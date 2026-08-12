@@ -11,6 +11,7 @@ module;
 #include <limits>
 #include <optional>
 #include <utility>
+#include <vector>
 
 module bioseq.postgres.extension:alignment_hook_publish;
 
@@ -76,7 +77,7 @@ void publish_alignment_root(alignment_executor_frame* frame)
 		&& statement_stats.fully_attested_alignment_jobs != 0;
 	if (are_persisted_gpu_stats_required
 		&& !frame->collector.persisted_gpu_operations.
-			matches_pipeline(statement_stats)) {
+			is_pipeline_match(statement_stats)) {
 		statement_stats.operational.are_stats_saturated = true;
 		statement_stats.reclassify_all_attempted_jobs();
 	}

@@ -94,7 +94,7 @@ struct pending_speculative_terminal_quarantine {
     bool active_map_quarantined = false;
 };
 
-[[nodiscard]] auto& pending_speculative_sources() {
+[[nodiscard]] auto& access_pending_speculative_sources() {
     static pending_speculative_source_map pending;
     return pending;
 }
@@ -118,7 +118,7 @@ static_assert(noexcept(
         std::declval<pending_speculative_source_map&>())));
 
 void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
-    auto& pending = pending_speculative_sources();
+    auto& pending = access_pending_speculative_sources();
     if (pending.empty()) return;
 
     std::uint64_t source_count = 0u;
@@ -158,7 +158,7 @@ void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
 }
 
 void require_no_pending_speculative_sources(const char* operation) {
-    const auto& pending = pending_speculative_sources();
+    const auto& pending = access_pending_speculative_sources();
     if (pending.empty()) return;
 
     std::size_t source_count = 0;
@@ -275,15 +275,15 @@ bioseq_beginscan(Relation relation, Snapshot snapshot,
 	int natts = relation->rd_att->natts;
 
 	/* attributes_needed represents 0-indexed attribute numbers */
-	bioseq::postgres::support::postgres_bitmapset attributes_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+	bioseq::postgres::support::postgres_bitmapset attributes_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
 	TableScanDesc scandesc = bioseq_beginscan_extended(relation, snapshot, key_count, key,
 														 parallel_table_scan,
-														 flags, attributes_needed, NULL,
+														 flags, attributes_needed.get(), NULL,
 														 NULL,
 														 false);
 
-	attributes_needed.free();
+	attributes_needed.clear();
 
 	return scandesc;
 }
@@ -386,8 +386,11 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 		 * of "slot" in first read.
 		 */
 		scan->read_state = NULL;
-		scan->attributes_needed = bms_copy(attributes_needed);
-		scan->scan_qualifiers = copyObject(scan_qualifiers);
+		scan->attributes_needed =
+			bioseq::postgres::support::postgres_bitmapset{attributes_needed}.clone();
+		scan->scan_qualifiers =
+			bioseq::postgres::support::postgres_list<Node>{
+				copyObject(scan_qualifiers)};
 		scan->scan_context = scan_context;
 
 		/* Parallel execution scan data */;
@@ -525,10 +528,12 @@ std::int64_t get_storage_id(
  * state.
  */
 static column_read_state *
-init_bioseq_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_needed,
-							 List *scan_qual, MemoryContext scan_context, Snapshot snapshot,
-							 bool random_access,
-							 parallel_column_scan_handle parallel_scan)
+init_bioseq_read_state(
+	Relation relation, TupleDesc tupdesc,
+	const bioseq::postgres::support::postgres_bitmapset& attr_needed,
+	List *scan_qual, MemoryContext scan_context, Snapshot snapshot,
+	bool random_access,
+	parallel_column_scan_handle parallel_scan)
 {
 	bioseq::postgres::support::memory_context_scope ctx_guard{scan_context};
 
@@ -611,10 +616,10 @@ bioseq_getnextslot_impl(
 		bool random_access = false;
 		scan->read_state =
 			init_bioseq_read_state(scan->scan_base.rs_rd, slot->tts_tupleDescriptor,
-									 scan->attributes_needed, scan->scan_qualifiers,
-									 scan->scan_context, scan->scan_base.rs_snapshot,
-									 random_access,
-									 scan->parallel_scan);
+								 scan->attributes_needed, scan->scan_qualifiers.get(),
+								 scan->scan_context, scan->scan_base.rs_snapshot,
+								 random_access,
+								 scan->parallel_scan);
 	}
 
 	ExecClearTuple(slot);
@@ -737,7 +742,7 @@ bioseq_index_fetch_begin(Relation rel)
 		scan = ::new (palloc0(sizeof(index_fetch_state))) index_fetch_state{};
 		scan->fetch_base.rel = rel;
 		scan->read_state = NULL;
-		scan->stripe_metadata = NIL;
+		scan->stripe_metadata = {};
 		scan->scan_context = scan_context;
 		scan->is_select_query = false;
 		init_index_fetch_seq_cache(scan, rel, scan_context);
@@ -765,10 +770,11 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 		scan = ::new (palloc0(sizeof(index_fetch_state))) index_fetch_state{};
 		scan->fetch_base.rel = rel;
 		scan->read_state = NULL;
-		scan->stripe_metadata = NIL;
+		scan->stripe_metadata = {};
 		scan->scan_context = scan_context;
 
-		scan->attributes_needed = bms_copy(attr_needed);
+		scan->attributes_needed =
+			bioseq::postgres::support::postgres_bitmapset{attr_needed}.clone();
 		scan->is_select_query = true;
 		init_index_fetch_seq_cache(scan, rel, scan_context);
 	}
@@ -805,7 +811,7 @@ bioseq_index_fetch_end(IndexFetchTableData *sscan)
 		scan->read_state = NULL;
 	}
 
-	scan->attributes_needed.free();
+	scan->attributes_needed.clear();
 
 	/* clean up any caches. */
 	if (bioseq::settings::column_cache::enabled == true)
@@ -821,14 +827,14 @@ find_stripe_metadata_by_row_number(index_fetch_state *scan, uint64_t row_number)
 {
 	ListCell *lc = NULL;
 
-	int high = scan->stripe_metadata.length() - 1;
+	int high = scan->stripe_metadata.size() - 1;
 	int low = 0;
 
 	while(low <= high)
 	{
 		int mid = low + (high - low) / 2;
 
-		lc = list_nth_cell(scan->stripe_metadata.ptr(), mid);
+		lc = list_nth_cell(scan->stripe_metadata.get(), mid);
 
 		stripe_metadata *stripe_metadata_entry = static_cast<stripe_metadata*>(lc->ptr_value);
 
@@ -884,12 +890,12 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 		/* no quals for index scan */
 		List *scan_qual = NIL;
 
-		if (scan->attributes_needed.empty())
+		if (scan->attributes_needed.is_empty())
 		{
 			/* we need all columns */
 			int natts = bioseq_column_relation->rd_att->natts;
-			scan->attributes_needed.free();
-			scan->attributes_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+			scan->attributes_needed.clear();
+			scan->attributes_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 		}
 
 		bool random_access = true;
@@ -901,7 +907,10 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 												  NULL);
 		if (scan->is_select_query)
 			scan->stripe_metadata =
-				list_stripes_for_relation(bioseq_column_relation->rd_locator, ForwardScanDirection);
+				bioseq::postgres::support::postgres_list<stripe_metadata>{
+					list_stripes_for_relation(
+						bioseq_column_relation->rd_locator,
+						ForwardScanDirection)};
 
 	}
 
@@ -1051,7 +1060,7 @@ bioseq_fetch_row_version(Relation relation,
 		read_state = acquire_column_read_state_slot(relation, GetCurrentSubTransactionId());
 
 		int natts = relation->rd_att->natts;
-		bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+		bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
 		List *scan_qual = NIL;
 
@@ -1673,7 +1682,7 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 				}
 				const pending_speculative_key key{
 					RelationGetRelid(relation), written_row_number};
-				if (!pending_speculative_sources().emplace(
+				if (!access_pending_speculative_sources().emplace(
 						key, std::move(speculative)).second) {
 					bioseq::postgres::support::invoke_pg_as_cpp([] {
 						bioseq_log<logging_level::error, logging_target::postgres>(
@@ -1730,8 +1739,8 @@ bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 				});
 			const pending_speculative_key key{
 				RelationGetRelid(relation), row_number};
-			auto pending = pending_speculative_sources().find(key);
-			if (pending == pending_speculative_sources().end()) {
+			auto pending = access_pending_speculative_sources().find(key);
+			if (pending == access_pending_speculative_sources().end()) {
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					bioseq_log<logging_level::error, logging_target::postgres>(
 						"bioseq storage: speculative source publication authority is missing");
@@ -1754,7 +1763,7 @@ bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 					Assert(!source.pending());
 				}
 			}
-			pending_speculative_sources().erase(pending);
+			access_pending_speculative_sources().erase(pending);
 		});
 	Assert(error_context_stack == &cache_restore.callback);
 	bioseq::settings::column_cache::enabled = previous_cache_enabled_state;
@@ -1907,7 +1916,7 @@ invalidate_sequence_source_epochs_for_row(Relation relation,
 	{
 		bioseq::postgres::support::memory_context_scope context_guard{read_context};
 		TupleDesc descriptor = RelationGetDescr(relation);
-		bioseq::postgres::support::postgres_bitmapset attributes = bioseq::postgres::support::postgres_bitmapset::full_range(descriptor->natts);
+		bioseq::postgres::support::postgres_bitmapset attributes = bioseq::postgres::support::postgres_bitmapset::make_member_range(descriptor->natts);
 		column_read_state *read_state = init_bioseq_read_state(
 			relation, descriptor, attributes, NIL, read_context, read_snapshot,
 			/*randomAccess=*/true, nullptr);
@@ -2001,7 +2010,7 @@ bioseq_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 	column_read_state *read_state = NULL;
 
 	int natts = relation->rd_att->natts;
-	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
 	List *scan_qual = NIL;
 
@@ -2219,7 +2228,7 @@ bioseq_relation_copy_for_cluster(Relation old_heap, Relation new_heap,
 
 	/* we need all columns */
 	int natts = old_heap->rd_att->natts;
-	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
 	/* no quals for table rewrite */
 	List *scan_qual = NIL;
@@ -2453,7 +2462,7 @@ truncate_and_compact_column_stripes(Relation rel, int elevel)
 
 	/* we need all columns */
 	int natts = rel->rd_att->natts;
-	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::full_range(natts);
+	bioseq::postgres::support::postgres_bitmapset attr_needed = bioseq::postgres::support::postgres_bitmapset::make_member_range(natts);
 
 	/* no quals for table rewrite */
 	List *scan_qual = NIL;
@@ -2535,7 +2544,7 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 {
 	static_cast<void>(bstrategy);
 	run_tableam_cpp_checked("bioseq_vacuum_rel", [rel, params] {
-		page_cache_disable_scope cache_guard{
+		bioseq::postgres::support::page_cache_disable_scope cache_guard{
 			bioseq::settings::column_cache::enabled};
 		bioseq::postgres::support::invoke_pg_as_cpp([rel, params] {
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
@@ -2928,7 +2937,8 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId oldest_xmin,
 								 TupleTableSlot *slot)
 {
 	/* Disable the page cache while ANALYZE collects sample rows. */
-	page_cache_disable_scope cache_guard{bioseq::settings::column_cache::enabled};
+	bioseq::postgres::support::page_cache_disable_scope cache_guard{
+		bioseq::settings::column_cache::enabled};
 
 	/*
 	 * Currently we don't do anything smart to reduce number of rows returned
@@ -3026,7 +3036,8 @@ bioseq_index_build_range_scan(Relation bioseq_column_relation,
 	}
 
 	/* Disable the page cache for the duration of the index build. */
-	page_cache_disable_scope cache_guard{bioseq::settings::column_cache::enabled};
+	bioseq::postgres::support::page_cache_disable_scope cache_guard{
+		bioseq::settings::column_cache::enabled};
 
 	/*
 	 * Columnar tuples have no dead-row form, so outside bootstrap an explicitly
@@ -3612,7 +3623,7 @@ column_transaction_callback(XactEvent event, void *arg)
 				speculative_source_quarantine_state_noexcept()
 					.active_map_quarantined;
 			if (!active_map_quarantined) {
-				pending_speculative_sources().clear();
+				access_pending_speculative_sources().clear();
 			}
 			break;
 		}
@@ -3639,7 +3650,7 @@ column_subtransaction_callback(SubXactEvent event, SubTransactionId my_subid,
 		case SUBXACT_EVENT_START_SUB:
 		case SUBXACT_EVENT_COMMIT_SUB:
 		{
-			for (auto& [key, pending] : pending_speculative_sources()) {
+			for (auto& [key, pending] : access_pending_speculative_sources()) {
 				(void)key;
 				if (pending.subtransaction_id == my_subid) {
 					pending.subtransaction_id = parent_subid;
@@ -3652,7 +3663,7 @@ column_subtransaction_callback(SubXactEvent event, SubTransactionId my_subid,
 		{
 			discard_all_relation_write_states(my_subid, parent_subid);
 			release_subtransaction_read_states(my_subid);
-			std::erase_if(pending_speculative_sources(),
+			std::erase_if(access_pending_speculative_sources(),
 				[my_subid](const auto& entry) {
 					return entry.second.subtransaction_id == my_subid;
 				});

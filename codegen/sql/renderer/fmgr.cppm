@@ -642,41 +642,14 @@ struct cpp_template_binding final {
         || source_module == "bioseq.postgres.table:custom_scan";
 }
 
-[[nodiscard]] inline std::string fmgr_owner_key(
-        std::string_view source_module) {
-    if (compact_sequence_owner_module(source_module)) {
-        return "postgres_types_compact_sequence";
-    }
-    if (table_entrypoint_owner_module(source_module)) {
-        return "table_access_hooks";
-    }
-    if (source_module.starts_with("bioseq.")) {
-        source_module.remove_prefix(
-            std::string_view{"bioseq."}.size());
-    }
-    std::string result;
-    bool separator = false;
-    for (const unsigned char value : source_module) {
-        if ((value >= 'a' && value <= 'z')
-            || (value >= '0' && value <= '9')) {
-            if (separator && !result.empty()) result.push_back('_');
-            result.push_back(static_cast<char>(value));
-            separator = false;
-        } else if (value == '.' || value == ':' || value == '_') {
-            separator = true;
-        } else {
-            throw std::runtime_error(
-                "SQL owner module '" + std::string{source_module}
-                + "' cannot form an fmgr owner key");
-        }
-    }
-    if (result.empty()
-        || (result.front() >= '0' && result.front() <= '9')) {
-        throw std::runtime_error(
-            "SQL owner module '" + std::string{source_module}
-            + "' produced an invalid fmgr owner key");
-    }
-    return result;
+[[nodiscard]] inline bool registered_module_closure_contains(
+        std::string_view registered_module,
+        std::string_view source_module) noexcept {
+    if (source_module == registered_module) return true;
+    return source_module.size() > registered_module.size()
+        && source_module.starts_with(registered_module)
+        && (source_module[registered_module.size()] == '.'
+            || source_module[registered_module.size()] == ':');
 }
 
 [[nodiscard]] inline std::string fmgr_module_name(
@@ -708,8 +681,8 @@ struct cpp_template_binding final {
         std::string_view source_module,
         const sql_graph& graph) {
     if (source_module
-        == "bioseq.storage.manager:sequence_storage_manager") {
-        return "bioseq.storage.manager";
+        == "bioseq.postgres.storage.manager:sequence_storage") {
+        return "bioseq.postgres.storage.manager";
     }
     if (table_entrypoint_owner_module(source_module)) {
         const std::size_t separator = source_module.find(':');
@@ -1146,7 +1119,7 @@ struct cpp_template_binding final {
         std::string_view prelude) {
     if (prelude == "bioseq_common") {
         return "module;\n\n"
-               "#include \"common.h\"\n\n";
+               "#include <bioseq/pg_compat.h>\n\n";
     }
     if (prelude == "postgresql") {
         return "module;\n\n"
@@ -1484,7 +1457,7 @@ render_vector_comparison_registry_from_associations(
     std::ostringstream output;
     output
         << "module;\n\n"
-        << "#include \"common.h\"\n\n"
+        << "#include <bioseq/pg_compat.h>\n\n"
         << "#include <array>\n"
         << "#include <span>\n"
         << "#include <string_view>\n\n"
@@ -1806,7 +1779,7 @@ render_vector_aggregate_registry_from_associations(
     std::ostringstream output;
     output
         << "module;\n\n"
-        << "#include \"common.h\"\n\n"
+        << "#include <bioseq/pg_compat.h>\n\n"
         << "#include <array>\n"
         << "#include <span>\n"
         << "#include <string_view>\n\n"
@@ -1942,15 +1915,50 @@ render_fmgr_entrypoint_modules(
                 + owner_key + "'");
         }
     }
+    for (std::size_t left = 0;
+         left < configured_owners.size(); ++left) {
+        for (std::size_t right = left + 1;
+             right < configured_owners.size(); ++right) {
+            const std::string& left_module =
+                configured_owners[left].second;
+            const std::string& right_module =
+                configured_owners[right].second;
+            if (fmgr_detail::registered_module_closure_contains(
+                    left_module, right_module)
+                || fmgr_detail::registered_module_closure_contains(
+                    right_module, left_module)) {
+                throw std::runtime_error(
+                    "configured fmgr owner module closures overlap for '"
+                    + configured_owners[left].first + "' and '"
+                    + configured_owners[right].first + "'");
+            }
+        }
+    }
     for (const normalized_entity& entity : graph.entities) {
         if (!fmgr_detail::generated_c_routine(entity)) continue;
-        const auto configured_owner = configured_owner_by_module.find(
-            entity.source.source_module);
-        const std::string owner_key =
-            configured_owner == configured_owner_by_module.end()
-            ? fmgr_detail::fmgr_owner_key(
-                  entity.source.source_module)
-            : configured_owner->second;
+        const std::pair<std::string, std::string>* configured_owner =
+            nullptr;
+        for (const auto& candidate : configured_owners) {
+            if (!fmgr_detail::registered_module_closure_contains(
+                    candidate.second,
+                    entity.source.source_module)) {
+                continue;
+            }
+            if (configured_owner != nullptr) {
+                throw std::runtime_error(
+                    "generated fmgr routine module '"
+                    + entity.source.source_module
+                    + "' matches multiple configured owner closures");
+            }
+            configured_owner = &candidate;
+        }
+        if (configured_owner == nullptr) {
+            throw std::runtime_error(
+                "generated fmgr routine module '"
+                + entity.source.source_module
+                + "' has no configured owner mapping");
+        }
+        const std::string& owner_key = configured_owner->first;
         by_owner[owner_key]
             [entity.source.name].push_back(&entity);
         sources_by_owner[owner_key].insert(
@@ -2045,11 +2053,6 @@ render_fmgr_entrypoint_modules(
         }
     }
     return result;
-}
-
-[[nodiscard]] inline std::vector<rendered_fmgr_entrypoint_module>
-render_fmgr_entrypoint_modules(const sql_graph& graph) {
-    return render_fmgr_entrypoint_modules(graph, {});
 }
 
 /**

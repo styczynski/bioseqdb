@@ -62,7 +62,8 @@ public:
         }
         std::size_t worker_count = options.io.parallel_gzip_thread_count;
         if (worker_count == 0) {
-            const unsigned hardware = bioseq::parallelism::default_concurrency();
+            const unsigned hardware =
+                bioseq::parallelism::default_concurrency_limit();
             worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 8) : 1;
         }
 

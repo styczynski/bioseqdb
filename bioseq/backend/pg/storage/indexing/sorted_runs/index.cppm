@@ -29,6 +29,7 @@ extern "C" {
 
 export module bioseq.postgres.storage.indexing.sorted_runs;
 
+import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
 import bioseq.parallelism.memory_admission;
 
@@ -370,7 +371,7 @@ template <class p_value>
         std::vector<p_value>& values,
         bioseq::parallelism::memory_permit& permit,
         std::size_t required_capacity) {
-    const std::uint64_t existing_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t existing_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(values.capacity()),
         static_cast<std::uint64_t>(sizeof(p_value)));
     if (existing_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -380,13 +381,13 @@ template <class p_value>
         return existing_bytes == 0u
             || (permit && permit.bytes() >= existing_bytes);
     }
-    const std::uint64_t logical_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t logical_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(required_capacity),
         static_cast<std::uint64_t>(sizeof(p_value)));
-    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+    const std::uint64_t admitted_headroom = bioseq::common::saturating_mul(
         logical_bytes,
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    const std::uint64_t allocation_peak = bioseq::parallelism::saturating_add(
+    const std::uint64_t allocation_peak = bioseq::common::saturating_add(
         existing_bytes, admitted_headroom);
     if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()
@@ -410,7 +411,7 @@ template <class p_value>
         permit = std::move(*acquired);
     }
     values.reserve(required_capacity);
-    const std::uint64_t exact_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t exact_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(values.capacity()),
         static_cast<std::uint64_t>(sizeof(p_value)));
     if (exact_bytes == (std::numeric_limits<std::uint64_t>::max)()
@@ -716,10 +717,10 @@ struct admitted_merge_head_queue {
 
 [[nodiscard]] admitted_merge_head_queue make_admitted_merge_head_queue(
         std::size_t maximum_heads) {
-    const std::uint64_t logical_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t logical_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(maximum_heads),
         static_cast<std::uint64_t>(sizeof(merge_head)));
-    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+    const std::uint64_t admitted_headroom = bioseq::common::saturating_mul(
         logical_bytes,
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (logical_bytes == (std::numeric_limits<std::uint64_t>::max)()
@@ -733,7 +734,7 @@ struct admitted_merge_head_queue {
     }
     std::vector<merge_head> backing;
     backing.reserve(maximum_heads);
-    const std::uint64_t exact_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t exact_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(backing.capacity()),
         static_cast<std::uint64_t>(sizeof(merge_head)));
     if (exact_bytes == (std::numeric_limits<std::uint64_t>::max)()
@@ -752,13 +753,13 @@ struct admitted_merge_head_queue {
 
 [[nodiscard]] std::uint64_t file_reader_owned_capacity_bytes(
         const std::vector<file_reader>& readers) noexcept {
-    std::uint64_t bytes = bioseq::parallelism::saturating_mul(
+    std::uint64_t bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(readers.capacity()),
         static_cast<std::uint64_t>(sizeof(file_reader)));
     for (const file_reader& reader : readers) {
-        bytes = bioseq::parallelism::saturating_add(
+        bytes = bioseq::common::saturating_add(
             bytes,
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(reader.buffer.capacity()),
                 static_cast<std::uint64_t>(sizeof(sorted_pair_wire))));
     }
@@ -932,7 +933,7 @@ void sorted_pair_run_store::steal_(sorted_pair_run_store&& other) noexcept {
 	        return false;
 	    }
 	    const std::uint64_t logical_bytes = static_cast<std::uint64_t>(requested_bytes);
-	    const std::uint64_t admitted_headroom = bioseq::parallelism::saturating_mul(
+	    const std::uint64_t admitted_headroom = bioseq::common::saturating_mul(
 	        logical_bytes,
 	        bioseq::parallelism::k_vector_preallocation_headroom_factor);
 	    if (admitted_headroom == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -1132,7 +1133,7 @@ void sorted_pair_run_store::demote_resident_runs_until_available(
 std::size_t sorted_pair_run_store::spill_sorted_run_owned(
         std::vector<sorted_pair_t> sorted) {
     const std::uint64_t capacity_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(sorted.capacity()),
             static_cast<std::uint64_t>(sizeof(sorted_pair_t)));
     if (auto permit = bioseq::parallelism::memory_admission_controller::instance()
@@ -1164,7 +1165,7 @@ std::size_t sorted_pair_run_store::spill_sorted_run_owned_admitted(
     if (!candidate.permit && admitted_bytes != 0) {
         report_sorted_run_error(sorted_run_error::admitted_run_without_permit);
     }
-    const std::uint64_t exact_capacity_bytes = bioseq::parallelism::saturating_mul(
+    const std::uint64_t exact_capacity_bytes = bioseq::common::saturating_mul(
         static_cast<std::uint64_t>(candidate.pairs.capacity()),
         static_cast<std::uint64_t>(sizeof(sorted_pair_t)));
     if (exact_capacity_bytes == (std::numeric_limits<std::uint64_t>::max)()
@@ -1222,14 +1223,14 @@ bool sorted_pair_run_store::try_open_file_readers_(merge_resources& resources) {
         std::uint64_t{32} << 10,
         std::uint64_t{4} << 20);
     const std::uint64_t total_reader_bytes =
-        bioseq::parallelism::saturating_add(
-            bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_add(
+            bioseq::common::saturating_mul(
                 per_reader,
                 static_cast<std::uint64_t>(file_runs_.size())),
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(file_runs_.size()),
                 static_cast<std::uint64_t>(sizeof(file_reader))));
-    const std::uint64_t reader_headroom = bioseq::parallelism::saturating_mul(
+    const std::uint64_t reader_headroom = bioseq::common::saturating_mul(
         total_reader_bytes,
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (total_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()
@@ -1289,13 +1290,13 @@ void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(
         reader_budget / std::max<std::size_t>(1u, runs.size()),
         std::uint64_t{32} << 10,
         std::uint64_t{4} << 20);
-    const std::uint64_t logical_reader_bytes = bioseq::parallelism::saturating_add(
-        bioseq::parallelism::saturating_mul(
+    const std::uint64_t logical_reader_bytes = bioseq::common::saturating_add(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(runs.size()), per_reader_bytes),
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(runs.size()),
             static_cast<std::uint64_t>(sizeof(file_reader))));
-    const std::uint64_t reader_headroom = bioseq::parallelism::saturating_mul(
+    const std::uint64_t reader_headroom = bioseq::common::saturating_mul(
         logical_reader_bytes,
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
     if (logical_reader_bytes == (std::numeric_limits<std::uint64_t>::max)()

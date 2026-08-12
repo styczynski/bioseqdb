@@ -67,6 +67,7 @@ import bioseq.postgres.configuration.core;
 import bioseq.postgres.vectorization.types;        // vector_column_storage, vector_tuple_table_slot_storage, create_vector_tuple_table_slot, ...
 import bioseq.postgres.vectorization.execution;    // rewrite_vectorized_expression_list, compile_vector_qualifier_list, evaluate_vectorized_qualifiers
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.external.path_builder_slot;  // external scan path registration
 import bioseq.postgres.storage.metadata;
@@ -75,6 +76,7 @@ import bioseq.postgres.table.scan_state;
 import bioseq.postgres.table.sql_row_codecs;
 import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.scheduler.dispatch_buffer.api;
 import bioseq.postgres.scheduler.supervisor;
@@ -84,6 +86,7 @@ import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
 import bioseq.sequences.simd;             // stdc_rewidth_to_type_params
+import bioseq.pipeline.stats;
 import bioseq.pipeline.minimap_port;  // match_result
 import bioseq.pipeline.pipe;            // for pipeline_description / describe_pipeline_for
 import bioseq.sequences.cigar;                    // for format_cigar
@@ -107,7 +110,7 @@ using namespace bioseq::postgres::support;
 using aligner_options_catalog_row =
 	bioseq::table::composite_rows::bioseq_aligner_options;
 using aligner_options_codec =
-	bioseq::table::sql_row_codecs::bioseq_aligner_options_codec;
+	bioseq::postgres::table::sql_row_codecs::bioseq_aligner_options_codec;
 
 [[nodiscard]] inline bioseq::simd::pipe::pipeline_description
 describe_pipeline_for_pg_alphabet(
@@ -1308,7 +1311,7 @@ static inline bool validate_raw_mmsearch_options_node(
 	}
 	if (IsA(node, Query)) {
 		validate_raw_mmsearch_options_query(
-			cast_node(Query, node), validation);
+			castNode(Query, node), validation);
 		return false;
 	}
 	return expression_tree_walker(
@@ -1335,7 +1338,7 @@ struct mmsearch_qualifier_walker {
 struct mmsearch_qualifier_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, mmsearch_qualifier_walker& data) const {
-		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+		if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
 			if (is_mmsearch_funcid(fe->funcid, *data.oids)) {
 				return pg_walk_step::stop;
 			}
@@ -1361,7 +1364,7 @@ struct mmsearch_occurrence_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node,
 			   mmsearch_occurrence_counter& data) const {
-		if (FuncExpr* fe = node.try_as<FuncExpr>();
+		if (FuncExpr* fe = node.try_cast<FuncExpr>();
 			fe != nullptr && is_mmsearch_funcid(fe->funcid, *data.oids)) {
 			++data.count;
 		}
@@ -1906,7 +1909,7 @@ struct bioseq_feature_detector {
 struct feature_flag_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, bioseq_feature_detector& detector) const {
-		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+		if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
 			const bioseq_stub_oids* o = detector.oids;
 			if (is_mmsearch_funcid(fe->funcid, *o)) {
 				detector.flags.has_mmsearch = true;
@@ -1968,7 +1971,7 @@ struct edit_function_probe_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 		pg_expression_walk_cursor, pg_node_view node,
 		edit_function_probe& probe) const {
-		if (FuncExpr* function = node.try_as<FuncExpr>();
+		if (FuncExpr* function = node.try_cast<FuncExpr>();
 			function != nullptr && function->funcid == probe.oids->edit_oid) {
 			probe.found = true;
 			return pg_walk_step::stop;
@@ -2113,11 +2116,11 @@ struct typmod_coalesce_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, explain_coalesce_walk_context& ctx) const {
 		if (!ctx.result.active) {
-			if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+			if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
 				if (is_mmsearch_funcid(fe->funcid, *ctx.oids) && list_length(fe->args) >= 2) {
 					Node* arg0 = reinterpret_cast<Node*>(linitial(fe->args));   // bioseq.seq column
 					Node* arg1 = reinterpret_cast<Node*>(lsecond(fe->args));    // query literal / param / var
-					if (arg0 != nullptr && arg1 != nullptr && pg_node_view{arg0}.is<Var>()) {
+					if (arg0 != nullptr && arg1 != nullptr && pg_node_view{arg0}.is_type<Var>()) {
 						const int32 col_typmod = expect_pg_node<Var>(arg0)->vartypmod;
 						int32 arg1_typmod = -1;
 						if (Const* arg1_const = try_cast_pg_node<Const>(arg1)) {
@@ -2864,7 +2867,7 @@ bounded_batch_fallback_options_are_supported(
 	TupleDesc tupdesc = lookup_rowtype_tupdesc(
 		row_typeoid, HeapTupleHeaderGetTypMod(header));
 	constexpr std::size_t k_expected_option_attrs =
-		aligner_options_codec::fields_count;
+		aligner_options_codec::field_count;
 	if (tupdesc->natts
 		!= static_cast<int>(k_expected_option_attrs)) {
 		ReleaseTupleDesc(tupdesc);
@@ -3780,7 +3783,7 @@ struct projection_presence_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, projection_presence_probe& data) const {
 		if (data.found) return pg_walk_step::stop;
-		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+		if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
 			if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids)
 				|| is_mmsearch_funcid(fe->funcid, *data.stub_oids)
 				|| fe->funcid == data.stub_oids->symbol_count_oid) {
@@ -4135,15 +4138,15 @@ slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
 			return static_cast<std::uint64_t>(*hi);
 		}
 		if (upper == nullptr && lo.has_value() && *lo < 0) {
-			return bioseq::storage::magnitude_of_negative(*lo);
+			return bioseq::storage::negative_magnitude(*lo);
 		}
 		if (lo.has_value() && hi.has_value() && *hi >= *lo) {
 			if (*lo >= 0) {
 				return static_cast<std::uint64_t>(*hi - *lo);
 			}
 			if (*hi < 0) {
-				return bioseq::storage::magnitude_of_negative(*lo)
-					- bioseq::storage::magnitude_of_negative(*hi);
+				return bioseq::storage::negative_magnitude(*lo)
+					- bioseq::storage::negative_magnitude(*hi);
 			}
 			/* A negative lower with a nonnegative upper depends on the
 			 * unknown source length; do not mislabel an upper bound as an
@@ -4158,7 +4161,7 @@ slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
 		if (*opcode == slice_project_opcode::concat) {
 			std::uint64_t total = 0u;
 			for (Node* argument : postgres_list<Node>(function->args)) {
-				total = bioseq::parallelism::saturating_add(
+				total = bioseq::common::saturating_add(
 					total, slice_project_estimated_symbols(argument, oids));
 			}
 			return total;
@@ -4175,7 +4178,7 @@ slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
 		if (opcode.has_value() && *opcode == slice_project_opcode::concat) {
 			std::uint64_t total = 0u;
 			for (Node* argument : postgres_list<Node>(operation->args)) {
-				total = bioseq::parallelism::saturating_add(
+				total = bioseq::common::saturating_add(
 					total, slice_project_estimated_symbols(argument, oids));
 			}
 			return total;
@@ -4432,7 +4435,7 @@ struct slice_project_ir_builder {
 	builder.nodes = lappend(builder.nodes, node);
 	if (opcode == slice_project_opcode::source_expr
 		|| opcode == slice_project_opcode::literal_expr) {
-		builder.source_pieces = bioseq::parallelism::saturating_add(
+		builder.source_pieces = bioseq::common::saturating_add(
 			builder.source_pieces, 1u);
 	}
 	builder.producer_expressions.push_back(
@@ -4541,9 +4544,9 @@ static void slice_project_add_boundary(
 	record = lappend(record, makeString(pstrdup(
 		preprojection ? "projection row" : "result datum")));
 	builder.records = lappend(builder.records, record);
-	builder.planned_symbols = bioseq::parallelism::saturating_add(
+	builder.planned_symbols = bioseq::common::saturating_add(
 		builder.planned_symbols, estimated_symbols);
-	builder.planned_bytes = bioseq::parallelism::saturating_add(
+	builder.planned_bytes = bioseq::common::saturating_add(
 		builder.planned_bytes, estimated_symbols);
 	if (preprojection) {
 		slice_project_note_source_binding(
@@ -4565,7 +4568,7 @@ static void slice_project_add_boundary(
 		|| opcode == slice_project_opcode::concat
 		|| opcode == slice_project_opcode::reverse
 		|| opcode == slice_project_opcode::reverse_complement) {
-		builder.piece_boundaries = bioseq::parallelism::saturating_add(
+		builder.piece_boundaries = bioseq::common::saturating_add(
 			builder.piece_boundaries, 1u);
 	}
 	if (List* arguments = slice_project_call_arguments(expression);
@@ -4612,12 +4615,12 @@ struct slice_project_discovery_visitor {
 		pg_expression_walk_cursor, pg_node_view node,
 		slice_project_discovery& discovery) const {
 		if (slice_project_node_opcode(
-				node.raw(), *discovery.builder->oids).has_value()) {
-			if (contain_volatile_functions(node.raw())) {
+				node.get(), *discovery.builder->oids).has_value()) {
+			if (contain_volatile_functions(node.get())) {
 				return pg_walk_step::skip_subtree;
 			}
 			(void)slice_project_build_ir_node(
-				*discovery.builder, node.raw());
+				*discovery.builder, node.get());
 			discovery.found = true;
 			return pg_walk_step::skip_subtree;
 		}
@@ -5297,7 +5300,7 @@ struct slice_project_dsm_merge_audit {
 	bool merged = false;
 };
 
-[[nodiscard]] static slice_project_dsm_layout slice_project_dsm_layout(
+[[nodiscard]] static slice_project_dsm_layout make_slice_project_dsm_layout(
 		std::uint32_t recipe_count, std::uint32_t slot_count) {
 	const Size header_bytes = MAXALIGN(sizeof(slice_dsm_header));
 	const Size counter_bytes = mul_size(
@@ -5583,7 +5586,7 @@ slice_project_run_corrupt_dsm_test(
 	if (source.boundary_count == 0u || source.boundaries == nullptr) return result;
 	constexpr std::uint32_t slot_count = 2u;
 	constexpr std::uint64_t cycle = 17u;
-	const slice_project_dsm_layout layout = slice_project_dsm_layout(
+	const slice_project_dsm_layout layout = make_slice_project_dsm_layout(
 		source.boundary_count, slot_count);
 	auto* bytes = static_cast<std::byte*>(palloc0(layout.total_bytes));
 	auto* counters = static_cast<slice_dsm_counter*>(palloc0(
@@ -5834,7 +5837,7 @@ static void slice_project_apply_dsm_test_fixture(
 	constexpr std::uint64_t first_cycle = 23u;
 	constexpr std::uint64_t second_cycle = first_cycle + 1u;
 	constexpr std::uint64_t reset_cycle = second_cycle + 1u;
-	const slice_project_dsm_layout layout = slice_project_dsm_layout(
+	const slice_project_dsm_layout layout = make_slice_project_dsm_layout(
 		runtime.boundary_count, slot_count);
 	auto* local_counters = static_cast<slice_dsm_counter*>(palloc0(
 		mul_size(runtime.boundary_count, sizeof(slice_dsm_counter))));
@@ -6481,7 +6484,7 @@ static Size slice_project_estimate_dsm(
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqSliceProject parallel context is invalid")));
 	}
-	return slice_project_dsm_layout(
+	return make_slice_project_dsm_layout(
 		state->runtime.boundary_count,
 		static_cast<std::uint32_t>(pcxt->nworkers)).total_bytes;
 }
@@ -6499,7 +6502,7 @@ static void slice_project_initialize_dsm(
 			 errmsg("BioseqSliceProject DSM initialization is invalid")));
 	}
 	const auto slot_count = static_cast<std::uint32_t>(pcxt->nworkers);
-	const slice_project_dsm_layout layout = slice_project_dsm_layout(
+	const slice_project_dsm_layout layout = make_slice_project_dsm_layout(
 		runtime.boundary_count, slot_count);
 	std::memset(coordinate, 0, layout.total_bytes);
 	auto* header = static_cast<slice_dsm_header*>(coordinate);
@@ -6585,7 +6588,7 @@ static void slice_project_reinitialize_dsm(
 			 errmsg("BioseqSliceProject parallel cycle exhausted")));
 	}
 	const auto slot_count = static_cast<std::uint32_t>(pcxt->nworkers);
-	const slice_project_dsm_layout layout = slice_project_dsm_layout(
+	const slice_project_dsm_layout layout = make_slice_project_dsm_layout(
 		runtime.boundary_count, slot_count);
 	std::memset(reinterpret_cast<char*>(header) + layout.header_bytes, 0,
 		layout.total_bytes - layout.header_bytes);
@@ -6699,7 +6702,7 @@ static void slice_project_initialize_worker(
 #endif
 	if (count_row) {
 		auto* state = reinterpret_cast<slice_project_state*>(custom);
-		state->runtime.rows_published = bioseq::parallelism::saturating_add(
+		state->runtime.rows_published = bioseq::common::saturating_add(
 			state->runtime.rows_published, 1u);
 	}
 	return scan_slot;
@@ -6880,7 +6883,7 @@ static void slice_project_rescan(CustomScanState* custom) {
 				/*is_commit=*/true);
 		}
 	}
-	state->runtime.rescans = bioseq::parallelism::saturating_add(
+	state->runtime.rescans = bioseq::common::saturating_add(
 		state->runtime.rescans, 1u);
 	const bool worker_rearmed =
 		slice_project_rearm_worker_for_rescan_noexcept(state);
@@ -7929,7 +7932,7 @@ static void batch_sort_collect_source_routes(
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("BioseqBatchSort source route is unavailable")));
 			}
-			provider_count = bioseq::parallelism::saturating_add(
+			provider_count = bioseq::common::saturating_add(
 				provider_count, 1u);
 			return;
 		}
@@ -7995,13 +7998,13 @@ struct slice_project_base_target_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			slice_project_base_target_validation& validation) const noexcept {
-		if (node.try_as<PlaceHolderVar>() != nullptr) {
+		if (node.try_cast<PlaceHolderVar>() != nullptr) {
 			/* A PHV belongs to a planner-selected evaluation/nulling frontier.
 			 * A base SliceProject must not move it below that frontier. */
 			validation.invalid = true;
 			return pg_walk_step::stop;
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (validation.allow_row_identity
 				&& slice_project_is_target_row_identity_var(
 					var, validation.relid)) {
@@ -8252,7 +8255,7 @@ struct slice_project_aggregate_recipe_presence_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			slice_project_aggregate_recipe_presence& analysis) const noexcept {
-		if (slice_project_node_opcode(node.raw(), *analysis.oids).has_value()) {
+		if (slice_project_node_opcode(node.get(), *analysis.oids).has_value()) {
 			analysis.found = true;
 			return pg_walk_step::stop;
 		}
@@ -8282,12 +8285,12 @@ struct slice_project_aggregate_argument_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			slice_project_aggregate_argument_validation& validation) const noexcept {
-		if (node.try_as<PlaceHolderVar>() != nullptr
-			|| node.try_as<Param>() != nullptr) {
+		if (node.try_cast<PlaceHolderVar>() != nullptr
+			|| node.try_cast<Param>() != nullptr) {
 			validation.invalid = true;
 			return pg_walk_step::stop;
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (!bioseq_is_concrete_rte_varno(var->varno)
 				|| !bms_is_member(static_cast<int>(var->varno),
 					validation.available_relids)
@@ -8361,12 +8364,12 @@ struct slice_project_aggregate_input_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			slice_project_aggregate_input_validation& validation) const {
-		if (node.tag() == T_GroupingFunc
-			|| node.tag() == T_WindowFunc
-			|| node.tag() == T_SubPlan) {
+		if (node.get_tag() == T_GroupingFunc
+			|| node.get_tag() == T_WindowFunc
+			|| node.get_tag() == T_SubPlan) {
 			return pg_walk_step::skip_subtree;
 		}
-		Aggref* aggregate = node.try_as<Aggref>();
+		Aggref* aggregate = node.try_cast<Aggref>();
 		if (aggregate == nullptr) return pg_walk_step::descend;
 		if (aggregate->agglevelsup != 0
 			|| list_member_ptr(validation.visited_aggregates, aggregate)) {
@@ -9095,7 +9098,7 @@ struct batch_join_target_projection_visitor {
 		 * parent from the current match_result. Neither argument is a request to
 		 * let the locator-backed datum escape into ordinary SQL evaluation. A
 		 * projected mmsearch call remains forbidden. */
-		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+		if (FuncExpr* function = node.try_cast<FuncExpr>()) {
 			if (probe.oids != nullptr
 				&& (is_bioseq_projection_funcid(function->funcid, *probe.oids)
 					|| (probe.allow_mmsearch_qualifier
@@ -9104,7 +9107,7 @@ struct batch_join_target_projection_visitor {
 				return pg_walk_step::skip_subtree;
 			}
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (var->varno == probe.target_varno
 				&& (var->varattno == 0
 					|| var->varattno == probe.target_seq_attno)) {
@@ -9569,7 +9572,7 @@ struct batch_join_projection_delta_visitor {
 		pg_expression_walk_cursor,
 		pg_node_view node,
 		batch_join_projection_delta& validation) const noexcept {
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			if (!batch_join_is_exact_helper_phv(
 					placeholder, validation.target_relid)) {
 				validation.invalid = true;
@@ -9578,7 +9581,7 @@ struct batch_join_projection_delta_visitor {
 			validation.saw_exact_helper_phv = true;
 			return pg_walk_step::skip_subtree;
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (!path_target_has_equal_expression(
 					validation.child_target, reinterpret_cast<Node*>(var))) {
 				validation.invalid = true;
@@ -10019,7 +10022,7 @@ struct batch_join_underlying_target_var_visitor {
 			pg_expression_walk_cursor,
 			pg_node_view node,
 			batch_join_underlying_target_var_collector& collector) const {
-		Var* var = node.try_as<Var>();
+		Var* var = node.try_cast<Var>();
 		if (var == nullptr) {
 			return pg_walk_step::descend;
 		}
@@ -10133,14 +10136,14 @@ struct per_row_operand_source_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			per_row_operand_source_resolution& resolution) const {
-		if (node.try_as<PlaceHolderVar>() != nullptr) {
+		if (node.try_cast<PlaceHolderVar>() != nullptr) {
 			/* Moving an operand PHV to the post-join recipe can change its
 			 * evaluation/nulling frontier.  No sequence helper requires that
 			 * representation, so decline instead of approximating semantics. */
 			resolution.invalid = true;
 			return pg_walk_step::stop;
 		}
-		Var* var = node.try_as<Var>();
+		Var* var = node.try_cast<Var>();
 		if (var == nullptr) return pg_walk_step::descend;
 		if (resolution.joinrel == nullptr
 			|| !bioseq_is_concrete_rte_varno(var->varno)
@@ -10190,7 +10193,7 @@ struct per_row_output_semantic_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			per_row_output_semantic_validation& validation) const {
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			/* The exact helper PHV is deliberately evaluated by the BatchJoin
 			 * owner after match_result production.  At an intermediate joinrel the
 			 * reltarget can also carry a whole helper PHV for a transformed owner
@@ -10218,7 +10221,7 @@ struct per_row_output_semantic_visitor {
 			return validation.invalid
 				? pg_walk_step::stop : pg_walk_step::skip_subtree;
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			/* UPDATE ... FROM EPQ carries exact ctid/tableoid row markers for
 			 * non-target join inputs as well as the target.  They are ordinary
 			 * inner-join passthrough values, not arbitrary system attributes. */
@@ -10371,7 +10374,7 @@ struct per_row_owner_support_visitor {
 			pg_expression_walk_cursor,
 			pg_node_view node,
 		per_row_owner_support_validation& validation) const {
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			FuncExpr* helper = validation.oids == nullptr ? nullptr
 				: batch_join_match_helper_phv_function(
 					placeholder, *validation.oids);
@@ -10432,7 +10435,7 @@ struct per_row_owner_support_visitor {
 			/* A generic PHV owns its planner-selected evaluation frontier. */
 			return pg_walk_step::skip_subtree;
 		}
-		if (FuncExpr* function = node.try_as<FuncExpr>();
+		if (FuncExpr* function = node.try_cast<FuncExpr>();
 			validation.oids != nullptr && function != nullptr
 			&& is_bioseq_projection_funcid(function->funcid, *validation.oids)) {
 			const bool names_recipe = batch_join_match_helper_names_recipe(
@@ -10464,7 +10467,7 @@ struct per_row_owner_support_visitor {
 			}
 			return pg_walk_step::skip_subtree;
 		}
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (var->varlevelsup != 0) {
 				return pg_walk_step::skip_subtree;
 			}
@@ -10551,7 +10554,7 @@ struct base_local_mmsearch_operand_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			base_local_mmsearch_operand_walker& validation_state) const {
-		Node* raw = node.raw();
+		Node* raw = node.get();
 		if (raw == nullptr || validation_state.rel == nullptr || validation_state.oids == nullptr) {
 			validation_state.invalid = true;
 			return pg_walk_step::stop;
@@ -10563,19 +10566,19 @@ struct base_local_mmsearch_operand_visitor {
 			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
-		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+		if (FuncExpr* function = node.try_cast<FuncExpr>()) {
 			if (function->funcretset
 				|| is_mmsearch_funcid(function->funcid, *validation_state.oids)) {
 				validation_state.invalid = true;
 				return pg_walk_step::stop;
 			}
 		}
-		if (OpExpr* operation = node.try_as<OpExpr>();
+		if (OpExpr* operation = node.try_cast<OpExpr>();
 			operation != nullptr && operation->opretset) {
 			validation_state.invalid = true;
 			return pg_walk_step::stop;
 		}
-		Var* variable = node.try_as<Var>();
+		Var* variable = node.try_cast<Var>();
 		if (variable == nullptr) return pg_walk_step::descend;
 		if (!bioseq_is_concrete_rte_varno(variable->varno)
 			|| variable->varno != validation_state.rel->relid
@@ -10605,7 +10608,7 @@ struct base_local_sequence_typmod_resolution {
 };
 
 [[nodiscard]] static base_local_sequence_typmod_resolution
-base_local_sequence_typmod_resolution(
+resolve_base_local_sequence_typmod(
 		Node* expression, const bioseq_stub_oids& oids) {
 	check_stack_depth();
 	if (expression == nullptr
@@ -10656,7 +10659,7 @@ base_local_sequence_typmod_resolution(
 
 	if (Node* source = slice_project_typmod_cast_source(expression, oids)) {
 		base_local_sequence_typmod_resolution child =
-			base_local_sequence_typmod_resolution(source, oids);
+			resolve_base_local_sequence_typmod(source, oids);
 		Const* target_typmod = try_cast_pg_node<Const>(
 			reinterpret_cast<Node*>(lsecond(
 				reinterpret_cast<FuncExpr*>(expression)->args)));
@@ -10673,11 +10676,11 @@ base_local_sequence_typmod_resolution(
 	}
 	if (IsA(expression, RelabelType)) {
 		auto* relabel = reinterpret_cast<RelabelType*>(expression);
-		return finish(base_local_sequence_typmod_resolution(
+		return finish(resolve_base_local_sequence_typmod(
 			reinterpret_cast<Node*>(relabel->arg), oids));
 	}
 	if (nodeTag(expression) == T_CaseExpr) {
-		CaseExpr* choice = cast_node(CaseExpr, expression);
+		CaseExpr* choice = castNode(CaseExpr, expression);
 		base_local_sequence_typmod_resolution result{};
 		for (CaseWhen* arm : postgres_list<CaseWhen>(choice->args)) {
 			if (arm == nullptr || arm->result == nullptr
@@ -10686,22 +10689,22 @@ base_local_sequence_typmod_resolution(
 				result.invalid = true;
 				break;
 			}
-			merge_exact(result, base_local_sequence_typmod_resolution(
+			merge_exact(result, resolve_base_local_sequence_typmod(
 				reinterpret_cast<Node*>(arm->result), oids));
 			if (result.invalid) break;
 		}
 		if (!result.invalid && choice->defresult != nullptr) {
-			merge_exact(result, base_local_sequence_typmod_resolution(
+			merge_exact(result, resolve_base_local_sequence_typmod(
 				reinterpret_cast<Node*>(choice->defresult), oids));
 		}
 		return finish(result);
 	}
 	if (nodeTag(expression) == T_CoalesceExpr) {
-		CoalesceExpr* choice = cast_node(CoalesceExpr, expression);
+		CoalesceExpr* choice = castNode(CoalesceExpr, expression);
 		base_local_sequence_typmod_resolution result{};
 		for (Node* arm : postgres_list<Node>(choice->args)) {
 			merge_exact(result,
-				base_local_sequence_typmod_resolution(arm, oids));
+				resolve_base_local_sequence_typmod(arm, oids));
 			if (result.invalid) break;
 		}
 		return finish(result);
@@ -10715,7 +10718,7 @@ base_local_sequence_typmod_resolution(
 			|| subscript->refrestype != oids.bioseq_seq_type_oid) {
 			return {.invalid = true};
 		}
-		return finish(base_local_sequence_typmod_resolution(
+		return finish(resolve_base_local_sequence_typmod(
 			reinterpret_cast<Node*>(subscript->refexpr), oids));
 	}
 	if (opcode.has_value()
@@ -10726,7 +10729,7 @@ base_local_sequence_typmod_resolution(
 			|| !per_row_function_signature_is_exact(function)) {
 			return {.invalid = true};
 		}
-		return finish(base_local_sequence_typmod_resolution(
+		return finish(resolve_base_local_sequence_typmod(
 			reinterpret_cast<Node*>(linitial(function->args)), oids));
 	}
 	if (opcode.has_value() && *opcode == slice_project_opcode::concat) {
@@ -10749,7 +10752,7 @@ base_local_sequence_typmod_resolution(
 		base_local_sequence_typmod_resolution result{};
 		for (Node* argument : postgres_list<Node>(arguments)) {
 			if (exprType(argument) != oids.bioseq_seq_type_oid) continue;
-			const auto child = base_local_sequence_typmod_resolution(
+			const auto child = resolve_base_local_sequence_typmod(
 				argument, oids);
 			if (child.invalid) return child;
 			if (child.typmod < 0) continue;
@@ -10793,7 +10796,7 @@ resolve_base_local_mmsearch_operand(
 		return std::nullopt;
 	}
 	const base_local_sequence_typmod_resolution type =
-		base_local_sequence_typmod_resolution(expression, oids);
+		resolve_base_local_sequence_typmod(expression, oids);
 	if (type.invalid || type.typmod < 0
 		|| !batch_join_typmod_is_supported(type.typmod)) return std::nullopt;
 	Var* raw = try_cast_pg_node<Var>(expression);
@@ -10993,7 +10996,7 @@ struct exact_mmsearch_owner_audit_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			exact_mmsearch_owner_audit& audit) const {
-		FuncExpr* function = node.try_as<FuncExpr>();
+		FuncExpr* function = node.try_cast<FuncExpr>();
 		if (function == nullptr || audit.oids == nullptr
 			|| !is_mmsearch_funcid(function->funcid, *audit.oids)) {
 			return pg_walk_step::descend;
@@ -13622,7 +13625,7 @@ struct per_row_path_helper_audit_visitor {
 			audit.unavailable = true;
 			return pg_walk_step::stop;
 		}
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			if (!batch_join_expression_has_match_helper(
 					reinterpret_cast<Node*>(placeholder->phexpr),
 					*audit.oids)) return pg_walk_step::descend;
@@ -13635,7 +13638,7 @@ struct per_row_path_helper_audit_visitor {
 			}
 			return pg_walk_step::skip_subtree;
 		}
-		FuncExpr* function = node.try_as<FuncExpr>();
+		FuncExpr* function = node.try_cast<FuncExpr>();
 		if (function == nullptr
 			|| !is_bioseq_projection_funcid(
 				function->funcid, *audit.oids)) {
@@ -13789,14 +13792,14 @@ struct per_row_path_metadata_audit_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			per_row_path_metadata_audit& audit) const {
-		if (node.tag() == T_List) {
-			if (!per_row_path_metadata_has_no_helper(node.raw())) {
+		if (node.get_tag() == T_List) {
+			if (!per_row_path_metadata_has_no_helper(node.get())) {
 				audit.invalid = true;
 				return pg_walk_step::stop;
 			}
 			return pg_walk_step::skip_subtree;
 		}
-		if (RestrictInfo* restriction = node.try_as<RestrictInfo>()) {
+		if (RestrictInfo* restriction = node.try_cast<RestrictInfo>()) {
 			if (restriction->clause == nullptr
 				|| !per_row_path_metadata_has_no_helper(
 					reinterpret_cast<Node*>(restriction->clause))
@@ -13807,14 +13810,14 @@ struct per_row_path_metadata_audit_visitor {
 			}
 			return pg_walk_step::skip_subtree;
 		}
-		if (per_row_path_metadata_node_is_scalar(node.tag())) {
+		if (per_row_path_metadata_node_is_scalar(node.get_tag())) {
 			return pg_walk_step::skip_subtree;
 		}
-		if (!per_row_path_metadata_node_is_walkable(node.tag())) {
+		if (!per_row_path_metadata_node_is_walkable(node.get_tag())) {
 			audit.invalid = true;
 			return pg_walk_step::stop;
 		}
-		if (FuncExpr* function = node.try_as<FuncExpr>();
+		if (FuncExpr* function = node.try_cast<FuncExpr>();
 			function != nullptr
 			&& is_bioseq_projection_funcid(function->funcid, *audit.oids)) {
 			audit.invalid = true;
@@ -15181,7 +15184,7 @@ static void per_row_record_path_identity(
 			target_symbols, query_symbols, recipe_path->path.rows,
 			/*index_read_requirement=*/false,
 			static_cast<std::uint32_t>(k_bioseq_runtime_buffer_reserve),
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				target_symbols, query_symbols));
 		const Cost startup = std::max<Cost>(0,
 			recipe_path->path.startup_cost + operand_cost.startup
@@ -15903,7 +15906,7 @@ bioseq_batch_join_set_join_pathlist_hook(
 	const std::uint64_t query_symbols = estimate_mmsearch_operand_symbols(
 		owned_operands.get_second(), oids);
 	const std::uint64_t admitted_bytes =
-		bioseq::parallelism::saturating_add(target_symbols, query_symbols);
+		bioseq::common::saturating_add(target_symbols, query_symbols);
 	const owned_mmsearch_cost alignment_cost = estimate_owned_mmsearch_cost(
 		target_symbols, query_symbols, locator_path->path.rows,
 		planned_requirement
@@ -16038,7 +16041,7 @@ remove_paths_by_predicate(RelOptInfo *rel, path_predicate remove_path_predicate)
 static bool
 is_not_index_path(Path *path)
 {
-	return !pg_node_view{to_pg_node(path)}.is<IndexPath>();
+	return !pg_node_view{to_pg_node(path)}.is_type<IndexPath>();
 }
 
 
@@ -16070,7 +16073,7 @@ cost_bioseq_column_paths(PlannerInfo *root, RelOptInfo *rel, Oid relation_id)
 	bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
 	for(auto path : postgres_list<Path>(rel->pathlist))
 	{
-		if (pg_node_view{to_pg_node(path)}.is<IndexPath>())
+		if (pg_node_view{to_pg_node(path)}.is_type<IndexPath>())
 		{
 			/*
 			 * Since we don't provide implementations for scan_bitmap_next_block
@@ -16280,13 +16283,14 @@ check_var_stats(PlannerInfo *root, Var *var, Oid sortop, float *abs_var_correlat
 	VariableStatData var_stat_data;
 	examine_variable(root, reinterpret_cast<Node *>(var), var->varno, &var_stat_data);
 	if (var_stat_data.rel == NULL ||
-		!HeapTupleIsValid(var_stat_data.stats_tuple))
+		!HeapTupleIsValid(var_stat_data.statsTuple))
 	{
+		ReleaseVariableStats(var_stat_data);
 		return true;
 	}
 
 	AttStatsSlot sslot;
-	if (!get_attstatsslot(&sslot, var_stat_data.stats_tuple,
+	if (!get_attstatsslot(&sslot, var_stat_data.statsTuple,
 						  STATISTIC_KIND_CORRELATION, sortop,
 						  ATTSTATSSLOT_NUMBERS))
 	{
@@ -16298,6 +16302,7 @@ check_var_stats(PlannerInfo *root, Var *var, Oid sortop, float *abs_var_correlat
 
 	float var_correlation = sslot.numbers[0];
 
+	free_attstatsslot(&sslot);
 	ReleaseVariableStats(var_stat_data);
 
 	/*
@@ -16458,13 +16463,13 @@ is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 * silently rejects, leaving the buffer inactive and bioseq.* projections
 	 * NULL.
 	 */
-	const bool local_query_recipe = !pg_node_view{arg1}.is<Const>()
-		&& !pg_node_view{arg1}.is<Var>() && !pg_node_view{arg1}.is<Param>()
+	const bool local_query_recipe = !pg_node_view{arg1}.is_type<Const>()
+		&& !pg_node_view{arg1}.is_type<Var>() && !pg_node_view{arg1}.is_type<Param>()
 		&& resolve_base_local_mmsearch_operand(
 			arg1, rel, stub_oids,
 			/*require_sequence_var=*/false).has_value();
-	if (!pg_node_view{arg1}.is<Const>() && !pg_node_view{arg1}.is<Var>()
-		&& !pg_node_view{arg1}.is<Param>() && !local_query_recipe) return false;
+	if (!pg_node_view{arg1}.is_type<Const>() && !pg_node_view{arg1}.is_type<Var>()
+		&& !pg_node_view{arg1}.is_type<Param>() && !local_query_recipe) return false;
 	/* A volatile function inside a validated base-local query recipe stays at
 	 * this scan frontier and is evaluated by one retained ExprState exactly
 	 * once per admitted row.  Only an unvalidated volatile shape is ineligible. */
@@ -16601,11 +16606,11 @@ extract_pushdown_clause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 		if (boolean_expression->boolop == AND_EXPR)
 		{
-			return make_andclause(pushdownable_args);
+			return make_andclause(pushdownable_args.release());
 		}
 		else if (boolean_expression->boolop == OR_EXPR)
 		{
-			return make_orclause(pushdownable_args);
+			return make_orclause(pushdownable_args.release());
 		}
 		else
 		{
@@ -16792,7 +16797,7 @@ find_pushdown_join_clauses(PlannerInfo *root, RelOptInfo *rel)
 	List *ec_clauses = generate_implied_equalities_for_column(
 		root, rel, pushdown_join_clause_matches, NULL,
 		rel->lateral_referencers);
-	join_clauses.concat(ec_clauses);
+	join_clauses.concatenate(ec_clauses);
 
 	return filter_pushdown_clauses(root, rel, join_clauses.release());
 }
@@ -17189,7 +17194,7 @@ struct exec_params_probe_state {};
 struct exec_params_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, exec_params_probe_state&) const {
-		if (Param *param = node.try_as<Param>())
+		if (Param *param = node.try_cast<Param>())
 		{
 			if (param->paramkind == PARAM_EXEC)
 			{
@@ -17267,7 +17272,7 @@ struct cost_test_visitor {
 	[[nodiscard]] pg_walk_step
 	operator()(pg_expression_walk_cursor, pg_node_view node, Query& parse) const {
 		bioseq_log<logging_level::debug>("[bioseq] pg: cost_test_visitor() entered");
-		if (Var* var_node = node.try_as<Var>()) {
+		if (Var* var_node = node.try_cast<Var>()) {
 			const auto var_no = var_node->varno;
 			List* range_table = parse.rtable;
 			if (range_table == nullptr) {
@@ -17424,9 +17429,10 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 			list_make1(owned_mmsearch.normalized_expr),
 			list_copy(owned_mmsearch.extra_normalized_exprs));
 	if (owned_mmsearch.restriction != nullptr) {
-		all_clauses = restrictions_without_owned_mmsearch(
-			all_clauses.release(), owned_mmsearch_restrictions,
-			/*restrictions_are_private_copies=*/true);
+		all_clauses = postgres_list<RestrictInfo>{
+			restrictions_without_owned_mmsearch(
+				all_clauses.release(), owned_mmsearch_restrictions,
+				/*restrictions_are_private_copies=*/true)};
 		/* Alignment statistics are backend-local and have no DSM aggregation.
 		 * A worker-local snapshot must not be exposed as statement statistics,
 		 * so every alignment-owning path is parallel unsafe. */
@@ -17603,7 +17609,7 @@ add_bioseq_column_scan_path(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 		const std::uint64_t query_symbols =
 			estimate_mmsearch_operand_symbols(operands.get_second(), stub_oids);
 		const std::uint64_t admitted_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				target_symbols, query_symbols);
 		bioseq::simd::minimap2_parameters planned_params =
 			build_params_from_gucs();
@@ -17837,7 +17843,7 @@ struct base_match_helper_registration_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			base_match_helper_registration& registration) const {
-		FuncExpr* function = node.try_as<FuncExpr>();
+		FuncExpr* function = node.try_cast<FuncExpr>();
 		if (function == nullptr || registration.oids == nullptr
 			|| !is_bioseq_projection_funcid(
 				function->funcid, *registration.oids)) {
@@ -18784,7 +18790,7 @@ struct batch_join_placeholder_registration_visitor {
 		pg_expression_walk_cursor,
 		pg_node_view node,
 		batch_join_placeholder_registration& registration) const {
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			FuncExpr* helper = registration.oids == nullptr ? nullptr
 				: batch_join_match_helper_phv_function(
 					placeholder, *registration.oids);
@@ -18833,7 +18839,7 @@ struct batch_join_placeholder_registration_visitor {
 			}
 			return pg_walk_step::descend;
 		}
-		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+		if (FuncExpr* function = node.try_cast<FuncExpr>()) {
 			if (registration.oids != nullptr
 				&& is_bioseq_projection_funcid(
 					function->funcid, *registration.oids)) {
@@ -18965,10 +18971,10 @@ struct batch_join_output_setrefs_rewrite_mutator {
 			pg_expression_mutation_cursor,
 			pg_node_view node,
 			batch_join_output_setrefs_rewrite& rewrite) const {
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			if (var->varno == INDEX_VAR || var->varno == OUTER_VAR
 				|| var->varno == INNER_VAR) {
-				return pg_node_mutation::with(
+				return pg_node_mutation::replace_with(
 					reinterpret_cast<Node*>(copyObject(var)));
 			}
 			TargetEntry* entry = batch_join_find_exact_scan_entry(
@@ -18977,20 +18983,20 @@ struct batch_join_output_setrefs_rewrite_mutator {
 				rewrite.scan_tlist, var);
 			if (entry == nullptr) {
 				rewrite.invalid = true;
-				return pg_node_mutation::with(
+				return pg_node_mutation::replace_with(
 					reinterpret_cast<Node*>(copyObject(var)));
 			}
-			return pg_node_mutation::with(
+			return pg_node_mutation::replace_with(
 				reinterpret_cast<Node*>(copyObject(entry->expr)));
 		}
 
 		bool helper_identity = false;
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			helper_identity = rewrite.oids != nullptr
 				&& batch_join_expression_has_match_helper(
 					reinterpret_cast<Node*>(placeholder->phexpr),
 					*rewrite.oids);
-		} else if (FuncExpr* function = node.try_as<FuncExpr>()) {
+		} else if (FuncExpr* function = node.try_cast<FuncExpr>()) {
 			helper_identity = rewrite.oids != nullptr
 				&& is_bioseq_projection_funcid(
 					function->funcid, *rewrite.oids);
@@ -18998,29 +19004,29 @@ struct batch_join_output_setrefs_rewrite_mutator {
 		if (!helper_identity) return pg_node_mutation::descend();
 
 		const bool inherited = batch_join_identity_list_contains(
-			rewrite.inherited_helper_identities, node.raw());
+			rewrite.inherited_helper_identities, node.get());
 		TargetEntry* entry = inherited
 			? batch_join_find_exact_scan_entry(
-				rewrite.scan_tlist, node.raw(), 1,
+				rewrite.scan_tlist, node.get(), 1,
 				static_cast<AttrNumber>(
 					rewrite.current_site_first_resno - 1))
 			: batch_join_find_exact_scan_entry(
-				rewrite.scan_tlist, node.raw(),
+				rewrite.scan_tlist, node.get(),
 				rewrite.current_site_first_resno);
 		if (entry == nullptr && inherited && rewrite.oids != nullptr) {
 			bool ambiguous = false;
 			entry = batch_join_find_unique_semantic_helper_entry(
-				rewrite.scan_tlist, node.raw(), *rewrite.oids, 1,
+				rewrite.scan_tlist, node.get(), *rewrite.oids, 1,
 				static_cast<AttrNumber>(
 					rewrite.current_site_first_resno - 1), ambiguous);
 			if (ambiguous) rewrite.invalid = true;
 		}
 		if (entry == nullptr || entry->resno <= 0) {
 			rewrite.invalid = true;
-			return pg_node_mutation::with(
-				reinterpret_cast<Node*>(copyObject(node.raw())));
+			return pg_node_mutation::replace_with(
+				reinterpret_cast<Node*>(copyObject(node.get())));
 		}
-		return pg_node_mutation::with(
+		return pg_node_mutation::replace_with(
 			reinterpret_cast<Node*>(copyObject(entry->expr)));
 	}
 };
@@ -19071,7 +19077,7 @@ struct batch_join_setrefs_coverage_visitor {
 			pg_expression_walk_cursor,
 			pg_node_view node,
 			batch_join_setrefs_coverage& coverage) const {
-		if (Var* var = node.try_as<Var>()) {
+		if (Var* var = node.try_cast<Var>()) {
 			for (TargetEntry* entry : postgres_list<TargetEntry>(coverage.scan_tlist)) {
 				Var* supplied = entry == nullptr
 					? nullptr
@@ -19088,7 +19094,7 @@ struct batch_join_setrefs_coverage_visitor {
 			coverage.missing_var = var;
 			return pg_walk_step::stop;
 		}
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* placeholder = node.try_cast<PlaceHolderVar>()) {
 			for (TargetEntry* entry : postgres_list<TargetEntry>(coverage.scan_tlist)) {
 				if (entry != nullptr && IsA(entry->expr, PlaceHolderVar)
 					&& equal(entry->expr, placeholder)) {
@@ -19109,11 +19115,11 @@ struct batch_join_setrefs_coverage_visitor {
 			if (entry != nullptr && entry->expr != nullptr
 				&& !IsA(entry->expr, Var)
 				&& !IsA(entry->expr, PlaceHolderVar)
-				&& equal(entry->expr, node.raw())) {
+				&& equal(entry->expr, node.get())) {
 				return pg_walk_step::skip_subtree;
 			}
 		}
-		if (FuncExpr* function = node.try_as<FuncExpr>();
+		if (FuncExpr* function = node.try_cast<FuncExpr>();
 			coverage.oids != nullptr && function != nullptr
 			&& is_bioseq_projection_funcid(
 				function->funcid, *coverage.oids)) {
@@ -21231,7 +21237,7 @@ static void neutralize_ancestor_owned_dummy_match_helpers(
 	std::span<match_owner_finalization> owners);
 
 export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
-	if (statement == nullptr || statement->plan_tree == nullptr
+	if (statement == nullptr || statement->planTree == nullptr
 		|| !OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
 		return;
 	}
@@ -21252,7 +21258,7 @@ export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
 				const std::uint64_t statement_scope =
 					allocate_match_owner_scope(next_scope_id);
 				collect_match_owner_plan(
-					statement->plan_tree, owners, statement_scope, next_scope_id);
+					statement->planTree, owners, statement_scope, next_scope_id);
 				for (Plan* subplan : postgres_list<Plan>(statement->subplans)) {
 					const std::uint64_t subplan_scope =
 						allocate_match_owner_scope(next_scope_id);
@@ -21429,7 +21435,7 @@ match_owner_finalization_scope_diagnostics(bool reset) {
 		}
 	}
 	const base_local_sequence_typmod_resolution target_type =
-		base_local_sequence_typmod_resolution(target_recipe, oids);
+		resolve_base_local_sequence_typmod(target_recipe, oids);
 	if (target_recipe == nullptr
 		|| exprType(target_recipe) != oids.bioseq_seq_type_oid
 		|| !lineage_valid || target_type.invalid || target_type.typmod < 0) {
@@ -21874,7 +21880,7 @@ struct finalized_base_owner_site_context {
 };
 
 [[nodiscard]] static bool
-finalized_base_owner_site_context(
+try_resolve_finalized_base_owner_site_context(
 		CustomScan* scan, const bioseq_stub_oids& oids,
 		finalized_base_owner_site_context& context) {
 	context = {};
@@ -21991,7 +21997,7 @@ struct finalized_base_targetlist_audit_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			finalized_base_targetlist_audit& audit) const {
-		FuncExpr* function = node.try_as<FuncExpr>();
+		FuncExpr* function = node.try_cast<FuncExpr>();
 		if (function == nullptr || audit.oids == nullptr
 			|| !is_bioseq_projection_funcid(
 				function->funcid, *audit.oids)) {
@@ -22036,7 +22042,7 @@ struct finalized_base_targetlist_audit_visitor {
 base_scan_targetlist_has_only_finalized_match_helpers(
 		CustomScan* scan, const bioseq_stub_oids& oids) {
 	finalized_base_owner_site_context context{};
-	if (!finalized_base_owner_site_context(scan, oids, context)
+	if (!try_resolve_finalized_base_owner_site_context(scan, oids, context)
 		|| context.sites == NIL) return false;
 	Bitmapset* matched_sites = nullptr;
 	finalized_base_targetlist_audit audit{
@@ -22061,7 +22067,7 @@ base_scan_targetlist_has_only_finalized_match_helpers(
 [[nodiscard]] static std::size_t finalized_base_owner_matching_site_count(
 		CustomScan* scan, Node* identity, const bioseq_stub_oids& oids) {
 	finalized_base_owner_site_context context{};
-	if (!finalized_base_owner_site_context(scan, oids, context)
+	if (!try_resolve_finalized_base_owner_site_context(scan, oids, context)
 		|| identity == nullptr) return 0u;
 	PlaceHolderVar* placeholder = try_cast_pg_node<PlaceHolderVar>(identity);
 	FuncExpr* helper = placeholder == nullptr
@@ -22600,10 +22606,10 @@ static void neutralize_ancestor_owned_dummy_match_helpers_plan(
 static void neutralize_ancestor_owned_dummy_match_helpers(
 		PlannedStmt* statement,
 		std::span<match_owner_finalization> owners) {
-	if (statement == nullptr || statement->plan_tree == nullptr) return;
+	if (statement == nullptr || statement->planTree == nullptr) return;
 	const bioseq_stub_oids& oids = get_cached_stub_oids();
 	neutralize_ancestor_owned_dummy_match_helpers_plan(
-		statement->plan_tree, owners, NIL, oids);
+		statement->planTree, owners, NIL, oids);
 	for (Plan* subplan : postgres_list<Plan>(statement->subplans)) {
 		neutralize_ancestor_owned_dummy_match_helpers_plan(
 			subplan, owners, NIL, oids);
@@ -22900,7 +22906,7 @@ static void record_batch_join_plan_helper_audit_failure(
 struct reparameterize_mutator {
 	[[nodiscard]] pg_node_mutation
 	operator()(pg_expression_mutation_cursor cursor, pg_node_view node, RelOptInfo &child_rel) const {
-		if (Var *var = node.try_as<Var>())
+		if (Var *var = node.try_cast<Var>())
 		{
 			if (bioseq_is_concrete_rte_varno(var->varno)
 				&& bms_is_member(
@@ -22910,15 +22916,15 @@ struct reparameterize_mutator {
 				var = copy_pg_node(var);
 				var->varno = child_rel.relid;
 			}
-			return pg_node_mutation::with(to_pg_node(var));
+			return pg_node_mutation::replace_with(to_pg_node(var));
 		}
 
-		if (RestrictInfo *rinfo = node.try_as<RestrictInfo>())
+		if (RestrictInfo *rinfo = node.try_cast<RestrictInfo>())
 		{
 			rinfo = copy_pg_node(rinfo);
 			rinfo->clause = reinterpret_cast<Expr *>(cursor.descend(
 				reinterpret_cast<Node *>(rinfo->clause)));
-			return pg_node_mutation::with(to_pg_node(rinfo));
+			return pg_node_mutation::replace_with(to_pg_node(rinfo));
 		}
 
 		return pg_node_mutation::descend();
@@ -23079,7 +23085,7 @@ bioseq_column_scan_create_custom_scan_state(CustomScan *cscan)
 struct eval_params_mutator {
 	[[nodiscard]] pg_node_mutation
 	operator()(pg_expression_mutation_cursor, pg_node_view node, ExprContext &econtext) const {
-		if (Param *param = node.try_as<Param>())
+		if (Param *param = node.try_cast<Param>())
 		{
 			int16_t typ_len;
 			bool typ_by_val;
@@ -23088,11 +23094,11 @@ struct eval_params_mutator {
 			get_typlenbyval(param->paramtype, &typ_len, &typ_by_val);
 
 			/* XXX: should save ExprState for efficiency */
-			ExprState *expr_state = ExecInitExprWithParams(to_pg_expression(node.raw()),
+			ExprState *expr_state = ExecInitExprWithParams(to_pg_expression(node.get()),
 														  econtext.ecxt_param_list_info);
 			Datum pval = ExecEvalExpr(expr_state, &econtext, &isnull);
 
-			return pg_node_mutation::with(reinterpret_cast<Node *>(makeConst(param->paramtype,
+			return pg_node_mutation::replace_with(reinterpret_cast<Node *>(makeConst(param->paramtype,
 									  param->paramtypmod,
 									  param->paramcollid,
 									  static_cast<int>(typ_len),
@@ -23638,7 +23644,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	 */
 	bioseq_scan_state->snapshot = estate->es_snapshot;
 	bioseq_scan_state->owns_snapshot_registration = false;
-	Oid relation_oid = cscanstate->ss.ss_currentRelation->rd_locator.rel_number;
+	Oid relation_oid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
 
 	bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() checking parallel mode");
 	if(!IsInParallelMode())
@@ -23815,8 +23821,8 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 			|| !equal(a0, base_match_target_recipe)) {
 			continue;
 		}
-		const bool is_c = pg_node_view{a1}.is<Const>();
-		const bool is_p = pg_node_view{a1}.is<Param>();
+		const bool is_c = pg_node_view{a1}.is_type<Const>();
+		const bool is_p = pg_node_view{a1}.is_type<Param>();
 		Var* a1_var = try_cast_pg_node<Var>(a1);
 		const bool is_v = a1_var != nullptr
 			&& a1_var->varno == cscan->scan.scanrelid
@@ -23950,7 +23956,7 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 			arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
 		} else {
 			const base_local_sequence_typmod_resolution query_type =
-				base_local_sequence_typmod_resolution(arg1, scan_stub_oids);
+				resolve_base_local_sequence_typmod(arg1, scan_stub_oids);
 			if (query_type.invalid || query_type.typmod < 0) continue;
 			arg1_typmod = query_type.typmod;
 		}
@@ -24511,9 +24517,9 @@ bioseq_column_scan_begin_custom_scan_impl(CustomScanState *cscanstate, EState *e
 	Oid scan_spc_oid = InvalidOid;
 	Oid scan_relfile = InvalidOid;
 	if (cscanstate->ss.ss_currentRelation != nullptr) {
-		scan_db_oid  = cscanstate->ss.ss_currentRelation->rd_locator.db_oid;
-		scan_spc_oid = cscanstate->ss.ss_currentRelation->rd_locator.spc_oid;
-		scan_relfile = cscanstate->ss.ss_currentRelation->rd_locator.rel_number;
+		scan_db_oid  = cscanstate->ss.ss_currentRelation->rd_locator.dbOid;
+		scan_spc_oid = cscanstate->ss.ss_currentRelation->rd_locator.spcOid;
+		scan_relfile = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
 	}
 	runtime.buffer.configure_params(aligner_params,
 							index_read_requirement,
@@ -24880,7 +24886,7 @@ try_rewrite_symbol_count(FuncExpr* fe, var_injector_context* ctx)
 struct var_injector_mutator {
 	[[nodiscard]] pg_node_mutation
 	operator()(pg_expression_mutation_cursor, pg_node_view node, var_injector_context &injector_context) const {
-		if (FuncExpr* func_expr = node.try_as<FuncExpr>()) {
+		if (FuncExpr* func_expr = node.try_cast<FuncExpr>()) {
 			if (!edit_sequence_argument_matches_recipe(
 					func_expr,
 					injector_context.match_target_recipe,
@@ -24899,13 +24905,13 @@ struct var_injector_mutator {
 			if (replacement != nullptr) {
 				bioseq_log<logging_level::debug>("[bioseq] pg: var_injector_mutator() replacing bioseq funcid={} with placeholder Const",
 						func_expr->funcid);
-				return pg_node_mutation::with(to_pg_node(replacement));
+				return pg_node_mutation::replace_with(to_pg_node(replacement));
 			}
 			if (func_expr->funcid == injector_context.oids->symbol_count_oid) {
 				Const* symbol_placeholder =
 					try_rewrite_symbol_count(func_expr, &injector_context);
 				if (symbol_placeholder != nullptr) {
-					return pg_node_mutation::with(to_pg_node(symbol_placeholder));
+					return pg_node_mutation::replace_with(to_pg_node(symbol_placeholder));
 				}
 				/* Call shape not supported (literal arg, non-Const letter,
 				 * letter outside alphabet, …) — let the scalar entry point
@@ -24926,7 +24932,7 @@ struct var_injector_mutator {
 		 * chance to rewrite our FuncExpr in place; the PHV node itself is
 		 * preserved.
 		 */
-		if (PlaceHolderVar* phv = node.try_as<PlaceHolderVar>()) {
+		if (PlaceHolderVar* phv = node.try_cast<PlaceHolderVar>()) {
 			bioseq_log<logging_level::debug>("[bioseq] pg: var_injector_mutator() encountered PlaceHolderVar phid={} at exec time — passing through",
 					phv->phid);
 			/* fall through to descend */
@@ -25026,7 +25032,7 @@ populate_placeholder_consts(placeholder_constants& consts,
 			}
 }
 
-[[nodiscard]] static batch_join_runtime* batch_join_runtime(
+[[nodiscard]] static batch_join_runtime* try_get_batch_join_runtime(
 		CustomScanState* node) noexcept {
 	auto* state = reinterpret_cast<batch_join_state*>(node);
 	return state == nullptr
@@ -25326,7 +25332,7 @@ static void batch_join_materialize_queries(
 	const std::uint64_t planner_rows = static_cast<std::uint64_t>(
 		std::ceil(bounded_rows));
 	const std::uint64_t planner_tuple_bytes =
-		bioseq::parallelism::saturating_add(
+		bioseq::common::saturating_add(
 			static_cast<std::uint64_t>(runtime.query_planner_width),
 			static_cast<std::uint64_t>(
 				MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)
@@ -25334,10 +25340,10 @@ static void batch_join_materialize_queries(
 				+ sizeof(bioseq::scheduler::dispatch_join_query_ref)
 				+ 256u));
 	const std::uint64_t scratch_metadata_bytes =
-		bioseq::parallelism::saturating_mul(
-			bioseq::parallelism::saturating_add(
+		bioseq::common::saturating_mul(
+			bioseq::common::saturating_add(
 				static_cast<std::uint64_t>(sizeof(TupleTableSlot)),
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					static_cast<std::uint64_t>(runtime.query_column_count),
 					static_cast<std::uint64_t>(
 						sizeof(Datum) + sizeof(bool)
@@ -25349,8 +25355,8 @@ static void batch_join_materialize_queries(
 	 * Admit their worst query-column-count shape once, even when the planner
 	 * estimated zero rows/width. */
 	runtime.query_planner_admission_bytes =
-		bioseq::parallelism::saturating_add(
-			bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_add(
+			bioseq::common::saturating_mul(
 				planner_rows, planner_tuple_bytes),
 			scratch_metadata_bytes);
 	{
@@ -25520,7 +25526,7 @@ static void batch_join_materialize_queries(
 				[staging_slot] { ExecStoreVirtualTuple(staging_slot); });
 		}
 		const std::uint64_t retained_recipe_bytes = row_has_expanded_sequence
-			? bioseq::parallelism::saturating_mul(
+			? bioseq::common::saturating_mul(
 				static_cast<std::uint64_t>(
 					expanded_source_attributes.size()),
 				k_batch_join_retained_recipe_admission_bytes)
@@ -25532,7 +25538,7 @@ static void batch_join_materialize_queries(
 					return toast_raw_datum_size(original);
 				}));
 		const std::uint64_t retained_expanded_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_recipe_bytes, flat_query_bytes);
 		TupleTableSlot* tuple_shape_source = row_has_expanded_sequence
 			? runtime.query_staging_slot : source;
@@ -25544,7 +25550,7 @@ static void batch_join_materialize_queries(
 					tuple_shape_source->tts_isnull);
 			});
 		std::uint64_t tuple_upper_bound =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				static_cast<std::uint64_t>(
 					MAXALIGN(MINIMAL_TUPLE_DATA_OFFSET)),
 				static_cast<std::uint64_t>(source_tuple_data));
@@ -25552,18 +25558,18 @@ static void batch_join_materialize_queries(
 		 * sequence datum. Adding the raw size rather than subtracting that datum
 		 * is deliberately conservative and covers the flat replacement without
 		 * inspecting or allocating any pass-by-reference value. */
-		tuple_upper_bound = bioseq::parallelism::saturating_add(
+		tuple_upper_bound = bioseq::common::saturating_add(
 			tuple_upper_bound, retained_expanded_bytes);
-		tuple_upper_bound = bioseq::parallelism::saturating_add(
+		tuple_upper_bound = bioseq::common::saturating_add(
 			tuple_upper_bound,
-			bioseq::parallelism::saturating_mul(
-				bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
+				bioseq::common::saturating_mul(
 					static_cast<std::uint64_t>(
 						expanded_source_attributes.size()),
 					static_cast<std::uint64_t>(sizeof(
 						batch_join_query_tuple::retained_expanded_attribute))),
 					bioseq::parallelism::k_vector_preallocation_headroom_factor));
-		tuple_upper_bound = bioseq::parallelism::saturating_add(
+		tuple_upper_bound = bioseq::common::saturating_add(
 			tuple_upper_bound,
 			static_cast<std::uint64_t>(
 				sizeof(batch_join_query_tuple)
@@ -25573,7 +25579,7 @@ static void batch_join_materialize_queries(
 					source->tts_tupleDescriptor->natts)
 					* (sizeof(Datum) + sizeof(bool))));
 		const std::uint64_t required_after_row =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				runtime.query_actual_materialized_bytes,
 				tuple_upper_bound);
 		if (required_after_row
@@ -25625,7 +25631,7 @@ static void batch_join_materialize_queries(
 								return acquire_writable_pg_sequence(read_only);
 							});
 					newly_retained_wrapper_bytes =
-						bioseq::parallelism::saturating_add(
+						bioseq::common::saturating_add(
 							newly_retained_wrapper_bytes,
 							static_cast<std::uint64_t>(
 								MemoryContextMemAllocated(
@@ -25743,18 +25749,18 @@ static void batch_join_materialize_queries(
 			throw;
 		}
 		const std::uint64_t retained_vector_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				static_cast<std::uint64_t>(
 					retained_expanded_attributes.capacity()),
 				static_cast<std::uint64_t>(
 					sizeof(batch_join_query_tuple::
 						retained_expanded_attribute)));
 		const std::uint64_t actual_tuple_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				static_cast<std::uint64_t>(copy->t_len),
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					newly_retained_wrapper_bytes,
-					bioseq::parallelism::saturating_add(
+					bioseq::common::saturating_add(
 						retained_vector_bytes,
 						static_cast<std::uint64_t>(
 							sizeof(batch_join_query_tuple)
@@ -25764,7 +25770,7 @@ static void batch_join_materialize_queries(
 									source->tts_tupleDescriptor->natts)
 									* (sizeof(Datum) + sizeof(bool))))));
 		runtime.query_actual_materialized_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				runtime.query_actual_materialized_bytes,
 				actual_tuple_bytes);
 		if (runtime.query_actual_materialized_bytes
@@ -26129,7 +26135,7 @@ static Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan) {
 			 errmsg("BioseqBatchJoin executor plan is missing")));
 	}
 	auto* state = reinterpret_cast<batch_join_state*>(
-		new_node(sizeof(batch_join_state), T_CustomScanState));
+		newNode(sizeof(batch_join_state), T_CustomScanState));
 	state->custom_scan_state.methods = &bioseq_batch_join_execute_methods;
 	state->runtime = nullptr;
 	return reinterpret_cast<Node*>(&state->custom_scan_state);
@@ -26712,9 +26718,9 @@ static void bioseq_batch_join_begin_custom_scan(
 			requirement,
 			bioseq::settings::index::sequence_read::enabled,
 			runtime->target_relation_oid,
-			target_relation->rd_locator.db_oid,
-			target_relation->rd_locator.spc_oid,
-			target_relation->rd_locator.rel_number,
+			target_relation->rd_locator.dbOid,
+			target_relation->rd_locator.spcOid,
+			target_relation->rd_locator.relNumber,
 			target_relation,
 			target_snapshot,
 			estate->es_query_cxt);
@@ -26807,7 +26813,7 @@ static void bioseq_batch_join_begin_custom_scan(
 
 static TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(
 		CustomScanState* node) {
-	batch_join_runtime* runtime = batch_join_runtime(node);
+	batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 	if (runtime == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -26914,7 +26920,7 @@ static TupleTableSlot* bioseq_batch_join_exec_custom_scan(
 	}
 	PG_END_TRY();
 	if (original_error != nullptr) {
-		if (batch_join_runtime* runtime = batch_join_runtime(node);
+		if (batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 			runtime != nullptr) {
 			batch_join_abandon_executor_resources_after_error(
 				node, *runtime);
@@ -26923,7 +26929,7 @@ static TupleTableSlot* bioseq_batch_join_exec_custom_scan(
 		ReThrowError(exact_error);
 	}
 	if (converted_pg_error != nullptr) {
-		if (batch_join_runtime* runtime = batch_join_runtime(node);
+		if (batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 			runtime != nullptr) {
 			batch_join_abandon_executor_resources_after_error(
 				node, *runtime);
@@ -26932,7 +26938,7 @@ static TupleTableSlot* bioseq_batch_join_exec_custom_scan(
 		ReThrowError(exact_error);
 	}
 	if (cpp_error != nullptr) {
-		if (batch_join_runtime* runtime = batch_join_runtime(node);
+		if (batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 			runtime != nullptr) {
 			batch_join_abandon_executor_resources_after_error(
 				node, *runtime);
@@ -26961,7 +26967,7 @@ static void bioseq_batch_join_end_custom_scan(CustomScanState* node) {
 		bioseq_per_row_join_end_custom_scan(node);
 		return;
 	}
-	batch_join_runtime* runtime = batch_join_runtime(node);
+	batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 	if (runtime == nullptr || runtime->cleanup_done) {
 		return;
 	}
@@ -27007,7 +27013,7 @@ static void bioseq_batch_join_rescan_custom_scan(CustomScanState* node) {
 		bioseq_per_row_join_rescan_custom_scan(node);
 		return;
 	}
-	batch_join_runtime* runtime = batch_join_runtime(node);
+	batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 	if (runtime == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -27087,7 +27093,7 @@ static void bioseq_batch_join_explain_custom_scan(
 		return;
 	}
 	(void)ancestors;
-	batch_join_runtime* runtime = batch_join_runtime(node);
+	batch_join_runtime* runtime = try_get_batch_join_runtime(node);
 	ExplainPropertyInteger(
 		"Bioseq Query Batch Capacity", nullptr,
 		static_cast<std::int64_t>(k_bioseq_runtime_buffer_reserve), es);
@@ -27162,7 +27168,7 @@ static void bioseq_batch_join_explain_custom_scan(
 		/*highway_dispatch_already_rendered=*/false);
 }
 
-[[nodiscard]] static per_row_join_runtime* per_row_join_runtime(
+[[nodiscard]] static per_row_join_runtime* try_get_per_row_join_runtime(
 		CustomScanState* node) noexcept {
 	auto* state = reinterpret_cast<per_row_join_state*>(node);
 	return state == nullptr
@@ -27513,9 +27519,9 @@ static void bioseq_per_row_join_begin_custom_scan_impl(
 	runtime->buffer.configure_params(
 		params, bioseq::indexing::index_read_requirement::require_absent,
 		/*read_sequence_index=*/false, target_relation_oid,
-		runtime->target_relation->rd_locator.db_oid,
-		runtime->target_relation->rd_locator.spc_oid,
-		runtime->target_relation->rd_locator.rel_number,
+		runtime->target_relation->rd_locator.dbOid,
+		runtime->target_relation->rd_locator.spcOid,
+		runtime->target_relation->rd_locator.relNumber,
 		runtime->target_relation, estate->es_snapshot,
 		estate->es_query_cxt);
 	char* column_name = get_attname(
@@ -27568,7 +27574,7 @@ static void bioseq_per_row_join_begin_custom_scan(
 	}
 	PG_END_TRY();
 	auto abandon = [node]() noexcept {
-		if (per_row_join_runtime* runtime = per_row_join_runtime(node);
+		if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 			runtime != nullptr) {
 			per_row_join_abandon_after_error(node, *runtime);
 			if (!runtime->cleanup_callback_registered) {
@@ -27651,7 +27657,7 @@ static void bioseq_per_row_join_begin_custom_scan(
 
 static TupleTableSlot* bioseq_per_row_join_exec_custom_scan_impl(
 		CustomScanState* node) {
-	per_row_join_runtime* runtime = per_row_join_runtime(node);
+	per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 	if (runtime == nullptr || runtime->child == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -27773,7 +27779,7 @@ static TupleTableSlot* bioseq_per_row_join_exec_custom_scan(
 	}
 	PG_END_TRY();
 	auto abandon = [node]() noexcept {
-		if (per_row_join_runtime* runtime = per_row_join_runtime(node);
+		if (per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 			runtime != nullptr) {
 			per_row_join_abandon_after_error(node, *runtime);
 		}
@@ -27810,7 +27816,7 @@ static TupleTableSlot* bioseq_per_row_join_exec_custom_scan(
 }
 
 static void bioseq_per_row_join_end_custom_scan(CustomScanState* node) {
-	per_row_join_runtime* runtime = per_row_join_runtime(node);
+	per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 	if (runtime == nullptr || runtime->cleanup_done) return;
 	try {
 		per_row_join_release_checked(node, *runtime);
@@ -27828,7 +27834,7 @@ static void bioseq_per_row_join_end_custom_scan(CustomScanState* node) {
 }
 
 static void bioseq_per_row_join_rescan_custom_scan(CustomScanState* node) {
-	per_row_join_runtime* runtime = per_row_join_runtime(node);
+	per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 	if (runtime == nullptr || runtime->child == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -27854,7 +27860,7 @@ static void bioseq_per_row_join_rescan_custom_scan(CustomScanState* node) {
 
 static void bioseq_per_row_join_explain_custom_scan(
 		CustomScanState* node, List*, ExplainState* es) {
-	per_row_join_runtime* runtime = per_row_join_runtime(node);
+	per_row_join_runtime* runtime = try_get_per_row_join_runtime(node);
 	ExplainPropertyText("Bioseq Mmsearch Ownership", "per-row recipe", es);
 	ExplainPropertyText("Bioseq Reconstructed Join", "child plan", es);
 	per_row_mmsearch_plan_audit child_audit{};
@@ -27915,7 +27921,7 @@ static void bioseq_per_row_join_explain_custom_scan(
  * placeholder. For the current output row (resolved by columnar rowno) it
  * random-access reads the SEQ column header, then for each site:
  *   (2) if bioseq.index.sequence_read.enabled = on, tries the stored INLINE
- *       SymbolCountsIndex chunk (one heap PK lookup, the only thing the GUC
+ *       symbol_counts_index chunk (one heap PK lookup, the only thing the GUC
  *       gates here);
  *   (3) otherwise UNCONDITIONALLY recomputes tally_symbol_counts over the row
  *       (scanner_pg-streamed for a stored stub, in-memory for an inline value).
@@ -28142,12 +28148,12 @@ populate_symbol_count_placeholders(placeholder_constants& consts,
 				auto store = bsi::open_sequence_storage(
 						relid, rid.db_oid, rid.tablespace_oid,
 						rid.relfilenode, site.column_attno,
-						bioseq::indexing::SymbolCountsIndex<
+						bioseq::indexing::symbol_counts_index<
 							bsi::sequence_index_storage>::index_name,
 						loc, static_cast<uint64_t>(rowno),
 						resources->caches, resources->scratch);
 				try {
-					stored = bioseq::indexing::SymbolCountsIndex<
+					stored = bioseq::indexing::symbol_counts_index<
 						bsi::sequence_index_storage>::read_count(
 							store, static_cast<std::size_t>(site.rank));
 					store.close_checked();
@@ -29845,7 +29851,7 @@ explain_prefilter_execution_stats(
 	ExplainState* es)
 {
 	if (!operational.prefilter_execution_stats_available) return;
-	const auto& stats = operational.prefilter_execution_stats;
+	const auto& stats = operational.prefilter_stats;
 	ExplainPropertyBool("Prefilter Stats Available", true, es);
 	ExplainPropertyText(
 		"Prefilter Resolved Algorithm", stats.resolved_algorithm_name(), es);
@@ -30178,7 +30184,7 @@ explain_pipeline_execution_stats(
 			static_cast<unsigned long long>(stats.attempted_alignment_jobs),
 			static_cast<unsigned long long>(stats.fully_attested_alignment_jobs),
 			static_cast<unsigned long long>(stats.unattested_alignment_jobs),
-			stats.environment.mixed_invalid ? "true" : "false",
+			stats.environment.is_mixed_invalid ? "true" : "false",
 			stats.has_mixed_persisted_identity ? "true" : "false",
 			operational.has_operational_identity_conflict ? "true" : "false",
 			operational.are_stats_saturated ? "true" : "false");
@@ -30273,7 +30279,7 @@ explain_pipeline_execution_stats(
 			stats.first_unattested_query_ordinal, es);
 	}
 	ExplainPropertyBool(
-		"Environment Mixed Invalid", stats.environment.mixed_invalid, es);
+		"Environment Mixed Invalid", stats.environment.is_mixed_invalid, es);
 	ExplainPropertyBool(
 		"Mixed Persisted Identity", stats.has_mixed_persisted_identity, es);
 	ExplainPropertyBool("Operational Identity Conflict",

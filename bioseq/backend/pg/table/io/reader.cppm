@@ -53,7 +53,7 @@ begin_column_read(Relation relation, TupleDesc tuple_descriptor,
 				  parallel_column_scan_handle parallel_scan);
 export bool
 read_next_column_vector(column_read_state *read_state,  Datum *column_values,
-					   bool *column_nulls, uint64 *row_number, int *new_vector_size);
+					   bool *column_nulls, std::uint64_t *row_number, int *new_vector_size);
 export void
 rescan_column_reader(column_read_state *read_state, List *scan_qual);
 export void
@@ -105,7 +105,7 @@ static bool read_next_stripe_vector(stripe_read_state *stripe_state, Datum *colu
 								 bool *column_nulls, int *new_vector_size,
 								 uint64 stripe_id,
 								 Snapshot snapshot,
-								 uint64 *row_number,
+								 std::uint64_t *row_number,
 								 uint64 stripe_first_row_number);
 
 /*
@@ -930,7 +930,7 @@ read_chunk_groups_filtered(column_read_state *state)
 
 bool
 read_next_column_vector(column_read_state *read_state,  Datum *column_values,
-					   bool *column_nulls, uint64 *row_number, int *new_vector_size)
+					   bool *column_nulls, std::uint64_t *row_number, int *new_vector_size)
 {
 	while (true)
 	{
@@ -977,7 +977,7 @@ read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
 					 bool *column_nulls, int *new_vector_size,
 					 uint64 stripe_id,
 					 Snapshot snapshot,
-					 uint64 *row_number,
+					 std::uint64_t *row_number,
 					 uint64 stripe_first_row_number)
 {
 	if (stripe_state->current_row >= stripe_state->row_count)

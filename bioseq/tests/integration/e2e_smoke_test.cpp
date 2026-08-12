@@ -26,6 +26,8 @@
 
 import bioseq.sequences;
 import bioseq.sequences.generation;
+import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.tests.integration.support;
 
 namespace {

@@ -639,7 +639,7 @@ inline void render_selector_switch(
     detail::render_imports(output, plan, false, true);
     if (plan.topology.region.configured_output_module_name
         == detail::scheduler_output_module) {
-        output << "import :cpu_preparation_support;\n\n";
+        output << "import :cpu_preparation;\n\n";
     }
     output << "namespace " << coordinate.identity_namespace << " {\n"
            << body;

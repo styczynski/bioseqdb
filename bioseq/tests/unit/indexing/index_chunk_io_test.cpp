@@ -116,7 +116,7 @@ void store_undeclared_text(
         index_sub_key_t sub_key,
         std::uint32_t first_chunk_no,
         std::initializer_list<std::string_view> chunks) {
-    bioseq::indexing::crc64_ecma182 checksum;
+    bioseq::indexing::crc64_ecma182_accumulator checksum;
     std::uint64_t total_bytes = 0;
     for (std::string_view chunk : chunks) {
         checksum.update(chunk);
@@ -188,7 +188,7 @@ TEST_CASE("payload-row checksum pins LE metadata order and relocation identity",
 TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
           "[component:bioseq][layer:unit][feature:io]") {
     using bioseq::indexing::crc64_ecma182;
-    using bioseq::indexing::crc64_ecma182;
+    using bioseq::indexing::crc64_ecma182_accumulator;
     using bioseq::indexing::crc64_ecma182_concatenate;
 
     constexpr std::array<std::size_t, 26> lengths{
@@ -217,7 +217,7 @@ TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
 
             const std::uint64_t prior = 0xA5A5A5A55A5A5A5AULL
                 ^ static_cast<std::uint64_t>(offset * 131u + length);
-            crc64_ecma182 incremental{prior};
+            crc64_ecma182_accumulator incremental{prior};
             std::size_t consumed = 0u;
             std::size_t chunk_ordinal = 0u;
             while (consumed < bytes.size()) {
@@ -257,7 +257,7 @@ TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
         const std::uint64_t expected = reference_crc64_ecma182(bytes);
         REQUIRE(crc64_ecma182(bytes) == expected);
 
-        crc64_ecma182 chunked;
+        crc64_ecma182_accumulator chunked;
         std::size_t consumed = 0u;
         while (consumed < bytes.size()) {
             random ^= random >> 12u;
@@ -290,12 +290,13 @@ TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
 TEST_CASE("CRC-64 full-row zero advance matches an independent state oracle",
           "[component:bioseq][layer:unit][feature:io]") {
     using bioseq::indexing::crc64_ecma182;
+    using bioseq::indexing::crc64_ecma182_accumulator;
     using bioseq::indexing::crc64_ecma182_concatenate;
     using bioseq::indexing::crc64_ecma182_advance_zero_bytes;
 
     constexpr std::uint64_t compile_time_state = 0xA5A5A5A55A5A5A5AULL;
     constexpr std::uint64_t compile_time_one = [] {
-        crc64_ecma182 crc{0xA5A5A5A55A5A5A5AULL};
+        crc64_ecma182_accumulator crc{0xA5A5A5A55A5A5A5AULL};
         crc.update_byte(0u);
         return crc.checksum();
     }();

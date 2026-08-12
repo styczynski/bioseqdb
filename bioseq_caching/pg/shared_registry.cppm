@@ -1530,7 +1530,7 @@ void timed_initialization_wait() {
 
 /** Normalize every exact core layout before shared memory is requested. */
 [[nodiscard]] inline shared_registry_preload_request
-shared_registry_preload_request(shared_registry_config config = {}) noexcept {
+make_shared_registry_preload_request(shared_registry_config config = {}) noexcept {
     shared_registry_preload_request result{};
     if (config.max_backends == 0 || config.max_backends > k_maximum_transition_owners ||
         config.dependency_partition_count == 0 ||
@@ -1561,7 +1561,7 @@ shared_registry_preload_request(shared_registry_config config = {}) noexcept {
     config.reusable.max_generations = static_cast<std::uint32_t>(generation_capacity);
     result.requested_config = config;
 
-    const auto reusable = reusable_registry_preload_request(config.reusable);
+    const auto reusable = make_reusable_registry_preload_request(config.reusable);
     if (!reusable.has_value()) {
         result.error = shared_registry_error::invalid_configuration;
         return result;
@@ -2078,7 +2078,7 @@ backend_identity_alive(const shared_registry_owner_token& owner) noexcept {
     return shared_registry_detail::default_owner_is_alive(nullptr, owner);
 }
 
-[[nodiscard]] inline shared_registry_diagnostics shared_registry_diagnostics() noexcept {
+[[nodiscard]] inline shared_registry_diagnostics snapshot_shared_registry_diagnostics() noexcept {
     using namespace shared_registry_detail;
     shared_registry_diagnostics result{};
     if (g_bootstrap == nullptr || g_bootstrap_lock == nullptr) {
@@ -2245,7 +2245,7 @@ inject_shared_registry_allocation_failure(std::uint32_t ordinal) noexcept {
     return current;
 }
 
-[[nodiscard]] inline shared_registry_test_status shared_registry_test_status() noexcept {
+[[nodiscard]] inline shared_registry_test_status snapshot_shared_registry_test_status() noexcept {
     using namespace shared_registry_detail;
     shared_registry_test_status result{};
     shared_registry_test_control* control = test_control();

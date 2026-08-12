@@ -31,7 +31,7 @@ struct reaper_event_encoder final {
 
     [[nodiscard]] auto operator()(
             const reaper_event& row) const {
-        return bioseq::postgres::support::sql_result_row(
+        return bioseq::postgres::support::encode_result_row(
             row.action,
             row.target);
     }
@@ -45,7 +45,7 @@ struct teardown_diagnostics_encoder final {
 
     [[nodiscard]] auto operator()(
             const teardown_diagnostics_row& row) const noexcept {
-        return bioseq::postgres::support::sql_result_row(
+        return bioseq::postgres::support::encode_result_row(
             row.lock_fallback_classifications,
             row.missing_relation_observations);
     }
@@ -64,7 +64,7 @@ struct invalid_result_encoder final {
 struct unnamed_result_encoder final {
     [[nodiscard]] auto operator()(
             const reaper_event& row) const {
-        return bioseq::postgres::support::sql_result_row(
+        return bioseq::postgres::support::encode_result_row(
             row.action,
             row.target);
     }
@@ -73,7 +73,7 @@ struct unnamed_result_encoder final {
 template<class p_value>
 concept encodable_result_field =
     requires(p_value&& value) {
-        bioseq::postgres::support::sql_result_row(
+        bioseq::postgres::support::encode_result_row(
             std::forward<p_value>(value));
     };
 
@@ -84,7 +84,7 @@ concept materializable_owned_result =
         p_result&& result,
         p_encoder&& encoder) {
         {
-            bioseq::postgres::support::sql_result_to_datum(
+            bioseq::postgres::support::encode_result(
                 call,
                 std::move(result),
                 std::move(encoder))
@@ -97,22 +97,22 @@ concept materializable_borrowed_result =
         FunctionCallInfo call,
         p_result& result,
         p_encoder&& encoder) {
-        bioseq::postgres::support::sql_result_to_datum(
+        bioseq::postgres::support::encode_result(
             call,
             result,
             std::move(encoder));
     };
 
 using encoded_reaper_event = decltype(
-    bioseq::postgres::support::sql_result_row(
+    bioseq::postgres::support::encode_result_row(
         std::declval<const std::string&>(),
         std::declval<const std::string&>()));
 using encoded_teardown_diagnostics = decltype(
-    bioseq::postgres::support::sql_result_row(
+    bioseq::postgres::support::encode_result_row(
         std::declval<std::int64_t>(),
         std::declval<std::int64_t>()));
 using encoded_nullable_fields = decltype(
-    bioseq::postgres::support::sql_result_row(
+    bioseq::postgres::support::encode_result_row(
         std::declval<const std::optional<std::string>&>(),
         std::declval<const std::optional<std::int64_t>&>()));
 
@@ -135,12 +135,12 @@ static_assert(std::same_as<
                       missing_relation_observations),
               std::int64_t>);
 
-static_assert(encoded_reaper_event::fields_count == 2);
+static_assert(encoded_reaper_event::field_count == 2);
 static_assert(
     encoded_reaper_event::expected_type_oids()[0] == TEXTOID);
 static_assert(
     encoded_reaper_event::expected_type_oids()[1] == TEXTOID);
-static_assert(encoded_teardown_diagnostics::fields_count == 2);
+static_assert(encoded_teardown_diagnostics::field_count == 2);
 static_assert(
     encoded_teardown_diagnostics::expected_type_oids()[0]
     == INT8OID);

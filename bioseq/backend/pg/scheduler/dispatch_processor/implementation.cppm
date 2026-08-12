@@ -153,6 +153,7 @@ import :highway_registry;
 import :cpu_preparation;
 import :typed_flat_selector;
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
@@ -164,6 +165,7 @@ import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.postgres.storage.indexing.chunked_storage;
@@ -232,7 +234,7 @@ namespace bioseq::simd {
         ::bioseq::simd_dispatch::select_highway_target_once(highway_plan);
     if (highway_binding.target == 0
         || highway_binding.kernels == nullptr
-        || !highway_binding.kernels->complete()
+        || !highway_binding.kernels->is_complete()
         || highway_binding.target != highway_plan.planned_target) {
         throw std::logic_error{
             "Highway runtime binding disagrees with the generated target plan"};
@@ -348,19 +350,19 @@ using cpu_preparation_detail::admitted_canonical_u32_query_collector;
 	}
 	if (required > destination.capacity()) {
 		const std::uint64_t old_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				destination.capacity(),
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t requested_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				required,
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t allocation_headroom =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_bytes,
 				bioseq::parallelism::k_vector_preallocation_headroom_factor);
 		const std::uint64_t peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_bytes, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
 			|| requested_bytes
@@ -382,7 +384,7 @@ using cpu_preparation_detail::admitted_canonical_u32_query_collector;
 			throw;
 		}
 		const std::uint64_t measured_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				destination.capacity(),
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		if (measured_bytes
@@ -391,7 +393,7 @@ using cpu_preparation_detail::admitted_canonical_u32_query_collector;
 			return false;
 		}
 		retained_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_bytes - old_bytes, measured_bytes);
 		if (retained_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()) {
@@ -488,7 +490,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			}
 			query_bp_sizes[query_index] = descriptor.bp_length;
 		}
-		if (!minimizer_query_length_is_representable<minimap_sketch_data>(
+		if (!is_minimizer_query_length_representable<minimap_sketch_data>(
 				query_bp_sizes[query_index])) {
 			ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
@@ -536,16 +538,16 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				== prepared_target.groups.capacity()) {
 			const std::size_t required = prepared_target.groups.size() + 1u;
 			const std::uint64_t old_outer_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					prepared_target.groups.capacity(),
 					sizeof(cpu_prepared_index_group));
 			const std::uint64_t allocation_headroom =
-				bioseq::parallelism::saturating_mul(
-					bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
+					bioseq::common::saturating_mul(
 						required, sizeof(cpu_prepared_index_group)),
 					bioseq::parallelism::
 						k_vector_preallocation_headroom_factor);
-			const std::uint64_t peak = bioseq::parallelism::saturating_add(
+			const std::uint64_t peak = bioseq::common::saturating_add(
 				prepared_target.query_union_admission_bytes,
 				allocation_headroom);
 			if (old_outer_bytes
@@ -565,7 +567,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			}
 			prepared_target.groups.reserve(required);
 			const std::uint64_t measured_outer_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					prepared_target.groups.capacity(),
 					sizeof(cpu_prepared_index_group));
 			if (measured_outer_bytes
@@ -579,7 +581,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				pg_unreachable();
 			}
 			prepared_target.query_union_admission_bytes =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					prepared_target.query_union_admission_bytes
 						- old_outer_bytes,
 					measured_outer_bytes);
@@ -749,11 +751,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
 		for (cpu_prepared_query_sketch& retained
 			 : group.retained_query_sketches) {
 			const std::uint64_t retained_minimizer_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					retained.minimizers.capacity(),
 					sizeof(minimap_sketch_data));
 			const std::uint64_t reconciled_cache_bytes =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					prepared_target.query_sketch_cache_admission_bytes,
 					retained_minimizer_bytes);
 			if (!retained.parallel_preparation_permit.has_value()
@@ -811,7 +813,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				});
 				pg_unreachable();
 			}
-			if (!canonical_collector.ok()) {
+			if (!canonical_collector.is_ok()) {
 				bioseq::postgres::support::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -1035,7 +1037,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 			}
 			group.key_set_checksum = signature;
 			prepared_target.total_unique_keys =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					prepared_target.total_unique_keys,
 					static_cast<std::uint64_t>(canonical.size()));
 			auto mix = [&prepared_target](
@@ -1120,7 +1122,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
 				static_cast<std::uint32_t>(group.window_size),
 				static_cast<std::uint32_t>(group.max_occ));
 		prepared_target.total_unique_keys =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				prepared_target.total_unique_keys,
 				static_cast<std::uint64_t>(group.query_hash_union.size()));
 		auto mix = [&prepared_target](const std::uint64_t value) noexcept {
@@ -1137,21 +1139,21 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	const std::uint64_t tracked_query_union_bytes =
 		prepared_target.query_union_admission_bytes;
 	std::uint64_t measured_query_union_bytes =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			prepared_target.groups.capacity(),
 			static_cast<std::uint64_t>(sizeof(cpu_prepared_index_group)));
 	for (const cpu_prepared_index_group& group : prepared_target.groups) {
 		measured_query_union_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				measured_query_union_bytes,
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					group.query_hash_union.capacity(),
 					static_cast<std::uint64_t>(
 						sizeof(minimap_sketch_data))));
 		measured_query_union_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				measured_query_union_bytes,
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					group.canonical_query_hash_union_u32.capacity(),
 					static_cast<std::uint64_t>(
 						sizeof(std::uint32_t))));
@@ -1181,18 +1183,18 @@ void batch_processor::prepare_cpu_shared_query_unions(
 	std::uint64_t measured_query_sketch_cache_bytes = 0u;
 	for (const cpu_prepared_index_group& group : prepared_target.groups) {
 		measured_query_sketch_cache_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				measured_query_sketch_cache_bytes,
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					group.retained_query_sketches.capacity(),
 					static_cast<std::uint64_t>(
 						sizeof(cpu_prepared_query_sketch))));
 		for (const cpu_prepared_query_sketch& retained
 			 : group.retained_query_sketches) {
 			measured_query_sketch_cache_bytes =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					measured_query_sketch_cache_bytes,
-					bioseq::parallelism::saturating_mul(
+					bioseq::common::saturating_mul(
 						retained.minimizers.capacity(),
 						static_cast<std::uint64_t>(
 							sizeof(minimap_sketch_data))));
@@ -1258,7 +1260,7 @@ bool batch_processor::publish_compact_direct_query_set_stats(
 	std::uint64_t retained_occurrence_count = 0u;
 	for (const cpu_prepared_query_sketch& retained
 			: group.retained_query_sketches) {
-		retained_occurrence_count = bioseq::parallelism::saturating_add(
+		retained_occurrence_count = bioseq::common::saturating_add(
 			retained_occurrence_count,
 			static_cast<std::uint64_t>(retained.minimizers.size()));
 	}
@@ -1323,15 +1325,15 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
 				"compact-direct query-set fallback retained stats are invalid");
 		}
 		previous_query_ordinal = retained.query_ordinal;
-		occurrence_count = bioseq::parallelism::saturating_add(
+		occurrence_count = bioseq::common::saturating_add(
 			occurrence_count,
 			static_cast<std::uint64_t>(retained.minimizers.size()));
 	}
 	const std::uint64_t requested_bytes =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			occurrence_count, sizeof(std::uint32_t));
 	const std::uint64_t allocation_headroom =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			requested_bytes,
 			bioseq::parallelism::k_vector_preallocation_headroom_factor);
 	if (occurrence_count
@@ -1358,7 +1360,7 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
 	try {
 		canonical.reserve(static_cast<std::size_t>(occurrence_count));
 		const std::uint64_t measured_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				canonical.capacity(), sizeof(std::uint32_t));
 		if (measured_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
@@ -1703,7 +1705,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 		const std::uint64_t admitted_bytes =
 			hash_major_reader->admitted_bytes();
 		const std::uint64_t authorized_posting_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				memory_stats.retained_position_count,
 				hash_major_manifest.storage_profile
 					.stored_posting_width_bytes);
@@ -2058,7 +2060,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 					.expected_direct_header_crc64 = direct_header_receipt,
 				};
 			auto bounded_direct = bioseq::indexing::
-				open_compact_h32_direct_index_bounded(
+				open_compact_hash32_direct_index_bounded(
 					std::move(mapped_owner), direct_section,
 					direct_open_options);
 			if (!bounded_direct
@@ -2236,7 +2238,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
 			std::move(*fragment_reader));
 		group.persisted_fragment_lookup_route =
 			compact_h32_direct_requested
-			? bioseq::indexing::minimizer_fragment_lookup_route::compact_h32_direct
+			? bioseq::indexing::minimizer_fragment_lookup_route::direct_compact_hash_lookup
 			: bioseq::indexing::minimizer_fragment_lookup_route::grouped_soa_control_scans;
 		group.target_index_source =
 			::bioseq::pipeline_stats::target_index_source::persisted;

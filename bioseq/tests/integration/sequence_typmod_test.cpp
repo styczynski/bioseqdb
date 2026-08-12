@@ -27,9 +27,9 @@ template <class> inline constexpr bool always_false_v = false;
 template <class p_entry>
 constexpr std::string_view sample_for() {
     using alphabet_type = typename p_entry::alphabet_type;
-    if constexpr (std::is_same_v<A, seq_entry_tag::dna4>) {
+    if constexpr (std::is_same_v<alphabet_type, seq_entry_tag::dna4>) {
         return "ACGTACGTACGTACGT";
-    } else if constexpr (std::is_same_v<A, seq_entry_tag::dna5>) {
+    } else if constexpr (std::is_same_v<alphabet_type, seq_entry_tag::dna5>) {
         return "ACGTNACGTNACGTNACGTNACGTN";
     } else {
         static_assert(always_false_v<p_entry>,

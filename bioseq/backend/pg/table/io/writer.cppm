@@ -20,6 +20,7 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.postgres.types.compact_sequence;
 import :buffers;
 
@@ -513,10 +514,10 @@ flush_stripe(column_write_state *write_state)
 			chunk_skip_node *chunk_skip_node = &chunk_skip_nodes[chunk_index];
 
 			chunk_skip_node->value_stream_offset = stripe_size;
-			chunk_skip_node->value_length = value_buffer_size;
+			chunk_skip_node->value_stream_length = value_buffer_size;
 			chunk_skip_node->value_compression_algorithm = value_compression_algorithm;
 			chunk_skip_node->value_compression_level = write_state->options.compression_level;
-			chunk_skip_node->decompressed_value_size = chunk_buffers->decompressed_value_size;
+			chunk_skip_node->value_decompressed_length = chunk_buffers->value_decompressed_length;
 
 			stripe_size += value_buffer_size;
 		}
@@ -655,7 +656,7 @@ serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index, uint
 		Assert(static_cast<int>(requested_compression) >= 0 &&
 			   static_cast<int>(requested_compression) < static_cast<int>(bioseq::compression_algorithm::count));
 
-		chunk_buffers->decompressed_value_size =
+		chunk_buffers->value_decompressed_length =
 			pending_chunk->referenced_value_buffers[column_index]->len;
 
 		/*

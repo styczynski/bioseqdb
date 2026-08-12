@@ -398,11 +398,11 @@ TEST_CASE(
     "GateKeeper ordered contract and diagnostics are exact",
     "[component:bioseq][layer:unit][feature:prefilter]")
 {
-    STATIC_REQUIRE(static_cast<std::uint32_t>(PrefilterStatus::success) == 0u);
+    STATIC_REQUIRE(static_cast<std::uint32_t>(prefilter_status::success) == 0u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(
-        PrefilterStatus::conservative_unequal) == 1u);
+        prefilter_status::conservative_unequal) == 1u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative) == 2u);
+        prefilter_status::unsupported_conservative) == 2u);
     STATIC_REQUIRE(gatekeeper_geometry_supported(prefilter_job{
         .query_length = 128u,
         .target_length = 128u,
@@ -452,7 +452,7 @@ TEST_CASE(
     const prefilter_result unequal_reject =
         gatekeeper_scalar(shorter, longer, 2u);
     REQUIRE(unequal_reject.status == static_cast<std::uint32_t>(
-        PrefilterStatus::conservative_unequal));
+        prefilter_status::conservative_unequal));
     REQUIRE(unequal_reject.lower_bound == 3u);
     REQUIRE_FALSE(is_prefilter_accepted(unequal_reject));
     REQUIRE(unequal_reject.diagnostics == 0u);
@@ -465,7 +465,7 @@ TEST_CASE(
     const prefilter_result empty_result = gatekeeper_scalar(
         empty, empty, (std::numeric_limits<std::uint32_t>::max)());
     REQUIRE(empty_result.status == static_cast<std::uint32_t>(
-        PrefilterStatus::success));
+        prefilter_status::success));
     REQUIRE(is_prefilter_accepted(empty_result));
     REQUIRE(empty_result.lower_bound == 0u);
     REQUIRE(empty_result.diagnostics == 0u);
@@ -474,7 +474,7 @@ TEST_CASE(
     const prefilter_result unsupported_edits =
         gatekeeper_scalar(one, one, 9u);
     REQUIRE(unsupported_edits.status == static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(unsupported_edits));
     REQUIRE(unsupported_edits.lower_bound == 0u);
     REQUIRE(unsupported_edits.diagnostics == 0u);
@@ -483,7 +483,7 @@ TEST_CASE(
     const prefilter_result unsupported_length =
         gatekeeper_scalar(too_long, too_long, 2u);
     REQUIRE(unsupported_length.status == static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(unsupported_length));
     REQUIRE(unsupported_length.diagnostics == 0u);
 }
@@ -698,24 +698,24 @@ TEST_CASE(
     REQUIRE(results.size() == jobs.size());
 
     REQUIRE(results[0].status == static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(results[0]));
     REQUIRE(results[0].lower_bound == 0u);
     REQUIRE(results[0].diagnostics == 0u);
 
     REQUIRE(results[1].status == static_cast<std::uint32_t>(
-        PrefilterStatus::conservative_unequal));
+        prefilter_status::conservative_unequal));
     REQUIRE_FALSE(is_prefilter_accepted(results[1]));
     REQUIRE(results[1].lower_bound == 1u);
     REQUIRE(results[1].diagnostics == 0u);
 
     REQUIRE(results[2].status == static_cast<std::uint32_t>(
-        PrefilterStatus::success));
+        prefilter_status::success));
     REQUIRE(is_prefilter_accepted(results[2]));
     REQUIRE(results[2].diagnostics == 0u);
 
     REQUIRE(results[3].status == static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(results[3]));
     REQUIRE(results[3].diagnostics == 0u);
 
@@ -731,7 +731,7 @@ TEST_CASE(
     "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
 {
     namespace gv = bioseq::gpu::vulkan;
-    if (!vulkan_gatekeeper_supported()) {
+    if (!is_vulkan_gatekeeper_supported()) {
         SKIP("hardware Vulkan device unavailable");
     }
 
@@ -875,7 +875,7 @@ TEST_CASE(
     "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
 {
     namespace gv = bioseq::gpu::vulkan;
-    if (!vulkan_gatekeeper_supported()) {
+    if (!is_vulkan_gatekeeper_supported()) {
         SKIP("hardware Vulkan device unavailable");
     }
 
@@ -956,7 +956,7 @@ TEST_CASE(
     }
     for (std::size_t index = 0u; index < jobs.size() - 1u; ++index) {
         CHECK(gpu[index].status == static_cast<std::uint32_t>(
-            PrefilterStatus::unsupported_conservative));
+            prefilter_status::unsupported_conservative));
         CHECK(is_prefilter_accepted(gpu[index]));
         CHECK(gpu[index].lower_bound == 0u);
         CHECK(gpu[index].diagnostics == 0u);
@@ -969,7 +969,7 @@ TEST_CASE(
     "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
 {
     namespace gv = bioseq::gpu::vulkan;
-    if (!vulkan_gatekeeper_supported()) {
+    if (!is_vulkan_gatekeeper_supported()) {
         SKIP("hardware Vulkan device unavailable");
     }
 

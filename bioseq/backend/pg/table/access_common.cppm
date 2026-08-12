@@ -7,6 +7,7 @@ module;
 #include <bioseq/pg_compat.h>
 
 #include <cstdint>
+#include <vector>
 
 export module bioseq.postgres.table:access_common;
 
@@ -118,7 +119,7 @@ export [[nodiscard]] List* build_needed_column_list(
         if (TupleDescAttr(tuple_descriptor, attribute_index)->attisdropped) {
             continue;
         }
-        if (attributes_needed.contains(attribute_index)) {
+        if (attributes_needed.has_member(attribute_index)) {
             columns.append(attribute_index + 1);
         }
     }

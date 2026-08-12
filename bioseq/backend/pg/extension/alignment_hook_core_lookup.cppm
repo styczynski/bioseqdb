@@ -10,6 +10,8 @@ extern "C" {
 #include "executor/executor.h"
 }
 
+#include <vector>
+
 module bioseq.postgres.extension:alignment_hook_core_lookup;
 
 import :alignment_hook_contract;

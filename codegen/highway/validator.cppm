@@ -795,6 +795,66 @@ inline void validate_complete_table_target_policy(
     }
 }
 
+inline void validate_target_compile_policy(
+    const target_manifest& targets) {
+    if (!detail::lowercase_hex_digest(targets.policy_digest)) {
+        throw std::runtime_error(
+            "Highway target manifest has invalid policy provenance");
+    }
+
+    std::string policy_block;
+    std::set<std::string, std::less<>> policy_names;
+    for (const auto& [name, value] : targets.policy_definitions) {
+        if (!detail::identifier(name) || value.contains('\n')
+            || value.contains('\r') || value.contains('\t')
+            || value.contains('#') || !policy_names.insert(name).second) {
+            throw std::runtime_error(
+                "invalid or duplicate Highway policy definition '" + name + "'");
+        }
+        policy_block += "#define " + name + " " + value + "\n";
+    }
+
+    static constexpr std::array required_policy_definitions{
+        std::pair{
+            std::string_view{"HWY_COMPILE_ALL_ATTAINABLE"},
+            std::string_view{"1"}},
+        std::pair{
+            std::string_view{"HWY_DISABLED_TARGETS"},
+            std::string_view{"(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"}},
+    };
+    for (const auto& required : required_policy_definitions) {
+        const auto actual = std::ranges::find_if(
+            targets.policy_definitions,
+            [&required](const auto& definition) {
+                return definition.first == required.first;
+            });
+        if (actual == targets.policy_definitions.end()
+            || actual->second != required.second) {
+            throw std::runtime_error(
+                "Highway target manifest does not contain the exact "
+                "all-target compile policy");
+        }
+    }
+
+    constexpr std::string_view probe_identity_name =
+        "BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY";
+    const auto probe_identity = std::ranges::find_if(
+        targets.policy_definitions,
+        [probe_identity_name](const auto& definition) {
+            return definition.first == probe_identity_name;
+        });
+    if (probe_identity == targets.policy_definitions.end()
+        || !detail::lowercase_hex_digest(probe_identity->second)) {
+        throw std::runtime_error(
+            "Highway target manifest has invalid probe compilation identity");
+    }
+
+    if (bioseq::common::sha256_hex(policy_block) != targets.policy_digest) {
+        throw std::runtime_error(
+            "Highway policy digest does not match the canonical definition block");
+    }
+}
+
 inline void validate_inventories(
     const target_manifest& targets,
     const source_manifest& sources) {
@@ -810,42 +870,7 @@ inline void validate_inventories(
         sources.domain_topologies,
         "Highway target/source manifests");
 
-    std::string policy_block;
-    std::set<std::string, std::less<>> policy_names;
-    for (const auto& [name, value] : targets.policy_definitions) {
-        if (!detail::identifier(name) || value.contains('\n')
-            || value.contains('\r') || value.contains('\t')
-            || value.contains('#') || !policy_names.insert(name).second) {
-            throw std::runtime_error(
-                "invalid or duplicate Highway policy definition '" + name + "'");
-        }
-        policy_block += "#define " + name + " " + value + "\n";
-    }
-    static constexpr std::array required_policy_definitions{
-        std::pair{
-            std::string_view{"HWY_COMPILE_ALL_ATTAINABLE"},
-            std::string_view{"1"}},
-        std::pair{
-            std::string_view{"HWY_DISABLED_TARGETS"},
-            std::string_view{"(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"}},
-    };
-    if (targets.policy_definitions.size()
-        != required_policy_definitions.size()
-        || !std::ranges::equal(
-            targets.policy_definitions,
-            required_policy_definitions,
-            [](const auto& actual, const auto& expected) {
-                return actual.first == expected.first
-                    && actual.second == expected.second;
-            })) {
-        throw std::runtime_error(
-            "Highway target manifest does not contain the exact all-target "
-            "compile policy");
-    }
-    if (bioseq::common::sha256_hex(policy_block) != targets.policy_digest) {
-        throw std::runtime_error(
-            "Highway policy digest does not match the canonical definition block");
-    }
+    validate_target_compile_policy(targets);
 
     std::map<std::uint64_t, std::string> namespaces_by_bit;
     std::map<std::string, std::uint64_t, std::less<>> bits_by_namespace;

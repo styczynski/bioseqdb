@@ -42,7 +42,7 @@ using bioseq::cache::object_definition_mutation_valid;
   };
 }
 
-[[nodiscard]] constexpr physical_identity physical_identity(
+[[nodiscard]] constexpr physical_identity make_opaque_physical_identity(
     std::uint8_t marker) noexcept {
   physical_identity result{
       .kind = physical_identity_kind::provider_opaque,
@@ -166,9 +166,9 @@ TEST_CASE("released savepoint composes old and current physical identity",
   REQUIRE(collector.initialize(17, 1) ==
           object_definition_dependency_error::none);
   const dependency_key procedure = object_key(dependency_kind::procedure, 101);
-  const physical_identity identity_a = physical_identity(1);
-  const physical_identity identity_b = physical_identity(2);
-  const physical_identity identity_c = physical_identity(3);
+  const physical_identity identity_a = make_opaque_physical_identity(1);
+  const physical_identity identity_b = make_opaque_physical_identity(2);
+  const physical_identity identity_c = make_opaque_physical_identity(3);
 
   REQUIRE(collector.observe(
       1, make_object_definition_mutation(
@@ -201,9 +201,9 @@ TEST_CASE("savepoint rollback restores the parent physical transition",
   REQUIRE(collector.initialize(17, 1) ==
           object_definition_dependency_error::none);
   const dependency_key procedure = object_key(dependency_kind::procedure, 101);
-  const physical_identity identity_a = physical_identity(1);
-  const physical_identity identity_b = physical_identity(2);
-  const physical_identity identity_c = physical_identity(3);
+  const physical_identity identity_a = make_opaque_physical_identity(1);
+  const physical_identity identity_b = make_opaque_physical_identity(2);
+  const physical_identity identity_c = make_opaque_physical_identity(3);
   REQUIRE(collector.observe(
       1, make_object_definition_mutation(
              procedure, identity_a, identity_b)));
@@ -235,10 +235,12 @@ TEST_CASE("ambiguous physical history remains guard-only after rollback",
   const dependency_key procedure = object_key(dependency_kind::procedure, 101);
   REQUIRE(collector.observe(
       2, make_object_definition_mutation(
-             procedure, physical_identity(1), physical_identity(2))));
+             procedure, make_opaque_physical_identity(1),
+             make_opaque_physical_identity(2))));
   const auto ambiguous = collector.observe(
       2, make_object_definition_mutation(
-             procedure, physical_identity(3), physical_identity(4)));
+             procedure, make_opaque_physical_identity(3),
+             make_opaque_physical_identity(4)));
   REQUIRE(ambiguous.error ==
           object_definition_dependency_error::ambiguous_mutation);
   REQUIRE(ambiguous.observation ==

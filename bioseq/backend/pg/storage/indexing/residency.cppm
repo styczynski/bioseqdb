@@ -25,6 +25,7 @@ extern "C" {
 export module bioseq.postgres.storage.indexing.residency;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.storage.size;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
@@ -209,12 +210,12 @@ struct assembled_index_cache_hit {
     return std::tie(lhs.db_oid, lhs.user_relid, lhs.tablespace_oid,
                     lhs.main_relfilenode, lhs.column_attno, lhs.index_name_hash,
                     lhs.sketch_backend, lhs.minimizer_scheme.id,
-                    lhs.minimizer_scheme.version, lhs.query_key,
+                    lhs.minimizer_scheme.revision, lhs.query_key,
                     lhs.query_signature, lhs.clip_lo_bp, lhs.clip_hi_bp)
         == std::tie(rhs.db_oid, rhs.user_relid, rhs.tablespace_oid,
                     rhs.main_relfilenode, rhs.column_attno, rhs.index_name_hash,
                     rhs.sketch_backend, rhs.minimizer_scheme.id,
-                    rhs.minimizer_scheme.version, rhs.query_key,
+                    rhs.minimizer_scheme.revision, rhs.query_key,
                     rhs.query_signature, rhs.clip_lo_bp, rhs.clip_hi_bp);
 }
 
@@ -243,7 +244,7 @@ struct residency_state {
     std::uint64_t assembled_bytes = 0;
 };
 
-[[nodiscard]] inline residency_state& residency_state() {
+[[nodiscard]] inline residency_state& get_residency_state() {
     static residency_state state{};
     return state;
 }
@@ -254,7 +255,7 @@ inline constexpr std::size_t k_assembled_cache_maximum_entries = 32;
 inline constexpr std::uint64_t k_assembled_cache_maximum_bytes = std::uint64_t{4} << 30;
 
 void evict_chunk_index(std::size_t entry_index) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     if (entry_index >= state.chunk_entries.size()) {
         return;
     }
@@ -269,7 +270,7 @@ void evict_chunk_index(std::size_t entry_index) noexcept {
 }
 
 void evict_assembled_index(std::size_t entry_index) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     if (entry_index >= state.assembled_entries.size()) {
         return;
     }
@@ -285,7 +286,7 @@ void evict_assembled_index(std::size_t entry_index) noexcept {
 }
 
 void evict_all_residency() noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (chunk_cache_entry& entry : state.chunk_entries) {
         entry.permit.release();
     }
@@ -299,7 +300,7 @@ void evict_all_residency() noexcept {
 }
 
 void evict_relation_residency(Oid relid) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     if (!OidIsValid(relid)) {
         evict_all_residency();
         return;
@@ -335,7 +336,7 @@ void evict_index_residency(
         Oid main_relfilenode,
         std::int16_t column_attno,
         std::uint64_t requested_index_name_hash) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     const auto matches = [db_oid, user_relid, tablespace_oid,
             main_relfilenode, column_attno,
             requested_index_name_hash](const auto& key) noexcept {
@@ -365,7 +366,7 @@ void evict_index_residency(
 }
 
 void evict_chunk_subxact(SubTransactionId subxid) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (std::size_t entry_index = 0; entry_index < state.chunk_entries.size();) {
         const chunk_cache_entry& entry = state.chunk_entries[entry_index];
         if (entry.written_in_xact && entry.subxid == subxid) {
@@ -377,7 +378,7 @@ void evict_chunk_subxact(SubTransactionId subxid) noexcept {
 }
 
 void finish_top_xact(bool committed) noexcept {
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     if (!committed) {
         for (std::size_t entry_index = 0; entry_index < state.chunk_entries.size();) {
             if (state.chunk_entries[entry_index].written_in_xact) {
@@ -477,7 +478,7 @@ void install_index_residency_callbacks() {
 
 [[nodiscard]] std::optional<cached_chunk_view> lookup_cached_chunk(const index_chunk_key& key) {
     install_index_residency_callbacks();
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (chunk_cache_entry& entry : state.chunk_entries) {
         if (entry.key == key) {
             entry.last_used = ++state.clock;
@@ -502,7 +503,7 @@ void install_index_residency_callbacks() {
         return std::nullopt;
     }
 
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (std::size_t entry_index = 0; entry_index < state.chunk_entries.size(); ++entry_index) {
         if (state.chunk_entries[entry_index].key == key) {
             evict_chunk_index(entry_index);
@@ -542,7 +543,7 @@ void install_index_residency_callbacks() {
 [[nodiscard]] std::optional<assembled_index_cache_hit> lookup_assembled_index(
         const assembled_index_key& key) {
     install_index_residency_callbacks();
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (assembled_index_cache_entry& entry : state.assembled_entries) {
         if (entry.key == key) {
             entry.last_used = ++state.clock;
@@ -557,11 +558,11 @@ void install_index_residency_callbacks() {
     const std::uint64_t serialized =
         static_cast<std::uint64_t>(index.serialize_binary_size());
     const std::uint64_t table_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(index.table_size()),
             32u);
     const std::uint64_t position_capacity_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(index.positions.capacity()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     return serialized + table_bytes + position_capacity_bytes;
@@ -582,7 +583,7 @@ void store_assembled_index(
         return;
     }
 
-    residency_state& state = residency_state();
+    residency_state& state = get_residency_state();
     for (std::size_t entry_index = 0; entry_index < state.assembled_entries.size(); ++entry_index) {
         if (state.assembled_entries[entry_index].key == key) {
             evict_assembled_index(entry_index);
@@ -631,7 +632,7 @@ void store_assembled_index(
 }
 
 [[nodiscard]] std::uint64_t cached_index_residency_bytes() noexcept {
-    const residency_state& state = residency_state();
+    const residency_state& state = get_residency_state();
     return state.chunk_bytes + state.assembled_bytes;
 }
 

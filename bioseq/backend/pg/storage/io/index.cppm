@@ -5,8 +5,9 @@
 module;
 // Highway and PostgreSQL declarations precede the module unit because this
 // owner imports Highway-bearing module graphs.
+#include <libassert/assert.hpp>
 #include <hwy/highway.h>
-#include <bioseq/pg_compat.h>            // DEBUG_ASSERT, bioseq_log<logging_level::debug>, fmt
+#include <bioseq/pg_compat.h>
 #include <boost/integer.hpp>
 #include <boost/container/small_vector.hpp>
 #include <climits>
@@ -51,12 +52,14 @@ export module bioseq.postgres.storage.io;
 import bioseq.common.logging;                           // bioseq_log<logging_level::debug>(bioseq::settings::diagnostics::logging::enabled)
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.postgres.storage.io.sql_rows;
 import bioseq.postgres.storage.io.sql_row_codecs;
 import bioseq.postgres.configuration.core;
 import bioseq.storage.size;                // sequence_size_t
 import bioseq.storage.layout;
-import bioseq.common.templating;           // enum_dispatch_pack / value_sequence
+import bioseq.common.templating.runtime_dispatch; // dispatch_exact_value_or_default
+import bioseq.common.templating.value_sequence;
 import bioseq.sequences;                   // compact_sequence_stdc_type_params::decode,
                                            //   dispatch_storage_unit_byte_width, traits
 import bioseq.postgres.types.compact_sequence;   // bioseq::pg_types::seq, pgseq_supported_alphabets
@@ -88,7 +91,7 @@ using bioseq::storage::sequence_size_t;   // bp counts (uint64 — 6 Gbp safe)
 using column_mapping_row =
     bioseq::storage::load_pg::composite_rows::column_mapping;
 using column_mapping_codec =
-    bioseq::storage::load_pg::sql_row_codecs::column_mapping_codec;
+    bioseq::postgres::storage::io::sql_row_codecs::column_mapping_codec;
 
 /// Raise one loader error through the checked PG leaf seam. The owned message
 /// remains alive while PostgreSQL constructs/copies ErrorData, then ordinary
@@ -280,8 +283,8 @@ struct load_context {
     // Keep the PostgreSQL writer non-templated so identifier parsing is not
     // multiplied by the alphabet, storage-width, and file-type dispatch matrix.
     bool                       parser_active = false;
-    idp::header_format         requested_fmt = idp::header_format::AUTO;
-    idp::header_format         effective_fmt = idp::header_format::AUTO;
+    idp::header_format         requested_fmt = idp::header_format::automatic;
+    idp::header_format         effective_fmt = idp::header_format::automatic;
     idp::identifier_routing    routing;
     idp::identifier_parse_state parse_state;
     idp::identifier_writer_reference writer_ref;
@@ -344,10 +347,10 @@ struct pg_identifier_writer {
 	        bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.clear_all_to_null();
 	    });
 	}
-	void set_null(idp::dest_slot_t slot) {
+	void set_null(idp::destination_slot slot) {
 	    bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_null(dest[slot].attno);
 	}
-    void set_field(idp::dest_slot_t slot, const char* data, std::int32_t len) {
+    void set_field(idp::destination_slot slot, const char* data, std::int32_t len) {
         const dest_coercion& dc = dest[slot];
         ctx.current_column_name = dc.column_name.c_str();   // errcontext if input fn errors
         const MemoryContext per_tuple =
@@ -420,7 +423,7 @@ struct pg_identifier_writer {
     void finish() {}
     [[nodiscard]] std::size_t destination_count() const { return dest.size(); }
 };
-static_assert(idp::is_identifier_dest_writer<pg_identifier_writer>);
+static_assert(idp::identifier_destination_writer<pg_identifier_writer>);
 
 // The non-templated parent writer keeps identifier parsing outside the
 // alphabet, storage-width, and file-type dispatch matrix.
@@ -852,7 +855,7 @@ struct format_dispatch {
 
     void run() const {
         file_format_adapter<p_alphabet, p_column_byte_width> adapter{};
-        out = tpl::enum_dispatch_pack<
+        out = tpl::dispatch_exact_value_or_default<
             std::int64_t,
             bioseq::io::sequence_file_format,
             bioseq::io::sequence_file_format::fasta>(
@@ -1141,10 +1144,10 @@ void setup_typed_column_mapping(
 
     // Preserve the whole header when AUTO has one text destination and no
     // explicit mapping.
-    if (requested_fmt == idp::header_format::AUTO && user_maps.empty() &&
+    if (requested_fmt == idp::header_format::automatic && user_maps.empty() &&
         columns.size() == 1 && columns[0].is_text) {
         ctx.parser_active = false;
-        ctx.effective_fmt = idp::header_format::PLAIN;
+        ctx.effective_fmt = idp::header_format::plain;
         ctx.cols.header_attno = col_attrs[0].attno;
         return;
     }
@@ -1152,18 +1155,18 @@ void setup_typed_column_mapping(
 
     // Sample headers to determine the effective AUTO format.
     idp::header_format effective_fmt = requested_fmt;
-    if (requested_fmt == idp::header_format::AUTO) {
+    if (requested_fmt == idp::header_format::automatic) {
         auto samples = bioseq::io::sample_sequence_headers(
             path, kind.format, bioseq::io::default_reader_options);
         std::vector<std::string_view> views;
         if (samples) for (const std::string& s : *samples) views.emplace_back(s);
         effective_fmt = idp::detect_header_format(views);
-        if (effective_fmt == idp::header_format::PLAIN) {
+        if (effective_fmt == idp::header_format::plain) {
             const bool has_metadata_target =
                 columns.size() > 1 ||
                 (columns.size() == 1 && !columns[0].is_text) ||
                 !user_maps.empty();
-            if (has_metadata_target) effective_fmt = idp::header_format::AUTO;
+            if (has_metadata_target) effective_fmt = idp::header_format::automatic;
         }
     }
     ctx.effective_fmt = effective_fmt;

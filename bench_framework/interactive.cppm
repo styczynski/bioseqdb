@@ -1056,7 +1056,7 @@ inline constexpr std::array<region_colour, 16> k_region_palette = {{
 /// `palette_key_universe` MUST be sorted ascending by name (§7.3).
 /// Returns `k_region_palette.size()` when the region was not seen during
 /// universe-building (race window only); callers map this through
-/// `region_colour(...)` which returns `Color::GrayLight` for the
+/// `resolve_region_colour(...)` which returns `Color::GrayLight` for the
 /// sentinel.
 [[nodiscard]] inline std::size_t palette_index_for_region(
     std::string_view region_name,
@@ -1081,7 +1081,7 @@ build_palette_index_table(const std::vector<std::string>& universe) noexcept {
     return table;
 }
 
-[[nodiscard]] inline ftxui::Color region_colour(std::size_t palette_index) noexcept {
+[[nodiscard]] inline ftxui::Color resolve_region_colour(std::size_t palette_index) noexcept {
     if (palette_index >= k_region_palette.size()) return ftxui::Color::GrayLight;
     const auto& slot = k_region_palette[palette_index];
     if (terminal_supports_truecolor()) {
@@ -1142,7 +1142,7 @@ struct ui_state {
     int                                             selected_sidebar_row = 0;
     bool                                            sidebar_visible = true;
     bool                                            help_visible = false;
-    footer_state                                     footer_state = footer_state::default_view;
+    footer_state                                     active_footer_state = footer_state::default_view;
     std::string                                     notification{};
     std::chrono::steady_clock::time_point           notification_expires{};
     std::string                                     search_query{};
@@ -1199,7 +1199,7 @@ struct ui_state {
     /// Active aggregate for the per-region table. Cycled via `>` /
     /// `<`. Single field, NOT view-keyed (§3.2): the user's
     /// "show me means everywhere" intent travels across views.
-    per_region_aggregate                              per_region_aggregate
+    per_region_aggregate                              region_aggregate_mode
         = per_region_aggregate::p50;
     /// Per-view chart focus, keyed by `(bench, tc, metric)` triple
     /// in the form of `ui_view_key { Report, ... }` (§6.1).
@@ -1962,13 +1962,13 @@ aggregate_from_cache_uncached(reload_state& reload)
         if (report_id == 0 || report_id > snap.max_index) continue;
         snap.report_data_present[report_id - 1] = 1;
         ++snap.present_count;
-        const auto sample_index = build_sample_index(parsed.doc->root);
+        const auto samples_by_path = build_sample_index(parsed.doc->root);
         walk_report_array(parsed.doc->root, "rule_violations",
             report_id, snap.max_index, snap.issues,
-            rule_violation_extractor(sample_index));
+            rule_violation_extractor(samples_by_path));
         walk_report_array(parsed.doc->root, "regressions",
             report_id, snap.max_index, snap.issues,
-            regression_extractor(sample_index));
+            regression_extractor(samples_by_path));
         walk_report_array(parsed.doc->root, "sanity_warnings",
             report_id, snap.max_index, snap.issues,
             sanity_warning_extractor());
@@ -3557,7 +3557,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
             const auto txt = clip_to_cells(region_universe[r], col_text_width[r]);
             header_cells.push_back(text(" ") | dim);
             header_cells.push_back(text(fmt::format("{:>{}}", txt, col_text_width[r]))
-                | bold | color(region_colour(pal)));
+                | bold | color(resolve_region_colour(pal)));
             header_cells.push_back(text(" ") | dim);
         }
         Elements rendered_rows;
@@ -3677,7 +3677,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
             ? uniform_chunk_width - inner_used : 0u;
         Elements chunk;
         chunk.push_back(text(fmt::format("{}: ", region_universe[r]))
-            | color(region_colour(palette_indices[r])));
+            | color(resolve_region_colour(palette_indices[r])));
         chunk.push_back(text(std::string(value_pad, ' ')));
         chunk.push_back(text(value_text));
         if (marker.empty()) {
@@ -3912,7 +3912,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
             }
             for (std::size_t c = 0; c < bar_cell_width; ++c) {
                 Element cell = text(glyph_text);
-                if (glyph_pal < k_region_palette.size()) cell = cell | color(region_colour(glyph_pal));
+                if (glyph_pal < k_region_palette.size()) cell = cell | color(resolve_region_colour(glyph_pal));
                 row_parts.push_back(cell);
             }
             for (std::size_t c = 0; c < gutter; ++c) row_parts.push_back(text(" "));
@@ -3950,7 +3950,7 @@ extract_per_region_rows(const benchmark_snapshot& snap,
         legend.push_back(text("Legend: ") | dim);
         for (std::size_t r = 0; r < region_universe.size(); ++r) {
             const std::size_t pal = palette_indices[r];
-            legend.push_back(text(std::string{gv.full_block()}) | color(region_colour(pal)));
+            legend.push_back(text(std::string{gv.full_block()}) | color(resolve_region_colour(pal)));
             legend.push_back(text(fmt::format(" {}  ", region_universe[r])));
         }
         grid_rows.push_back(hbox(std::move(legend)));
@@ -4195,7 +4195,7 @@ struct step_lines_frame {
         for (std::size_t c = 0; c < cells_total; ++c) {
             const auto& cell = canvas[row][c];
             Element el = text(cell.glyph);
-            if (cell.pal < k_region_palette.size()) el = el | color(region_colour(cell.pal));
+            if (cell.pal < k_region_palette.size()) el = el | color(resolve_region_colour(cell.pal));
             row_parts.push_back(el);
         }
         out.push_back(hbox(std::move(row_parts)));
@@ -4261,7 +4261,7 @@ struct step_lines_frame {
                                                           : std::string{gv.point_hollow()};
             const std::string glyph_ln = ((pal / 2) % 2 == 0) ? std::string{gv.br_h()}
                                                                 : std::string{gv.br_h_double()};
-            legend.push_back(text(glyph_pt + glyph_ln) | color(region_colour(pal)));
+            legend.push_back(text(glyph_pt + glyph_ln) | color(resolve_region_colour(pal)));
             legend.push_back(text(fmt::format(" {}  ", frame.region_names[r])));
         }
         out.push_back(hbox(std::move(legend)));
@@ -4524,7 +4524,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
     }
     const auto region_universe = region_universe_for(focus_snap, focus.test_case);
     const auto all_rows = extract_per_region_rows(focus_snap, focus.test_case,
-        focus.metric, region_universe, ui.per_region_aggregate);
+        focus.metric, region_universe, ui.region_aggregate_mode);
     ui_view_key view_key{ui_view_key::view_kind::report, focus.benchmark, focus.test_case, focus.metric};
     const auto* focus_ptr = chart_focus_for_const(ui, view_key);
     chart_focus effective_focus = focus_ptr != nullptr ? *focus_ptr : chart_focus{};
@@ -4555,7 +4555,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
             | color(Color::Yellow) | dim);
     }
     parts.push_back(render_per_region_table_body(rows, region_universe,
-        focus.metric, ui.per_region_aggregate,
+        focus.metric, ui.region_aggregate_mode,
         omit_alg_column, panel_inner_cols, gv));
     if (!any_finite_value(all_rows)) {
         parts.push_back(text(""));
@@ -4568,7 +4568,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
         // so the user can compare the page they're inspecting against
         // the full picture.
         parts.push_back(render_stacked_bar_chart(all_rows, region_universe,
-            focus.metric, ui.per_region_aggregate, ui.selected_report_id,
+            focus.metric, ui.region_aggregate_mode, ui.selected_report_id,
             ui.value_mode, panel_inner_cols, chart_rows, gv));
     } else {
         // Resolve active algorithm, fall back to first if missing.
@@ -4625,7 +4625,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
                     active_tuple->algorithm, active_tuple->params,
                     focus.test_case, region_universe[r], focus.metric);
                 if (!agg.has_value() || !has_finite_samples(*agg)) continue;
-                const double v = aggregate_field(*agg, ui.per_region_aggregate);
+                const double v = aggregate_field(*agg, ui.region_aggregate_mode);
                 frame.values[r][i] = v;
                 if (i == 0) first_anchor[r] = v;
                 if (baseline_id.has_value() && frame.report_ids[i] == *baseline_id) {
@@ -4671,7 +4671,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
             }
         }
         parts.push_back(render_step_lines_chart(frame, focus.metric,
-            ui.per_region_aggregate, ui.value_mode,
+            ui.region_aggregate_mode, ui.value_mode,
             panel_inner_cols, chart_rows, gv));
     }
     return vbox(std::move(parts));
@@ -4696,7 +4696,7 @@ resolve_perregion_focus(const ui_state& ui, const benchmark_snapshot* /*unused*/
 /// invariant is preserved.
 struct bracket_group {
     std::size_t row_count = 1;     // panel body rows this group occupies
-    char        scroll_state = ' '; // '^' above-viewport, 'v' below, 'x' both off
+    char        scroll_marker = ' '; // '^' above-viewport, 'v' below, 'x' both off
 };
 
 [[nodiscard]] inline ftxui::Element render_bracket_gutter(
@@ -4716,13 +4716,13 @@ struct bracket_group {
             if (cursor >= total_rows) break;
             std::string glyph;
             ftxui::Color fg = ftxui::Color::GrayLight;
-            if (group.scroll_state == 'x') {
+            if (group.scroll_marker == 'x') {
                 glyph = (r == 0) ? std::string{gv.scroll_off()} : std::string{gv.br_v()};
                 fg = ftxui::Color::GrayDark;
-            } else if (group.scroll_state == '^' && r == 0) {
+            } else if (group.scroll_marker == '^' && r == 0) {
                 glyph = std::string{gv.scroll_above()};
                 fg = ftxui::Color::GrayDark;
-            } else if (group.scroll_state == 'v' && r + 1 == span) {
+            } else if (group.scroll_marker == 'v' && r + 1 == span) {
                 glyph = std::string{gv.scroll_below()};
                 fg = ftxui::Color::GrayDark;
             } else if (span == 1) {
@@ -4825,7 +4825,7 @@ build_bracket_groups(const table_layout& layout) noexcept
     const std::size_t chart_rows = panel_rows > 8 ? panel_rows - 8 : k_chart_min_rows;
     Elements parts;
     const std::string header_body = per_region_header_body(
-        ui.selected_report_id, ui.per_region_aggregate, ui.value_mode,
+        ui.selected_report_id, ui.region_aggregate_mode, ui.value_mode,
         focus_opt.has_value() ? focus_opt->metric : "");
     Elements header_parts;
     header_parts.push_back(text(std::string{gv.note_emoji()} + " ") | bold);
@@ -4844,7 +4844,7 @@ build_bracket_groups(const table_layout& layout) noexcept
         : std::vector<std::string>{};
     const auto all_rows_pre = focus_opt.has_value()
         ? extract_per_region_rows(*focus_snap, focus_opt->test_case,
-            focus_opt->metric, region_universe_pre, ui.per_region_aggregate)
+            focus_opt->metric, region_universe_pre, ui.region_aggregate_mode)
         : std::vector<per_region_row>{};
     // Layout-aware pagination: compute the *actual* per-algo row count
     // from a layout pass over ALL rows so the gutter/body see the same
@@ -5011,7 +5011,7 @@ build_bracket_groups(const table_layout& layout) noexcept
                                         == ui.focused_section_index;
                 const resolved_focus narrow_focus{bench_key, tc, active_metric};
                 const std::string header_body = per_region_header_body(
-                    ui.selected_report_id, ui.per_region_aggregate, ui.value_mode,
+                    ui.selected_report_id, ui.region_aggregate_mode, ui.value_mode,
                     active_metric);
                 const std::string base_label = fmt::format("{} Per region ({})",
                     gv.note_emoji(), header_body);
@@ -5216,7 +5216,7 @@ build_bracket_groups(const table_layout& layout) noexcept
 [[nodiscard]] inline ftxui::Element render_footer(
     const ui_state& ui, const glyph_view& gv) noexcept
 {
-    switch (ui.footer_state) {
+    switch (ui.active_footer_state) {
         case footer_state::help:         return render_footer_help(gv);
         case footer_state::notification: return render_footer_notification(ui);
         case footer_state::search:       return render_footer_search(ui);
@@ -5283,7 +5283,7 @@ inline void advance_search(ui_state& ui, bool forward) noexcept;
 inline void notify_user(ui_state& ui, std::string message) noexcept {
     ui.notification = std::move(message);
     ui.notification_expires = std::chrono::steady_clock::now() + k_notification_duration;
-    ui.footer_state = footer_state::notification;
+    ui.active_footer_state = footer_state::notification;
 }
 
 [[nodiscard]] inline std::vector<std::size_t>
@@ -5370,32 +5370,32 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
         return true;
     }
     if (event == Event::Escape) {
-        if (ui.help_visible) { ui.help_visible = false; ui.footer_state = footer_state::default_view; return true; }
-        if (ui.footer_state == footer_state::search) {
+        if (ui.help_visible) { ui.help_visible = false; ui.active_footer_state = footer_state::default_view; return true; }
+        if (ui.active_footer_state == footer_state::search) {
             ui.search_query.clear();
             ui.search_match_count = 0;
-            ui.footer_state = footer_state::default_view;
+            ui.active_footer_state = footer_state::default_view;
             return true;
         }
-        if (ui.footer_state == footer_state::notification) {
-            ui.footer_state = footer_state::default_view; return true;
+        if (ui.active_footer_state == footer_state::notification) {
+            ui.active_footer_state = footer_state::default_view; return true;
         }
         if (ui.commit_filter.has_value()) { ui.commit_filter.reset(); return true; }
         return false;
     }
     if (event == Event::Character('?')) {
         ui.help_visible = !ui.help_visible;
-        ui.footer_state = ui.help_visible ? footer_state::help : footer_state::default_view;
+        ui.active_footer_state = ui.help_visible ? footer_state::help : footer_state::default_view;
         return true;
     }
     if (event == Event::Character('/')) {
-        ui.footer_state = footer_state::search;
+        ui.active_footer_state = footer_state::search;
         ui.search_query.clear();
         ui.search_match_count = 0;
         ui.search_match_cursor = -1;     // first `n` lands at index 0
         return true;
     }
-    if (ui.footer_state == footer_state::search) {
+    if (ui.active_footer_state == footer_state::search) {
         if (event == Event::Backspace) {
             if (!ui.search_query.empty()) {
                 ui.search_query.pop_back();
@@ -5408,7 +5408,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             // match and exits the search bar (per §5.2 "Enter focuses
             // the highlighted match and exits search").
             advance_search(ui, /*forward=*/true);
-            ui.footer_state = footer_state::default_view;
+            ui.active_footer_state = footer_state::default_view;
             return true;
         }
         if (event.is_character()) {
@@ -5551,7 +5551,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
     // Backspace — strict inverse of SPACE. Pre-order backward; tapping
     // SPACE then Backspace returns focus to where it came from
     // (§6.6 round-trip property). Only active when not in search.
-    if (event == Event::Backspace && ui.footer_state != footer_state::search) {
+    if (event == Event::Backspace && ui.active_footer_state != footer_state::search) {
         if (ui.last_frame_section_ids.empty()) return true;
         const int size = static_cast<int>(ui.last_frame_section_ids.size());
         if (ui.focused_section_index < 0 || ui.focused_section_index >= size) {
@@ -5562,7 +5562,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
         return true;
     }
     // Enter — toggle collapse on the focused section (§5.1, §6.6.1).
-    if (event == Event::Return && ui.footer_state != footer_state::search) {
+    if (event == Event::Return && ui.active_footer_state != footer_state::search) {
         if (ui.last_frame_section_ids.empty()) return true;
         if (ui.focused_section_index < 0
             || ui.focused_section_index
@@ -5742,9 +5742,9 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
                     return true;
                 }
             }
-            ui.per_region_aggregate = cycle_aggregate(ui.per_region_aggregate, forward);
+            ui.region_aggregate_mode = cycle_aggregate(ui.region_aggregate_mode, forward);
             notify_user(ui, fmt::format(k_notif_aggr_cycle_fmt,
-                std::string{aggregate_label(ui.per_region_aggregate)}));
+                std::string{aggregate_label(ui.region_aggregate_mode)}));
             return true;
         }
         // walk through Stacked-mode table pages before mode flip.
@@ -5774,7 +5774,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             // frame so the page count matches what `render_*` will draw.
             const int header_rows_est = reload.live_tmp_present.load(std::memory_order_acquire)
                 ? k_header_rows_live : k_header_rows_base;
-            const int footer_rows_est = footer_rows_for(ui.footer_state);
+            const int footer_rows_est = footer_rows_for(ui.active_footer_state);
             const std::size_t panel_total_rows = static_cast<std::size_t>(
                 std::max(1, screen.dimy() - header_rows_est - k_body_separator_rows
                           - footer_rows_est));
@@ -5787,7 +5787,7 @@ inline void on_terminal_resize(ui_state& ui, int width, int height) noexcept {
             // rows per algo — must NOT use the obsolete 2-row estimate.
             const auto kp_rows = extract_per_region_rows(*snap_opt,
                 resolved->test_case, resolved->metric, region_uni,
-                ui.per_region_aggregate);
+                ui.region_aggregate_mode);
             const glyph_view kp_gv{k_glyphs_unicode, ui.ascii_fallback};
             const auto kp_layout = compute_table_layout(kp_rows, region_uni,
                 resolved->metric, panel_inner, /*omit_alg_column=*/false, kp_gv);
@@ -5862,8 +5862,8 @@ inline void per_frame_tick(ui_state& ui) noexcept {
         ui.value_mode = ui.pre_peek_mode;
         ui.peek_started_at.reset();
     }
-    if (ui.footer_state == footer_state::notification && now >= ui.notification_expires) {
-        ui.footer_state = footer_state::default_view;
+    if (ui.active_footer_state == footer_state::notification && now >= ui.notification_expires) {
+        ui.active_footer_state = footer_state::default_view;
         ui.notification.clear();
     }
     // Re-count search matches for the freshly-rendered frame's
@@ -6068,7 +6068,7 @@ namespace bioseq::bench::framework::detail {
             ? ui.sidebar_width_cols : 0;
         const auto layout = details_layout(screen.dimx(), ui.sidebar_width_cols,
             ui.sidebar_visible && screen.dimx() >= static_cast<int>(k_min_screen_cols));
-        const int footer_rows_for_size = footer_rows_for(ui.footer_state);
+        const int footer_rows_for_size = footer_rows_for(ui.active_footer_state);
         const int body_rows = std::max(1,
             screen.dimy() - header_rows - k_body_separator_rows - footer_rows_for_size);
         std::size_t panel_cols = 0;
@@ -6136,7 +6136,7 @@ namespace bioseq::bench::framework::detail {
             body = main_pane;
         }
         ftxui::Element footer = render_footer(ui, gv);
-        const int footer_rows = footer_rows_for(ui.footer_state);
+        const int footer_rows = footer_rows_for(ui.active_footer_state);
         auto frame = ftxui::vbox({
             header_block,
             ftxui::separator(),

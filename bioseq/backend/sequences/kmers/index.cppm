@@ -42,8 +42,8 @@ using ::bioseq::minimizers::admitted_sketch_collector;
 template <class p_sequence_view>
 inline constexpr std::size_t logical_bits_per_symbol_v = [] {
     using traits = typename std::remove_cvref_t<p_sequence_view>::traits;
-    if constexpr (requires { traits::logical_bits_per_symbol; }) {
-        return static_cast<std::size_t>(traits::logical_bits_per_symbol);
+    if constexpr (requires { traits::k_logical_bits_per_symbol; }) {
+        return static_cast<std::size_t>(traits::k_logical_bits_per_symbol);
     } else {
         return static_cast<std::size_t>(traits::bits_per_char);
     }
@@ -168,7 +168,7 @@ inline void collect_minimizers_view(
 					buffer.push_back(p_minimizer_type(
 						/*kmer=*/canonical_hash,
 						/*last_pos=*/sequence_position,
-						/*strand=*/strand));
+						/*strand=*/static_cast<std::uint64_t>(strand)));
 				} else {
 					buffer.push_back(p_minimizer_type::maximum());
 				}

@@ -145,13 +145,13 @@ static void check_generated_reference_matches_mm_sketch(
     const auto descriptor = pipe::try_word_minimizer_resident_packed(
         sequence_view, 0u, sequence_view.bp_size());
     REQUIRE(descriptor.has_value());
-    REQUIRE(descriptor->storage_unit_byte_width == sizeof(p_storage_unit));
+    REQUIRE(descriptor->storage_unit_width == sizeof(p_storage_unit));
 
     sketch_collector collector;
     const auto result = pipe::invoke_selected_minimizer_kernel<
         minimap_sketch_data>(
             &table,
-            ::bioseq::simd_dispatch::highway_kernel_id::
+            ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_minimap2_reference,
             ::bioseq::minimizers::minimizer_kernel_algorithm::
                 minimap2_reference,
@@ -207,7 +207,7 @@ template<typename p_alphabet, typename p_storage_unit>
 static ::bioseq::minimizers::minimizer_kernel_result
 invoke_generated_minimizer_coordinate(
     std::vector<p_alphabet>& data,
-    const ::bioseq::simd_dispatch::highway_kernel_id kernel,
+    const ::bioseq::simd_dispatch::highway_kernel kernel,
     const ::bioseq::minimizers::minimizer_kernel_algorithm algorithm,
     sketch_collector& collector)
 {
@@ -227,7 +227,7 @@ invoke_generated_minimizer_coordinate(
     const auto descriptor = pipe::try_minimizer_resident_packed(
         sequence_view, 0u, sequence_view.bp_size());
     REQUIRE(descriptor.has_value());
-    REQUIRE(descriptor->storage_unit_byte_width == sizeof(p_storage_unit));
+    REQUIRE(descriptor->storage_unit_width == sizeof(p_storage_unit));
 
     return pipe::invoke_selected_minimizer_kernel<minimap_sketch_data>(
         &table,
@@ -248,7 +248,7 @@ static void check_generated_reference_rejects_coordinate(
     const auto result = invoke_generated_minimizer_coordinate<
         p_alphabet, p_storage_unit>(
             data,
-            ::bioseq::simd_dispatch::highway_kernel_id::
+            ::bioseq::simd_dispatch::highway_kernel::
                 minimizer_minimap2_reference,
             ::bioseq::minimizers::minimizer_kernel_algorithm::
                 minimap2_reference,
@@ -309,7 +309,7 @@ static void check_generated_bounded_nthash_supports_coordinate(
     const auto result = invoke_generated_minimizer_coordinate<
         p_alphabet, p_storage_unit>(
             data,
-            ::bioseq::simd_dispatch::highway_kernel_id::minimizer_bounded_nthash,
+            ::bioseq::simd_dispatch::highway_kernel::minimizer_bounded_nthash,
             ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
             collector);
 
@@ -338,7 +338,7 @@ static void check_generated_bounded_nthash_rejects_coordinate(
     const auto result = invoke_generated_minimizer_coordinate<
         p_alphabet, p_storage_unit>(
             data,
-            ::bioseq::simd_dispatch::highway_kernel_id::minimizer_bounded_nthash,
+            ::bioseq::simd_dispatch::highway_kernel::minimizer_bounded_nthash,
             ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
             collector);
     const auto pairs = collector.extract_pairs();

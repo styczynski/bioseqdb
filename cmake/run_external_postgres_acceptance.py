@@ -115,7 +115,7 @@ EXPECTED_EXTERNAL_TOP_LEVEL_IDENTITIES = frozenset({
     "sql:function:bioseq.bioseq_external_handler(internal)",
     (
         "sql:access_method:$extension."
-        "bioseq::external::sql_routines.bioseq_external"
+        "bioseq::postgres::external::sql_routines.bioseq_external"
     ),
     "sql:schema:bioseq_external",
     *(
@@ -129,14 +129,21 @@ EXPECTED_EXTERNAL_TOP_LEVEL_IDENTITIES = frozenset({
             "taxonomy",
         )
     ),
-    "sql:revoke:schema:bioseq_external:all:public:ordinary",
     (
-        "sql:revoke:all tables in schema:bioseq_external:"
-        "all:public:ordinary"
+        "sql:revoke:bioseq_external:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all"
     ),
     (
-        "sql:revoke:function:"
-        "bioseq.bioseq_external_handler(internal):execute:public:ordinary"
+        "sql:revoke:bioseq_external:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all:"
+        "scope=bioseq::sql::acl_scope::all_tables_in_schema"
+    ),
+    (
+        "sql:revoke:bioseq_external_handler:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all"
     ),
 })
 

@@ -131,7 +131,7 @@ void check_segment_parity(std::size_t n, std::uint64_t seed) {
     bioseq::indexing::minimizer_assembly_scratch scratch;
     bioseq::indexing::minimizer_hashmap_fragment_index assembled;
 
-    if constexpr (p_scanner::supports_fragments()) {
+    if constexpr (p_scanner::is_fragmented()) {
         lazy_sequence<dna4_u64, p_scanner> lazy{p_scanner::from_range(range)};
         const auto fragmented_view =
             bioseq::storage::make_lazy_sequence_view(lazy);

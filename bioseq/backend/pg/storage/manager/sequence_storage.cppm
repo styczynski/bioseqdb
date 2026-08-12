@@ -88,6 +88,7 @@ export module bioseq.postgres.storage.manager:sequence_storage;
 
 import bioseq.common.logging;
 import bioseq.postgres.support;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.configuration.storage;
 import bioseq.postgres.storage.metadata;
@@ -118,7 +119,7 @@ namespace storage_manager_entity_handles =
 namespace storage_manager_catalog_rows =
     bioseq::storage::catalog_rows;
 namespace storage_manager_row_codecs =
-    bioseq::storage::manager::sql_row_codecs;
+    bioseq::postgres::storage::manager::sql_row_codecs;
 using sequence_source_version_catalog_row =
     storage_manager_catalog_rows::sequence_source_version;
 using sequence_source_version_codec =
@@ -323,7 +324,7 @@ inline void validate_catalog_schema(Relation relation) {
     if (descriptor == nullptr
         || descriptor->natts
             != static_cast<int>(
-                sequence_source_version_codec::fields_count)) {
+                sequence_source_version_codec::field_count)) {
         source_catalog_error("catalog attribute count changed");
     }
     for (const bioseq::postgres::support::row_descriptor_field& expected :
@@ -622,12 +623,12 @@ enum class default_kind : std::uint8_t {
 
 inline constexpr std::array<
     default_kind,
-    minimizer_generation_storage_codec::fields_count>
+    minimizer_generation_storage_codec::field_count>
 k_storage_defaults{};
 
 inline constexpr std::array<
     default_kind,
-    minimizer_generation_reaper_codec::fields_count>
+    minimizer_generation_reaper_codec::field_count>
 k_reaper_defaults{{
     default_kind::none,
     default_kind::zero_int4,
@@ -684,19 +685,19 @@ k_reaper_check_expressions{{
 [[nodiscard]] inline bool exact_default(
         Relation relation,
         const bioseq::postgres::support::row_descriptor_field& expected,
-        const default_kind default_kind) {
+        const default_kind expected_default_kind) {
     Node* node = bioseq::postgres::support::invoke_pg_as_cpp(
         [relation, &expected] {
             return build_column_default(
                 relation, expected.attribute_number);
         });
-    if (default_kind == default_kind::none) {
+    if (expected_default_kind == default_kind::none) {
         return node == nullptr;
     }
     if (node == nullptr || !IsA(node, Const)) return false;
     const auto* constant = castNode(Const, node);
     if (constant->constisnull) return false;
-    switch (default_kind) {
+    switch (expected_default_kind) {
         case default_kind::none:
             return false;
         case default_kind::zero_int2:
@@ -1633,11 +1634,9 @@ static_assert(!std::is_move_assignable_v<pending_sequence_source>,
 // payload. No alternate on-disk representation is accepted.
 // ---------------------------------------------------------------------------
 
-// `sequence_locator_payload_version` and the `sequence_locator` value
-// (with its 32-byte / offset static_asserts) live in the PG-free
-// `bioseq_bucket_math` module so the unit-test TU can link them; they are
-// re-exported above via `export import bioseq_bucket_math`, so every use of
-// `sequence_locator` / `sequence_locator_payload_version` below resolves unchanged.
+// `sequence_locator_payload_version` and the 40-byte `sequence_locator` value
+// live in the PG-free `bioseq.storage.layout` module so the unit-test TU can
+// link them. They are re-exported above, so every use below resolves unchanged.
 
 constexpr std::size_t k_locator_stub_varlena_bytes =
     bioseq::pg_types::seq::header_bytes() + sizeof(sequence_locator);
@@ -1689,31 +1688,31 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
 inline void validate_locator_flat_materialization_length(
     const sequence_locator& loc)
 {
-    using error = flat_locator_validation_error;
+    using error = sequence_locator_validation_error;
     switch (validate_sequence_locator(loc)) {
         case error::none:
             return;
-        case error::logical_length_exceeds_bigint:
+        case error::logical_length_exceeds_sql_bigint:
             ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq locator logical length exceeds bigint")));
-        case error::logical_length_exceeds_flat_field:
+        case error::logical_length_exceeds_flat_storage:
             ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to flatten")));
-        case error::invalid_wire_metadata:
+        case error::invalid_payload_metadata:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator wire metadata is invalid")));
-        case error::shard_exceeds_catalog_domain:
+        case error::shard_index_exceeds_catalog:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator shard exceeds the catalog domain")));
-        case error::first_row_exceeds_catalog_domain:
+        case error::first_fragment_row_exceeds_catalog:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator first fragment row exceeds bigint")));
-        case error::fragment_geometry_inconsistent:
+        case error::inconsistent_fragment_geometry:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator fragment geometry is inconsistent"),
@@ -1721,7 +1720,7 @@ inline void validate_locator_flat_materialization_length(
                      static_cast<unsigned long long>(loc.logical_length),
                      loc.fragment_count,
                      static_cast<unsigned long long>(loc.first_fragment_row))));
-        case error::fragment_row_range_exceeds_catalog_domain:
+        case error::fragment_row_range_exceeds_catalog:
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq locator fragment row range exceeds bigint")));
@@ -1733,8 +1732,8 @@ inline void validate_locator_flat_materialization_length(
 inline void validate_sequence_fragment_frame(
     Size raw_bytes, Size expected_bytes, std::uint64_t row_no)
 {
-    using error = fragment_frame_validation_error;
-    switch (validate_fragment_frame_size(
+    using error = fragment_frame_error;
+    switch (validate_fragment_frame(
         static_cast<std::uint64_t>(raw_bytes),
         static_cast<std::uint64_t>(bioseq::pg_types::seq::header_bytes()),
         static_cast<std::uint64_t>(expected_bytes))) {
@@ -1767,7 +1766,7 @@ inline void validate_sequence_fragment_metadata(
     std::uint64_t expected_padding,
     std::uint64_t row_no)
 {
-    using error = fragment_metadata_validation_error;
+    using error = fragment_metadata_error;
     switch (validate_fragment_metadata(
         static_cast<std::uint8_t>(raw->alphabet_code),
         static_cast<std::uint8_t>(raw->storage_unit_byte_width),
@@ -1859,10 +1858,10 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
 }
 
 // ---------------------------------------------------------------------------
-// Bucket math. The consteval threshold builder, len_log2_for_size, the
-// branchless L->bucket LUT and sequence_bucket_index now live in the PG-free
-// `bioseq_bucket_math` module and are re-exported above via
-// `export import bioseq_bucket_math`. The template below delegates to them.
+// Bucket math. The consteval threshold builder, sequence-size bit-width
+// calculation, branchless lookup, and sequence_bucket_index live in the
+// PG-free `bioseq.storage.layout` module re-exported above. The template below
+// delegates to that authority.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -2127,18 +2126,18 @@ struct sequence_storage_manager {
         p_bucket_maximum_length_bits;
     static constexpr std::size_t total_len_bits      = sizeof(len_t) * 8u;
     static constexpr auto table_seq_buckets_len_thresholds =
-        generate_seq_buckets_len_thresholds<
+        make_sequence_bucket_bit_thresholds<
             len_t, bucket_min_len_bits, bucket_max_len_bits>();
     static constexpr std::size_t bucket_count =
         table_seq_buckets_len_thresholds.size();
 
     static_assert(bucket_count <= std::numeric_limits<std::uint8_t>::max(),
-                  "sequence_locator::bucket_idx is uint8_t; raise the locator "
+                  "sequence_locator::bucket_index is uint8_t; raise the locator "
                   "wire revision before configuring more than 255 buckets");
 
     // Delegate to the PG-free template so production and
     // the unit-test TU resolve to identical bucketing code (the LUT itself is
-    // bucket_lut_v in bioseq_bucket_math).
+    // sequence_bucket_lookup in bioseq.storage.layout).
     [[nodiscard]] [[gnu::always_inline]] static constexpr std::size_t
     sequence_bucket_index(sequence_size_t seq_size) noexcept {
         return bioseq::storage::sequence_bucket_index<
@@ -4066,7 +4065,7 @@ sequence_storage_manager<
             bioseq::pg_types::seq::header_bytes(), "flat sequence");
 
     const std::uint64_t expected_fragments =
-        expected_flat_locator_fragment_count(
+        expected_sequence_fragment_count(
             loc.logical_length, static_cast<std::uint64_t>(lpu),
             detail::k_fragment_storage_units);
     if (expected_fragments != loc.fragment_count) {
@@ -4119,7 +4118,7 @@ sequence_storage_manager<
         // tens of thousands of fragment rows. Make it cancellable and observable.
         CHECK_FOR_INTERRUPTS();
         if (bioseq::settings::diagnostics::logging::enabled && (fragment_no & 0x3FFF) == 0) {
-            bioseq_log_progress<DBG>("[fetch_payload] hydrated {}/{} fragments",
+            bioseq_log_progress<logging_level::debug>("[fetch_payload] hydrated {}/{} fragments",
                             fragment_no, loc.fragment_count);
         }
         const std::uint64_t row_no = loc.first_fragment_row + fragment_no;

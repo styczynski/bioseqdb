@@ -4291,7 +4291,10 @@ runtime_probe_target_kind(
     const auto* literal =
         clang::dyn_cast_or_null<clang::StringLiteral>(expression);
     if (literal == nullptr || !literal->isOrdinary()
-        || literal->getCharByteWidth() != 1) {
+        || literal->getCharByteWidth() != 1
+        || literal->getNumConcatenated() != 1
+        || literal->getBeginLoc().isMacroID()
+        || literal->getEndLoc().isMacroID()) {
         fact_failure(
             context,
             "runtime probe value must be one ordinary narrow "

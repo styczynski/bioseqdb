@@ -5,6 +5,8 @@
 module;
 #include <bioseq/pg_compat.h>
 
+#include <cstdint>
+
 export module bioseq.postgres.table.io:read_chunk;
 
 import bioseq.common.logging;
@@ -103,7 +105,7 @@ get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attri
 
 	/* try reducing the default value node to a const node */
 	default_value_node = eval_const_expressions(NULL, default_value_node);
-	if (Const *const_node = pg_node_try_as<Const>(default_value_node))
+	if (Const *const_node = try_cast_pg_node<Const>(default_value_node))
 	{
 		return const_node->constvalue;
 	}
@@ -454,7 +456,7 @@ export bool
 read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *column_values,
 						 bool *column_nulls, TupleDesc tuple_desc,
 						 int32_t *column_value_offset, int *chunk_read_rows,
-						 uint64 *row_number,
+						 std::uint64_t *row_number,
 						 uint64 stripe_first_row_number)
 {
 	(void) tuple_desc;

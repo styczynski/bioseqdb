@@ -9,6 +9,7 @@
  * `(bucket, shard)`; the table layout shards via `index_table_shard`.
  */
 module;
+#include <libassert/assert.hpp>
 #include <bioseq/pg_compat.h>
 
 extern "C" {
@@ -88,7 +89,11 @@ extern "C" {
 #include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
+import bioseq.common.memory_budget;
 import bioseq.postgres.support;                       // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
+import bioseq.postgres.support.datums;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.storage.manager;                 // seq_caches, sequence_locator, format helpers
 import bioseq.storage.layout;             // sequence_locator
 import bioseq.storage.size;            // sequence_size_t
@@ -125,12 +130,12 @@ namespace indexing_entity_handles =
 using minimizer_generation_storage_catalog_row =
     bioseq::storage::catalog_rows::minimizer_generation_storage;
 using minimizer_generation_storage_codec =
-    bioseq::storage::manager::sql_row_codecs::
+    bioseq::postgres::storage::manager::sql_row_codecs::
         minimizer_generation_storage_codec;
 using metadata_age_log_catalog_row =
     bioseq::storage::indexing::catalog_rows::metadata_age_log;
 using metadata_age_log_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         metadata_age_log_codec;
 
 static_assert(
@@ -1538,7 +1543,7 @@ upsert_metadata_age_log_pg(
             operation_context);
         const auto tuple_data =
             encoded.tuple_data(RelationGetDescr(relation));
-        std::array<Oid, metadata_age_log_codec::fields_count>
+        std::array<Oid, metadata_age_log_codec::field_count>
             argument_types{
                 OIDOID,
                 OIDOID,
@@ -1546,7 +1551,7 @@ upsert_metadata_age_log_pg(
                 TEXTOID,
                 TIMESTAMPTZOID,
             };
-        std::array<Datum, metadata_age_log_codec::fields_count>
+        std::array<Datum, metadata_age_log_codec::field_count>
             argument_values{};
         std::copy_n(
             tuple_data.values,
@@ -3101,7 +3106,7 @@ struct minimizer_generation_storage_descriptor {
 };
 
 inline constexpr std::size_t k_storage_descriptor_attribute_count =
-    minimizer_generation_storage_codec::fields_count;
+    minimizer_generation_storage_codec::field_count;
 
 [[nodiscard]] inline bool exact_storage_descriptor_identity(
         const minimizer_generation_storage_descriptor& descriptor,
@@ -5702,7 +5707,7 @@ public:
         }
         const compact_hash32_sorted_run_source compact_source =
             compact_adapter.sorted_run_source();
-        const auto compact_plan = plan_compact_h32_direct_index(
+        const auto compact_plan = plan_compact_hash32_direct_index(
             compact_source, *compact_options);
         if (!compact_plan) {
             minimizer_generation_storage_error_as_cpp(
@@ -5764,7 +5769,7 @@ public:
             std::span<std::byte> direct_image =
                 destination_mapping.writable_bytes().subspan(
                     direct_offset, direct_bytes);
-            if (auto built = build_compact_h32_direct_index_into(
+            if (auto built = build_compact_hash32_direct_index_into(
                     compact_source, *compact_options,
                     *compact_plan, direct_image);
                 !built) {
@@ -5772,7 +5777,7 @@ public:
                     "minimizer fragment image compact-H32 image replay/build failed");
             }
             const auto validated_direct =
-                validate_compact_h32_direct_index(
+                validate_compact_hash32_direct_index(
                     std::span<const std::byte>{direct_image},
                     compact_options->identity,
                     compact_options->max_occ_cap,
@@ -6379,7 +6384,7 @@ open_exact_minimizer_fragment_image_pg(
 }
 
 /// Relation-owning sink factory target used directly by the existing common
-/// two-pass generation encoder. It cannot publish the head and therefore cannot
+/// three-scan generation encoder. It cannot publish the head and therefore cannot
 /// make an incompletely reread generation visible.
 class index_storage_fragment_generation_row_sink {
 private:
@@ -9525,14 +9530,14 @@ public:
         const std::uint64_t entry_storage =
             entry_count * sizeof(grouped_soa_bucket_directory_entry);
         const std::uint64_t directory_owned_logical =
-            bioseq::parallelism::saturating_add(
+            bioseq::common::saturating_add(
                 manifest->directory_bytes, entry_storage);
         const std::uint64_t scratch_headroom =
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 manifest->directory_bytes,
                 bioseq::parallelism::k_vector_preallocation_headroom_factor);
         const std::uint64_t admitted_bytes =
-            bioseq::parallelism::saturating_add(
+            bioseq::common::saturating_add(
                 scratch_headroom, directory_owned_logical);
         if (directory_owned_logical
                 == (std::numeric_limits<std::uint64_t>::max)()
@@ -9553,10 +9558,10 @@ public:
         directory_bytes_scratch_.reserve(
             static_cast<std::size_t>(manifest->directory_bytes));
         const std::uint64_t measured_scratch_bytes =
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 directory_bytes_scratch_.capacity(), sizeof(std::byte));
         const std::uint64_t measured_metadata_bytes =
-            bioseq::parallelism::saturating_add(
+            bioseq::common::saturating_add(
                 measured_scratch_bytes, directory_owned_logical);
         if (measured_scratch_bytes
                 == (std::numeric_limits<std::uint64_t>::max)()
@@ -15900,7 +15905,7 @@ private:
     void record_segment_spill_mutation_() noexcept;
     [[nodiscard]] bool ensure_segment_run_metadata_capacity_(
             std::size_t required) {
-        const std::uint64_t retained = bioseq::parallelism::saturating_mul(
+        const std::uint64_t retained = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(segment_sorted_runs_.capacity()),
             static_cast<std::uint64_t>(sizeof(segment_run_entry_type)));
         if (retained == (std::numeric_limits<std::uint64_t>::max)()
@@ -15913,12 +15918,12 @@ private:
         if (segment_sorted_runs_.capacity() >= required) {
             return true;
         }
-        const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
-            bioseq::parallelism::saturating_mul(
+        const std::uint64_t headroom = bioseq::common::saturating_mul(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(required),
                 static_cast<std::uint64_t>(sizeof(segment_run_entry_type))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
-        const std::uint64_t peak = bioseq::parallelism::saturating_add(
+        const std::uint64_t peak = bioseq::common::saturating_add(
             retained, headroom);
         if (headroom == (std::numeric_limits<std::uint64_t>::max)()
             || peak == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -15938,7 +15943,7 @@ private:
             segment_sorted_runs_metadata_permit_ = std::move(*permit);
         }
         segment_sorted_runs_.reserve(required);
-        const std::uint64_t exact = bioseq::parallelism::saturating_mul(
+        const std::uint64_t exact = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(segment_sorted_runs_.capacity()),
             static_cast<std::uint64_t>(sizeof(segment_run_entry_type)));
         if (exact == (std::numeric_limits<std::uint64_t>::max)()
@@ -17932,7 +17937,8 @@ public:
         constexpr std::uint64_t k_ceiling = std::uint64_t{8} << 30;
         const std::uint64_t desired = std::uint64_t{2} << 30;
         std::uint64_t capped =
-            bioseq::memory::default_budget().clamp_working_set(desired, k_floor, k_ceiling);
+            bioseq::common::memory::default_budget().clamp_working_set(
+                desired, k_floor, k_ceiling);
         const std::uint64_t index_cap =
             bioseq::parallelism::memory_admission_controller::instance().index_memory_cap_bytes();
         if (index_cap != 0) {
@@ -18990,7 +18996,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
             bioseq::parallelism::memory_permit& permit,
             std::vector<p_value_type>& values,
             std::size_t required) -> bool {
-        const std::uint64_t retained = bioseq::parallelism::saturating_mul(
+        const std::uint64_t retained = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(values.capacity()),
             static_cast<std::uint64_t>(sizeof(p_value_type)));
         if (retained == (std::numeric_limits<std::uint64_t>::max)()
@@ -19001,12 +19007,12 @@ inline bool fragment_index_storage::reroute_segment_runs(
         if (values.capacity() >= required) {
             return true;
         }
-        const std::uint64_t headroom = bioseq::parallelism::saturating_mul(
-            bioseq::parallelism::saturating_mul(
+        const std::uint64_t headroom = bioseq::common::saturating_mul(
+            bioseq::common::saturating_mul(
                 static_cast<std::uint64_t>(required),
                 static_cast<std::uint64_t>(sizeof(p_value_type))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
-        const std::uint64_t peak = bioseq::parallelism::saturating_add(
+        const std::uint64_t peak = bioseq::common::saturating_add(
             retained, headroom);
         if (headroom == (std::numeric_limits<std::uint64_t>::max)()
             || peak == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -19026,7 +19032,7 @@ inline bool fragment_index_storage::reroute_segment_runs(
             permit = std::move(*acquired);
         }
         values.reserve(required);
-        const std::uint64_t exact = bioseq::parallelism::saturating_mul(
+        const std::uint64_t exact = bioseq::common::saturating_mul(
             static_cast<std::uint64_t>(values.capacity()),
             static_cast<std::uint64_t>(sizeof(p_value_type)));
         if (exact == (std::numeric_limits<std::uint64_t>::max)()
@@ -19465,13 +19471,13 @@ inline void table_index_storage::for_each_sequence(p_callback&& loader) {
                 [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
                 using source_binding =
                     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
-                const source_binding source_binding{
+                const source_binding bound_source{
                     db_oid_, tablespace_oid_, main_relfilenode_,
                     column_attno_, loc,
                     source_binding::expected_last_fragment_padding(loc),
                     rs->snapshot, read_caches_, inner};
                 bioseq::storage::with_postgres_lazy_sequence<p_sequence_type>(
-                    source_binding,
+                    bound_source,
                     [&loader, rowno, total](auto view){
                         loader(view, static_cast<std::size_t>(rowno), total);
                     });

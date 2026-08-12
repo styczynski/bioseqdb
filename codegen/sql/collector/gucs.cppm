@@ -75,6 +75,7 @@ struct collected_guc {
     guc_kind kind{guc_kind::boolean};
     std::string cpp_qualified_name;
     std::string source_module;
+    std::vector<std::string> required_import_modules;
     std::filesystem::path source_path;
     std::string source_sha256;
     std::string active_condition;
@@ -245,6 +246,54 @@ registered_guc_source(
             + "' is owned by an unsupported PostgreSQL adapter path");
     }
     return *source;
+}
+
+[[nodiscard]] inline const structural_analysis::module_graph_unit&
+registered_guc_module_graph_unit(
+    const collected_program& program,
+    const collected_entity& entity) {
+    const std::string expected_source_identity =
+        structural_analysis::repository_source_identity(
+            entity.source_path);
+    const structural_analysis::module_graph_unit* result = nullptr;
+    for (const structural_analysis::module_graph_unit& candidate :
+         program.module_graph.units) {
+        if (candidate.source_identity != expected_source_identity) continue;
+        if (result != nullptr) {
+            throw std::runtime_error(
+                "registered GUC owner source '" + expected_source_identity
+                + "' has duplicate authenticated module-graph units");
+        }
+        result = &candidate;
+    }
+    if (result == nullptr) {
+        throw std::runtime_error(
+            "registered GUC owner source '" + expected_source_identity
+            + "' is absent from the authenticated module graph");
+    }
+    if (result->provided_module != entity.source_module) {
+        throw std::runtime_error(
+            "registered GUC owner source '" + expected_source_identity
+            + "' provides module '" + result->provided_module
+            + "' instead of '" + entity.source_module + "'");
+    }
+    if (std::ranges::count(
+            program.module_graph.units,
+            entity.source_module,
+            &structural_analysis::module_graph_unit::provided_module)
+        != 1) {
+        throw std::runtime_error(
+            "registered GUC owner module '" + entity.source_module
+            + "' does not have exactly one authenticated source");
+    }
+    return *result;
+}
+
+[[nodiscard]] inline bool owner_directly_imports(
+    const structural_analysis::module_graph_unit& owner,
+    std::string_view module_name) noexcept {
+    return std::ranges::contains(owner.exported_imports, module_name)
+        || std::ranges::contains(owner.internal_imports, module_name);
 }
 
 [[nodiscard]] inline std::string guc_owner_key(
@@ -432,7 +481,29 @@ registered_guc_source(
     return std::nullopt;
 }
 
-[[nodiscard]] inline std::string enum_type_leaf(
+[[nodiscard]] inline bool identifier_token(
+    std::string_view token) noexcept {
+    if (token.empty()
+        || !((token.front() >= 'a' && token.front() <= 'z')
+             || (token.front() >= 'A' && token.front() <= 'Z')
+             || token.front() == '_')) {
+        return false;
+    }
+    return std::ranges::all_of(
+        token.substr(1),
+        [](char value) {
+            return (value >= 'a' && value <= 'z')
+                || (value >= 'A' && value <= 'Z')
+                || (value >= '0' && value <= '9') || value == '_';
+        });
+}
+
+struct enum_type_reference {
+    std::string qualified_name;
+    std::string leaf;
+};
+
+[[nodiscard]] inline enum_type_reference enum_type_from_storage(
     std::string_view cpp_type) {
     const std::size_t marker = cpp_type.find("postgres_enum_storage");
     if (marker == std::string_view::npos) return {};
@@ -445,18 +516,47 @@ registered_guc_source(
         } else if (cpp_type[index] == '>') {
             --depth;
             if (depth == 0) {
-                std::string value{cpp_type.substr(
-                    open + 1, index - open - 1)};
-                const std::size_t separator = value.rfind("::");
-                return separator == std::string::npos
-                    ? value
-                    : value.substr(separator + 2);
+                std::string canonical;
+                canonical.reserve(index - open - 1);
+                for (const char value : cpp_type.substr(
+                         open + 1, index - open - 1)) {
+                    if (value != ' ' && value != '\t'
+                        && value != '\n' && value != '\r') {
+                        canonical.push_back(value);
+                    }
+                }
+                if (canonical.starts_with("::")) {
+                    canonical.erase(0, 2);
+                }
+                std::size_t component_begin = 0;
+                while (component_begin < canonical.size()) {
+                    const std::size_t separator = canonical.find(
+                        "::", component_begin);
+                    const std::string_view component{
+                        canonical.data() + component_begin,
+                        (separator == std::string::npos
+                             ? canonical.size()
+                             : separator)
+                            - component_begin};
+                    if (!identifier_token(component)) return {};
+                    if (separator == std::string::npos) break;
+                    component_begin = separator + 2;
+                }
+                if (canonical.empty()) return {};
+                const std::size_t separator = canonical.rfind("::");
+                return {
+                    .qualified_name = separator == std::string::npos
+                        ? std::string{}
+                        : canonical,
+                    .leaf = separator == std::string::npos
+                        ? canonical
+                        : canonical.substr(separator + 2),
+                };
             }
         }
     }
     return {};
 }
-
 
 [[nodiscard]] inline bool condition_enabled_for_profile(
     std::string_view condition,
@@ -575,23 +675,6 @@ registered_guc_source(
     return result;
 }
 
-[[nodiscard]] inline bool identifier_token(
-    std::string_view token) noexcept {
-    if (token.empty()
-        || !((token.front() >= 'a' && token.front() <= 'z')
-             || (token.front() >= 'A' && token.front() <= 'Z')
-             || token.front() == '_')) {
-        return false;
-    }
-    return std::ranges::all_of(
-        token.substr(1),
-        [](char value) {
-            return (value >= 'a' && value <= 'z')
-                || (value >= 'A' && value <= 'Z')
-                || (value >= '0' && value <= '9') || value == '_';
-        });
-}
-
 struct parsed_enumerator {
     std::string name;
     std::string qualified_name;
@@ -601,41 +684,100 @@ struct parsed_enumerator {
 
 struct parsed_enum {
     std::string qualified_name;
+    std::string authority_module;
     std::map<std::string, parsed_enumerator, std::less<>> values;
     std::vector<std::string> declaration_order;
+    bool semantic_authority{};
+    bool direct_import_authority{};
 };
 
 [[nodiscard]] inline parsed_enum parse_enum(
     const collected_program& program,
     const collected_entity& entity,
-    std::string_view leaf) {
-    const auto unit = std::ranges::find(
-        program.translation_units,
-        entity.source_path,
-        &structural_analysis::translation_unit::source_path);
-    if (unit == program.translation_units.end()) {
+    const enum_type_reference& reference) {
+    const std::string settings_marker = "::settings::";
+    const std::size_t settings =
+        entity.cpp_qualified_name.find(settings_marker);
+    if (settings == std::string::npos) {
         throw std::runtime_error(
-            "cannot find translation unit for enum GUC '" + entity.name
-            + "'");
+            "enum GUC '" + entity.name
+            + "' is not nested in a natural settings owner");
     }
+    const std::string qualified_name = reference.qualified_name.empty()
+        ? entity.cpp_qualified_name.substr(0, settings)
+            + "::" + reference.leaf
+        : reference.qualified_name;
+
+    const structural_analysis::translation_unit* unit = nullptr;
+    const structural_analysis::declaration_record* declaration = nullptr;
+    const auto consider_units =
+        [&](const auto& units) {
+            for (const structural_analysis::translation_unit& candidate :
+                 units) {
+                const auto match = std::ranges::find_if(
+                    candidate.declarations,
+                    [&](const structural_analysis::declaration_record& item) {
+                        return item.kind
+                                == structural_analysis::declaration_kind::
+                                    enumeration
+                            && item.qualified_name == qualified_name;
+                    });
+                if (match == candidate.declarations.end()) continue;
+                if (unit != nullptr
+                    && unit->source_path != candidate.source_path) {
+                    throw std::runtime_error(
+                        "enum type '" + qualified_name
+                        + "' has multiple direct source authorities for GUC '"
+                        + entity.name + "'");
+                }
+                if (unit == nullptr
+                    || (unit->mode
+                            != structural_analysis::collection_mode::
+                                full_translation_unit
+                        && candidate.mode
+                            == structural_analysis::collection_mode::
+                                full_translation_unit)) {
+                    unit = &candidate;
+                    declaration = &*match;
+                }
+            }
+        };
+    consider_units(program.translation_units);
+    consider_units(program.enum_authority_units);
+    if (unit == nullptr || declaration == nullptr) {
+        throw std::runtime_error(
+            "cannot resolve enum type '" + qualified_name
+            + "' used by GUC '" + entity.name + "'");
+    }
+
+    const bool direct_import_authority =
+        unit->source_path != entity.source_path;
+    if (unit->module_name.empty()
+        || (direct_import_authority
+            && !owner_directly_imports(
+                registered_guc_module_graph_unit(program, entity),
+                unit->module_name))) {
+        throw std::runtime_error(
+            "enum type '" + qualified_name + "' used by GUC '"
+            + entity.name + "' is owned by module '"
+            + unit->module_name
+            + "', which is not a direct import of registered owner '"
+            + entity.source_module + "'");
+    }
+
     const std::string source = read_artifact_bytes(unit->source_path);
     const auto& tokens = unit->tokens;
     std::size_t enum_name = tokens.size();
     std::size_t open = tokens.size();
     std::size_t close = tokens.size();
     for (std::size_t index = 0; index < tokens.size(); ++index) {
-        if (tokens[index].spelling != "enum") continue;
-        std::size_t cursor = index + 1;
-        if (cursor < tokens.size()
-            && (tokens[cursor].spelling == "class"
-                || tokens[cursor].spelling == "struct")) {
-            ++cursor;
-        }
-        if (cursor >= tokens.size()
-            || tokens[cursor].spelling != leaf) {
+        if (tokens[index].spelling != reference.leaf
+            || tokens[index].range.begin.byte_offset
+                != declaration->name_range.begin.byte_offset) {
             continue;
         }
-        enum_name = cursor;
+        enum_name = index;
+        std::size_t cursor = index + 1;
         while (cursor < tokens.size()
                && tokens[cursor].spelling != "{"
                && tokens[cursor].spelling != ";") {
@@ -662,22 +804,16 @@ struct parsed_enum {
     }
     if (enum_name == tokens.size() || close == tokens.size()) {
         throw std::runtime_error(
-            "cannot resolve enum type '" + std::string{leaf}
+            "cannot resolve enum type '" + qualified_name
             + "' used by GUC '" + entity.name + "'");
     }
-
-    const std::string settings_marker = "::settings::";
-    const std::size_t settings =
-        entity.cpp_qualified_name.find(settings_marker);
-    if (settings == std::string::npos) {
-        throw std::runtime_error(
-            "enum GUC '" + entity.name
-            + "' is not nested in a natural settings owner");
-    }
     parsed_enum result{
-        .qualified_name =
-            entity.cpp_qualified_name.substr(0, settings)
-            + "::" + std::string{leaf},
+        .qualified_name = qualified_name,
+        .authority_module = unit->module_name,
+        .semantic_authority = unit->mode
+            == structural_analysis::collection_mode::
+                full_translation_unit,
+        .direct_import_authority = direct_import_authority,
     };
     const auto parse_segment = [
         &result,
@@ -843,10 +979,26 @@ inline void validate_documentation(const collected_entity& entity) {
 
 [[nodiscard]] inline bool compiled_enumerator(
     const collected_program& program,
-    const parsed_enumerator& value) {
-    if (program.compiler_profile.empty()) {
-        return canonical_feature_predicate(value.active_condition)
-            == "true";
+    const parsed_enum& parsed,
+    const parsed_enumerator& value,
+    guc_profile profile) {
+    if (!parsed.semantic_authority) {
+        const std::string predicate =
+            canonical_feature_predicate(value.active_condition);
+        if (predicate == "true") {
+            return true;
+        }
+        if (predicate == "BIOSEQ_TEST_INDEXES"
+            || predicate == "defined(BIOSEQ_TEST_INDEXES)") {
+            return profile == guc_profile::test_indexes;
+        }
+        if (!parsed.direct_import_authority) {
+            return false;
+        }
+        throw std::runtime_error(
+            "direct-import enum type '" + parsed.qualified_name
+            + "' has conditional value '" + value.name
+            + "' without semantic compilation authority");
     }
     return std::ranges::any_of(
         program.translation_units,
@@ -869,7 +1021,8 @@ inline void validate_documentation(const collected_entity& entity) {
 collect_enum_values(
     const collected_program& program,
     const collected_entity& entity,
-    const parsed_enum& parsed) {
+    const parsed_enum& parsed,
+    guc_profile profile) {
     const auto exceptions =
         guc_value_exceptions(program, parsed.qualified_name);
     for (const auto& [name, exception] : exceptions) {
@@ -912,7 +1065,8 @@ collect_enum_values(
             .wire_expression = declaration.initializer_text,
             .active_condition = declaration.active_condition,
             .hidden = false,
-            .compiled = compiled_enumerator(program, declaration),
+            .compiled = compiled_enumerator(
+                program, parsed, declaration, profile),
         });
         if (exception == exceptions.end()
             || !exception->second.alias) {
@@ -942,7 +1096,8 @@ collect_enum_values(
             .active_condition = declaration.active_condition,
             .alias_of = name,
             .hidden = exception->second.alias_hidden,
-            .compiled = compiled_enumerator(program, declaration),
+            .compiled = compiled_enumerator(
+                program, parsed, declaration, profile),
         });
     }
     if (result.empty()) {
@@ -1059,22 +1214,55 @@ struct resolved_enum_default {
         std::vector<
             const structural_analysis::declaration_record*>
             constants;
-        for (const structural_analysis::declaration_record& candidate :
-             source.declarations) {
-            if (candidate.kind
-                    != structural_analysis::declaration_kind::variable
-                || candidate.name != leaf
-                || candidate.initializer_text.empty()
-                || !candidate.signature_text.contains("constexpr")) {
-                continue;
+        const auto collect_constants =
+            [&](const structural_analysis::translation_unit& unit) {
+                for (const structural_analysis::declaration_record& candidate :
+                     unit.declarations) {
+                    if (candidate.kind
+                            != structural_analysis::declaration_kind::variable
+                        || candidate.name != leaf
+                        || candidate.initializer_text.empty()
+                        || !candidate.specifiers.is_constexpr) {
+                        continue;
+                    }
+                    std::string requested = authored;
+                    if (requested.starts_with("::")) requested.erase(0, 2);
+                    if (authored.contains("::")
+                        && candidate.qualified_name != requested) {
+                        continue;
+                    }
+                    constants.push_back(&candidate);
+                }
+            };
+        collect_constants(source);
+        if (constants.empty()) {
+            const structural_analysis::translation_unit* source_authority =
+                nullptr;
+            for (const structural_analysis::translation_unit& candidate :
+                 program.enum_authority_units) {
+                if (candidate.source_path != source.source_path) continue;
+                if (candidate.module_name != source.module_name
+                    || candidate.source_sha256 != source.source_sha256
+                    || candidate.mode
+                        != structural_analysis::collection_mode::token_slice) {
+                    throw std::runtime_error(
+                        "enum GUC '" + natural_guc_name(
+                            entity.cpp_qualified_name)
+                        + "' has inconsistent registered-source constexpr "
+                          "authority");
+                }
+                if (source_authority != nullptr) {
+                    throw std::runtime_error(
+                        "enum GUC '" + natural_guc_name(
+                            entity.cpp_qualified_name)
+                        + "' has multiple registered-source constexpr "
+                          "authorities");
+                }
+                source_authority = &candidate;
             }
-            std::string requested = authored;
-            if (requested.starts_with("::")) requested.erase(0, 2);
-            if (authored.contains("::")
-                && candidate.qualified_name != requested) {
-                continue;
+            if (source_authority != nullptr) {
+                collect_constants(*source_authority);
             }
-            constants.push_back(&candidate);
         }
         if (constants.empty()) {
             throw std::runtime_error(
@@ -1763,21 +1951,25 @@ make_generated_live_authority(
                 + "_and_reset_plan_cache";
         }
         if (kind == guc_kind::enumeration) {
-            const std::string enum_leaf =
-                guc_detail::enum_type_leaf(
+            const guc_detail::enum_type_reference enum_type =
+                guc_detail::enum_type_from_storage(
                     entity.cpp_return_type);
-            if (enum_leaf.empty()) {
+            if (enum_type.leaf.empty()) {
                 throw std::runtime_error(
                     "enum GUC '" + name
                     + "' has no postgres_enum_storage type argument");
             }
             const guc_detail::parsed_enum parsed =
                 guc_detail::parse_enum(
-                    program, entity, enum_leaf);
+                    program, entity, enum_type);
             guc.enum_cpp_name = parsed.qualified_name;
+            if (parsed.direct_import_authority) {
+                guc.required_import_modules.push_back(
+                    parsed.authority_module);
+            }
             guc.enum_values =
                 guc_detail::collect_enum_values(
-                    program, entity, parsed);
+                    program, entity, parsed, profile);
             guc_detail::resolved_enum_default resolved_default =
                 guc_detail::resolve_enum_default(
                     program, entity, parsed, guc.enum_values);

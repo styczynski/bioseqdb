@@ -10,6 +10,8 @@
  */
 module;
 
+#include <libassert/assert.hpp>
+
 #include <algorithm>
 #include <array>
 #include <concepts>

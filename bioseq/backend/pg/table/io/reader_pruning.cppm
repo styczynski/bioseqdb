@@ -81,14 +81,14 @@ update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max
 {
 	BoolExpr *and_expr = reinterpret_cast<BoolExpr *>(base_constraint);
 	bioseq::postgres::support::postgres_list<Node> arg_list{and_expr->args};
-	Node *less_than_expr = arg_list.first();
-	Node *greater_than_expr = arg_list.second();
+	Node *less_than_expr = arg_list.get_first();
+	Node *greater_than_expr = arg_list.get_second();
 
 	Node *min_node = get_rightop(reinterpret_cast<Expr *>(greater_than_expr));
 	Node *max_node = get_rightop(reinterpret_cast<Expr *>(less_than_expr));
 
-	Const *min_constant = pg_node_expect<Const>(min_node);
-	Const *max_constant = pg_node_expect<Const>(max_node);
+	Const *min_constant = expect_pg_node<Const>(min_node);
+	Const *max_constant = expect_pg_node<Const>(max_node);
 
 	min_constant->constvalue = min_value;
 	max_constant->constvalue = max_value;
@@ -115,7 +115,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 
 	for (auto node : bioseq::postgres::support::postgres_list<Node>(vars))
 	{
-		Var *var = pg_node_expect<Var>(node);
+		Var *var = expect_pg_node<Var>(node);
 		int idx = var->varattno - 1;
 
 		if (deduplicate[idx] != NULL)
@@ -139,7 +139,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 
 	pfree(deduplicate);
 
-	return filter_variables;
+	return filter_variables.release();
 }
 
 export bool *
@@ -199,9 +199,10 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 			update_chunk_constraint_bounds(base_constraint, chunk_skip_node_entry->minimum_value,
 							 chunk_skip_node_entry->maximum_value);
 
-			auto constraint_list = bioseq::postgres::support::postgres_list<Node>::of(base_constraint);
+			auto constraint_list =
+				bioseq::postgres::support::postgres_list<Node>::make_singleton(base_constraint);
 			bool predicate_refuted =
-				predicate_refuted_by(constraint_list, filter_clauses, false);
+				predicate_refuted_by(constraint_list.get(), filter_clauses, false);
 			if (predicate_refuted && selected_chunk_mask[chunk_index])
 			{
 				selected_chunk_mask[chunk_index] = false;

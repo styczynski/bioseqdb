@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.prefilter.sneaky_snake.vulkan;
 import bioseq.highway.dispatch_contract;
@@ -177,13 +178,13 @@ TEST_CASE(
     "SneakySnake stable ABI and canonical fixtures",
     "[component:bioseq][layer:unit][feature:prefilter]")
 {
-    STATIC_REQUIRE(sneaky_snake_default_submaze_width == 512u);
-    STATIC_REQUIRE(sneaky_snake_default_max_escape_segments == 512u);
-    STATIC_REQUIRE(static_cast<std::uint32_t>(PrefilterStatus::success) == 0u);
+    STATIC_REQUIRE(k_sneaky_snake_default_submaze_width == 512u);
+    STATIC_REQUIRE(k_sneaky_snake_default_max_escape_segments == 512u);
+    STATIC_REQUIRE(static_cast<std::uint32_t>(prefilter_status::success) == 0u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(
-        PrefilterStatus::conservative_unequal) == 1u);
+        prefilter_status::conservative_unequal) == 1u);
     STATIC_REQUIRE(static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative) == 2u);
+        prefilter_status::unsupported_conservative) == 2u);
     STATIC_REQUIRE(sizeof(prefilter_job) == 20u);
     STATIC_REQUIRE(sizeof(prefilter_result) == 16u);
 
@@ -251,7 +252,7 @@ TEST_CASE(
 
     query.assign(20u, 0u);
     target.assign(20u, 255u);
-    const SneakySnakeOptions capped{
+    const sneaky_snake_options capped{
         .submaze_width = 8u,
         .max_escape_segments = 1u,
     };
@@ -311,23 +312,23 @@ TEST_CASE(
         .jobs = fixture.jobs,
     };
 
-    const std::array<SneakySnakeOptions, 4u> option_sets{
-        SneakySnakeOptions{},
-        SneakySnakeOptions{
+    const std::array<sneaky_snake_options, 4u> option_sets{
+        sneaky_snake_options{},
+        sneaky_snake_options{
             .submaze_width = 7u,
             .max_escape_segments = 7u,
         },
-        SneakySnakeOptions{
+        sneaky_snake_options{
             .submaze_width = 13u,
             .max_escape_segments = 2u,
         },
-        SneakySnakeOptions{
+        sneaky_snake_options{
             .submaze_width = 0u,
             .max_escape_segments = 0u,
         },
     };
 
-    for (const SneakySnakeOptions options : option_sets) {
+    for (const sneaky_snake_options options : option_sets) {
         const auto scalar = sneaky_snake_scalar_batch(input, options);
         const auto simd = fixed_sneaky_snake_kernel()(input, options);
         REQUIRE(scalar.size() == fixture.jobs.size());
@@ -475,7 +476,7 @@ TEST_CASE(
         .target_ranks = target,
         .jobs = jobs,
     };
-    const SneakySnakeOptions options{
+    const sneaky_snake_options options{
         .submaze_width = submaze_width,
         .max_escape_segments = submaze_width,
     };
@@ -495,7 +496,7 @@ TEST_CASE(
 {
     namespace vp = bioseq::prefilter;
     namespace gv = bioseq::gpu::vulkan;
-    if (!vp::vulkan_sneaky_snake_supported()) {
+    if (!vp::is_vulkan_sneaky_snake_supported()) {
         SKIP("hardware Vulkan device unavailable");
     }
 
@@ -544,13 +545,13 @@ TEST_CASE(
                 CHECK(gpu[index].lower_bound == 0u);
                 CHECK(gpu[index].status
                     == static_cast<std::uint32_t>(
-                        PrefilterStatus::unsupported_conservative));
+                        prefilter_status::unsupported_conservative));
                 CHECK(gpu[index].is_accepted == 1u);
                 CHECK(gpu[index].diagnostics == 0u);
                 CHECK(replayed[index].lower_bound == 0u);
                 CHECK(replayed[index].status
                     == static_cast<std::uint32_t>(
-                        PrefilterStatus::unsupported_conservative));
+                        prefilter_status::unsupported_conservative));
                 CHECK(replayed[index].is_accepted == 1u);
                 CHECK(replayed[index].diagnostics == 0u);
                 continue;
@@ -652,7 +653,7 @@ TEST_CASE(
     REQUIRE(scalar.size() == 1u);
     REQUIRE(same_result(scalar.front(), simd.front()));
     REQUIRE(scalar.front().status == static_cast<std::uint32_t>(
-        PrefilterStatus::unsupported_conservative));
+        prefilter_status::unsupported_conservative));
     REQUIRE(is_prefilter_accepted(scalar.front()));
 }
 

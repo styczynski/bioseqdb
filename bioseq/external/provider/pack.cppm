@@ -35,7 +35,7 @@ template <class p_handler_type> struct pack_dispatch_handler {
 struct pack_dispatch_probe {
   std::string_view requested_provider_id;
   template <class p_provider_type>
-  [[nodiscard]] bool is_match(std::size_t) const noexcept {
+  [[nodiscard]] bool matches(std::size_t) const noexcept {
     return p_provider_type::id.view() == requested_provider_id;
   }
   void on_no_match(std::size_t) const noexcept {}

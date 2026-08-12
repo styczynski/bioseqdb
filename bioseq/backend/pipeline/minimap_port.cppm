@@ -1114,8 +1114,8 @@ struct scalar_pipeline_execution_stats {
         query_minimizers.merge(other.query_minimizers);
         target_minimizers.merge(other.target_minimizers);
         bool overflow = is_saturated || other.is_saturated
-            || query_minimizers.is_saturated
-            || target_minimizers.is_saturated;
+            || query_minimizers.saturated
+            || target_minimizers.saturated;
         add(seed_lookup_calls, other.seed_lookup_calls, overflow);
         add(seed_query_minimizers, other.seed_query_minimizers, overflow);
         add(chain_stage_completion_calls,
@@ -1239,7 +1239,7 @@ template<
     scalar_ksw2_stage scalar_stage = scalar_ksw2_stage::gap)
 {
     if (forbidden_block_stats != nullptr) {
-        block_aligner_forbidden_ksw2_fallback(*forbidden_block_stats);
+        abort_forbidden_ksw2_fallback(*forbidden_block_stats);
     }
     if (scalar_execution_stats != nullptr) {
         scalar_execution_stats->record_ksw2_call(
@@ -1636,10 +1636,10 @@ struct align_one_region {
                 append_cigar(region.cigar, left_result.cigar);
                 region.dp_score += left_result.max;
             }
-            const int32_t left_ref_offset = left_result.reach_end
+            const int32_t left_ref_offset = left_result.has_reached_end
                 ? left_result.mqe_t + 1 : left_result.max_t + 1;
             final_ref_start = seed_ref_start - left_ref_offset;
-            const int32_t left_query_offset = left_result.reach_end
+            const int32_t left_query_offset = left_result.has_reached_end
                 ? seed_query_start - outer_query_start : left_result.max_q + 1;
             final_query_start = seed_query_start - left_query_offset;
             if (params.compute_edit_distance) {
@@ -1870,10 +1870,10 @@ struct align_one_region {
                 append_cigar(region.cigar, right_result.cigar);
                 region.dp_score += right_result.max;
             }
-            const int32_t right_ref_offset = right_result.reach_end
+            const int32_t right_ref_offset = right_result.has_reached_end
                 ? right_result.mqe_t + 1 : right_result.max_t + 1;
             final_ref_end = seed_ref_end + right_ref_offset;
-            const int32_t right_query_offset = right_result.reach_end
+            const int32_t right_query_offset = right_result.has_reached_end
                 ? outer_query_end - seed_query_end : right_result.max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
             if (params.compute_edit_distance) {
@@ -2133,8 +2133,8 @@ void align_regions(
         bioseq::parallelism::has_parallel_tasks(pool.get_mode())
         && pool.maximum_concurrency() > 1
         && p_base_alignment_algorithm != base_alignment_algorithm::ksw2_batched
-        && lazy_is_worker_shareable(query_seq)
-        && lazy_is_worker_shareable(target_seq)
+        && bioseq::storage::is_worker_shareable(query_seq)
+        && bioseq::storage::is_worker_shareable(target_seq)
         && regions.size() >= bioseq::parallelism::task_parallel_minimums::k_region_count;
     std::size_t total_seed_count = 0;
     if (task_parallel_candidate) {
@@ -3317,13 +3317,13 @@ struct match_result_collection {
     bounded_nthash_execution_stats bounded_nthash_query_execution_stats{};
     bounded_nthash_execution_stats bounded_nthash_target_execution_stats{};
     bioseq::chaining::simd_chaining_execution_stats
-        simd_chaining_execution_stats{};
-    block_aligner_execution_stats block_aligner_execution_stats{};
-    scalar_pipeline_execution_stats scalar_pipeline_execution_stats{};
-    ksw2_batched_execution_stats ksw2_batched_execution_stats{};
+        simd_chaining_stats{};
+    block_aligner_execution_stats block_aligner_stats{};
+    scalar_pipeline_execution_stats scalar_pipeline_stats{};
+    ksw2_batched_execution_stats ksw2_batched_stats{};
     ::bioseq::prefilter::prefilter_execution_stats
-        prefilter_execution_stats{};
-    partial_vulkan_execution_stats partial_vulkan_execution_stats{};
+        prefilter_stats{};
+    partial_vulkan_execution_stats partial_vulkan_stats{};
     bioseq::indexing::prepared_fragment_anchor_batch_stats
         fragment_native_query_stats{};
     bool exact_simd_query_execution_stats_available = false;
@@ -3386,32 +3386,32 @@ struct match_result_collection {
     void record_simd_chaining_execution_stats(
             const bioseq::chaining::simd_chaining_execution_stats& stats)
             noexcept {
-        simd_chaining_execution_stats.merge(stats);
+        simd_chaining_stats.merge(stats);
         simd_chaining_execution_stats_available = true;
     }
 
     void record_block_aligner_execution_stats(
             const block_aligner_execution_stats& stats) noexcept {
-        block_aligner_execution_stats.merge(stats);
+        block_aligner_stats.merge(stats);
         block_aligner_execution_stats_available = true;
     }
 
     void record_scalar_pipeline_execution_stats(
             const scalar_pipeline_execution_stats& stats) noexcept {
-        scalar_pipeline_execution_stats.merge(stats);
+        scalar_pipeline_stats.merge(stats);
         scalar_pipeline_execution_stats_available = true;
     }
 
     void record_ksw2_batched_execution_stats(
             const ksw2_batched_execution_stats& stats) noexcept {
-        ksw2_batched_execution_stats.merge(stats);
+        ksw2_batched_stats.merge(stats);
         ksw2_batched_execution_stats_available = true;
     }
 
     void record_prefilter_execution_stats(
             const ::bioseq::prefilter::prefilter_execution_stats&
                 stats) noexcept {
-        prefilter_execution_stats.merge(stats);
+        prefilter_stats.merge(stats);
         prefilter_execution_stats_available = true;
     }
 
@@ -3431,7 +3431,7 @@ struct match_result_collection {
 
     void record_partial_vulkan_execution_stats(
             const partial_vulkan_execution_stats& stats) noexcept {
-        partial_vulkan_execution_stats.merge(stats);
+        partial_vulkan_stats.merge(stats);
     }
 
     void record_fragment_native_query_stats(
@@ -3551,26 +3551,25 @@ struct match_result_collection {
         }
         if (other.simd_chaining_execution_stats_available) {
             record_simd_chaining_execution_stats(
-                other.simd_chaining_execution_stats);
+                other.simd_chaining_stats);
         }
         if (other.block_aligner_execution_stats_available) {
             record_block_aligner_execution_stats(
-                other.block_aligner_execution_stats);
+                other.block_aligner_stats);
         }
         if (other.scalar_pipeline_execution_stats_available) {
             record_scalar_pipeline_execution_stats(
-                other.scalar_pipeline_execution_stats);
+                other.scalar_pipeline_stats);
         }
         if (other.ksw2_batched_execution_stats_available) {
             record_ksw2_batched_execution_stats(
-                other.ksw2_batched_execution_stats);
+                other.ksw2_batched_stats);
         }
         if (other.prefilter_execution_stats_available) {
             record_prefilter_execution_stats(
-                other.prefilter_execution_stats);
+                other.prefilter_stats);
         }
-        partial_vulkan_execution_stats.merge(
-            other.partial_vulkan_execution_stats);
+        partial_vulkan_stats.merge(other.partial_vulkan_stats);
         if (other.fragment_native_query_stats_available) {
             record_fragment_native_query_stats(
                 other.fragment_native_query_stats);
@@ -3624,14 +3623,14 @@ struct match_result_collection {
             simd_chaining_policy selected_policy,
             bool require_nonempty_vector_work) const noexcept {
         return simd_chaining_execution_stats_available
-            && simd_chaining_execution_stats.is_internally_consistent(
+            && simd_chaining_stats.is_internally_consistent(
                 selected_policy, require_nonempty_vector_work);
     }
 
     [[nodiscard]] bool is_ksw2_batched_execution_consistent(
             const bool require_nonempty_work) const noexcept {
         return ksw2_batched_execution_stats_available
-            && ksw2_batched_execution_stats.is_coherent(
+            && ksw2_batched_stats.is_coherent(
                 require_nonempty_work);
     }
 
@@ -3639,8 +3638,7 @@ struct match_result_collection {
             minimizer_algorithm selected,
             bool require_target_sketch,
             bool require_nonempty_vector_work) const noexcept {
-        if (partial_vulkan_execution_stats
-                != partial_vulkan_execution_stats{}) {
+        if (partial_vulkan_stats != partial_vulkan_execution_stats{}) {
             return false;
         }
 
@@ -3690,7 +3688,7 @@ struct match_result_collection {
             simd_chaining_policy selected_chaining_policy,
             bool require_target_sketch,
             bool require_nonempty_vector_work) const noexcept {
-        const auto& scalar = scalar_pipeline_execution_stats;
+        const auto& scalar = scalar_pipeline_stats;
         const bool is_scalar_seed_only_consistent =
             scalar_pipeline_execution_stats_available
             && !scalar.is_saturated
@@ -3710,8 +3708,7 @@ struct match_result_collection {
             && scalar.ksw2_input_cell_area == 0u;
         return is_scalar_seed_only_consistent
             && !ksw2_batched_execution_stats_available
-            && ksw2_batched_execution_stats
-                == ksw2_batched_execution_stats{}
+            && ksw2_batched_stats == ksw2_batched_execution_stats{}
             && is_selected_simd_sketch_execution_consistent(
                 selected,
                 require_target_sketch,
@@ -3728,26 +3725,23 @@ struct match_result_collection {
             const bool require_alignment) const noexcept {
         const bool simd_chain_absent =
             !simd_chaining_execution_stats_available
-            && simd_chaining_execution_stats
+            && simd_chaining_stats
                 == bioseq::chaining::simd_chaining_execution_stats{};
         const bool block_absent =
             !block_aligner_execution_stats_available
-            && block_aligner_execution_stats
-                == block_aligner_execution_stats{};
+            && block_aligner_stats == block_aligner_execution_stats{};
         const bool batched_absent =
             !ksw2_batched_execution_stats_available
-            && ksw2_batched_execution_stats
-                == ksw2_batched_execution_stats{};
+            && ksw2_batched_stats == ksw2_batched_execution_stats{};
         return is_selected_scalar_sketch_execution_consistent(
                 require_target_sketch,
                 /*require_nonempty_work=*/true)
-            && scalar_pipeline_execution_stats.is_route_consistent(
+            && scalar_pipeline_stats.is_route_consistent(
                 require_target_sketch, require_alignment)
             && simd_chain_absent
             && block_absent
             && batched_absent
-            && partial_vulkan_execution_stats
-                == partial_vulkan_execution_stats{};
+            && partial_vulkan_stats == partial_vulkan_execution_stats{};
     }
 
     [[nodiscard]] bool is_selected_scalar_sketch_execution_consistent(
@@ -3766,18 +3760,17 @@ struct match_result_collection {
             && bounded_nthash_target_execution_stats
                 == bounded_nthash_execution_stats{};
         const bool is_target_valid = require_target_sketch
-            ? scalar_pipeline_execution_stats.target_minimizers.is_coherent(
+            ? scalar_pipeline_stats.target_minimizers.is_coherent(
                 require_nonempty_work)
-            : scalar_pipeline_execution_stats.target_minimizers
+            : scalar_pipeline_stats.target_minimizers
                 == scalar_minimizer_execution_stats{};
         return scalar_pipeline_execution_stats_available
-            && scalar_pipeline_execution_stats.query_minimizers.is_coherent(
+            && scalar_pipeline_stats.query_minimizers.is_coherent(
                 require_nonempty_work)
             && is_target_valid
             && exact_absent
             && bounded_absent
-            && partial_vulkan_execution_stats
-                == partial_vulkan_execution_stats{};
+            && partial_vulkan_stats == partial_vulkan_execution_stats{};
     }
 
     [[nodiscard]] bool has_any_algorithm_execution_stats() const noexcept {
@@ -3789,19 +3782,19 @@ struct match_result_collection {
             || block_aligner_execution_stats_available
             || scalar_pipeline_execution_stats_available
             || ksw2_batched_execution_stats_available
-            || partial_vulkan_execution_stats.has_any_dispatch();
+            || partial_vulkan_stats.has_any_dispatch();
     }
 
     [[nodiscard]] bool is_block_aligner_execution_consistent(
             bool require_nonempty_simd_work) const noexcept {
         if (!block_aligner_execution_stats_available
-            || !block_aligner_execution_stats.is_internally_consistent()) {
+            || !block_aligner_stats.is_internally_consistent()) {
             return false;
         }
         if (!require_nonempty_simd_work) {
             return true;
         }
-        const auto& stats = block_aligner_execution_stats;
+        const auto& stats = block_aligner_stats;
         return stats.executed_calls() > 0
             && stats.nonempty_calls > 0
             && stats.nonempty_calls_with_simd == stats.nonempty_calls

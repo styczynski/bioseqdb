@@ -53,7 +53,7 @@ constexpr void dispatch_first_matching_type_impl(
     p_probe_type& probe,
     p_index_type cursor)
 {
-    if (probe.template is_match<p_head_type>(cursor)) {
+    if (probe.template matches<p_head_type>(cursor)) {
         handler.template operator()<p_head_type>();
         return;
     }
@@ -169,7 +169,7 @@ p_result_type dispatch_smallest_not_less_impl(
  * @tparam p_index_type Cursor type supplied to the probe.
  * @tparam p_type_pack `type_list` specialization in search order.
  * @tparam p_handler_type Templated handler type.
- * @tparam p_probe_type Probe type exposing `is_match` and `on_no_match`.
+ * @tparam p_probe_type Probe type exposing `matches` and `on_no_match`.
  * @param handler Handler invoked as `operator()<matched_type>()`.
  * @param probe Match policy receiving the zero-based cursor.
  */

@@ -179,7 +179,10 @@ inline void run_compact_fmgr_contract_tests() {
   }
 
   const std::vector<rendered_fmgr_entrypoint_module> modules =
-      render_fmgr_entrypoint_modules(graph);
+      render_fmgr_entrypoint_modules(
+          graph,
+          {{"postgres_types_compact_sequence",
+            "bioseq.postgres.types.compact_sequence"}});
   compact_fmgr_contract_detail::require(
       modules.size() == 1,
       "all natural compact owners emit one generated partition");

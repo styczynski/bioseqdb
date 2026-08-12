@@ -145,6 +145,7 @@ module;
 export module bioseq.postgres.scheduler.dispatch_processor;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.radix_sort;
 import bioseq.common.seqan_adapter;
@@ -550,7 +551,7 @@ public:
 		[[nodiscard]] bool release_group_query_hash_union_noexcept(
 				cpu_prepared_index_group& group) noexcept {
 			const std::uint64_t released_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					group.query_hash_union.capacity(),
 					static_cast<std::uint64_t>(
 						sizeof(minimap_sketch_data)));
@@ -762,7 +763,7 @@ public:
 			target.query_union_permit.emplace(std::move(*permit));
 
 			const std::uint64_t outer_headroom =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					sizeof(cpu_prepared_index_group),
 					bioseq::parallelism::
 						k_vector_preallocation_headroom_factor);
@@ -773,7 +774,7 @@ public:
 			}
 			target.groups.reserve(1u);
 			const std::uint64_t outer_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					target.groups.capacity(),
 					sizeof(cpu_prepared_index_group));
 			if (outer_bytes > outer_headroom) return false;
@@ -782,13 +783,13 @@ public:
 			target.groups.emplace_back();
 
 			const std::uint64_t inner_headroom =
-				bioseq::parallelism::saturating_mul(
-					bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
+					bioseq::common::saturating_mul(
 						sketch_capacity, sizeof(minimap_sketch_data)),
 					bioseq::parallelism::
 						k_vector_preallocation_headroom_factor);
 			const std::uint64_t peak =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					outer_bytes, inner_headroom);
 			if (inner_headroom
 					== (std::numeric_limits<std::uint64_t>::max)()
@@ -798,11 +799,11 @@ public:
 			}
 			target.groups.front().query_hash_union.reserve(sketch_capacity);
 			const std::uint64_t inner_bytes =
-				bioseq::parallelism::saturating_mul(
+				bioseq::common::saturating_mul(
 					target.groups.front().query_hash_union.capacity(),
 					sizeof(minimap_sketch_data));
 			const std::uint64_t retained =
-				bioseq::parallelism::saturating_add(
+				bioseq::common::saturating_add(
 					outer_bytes, inner_bytes);
 			if (inner_bytes > inner_headroom
 				|| retained == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -817,7 +818,7 @@ public:
 		const std::size_t oversized_capacity =
 			target.groups.front().query_hash_union.capacity();
 		const std::uint64_t retained_outer_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				target.groups.capacity(),
 				static_cast<std::uint64_t>(
 					sizeof(cpu_prepared_index_group)));

@@ -409,7 +409,7 @@ void require_exhaustive_profile(std::string_view profile) {
 
         compact_sequence_range<instance> directly_packed{letters};
         CAPTURE(profile, length);
-        require_unit_bytes_equal<p_unit>(directly_packed._data, expected);
+        require_unit_bytes_equal<p_unit>(directly_packed.packed_units, expected);
         REQUIRE(directly_packed.padding() == expected_padding);
         REQUIRE(directly_packed.bp_size() == length);
         REQUIRE(directly_packed.to_string() == expected_text);
@@ -420,8 +420,8 @@ void require_exhaustive_profile(std::string_view profile) {
         const auto simd =
             bioseq::simd::active_target::encode_sequence_simd<instance>(
                 expected_text.data(), expected_text.size());
-        require_unit_bytes_equal<p_unit>(scalar._data, expected);
-        require_unit_bytes_equal<p_unit>(simd._data, expected);
+        require_unit_bytes_equal<p_unit>(scalar.packed_units, expected);
+        require_unit_bytes_equal<p_unit>(simd.packed_units, expected);
         REQUIRE(scalar.padding() == expected_padding);
         REQUIRE(simd.padding() == expected_padding);
 

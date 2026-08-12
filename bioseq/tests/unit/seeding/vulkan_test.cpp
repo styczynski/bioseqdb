@@ -39,6 +39,7 @@ using minimap_sketch_data = bioseq::indexing::minimap_sketch_data;
 using bioseq::indexing::minimizer_hashmap_fragment_index;
 using anchor = bioseq::chaining::anchor;
 namespace ch = bioseq::chaining;
+namespace seed = bioseq::seeding;
 namespace vk = bioseq::gpu::vulkan;
 namespace idx_ns = bioseq::indexing;
 
@@ -85,9 +86,13 @@ anchor_tuples(const ch::arena_slab<anchor>& slab) {
     return out;
 }
 
-[[nodiscard]] static bool nondecreasing_ref_bits(const ch::arena_slab<anchor>& slab) {
+[[nodiscard]] static bool nondecreasing_reference_sort_keys(
+        const ch::arena_slab<anchor>& slab) {
     for (std::size_t i = 1; i < slab.size(); ++i) {
-        if (slab.data()[i].ref_bits() < slab.data()[i - 1].ref_bits()) return false;
+        if (slab.data()[i].reference_sort_key()
+                < slab.data()[i - 1].reference_sort_key()) {
+            return false;
+        }
     }
     return true;
 }
@@ -147,7 +152,7 @@ TEST_CASE("vulkan seeding: scalable sort plan boundary and XXL arithmetic",
     REQUIRE(report87.host_result_bytes == 36'502'656u);
     REQUIRE(report87.transient_bytes == 136'885'376u);
 
-    const vk::vulkan_seed_buffer_allocation_requirements requirements{
+    const seed::vulkan_seed_buffer_allocation_requirements requirements{
         .scratch_bytes = 4u,
         .prefix_bytes = 404u,
         .anchors_bytes = report87.anchor_bytes,
@@ -156,23 +161,23 @@ TEST_CASE("vulkan seeding: scalable sort plan boundary and XXL arithmetic",
         .anchor_keys_scratch_bytes = report87.key_bytes,
         .histogram_bytes = report87.histogram_bytes,
     };
-    const auto no_slab_growth = vk::make_vulkan_seed_reservation_plan(
+    const auto no_slab_growth = seed::make_vulkan_seed_reservation_plan(
         requirements, 404u, report87.host_result_bytes, 0u);
-    REQUIRE(no_slab_growth.arithmetic_valid);
+    REQUIRE(no_slab_growth.is_arithmetic_valid);
     REQUIRE(no_slab_growth.vulkan_allocation_requirement_bytes
             == 100'383'128u);
     REQUIRE(no_slab_growth.total_bytes == 136'886'188u);
-    REQUIRE(vk::vulkan_seed_reservation_fits(
+    REQUIRE(seed::vulkan_seed_reservation_fits(
         no_slab_growth, no_slab_growth.total_bytes));
-    REQUIRE_FALSE(vk::vulkan_seed_reservation_fits(
+    REQUIRE_FALSE(seed::vulkan_seed_reservation_fits(
         no_slab_growth, no_slab_growth.total_bytes - 1u));
 
-    const auto with_slab_growth = vk::make_vulkan_seed_reservation_plan(
+    const auto with_slab_growth = seed::make_vulkan_seed_reservation_plan(
         requirements,
         404u,
         report87.host_result_bytes,
         report87.anchor_bytes);
-    REQUIRE(with_slab_growth.arithmetic_valid);
+    REQUIRE(with_slab_growth.is_arithmetic_valid);
     REQUIRE(with_slab_growth.total_bytes == 173'388'844u);
     REQUIRE(with_slab_growth.anchors_out_growth_bytes == 36'502'656u);
 }
@@ -248,7 +253,7 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
         checksum = idx_ns::gpu_source_direct_checksum_word(
             checksum, control.pos_count);
     }
-    const auto validation = vk::validate_mapped_sorted_dense_payload(
+    const auto validation = seed::validate_mapped_sorted_dense_payload(
         controls, positions, 100u, checksum);
     REQUIRE(validation.canonical_order_checked);
     REQUIRE(validation.is_valid);
@@ -272,12 +277,12 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     minimizer_hashmap_fragment_index oracle;
     oracle.build_from_pairs(oracle_pairs, 100u);
 
-    const auto mapped_plan = vk::count_seed_prefix_plan(
+    const auto mapped_plan = seed::count_seed_prefix_plan(
         query_span,
-        vk::validated_mapped_sorted_dense_prefix_view(
+        seed::validated_mapped_sorted_dense_prefix_view(
             controls, positions, 100u, checksum),
         /*max_occ=*/500);
-    const auto oracle_plan = vk::count_seed_prefix_plan(
+    const auto oracle_plan = seed::count_seed_prefix_plan(
         query_span, oracle, /*max_occ=*/500);
     REQUIRE(mapped_plan.prefix_len == query.size() + 1u);
     REQUIRE(mapped_plan.exact_anchor_count == 5u);
@@ -287,14 +292,14 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE(mapped_plan.mapped_comparison_count >= query.size());
 
     const auto mapped_prefix =
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             query_span,
-            vk::validated_mapped_sorted_dense_prefix_view(
+            seed::validated_mapped_sorted_dense_prefix_view(
                 controls, positions, 100u, checksum),
             /*max_occ=*/500,
             mapped_plan);
     const auto oracle_prefix =
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             query_span, oracle, /*max_occ=*/500, oracle_plan);
     REQUIRE((mapped_prefix.prefix
              == std::vector<std::uint32_t>{0u, 2u, 3u, 3u, 5u}));
@@ -307,15 +312,15 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     // calls reconstruct and validate the complete mapped payload; the absence
     // of query hashes legitimately produces zero binary-search activity.
     const std::span<const minimap_sketch_data> empty_query{};
-    const auto empty_mapped_plan = vk::count_seed_prefix_plan(
+    const auto empty_mapped_plan = seed::count_seed_prefix_plan(
         empty_query,
-        vk::validated_mapped_sorted_dense_prefix_view(
+        seed::validated_mapped_sorted_dense_prefix_view(
             controls, positions, 100u, checksum),
         /*max_occ=*/500);
     const auto empty_mapped_prefix =
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             empty_query,
-            vk::validated_mapped_sorted_dense_prefix_view(
+            seed::validated_mapped_sorted_dense_prefix_view(
                 controls, positions, 100u, checksum),
             /*max_occ=*/500,
             empty_mapped_plan);
@@ -328,15 +333,15 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE(empty_mapped_prefix.mapped_lookup_count == 0u);
     REQUIRE(empty_mapped_prefix.mapped_comparison_count == 0u);
 
-    const auto limited_plan = vk::count_seed_prefix_plan(
+    const auto limited_plan = seed::count_seed_prefix_plan(
         query_span,
-        vk::validated_mapped_sorted_dense_prefix_view(
+        seed::validated_mapped_sorted_dense_prefix_view(
             controls, positions, 100u, checksum),
         /*max_occ=*/1);
     const auto limited_prefix =
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             query_span,
-            vk::validated_mapped_sorted_dense_prefix_view(
+            seed::validated_mapped_sorted_dense_prefix_view(
                 controls, positions, 100u, checksum),
             /*max_occ=*/1,
             limited_plan);
@@ -344,15 +349,15 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     REQUIRE((limited_prefix.prefix
              == std::vector<std::uint32_t>{0u, 0u, 1u, 1u, 1u}));
 
-    const auto disabled_plan = vk::count_seed_prefix_plan(
+    const auto disabled_plan = seed::count_seed_prefix_plan(
         query_span,
-        vk::validated_mapped_sorted_dense_prefix_view(
+        seed::validated_mapped_sorted_dense_prefix_view(
             controls, positions, 100u, checksum),
         /*max_occ=*/-1);
     const auto disabled_prefix =
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             query_span,
-            vk::validated_mapped_sorted_dense_prefix_view(
+            seed::validated_mapped_sorted_dense_prefix_view(
                 controls, positions, 100u, checksum),
             /*max_occ=*/-1,
             disabled_plan);
@@ -364,22 +369,22 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
     auto divergent_plan = mapped_plan;
     ++divergent_plan.exact_anchor_count;
     REQUIRE_THROWS_AS(
-        vk::build_seed_prefix_counts_after_admission(
+        seed::build_seed_prefix_counts_after_admission(
             query_span,
-            vk::validated_mapped_sorted_dense_prefix_view(
+            seed::validated_mapped_sorted_dense_prefix_view(
                 controls, positions, 100u, checksum),
             /*max_occ=*/500,
             divergent_plan),
-        vk::mapped_prefix_authority_invalid);
+        seed::mapped_prefix_invalid_error);
 
     auto mutated_positions = positions;
     mutated_positions[1] ^= 2u;
-    REQUIRE_FALSE(vk::validate_mapped_sorted_dense_payload(
+    REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
         controls, mutated_positions, 100u, checksum).is_valid);
 
     auto mutated_controls = controls;
     mutated_controls[1].pos_offset = 1u;
-    REQUIRE_FALSE(vk::validate_mapped_sorted_dense_payload(
+    REQUIRE_FALSE(seed::validate_mapped_sorted_dense_payload(
         mutated_controls, positions, 100u, checksum).is_valid);
 
     // The second pass revalidates the whole mapped payload, so mutation after
@@ -390,31 +395,33 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
         checksum,
         query_span,
         mapped_plan] {
-        auto second_view = vk::validated_mapped_sorted_dense_prefix_view(
+        auto second_view = seed::validated_mapped_sorted_dense_prefix_view(
             controls, mutated_positions, 100u, checksum);
-        static_cast<void>(vk::build_seed_prefix_counts_after_admission(
+        static_cast<void>(seed::build_seed_prefix_counts_after_admission(
             query_span, std::move(second_view), /*max_occ=*/500,
             mapped_plan));
     };
     REQUIRE_THROWS_AS(mutated_second_pass(),
-                      vk::mapped_prefix_authority_invalid);
+                      seed::mapped_prefix_invalid_error);
 
     constexpr std::uint64_t u32_max =
         (std::numeric_limits<std::uint32_t>::max)();
-    REQUIRE(vk::checked_seed_prefix_length(u32_max - 1u) == u32_max);
-    REQUIRE(vk::checked_seed_anchor_total(u32_max - 1u, 1u) == u32_max);
+    REQUIRE(seed::checked_seed_prefix_length(u32_max - 1u) == u32_max);
+    REQUIRE(seed::checked_seed_anchor_total(u32_max - 1u, 1u) == u32_max);
     try {
-        static_cast<void>(vk::checked_seed_prefix_length(u32_max));
+        static_cast<void>(seed::checked_seed_prefix_length(u32_max));
         FAIL("u32+1 prefix length was accepted");
-    } catch (const vk::seed_lookup_too_large& error) {
-        REQUIRE(error.kind == vk::seed_lookup_overflow_kind::query_prefix_length);
+    } catch (const seed::seed_lookup_too_large& error) {
+        REQUIRE(error.kind
+                == seed::seed_lookup_overflow_kind::query_prefix_length);
         REQUIRE(error.observed == u32_max + 1u);
     }
     try {
-        static_cast<void>(vk::checked_seed_anchor_total(u32_max, 1u));
+        static_cast<void>(seed::checked_seed_anchor_total(u32_max, 1u));
         FAIL("u32+1 exact anchor total was accepted");
-    } catch (const vk::seed_lookup_too_large& error) {
-        REQUIRE(error.kind == vk::seed_lookup_overflow_kind::exact_anchor_count);
+    } catch (const seed::seed_lookup_too_large& error) {
+        REQUIRE(error.kind
+                == seed::seed_lookup_overflow_kind::exact_anchor_count);
         REQUIRE(error.observed == u32_max + 1u);
     }
 }
@@ -504,8 +511,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
 
     auto gpu_slab = ch::make_arena_slab<anchor>();
     gpu_slab.reserve(64);
-    vk::vulkan_seed_lookup_decline decline{};
-    const bool ok = vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    seed::vulkan_seed_lookup_decline decline{};
+    const bool ok = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt, idx, resident, /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, gpu_slab,
@@ -519,7 +526,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     ASSERT(cpu_slab.size() == 5,
            fmt::format("expected 5 anchors, got {}", cpu_slab.size()),
            cpu_slab.size());
-    ASSERT(nondecreasing_ref_bits(gpu_slab), "GPU anchors are not ref_bits-sorted", 0);
+    ASSERT(nondecreasing_reference_sort_keys(gpu_slab),
+        "GPU anchors are not reference_sort_key-sorted", 0);
     REQUIRE(decline.seed_lookup_dispatches == 1u);
     REQUIRE(decline.open_addressed_lookup_dispatches == 1u);
     REQUIRE(decline.sorted_dense_lookup_dispatches == 0u);
@@ -540,8 +548,8 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
            cpu_t.size());
 
     auto fused_slab = ch::make_arena_slab<anchor>();
-    vk::vulkan_seed_lookup_decline fused_decline{};
-    REQUIRE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    seed::vulkan_seed_lookup_decline fused_decline{};
+    REQUIRE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt, idx, resident, /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, fused_slab,
@@ -611,8 +619,8 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
 
     auto gpu_slab = ch::make_arena_slab<anchor>();
     gpu_slab.reserve(64u);
-    vk::vulkan_seed_lookup_decline decline{};
-    REQUIRE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    seed::vulkan_seed_lookup_decline decline{};
+    REQUIRE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt, idx, resident, /*vulkan_enabled=*/true,
         query_len, max_occ, kmer_size, gpu_slab,
@@ -621,7 +629,7 @@ TEST_CASE("vulkan seeding: non-fused shader consumes sorted-dense resident with 
     REQUIRE(decline.seed_lookup_dispatches == 1u);
     REQUIRE(decline.open_addressed_lookup_dispatches == 0u);
     REQUIRE(decline.sorted_dense_lookup_dispatches == 1u);
-    REQUIRE(nondecreasing_ref_bits(gpu_slab));
+    REQUIRE(nondecreasing_reference_sort_keys(gpu_slab));
     REQUIRE(anchor_tuples(gpu_slab) == anchor_tuples(cpu_slab));
 }
 
@@ -665,15 +673,15 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
         REQUIRE(resident != nullptr);
 
         auto slab = ch::make_arena_slab<anchor>();
-        vk::vulkan_seed_lookup_decline decline{};
-        REQUIRE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+        seed::vulkan_seed_lookup_decline decline{};
+        REQUIRE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
             std::span<const minimap_sketch_data>{query.data(), query.size()},
             std::nullopt, idx, resident, true,
             /*query_len=*/4096u, /*max_occ=*/500, /*kmer_size=*/15,
             slab, /*fused_frontend=*/false, &decline));
 
         REQUIRE(slab.size() == anchor_count);
-        REQUIRE(nondecreasing_ref_bits(slab));
+        REQUIRE(nondecreasing_reference_sort_keys(slab));
         REQUIRE(decline.seed_lookup_dispatches == 1u);
         REQUIRE(decline.sort_plan.backend == vk::seed_anchor_sort_backend::radix);
         REQUIRE(decline.sort_stats.bitonic_sort_dispatches == 0u);
@@ -692,10 +700,10 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
         REQUIRE(decline.canonical_tie_normalization_runs == 1u);
         REQUIRE(decline.canonical_tie_normalization_anchors == anchor_count);
 
-        const std::uint64_t equal_key = slab.data()[0].ref_bits();
+        const std::uint64_t equal_key = slab.data()[0].reference_sort_key();
         for (std::uint32_t ordinal = 0; ordinal < anchor_count; ++ordinal) {
             CAPTURE(ordinal, target_position, target_length, expected_passes);
-            REQUIRE(slab.data()[ordinal].ref_bits() == equal_key);
+            REQUIRE(slab.data()[ordinal].reference_sort_key() == equal_key);
             REQUIRE(slab.data()[ordinal].ref_position == target_position);
             REQUIRE(slab.data()[ordinal].query_position == ordinal);
         }
@@ -733,8 +741,8 @@ TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target"
 
     auto gpu_slab = ch::make_arena_slab<anchor>();
     gpu_slab.reserve(8);
-    vk::vulkan_seed_lookup_decline decline{};
-    const bool ok = vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    seed::vulkan_seed_lookup_decline decline{};
+    const bool ok = seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt, idx, resident, true, 200, 500, 15, gpu_slab,
         /*fused_frontend=*/false, &decline);
@@ -757,9 +765,9 @@ TEST_CASE("vulkan seeding: empty query succeeds without fabricated dispatch stat
     minimizer_hashmap_fragment_index idx;
     std::vector<minimap_sketch_data> empty;
     auto slab = ch::make_arena_slab<anchor>();
-    vk::vulkan_seed_lookup_decline decline{};
+    seed::vulkan_seed_lookup_decline decline{};
 
-    REQUIRE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    REQUIRE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{empty.data(), empty.size()},
         std::nullopt, idx, nullptr, /*vulkan_enabled=*/true,
         /*query_len=*/200u, /*max_occ=*/500, /*kmer_size=*/15,
@@ -785,9 +793,9 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
     context::context ctx;
     context::installed_context_scope install{ctx};
     auto slab = ch::make_arena_slab<anchor>();
-    vk::vulkan_seed_lookup_decline decline{};
+    seed::vulkan_seed_lookup_decline decline{};
 
-    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    REQUIRE_FALSE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt,
         idx,
@@ -800,10 +808,10 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         /*fused_frontend=*/false,
         &decline));
     REQUIRE(decline.reason
-            == vk::vulkan_seed_lookup_decline_reason::vulkan_disabled);
+            == seed::vulkan_seed_lookup_decline_reason::vulkan_disabled);
     REQUIRE(decline.query_minimizer_count == query.size());
 
-    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    REQUIRE_FALSE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt,
         idx,
@@ -816,9 +824,9 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         /*fused_frontend=*/false,
         &decline));
     REQUIRE(decline.reason
-            == vk::vulkan_seed_lookup_decline_reason::invalid_kmer_size);
+            == seed::vulkan_seed_lookup_decline_reason::invalid_kmer_size);
 
-    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    REQUIRE_FALSE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt,
         idx,
@@ -831,9 +839,10 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         /*fused_frontend=*/false,
         &decline));
     REQUIRE(decline.reason
-            == vk::vulkan_seed_lookup_decline_reason::query_length_exceeds_u32);
+            == seed::vulkan_seed_lookup_decline_reason::
+                query_length_exceeds_u32);
 
-    REQUIRE_FALSE(vk::collect_seed_hits_vulkan<minimap_sketch_data>(
+    REQUIRE_FALSE(seed::collect_seed_hits_vulkan<minimap_sketch_data>(
         std::span<const minimap_sketch_data>{query.data(), query.size()},
         std::nullopt,
         idx,
@@ -846,7 +855,8 @@ TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",
         /*fused_frontend=*/false,
         &decline));
     REQUIRE(decline.reason
-            == vk::vulkan_seed_lookup_decline_reason::resident_index_unavailable);
+            == seed::vulkan_seed_lookup_decline_reason::
+                resident_index_unavailable);
 }
 
 TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admission metrics",
@@ -863,8 +873,8 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
         .system_total_bytes = 17179869184u,
         .process_soft_cap_bytes = 13743895347u,
     };
-    const vk::vulkan_seed_lookup_decline seed_decline{
-        .reason = vk::vulkan_seed_lookup_decline_reason::
+    const seed::vulkan_seed_lookup_decline seed_decline{
+        .reason = seed::vulkan_seed_lookup_decline_reason::
             seed_transient_memory_admission_denied,
         .query_length = 5121827u,
         .query_minimizer_count = 1023214u,
@@ -878,7 +888,7 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
         .admission = admission,
     };
     const std::string formatted =
-        vk::format_vulkan_seed_lookup_decline(seed_decline);
+        seed::format_vulkan_seed_lookup_decline(seed_decline);
     REQUIRE(formatted.find("reason=seed_transient_memory_admission_denied")
             != std::string::npos);
     REQUIRE(formatted.find("admission_reason=budget_exhausted")
@@ -890,7 +900,7 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
 
     bool caught = false;
     try {
-        vk::throw_vulkan_seed_lookup_strict_decline(
+        seed::throw_vulkan_seed_lookup_strict_decline(
             "Vulkan seed lookup fixture", seed_decline);
     } catch (const vk::vulkan_runtime_error& error) {
         caught = true;
@@ -904,8 +914,8 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
     }
     REQUIRE(caught);
 
-    const vk::vulkan_seed_lookup_decline cache_decline{
-        .reason = vk::vulkan_seed_lookup_decline_reason::
+    const seed::vulkan_seed_lookup_decline cache_decline{
+        .reason = seed::vulkan_seed_lookup_decline_reason::
             resident_index_upload_declined,
         .query_length = 5121827u,
         .query_minimizer_count = 1023214u,
@@ -922,7 +932,7 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
         },
     };
     const std::string cache_formatted =
-        vk::format_vulkan_seed_lookup_decline(cache_decline);
+        seed::format_vulkan_seed_lookup_decline(cache_decline);
     REQUIRE(cache_formatted.find("reason=resident_index_upload_declined")
             != std::string::npos);
     REQUIRE(cache_formatted.find("upload_peak_memory_admission_denied")
@@ -936,28 +946,42 @@ TEST_CASE("vulkan seeding: strict typed decline preserves cache and seed admissi
 TEST_CASE("vulkan seeding: every typed decline reason has a stable metric name",
           "[component:bioseq][layer:unit][feature:seeding]") {
     for (const auto reason : {
-            vk::vulkan_seed_lookup_decline_reason::vulkan_disabled,
-            vk::vulkan_seed_lookup_decline_reason::query_length_exceeds_u32,
-            vk::vulkan_seed_lookup_decline_reason::query_minimizer_count_exceeds_u32,
-            vk::vulkan_seed_lookup_decline_reason::query_prefix_length_exceeds_u32,
-            vk::vulkan_seed_lookup_decline_reason::invalid_kmer_size,
-            vk::vulkan_seed_lookup_decline_reason::hardware_device_unavailable,
-            vk::vulkan_seed_lookup_decline_reason::index_cache_unavailable,
-            vk::vulkan_seed_lookup_decline_reason::resident_index_upload_declined,
-            vk::vulkan_seed_lookup_decline_reason::resident_index_unavailable,
-            vk::vulkan_seed_lookup_decline_reason::exact_anchor_count_exceeds_u32,
-            vk::vulkan_seed_lookup_decline_reason::dispatch_workgroup_limit_exceeded,
-            vk::vulkan_seed_lookup_decline_reason::
+            seed::vulkan_seed_lookup_decline_reason::vulkan_disabled,
+            seed::vulkan_seed_lookup_decline_reason::query_length_exceeds_u32,
+            seed::vulkan_seed_lookup_decline_reason::
+                query_minimizer_count_exceeds_u32,
+            seed::vulkan_seed_lookup_decline_reason::
+                query_prefix_length_exceeds_u32,
+            seed::vulkan_seed_lookup_decline_reason::invalid_kmer_size,
+            seed::vulkan_seed_lookup_decline_reason::
+                hardware_device_unavailable,
+            seed::vulkan_seed_lookup_decline_reason::
+                index_cache_unavailable,
+            seed::vulkan_seed_lookup_decline_reason::
+                resident_index_upload_declined,
+            seed::vulkan_seed_lookup_decline_reason::
+                resident_index_unavailable,
+            seed::vulkan_seed_lookup_decline_reason::
+                exact_anchor_count_exceeds_u32,
+            seed::vulkan_seed_lookup_decline_reason::
+                dispatch_workgroup_limit_exceeded,
+            seed::vulkan_seed_lookup_decline_reason::
                 radix_workgroup_geometry_unsupported,
-            vk::vulkan_seed_lookup_decline_reason::target_coordinate_invalid,
-            vk::vulkan_seed_lookup_decline_reason::
+            seed::vulkan_seed_lookup_decline_reason::target_coordinate_invalid,
+            seed::vulkan_seed_lookup_decline_reason::
                 sort_storage_buffer_range_exceeded,
-            vk::vulkan_seed_lookup_decline_reason::
+            seed::vulkan_seed_lookup_decline_reason::
                 sort_plan_arithmetic_overflow,
-            vk::vulkan_seed_lookup_decline_reason::negative_max_occ_unsupported,
-            vk::vulkan_seed_lookup_decline_reason::
-                seed_transient_memory_admission_denied}) {
-        REQUIRE(vk::vulkan_seed_lookup_decline_reason_name(reason) != "unknown");
+            seed::vulkan_seed_lookup_decline_reason::
+                negative_max_occ_unsupported,
+            seed::vulkan_seed_lookup_decline_reason::
+                seed_transient_memory_admission_denied,
+            seed::vulkan_seed_lookup_decline_reason::
+                mapped_prefix_authority_invalid,
+            seed::vulkan_seed_lookup_decline_reason::
+                seed_arena_permit_owner_unavailable}) {
+        REQUIRE(seed::vulkan_seed_lookup_decline_reason_name(reason)
+                != "unknown");
     }
 }
 

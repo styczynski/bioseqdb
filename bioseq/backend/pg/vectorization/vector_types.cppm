@@ -25,6 +25,7 @@ module;
 
 export module bioseq.postgres.vectorization.types;
 
+import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support.datums;
 import bioseq.postgres.support;
 import bioseq.postgres.support.runtime_diagnostics;
@@ -197,7 +198,7 @@ allocate_vector_column(
 
 	column->lane_count = 0;
 	column->data = static_cast<Datum*>(palloc0(
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			static_cast<std::uint64_t>(element_width),
 			vector_column_capacity)));
 	column->element_width = static_cast<uint16>(element_width);

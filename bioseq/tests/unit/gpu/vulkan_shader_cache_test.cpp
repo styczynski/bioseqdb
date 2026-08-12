@@ -551,7 +551,7 @@ make_grouped_soa_coordinate_hit_audit(
         .chain_score = 42,
         .seed_count = 7u,
         .is_reverse = 0u,
-        .valid = 1u,
+        .is_valid = 1u,
     };
     audit.configuration =
         gv::make_persisted_grouped_soa_coordinate_config_identity(
@@ -828,7 +828,7 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
             hit.count_submit_wait_identity;
         CHECK_FALSE(tampered.is_internally_consistent());
         tampered = hit;
-        tampered.result.valid = 2u;
+        tampered.result.is_valid = 2u;
         CHECK_FALSE(tampered.is_internally_consistent());
         tampered = hit;
         tampered.result.is_reverse = 9u;
@@ -1539,7 +1539,7 @@ TEST_CASE("process seed reads once and survives source mutation and deletion",
           == seed->owned_capacity_bytes());
     CHECK_FALSE(receipt.admission_saturated());
 
-    auto key_view = gv::sealed_shader_cache_key_view(*seed, key);
+    auto key_view = gv::make_sealed_shader_cache_key_view(*seed, key);
     REQUIRE(key_view);
     expected_shader_module_metallib.assign(
         key_view->metallib_bytes.begin(), key_view->metallib_bytes.end());
@@ -2775,9 +2775,9 @@ TEST_CASE("immutable Metal archive pipeline receipt is strict and retained",
 TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
           "[component:bioseq][layer:unit][feature:gpu_runtime][resource:filesystem]") {
     STATIC_REQUIRE(!std::is_copy_constructible_v<
-                   gv::runtime_pipeline_operation_audit>);
+                   gv::runtime_pipeline_operation_token>);
     STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
-                   gv::runtime_pipeline_operation_audit>);
+                   gv::runtime_pipeline_operation_token>);
     STATIC_REQUIRE(!std::is_copy_constructible_v<
                    gv::persisted_grouped_soa_coordinate_accepted_operation>);
     STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
@@ -2796,7 +2796,7 @@ TEST_CASE("runtime pipeline PREPARED and USED receipts are causal and one-shot",
     // process shutdown, so leak checks begin after this process-wide baseline.
     const std::uint64_t reserved_after_process_qualification =
         admission.reserved_bytes();
-    CHECK(gv::runtime_pipeline_operation_audit::
+    CHECK(gv::runtime_pipeline_operation_token::
           self_test_causal_collector_contract(
               base_audit));
     CHECK(admission.reserved_bytes()

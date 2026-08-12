@@ -137,7 +137,7 @@ try_materialize_async_minimizer_sequence_worker_target(
         const auto& descriptor = owner.descriptor();
         const std::uint64_t packed_bytes =
             static_cast<std::uint64_t>(descriptor.unit_count)
-            * descriptor.storage_unit_byte_width;
+            * descriptor.storage_unit_width;
         bioseq_log<logging_level::debug>(
             "[bioseq] index: async minimizer-sequence worker row={} index={} target_bp={} "
             "packed_bytes={} materialized resident target",

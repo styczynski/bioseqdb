@@ -27,7 +27,7 @@ import bioseq.postgres.support;
 import bioseq.postgres.storage.metadata.sql_row_codecs;
 
 using row_mask_codec =
-	bioseq::storage::metadata::sql_row_codecs::row_mask_codec;
+	bioseq::postgres::storage::metadata::sql_row_codecs::row_mask_codec;
 export using row_mask_row = row_mask_codec::row_type;
 
 /*

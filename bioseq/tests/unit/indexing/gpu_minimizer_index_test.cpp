@@ -34,6 +34,7 @@ import bioseq.indexing.gpu_minimizer_index;
 import bioseq.indexing.storage;
 import bioseq.indexing.type;
 import bioseq.sequences.kmers.vulkan_minimizers;
+import bioseq.gpu.vulkan.abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 
@@ -374,7 +375,7 @@ make_grouped_soa_gpu_resident_fixture() {
     }
     fixture.directory = std::move(*directory);
 
-    idx_ns::crc64_ecma182 payload_row_checksums{};
+    idx_ns::crc64_ecma182_accumulator payload_row_checksums{};
     for (std::size_t ordinal = 0u; ordinal < fixture.entries.size(); ++ordinal) {
         const auto& entry = fixture.entries[ordinal];
         payload_row_checksums.update_little_endian(
@@ -457,10 +458,10 @@ make_grouped_soa_gpu_resident_fixture() {
     return fixture;
 }
 
-[[nodiscard]] static idx_ns::gpu_device_uuid synthetic_device_uuid(
+[[nodiscard]] static bioseq::gpu::vulkan::gpu_device_uuid synthetic_device_uuid(
     std::uint8_t seed) noexcept
 {
-    idx_ns::gpu_device_uuid uuid{};
+    bioseq::gpu::vulkan::gpu_device_uuid uuid{};
     for (std::size_t index = 0; index < uuid.size(); ++index) {
         uuid[index] = static_cast<std::uint8_t>(seed + index);
     }
@@ -779,7 +780,7 @@ TEST_CASE("vulkan index: typed upload decline preserves every predicate and admi
             .load_ppm = 699'999u,
             .max_probe = 9u,
             .materialization_permit_released = true,
-            .is_process_footprint_reflected = true,
+            .process_footprint_reflected = true,
             .admission = admission,
         };
         const std::string formatted =
@@ -884,7 +885,7 @@ TEST_CASE("vulkan index: resident upload + cache reuse (device path)",
             == handle1->materialization.reflected_delta_bytes);
     REQUIRE(diagnostic.materialization_permit_released
             == handle1->materialization.is_permit_released);
-    REQUIRE(diagnostic.is_process_footprint_reflected
+    REQUIRE(diagnostic.process_footprint_reflected
             == handle1->materialization.allocation_snapshot.is_process_footprint_reflected);
     if (handle1->materialization.is_permit_released) {
         REQUIRE(handle1->permit.bytes() == 0u);
@@ -993,8 +994,8 @@ TEST_CASE("vulkan index: GPU-built adoption transfers retained ownership without
     REQUIRE((*adopted)->ownership.adoption_successes == 1u);
     REQUIRE(admission.reserved_bytes() == with_built);
     REQUIRE_FALSE(built.valid);
-    REQUIRE_FALSE(built.slots.valid());
-    REQUIRE_FALSE(built.positions.valid());
+    REQUIRE_FALSE(built.slots.is_valid());
+    REQUIRE_FALSE(built.positions.is_valid());
     adopted->reset();
     REQUIRE(admission.reserved_bytes() == before);
 }
@@ -1022,8 +1023,8 @@ TEST_CASE("vulkan index: GPU-built move assignment releases destination after bu
         destination = std::move(source);
         REQUIRE(destination.valid);
         REQUIRE_FALSE(source.valid);
-        REQUIRE_FALSE(source.slots.valid());
-        REQUIRE_FALSE(source.positions.valid());
+        REQUIRE_FALSE(source.slots.is_valid());
+        REQUIRE_FALSE(source.positions.is_valid());
         REQUIRE_FALSE(static_cast<bool>(source.permit));
         REQUIRE(admission.reserved_bytes() == before + one_resident);
     }
@@ -1047,8 +1048,8 @@ TEST_CASE("vulkan index: adoption rejects inconsistent stats without consuming s
     REQUIRE(adopted.error()
             == idx_ns::gpu_built_index_adoption_error::stats_mismatch);
     REQUIRE(built.valid);
-    REQUIRE(built.slots.valid());
-    REQUIRE(built.positions.valid());
+    REQUIRE(built.slots.is_valid());
+    REQUIRE(built.positions.is_valid());
     REQUIRE(static_cast<bool>(built.permit));
 
     built.materialization.allocation_snapshot.fully_touched_bytes++;
@@ -1060,8 +1061,8 @@ TEST_CASE("vulkan index: adoption rejects inconsistent stats without consuming s
     REQUIRE_FALSE(adopted.has_value());
     REQUIRE(adopted.error() == idx_ns::gpu_built_index_adoption_error::invalid_build);
     REQUIRE(built.valid);
-    REQUIRE(built.slots.valid());
-    REQUIRE(built.positions.valid());
+    REQUIRE(built.slots.is_valid());
+    REQUIRE(built.positions.is_valid());
 
     built.occupied_slots = built.position_count;
     built.ownership.distinct_minimizer_count = built.occupied_slots;
@@ -1120,8 +1121,8 @@ TEST_CASE("vulkan index: adoption rejects tampered deterministic target-build st
         REQUIRE(adopted.error()
                 == idx_ns::gpu_built_index_adoption_error::stats_mismatch);
         REQUIRE(built.valid);
-        REQUIRE(built.slots.valid());
-        REQUIRE(built.positions.valid());
+        REQUIRE(built.slots.is_valid());
+        REQUIRE(built.positions.is_valid());
     }
 }
 
@@ -1206,8 +1207,8 @@ TEST_CASE("vulkan index: Gate-A build cannot adopt under forced-collision Gate-B
     REQUIRE(adopted.error()
             == idx_ns::gpu_built_index_adoption_error::stats_mismatch);
     REQUIRE(built.valid);
-    REQUIRE(built.slots.valid());
-    REQUIRE(built.positions.valid());
+    REQUIRE(built.slots.is_valid());
+    REQUIRE(built.positions.is_valid());
     REQUIRE(static_cast<bool>(built.permit));
 }
 

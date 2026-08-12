@@ -2277,6 +2277,9 @@ function(bioseq_add_highway_codegen)
       "${_prepare_stamp}")
   add_dependencies("${_prepare_target}" bioseq_codegen_project)
 
+  string(CONCAT _generation_comment
+    "Generating ${_platform} Highway target module graph "
+    "(compiled mask ${_compiled_mask})")
   add_custom_command(
     OUTPUT ${_generated_modules} "${_artifact_manifest}" "${_stamp}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -2318,9 +2321,7 @@ function(bioseq_add_highway_codegen)
       ${_domain_topology_paths}
       ${_source_paths}
       ${_probe_template_paths}
-    COMMENT
-      "Generating ${_platform} Highway target module graph "
-      "(compiled mask ${_compiled_mask})"
+    COMMENT "${_generation_comment}"
     VERBATIM)
   add_custom_target("${ARG_TARGET}"
     DEPENDS ${_generated_modules} "${_artifact_manifest}" "${_stamp}")

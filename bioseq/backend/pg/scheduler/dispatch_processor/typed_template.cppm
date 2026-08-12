@@ -2,6 +2,7 @@
 // supplies canonical source geometry; it is never attached to a compiler target.
 module;
 
+#include <libassert/assert.hpp>
 #include <bioseq/pg_compat.h>
 
 #include <algorithm>
@@ -27,6 +28,7 @@ export module bioseq.codegen.inputs.dispatch_processor_typed;
 import bioseq.postgres.scheduler.dispatch_processor;
 import bioseq.highway.dispatch_contract;
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
@@ -58,7 +60,6 @@ import bioseq.instrumentation.region;
 import bioseq.instrumentation.runtime;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
-import bioseq.storage.scanner;
 import bioseq.storage.size;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.scanner;
@@ -497,7 +498,7 @@ observed_simd_chaining_policy_identity(
         return identity_type::none;
     }
     const auto& policy =
-        execution_stats->simd_chaining_execution_stats.policy;
+        execution_stats->simd_chaining_stats.policy;
     // identity_type answers only which named policy emitted operation calls.
     // Rejections, saturation, forbidden scalar work, and missing vector work
     // are retained as separate fail-closed validation stats below; folding them into
@@ -534,8 +535,8 @@ observed_simd_alignment_algorithm_identity(
 
     const bool block_present =
         execution_stats->block_aligner_execution_stats_available;
-    const auto& block = execution_stats->block_aligner_execution_stats;
-    const auto& scalar = execution_stats->scalar_pipeline_execution_stats;
+    const auto& block = execution_stats->block_aligner_stats;
+    const auto& scalar = execution_stats->scalar_pipeline_stats;
     const bool scalar_alignment_observed =
         execution_stats->scalar_pipeline_execution_stats_available
         && (scalar.ksw2_left_calls != 0
@@ -590,7 +591,7 @@ inline void record_block_aligner_execution_stats(
         || !execution_stats->block_aligner_execution_stats_available) {
         return;
     }
-    const auto& block_stats = execution_stats->block_aligner_execution_stats;
+    const auto& block_stats = execution_stats->block_aligner_stats;
     ::bioseq::pipeline_stats::block_aligner_stage_stats stage_stats{};
     stage_stats.is_available = true;
     stage_stats.is_accepted = block_stats.is_internally_consistent();
@@ -623,11 +624,11 @@ inline void record_unattested_job(
     if (execution_stats != nullptr) {
         if (execution_stats->prefilter_execution_stats_available) {
             stats.operational.record_prefilter_execution_stats(
-                execution_stats->prefilter_execution_stats);
-        } else if (execution_stats->prefilter_execution_stats
-                   != decltype(execution_stats->prefilter_execution_stats){}) {
+                execution_stats->prefilter_stats);
+        } else if (execution_stats->prefilter_stats
+                   != decltype(execution_stats->prefilter_stats){}) {
             auto malformed_prefilter_stats =
-                execution_stats->prefilter_execution_stats;
+                execution_stats->prefilter_stats;
             malformed_prefilter_stats.is_saturated = true;
             stats.operational.record_prefilter_execution_stats(
                 malformed_prefilter_stats);
@@ -669,7 +670,7 @@ inline void record_unattested_job(
                 execution_stats->fragment_native_query_stats);
             stats.operational.are_stats_saturated =
                 stats.operational.are_stats_saturated
-                || stats.operational.fragment_native_query_stats.is_saturated;
+                || stats.operational.fragment_native_query_stats.saturated;
         }
     }
     ::bioseq::pipeline_stats::pipeline_job_execution_stats job{};
@@ -706,7 +707,7 @@ inline void record_unattested_job(
     if (execution_stats != nullptr
         && execution_stats->simd_chaining_execution_stats_available) {
         const auto& policy =
-            execution_stats->simd_chaining_execution_stats.policy;
+            execution_stats->simd_chaining_stats.policy;
         add_operational_counter(
             stats,
             stats.operational.simd_chaining_exact_policy_calls,
@@ -850,7 +851,7 @@ inline void record_unattested_job(
         mark(stage_type::chain_score, biological_engine);
         mark(stage_type::chain_backtrack, biological_engine);
         if (accepted_all_simd) {
-            const auto& block = execution_stats->block_aligner_execution_stats;
+            const auto& block = execution_stats->block_aligner_stats;
             if (block.left_executed != 0) {
                 mark(stage_type::left_extension, engine_type::simd_cpu);
             }
@@ -862,7 +863,7 @@ inline void record_unattested_job(
             }
         } else {
             const auto& scalar =
-                execution_stats->scalar_pipeline_execution_stats;
+                execution_stats->scalar_pipeline_stats;
             if (scalar.ksw2_left_calls != 0) {
                 mark(stage_type::left_extension, engine_type::scalar_cpu);
             }
@@ -904,12 +905,12 @@ inline void record_unattested_job(
         if (accepted_all_simd) {
             add_operational_counter(
                 stats, stats.operational.simd_chain_vector_batches,
-                execution_stats->simd_chaining_execution_stats
+                execution_stats->simd_chaining_stats
                     .score_vector_batches);
             add_operational_counter(
                 stats,
                 stats.operational.simd_chain_backtrack_vector_batches,
-                execution_stats->simd_chaining_execution_stats
+                execution_stats->simd_chaining_stats
                     .backtrack_path_vector_batches);
         }
     }
@@ -1020,7 +1021,7 @@ make_persisted_gpu_cache_validation_stats(
         const bioseq::gpu::vulkan::
             runtime_metal_archive_process_qualification& source) noexcept {
     ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result result{
-        .version = source.version,
+        .qualification_wire_revision = source.wire_revision,
         .identity = source.identity,
         .archive_count = source.archive_set.archive_count,
         .archive_bytes = source.archive_set.total_size,
@@ -1035,7 +1036,7 @@ make_persisted_gpu_cache_validation_stats(
             source.pipeline_filesystem_hash_passes,
         .pipeline_filesystem_hashed_bytes =
             source.pipeline_filesystem_hashed_bytes,
-        .helper_protocol_version = source.helper_protocol_version,
+        .helper_wire_revision = source.helper_wire_revision,
         .helper_executable_size = source.helper_executable_size,
         .helper_executable_sha256 = source.helper_executable_sha256,
         .helper_metal_registry_id = source.helper_metal_registry_id,
@@ -1049,7 +1050,7 @@ make_persisted_gpu_cache_validation_stats(
         .seed_sha256 = source.seed_sha256,
         .seed_size = source.seed_size,
         .manifest_checksum = source.manifest_checksum,
-        .saturated = source.saturated,
+        .is_saturated = source.saturated,
     };
     result.helper_build_identity_size = copy_persisted_gpu_stats_text(
         result.helper_build_identity, source.helper_build_identity);
@@ -1112,7 +1113,7 @@ make_persisted_gpu_job_stats(
             .chain_score = coordinate.chain_score,
             .seed_count = coordinate.seed_count,
             .is_reverse = coordinate.is_reverse != 0u,
-            .valid = coordinate.valid != 0u,
+            .is_valid = coordinate.is_valid != 0u,
         },
     };
     for (std::size_t i = 0u; i < result.submissions.size(); ++i) {
@@ -1189,7 +1190,7 @@ persisted_grouped_soa_publication_staging_bytes(
 
     std::uint64_t bytes_per_job = 0u;
     const auto add = [&bytes_per_job](const std::uint64_t bytes) noexcept {
-        bytes_per_job = bioseq::parallelism::saturating_add(
+        bytes_per_job = bioseq::common::saturating_add(
             bytes_per_job, bytes);
     };
     add(sizeof(bioseq::gpu::vulkan::gpu_seed_coordinate_job));
@@ -1204,10 +1205,10 @@ persisted_grouped_soa_publication_staging_bytes(
     add(4u * sizeof(void*));
     // Repeated query ids can geometrically grow result vectors, but total
     // capacity remains below two elements per appended coordinate result.
-    add(bioseq::parallelism::saturating_mul(2u, sizeof(match_result)));
+    add(bioseq::common::saturating_mul(2u, sizeof(match_result)));
 
-    return bioseq::parallelism::saturating_mul(
-        bioseq::parallelism::saturating_mul(job_count, bytes_per_job),
+    return bioseq::common::saturating_mul(
+        bioseq::common::saturating_mul(job_count, bytes_per_job),
         bioseq::parallelism::k_vector_preallocation_headroom_factor);
 }
 
@@ -2494,20 +2495,20 @@ template <sequence_alphabet p_alphabet>
 			&& minimizer_sequence_params.base_alignment_algorithm
                 == base_alignment_algorithm::block_aligner;
         if (exact_simd_query_selected) {
-			if (!query_sketch.exact_simd_available
-				|| !query_sketch.exact_simd.is_internally_consistent(
+			if (!query_sketch.exact_simd_execution_stats_available
+				|| !query_sketch.exact_simd_execution_stats.is_internally_consistent(
                     /*require_nonempty_vector_work=*/false)) {
                 bioseq_log<logging_level::error>(
                     "Persisted-index two_stack_nthash query lacks actual execution stats");
                 std::abort();
             }
 			collection.record_exact_simd_query_execution_stats(
-				query_sketch.exact_simd);
+				query_sketch.exact_simd_execution_stats);
 		} else if (scalar_query_selected) {
-			if (!query_sketch.scalar_available
-				|| !query_sketch.scalar.is_coherent()
-				|| query_sketch.exact_simd_available
-				|| query_sketch.bounded_nthash_available
+			if (!query_sketch.scalar_execution_stats_available
+				|| !query_sketch.scalar_execution_stats.is_coherent()
+				|| query_sketch.exact_simd_execution_stats_available
+				|| query_sketch.bounded_nthash_execution_stats_available
 				|| !scalar_target_build_stats.is_internally_consistent()
                 || backend
                     != bioseq::simd::
@@ -2517,7 +2518,7 @@ template <sequence_alphabet p_alphabet>
                 std::abort();
             }
 			collection.record_scalar_query_minimizer_execution_stats(
-				query_sketch.scalar);
+				query_sketch.scalar_execution_stats);
 			const scalar_minimizer_execution_stats target_stats{
 				.calls = scalar_target_build_stats.scalar_collection_calls,
 				.input_symbols = scalar_target_build_stats.input_symbols,
@@ -2530,7 +2531,7 @@ template <sequence_alphabet p_alphabet>
             }
 			collection.record_scalar_target_minimizer_execution_stats(
 				target_stats);
-		} else if (query_sketch.exact_simd_available) {
+		} else if (query_sketch.exact_simd_execution_stats_available) {
             bioseq_log<logging_level::error>(
                 "Non-two_stack_nthash persisted-index query emitted two_stack_nthash stats");
             std::abort();
@@ -2605,7 +2606,7 @@ template <sequence_alphabet p_alphabet>
         storage_unit_byte_width,
         last_fragment_padding,
         static_cast<std::int32_t>(
-            bioseq::settings::index::sequence_minimizer_sort::algorithm.value()),
+            bioseq::settings::index::sequence_minimizer_sort::algorithm.get_value()),
         static_cast<int>(
             bioseq::scheduler::settings::pipeline::mode.get_value()),
         bioseq::scheduler::settings::backend::max_concurrency,
@@ -2651,7 +2652,7 @@ run_recompute_with_deferred_minimizer_persist(
             static_cast<sequence_size_t>(loc.logical_length),
             storage_unit_byte_width * CHAR_BIT
                 / bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                    logical_bits_per_symbol);
+                    k_logical_bits_per_symbol);
 
         bioseq_log<logging_level::debug>(
             "[bioseq] index: recompute real-minimizer-sequence-noindex row={} index={} "
@@ -2727,7 +2728,7 @@ try_materialize_target_for_segment_workers(
     const auto& descriptor = owner.descriptor();
     const std::uint64_t packed_bytes =
         static_cast<std::uint64_t>(descriptor.unit_count)
-        * descriptor.storage_unit_byte_width;
+        * descriptor.storage_unit_width;
 
     bioseq_log<logging_level::debug>(
         "[bioseq] resident target: row={} target_bp={} packed_bytes={} "
@@ -2860,7 +2861,7 @@ try_materialize_target_for_segment_workers(
     const bool exact_lookup_backing_identity = [&]() noexcept {
         switch (group.persisted_fragment_lookup_route) {
         case bioseq::indexing::minimizer_fragment_lookup_route::
-                compact_h32_direct:
+                direct_compact_hash_lookup:
             return reader.compact_direct_ready()
                 && reader.compact_direct_only()
                 && reader.mapped_grouped_soa_payload_bytes() == 0u
@@ -2886,7 +2887,7 @@ try_materialize_target_for_segment_workers(
 		group.compact_direct_query_set_validation_pending
 		? group.persisted_fragment_lookup_route
 				== bioseq::indexing::minimizer_fragment_lookup_route::
-					compact_h32_direct
+					direct_compact_hash_lookup
 			&& group.canonical_query_hash_union_u32.empty()
 			&& group.canonical_query_hash_union_u32.capacity() == 0u
 			&& group.key_set_checksum == 0u
@@ -2944,8 +2945,8 @@ inline void attach_retained_hash_major_query_stats(
         && collection.exact_simd_query_execution_stats
             == decltype(collection.exact_simd_query_execution_stats){};
     const bool scalar_query_stats_absent =
-        collection.scalar_pipeline_execution_stats.query_minimizers
-            == decltype(collection.scalar_pipeline_execution_stats
+        collection.scalar_pipeline_stats.query_minimizers
+            == decltype(collection.scalar_pipeline_stats
                 .query_minimizers){};
     const bool bounded_query_stats_absent =
         !collection.bounded_nthash_query_execution_stats_available
@@ -3389,7 +3390,7 @@ template <class p_sequence>
                  &row_consumed_persisted_query_sketch,
                  &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
-                    if (!minimizer_query_length_is_representable<
+                    if (!is_minimizer_query_length_representable<
                             minimap_sketch_data>(
                                 static_cast<sequence_size_t>(
                                     query_bp_size))) {
@@ -3756,11 +3757,13 @@ template <class p_sequence>
 	                                        loc_opt->logical_length;
 	                                    const std::size_t a_lpu =
 	                                        target_letters_per_unit;
-	                                    const std::size_t frag_units =
-	                                        bioseq::storage::
-	                                            SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
-	                                    const sequence_size_t frag_bp =
-	                                        static_cast<sequence_size_t>(frag_units) * a_lpu;
+	                                    constexpr sequence_size_t frag_bp =
+	                                        static_cast<sequence_size_t>(
+	                                            bioseq::storage::
+	                                                postgres_lazy_sequence_binding<
+	                                                    p_sequence>::
+	                                                    fragment_bp_capacity());
+	                                    static_assert(frag_bp != 0u);
 	                                    const std::size_t size_u =
 	                                        static_cast<std::size_t>(
 	                                            (total_bp + a_lpu - 1) / a_lpu);
@@ -3770,20 +3773,24 @@ template <class p_sequence>
 	                                            ? *query_minimizers
 	                                            : prepared_group->query_hash_union;
 	                                    auto assemble_one =
-	                                        [frag_units, a_lpu, total_bp, frag_bp,
+	                                        [a_lpu, total_bp, frag_bp,
 	                                         &fragment_store, &scratch,
 	                                         &assembly_minimizers](
 	                                                std::size_t cs_u,
 	                                                std::size_t ce_u) {
-	                                        const std::size_t frag_lo = cs_u / frag_units;
-	                                        const std::size_t frag_hi =
-	                                            (ce_u + frag_units - 1) / frag_units;
 	                                        const sequence_size_t cs_bp =
 	                                            static_cast<sequence_size_t>(cs_u) * a_lpu;
 	                                        const sequence_size_t ce_bp =
 	                                            std::min(
 	                                                static_cast<sequence_size_t>(ce_u) * a_lpu,
 	                                                total_bp);
+	                                        const std::size_t frag_lo =
+	                                            static_cast<std::size_t>(
+	                                                cs_bp / frag_bp);
+	                                        const std::size_t frag_hi =
+	                                            static_cast<std::size_t>(
+	                                                bioseq::common::ceil_div(
+	                                                    ce_bp, frag_bp));
 	                                        const auto query_span =
 	                                            std::span<const minimap_sketch_data>(
 	                                                assembly_minimizers.data(),
@@ -4217,28 +4224,31 @@ template <class p_sequence>
 
                     const sequence_size_t total_bp = loc_opt->logical_length;
                     const std::size_t a_lpu = target_letters_per_unit;
-                    const std::size_t frag_units =
-                        bioseq::storage::
-                            SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
-                    const sequence_size_t frag_bp =
-                        static_cast<sequence_size_t>(frag_units) * a_lpu;
+                    constexpr sequence_size_t frag_bp =
+                        static_cast<sequence_size_t>(
+                            bioseq::storage::
+                                postgres_lazy_sequence_binding<p_sequence>::
+                                fragment_bp_capacity());
+                    static_assert(frag_bp != 0u);
                     const std::size_t size_u =
                         static_cast<std::size_t>((total_bp + a_lpu - 1) / a_lpu);
                     bioseq::indexing::minimizer_assembly_scratch scratch;
                     auto assemble_ram_one =
-                        [frag_units, a_lpu, total_bp, frag_bp,
+                        [a_lpu, total_bp, frag_bp,
                          &ram_store, &scratch, &query_minimizers](
                                 std::size_t cs_u,
                                 std::size_t ce_u) {
-                        const std::size_t frag_lo = cs_u / frag_units;
-                        const std::size_t frag_hi =
-                            (ce_u + frag_units - 1) / frag_units;
                         const sequence_size_t cs_bp =
                             static_cast<sequence_size_t>(cs_u) * a_lpu;
                         const sequence_size_t ce_bp =
                             std::min(
                                 static_cast<sequence_size_t>(ce_u) * a_lpu,
                                 total_bp);
+                        const std::size_t frag_lo =
+                            static_cast<std::size_t>(cs_bp / frag_bp);
+                        const std::size_t frag_hi =
+                            static_cast<std::size_t>(
+                                bioseq::common::ceil_div(ce_bp, frag_bp));
                         const auto query_span =
                             std::span<const minimap_sketch_data>(
                                 query_minimizers->data(),
@@ -4576,8 +4586,8 @@ template <class p_sequence>
             && collection.exact_simd_query_execution_stats
                 == decltype(collection.exact_simd_query_execution_stats){};
 		const bool scalar_query_stats_absent =
-			collection.scalar_pipeline_execution_stats.query_minimizers
-				== decltype(collection.scalar_pipeline_execution_stats
+			collection.scalar_pipeline_stats.query_minimizers
+				== decltype(collection.scalar_pipeline_stats
 					.query_minimizers){};
 		const bool bounded_query_stats_absent =
 			!collection.bounded_nthash_query_execution_stats_available
@@ -5378,14 +5388,14 @@ template <class p_sequence>
 								query_minimizer_device_span.count()),
 							.minimizer_word_kind = static_cast<std::uint32_t>(
 								bioseq::gpu::vulkan::minimizer_wire_traits<
-									minimizer_type>::word_kind),
+									minimizer_type>::k_word_kind),
 							.minimizer_words32_per_record =
 								bioseq::gpu::vulkan::minimizer_wire_traits<
-									minimizer_type>::words32_per_minimizer,
+									minimizer_type>::k_words32_per_minimizer,
 							.hash_shift = bioseq::gpu::vulkan::minimizer_wire_traits<
-								minimizer_type>::hash_shift,
+								minimizer_type>::k_hash_shift,
 							.pos_bits = bioseq::gpu::vulkan::minimizer_wire_traits<
-								minimizer_type>::pos_bits,
+								minimizer_type>::k_position_bits,
 							.window_size = static_cast<std::uint32_t>(
 								dispatch_params.window_size),
 							.host_query_records = std::span<const
@@ -5596,7 +5606,7 @@ template <class p_sequence>
 								continue;
 							}
 							staged_jobs.push_back(std::move(*staged_job));
-							if (coord.valid != 0u) {
+							if (coord.is_valid != 0u) {
 								const std::uint32_t query_index =
 									direct_jobs[problem_index].query_index;
 								staged_results[query_ids[row]].push_back(
@@ -6400,16 +6410,16 @@ template <class p_sequence>
                         .minimizer_word_kind =
                             static_cast<std::uint32_t>(
                                 bioseq::gpu::vulkan::minimizer_wire_traits<
-                                    minimizer_type>::word_kind),
+                                    minimizer_type>::k_word_kind),
                         .minimizer_words32_per_record =
                             bioseq::gpu::vulkan::minimizer_wire_traits<
-                                minimizer_type>::words32_per_minimizer,
+                                minimizer_type>::k_words32_per_minimizer,
                         .hash_shift =
                             bioseq::gpu::vulkan::minimizer_wire_traits<
-                                minimizer_type>::hash_shift,
+                                minimizer_type>::k_hash_shift,
                         .pos_bits =
                             bioseq::gpu::vulkan::minimizer_wire_traits<
-                                minimizer_type>::pos_bits,
+                                minimizer_type>::k_position_bits,
                         .host_query_records = std::span<
                             const bioseq::gpu::vulkan::gpu_seed_query_record_wire>{
                             query_records.data(),
@@ -6485,7 +6495,7 @@ template <class p_sequence>
                          problem_index < coord_run.results.size();
                          ++problem_index) {
                         const auto& coord = coord_run.results[problem_index];
-                        if (coord.valid == 0u) {
+                        if (coord.is_valid == 0u) {
                             continue;
                         }
                         const gpu_batch_problem_sidecar& owner =
@@ -7083,7 +7093,7 @@ template <class p_sequence>
 							fragment_reader != nullptr
 								&& fragment_lookup_route
 									== bioseq::indexing::minimizer_fragment_lookup_route::
-										compact_h32_direct
+										direct_compact_hash_lookup
 							? batch_size
 							: worker_bounded_fragment_wave_size;
                         std::vector<match_result_collection>
@@ -7186,12 +7196,12 @@ template <class p_sequence>
                                     std::move(*scratch_result);
 
                                 const std::uint64_t descriptor_bytes =
-                                    bioseq::parallelism::saturating_mul(
+                                    bioseq::common::saturating_mul(
                                         fragment_wave_size,
                                         sizeof(bioseq::indexing::
                                             fragment_seed_query));
                                 const std::uint64_t descriptor_headroom =
-                                    bioseq::parallelism::saturating_mul(
+                                    bioseq::common::saturating_mul(
                                         descriptor_bytes,
                                         bioseq::parallelism::
                                             k_vector_preallocation_headroom_factor);
@@ -7230,7 +7240,7 @@ template <class p_sequence>
                                             "allocation failed");
                                 }
                                 const std::uint64_t actual_descriptor_bytes =
-                                    bioseq::parallelism::saturating_mul(
+                                    bioseq::common::saturating_mul(
                                         wave_queries.capacity(),
                                         sizeof(bioseq::indexing::
                                             fragment_seed_query));
@@ -7255,7 +7265,7 @@ template <class p_sequence>
 									fragment_lookup_route
 										== bioseq::indexing::
 											minimizer_fragment_lookup_route::
-												compact_h32_direct
+												direct_compact_hash_lookup
 									&& fragment_wave_size == batch_size
 									&& worker_bounded_fragment_wave_size
 										< batch_size;
@@ -7335,7 +7345,7 @@ template <class p_sequence>
 														*prepared_target,
 														*native_group,
 														prepared_seed_batch->
-															compact_direct_query_set_stats())) {
+																			compact_direct_query_stats())) {
 												throw bioseq::indexing::
 													persisted_minimizer_lookup_error(
 												"compact-direct full-batch query-set stats were rejected");
@@ -7471,7 +7481,7 @@ template <class p_sequence>
                                 native_query_params[row].min_chain_score,
                                 native_query_params[row].min_seed_count,
                                 native_collections[row].size());
-                            if (!native_collections[row].empty()) {
+                            if (!native_collections[row].is_empty()) {
                                 results[query_ids[row]] =
                                     std::move(
                                         native_collections[row].results);
@@ -7602,7 +7612,7 @@ template <class p_sequence>
                             parallel_params[i].min_chain_score,
                             parallel_params[i].min_seed_count,
                             false, match_count);
-                    if (!parallel_collections[i].empty()) {
+                    if (!parallel_collections[i].is_empty()) {
                         results[query_ids[i]] = std::move(parallel_collections[i].results);
                     }
                     continue;
@@ -7996,7 +8006,7 @@ template <class p_sequence>
                         target_index_source
                             == ::bioseq::pipeline_stats::target_index_source::persisted,
                         collection.size());
-                if (!collection.empty()) {
+                if (!collection.is_empty()) {
                     results[query_ids[i]] = std::move(collection.results);
                 }
             }

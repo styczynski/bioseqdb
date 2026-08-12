@@ -1,5 +1,6 @@
 module;
 
+#include <bioseq/pg_compat.h>
 #include <climits>
 
 export module bioseq.postgres.configuration.core;

@@ -23,6 +23,7 @@
 #include <tuple>
 
 import bioseq.tests.integration.support;
+import bioseq.common.logging;
 
 using namespace bioseq_int_tests;
 

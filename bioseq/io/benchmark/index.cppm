@@ -316,8 +316,8 @@ struct lazy_expression_node {
 [[nodiscard]] bool lazy_expression_node_worker_shareable(
         void const* opaque) noexcept {
     const auto& node = *static_cast<lazy_expression_node const*>(opaque);
-    return lazy_is_worker_shareable(node.left)
-        && lazy_is_worker_shareable(node.right);
+    return bioseq::storage::is_worker_shareable(node.left)
+        && bioseq::storage::is_worker_shareable(node.right);
 }
 
 [[nodiscard]] lazy_expression_facade::resident_probe_result
@@ -336,7 +336,7 @@ void lazy_expression_copy_child(
         throw std::overflow_error("lazy-expression coordinate overflow");
     }
     const std::size_t begin = static_cast<std::size_t>(from);
-    child.template to_encoded_into<false, false>(
+    child.template copy_ranks<false, false>(
         output, begin, begin + output.size());
 }
 

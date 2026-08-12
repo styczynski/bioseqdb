@@ -16,7 +16,7 @@
 //                                    direct-anchor layout (stride 24, offsets
 //                                    {0,8,16,20}, bindings 0..3, 32-byte push).
 //
-// The GPU-only cases skip cleanly when vulkan_chaining_supported() is false;
+// The GPU-only cases skip cleanly when is_vulkan_chaining_supported() is false;
 // the parity / shader-layout cases run on every machine.
 
 #include <hwy/highway.h>
@@ -39,7 +39,7 @@ import bioseq.sequences;
 import bioseq.pipeline.minimap_port;    // minimap2_parameters / match_result(_collection)
 import bioseq.pipeline.pipe;            // pipeline entry point
 import bioseq.chaining.core;            // anchor / chain / chaining_parameters
-import bioseq.chaining.vulkan;          // chain_anchors_vulkan / vulkan_chaining_supported
+import bioseq.chaining.vulkan;          // chain_anchors_vulkan / is_vulkan_chaining_supported
 import bioseq.gpu.vulkan.runtime;       // runtime / scan_spirv_layout / pipeline key
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.storage.lazy_sequence;    // make_resident_lazy_sequence
@@ -184,7 +184,7 @@ struct chain_outputs {
 }
 
 [[nodiscard]] bool skip_untrusted_vulkan_chaining() {
-    if (ch::vulkan_chaining_supported()) return false;
+    if (ch::is_vulkan_chaining_supported()) return false;
     SUCCEED("Vulkan chaining correctness cases require a trusted hardware Vulkan device");
     return true;
 }
@@ -213,7 +213,7 @@ void check_chain_invariants(
             REQUIRE(cur.ref_position > prev.ref_position);
             REQUIRE(cur.query_position > prev.query_position);
             // No chain crosses a hard range boundary.
-            REQUIRE(cur.ref_chromosome_key() == prev.ref_chromosome_key());
+            REQUIRE(cur.strand_partition_key() == prev.strand_partition_key());
             REQUIRE(cur.ref_position - prev.ref_position <= max_dist_x);
         }
     }

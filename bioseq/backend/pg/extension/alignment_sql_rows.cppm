@@ -7,7 +7,7 @@ module;
 #include <string>
 #include <type_traits>
 
-export module bioseq.postgres.extension.alignment_sql_rows;
+export module bioseq.postgres.extension.alignment.sql_rows;
 
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support.sql_boundary;

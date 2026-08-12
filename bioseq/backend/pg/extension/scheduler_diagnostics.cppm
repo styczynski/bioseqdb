@@ -60,7 +60,7 @@ module bioseq.postgres.extension;
 
 import bioseq.common.logging;
 import bioseq.postgres.column;
-import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
 import bioseq.postgres.support;
 #if defined(BIOSEQ_TEST_INDEXES)

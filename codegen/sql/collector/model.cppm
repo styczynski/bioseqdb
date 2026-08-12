@@ -133,6 +133,8 @@ struct collected_entity {
 
 struct collected_program {
     std::vector<structural_analysis::translation_unit> translation_units;
+    std::vector<structural_analysis::translation_unit>
+        enum_authority_units;
     structural_analysis::module_graph module_graph;
     std::string compiler_profile;
     std::string compilation_signature;
@@ -144,6 +146,8 @@ struct source_collection_environment {
     std::filesystem::path compile_database;
     std::filesystem::path pcm_root;
     std::string compiler_profile;
+    std::vector<structural_analysis::dependency_module_identity>
+        dependency_modules;
 };
 
 [[nodiscard]] inline std::vector<const routine_parameter*>

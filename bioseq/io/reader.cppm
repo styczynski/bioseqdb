@@ -1126,7 +1126,7 @@ template <
                     auto& pool = bioseq::parallelism::global_pool::instance();
                     const unsigned worker_slots = pool.is_active()
                         ? pool.maximum_concurrency()
-                        : bioseq::parallelism::default_concurrency();
+                        : bioseq::parallelism::default_concurrency_limit();
                     requested_shards = std::min<std::size_t>(
                         worker_slots,
                         options.concurrency.mmap_parallel_max_shards);

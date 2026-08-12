@@ -51,10 +51,6 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// The encode path uses the lazy wrapper's slot-ring accessor so target workers
-// share the canonical bounded sequence materialization path.
-using bioseq::storage::encode_region_via_ptr_at;
-
 // =============================================================================
 // ksw_aligner_mode — selects single- or dual-affine-gap formulation.
 // =============================================================================
@@ -828,21 +824,21 @@ template<
     std::span<uint8_t> target_dst(state.target_bytes, target_len);
     if (flags.reverse_cigar) {
         // qr stays in source order — no extra mirror.
-        encode_region_via_ptr_at<p_is_reversed, false>(
-            query_seq, query_dst, query_start, query_end);
+        query_seq.template copy_ranks<p_is_reversed, false>(
+            query_dst, query_start, query_end);
         // Target is reversed; no rc on target, so the second template arg is
         // the only orientation flip.
-        encode_region_via_ptr_at<false, true>(
-            target_seq, target_dst, target_start, target_end);
+        target_seq.template copy_ranks<false, true>(
+            target_dst, target_start, target_end);
     } else {
         // qr = reverse(encoded query). For a reversed strand the
         // existing <true, false> path produced rc(query); we want rc then
         // reverse-again, which is just complement-only. Captured as
         // <true, true> (see overload comment).
-        encode_region_via_ptr_at<p_is_reversed, true>(
-            query_seq, query_dst, query_start, query_end);
-        encode_region_via_ptr_at<false, false>(
-            target_seq, target_dst, target_start, target_end);
+        query_seq.template copy_ranks<p_is_reversed, true>(
+            query_dst, query_start, query_end);
+        target_seq.template copy_ranks<false, false>(
+            target_dst, target_start, target_end);
     }
 
     // --- Approximate max tracking ------------------------------------------

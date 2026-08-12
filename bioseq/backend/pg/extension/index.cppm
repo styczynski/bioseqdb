@@ -19,7 +19,7 @@ module;
 export module bioseq.postgres.extension;
 
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.postgres.support.sql_boundary;

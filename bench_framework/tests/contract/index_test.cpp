@@ -3574,7 +3574,7 @@ TEST_CASE("regression history skips every ineligible candidate",
         aggregate,
     };
     struct mutation_case {
-        mutation mutation;
+        mutation kind;
         std::string_view reason;
     };
     static constexpr std::array<mutation_case, 16> mutations{{
@@ -3603,8 +3603,9 @@ TEST_CASE("regression history skips every ineligible candidate",
          "selected sum aggregate is missing, malformed, or non-finite"},
     }};
 
-    for (const auto& mutation : mutations) {
-        INFO("candidate mutation " << static_cast<int>(mutation.mutation));
+    for (const auto& mutation_case_entry : mutations) {
+        INFO("candidate mutation "
+             << static_cast<int>(mutation_case_entry.kind));
         temporary_report_directory report_dir;
         const auto oldest = run_one_bench(
             "bench_history_eligibility", "oldest valid", config_text,
@@ -3616,43 +3617,43 @@ TEST_CASE("regression history skips every ineligible candidate",
         REQUIRE(candidate.report_path.filename() == "report_2.json");
         REQUIRE(candidate.report["meta"]["history_eligible"] == true);
 
-        if (mutation.mutation == mutation::incomplete_raw) {
+        if (mutation_case_entry.kind == mutation::incomplete_raw) {
             candidate.report["raw_evidence"] = {
                 {"complete", false}, {"record_count", 2}};
-        } else if (mutation.mutation == mutation::missing_raw_complete) {
+        } else if (mutation_case_entry.kind == mutation::missing_raw_complete) {
             candidate.report["raw_evidence"] = {{"record_count", 2}};
-        } else if (mutation.mutation == mutation::malformed_record_count) {
+        } else if (mutation_case_entry.kind == mutation::malformed_record_count) {
             candidate.report["raw_evidence"] = {
                 {"complete", true}, {"record_count", "two"}};
-        } else if (mutation.mutation == mutation::missing_fast) {
+        } else if (mutation_case_entry.kind == mutation::missing_fast) {
             candidate.report["meta"].erase("fast");
-        } else if (mutation.mutation == mutation::mismatched_fast) {
+        } else if (mutation_case_entry.kind == mutation::mismatched_fast) {
             candidate.report["meta"]["fast"] =
                 !candidate.report["meta"]["fast"].get<bool>();
-        } else if (mutation.mutation == mutation::missing_history_seal) {
+        } else if (mutation_case_entry.kind == mutation::missing_history_seal) {
             candidate.report["meta"].erase("history_eligible");
-        } else if (mutation.mutation == mutation::malformed_history_seal) {
+        } else if (mutation_case_entry.kind == mutation::malformed_history_seal) {
             candidate.report["meta"]["history_eligible"] = "yes";
-        } else if (mutation.mutation == mutation::missing_rule_violations) {
+        } else if (mutation_case_entry.kind == mutation::missing_rule_violations) {
             candidate.report.erase("rule_violations");
-        } else if (mutation.mutation == mutation::malformed_rule_violations) {
+        } else if (mutation_case_entry.kind == mutation::malformed_rule_violations) {
             candidate.report["rule_violations"] = "not-an-array";
-        } else if (mutation.mutation == mutation::missing_regressions) {
+        } else if (mutation_case_entry.kind == mutation::missing_regressions) {
             candidate.report.erase("regressions");
-        } else if (mutation.mutation == mutation::malformed_regressions) {
+        } else if (mutation_case_entry.kind == mutation::malformed_regressions) {
             candidate.report["regressions"] = "not-an-array";
-        } else if (mutation.mutation == mutation::missing_sanity_warnings) {
+        } else if (mutation_case_entry.kind == mutation::missing_sanity_warnings) {
             candidate.report.erase("sanity_warnings");
-        } else if (mutation.mutation == mutation::malformed_sanity_warnings) {
+        } else if (mutation_case_entry.kind == mutation::malformed_sanity_warnings) {
             candidate.report["sanity_warnings"] = "not-an-array";
         } else {
             auto* aggregate = mutable_aggregate_at(
                 candidate.report, "bench_history_eligibility", "identity",
                 "ONE", "all_regions", "value");
             REQUIRE(aggregate != nullptr);
-            if (mutation.mutation == mutation::sample_count) {
+            if (mutation_case_entry.kind == mutation::sample_count) {
                 (*aggregate)["samples_count"] = 3;
-            } else if (mutation.mutation == mutation::finite_count) {
+            } else if (mutation_case_entry.kind == mutation::finite_count) {
                 // Claims one finite + one non-finite sample, unlike current.
                 (*aggregate)["histogram"][0]["count"] = 1;
             } else {
@@ -3672,7 +3673,7 @@ TEST_CASE("regression history skips every ineligible candidate",
         REQUIRE(current.captured_stderr.find(
                     "regression_history_candidate_skipped")
                 != std::string::npos);
-        REQUIRE(current.captured_stderr.find(mutation.reason)
+        REQUIRE(current.captured_stderr.find(mutation_case_entry.reason)
                 != std::string::npos);
     }
 
@@ -4398,7 +4399,7 @@ struct small_seed_rule_fixture {
     small_seed_rule_fault fault = small_seed_rule_fault::none;
 };
 
-[[nodiscard]] inline small_seed_rule_source small_seed_rule_source(
+[[nodiscard]] inline small_seed_rule_source small_seed_rule_source_from_selector(
     const nlohmann::json& selector)
 {
     return {
@@ -4428,8 +4429,10 @@ struct small_seed_rule_fixture {
         }
     }
     for (const auto& rule : rules) {
-        const small_seed_rule_source lhs = small_seed_rule_source(rule.at(1));
-        const small_seed_rule_source rhs = small_seed_rule_source(rule.at(3));
+        const small_seed_rule_source lhs =
+            small_seed_rule_source_from_selector(rule.at(1));
+        const small_seed_rule_source rhs =
+            small_seed_rule_source_from_selector(rule.at(3));
         fixture.source_values.insert_or_assign(lhs, gatekeeper_value);
         fixture.source_values.insert_or_assign(rhs, 100.0);
         if (!fixture.fault_source.has_value()) fixture.fault_source = lhs;
@@ -4604,9 +4607,9 @@ TEST_CASE("GateKeeper small-seed config binds fixed keys to E and exact rules",
         const auto& comparator = rule.at(2);
         const auto& rhs_selector = rule.at(3);
         const small_seed_rule_source lhs =
-            small_seed_rule_source(lhs_selector);
+            small_seed_rule_source_from_selector(lhs_selector);
         const small_seed_rule_source rhs =
-            small_seed_rule_source(rhs_selector);
+            small_seed_rule_source_from_selector(rhs_selector);
         CAPTURE(lhs.algorithm, lhs.test_case, rhs.algorithm, rhs.test_case);
 
         REQUIRE(matrix.at("for").contains(lhs.test_case));
@@ -4732,7 +4735,7 @@ TEST_CASE("production small-seed rules reject unavailable nonfinite and incomple
     const std::string expected_rule_name =
         rules.at(0).at(0).get<std::string>();
     const small_seed_rule_source fault_source =
-        small_seed_rule_source(rules.at(0).at(1));
+        small_seed_rule_source_from_selector(rules.at(0).at(1));
 
     const auto execute = [&config](small_seed_rule_fault fault) {
         temporary_report_directory report_dir;

@@ -280,11 +280,11 @@ inline void invoke_pg_across_transactions_as_cpp_erased(void* callback_context,
     PG_TRY();
     {
         try {
-            if (safety_runtime_probe::consume_fault("invoke_pg_across_transactions_as_cpp."
-                                                    "error_capture")) {
+            if (safety_runtime_probe::consume_fault(
+                    "invoke_pg_across_transactions_as_cpp.error_capture")) {
                 state->force_error_capture_failure = true;
-                safety_runtime_probe::record_site_visit("invoke_pg_across_transactions_as_cpp."
-                                                        "error_capture");
+                safety_runtime_probe::record_site_visit(
+                    "invoke_pg_across_transactions_as_cpp.error_capture");
                 ereport(ERROR,
                         (errcode(ERRCODE_INTERNAL_ERROR),
                          errmsg_internal("bioseq safety runtime injected a "

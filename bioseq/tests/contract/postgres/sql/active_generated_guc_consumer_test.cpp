@@ -24,7 +24,7 @@ static_assert(active_guc_registry::registration_count == 73U);
 
 static_assert(requires {
     {
-        &active_guc_owner::register_logging
+        &active_guc_owner::register_diagnostics_logging_enabled
     } -> std::same_as<void (*)()>;
 });
 static_assert(requires {

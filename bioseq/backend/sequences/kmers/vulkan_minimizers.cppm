@@ -635,7 +635,7 @@ template <sequence_alphabet p_alphabet> struct borrowed_u32_instance {
 
   static constexpr std::size_t letter_bit_width =
       bioseq::storage::lazy_sequence_view<
-          p_alphabet>::traits::logical_bits_per_symbol;
+          p_alphabet>::traits::k_logical_bits_per_symbol;
   static constexpr std::size_t byte_width = sizeof(storage_unit);
   static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
@@ -1252,7 +1252,7 @@ template <sequence_alphabet p_alphabet>
     using lazy_traits = bioseq::storage::lazy_sequence_traits<p_alphabet>;
     const auto& descriptor = owner.descriptor();
     constexpr std::uint32_t bits = static_cast<std::uint32_t>(
-        lazy_traits::logical_bits_per_symbol);
+        lazy_traits::k_logical_bits_per_symbol);
     const std::uint32_t letters_per_unit = static_cast<std::uint32_t>(
         bioseq::storage::packed_letters_per_unit(
             descriptor.storage_unit_width,
@@ -2449,7 +2449,7 @@ build_gpu_index_from_upload_on_device(
             });
         if (!built.valid) {
             if (decline_out != nullptr
-                && built.execution_peak_admission_failure.failed()) {
+                && built.execution_peak_admission_failure.has_failure()) {
                 decline_out->admission = built.execution_peak_admission_failure;
             }
             decline(

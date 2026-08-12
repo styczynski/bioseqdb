@@ -627,14 +627,14 @@ inline constexpr std::array<builtin_metric_entry, 22> k_builtin_metric_registry{
     return nullptr;
 }
 
-[[nodiscard]] inline constexpr const char* metric_kind_name(metric_kind metric_kind) noexcept {
-    switch (metric_kind) {
+[[nodiscard]] inline constexpr const char* metric_kind_name(metric_kind kind) noexcept {
+    switch (kind) {
         case metric_kind::counter:    return "counter";
         case metric_kind::evaluation: return "evaluation";
         default: break;
     }
     for (const auto& entry : k_builtin_metric_registry) {
-        if (entry.kind == metric_kind) return entry.name.data();
+        if (entry.kind == kind) return entry.name.data();
     }
     return "?";
 }
@@ -737,7 +737,7 @@ struct rule_comparator {
 struct benchmark_rule {
     std::string     name;
     std::string     metric_name;
-    metric_kind      metric_kind = metric_kind::wall_clock_ns;
+    metric_kind      kind = metric_kind::wall_clock_ns;
     rule_selector    lhs;
     rule_comparator  cmp;
     rule_selector    rhs;
@@ -1061,14 +1061,14 @@ struct benchmark_execution_state {
     /// Every resolved paired ratio gate, including accepted gates. The
     /// report writer emits this vector and the debug sink streams the same
     /// objects as soon as post-run evaluation completes.
-    std::vector<paired_rule_evidence>     paired_rule_evidence{};
+    std::vector<paired_rule_evidence>     paired_rule_evidence_records{};
     bool                                raw_samples_enabled = false;
     std::size_t                         driver_benchmark_index = 0;
     /// Per-case (per matrix.over key) debug progress for `--debug`. Keyed by
     /// execution_tuple::algorithm_name (== case name). std::map keeps stable
     /// references; populated before the parallel run, read-only structure
     /// after (only the per-node atomics mutate). Empty unless --debug is on.
-    std::map<std::string, case_debug_progress> case_debug_progress{};
+    std::map<std::string, case_debug_progress> debug_progress_by_case{};
 
     // `concurrency.concurrency: false` by admitting at most one batch
     // per benchmark at a time (see batch_scheduler::concurrency_admissible_locked).
@@ -1882,7 +1882,7 @@ public:
         std::size_t   pending_count;
         std::size_t   running_count;
     };
-    [[nodiscard]] live_snapshot live_snapshot() const noexcept {
+    [[nodiscard]] live_snapshot capture_live_snapshot() const noexcept {
         const auto sys = budget_.current_system_snapshot();
         const auto cap = benchmark_memory_budget::cap_for(sys.system_total_bytes,
                                                 budget_.memory_buffer_pct());
@@ -1916,7 +1916,7 @@ private:
     /// Scheduler thread body — admits whatever fits, then sleeps until
     /// either a notify or the next tick. The platform snapshot is taken
     /// OUTSIDE `mu_` so the only path that takes both `mu_` and
-    /// `cache_mu_` is `live_snapshot()`/`scheduler_loop`, both in the
+    /// `cache_mu_` is `capture_live_snapshot()`/`scheduler_loop`, both in the
     /// `mu_`-released → `cache_mu_`-acquired order. Keeps the lock
     /// hierarchy single-direction and deadlock-free.
     void scheduler_loop() noexcept {
@@ -3573,8 +3573,8 @@ inline void drain_diagnostics_to_context(
 {
     std::map<std::string, algorithm_schema> result;
     for (auto algorithm_field : params_object) {
-        algorithm_schema algorithm_schema;
-        algorithm_schema.algorithm_name = std::string{algorithm_field.key};
+        algorithm_schema parsed_algorithm_schema;
+        parsed_algorithm_schema.algorithm_name = std::string{algorithm_field.key};
 
         simdjson::dom::object param_object;
         if (algorithm_field.value.get(param_object) != simdjson::SUCCESS) {
@@ -3585,13 +3585,13 @@ inline void drain_diagnostics_to_context(
 
         for (auto param_field : param_object) {
             parameter_schema schema;
-            schema.algorithm_name = algorithm_schema.algorithm_name;
+            schema.algorithm_name = parsed_algorithm_schema.algorithm_name;
             schema.param_name     = std::string{param_field.key};
 
             simdjson::dom::object schema_obj;
             if (param_field.value.get(schema_obj) != simdjson::SUCCESS) {
                 bioseq_log<logging_level::error>("[bench_framework] params.{}.{} is not an object",
-                             algorithm_schema.algorithm_name, param_field.key);
+                             parsed_algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
             }
@@ -3599,7 +3599,7 @@ inline void drain_diagnostics_to_context(
             std::string_view type_text;
             if (schema_obj["type"].get(type_text) != simdjson::SUCCESS) {
                 bioseq_log<logging_level::error>("[bench_framework] params.{}.{} missing 'type'",
-                             algorithm_schema.algorithm_name, param_field.key);
+                             parsed_algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
             }
@@ -3622,10 +3622,10 @@ inline void drain_diagnostics_to_context(
                 schema.description = std::string{description_text};
             }
 
-            algorithm_schema.params.push_back(std::move(schema));
+            parsed_algorithm_schema.params.push_back(std::move(schema));
         }
 
-        result.emplace(algorithm_schema.algorithm_name, std::move(algorithm_schema));
+        result.emplace(parsed_algorithm_schema.algorithm_name, std::move(parsed_algorithm_schema));
     }
     return result;
 }
@@ -3828,7 +3828,7 @@ parse_compare_and_tolerance(
 [[nodiscard]] inline std::optional<benchmark_rule> parse_one_rule(
     simdjson::dom::array rule_array,
     const std::string& metric_name,
-    metric_kind metric_kind,
+    metric_kind kind,
     bool& parse_ok)
 {
     std::vector<simdjson::dom::element> elements;
@@ -3842,7 +3842,7 @@ parse_compare_and_tolerance(
 
     benchmark_rule rule;
     rule.metric_name = metric_name;
-    rule.metric_kind = metric_kind;
+    rule.kind = kind;
 
     std::string_view rule_name;
     if (elements[0].get(rule_name) != simdjson::SUCCESS) {
@@ -7492,7 +7492,7 @@ struct logical_iteration_series {
     bool complete = false;
 };
 
-[[nodiscard]] inline logical_iteration_series logical_iteration_series(
+[[nodiscard]] inline logical_iteration_series build_logical_iteration_series(
     const benchmark_execution_state& state,
     const execution_tuple* tuple,
     const std::string& test_case_name,
@@ -7829,7 +7829,7 @@ struct logical_iteration_series {
 inline void evaluate_rules(
     const benchmark_execution_state& state,
     std::vector<violation>& violations,
-    std::vector<paired_rule_evidence>& paired_rule_evidence)
+    std::vector<paired_rule_evidence>& evidence_records)
 {
     const auto merged = merged_samples_for_state(state);
     const auto named_region_coverage =
@@ -7921,11 +7921,11 @@ inline void evaluate_rules(
                             == rule_comparator::pairing_mode::by_iteration_ratio) {
                             const bool lhs_source_present = lhs_present;
                             const bool rhs_source_present = rhs_present;
-                            const auto lhs_logical = logical_iteration_series(
+                            const auto lhs_logical = build_logical_iteration_series(
                                 state, lhs_tuple, test_case_name,
                                 lhs_region, rule.metric_name,
                                 rule.cmp.aggregate);
-                            const auto rhs_logical = logical_iteration_series(
+                            const auto rhs_logical = build_logical_iteration_series(
                                 state, rhs_tuple, test_case_name,
                                 rhs_region, rule.metric_name,
                                 rule.cmp.aggregate);
@@ -7942,7 +7942,7 @@ inline void evaluate_rules(
                             paired_present =
                                 evidence.observed_paired_ratio_present;
                             paired_evidence_accepted = evidence.accepted;
-                            paired_rule_evidence.push_back(
+                            evidence_records.push_back(
                                 std::move(evidence));
                             lhs_present = paired_present;
                             rhs_present = paired_present;
@@ -7994,23 +7994,23 @@ inline void evaluate_rules(
                             continue;
                         }
 
-                        violation violation;
-                        violation.config_path     = state.config.config_path;
-                        violation.benchmark_key   = state.config.benchmark_key;
-                        violation.rule_name       = rule.name;
-                        violation.test_case       = test_case_name;
-                        violation.metric          = rule.metric_name;
-                        violation.lhs_algorithm   = lhs_tuple->algorithm_name;
-                        violation.lhs_full_params = lhs_tuple->params;
-                        violation.rhs_algorithm   = rhs_tuple->algorithm_name;
-                        violation.rhs_full_params = rhs_tuple->params;
-                        violation.args            = {lhs_aggregate, rhs_aggregate};
-                        violation.args_present    = {lhs_present, rhs_present};
-                        violation.comparison_mode = rule.cmp.pairing;
-                        violation.warmup_repetitions =
+                        violation detected_violation;
+                        detected_violation.config_path     = state.config.config_path;
+                        detected_violation.benchmark_key   = state.config.benchmark_key;
+                        detected_violation.rule_name       = rule.name;
+                        detected_violation.test_case       = test_case_name;
+                        detected_violation.metric          = rule.metric_name;
+                        detected_violation.lhs_algorithm   = lhs_tuple->algorithm_name;
+                        detected_violation.lhs_full_params = lhs_tuple->params;
+                        detected_violation.rhs_algorithm   = rhs_tuple->algorithm_name;
+                        detected_violation.rhs_full_params = rhs_tuple->params;
+                        detected_violation.args            = {lhs_aggregate, rhs_aggregate};
+                        detected_violation.args_present    = {lhs_present, rhs_present};
+                        detected_violation.comparison_mode = rule.cmp.pairing;
+                        detected_violation.warmup_repetitions =
                             rule.cmp.warmup_repetitions;
-                        violation.blocking = rule.cmp.blocking;
-                        violations.push_back(std::move(violation));
+                        detected_violation.blocking = rule.cmp.blocking;
+                        violations.push_back(std::move(detected_violation));
                     }
                 }
             }
@@ -9864,14 +9864,14 @@ inline void emit_paired_rule_evidence_record(
     simdjson::builder::string_builder& builder,
     const paired_rule_evidence& evidence)
 {
-    std::string_view comparison_operator = "=";
+    std::string_view operator_text = "=";
     switch (evidence.comparator.op) {
-        case comparison_operator::less_than: comparison_operator = "<"; break;
-        case comparison_operator::greater_than: comparison_operator = ">"; break;
-        case comparison_operator::equal: comparison_operator = "="; break;
+        case comparison_operator::less_than: operator_text = "<"; break;
+        case comparison_operator::greater_than: operator_text = ">"; break;
+        case comparison_operator::equal: operator_text = "="; break;
     }
     emit_object_with_body(builder,
-        [&evidence, comparison_operator](auto& inner) {
+        [&evidence, operator_text](auto& inner) {
             emit_kv_string(inner, "location", evidence.config_path);
             inner.append_comma();
             emit_kv_string(inner, "benchmark", evidence.benchmark_key);
@@ -9899,12 +9899,12 @@ inline void emit_paired_rule_evidence_record(
             inner.append_comma();
             emit_kv_with_body(
                 inner, "comparator",
-                [&evidence, comparison_operator](auto& comparator_builder) {
+                [&evidence, operator_text](auto& comparator_builder) {
                     emit_object_with_body(
                         comparator_builder,
-                        [&evidence, comparison_operator](auto& comparator) {
+                        [&evidence, operator_text](auto& comparator) {
                             emit_kv_string(
-                                comparator, "operator", comparison_operator);
+                                comparator, "operator", operator_text);
                             comparator.append_comma();
                             emit_key(comparator, "threshold_pct");
                             comparator.append(
@@ -10974,7 +10974,7 @@ private:
 inline void debug_finish_cell(benchmark_context& context,
                               benchmark_execution_state& state,
                               const std::string& case_name) {
-    auto& cp = state.case_debug_progress.at(case_name);
+    auto& cp = state.debug_progress_by_case.at(case_name);
     if (cp.remaining_cells.fetch_sub(1, std::memory_order_acq_rel) == 1
         && !cp.emitted.exchange(true, std::memory_order_acq_rel))
         context.debug_sink->emit_case_results(state.config.benchmark_key, case_name, state);
@@ -11076,7 +11076,7 @@ template<typename p_input, typename p_output>
         }
         if (track_paired_rule_evidence) break;
     }
-    const auto paired_schedule_evidence_fault =
+    const auto injected_schedule_fault =
         paired_schedule_evidence_fault_for_testing.load(
             std::memory_order_acquire);
 
@@ -11090,7 +11090,7 @@ template<typename p_input, typename p_output>
     // atomics mutate, so concurrent reads of nodes + atomic updates are safe.
     if (context.debug_sink != nullptr) {
         for (const auto& cell_ptr : state.cells)
-            state.case_debug_progress[cell_ptr->tuple->algorithm_name]
+            state.debug_progress_by_case[cell_ptr->tuple->algorithm_name]
                 .remaining_cells.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -11119,7 +11119,7 @@ template<typename p_input, typename p_output>
     auto run_one_iteration = [&context, &state, by_regions,
                                 track_named_region_iteration_sample_counts,
                                 track_paired_rule_evidence,
-                                paired_schedule_evidence_fault,
+                                injected_schedule_fault,
                                 counter_handles,
                                 &on_run, &on_evaluate,
                                 &serialize_raw_sample_payload](measurement_cell& cell,
@@ -11209,10 +11209,10 @@ template<typename p_input, typename p_output>
         if (track_paired_rule_evidence) {
             std::size_t evidence_order_position = order_position;
             std::uint64_t evidence_shuffle_seed = shuffle_seed;
-            if (paired_schedule_evidence_fault
+            if (injected_schedule_fault
                     == paired_schedule_evidence_fault::wrong_shuffle_seed) {
                 ++evidence_shuffle_seed;
-            } else if (paired_schedule_evidence_fault
+            } else if (injected_schedule_fault
                            == paired_schedule_evidence_fault::wrong_first_tuple_order_position
                        && cell.tuple_index == 0) {
                 ++evidence_order_position;
@@ -11329,7 +11329,7 @@ template<typename p_input, typename p_output>
             progress_update_label(context, batch, item, state.config.benchmark_key);
             // --debug CASE_STARTED: first time any cell of this case begins.
             if (context.debug_sink != nullptr) {
-                auto& cp = state.case_debug_progress.at(item.cell->tuple->algorithm_name);
+                auto& cp = state.debug_progress_by_case.at(item.cell->tuple->algorithm_name);
                 if (!cp.started.exchange(true, std::memory_order_relaxed))
                     context.debug_sink->emit_case_started(state.config.benchmark_key,
                                                           item.cell->tuple->algorithm_name);
@@ -11510,7 +11510,7 @@ template<typename p_input, typename p_output>
         // case (counter never hit 0 because some batches aborted / skipped /
         // idle-timed-out). All bodies have joined, so this is race-free.
         if (context_ptr->debug_sink != nullptr) {
-            for (auto& [case_name, cp] : state_ptr->case_debug_progress) {
+            for (auto& [case_name, cp] : state_ptr->debug_progress_by_case) {
                 if (cp.started.load(std::memory_order_relaxed)
                     && !cp.emitted.exchange(true, std::memory_order_acq_rel)) {
                     context_ptr->debug_sink->emit_case_results(
@@ -11567,60 +11567,60 @@ template<typename p_input, typename p_output>
 
     /// Emit one violation as a JSON object — exactly the shape the spec
     /// `execution_tuple`, `test_case`, `metric`, `args`).
-    auto emit_one_violation = [&](auto& b, const violation& violation) {
+    auto emit_one_violation = [&](auto& b, const violation& rule_violation) {
         emit_object_with_body(b, [&](auto& inner) {
-            emit_kv_string(inner, "location",  violation.config_path);
+            emit_kv_string(inner, "location",  rule_violation.config_path);
             inner.append_comma();
-            emit_kv_string(inner, "benchmark", violation.benchmark_key);
+            emit_kv_string(inner, "benchmark", rule_violation.benchmark_key);
             inner.append_comma();
-            emit_kv_string(inner, "rule_name", violation.rule_name);
+            emit_kv_string(inner, "rule_name", rule_violation.rule_name);
             inner.append_comma();
             emit_kv_with_body(inner, "execution_tuple", [&](auto& tuple_b) {
                 emit_object_with_body(tuple_b, [&](auto& tuple_inner) {
-                    emit_key(tuple_inner, std::string_view{violation.lhs_algorithm});
-                    emit_param_object(tuple_inner, violation.lhs_full_params);
+                    emit_key(tuple_inner, std::string_view{rule_violation.lhs_algorithm});
+                    emit_param_object(tuple_inner, rule_violation.lhs_full_params);
                     // Emit RHS as a separate JSON property only when it
                     // names a different algorithm. When LHS and RHS share
                     // an algorithm name (e.g. a self-comparison rule), a
                     // second emit would produce duplicate keys → invalid
                     // JSON. The schema's `maxProperties: 2` tolerates the
                     // 1-key form already.
-                    if (!violation.rhs_algorithm.empty()
-                        && violation.rhs_algorithm != violation.lhs_algorithm) {
+                    if (!rule_violation.rhs_algorithm.empty()
+                        && rule_violation.rhs_algorithm != rule_violation.lhs_algorithm) {
                         tuple_inner.append_comma();
-                        emit_key(tuple_inner, std::string_view{violation.rhs_algorithm});
-                        emit_param_object(tuple_inner, violation.rhs_full_params);
+                        emit_key(tuple_inner, std::string_view{rule_violation.rhs_algorithm});
+                        emit_param_object(tuple_inner, rule_violation.rhs_full_params);
                     }
                 });
             });
             inner.append_comma();
-            emit_kv_string(inner, "test_case", violation.test_case);
+            emit_kv_string(inner, "test_case", rule_violation.test_case);
             inner.append_comma();
-            emit_kv_string(inner, "metric",    violation.metric);
+            emit_kv_string(inner, "metric",    rule_violation.metric);
             inner.append_comma();
             emit_kv_string(
                 inner, "comparison_mode",
-                pairing_mode_report_name(violation.comparison_mode));
+                pairing_mode_report_name(rule_violation.comparison_mode));
             inner.append_comma();
             emit_key(inner, "warmup_repetitions");
-            inner.append(violation.warmup_repetitions);
+            inner.append(rule_violation.warmup_repetitions);
             inner.append_comma();
             emit_key(inner, "blocking");
-            inner.append(violation.blocking);
+            inner.append(rule_violation.blocking);
             inner.append_comma();
             emit_kv_with_body(inner, "args", [&](auto& args_b) {
                 args_b.start_array();
-                args_b.append(violation.args[0]);
+                args_b.append(rule_violation.args[0]);
                 args_b.append_comma();
-                args_b.append(violation.args[1]);
+                args_b.append(rule_violation.args[1]);
                 args_b.end_array();
             });
             inner.append_comma();
             emit_kv_with_body(inner, "args_present", [&](auto& present_b) {
                 present_b.start_array();
-                present_b.append(violation.args_present[0]);
+                present_b.append(rule_violation.args_present[0]);
                 present_b.append_comma();
-                present_b.append(violation.args_present[1]);
+                present_b.append(rule_violation.args_present[1]);
                 present_b.end_array();
             });
         });
@@ -11807,7 +11807,7 @@ template<typename p_input, typename p_output>
                 for (const auto& [benchmark_key, state] : reports) {
                     (void)benchmark_key;
                     for (const auto& evidence :
-                         state->paired_rule_evidence) {
+                         state->paired_rule_evidence_records) {
                         if (!first_evidence) {
                             evidence_array.append_comma();
                         }
@@ -11822,8 +11822,8 @@ template<typename p_input, typename p_output>
         emit_kv_with_body(root_b, "rule_violations", [&](auto& arr_b) {
             arr_b.start_array();
             emit_range_with_commas(arr_b, violations,
-                [&](auto& vb, const violation& violation) {
-                    emit_one_violation(vb, violation);
+                [&](auto& vb, const violation& rule_violation) {
+                    emit_one_violation(vb, rule_violation);
                 });
             arr_b.end_array();
         });
@@ -11955,12 +11955,12 @@ inline void print_violations(const std::vector<violation>& violations) noexcept 
         "============================================================\n",
         violations.size(), violations.size() == 1 ? "" : "s");
 
-    for (const auto& violation : violations) {
+    for (const auto& rule_violation : violations) {
         const std::string_view comparison_mode =
-            pairing_mode_report_name(violation.comparison_mode);
-        const bool ratio_paired = violation.comparison_mode
+            pairing_mode_report_name(rule_violation.comparison_mode);
+        const bool ratio_paired = rule_violation.comparison_mode
             == rule_comparator::pairing_mode::by_iteration_ratio;
-        const bool exact_paired = violation.comparison_mode
+        const bool exact_paired = rule_violation.comparison_mode
             == rule_comparator::pairing_mode::by_iteration_exact;
         const char* lhs_value_label = ratio_paired
             ? "paired-ratio aggregate"
@@ -11970,49 +11970,49 @@ inline void print_violations(const std::vector<violation>& violations) noexcept 
             : exact_paired ? "first unequal iteration" : "aggregate";
         std::fprintf(stderr,
             "[%s] %s (test_case=%s, metric=%s, comparison=%s, warmup=%zu, %s)\n",
-            violation.benchmark_key.c_str(),
-            violation.rule_name.c_str(),
-            violation.test_case.c_str(),
-            violation.metric.c_str(),
+            rule_violation.benchmark_key.c_str(),
+            rule_violation.rule_name.c_str(),
+            rule_violation.test_case.c_str(),
+            rule_violation.metric.c_str(),
             comparison_mode.data(),
-            violation.warmup_repetitions,
-            violation.blocking ? "BLOCKING" : "diagnostic");
-        if (!violation.args_present[0] || !violation.args_present[1]) {
+            rule_violation.warmup_repetitions,
+            rule_violation.blocking ? "BLOCKING" : "diagnostic");
+        if (!rule_violation.args_present[0] || !rule_violation.args_present[1]) {
             std::fprintf(stderr,
                 "    selected source unavailable: LHS=%s RHS=%s\n",
-                violation.args_present[0] ? "present" : "UNAVAILABLE",
-                violation.args_present[1] ? "present" : "UNAVAILABLE");
+                rule_violation.args_present[0] ? "present" : "UNAVAILABLE",
+                rule_violation.args_present[1] ? "present" : "UNAVAILABLE");
         }
-        const auto lhs_param_text = format_param_map(violation.lhs_full_params);
-        const auto rhs_param_text = format_param_map(violation.rhs_full_params);
+        const auto lhs_param_text = format_param_map(rule_violation.lhs_full_params);
+        const auto rhs_param_text = format_param_map(rule_violation.rhs_full_params);
         // Mirror the JSON writer's RHS-dedup: when both selectors named the
         // same algorithm with the same param map, print one combined line
         // instead of two visually identical sides.
         const bool same_side =
-            violation.lhs_algorithm == violation.rhs_algorithm
+            rule_violation.lhs_algorithm == rule_violation.rhs_algorithm
             && lhs_param_text == rhs_param_text;
         if (same_side) {
             std::fprintf(stderr,
                 "    self-compare on %s { %s }\n        LHS %s = %.6g\n        RHS %s = %.6g\n",
-                violation.lhs_algorithm.c_str(),
+                rule_violation.lhs_algorithm.c_str(),
                 lhs_param_text.c_str(),
                 lhs_value_label,
-                violation.args[0],
+                rule_violation.args[0],
                 rhs_value_label,
-                violation.args[1]);
+                rule_violation.args[1]);
         } else {
             std::fprintf(stderr,
                 "    LHS %s { %s }\n        %s = %.6g\n",
-                violation.lhs_algorithm.c_str(),
+                rule_violation.lhs_algorithm.c_str(),
                 lhs_param_text.c_str(),
                 lhs_value_label,
-                violation.args[0]);
+                rule_violation.args[0]);
             std::fprintf(stderr,
                 "    RHS %s { %s }\n        %s = %.6g\n",
-                violation.rhs_algorithm.c_str(),
+                rule_violation.rhs_algorithm.c_str(),
                 rhs_param_text.c_str(),
                 rhs_value_label,
-                violation.args[1]);
+                rule_violation.args[1]);
         }
         std::fprintf(stderr, "\n");
     }
@@ -12721,7 +12721,7 @@ struct presence_pattern {
     bool        any_old_gap       = false;
 };
 
-[[nodiscard]] inline presence_pattern presence_pattern(
+[[nodiscard]] inline presence_pattern compute_presence_pattern(
     std::span<const std::uint8_t> presence) noexcept
 {
     presence_pattern result;
@@ -12747,7 +12747,7 @@ struct presence_pattern {
 /// amplitude (no underlying numeric comparison); rules and
 /// regressions use both.
 [[nodiscard]] inline double score_summary_issue(const summary_issue& issue) noexcept {
-    const auto pattern = presence_pattern(issue.presence_per_report);
+    const auto pattern = compute_presence_pattern(issue.presence_per_report);
     const double recurrence = recurrence_factor(
         pattern.present_in_latest,
         pattern.recent_streak,
@@ -12984,8 +12984,8 @@ inline void render_summary(
 /// Build the rule-violation extractor lambda. Returns a lambda
 /// suitable for `walk_report_array<...>`, capturing `sample_index`
 /// by reference (caller-owned, lives for the whole report walk).
-[[nodiscard]] inline auto rule_violation_extractor(const sample_index& sample_index) noexcept {
-    return [&sample_index](simdjson::dom::object obj)
+[[nodiscard]] inline auto rule_violation_extractor(const sample_index& samples_by_path) noexcept {
+    return [&samples_by_path](simdjson::dom::object obj)
         -> std::optional<extracted_issue>
     {
         const auto location  = get_string_field(obj, "location");
@@ -13029,14 +13029,14 @@ inline void render_summary(
         ex.update_latest = [args, benchmark,
                             lhs_algo = std::move(lhs.first),
                             lhs_params = std::move(lhs.second),
-                            test_case, metric, &sample_index]
+                            test_case, metric, &samples_by_path]
                            (summary_issue& issue) noexcept {
             issue.latest_args = args;
             // Amplitude reads the LHS cell's samples (the side that
             // against `all_regions`; per-region rules would need this
             // hard-coded "all_regions" replaced with the rule's region.
             issue.latest_samples = samples_from_index(
-                sample_index, benchmark, lhs_algo, lhs_params,
+                samples_by_path, benchmark, lhs_algo, lhs_params,
                 test_case, "all_regions", metric);
         };
         return ex;
@@ -13046,8 +13046,8 @@ inline void render_summary(
 /// Build the regression extractor lambda. Same shape as the rule
 /// extractor; the regression's stored `region` flows into both the
 /// identity and the sample lookup.
-[[nodiscard]] inline auto regression_extractor(const sample_index& sample_index) noexcept {
-    return [&sample_index](simdjson::dom::object obj)
+[[nodiscard]] inline auto regression_extractor(const sample_index& samples_by_path) noexcept {
+    return [&samples_by_path](simdjson::dom::object obj)
         -> std::optional<extracted_issue>
     {
         const auto location       = get_string_field(obj, "location");
@@ -13092,11 +13092,11 @@ inline void render_summary(
         };
         ex.update_latest = [previously, now_value, benchmark, algorithm_name,
                             params = std::move(params), test_case, region,
-                            metric, &sample_index]
+                            metric, &samples_by_path]
                            (summary_issue& issue) noexcept {
             issue.latest_args = {previously, now_value};
             issue.latest_samples = samples_from_index(
-                sample_index, benchmark, algorithm_name, params,
+                samples_by_path, benchmark, algorithm_name, params,
                 test_case, region, metric);
         };
         return ex;
@@ -13151,13 +13151,13 @@ inline void render_summary(
         if (report == nullptr) continue;     // gap → presence stays 0
         report_data_present[report_index - 1] = 1;
         ++reports_present_count;
-        const auto sample_index = build_sample_index(report->root);
+        const auto samples_by_path = build_sample_index(report->root);
         walk_report_array(report->root, "rule_violations",
             report_index, max_index, aggregation,
-            rule_violation_extractor(sample_index));
+            rule_violation_extractor(samples_by_path));
         walk_report_array(report->root, "regressions",
             report_index, max_index, aggregation,
-            regression_extractor(sample_index));
+            regression_extractor(samples_by_path));
         walk_report_array(report->root, "sanity_warnings",
             report_index, max_index, aggregation,
             sanity_warning_extractor());
@@ -13645,7 +13645,7 @@ inline void render_progress_loop(progress_state& progress) noexcept {
         // back to benchmark_memory_budget for the system-wide numbers.
         rows.push_back(text("bench_framework — live progress") | bold);
         if (progress.scheduler != nullptr) {
-            const auto snap = progress.scheduler->live_snapshot();
+            const auto snap = progress.scheduler->capture_live_snapshot();
             const auto over_cap = snap.used_bytes >= snap.cap_bytes;
             rows.push_back(hbox({
                 text("[budget room ") | color(Color::GrayLight),
@@ -13978,7 +13978,7 @@ struct benchmark_filter_metadata {
     // schema/semantic errors.
     std::vector<benchmark_filter_metadata> registered_metadata;
     registered_metadata.reserve(selected.size());
-    regression_validation_universe regression_validation_universe;
+    regression_validation_universe validation_universe;
     for (const auto& erased : selected) {
         registered_metadata.push_back(extract_filter_metadata(
             erased.config_path, erased.benchmark_key));
@@ -13990,7 +13990,7 @@ struct benchmark_filter_metadata {
         declaration.matrix_algorithms = metadata.case_names;
         declaration.matrix_test_cases = metadata.matrix_test_cases;
         declaration.metrics = metadata.metric_names;
-        regression_validation_universe[erased.config_path].push_back(
+        validation_universe[erased.config_path].push_back(
             std::move(declaration));
     }
 
@@ -14221,7 +14221,7 @@ struct benchmark_filter_metadata {
 
     // Process-wide scheduler owns batch admission and the TBB
     // task pool that runs the bodies. Constructed BEFORE the progress
-    // thread so the renderer can read `scheduler.live_snapshot()`.
+    // thread so the renderer can read `scheduler.capture_live_snapshot()`.
     batch_scheduler scheduler(memory_budget, bench_arena);
 
     progress_state progress;
@@ -14327,7 +14327,7 @@ struct benchmark_filter_metadata {
     // `benchmarks` membership and metric existence in one place).
     {
         auto regression_validation_diags = semantic_validate_regression_rules(
-            regression_rules_by_config, regression_validation_universe);
+            regression_rules_by_config, validation_universe);
         std::lock_guard<std::mutex> guard(diagnostics_mu);
         for (auto& diag : regression_validation_diags) {
             diagnostics.push_back(std::move(diag));
@@ -14381,7 +14381,7 @@ struct benchmark_filter_metadata {
 
     const bool blocking_rule_violation = std::any_of(
         violations.begin(), violations.end(),
-        [](const violation& violation) { return violation.blocking; });
+        [](const violation& rule_violation) { return rule_violation.blocking; });
     const bool blocking_regression = std::any_of(
         regressions.begin(), regressions.end(),
         [](const regression_entry& regression) {
@@ -14573,7 +14573,7 @@ template<typename p_input, typename p_output>
                 }
             }
         };
-        publish_on_exit publish_on_exit{
+        publish_on_exit setup_publish_guard{
             (context.progress != nullptr
              && context.benchmark_index < context.progress->per_benchmark.size())
                 ? context.progress->per_benchmark[context.benchmark_index].get()
@@ -14751,10 +14751,10 @@ template<typename p_input, typename p_output>
             std::vector<detail::violation> local_violations;
             detail::evaluate_rules(
                 final_state, local_violations,
-                final_state.paired_rule_evidence);
+                final_state.paired_rule_evidence_records);
 
             if (final_context.debug_sink != nullptr) {
-                for (const auto& evidence : final_state.paired_rule_evidence) {
+                for (const auto& evidence : final_state.paired_rule_evidence_records) {
                     final_context.debug_sink->emit_paired_rule_evidence(evidence);
                 }
             }
@@ -14763,8 +14763,8 @@ template<typename p_input, typename p_output>
                 && final_context.violations_mu != nullptr) {
                 std::lock_guard<std::mutex> guard(
                     *final_context.violations_mu);
-                for (auto& violation : local_violations) {
-                    final_context.violations->push_back(std::move(violation));
+                for (auto& rule_violation : local_violations) {
+                    final_context.violations->push_back(std::move(rule_violation));
                 }
             }
             if (final_context.reports != nullptr

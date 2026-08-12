@@ -67,7 +67,11 @@ struct command_line {
     std::filesystem::path test_indexes_support_seal;
     std::filesystem::path expected_core_hash;
     std::vector<configured_entity_handle_output> entity_handle_outputs;
+    std::vector<std::pair<std::string, std::string>>
+        entity_handle_owners;
     std::vector<configured_row_codec_output> row_codec_outputs;
+    std::vector<std::pair<std::string, std::string>>
+        row_codec_owners;
     std::vector<configured_fmgr_entrypoint_output>
         fmgr_entrypoint_outputs;
     std::vector<std::pair<std::string, std::string>> fmgr_owners;

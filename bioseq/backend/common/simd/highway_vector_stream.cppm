@@ -844,58 +844,200 @@ auto lift_operation(p_operation_type&& operation, p_argument_types&&... argument
     }
 }
 
-#define bioseq_define_vector_stream_operation(semantic_name, highway_name)          \
-    struct semantic_name##_operation {                                               \
-        template <class... p_argument_types>                                         \
-        [[gnu::always_inline]] HWY_INLINE static auto apply(                         \
-            p_argument_types&&... arguments) {                                      \
-            return hn::highway_name(                                                 \
-                std::forward<p_argument_types>(arguments)...);                       \
-        }                                                                            \
-    }
-
+// The structural generator inserts a target attribute into every callable in
+// this namespace. Keep adapter bodies directly source-spelled so Clang exposes
+// one writable declaration/body geometry instead of macro expansion locations.
 /** @brief Adapts Highway addition for stream lifting. */
-bioseq_define_vector_stream_operation(add, Add);
+struct add_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Add(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway subtraction for stream lifting. */
-bioseq_define_vector_stream_operation(subtract, Sub);
+struct subtract_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Sub(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway multiplication for stream lifting. */
-bioseq_define_vector_stream_operation(multiply, Mul);
+struct multiply_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Mul(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway lane-wise minimum for stream lifting. */
-bioseq_define_vector_stream_operation(minimum, Min);
+struct minimum_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Min(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway lane-wise maximum for stream lifting. */
-bioseq_define_vector_stream_operation(maximum, Max);
+struct maximum_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Max(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway bitwise AND for stream lifting. */
-bioseq_define_vector_stream_operation(bit_and, And);
+struct bit_and_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::And(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway bitwise OR for stream lifting. */
-bioseq_define_vector_stream_operation(bit_or, Or);
+struct bit_or_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Or(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway bitwise XOR for stream lifting. */
-bioseq_define_vector_stream_operation(bit_xor, Xor);
+struct bit_xor_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Xor(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway bitwise AND-NOT for stream lifting. */
-bioseq_define_vector_stream_operation(bit_and_not, AndNot);
+struct bit_and_not_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::AndNot(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway bitwise complement for stream lifting. */
-bioseq_define_vector_stream_operation(bit_not, Not);
+struct bit_not_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Not(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway arithmetic negation for stream lifting. */
-bioseq_define_vector_stream_operation(negate, Neg);
+struct negate_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Neg(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway absolute value for stream lifting. */
-bioseq_define_vector_stream_operation(absolute, Abs);
+struct absolute_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Abs(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway equality comparison for stream lifting. */
-bioseq_define_vector_stream_operation(equal, Eq);
+struct equal_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Eq(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway inequality comparison for stream lifting. */
-bioseq_define_vector_stream_operation(not_equal, Ne);
+struct not_equal_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Ne(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway less-than comparison for stream lifting. */
-bioseq_define_vector_stream_operation(less, Lt);
+struct less_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Lt(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway greater-than comparison for stream lifting. */
-bioseq_define_vector_stream_operation(greater, Gt);
+struct greater_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Gt(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway less-than-or-equal comparison for stream lifting. */
-bioseq_define_vector_stream_operation(less_equal, Le);
+struct less_equal_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Le(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway greater-than-or-equal comparison for stream lifting. */
-bioseq_define_vector_stream_operation(greater_equal, Ge);
+struct greater_equal_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::Ge(std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway variable-count left shift for stream lifting. */
-bioseq_define_vector_stream_operation(shift_left_same, ShiftLeftSame);
+struct shift_left_same_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::ShiftLeftSame(
+            std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway variable-count right shift for stream lifting. */
-bioseq_define_vector_stream_operation(shift_right_same, ShiftRightSame);
+struct shift_right_same_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::ShiftRightSame(
+            std::forward<p_argument_types>(arguments)...);
+    }
+};
+
 /** @brief Adapts Highway vector-to-mask conversion for stream lifting. */
-bioseq_define_vector_stream_operation(mask_from_vector, MaskFromVec);
+struct mask_from_vector_operation {
+    template <class... p_argument_types>
+    [[gnu::always_inline]] HWY_INLINE static auto apply(
+        p_argument_types&&... arguments) {
+        return hn::MaskFromVec(
+            std::forward<p_argument_types>(arguments)...);
+    }
+};
 
 /** @brief Preserves a target-native predicate for conditional Highway operations. */
 template <class p_mask_type>
@@ -942,8 +1084,6 @@ struct if_then_zero_else_operation {
     }
 };
 
-#undef bioseq_define_vector_stream_operation
-
 } // namespace vector_stream_detail
 
 /**
@@ -967,94 +1107,242 @@ auto apply_lifted(p_argument_types&&... arguments) {
 }
 
 // Wrappers remain non-constexpr because Highway operations are target callables.
-
-#define bioseq_define_binary_vector_stream_wrapper(function_name, operation_name)   \
-    template <class p_left_type, class p_right_type>                                 \
-    requires has_stream_argument<p_left_type, p_right_type>                          \
-    [[nodiscard]] HWY_INLINE auto function_name(                                    \
-        p_left_type&& left, p_right_type&& right) {                                  \
-        return apply_lifted<vector_stream_detail::operation_name##_operation>(       \
-            std::forward<p_left_type>(left),                                         \
-            std::forward<p_right_type>(right));                                      \
-    }
-
-#define bioseq_define_unary_vector_stream_wrapper(function_name, operation_name)    \
-    template <class p_input_type>                                                    \
-    requires k_is_any_stream<p_input_type>                                           \
-    [[nodiscard]] HWY_INLINE auto function_name(p_input_type&& input) {              \
-        return apply_lifted<vector_stream_detail::operation_name##_operation>(       \
-            std::forward<p_input_type>(input));                                      \
-    }
-
-#define bioseq_define_ternary_vector_stream_wrapper(function_name, operation_name)  \
-    template <class p_first_type, class p_second_type, class p_third_type>            \
-    requires has_stream_argument<p_first_type, p_second_type, p_third_type>          \
-    [[nodiscard]] HWY_INLINE auto function_name(                                    \
-        p_first_type&& first, p_second_type&& second, p_third_type&& third) {         \
-        return apply_lifted<vector_stream_detail::operation_name##_operation>(       \
-            std::forward<p_first_type>(first),                                       \
-            std::forward<p_second_type>(second),                                     \
-            std::forward<p_third_type>(third));                                      \
-    }
+// These bodies are likewise source-spelled for structural target attribution.
 
 // Binary lifts — both vec/vec and mask/mask are handled here; the constraint
 // Each wrapper accepts either vector or mask streams as supported by its Highway operation.
 /** @brief Adds corresponding lanes across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(add, add)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto add(p_left_type&& left, p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::add_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Subtracts corresponding lanes across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(subtract, subtract)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto subtract(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::subtract_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Multiplies corresponding lanes across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(multiply, multiply)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto multiply(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::multiply_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise minima across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(minimum, minimum)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto minimum(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::minimum_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise maxima across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(maximum, maximum)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto maximum(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::maximum_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise bitwise AND across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(bit_and, bit_and)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto bit_and(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::bit_and_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise bitwise OR across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(bit_or, bit_or)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto bit_or(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::bit_or_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise bitwise XOR across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(bit_xor, bit_xor)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto bit_xor(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::bit_xor_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Computes lane-wise bitwise AND-NOT across compatible stream arguments. */
-bioseq_define_binary_vector_stream_wrapper(bit_and_not, bit_and_not)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto bit_and_not(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::bit_and_not_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes for equality. */
-bioseq_define_binary_vector_stream_wrapper(equal, equal)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto equal(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::equal_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes for inequality. */
-bioseq_define_binary_vector_stream_wrapper(not_equal, not_equal)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto not_equal(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::not_equal_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes with less-than. */
-bioseq_define_binary_vector_stream_wrapper(less, less)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto less(p_left_type&& left, p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::less_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes with greater-than. */
-bioseq_define_binary_vector_stream_wrapper(greater, greater)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto greater(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::greater_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes with less-than-or-equal. */
-bioseq_define_binary_vector_stream_wrapper(less_equal, less_equal)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto less_equal(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::less_equal_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Compares corresponding lanes with greater-than-or-equal. */
-bioseq_define_binary_vector_stream_wrapper(greater_equal, greater_equal)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto greater_equal(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::greater_equal_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Shifts lanes left by per-lane counts across stream slots. */
-bioseq_define_binary_vector_stream_wrapper(shift_left_same, shift_left_same)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto shift_left_same(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::shift_left_same_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
 /** @brief Shifts lanes right by per-lane counts across stream slots. */
-bioseq_define_binary_vector_stream_wrapper(shift_right_same, shift_right_same)
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto shift_right_same(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::shift_right_same_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
 
 // Unary lifts.
 /** @brief Complements every lane in a stream argument. */
-bioseq_define_unary_vector_stream_wrapper(bit_not, bit_not)
+template <class p_input_type>
+requires k_is_any_stream<p_input_type>
+[[nodiscard]] HWY_INLINE auto bit_not(p_input_type&& input) {
+    return apply_lifted<vector_stream_detail::bit_not_operation>(
+        std::forward<p_input_type>(input));
+}
+
 /** @brief Negates every lane in a stream argument. */
-bioseq_define_unary_vector_stream_wrapper(negate, negate)
+template <class p_input_type>
+requires k_is_any_stream<p_input_type>
+[[nodiscard]] HWY_INLINE auto negate(p_input_type&& input) {
+    return apply_lifted<vector_stream_detail::negate_operation>(
+        std::forward<p_input_type>(input));
+}
+
 /** @brief Computes the absolute value of every stream lane. */
-bioseq_define_unary_vector_stream_wrapper(absolute, absolute)
+template <class p_input_type>
+requires k_is_any_stream<p_input_type>
+[[nodiscard]] HWY_INLINE auto absolute(p_input_type&& input) {
+    return apply_lifted<vector_stream_detail::absolute_operation>(
+        std::forward<p_input_type>(input));
+}
+
 /** @brief Converts every vector slot to a mask slot. */
-bioseq_define_unary_vector_stream_wrapper(mask_from_vector, mask_from_vector)
+template <class p_input_type>
+requires k_is_any_stream<p_input_type>
+[[nodiscard]] HWY_INLINE auto mask_from_vector(p_input_type&& input) {
+    return apply_lifted<vector_stream_detail::mask_from_vector_operation>(
+        std::forward<p_input_type>(input));
+}
 
 // Ternary lifts (full {stream, scalar}^3 = 27 cases handled in one wrapper).
 /** @brief Selects lanes conditionally across compatible stream arguments. */
-bioseq_define_ternary_vector_stream_wrapper(if_then_else, if_then_else)
-/** @brief Applies true-or-zero conditional selection across stream slots. */
-bioseq_define_binary_vector_stream_wrapper(if_then_else_zero, if_then_else_zero)
-/** @brief Applies zero-or-false conditional selection across stream slots. */
-bioseq_define_binary_vector_stream_wrapper(if_then_zero_else, if_then_zero_else)
+template <class p_first_type, class p_second_type, class p_third_type>
+requires has_stream_argument<p_first_type, p_second_type, p_third_type>
+[[nodiscard]] HWY_INLINE auto if_then_else(
+    p_first_type&& first,
+    p_second_type&& second,
+    p_third_type&& third) {
+    return apply_lifted<vector_stream_detail::if_then_else_operation>(
+        std::forward<p_first_type>(first),
+        std::forward<p_second_type>(second),
+        std::forward<p_third_type>(third));
+}
 
-#undef bioseq_define_binary_vector_stream_wrapper
-#undef bioseq_define_unary_vector_stream_wrapper
-#undef bioseq_define_ternary_vector_stream_wrapper
+/** @brief Applies true-or-zero conditional selection across stream slots. */
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto if_then_else_zero(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::if_then_else_zero_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
+
+/** @brief Applies zero-or-false conditional selection across stream slots. */
+template <class p_left_type, class p_right_type>
+requires has_stream_argument<p_left_type, p_right_type>
+[[nodiscard]] HWY_INLINE auto if_then_zero_else(
+    p_left_type&& left,
+    p_right_type&& right) {
+    return apply_lifted<vector_stream_detail::if_then_zero_else_operation>(
+        std::forward<p_left_type>(left), std::forward<p_right_type>(right));
+}
 
 // ============================================================================
 // Templated shifts — non-type template parameter, written long-hand.

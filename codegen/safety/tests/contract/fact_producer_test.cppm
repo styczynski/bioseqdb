@@ -1161,9 +1161,6 @@ inline void run_runtime_probe_contracts() {
     const std::filesystem::path path = module_path(
         fixture,
         "bioseq/runtime_probe_contract.cppm");
-    const std::filesystem::path boundary_path = module_path(
-        fixture,
-        "common/postgres/sql_boundary/index.cppm");
     const auto scan = [&](
         std::string_view source,
         std::string_view profile) {
@@ -1175,11 +1172,12 @@ inline void run_runtime_probe_contracts() {
             std::addressof(fixture.provenance));
     };
     static constexpr std::string_view positive = R"cpp(module;
+#include <string_view>
 #include <utils/elog.h>
 export module bioseq.runtime_probe.contract;
 namespace bioseq::postgres::support::safety_runtime_probe {
-void record_site_visit(const char*) noexcept;
-bool consume_fault(const char*) noexcept;
+void record_site_visit(std::string_view) noexcept;
+bool consume_fault(std::string_view) noexcept;
 }
 using bioseq::postgres::support::safety_runtime_probe::consume_fault;
 using bioseq::postgres::support::safety_runtime_probe::record_site_visit;
@@ -1331,345 +1329,6 @@ void invalid_probe(bool escape) {
         },
         "does not prove exactly one supported CFG relation");
 
-    static constexpr std::string_view descriptor_bound = R"cpp(module;
-#include <string_view>
-#include <utils/elog.h>
-export module bioseq.runtime_probe.contract;
-namespace bioseq::postgres::support::safety_runtime_probe {
-void record_site_visit(std::string_view) noexcept;
-bool consume_fault(std::string_view) noexcept;
-}
-namespace bioseq::postgres::support {
-struct sql_boundary_probe_descriptor final {
-    std::string_view site_id;
-    std::string_view fault_key;
-};
-template<class p_function>
-int invoke_postgres_callback(
-        sql_boundary_probe_descriptor probe,
-        p_function&& call) {
-    const int result = call();
-    pg_contract_leaf();
-    safety_runtime_probe::record_site_visit(probe.site_id);
-    if (safety_runtime_probe::consume_fault(probe.fault_key)) {
-        pg_contract_leaf();
-    }
-    return result;
-}
-int generated_wrapper() {
-    return invoke_postgres_callback(
-        sql_boundary_probe_descriptor{
-            .site_id =
-                "probe:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            .fault_key = "fixture.descriptor",
-        },
-        [] { return 0; });
-}
-}
-)cpp";
-    const isolated_compiler_fact_scan descriptor_facts =
-        scan(
-            descriptor_bound,
-            "runtime-descriptor-binding");
-    const runtime_probe_fact& descriptor_probe =
-        require_runtime_probe(
-            descriptor_facts,
-            "fixture.descriptor",
-            runtime_relation::
-                injected_after_site_success);
-    if (!descriptor_probe.trigger_call_stable_id) {
-        throw std::runtime_error(
-            "literal SQL-boundary descriptor did not bind "
-            "symbolic runtime-probe arguments");
-    }
-
-    static constexpr std::string_view production_descriptor =
-        R"cpp(module;
-#include <functional>
-#include <stdexcept>
-#include <string_view>
-#include <utils/elog.h>
-export module bioseq.postgres.sql_boundary;
-namespace bioseq::postgres::support::safety_runtime_probe {
-void record_site_visit(std::string_view) noexcept;
-bool consume_fault(std::string_view) noexcept;
-}
-namespace bioseq::postgres::support {
-struct postgres_error {
-    ErrorData* release_error_data() noexcept;
-};
-struct postgres_error_capture_failure {};
-struct sql_boundary_probe_descriptor final {
-    std::string_view site_id;
-    std::string_view fault_key;
-};
-template<class p_function>
-int invoke_postgres_callback(
-        sql_boundary_probe_descriptor probe,
-        p_function&& call) {
-    ErrorData* exact_error = nullptr;
-    bool standard_error = false;
-    bool unknown_error = false;
-    try {
-        const int result = std::invoke(call);
-        if (safety_runtime_probe::consume_fault(
-                probe.fault_key)) {
-            throw std::runtime_error{
-                "injected boundary exception"};
-        }
-        return result;
-    } catch (postgres_error& error) {
-        exact_error = error.release_error_data();
-    } catch (const postgres_error_capture_failure&) {
-        standard_error = true;
-    } catch (const std::exception&) {
-        standard_error = true;
-    } catch (...) {
-        unknown_error = true;
-    }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
-    }
-    safety_runtime_probe::record_site_visit(probe.site_id);
-    pg_contract_leaf();
-    return standard_error || unknown_error ? 1 : 0;
-}
-int generated_wrapper() {
-    return invoke_postgres_callback(
-        sql_boundary_probe_descriptor{
-            .site_id =
-                "probe:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            .fault_key =
-                "generated_boundary_tail.std_exception",
-        },
-        [] { return 0; });
-}
-int generated_multi_wrapper(int arity) {
-    switch (arity) {
-        case 1:
-            return invoke_postgres_callback(
-                sql_boundary_probe_descriptor{
-                    .site_id =
-                        "probe:cccccccccccccccccccccccccccccccc"
-                        "cccccccccccccccccccccccccccccccc",
-                    .fault_key =
-                        "generated_boundary_tail.std_exception",
-                },
-                [] { return 1; });
-        case 2:
-            return invoke_postgres_callback(
-                sql_boundary_probe_descriptor{
-                    .site_id =
-                        "probe:dddddddddddddddddddddddddddddddd"
-                        "dddddddddddddddddddddddddddddddd",
-                    .fault_key =
-                        "generated_boundary_tail.std_exception",
-                },
-                [] { return 2; });
-        default:
-            pg_contract_leaf();
-            __builtin_unreachable();
-    }
-}
-}
-)cpp";
-    const isolated_compiler_fact_scan production_facts =
-        scan_safety_facts_from_code(
-            boundary_path,
-            production_descriptor,
-            fixture.arguments,
-            "runtime-production-descriptor",
-            std::addressof(fixture.provenance));
-    const runtime_probe_fact& production_probe =
-        require_runtime_probe(
-            production_facts,
-            "generated_boundary_tail.std_exception",
-            runtime_relation::injected_routes_to_site);
-    const function_flow& multi_wrapper =
-        require_function(
-            production_facts.functions,
-            "bioseq::postgres::support::generated_multi_wrapper");
-    const auto default_error = std::ranges::find_if(
-        multi_wrapper.calls,
-        [](const flow_call_site& call) {
-            return std::ranges::any_of(
-                call.targets,
-                [](const flow_call_target& target) {
-                    return target.target_qualified_name
-                        == "pg_contract_leaf";
-                });
-        });
-    const std::size_t direct_boundaries =
-        std::ranges::count_if(
-            multi_wrapper.calls,
-            [](const flow_call_site& call) {
-                return call.resolution
-                        == resolution_status::direct
-                    && call.target_set_complete
-                    && call.targets.size() == 1
-                    && call.targets.front()
-                           .target_qualified_name
-                        == "bioseq::postgres::support::"
-                           "invoke_postgres_callback";
-            });
-    if (!production_probe.trigger_call_stable_id
-        || production_probe.site_call_stable_id
-            == *production_probe.trigger_call_stable_id
-        || production_probe.visit_call_stable_id
-            == *production_probe.trigger_call_stable_id
-        || production_facts.runtime_probes.size() != 3
-        || !std::ranges::all_of(
-            production_facts.runtime_probes,
-            [](const runtime_probe_fact& probe) {
-                return probe.fault_key
-                        == "generated_boundary_tail.std_exception"
-                    && probe.relation
-                        == runtime_relation::
-                            injected_routes_to_site
-                    && probe.trigger_call_stable_id.has_value();
-            })
-        || direct_boundaries != 2
-        || default_error == multi_wrapper.calls.end()
-        || default_error->resolution
-            != resolution_status::direct
-        || !default_error->target_set_complete
-        || default_error->targets.size() != 1
-        || default_error->targets.front().domain
-            != callee_domain::postgresql_server
-        || std::ranges::any_of(
-            default_error->live_objects,
-            [](const flow_object& object) {
-                return !object.trivially_destructible;
-            })) {
-        throw std::runtime_error(
-            "production boundary or multi-arity lifetime-free "
-            "default did not preserve routed probe authority");
-    }
-
-    static constexpr std::string_view conflicting_specialization =
-        R"cpp(module;
-#include <string_view>
-#include <utils/elog.h>
-export module bioseq.runtime_probe.contract;
-namespace bioseq::postgres::support {
-struct sql_boundary_probe_descriptor final {
-    std::string_view site_id;
-    std::string_view fault_key;
-};
-template<class p_function>
-int invoke_postgres_callback(
-        sql_boundary_probe_descriptor,
-        p_function&& call) {
-    return call();
-}
-struct shared_call final {
-    int operator()() const {
-        return 0;
-    }
-};
-int generated_wrapper(bool first) {
-    shared_call call;
-    if (first) {
-        return invoke_postgres_callback(
-            sql_boundary_probe_descriptor{
-                .site_id =
-                    "probe:ffffffffffffffffffffffffffffffff"
-                    "ffffffffffffffffffffffffffffffff",
-                .fault_key = "fixture.shared",
-            },
-            call);
-    }
-    return invoke_postgres_callback(
-        sql_boundary_probe_descriptor{
-            .site_id =
-                "probe:00000000000000000000000000000000"
-                "00000000000000000000000000000000",
-            .fault_key = "fixture.shared",
-        },
-        call);
-}
-}
-)cpp";
-    require_scan_failure(
-        [&] {
-            static_cast<void>(scan(
-                conflicting_specialization,
-                "runtime-conflicting-specialization"));
-        },
-        "one SQL boundary specialization is bound to "
-        "conflicting literal probe descriptors");
-
-    static constexpr std::string_view invalid_descriptor = R"cpp(module;
-#include <string_view>
-#include <utils/elog.h>
-export module bioseq.runtime_probe.contract;
-namespace bioseq::postgres::support {
-struct sql_boundary_probe_descriptor final {
-    std::string_view site_id;
-    std::string_view fault_key;
-};
-template<class p_function>
-int invoke_postgres_callback(
-        sql_boundary_probe_descriptor,
-        p_function&& call) {
-    return call();
-}
-int generated_wrapper() {
-    return invoke_postgres_callback(
-        sql_boundary_probe_descriptor{
-            .site_id = "probe:not-a-sealed-site",
-            .fault_key = "fixture.descriptor",
-        },
-        [] { return 0; });
-}
-}
-)cpp";
-    require_scan_failure(
-        [&] {
-            static_cast<void>(scan(
-                invalid_descriptor,
-                "runtime-invalid-descriptor"));
-        },
-        "invalid site id or fault key");
-
-    static constexpr std::string_view local_descriptor = R"cpp(module;
-#include <string_view>
-#include <utils/elog.h>
-export module bioseq.runtime_probe.contract;
-namespace bioseq::postgres::support {
-struct sql_boundary_probe_descriptor final {
-    std::string_view site_id;
-    std::string_view fault_key;
-};
-template<class p_function>
-int invoke_postgres_callback(
-        sql_boundary_probe_descriptor,
-        p_function&& call) {
-    return call();
-}
-int generated_wrapper() {
-    const sql_boundary_probe_descriptor boundary_probe{
-        .site_id =
-            "probe:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        .fault_key = "fixture.local",
-    };
-    return invoke_postgres_callback(
-        boundary_probe,
-        [] { return 0; });
-}
-}
-)cpp";
-    require_scan_failure(
-        [&] {
-            static_cast<void>(scan(
-                local_descriptor,
-                "runtime-local-descriptor"));
-        },
-        "not one exact two-field aggregate initializer");
-
     static constexpr std::string_view computed_key = R"cpp(module;
 #include <utils/elog.h>
 export module bioseq.runtime_probe.contract;
@@ -1687,6 +1346,46 @@ void invalid_probe() {
         [&] {
             static_cast<void>(
                 scan(computed_key, "runtime-computed-key"));
+        },
+        "must be one ordinary narrow string literal");
+
+    static constexpr std::string_view concatenated_key = R"cpp(module;
+#include <utils/elog.h>
+export module bioseq.runtime_probe.contract;
+namespace bioseq::postgres::support::safety_runtime_probe {
+void record_site_visit(const char*) noexcept;
+}
+void invalid_probe() {
+    bioseq::postgres::support::safety_runtime_probe::
+        record_site_visit("fixture." "concatenated");
+    pg_contract_leaf();
+}
+)cpp";
+    require_scan_failure(
+        [&] {
+            static_cast<void>(scan(
+                concatenated_key,
+                "runtime-concatenated-key"));
+        },
+        "must be one ordinary narrow string literal");
+
+    static constexpr std::string_view macro_key = R"cpp(module;
+#include <utils/elog.h>
+#define BIOSEQ_RUNTIME_PROBE_KEY "fixture.macro"
+export module bioseq.runtime_probe.contract;
+namespace bioseq::postgres::support::safety_runtime_probe {
+void record_site_visit(const char*) noexcept;
+}
+void invalid_probe() {
+    bioseq::postgres::support::safety_runtime_probe::
+        record_site_visit(BIOSEQ_RUNTIME_PROBE_KEY);
+    pg_contract_leaf();
+}
+)cpp";
+    require_scan_failure(
+        [&] {
+            static_cast<void>(
+                scan(macro_key, "runtime-macro-key"));
         },
         "must be one ordinary narrow string literal");
 

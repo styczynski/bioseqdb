@@ -956,7 +956,7 @@ struct vulkan_seed_lookup_completion {
 template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_lookup_completion collect_seed_hits_vulkan(
     std::span<const p_minimizer_type> query_minimizers,
-    std::optional<bioseq::simd::vulkan_device_minimizer_span<p_minimizer_type>>
+    std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer_type>>
         device_minimizers,
     const bioseq::indexing::minimizer_hashmap_fragment_index& target_index,
     std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index> resident_index,
@@ -1247,7 +1247,7 @@ template <class p_minimizer_type>
     }
     constexpr std::uint32_t k_seed_lookup_local_size = 128u;
     const std::uint64_t required_workgroups =
-        bioseq::gpu::vulkan::ceil_div_u64(
+        bioseq::common::ceil_div(
             query_minimizers.size(), k_seed_lookup_local_size);
     if (decline_out != nullptr) {
         decline_out->required_workgroups = required_workgroups;

@@ -24,40 +24,6 @@ export namespace bioseq::codegen::sql {
 
 namespace detail {
 
-[[nodiscard]] inline std::string entity_handle_owner_key(
-    std::string_view source_module) {
-    if (source_module.starts_with("bioseq.")) {
-        source_module.remove_prefix(
-            std::string_view{"bioseq."}.size());
-    }
-    std::string result;
-    result.reserve(source_module.size());
-    bool pending_separator = false;
-    for (const unsigned char value : source_module) {
-        if ((value >= 'a' && value <= 'z')
-            || (value >= '0' && value <= '9')) {
-            if (pending_separator && !result.empty()) {
-                result.push_back('_');
-            }
-            pending_separator = false;
-            result.push_back(static_cast<char>(value));
-        } else if (value == '.' || value == ':' || value == '_') {
-            pending_separator = true;
-        } else {
-            throw std::runtime_error(
-                "SQL owner module '" + std::string{source_module}
-                + "' cannot form a generated C++ owner key");
-        }
-    }
-    if (result.empty()
-        || (result.front() >= '0' && result.front() <= '9')) {
-        throw std::runtime_error(
-            "SQL owner module '" + std::string{source_module}
-            + "' produced an invalid generated C++ owner key");
-    }
-    return result;
-}
-
 [[nodiscard]] inline std::string entity_handle_module_name(
     std::string_view owner_key) {
     return "bioseq.postgres.sql.generated.core." + std::string{owner_key}
@@ -98,19 +64,6 @@ namespace detail {
     }
     output << "} // namespace " << module.cpp_namespace << "\n";
     return output.str();
-}
-
-[[nodiscard]] inline std::string row_codec_owner_key(
-    std::string_view source_module) {
-    constexpr std::string_view suffix = ".sql_rows";
-    if (!source_module.ends_with(suffix)) {
-        throw std::runtime_error(
-            "generated row-codec owner module '"
-            + std::string{source_module}
-            + "' must end in .sql_rows");
-    }
-    source_module.remove_suffix(suffix.size());
-    return entity_handle_owner_key(source_module);
 }
 
 [[nodiscard]] inline std::string row_codec_module_name(
@@ -1351,8 +1304,9 @@ inline void validate_row_codec_text_lifetime_contract(
     std::ostringstream output;
     output
         << "module;\n\n"
-        << "#include \"common.h\"\n"
+        << "#include <bioseq/pg_compat.h>\n"
         << "#include \"utils/builtins.h\"\n"
+        << "#include \"utils/timestamp.h\"\n"
         << "#include \"utils/xid8.h\"\n\n"
         << "#include <array>\n"
         << "#include <concepts>\n"
@@ -1377,10 +1331,25 @@ inline void validate_row_codec_text_lifetime_contract(
 }  // namespace detail
 
 [[nodiscard]] inline std::vector<rendered_entity_handle_module>
-render_entity_handle_modules(const sql_graph& graph) {
+render_entity_handle_modules(
+        const sql_graph& graph,
+        const std::vector<
+            std::pair<std::string, std::string>>& configured_owners) {
     std::map<std::string, rendered_entity_handle_module, std::less<>>
         grouped;
     std::map<std::string, std::string, std::less<>> source_by_owner_key;
+    std::map<std::string, std::string, std::less<>>
+        configured_owner_by_module;
+    std::set<std::string, std::less<>> configured_owner_keys;
+    for (const auto& [owner_key, source_module] : configured_owners) {
+        if (!configured_owner_by_module.emplace(
+                source_module, owner_key).second
+            || !configured_owner_keys.emplace(owner_key).second) {
+            throw std::runtime_error(
+                "configured entity-handle owner mapping is not one-to-one "
+                "for '" + owner_key + "'");
+        }
+    }
     for (const normalized_entity& entity : graph.entities) {
         if (entity.source.kind != entity_kind::sequence) {
             continue;
@@ -1396,8 +1365,15 @@ render_entity_handle_modules(const sql_graph& graph) {
                 "generated entity handle '" + entity.stable_identity
                 + "' has no schema binding");
         }
-        const std::string owner_key =
-            detail::entity_handle_owner_key(entity.source.source_module);
+        const auto configured_owner = configured_owner_by_module.find(
+            entity.source.source_module);
+        if (configured_owner == configured_owner_by_module.end()) {
+            throw std::runtime_error(
+                "generated entity-handle source module '"
+                + entity.source.source_module
+                + "' has no configured owner mapping");
+        }
+        const std::string& owner_key = configured_owner->second;
         const auto [source_position, inserted] =
             source_by_owner_key.emplace(
                 owner_key, entity.source.source_module);
@@ -1433,6 +1409,15 @@ render_entity_handle_modules(const sql_graph& graph) {
         });
     }
 
+    for (const auto& [owner_key, source_module] : configured_owners) {
+        if (!grouped.contains(owner_key)) {
+            throw std::runtime_error(
+                "configured entity-handle owner '" + owner_key
+                + "' has no generated sequence in module '"
+                + source_module + "'");
+        }
+    }
+
     std::vector<rendered_entity_handle_module> result;
     result.reserve(grouped.size());
     for (auto& [owner_key, module] : grouped) {
@@ -1457,10 +1442,25 @@ render_entity_handle_modules(const sql_graph& graph) {
 }
 
 [[nodiscard]] inline std::vector<rendered_row_codec_module>
-render_row_codec_modules(const sql_graph& graph) {
+render_row_codec_modules(
+        const sql_graph& graph,
+        const std::vector<
+            std::pair<std::string, std::string>>& configured_owners) {
     using row_group = std::vector<std::pair<
         const normalized_entity*,
         std::vector<const normalized_entity*>>>;
+    std::map<std::string, std::string, std::less<>>
+        configured_owner_by_module;
+    std::set<std::string, std::less<>> configured_owner_keys;
+    for (const auto& [owner_key, source_module] : configured_owners) {
+        if (!configured_owner_by_module.emplace(
+                source_module, owner_key).second
+            || !configured_owner_keys.emplace(owner_key).second) {
+            throw std::runtime_error(
+                "configured row-codec owner mapping is not one-to-one "
+                "for '" + owner_key + "'");
+        }
+    }
     std::map<std::string, row_group, std::less<>> rows_by_source;
     for (const normalized_entity& entity : graph.entities) {
         if ((entity.source.kind != entity_kind::table
@@ -1496,7 +1496,6 @@ render_row_codec_modules(const sql_graph& graph) {
 
     std::vector<rendered_row_codec_module> result;
     result.reserve(rows_by_source.size());
-    std::map<std::string, std::string, std::less<>> source_by_owner;
     for (auto& [source_module, rows] : rows_by_source) {
         std::ranges::sort(
             rows,
@@ -1504,15 +1503,14 @@ render_row_codec_modules(const sql_graph& graph) {
             [](const auto& row) {
                 return row.first->source.cpp_qualified_name;
             });
-        const std::string owner_key =
-            detail::row_codec_owner_key(source_module);
-        const auto [source_position, inserted] =
-            source_by_owner.emplace(owner_key, source_module);
-        if (!inserted && source_position->second != source_module) {
+        const auto configured_owner =
+            configured_owner_by_module.find(source_module);
+        if (configured_owner == configured_owner_by_module.end()) {
             throw std::runtime_error(
-                "generated row-codec owner key collision for '"
-                + owner_key + "'");
+                "generated row-codec source module '" + source_module
+                + "' has no configured owner mapping");
         }
+        const std::string& owner_key = configured_owner->second;
         rendered_row_codec_module module{
             .owner_key = owner_key,
             .source_module = source_module,
@@ -1529,6 +1527,14 @@ render_row_codec_modules(const sql_graph& graph) {
         module.content =
             detail::render_row_codec_module(module, rows);
         result.push_back(std::move(module));
+    }
+    for (const auto& [owner_key, source_module] : configured_owners) {
+        if (!rows_by_source.contains(source_module)) {
+            throw std::runtime_error(
+                "configured row-codec owner '" + owner_key
+                + "' has no generated row in module '"
+                + source_module + "'");
+        }
     }
     return result;
 }

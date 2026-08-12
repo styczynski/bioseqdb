@@ -205,29 +205,34 @@ EXPECTED_TABLES: dict[str, tuple[tuple[str, str, bool], ...]] = {
     ),
 }
 
+EXTERNAL_ACCESS_METHOD_IDENTITY = (
+    "sql:access_method:$extension."
+    "bioseq::postgres::external::sql_routines.bioseq_external"
+)
+
 EXPECTED_TOP_LEVEL_IDENTITIES = {
     "sql:function:bioseq.bioseq_external_handler(internal)",
-    (
-        "sql:access_method:$extension."
-        "bioseq::external::sql_routines.bioseq_external"
-    ),
+    EXTERNAL_ACCESS_METHOD_IDENTITY,
     "sql:schema:bioseq_external",
     *(
         f"sql:table:bioseq_external.{name}"
         for name in EXPECTED_TABLES
     ),
     (
-        "sql:revoke:schema:bioseq_external:"
-        "all:public:ordinary"
+        "sql:revoke:bioseq_external:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all"
     ),
     (
-        "sql:revoke:all tables in schema:bioseq_external:"
-        "all:public:ordinary"
+        "sql:revoke:bioseq_external:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all:"
+        "scope=bioseq::sql::acl_scope::all_tables_in_schema"
     ),
     (
-        "sql:revoke:function:"
-        "bioseq.bioseq_external_handler(internal):"
-        "execute:public:ordinary"
+        "sql:revoke:bioseq_external_handler:"
+        "from=bioseq::sql::public_role:"
+        "privileges=bioseq::sql::privileges::all"
     ),
 }
 
@@ -245,11 +250,11 @@ KSW_TEST_FUNCTION_IDENTITY = (
     "highway_ksw_boundary_receipt_for_test()"
 )
 KSW_TEST_REVOKE_IDENTITY = (
-    "sql:revoke:function:bioseq_internal."
-    "highway_ksw_boundary_receipt_for_test():"
-    "execute:public:ordinary"
+    "sql:revoke:highway_ksw_boundary_receipt_for_test:"
+    "from=bioseq::sql::public_role:"
+    "privileges=bioseq::sql::privileges::all"
 )
-KSW_TEST_SQL_SUFFIX = (
+KSW_TEST_FUNCTION_SQL = (
     b"\n"
     b"CREATE OR REPLACE FUNCTION "
     b"bioseq_internal.highway_ksw_boundary_receipt_for_test()\n"
@@ -259,10 +264,18 @@ KSW_TEST_SQL_SUFFIX = (
     b"VOLATILE\n"
     b"PARALLEL UNSAFE\n"
     b"SECURITY INVOKER;\n"
+)
+KSW_TEST_REVOKE_SQL = (
     b"\n"
     b"REVOKE ALL ON FUNCTION "
     b"bioseq_internal.highway_ksw_boundary_receipt_for_test() "
     b"FROM PUBLIC;\n"
+)
+# Natural graph order separates the function from its dependent revoke, so
+# validate and remove the two exact profile-only statements independently.
+KSW_TEST_SQL_STATEMENTS = (
+    KSW_TEST_FUNCTION_SQL,
+    KSW_TEST_REVOKE_SQL,
 )
 
 
@@ -319,19 +332,22 @@ def _normalize_profile_sql(
         if (
             ksw_entities
             or ksw_statements
-            or KSW_TEST_SQL_SUFFIX in sql_bytes
+            or any(
+                statement in sql_bytes
+                for statement in KSW_TEST_SQL_STATEMENTS
+            )
         ):
             raise RuntimeError(
                 "production SQL contains the test-indexes-only KSW receipt"
             )
         return sql_bytes
 
-    if (
-        sql_bytes.count(KSW_TEST_SQL_SUFFIX) != 1
-        or not sql_bytes.endswith(KSW_TEST_SQL_SUFFIX)
+    if any(
+        sql_bytes.count(statement) != 1
+        for statement in KSW_TEST_SQL_STATEMENTS
     ):
         raise RuntimeError(
-            "test-indexes SQL does not end in exactly the reviewed KSW "
+            "test-indexes SQL does not contain exactly the reviewed KSW "
             "receipt projection"
         )
 
@@ -465,11 +481,10 @@ def _normalize_profile_sql(
             "test-indexes manifest does not contain the exact reviewed KSW "
             "receipt statement projection"
         )
-    if statements[-2:] != ksw_statements:
-        raise RuntimeError(
-            "test-indexes KSW receipt is not the terminal natural SQL delta"
-        )
-    return sql_bytes[: -len(KSW_TEST_SQL_SUFFIX)]
+    base_sql_bytes = sql_bytes
+    for statement in KSW_TEST_SQL_STATEMENTS:
+        base_sql_bytes = base_sql_bytes.replace(statement, b"", 1)
+    return base_sql_bytes
 
 
 def _parse_table_columns(body: str, table: str) -> tuple[tuple[str, str, bool], ...]:
@@ -657,10 +672,7 @@ def _verify_enabled_manifest(
     handler = by_identity[
         "sql:function:bioseq.bioseq_external_handler(internal)"
     ]
-    access_method_identity = (
-        "sql:access_method:$extension."
-        "bioseq::external::sql_routines.bioseq_external"
-    )
+    access_method_identity = EXTERNAL_ACCESS_METHOD_IDENTITY
     access_method = by_identity[access_method_identity]
     properties = handler.get("routine_properties")
     binding = handler.get("c_binding")

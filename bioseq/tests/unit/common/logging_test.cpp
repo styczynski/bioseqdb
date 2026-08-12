@@ -411,8 +411,8 @@ TEST_CASE("logging checked argument sizing enforces queue record bounds",
     // this record before the tracked argument is copied or constructed in
     // queue storage.
     std::uint32_t oversized_log_id = 0;
-    fmtlogWrapper<>::impl.log(
-        oversized_log_id, fmtlogWrapper<>::impl.tscns.rdtsc(),
+    fmtlog_wrapper<>::instance.log(
+        oversized_log_id, fmtlog_wrapper<>::instance.tscns.rdtsc(),
         "logging_test.cpp:oversized", fmtlog::INF, "oversized {} {}",
         std::string_view(prefix), tracked);
     CHECK(logging_tracked_argument::copy_count == 0);

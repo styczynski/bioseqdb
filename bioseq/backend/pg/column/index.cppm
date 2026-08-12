@@ -11,6 +11,9 @@ module;
 
 #include <bioseq/pg_compat.h>
 
+// Clang 22 reduced-BMI codegen needs allocation declarations reachable in the
+// module that instantiates the imported logging template below.
+#include <new>
 
 extern "C" {
 #include "miscadmin.h"

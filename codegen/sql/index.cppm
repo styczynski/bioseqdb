@@ -45,6 +45,98 @@ namespace detail {
         || owner_key == "vector_aggregate_registry";
 }
 
+inline void validate_final_fmgr_owner_modules(
+        const command_line& command) {
+    std::set<std::string, std::less<>> output_keys;
+    for (const configured_fmgr_entrypoint_output& output :
+         command.fmgr_entrypoint_outputs) {
+        if (support_owned_fmgr_output(output.owner_key)) continue;
+        if (!output_keys.emplace(output.owner_key).second) {
+            throw std::runtime_error(
+                "duplicate FINAL fmgr output for '"
+                + output.owner_key + "'");
+        }
+    }
+
+    std::set<std::string, std::less<>> owner_keys;
+    std::set<std::string, std::less<>> owner_modules;
+    for (const auto& [owner_key, source_module] :
+         command.fmgr_owners) {
+        if (support_owned_fmgr_output(owner_key)) {
+            throw std::runtime_error(
+                "synthetic SUPPORT fmgr output '" + owner_key
+                + "' must not claim a source module");
+        }
+        if (!owner_keys.emplace(owner_key).second) {
+            throw std::runtime_error(
+                "duplicate FINAL fmgr owner mapping for '"
+                + owner_key + "'");
+        }
+        if (!owner_modules.emplace(source_module).second) {
+            throw std::runtime_error(
+                "FINAL fmgr source module '" + source_module
+                + "' is assigned to more than one output");
+        }
+    }
+    for (const std::string& owner_key : output_keys) {
+        if (!owner_keys.contains(owner_key)) {
+            throw std::runtime_error(
+                "FINAL fmgr output '" + owner_key
+                + "' has no configured source-module owner");
+        }
+    }
+    for (const std::string& owner_key : owner_keys) {
+        if (!output_keys.contains(owner_key)) {
+            throw std::runtime_error(
+                "FINAL fmgr owner mapping '" + owner_key
+                + "' has no configured output");
+        }
+    }
+}
+
+inline void validate_row_codec_owner_modules(
+        const command_line& command) {
+    std::set<std::string, std::less<>> output_keys;
+    for (const configured_row_codec_output& output :
+         command.row_codec_outputs) {
+        if (!output_keys.emplace(output.owner_key).second) {
+            throw std::runtime_error(
+                "duplicate row-codec output for '"
+                + output.owner_key + "'");
+        }
+    }
+
+    std::set<std::string, std::less<>> owner_keys;
+    std::set<std::string, std::less<>> owner_modules;
+    for (const auto& [owner_key, source_module] :
+         command.row_codec_owners) {
+        if (!owner_keys.emplace(owner_key).second) {
+            throw std::runtime_error(
+                "duplicate row-codec owner mapping for '"
+                + owner_key + "'");
+        }
+        if (!owner_modules.emplace(source_module).second) {
+            throw std::runtime_error(
+                "row-codec source module '" + source_module
+                + "' is assigned to more than one output");
+        }
+    }
+    for (const std::string& owner_key : output_keys) {
+        if (!owner_keys.contains(owner_key)) {
+            throw std::runtime_error(
+                "row-codec output '" + owner_key
+                + "' has no configured source-module owner");
+        }
+    }
+    for (const std::string& owner_key : owner_keys) {
+        if (!output_keys.contains(owner_key)) {
+            throw std::runtime_error(
+                "row-codec owner mapping '" + owner_key
+                + "' has no configured output");
+        }
+    }
+}
+
 [[nodiscard]] inline std::string_view trim_cli_line(
     std::string_view value) noexcept {
     while (!value.empty()
@@ -159,28 +251,248 @@ parse_fmgr_entrypoint_output(std::string_view value) {
     };
 }
 
+[[nodiscard]] inline bool valid_cpp_module_identifier(
+        std::string_view value) noexcept {
+    if (value.empty()
+        || !((value.front() >= 'a' && value.front() <= 'z')
+             || (value.front() >= 'A' && value.front() <= 'Z')
+             || value.front() == '_')) {
+        return false;
+    }
+    return std::ranges::all_of(
+        value.substr(1),
+        [](char item) {
+            return (item >= 'a' && item <= 'z')
+                || (item >= 'A' && item <= 'Z')
+                || (item >= '0' && item <= '9')
+                || item == '_';
+        });
+}
+
+[[nodiscard]] inline bool valid_cpp_module_name(
+        std::string_view value) noexcept {
+    if (value.empty()) return false;
+    bool partition_seen = false;
+    std::size_t identifier_begin = 0;
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const char item = value[index];
+        if (item != '.' && item != ':') continue;
+        if (partition_seen
+            || !valid_cpp_module_identifier(
+                value.substr(identifier_begin,
+                             index - identifier_begin))) {
+            return false;
+        }
+        if (item == ':') partition_seen = true;
+        identifier_begin = index + 1;
+    }
+    return valid_cpp_module_identifier(value.substr(identifier_begin));
+}
+
 [[nodiscard]] inline std::pair<std::string, std::string>
-parse_fmgr_owner(std::string_view value) {
+parse_owner_module(
+        std::string_view value,
+        std::string_view option) {
+    const std::size_t assignment = value.find('=');
+    if (assignment == std::string_view::npos || assignment == 0
+        || assignment + 1 == value.size()) {
+        throw std::runtime_error(
+            std::string{option}
+            + " requires <owner-key>=<source-module>");
+    }
     const configured_entity_handle_output parsed =
         parse_entity_handle_output(value);
     const std::string source_module = parsed.path.generic_string();
-    if (source_module.empty()
-        || source_module.front() == '.'
-        || source_module.back() == '.'
-        || source_module.contains("..")
-        || !std::ranges::all_of(
-            source_module,
-            [](char item) {
-                return (item >= 'a' && item <= 'z')
-                    || (item >= 'A' && item <= 'Z')
-                    || (item >= '0' && item <= '9')
-                    || item == '_' || item == '.' || item == ':';
-            })) {
+    if (!valid_cpp_module_name(source_module)) {
         throw std::runtime_error(
-            "--fmgr-owner-module has invalid C++ module name '"
+            std::string{option} + " has invalid C++ module name '"
             + source_module + "'");
     }
     return {parsed.owner_key, source_module};
+}
+
+[[nodiscard]] inline std::pair<std::string, std::string>
+parse_entity_handle_owner(std::string_view value) {
+    return parse_owner_module(
+        value, "--entity-handle-owner-module");
+}
+
+[[nodiscard]] inline std::pair<std::string, std::string>
+parse_row_codec_owner(std::string_view value) {
+    return parse_owner_module(
+        value, "--row-codec-owner-module");
+}
+
+[[nodiscard]] inline std::pair<std::string, std::string>
+parse_fmgr_owner(std::string_view value) {
+    return parse_owner_module(value, "--fmgr-owner-module");
+}
+
+inline void run_owner_module_argument_contract_self_test() {
+    const auto parsed = parse_entity_handle_owner(
+        "storage_metadata_core="
+        "bioseq.postgres.storage.metadata.sql_entities");
+    if (parsed.first != "storage_metadata_core"
+        || parsed.second
+            != "bioseq.postgres.storage.metadata.sql_entities") {
+        throw std::runtime_error(
+            "entity-handle owner-module argument lost its explicit "
+            "registry identity");
+    }
+    const auto require_rejected = [](std::string_view value) {
+        try {
+            static_cast<void>(parse_entity_handle_owner(value));
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}.contains(
+                    "--entity-handle-owner-module")) {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "invalid entity-handle owner-module argument was accepted: "
+            + std::string{value});
+    };
+    require_rejected("storage_metadata_core");
+
+    const auto row_codec_parsed = parse_row_codec_owner(
+        "storage_indexing_pg="
+        "bioseq.postgres.storage.indexing.sql_rows");
+    if (row_codec_parsed.first != "storage_indexing_pg"
+        || row_codec_parsed.second
+            != "bioseq.postgres.storage.indexing.sql_rows") {
+        throw std::runtime_error(
+            "row-codec owner-module argument lost its explicit registry "
+            "identity");
+    }
+    const auto require_malformed_row_codec_rejected = [] {
+        try {
+            static_cast<void>(parse_row_codec_owner(
+                "storage_indexing_pg=a::b"));
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}
+                == "--row-codec-owner-module has invalid C++ module name 'a::b'") {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "malformed row-codec owner-module argument was accepted");
+    };
+    require_malformed_row_codec_rejected();
+
+    command_line row_codec_authority_contract;
+    row_codec_authority_contract.row_codec_outputs = {{
+        .owner_key = "storage_indexing_pg",
+        .path = "storage_indexing_pg.row_codecs.cppm",
+    }};
+    row_codec_authority_contract.row_codec_owners = {{
+        "storage_indexing_pg",
+        "bioseq.postgres.storage.indexing.sql_rows",
+    }};
+    validate_row_codec_owner_modules(row_codec_authority_contract);
+    const auto require_row_codec_authority_rejected = [](
+            command_line invalid,
+            std::string_view expected) {
+        try {
+            validate_row_codec_owner_modules(invalid);
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}.contains(expected)) {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "invalid row-codec owner authority was accepted");
+    };
+    command_line missing_row_codec_authority =
+        row_codec_authority_contract;
+    missing_row_codec_authority.row_codec_owners.clear();
+    require_row_codec_authority_rejected(
+        std::move(missing_row_codec_authority),
+        "has no configured source-module owner");
+    command_line extra_row_codec_authority =
+        row_codec_authority_contract;
+    extra_row_codec_authority.row_codec_owners.emplace_back(
+        "unused_owner", "bioseq.postgres.unused.sql_rows");
+    require_row_codec_authority_rejected(
+        std::move(extra_row_codec_authority),
+        "has no configured output");
+
+    const auto fmgr_parsed = parse_fmgr_owner(
+        "vector_types_integer="
+        "bioseq.postgres.vectorization.types.integer");
+    if (fmgr_parsed.first != "vector_types_integer"
+        || fmgr_parsed.second
+            != "bioseq.postgres.vectorization.types.integer") {
+        throw std::runtime_error(
+            "fmgr owner-module argument lost its explicit registry "
+            "identity");
+    }
+    const auto require_fmgr_rejected = [](std::string_view value) {
+        try {
+            static_cast<void>(parse_fmgr_owner(value));
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}.contains(
+                    "--fmgr-owner-module")) {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "invalid fmgr owner-module argument was accepted: "
+            + std::string{value});
+    };
+    require_fmgr_rejected("vector_types_integer");
+    require_fmgr_rejected("vector_types_integer=a::b");
+    require_fmgr_rejected("vector_types_integer=a:");
+    require_fmgr_rejected("vector_types_integer=a:b:c");
+    require_fmgr_rejected("vector_types_integer=a:b.c");
+
+    command_line authority_contract;
+    authority_contract.fmgr_entrypoint_outputs = {
+        {
+            .owner_key = "fixture_owner",
+            .path = "fixture.entrypoints.cppm",
+        },
+        {
+            .owner_key = "vector_comparison_registry",
+            .path = "vector-comparison-registry.cppm",
+        },
+    };
+    authority_contract.fmgr_owners = {
+        {"fixture_owner", "bioseq.postgres.fixture"},
+    };
+    validate_final_fmgr_owner_modules(authority_contract);
+    const auto require_authority_rejected = [](
+            command_line invalid,
+            std::string_view expected) {
+        try {
+            validate_final_fmgr_owner_modules(invalid);
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}.contains(expected)) {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "invalid FINAL fmgr owner authority was accepted");
+    };
+    command_line missing_authority = authority_contract;
+    missing_authority.fmgr_owners.clear();
+    require_authority_rejected(
+        std::move(missing_authority),
+        "has no configured source-module owner");
+    command_line extra_authority = authority_contract;
+    extra_authority.fmgr_owners.emplace_back(
+        "unused_owner", "bioseq.postgres.unused");
+    require_authority_rejected(
+        std::move(extra_authority), "has no configured output");
+    command_line synthetic_authority = authority_contract;
+    synthetic_authority.fmgr_owners.emplace_back(
+        "vector_comparison_registry", "generated.vector_registry");
+    require_authority_rejected(
+        std::move(synthetic_authority), "must not claim a source module");
 }
 
 [[nodiscard]] inline std::filesystem::path
@@ -1043,78 +1355,111 @@ inline void publish_guc_package(
     return output.str();
 }
 
+[[nodiscard]] inline std::size_t count_top_level_json_object_fields(
+    std::string_view document,
+    std::string_view field) {
+    std::size_t nesting_depth = 0;
+    std::size_t matching_fields = 0;
+    std::size_t root_key_begin = std::string_view::npos;
+    bool in_string = false;
+    bool escaped = false;
+    bool root_expects_key = false;
+    for (std::size_t index = 0; index < document.size(); ++index) {
+        const char character = document[index];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (character == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (character != '"') continue;
+            in_string = false;
+            if (root_key_begin == std::string_view::npos) continue;
+            llvm::Expected<llvm::json::Value> parsed_key =
+                llvm::json::parse(document.substr(
+                    root_key_begin, index - root_key_begin + 1U));
+            if (!parsed_key) {
+                llvm::consumeError(parsed_key.takeError());
+                throw std::runtime_error(
+                    "sealed SQL artifact is not valid JSON");
+            }
+            const std::optional<llvm::StringRef> key =
+                parsed_key->getAsString();
+            if (key && key->compare(llvm::StringRef{field}) == 0) {
+                ++matching_fields;
+            }
+            root_key_begin = std::string_view::npos;
+            root_expects_key = false;
+            continue;
+        }
+        switch (character) {
+            case '"':
+                in_string = true;
+                if (nesting_depth == 1U && root_expects_key) {
+                    root_key_begin = index;
+                }
+                break;
+            case '{':
+            case '[':
+                ++nesting_depth;
+                if (nesting_depth == 1U) {
+                    root_expects_key = character == '{';
+                }
+                break;
+            case '}':
+            case ']':
+                if (nesting_depth > 0U) --nesting_depth;
+                break;
+            case ',':
+                if (nesting_depth == 1U) root_expects_key = true;
+                break;
+            case ':':
+                if (nesting_depth == 1U) root_expects_key = false;
+                break;
+            default: break;
+        }
+    }
+    return matching_fields;
+}
+
 [[nodiscard]] inline std::string json_string_field(
     std::string_view document,
     std::string_view field) {
-    const std::string needle =
-        "\"" + std::string{field} + "\"";
-    const std::size_t position = document.find(needle);
-    if (position == std::string_view::npos
-        || document.find(needle, position + needle.size())
-            != std::string_view::npos) {
+    llvm::Expected<llvm::json::Value> parsed =
+        llvm::json::parse(document);
+    if (!parsed) {
+        llvm::consumeError(parsed.takeError());
+        throw std::runtime_error(
+            "sealed SQL artifact is not valid JSON");
+    }
+    const llvm::json::Object* object = parsed->getAsObject();
+    const std::optional<llvm::StringRef> value =
+        object == nullptr
+        ? std::nullopt
+        : object->getString(field);
+    const std::size_t matching_fields =
+        object == nullptr
+        ? 0U
+        : count_top_level_json_object_fields(document, field);
+    if (matching_fields != 1U) {
         throw std::runtime_error(
             "support manifest must contain exactly one string field '"
             + std::string{field} + "'");
     }
-    std::size_t cursor = position + needle.size();
-    while (cursor < document.size()
-           && (document[cursor] == ' '
-               || document[cursor] == '\t'
-               || document[cursor] == '\r'
-               || document[cursor] == '\n')) {
-        ++cursor;
-    }
-    if (cursor == document.size() || document[cursor++] != ':') {
-        throw std::runtime_error(
-            "malformed support manifest field '"
-            + std::string{field} + "'");
-    }
-    while (cursor < document.size()
-           && (document[cursor] == ' '
-               || document[cursor] == '\t'
-               || document[cursor] == '\r'
-               || document[cursor] == '\n')) {
-        ++cursor;
-    }
-    if (cursor == document.size() || document[cursor++] != '"') {
+    if (!value) {
         throw std::runtime_error(
             "support manifest field '" + std::string{field}
             + "' is not a string");
     }
-    std::string result;
-    bool escaped = false;
-    for (; cursor < document.size(); ++cursor) {
-        const char character = document[cursor];
-        if (escaped) {
-            throw std::runtime_error(
-                "support manifest field '" + std::string{field}
-                + "' unexpectedly contains JSON escapes");
-        }
-        if (character == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (character == '"') return result;
-        result.push_back(character);
-    }
-    throw std::runtime_error(
-        "unterminated support manifest field '"
-        + std::string{field} + "'");
+    return value->str();
 }
 
 [[nodiscard]] inline std::uint64_t json_unsigned_integer_field(
     std::string_view document,
     std::string_view field) {
-    const std::string needle =
-        "\"" + std::string{field} + "\"";
-    const std::size_t position = document.find(needle);
-    if (position == std::string_view::npos
-        || document.find(needle, position + needle.size())
-            != std::string_view::npos) {
-        throw std::runtime_error(
-            "sealed SQL artifact must contain exactly one numeric field '"
-            + std::string{field} + "'");
-    }
     llvm::Expected<llvm::json::Value> parsed =
         llvm::json::parse(document);
     if (!parsed) {
@@ -1127,12 +1472,70 @@ inline void publish_guc_package(
         object == nullptr
         ? std::nullopt
         : object->getInteger(field);
+    const std::size_t matching_fields =
+        object == nullptr
+        ? 0U
+        : count_top_level_json_object_fields(document, field);
+    if (matching_fields != 1U) {
+        throw std::runtime_error(
+            "sealed SQL artifact must contain exactly one numeric field '"
+            + std::string{field} + "'");
+    }
     if (!value || *value < 0) {
         throw std::runtime_error(
             "sealed SQL artifact field '" + std::string{field}
             + "' is not an unsigned integer");
     }
     return static_cast<std::uint64_t>(*value);
+}
+
+inline void run_json_object_field_contract_self_test() {
+    constexpr std::string_view document = R"json({
+  "schema": "outer",
+  "schema_revision": 1,
+  "key_like_string": "{\"schema\":\"inner\",\"schema_revision\":2}",
+  "nested": {
+    "schema": "inner",
+    "schema_revision": 2
+  }
+})json";
+    if (json_string_field(document, "schema") != "outer"
+        || json_unsigned_integer_field(
+               document, "schema_revision") != 1U) {
+        throw std::runtime_error(
+            "sealed SQL artifact field lookup escaped the top-level "
+            "JSON object");
+    }
+    const auto require_duplicate_rejected = [](
+            auto&& action,
+            std::string_view field) {
+        try {
+            action();
+        } catch (const std::runtime_error& failure) {
+            if (std::string_view{failure.what()}.contains(
+                    "exactly one")) {
+                return;
+            }
+            throw;
+        }
+        throw std::runtime_error(
+            "sealed SQL artifact accepted duplicate top-level field '"
+            + std::string{field} + "'");
+    };
+    require_duplicate_rejected(
+        [] {
+            static_cast<void>(json_string_field(
+                R"json({"schema":"outer","\u0073chema":"outer"})json",
+                "schema"));
+        },
+        "schema");
+    require_duplicate_rejected(
+        [] {
+            static_cast<void>(json_unsigned_integer_field(
+                R"json({"schema_revision":1,"schema\u005frevision":1})json",
+                "schema_revision"));
+        },
+        "schema_revision");
 }
 
 inline void verify_row_codec_modules(
@@ -1919,8 +2322,14 @@ load_sealed_guc_profile_projection(
             "generation requires --stage <support|core|final>, "
             "--compile-database, and --pcm-manifest "
             "[--entity-handles-output <owner-key>=<path>]... "
+            "[--entity-handle-owner-module "
+            "<owner-key>=<source-module>]... "
             "[--row-codecs-output <owner-key>=<path>]... "
+            "[--row-codec-owner-module "
+            "<owner-key>=<source-module>]... "
             "[--fmgr-entrypoints-output <owner-key>=<path>]... "
+            "[--fmgr-owner-module "
+            "<owner-key>=<source-module>]... "
             "[--guc-output-root <path> "
             "--guc-active-profile <production|test_indexes>] "
             "[--require-complete-codegen] "
@@ -1951,7 +2360,9 @@ load_sealed_guc_profile_projection(
         const bool repeatable =
             option == "--source"
             || option == "--entity-handles-output"
+            || option == "--entity-handle-owner-module"
             || option == "--row-codecs-output"
+            || option == "--row-codec-owner-module"
             || option == "--fmgr-entrypoints-output"
             || option == "--fmgr-owner-module";
         if (!repeatable
@@ -2027,9 +2438,15 @@ load_sealed_guc_profile_projection(
         } else if (option == "--entity-handles-output") {
             result.entity_handle_outputs.push_back(
                 detail::parse_entity_handle_output(value));
+        } else if (option == "--entity-handle-owner-module") {
+            result.entity_handle_owners.push_back(
+                detail::parse_entity_handle_owner(value));
         } else if (option == "--row-codecs-output") {
             result.row_codec_outputs.push_back(
                 detail::parse_row_codec_output(value));
+        } else if (option == "--row-codec-owner-module") {
+            result.row_codec_owners.push_back(
+                detail::parse_row_codec_owner(value));
         } else if (option == "--fmgr-entrypoints-output") {
             result.fmgr_entrypoint_outputs.push_back(
                 detail::parse_fmgr_entrypoint_output(value));
@@ -2183,8 +2600,11 @@ load_sealed_guc_profile_projection(
             || !result.test_indexes_support_seal.empty()
             || !result.expected_core_hash.empty()
             || !result.entity_handle_outputs.empty()
+            || !result.entity_handle_owners.empty()
             || !result.row_codec_outputs.empty()
+            || !result.row_codec_owners.empty()
             || !result.fmgr_entrypoint_outputs.empty()
+            || !result.fmgr_owners.empty()
             || result.require_complete_codegen) {
             throw std::runtime_error(
                 "prepare does not accept generation output options");
@@ -2223,20 +2643,24 @@ load_sealed_guc_profile_projection(
     if (result.stage == generation_stage::support
         && (result.manifest.empty()
             || result.row_codec_outputs.empty()
+            || result.row_codec_owners.empty()
             || result.fmgr_entrypoint_outputs.empty()
             || result.guc_output_root.empty())) {
         throw std::runtime_error(
             "support generation requires --manifest, "
-            "--row-codecs-output, SUPPORT registry outputs, "
+            "--row-codecs-output, --row-codec-owner-module, "
+            "SUPPORT registry outputs, "
             "and --guc-output-root");
     }
     if (result.stage == generation_stage::core
         && (result.core_hash_output.empty()
             || result.core_manifest.empty()
-            || result.entity_handle_outputs.empty())) {
+            || result.entity_handle_outputs.empty()
+            || result.entity_handle_owners.empty())) {
         throw std::runtime_error(
             "core generation requires --core-hash-output, "
-            "--core-manifest, and --entity-handles-output");
+            "--core-manifest, --entity-handles-output, and "
+            "--entity-handle-owner-module");
     }
     if (result.stage == generation_stage::final
         && (result.output.empty() || result.manifest.empty())) {
@@ -2245,19 +2669,26 @@ load_sealed_guc_profile_projection(
             "CORE, SUPPORT, row-codec, GUC, and fmgr artifacts are "
             "required only when selected by registered owners");
     }
+    if (result.stage == generation_stage::support
+        || result.stage == generation_stage::final) {
+        detail::validate_row_codec_owner_modules(result);
+    }
     if (result.stage == generation_stage::final) {
+        detail::validate_final_fmgr_owner_modules(result);
         const bool any_core =
             !result.expected_core_hash.empty()
             || !result.core_manifest.empty()
-            || !result.entity_handle_outputs.empty();
+            || !result.entity_handle_outputs.empty()
+            || !result.entity_handle_owners.empty();
         const bool complete_core =
             !result.expected_core_hash.empty()
             && !result.core_manifest.empty()
-            && !result.entity_handle_outputs.empty();
+            && !result.entity_handle_outputs.empty()
+            && !result.entity_handle_owners.empty();
         if (any_core != complete_core) {
             throw std::runtime_error(
                 "FINAL CORE handoff requires expected seal, manifest, and "
-                "entity-handle outputs together");
+                "entity-handle outputs/owner mappings together");
         }
         if (result.support_manifest.empty()
             != result.support_seal.empty()) {
@@ -2300,6 +2731,8 @@ load_sealed_guc_profile_projection(
             || !result.test_indexes_support_manifest.empty()
             || !result.test_indexes_support_seal.empty()
             || !result.entity_handle_outputs.empty()
+            || !result.entity_handle_owners.empty()
+            || !result.fmgr_owners.empty()
             || result.require_complete_codegen)) {
         throw std::runtime_error(
             "support generation accepts only SUPPORT-owned outputs");
@@ -2325,7 +2758,9 @@ load_sealed_guc_profile_projection(
             || !result.test_indexes_support_seal.empty()
             || !result.expected_core_hash.empty()
             || !result.row_codec_outputs.empty()
+            || !result.row_codec_owners.empty()
             || !result.fmgr_entrypoint_outputs.empty()
+            || !result.fmgr_owners.empty()
             || !result.guc_output_root.empty()
             || result.require_complete_codegen)) {
         throw std::runtime_error(
@@ -2348,7 +2783,9 @@ load_sealed_guc_profile_projection(
 [[nodiscard]] inline int self_test() {
     try {
         run_generator_contract_self_tests();
+        detail::run_owner_module_argument_contract_self_test();
         detail::run_artifact_path_alias_contract_self_test();
+        detail::run_json_object_field_contract_self_test();
         return 0;
     } catch (const std::exception& error) {
         std::println(stderr, "bioseq_sql_codegen: {}", error.what());
@@ -2454,6 +2891,7 @@ load_sealed_guc_profile_projection(
                 .compile_database = command.compile_database,
                 .pcm_root = command.pcm_root,
                 .compiler_profile = command.compiler_profile,
+                .dependency_modules = prepared_validation.modules,
             });
         program.compilation_signature = bioseq::common::sha256_hex(
             "bioseq_sql_relocatable_prepared_closure\n"
@@ -2512,7 +2950,8 @@ load_sealed_guc_profile_projection(
             }
             const std::vector<rendered_row_codec_module>
                 row_codec_modules =
-                    render_row_codec_modules(graph);
+                    render_row_codec_modules(
+                        graph, command.row_codec_owners);
             const std::vector<rendered_fmgr_entrypoint_module>
                 vector_registry_modules =
                     render_support_vector_registry_modules(
@@ -2555,7 +2994,8 @@ load_sealed_guc_profile_projection(
         if (command.stage == generation_stage::core
             || !command.expected_core_hash.empty()) {
             entity_handle_modules =
-                render_entity_handle_modules(graph);
+                render_entity_handle_modules(
+                    graph, command.entity_handle_owners);
         }
         const std::string core_hash =
             detail::core_descriptor_hash(entity_handle_modules);
@@ -2604,7 +3044,8 @@ load_sealed_guc_profile_projection(
             row_codec_modules;
         if (!command.row_codec_outputs.empty()) {
             row_codec_modules =
-                render_row_codec_modules(graph);
+                render_row_codec_modules(
+                    graph, command.row_codec_owners);
         }
         const std::vector<rendered_fmgr_entrypoint_module>
             fmgr_entrypoint_modules =
@@ -2677,6 +3118,8 @@ load_sealed_guc_profile_projection(
             graph,
             artifact,
             fmgr_entrypoint_modules,
+            command.entity_handle_owners,
+            command.row_codec_owners,
             command.extension_name == "bioseq");
         if (active_gucs && active_guc_package) {
             manifest = merge_guc_manifest(

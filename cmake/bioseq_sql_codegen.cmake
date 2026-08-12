@@ -10,6 +10,15 @@ function(_bioseq_sql_registry_fail message_text)
     "SQL owner registry: ${_full_message}")
 endfunction()
 
+function(_bioseq_sql_support_owned_fmgr_entrypoint output_variable facet_key)
+  if(facet_key STREQUAL "vector_comparison_registry"
+      OR facet_key STREQUAL "vector_aggregate_registry")
+    set(${output_variable} TRUE PARENT_SCOPE)
+  else()
+    set(${output_variable} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
+
 # Instantiates the owner-derived FINAL collection/render/validation pipeline for
 # a finalized extension context.  SUPPORT and CORE remain owned by contexts
 # that registered those facets; a FINAL/fmgr-only sibling extension therefore
@@ -592,6 +601,12 @@ function(bioseq_sql_begin_owner_registry)
   set_property(GLOBAL PROPERTY "${_context_prefix}_AUDIT_ROOTS"
     "${_audit_roots}")
   set_property(GLOBAL PROPERTY "${_context_prefix}_OWNERS" "")
+  set_property(GLOBAL PROPERTY
+    "${_context_prefix}_ENTITY_HANDLE_OWNER_RECORDS" "")
+  set_property(GLOBAL PROPERTY
+    "${_context_prefix}_ROW_CODEC_OWNER_RECORDS" "")
+  set_property(GLOBAL PROPERTY
+    "${_context_prefix}_FMGR_OWNER_RECORDS" "")
   set_property(GLOBAL PROPERTY BIOSEQ_SQL_ACTIVE_CONTEXT
     "${ARG_EXTENSION}")
   if(NOT ARG_EXTENSION)
@@ -604,7 +619,7 @@ function(bioseq_register_sql_owner)
     ARG
     ""
     "EXTENSION;OWNER_KEY;MODULE"
-    "SOURCES;PROFILES;AUTHORITIES;ROW_CODECS;ENTITY_HANDLES;FMGR_ENTRYPOINTS;GUC_OWNERS;ANNOTATION_FREE_RESULT_ROWS;HANDWRITTEN_FMGR_EXPORTS"
+    "SOURCES;PROFILES;AUTHORITIES;ROW_CODECS;ENTITY_HANDLES;FMGR_ENTRYPOINTS;FMGR_OWNER_MODULES;GUC_OWNERS;ANNOTATION_FREE_RESULT_ROWS;HANDWRITTEN_FMGR_EXPORTS"
     ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     _bioseq_sql_registry_fail(
@@ -655,6 +670,71 @@ function(bioseq_register_sql_owner)
     _bioseq_sql_registry_fail(
       "invalid C++ module name '${ARG_MODULE}' for ${ARG_OWNER_KEY}")
   endif()
+
+  set(_explicit_fmgr_owner_keys)
+  set(_explicit_fmgr_owner_modules)
+  foreach(_fmgr_owner_record IN LISTS ARG_FMGR_OWNER_MODULES)
+    string(FIND "${_fmgr_owner_record}" "=" _assignment_index)
+    if(_assignment_index LESS 1)
+      _bioseq_sql_registry_fail(
+        "FMGR_OWNER_MODULES entry '${_fmgr_owner_record}' on "
+        "${ARG_OWNER_KEY} must be <facet-key>=<source-module>")
+    endif()
+    math(EXPR _module_index "${_assignment_index} + 1")
+    string(SUBSTRING "${_fmgr_owner_record}" 0
+      ${_assignment_index} _fmgr_owner_key)
+    string(SUBSTRING "${_fmgr_owner_record}" ${_module_index} -1
+      _fmgr_owner_module)
+    if(NOT _fmgr_owner_key MATCHES "^[a-z][a-z0-9_]*$")
+      _bioseq_sql_registry_fail(
+        "invalid FMGR owner key '${_fmgr_owner_key}' on ${ARG_OWNER_KEY}")
+    endif()
+    if(NOT _fmgr_owner_module MATCHES
+        "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*(:[A-Za-z_][A-Za-z0-9_]*)?$")
+      _bioseq_sql_registry_fail(
+        "invalid FMGR owner module '${_fmgr_owner_module}' on "
+        "${ARG_OWNER_KEY}")
+    endif()
+    list(FIND ARG_FMGR_ENTRYPOINTS "${_fmgr_owner_key}"
+      _fmgr_facet_index)
+    if(_fmgr_facet_index EQUAL -1)
+      _bioseq_sql_registry_fail(
+        "FMGR owner mapping '${_fmgr_owner_key}' on ${ARG_OWNER_KEY} "
+        "does not name a registered FMGR_ENTRYPOINTS facet")
+    endif()
+    _bioseq_sql_support_owned_fmgr_entrypoint(
+      _support_owned_fmgr_entrypoint "${_fmgr_owner_key}")
+    if(_support_owned_fmgr_entrypoint)
+      _bioseq_sql_registry_fail(
+        "synthetic SUPPORT FMGR facet '${_fmgr_owner_key}' on "
+        "${ARG_OWNER_KEY} must not claim a source module")
+    endif()
+    list(FIND _explicit_fmgr_owner_keys "${_fmgr_owner_key}"
+      _duplicate_fmgr_key_index)
+    if(NOT _duplicate_fmgr_key_index EQUAL -1)
+      _bioseq_sql_registry_fail(
+        "duplicate FMGR owner mapping for '${_fmgr_owner_key}' on "
+        "${ARG_OWNER_KEY}")
+    endif()
+    list(FIND _explicit_fmgr_owner_modules "${_fmgr_owner_module}"
+      _duplicate_fmgr_module_index)
+    if(NOT _duplicate_fmgr_module_index EQUAL -1)
+      _bioseq_sql_registry_fail(
+        "FMGR source module '${_fmgr_owner_module}' is assigned to more "
+        "than one facet on ${ARG_OWNER_KEY}")
+    endif()
+    list(APPEND _explicit_fmgr_owner_keys "${_fmgr_owner_key}")
+    list(APPEND _explicit_fmgr_owner_modules "${_fmgr_owner_module}")
+  endforeach()
+
+  set(_natural_fmgr_entrypoints)
+  foreach(_fmgr_entrypoint IN LISTS ARG_FMGR_ENTRYPOINTS)
+    _bioseq_sql_support_owned_fmgr_entrypoint(
+      _support_owned_fmgr_entrypoint "${_fmgr_entrypoint}")
+    if(NOT _support_owned_fmgr_entrypoint)
+      list(APPEND _natural_fmgr_entrypoints "${_fmgr_entrypoint}")
+    endif()
+  endforeach()
 
   get_property(_registered_owner_keys GLOBAL
     PROPERTY "${_context_prefix}_OWNERS")
@@ -831,6 +911,7 @@ function(bioseq_register_sql_owner)
   get_property(_registered_sources GLOBAL
     PROPERTY "${_context_prefix}_SOURCES")
   set(_owner_sources)
+  set(_owner_declared_modules)
   foreach(_source IN LISTS ARG_SOURCES)
     if(IS_ABSOLUTE "${_source}")
       _bioseq_sql_registry_fail(
@@ -925,6 +1006,7 @@ function(bioseq_register_sql_owner)
         "${_source_real}")
     endif()
     set(_declared_source_module "${CMAKE_MATCH_1}")
+    list(APPEND _owner_declared_modules "${_declared_source_module}")
     if(NOT _declared_source_module STREQUAL ARG_MODULE
         AND NOT _declared_source_module MATCHES
           "^${ARG_MODULE}[:.][A-Za-z_][A-Za-z0-9_]*$")
@@ -959,6 +1041,52 @@ function(bioseq_register_sql_owner)
         "CORE source imports generated SQL modules and cannot bootstrap: "
         "${_source_real}")
     endif()
+  endforeach()
+
+  if(ARG_ROW_CODECS)
+    list(LENGTH ARG_ROW_CODECS _row_codec_facet_count)
+    list(LENGTH _owner_declared_modules _row_codec_module_count)
+    if(NOT _row_codec_facet_count EQUAL 1
+        OR NOT _row_codec_module_count EQUAL 1)
+      _bioseq_sql_registry_fail(
+        "row-codec owner ${ARG_OWNER_KEY} must register exactly one facet "
+        "and one source module")
+    endif()
+    list(GET _owner_declared_modules 0 _row_codec_source_module)
+    if(NOT _row_codec_source_module STREQUAL ARG_MODULE)
+      _bioseq_sql_registry_fail(
+        "row-codec owner ${ARG_OWNER_KEY} module '${ARG_MODULE}' does not "
+        "exactly name its source module '${_row_codec_source_module}'")
+    endif()
+  endif()
+
+  foreach(_fmgr_owner_module IN LISTS _explicit_fmgr_owner_modules)
+    list(FIND _owner_declared_modules "${_fmgr_owner_module}"
+      _declared_module_index)
+    if(_declared_module_index EQUAL -1)
+      _bioseq_sql_registry_fail(
+        "FMGR source module '${_fmgr_owner_module}' on ${ARG_OWNER_KEY} "
+        "is not declared by one of the owner's registered sources")
+    endif()
+  endforeach()
+  list(LENGTH _natural_fmgr_entrypoints _natural_fmgr_entrypoint_count)
+  set(_resolved_fmgr_owner_records)
+  foreach(_fmgr_owner_key IN LISTS _natural_fmgr_entrypoints)
+    list(FIND _explicit_fmgr_owner_keys "${_fmgr_owner_key}"
+      _explicit_fmgr_owner_index)
+    if(_explicit_fmgr_owner_index EQUAL -1)
+      if(_natural_fmgr_entrypoint_count GREATER 1)
+        _bioseq_sql_registry_fail(
+          "multi-facet FMGR owner ${ARG_OWNER_KEY} must explicitly map "
+          "'${_fmgr_owner_key}' with FMGR_OWNER_MODULES")
+      endif()
+      set(_resolved_fmgr_owner_module "${ARG_MODULE}")
+    else()
+      list(GET _explicit_fmgr_owner_modules
+        ${_explicit_fmgr_owner_index} _resolved_fmgr_owner_module)
+    endif()
+    list(APPEND _resolved_fmgr_owner_records
+      "${_fmgr_owner_key}=${_resolved_fmgr_owner_module}")
   endforeach()
 
   set(_profiles_for_record ${ARG_PROFILES})
@@ -1012,16 +1140,35 @@ function(bioseq_register_sql_owner)
       PROPERTY "${_context_prefix}_OWNER_RECORDS"
       "${ARG_OWNER_KEY}\t${ARG_MODULE}\t${_profile_record}\t${_authority_record}\t${_facet_record}\t${_source_real}")
   endforeach()
-  foreach(_fmgr_owner IN LISTS ARG_FMGR_ENTRYPOINTS)
+  foreach(_entity_handle_owner IN LISTS ARG_ENTITY_HANDLES)
+    set_property(GLOBAL APPEND
+      PROPERTY "${_context_prefix}_ENTITY_HANDLE_OWNER_RECORDS"
+      "${_entity_handle_owner}=${ARG_MODULE}")
+  endforeach()
+  foreach(_row_codec_owner IN LISTS ARG_ROW_CODECS)
+    set(_row_codec_owner_record
+      "${_row_codec_owner}=${ARG_MODULE}")
+    set_property(GLOBAL APPEND
+      PROPERTY "${_context_prefix}_ROW_CODEC_OWNER_RECORDS"
+      "${_row_codec_owner_record}")
+    foreach(_profile IN LISTS ARG_PROFILES)
+      _bioseq_sql_profile_key(_profile_key "${_profile}")
+      set_property(GLOBAL APPEND
+        PROPERTY
+          "${_context_prefix}_${_profile_key}_ROW_CODEC_OWNER_RECORDS"
+        "${_row_codec_owner_record}")
+    endforeach()
+  endforeach()
+  foreach(_fmgr_owner_record IN LISTS _resolved_fmgr_owner_records)
     set_property(GLOBAL APPEND
       PROPERTY "${_context_prefix}_FMGR_OWNER_RECORDS"
-      "${_fmgr_owner}=${ARG_MODULE}")
+      "${_fmgr_owner_record}")
     foreach(_profile IN LISTS ARG_PROFILES)
       _bioseq_sql_profile_key(_profile_key "${_profile}")
       set_property(GLOBAL APPEND
         PROPERTY
           "${_context_prefix}_${_profile_key}_FMGR_OWNER_RECORDS"
-        "${_fmgr_owner}=${ARG_MODULE}")
+        "${_fmgr_owner_record}")
     endforeach()
   endforeach()
 

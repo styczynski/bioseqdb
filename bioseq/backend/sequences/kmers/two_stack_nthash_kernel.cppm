@@ -80,7 +80,7 @@ struct borrowed_packed_instance {
 
     static constexpr std::size_t letter_bit_width =
         bioseq::storage::lazy_sequence_view<p_alphabet>::traits::
-            logical_bits_per_symbol;
+            k_logical_bits_per_symbol;
     static constexpr std::size_t byte_width = sizeof(p_storage_unit);
     static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
@@ -228,12 +228,12 @@ template<
     std::size_t p_window_size,
     std::size_t... p_index>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-vec_stream<p_simd_tag, p_storage_unit, p_window_size>
-make_undefined_vec_stream(
+vector_stream<p_simd_tag, p_storage_unit, p_window_size>
+make_undefined_vector_stream(
     p_simd_tag simd_tag,
     std::index_sequence<p_index...>) noexcept
 {
-    return pack_vec_stream<p_simd_tag, p_storage_unit, p_window_size>(
+    return pack_vector_stream<p_simd_tag, p_storage_unit, p_window_size>(
         simd_tag, ((void)p_index, hn::Undefined(simd_tag))...);
 }
 
@@ -244,14 +244,14 @@ template<
     std::size_t p_window_size,
     std::size_t... p_index>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-std::array<vec_stream<p_simd_tag, p_storage_unit, p_window_size>, p_capacity>
-make_undefined_vec_stream_array(
+std::array<vector_stream<p_simd_tag, p_storage_unit, p_window_size>, p_capacity>
+make_undefined_vector_stream_array(
     p_simd_tag simd_tag,
     std::index_sequence<p_index...>) noexcept
 {
     return {
         ((void)p_index,
-         make_undefined_vec_stream<
+         make_undefined_vector_stream<
              p_simd_tag, p_storage_unit, p_window_size>(
              simd_tag, std::make_index_sequence<p_window_size>{}))...
     };
@@ -268,10 +268,10 @@ template<
     typename p_storage_unit,
     std::size_t p_window_size>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-std::array<vec_stream<p_simd_tag, p_storage_unit, p_window_size>, p_capacity>
-make_undefined_vec_stream_array(p_simd_tag simd_tag) noexcept
+std::array<vector_stream<p_simd_tag, p_storage_unit, p_window_size>, p_capacity>
+make_undefined_vector_stream_array(p_simd_tag simd_tag) noexcept
 {
-    return make_undefined_vec_stream_array<
+    return make_undefined_vector_stream_array<
         p_capacity, p_simd_tag, p_storage_unit, p_window_size>(
         simd_tag, std::make_index_sequence<p_capacity>{});
 }
@@ -279,7 +279,7 @@ make_undefined_vec_stream_array(p_simd_tag simd_tag) noexcept
 /**
  * Register-promotable state for one two-stack SIMD traversal.
  *
- * The state is stack-owned, `step_one_bp_vec_stream` is its only mutator, and
+ * The state is stack-owned, `step_one_bp_vector_stream` is its only mutator, and
  * the collector reference remains valid for the enclosing kernel call.
  */
 template<
@@ -308,7 +308,7 @@ struct sequence_simd_iteration_state {
     using vector_type         = hn::Vec<simd_tag_type>;
     using mask_type        = hn::Mask<simd_tag_type>;
     using vector_stream_type =
-        vec_stream<simd_tag_type, storage_unit, p_stream_count>;
+        vector_stream<simd_tag_type, storage_unit, p_stream_count>;
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
 
     // Per-iteration mutable state.
@@ -358,16 +358,20 @@ struct sequence_simd_iteration_state {
     // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN two_stack_simd_iteration_resident_kernel
     template<bool p_is_full, typename p_offsets_type>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE
-    void step_one_bp_vec_stream(
+    void step_one_bp_vector_stream(
         simd_tag_type          d,
         p_offsets_type const& offsets_in,
         mask_type       live_mask,
         vector_stream_type bp_v
     ) {
         // ---- Forward / RC state update ----
-        const vector_stream_type complemented = Xor(bp_v, v_alphabet_complement_xor);
-        state_fwd = And(Or(ShiftLeft<p_sequence_traits::bits_per_char>(state_fwd), bp_v),
-                        v_kmer_mask);
+        const vector_stream_type complemented =
+            bit_xor(bp_v, v_alphabet_complement_xor);
+        state_fwd = bit_and(
+            bit_or(
+                shift_left<p_sequence_traits::bits_per_char>(state_fwd),
+                bp_v),
+            v_kmer_mask);
 
         vector_stream_type new_high;
         if constexpr (k_has_static_kmer) {
@@ -377,7 +381,7 @@ struct sequence_simd_iteration_state {
             // bit-castable. dna5 has leftover bits at every candidate width,
             // so unsupported wide shifts must be rejected before this leaf.
             if constexpr (static_rev_shift < sizeof(storage_unit) * 8) {
-                new_high = ShiftLeft<static_rev_shift>(complemented);
+                new_high = shift_left<static_rev_shift>(complemented);
             } else {
                 DEBUG_ASSERT(false,
                     fmt::format("two_stack SIMD: static k-mer reverse-complement "
@@ -391,45 +395,51 @@ struct sequence_simd_iteration_state {
         } else {
             const size_t dynamic_rev_shift =
                 p_sequence_traits::bits_per_char * (kmer_size - 1);
-            new_high = ShiftLeftSame(complemented,
+            new_high = shift_left_same(complemented,
                 static_cast<int>(dynamic_rev_shift));
         }
-        state_rc = Or(ShiftRight<p_sequence_traits::bits_per_char>(state_rc), new_high);
+        state_rc = bit_or(
+            shift_right<p_sequence_traits::bits_per_char>(state_rc), new_high);
 
         // ---- Lex + strand classification ----
-        const vector_stream_type  lex    = Min(state_fwd, state_rc);
-        const mask_stream_type strand = Lt(state_rc, state_fwd);
+        const vector_stream_type lex = minimum(state_fwd, state_rc);
+        const mask_stream_type strand = less(state_rc, state_fwd);
 
         // Mixed hash for ordering. The post-multiplication
         // mask is `hash_mask_high` alone.
-        const vector_stream_type hash_full = And(Mul(lex, v_golden), v_hash_kmer_mask);
+        const vector_stream_type hash_full = bit_and(
+            multiply(lex, v_golden), v_hash_kmer_mask);
 
         // ---- Strand-encoded lex (LSB := strand bit) for emit-time recovery.
-        const vector_stream_type hash_with_strand_lex =
-            IfThenElse(strand, Or(lex, v_one), And(lex, v_strand_clear));
+        const vector_stream_type hash_with_strand_lex = if_then_else(
+            strand,
+            bit_or(lex, v_one),
+            bit_and(lex, v_strand_clear));
 
         // ---- Element pack — palindrome detection on `p_detect_palindrome` path.
-        const vector_stream_type elem_valid = Or(hash_full, pos_local);
+        const vector_stream_type elem_valid = bit_or(hash_full, pos_local);
         vector_stream_type packed_element;
         if constexpr (p_detect_palindrome) {
-            const mask_stream_type palindrome = Eq(state_fwd, state_rc);
-            const mask_stream_type valid_mask = AndNot(palindrome, live_mask);
-            packed_element = IfThenElse(valid_mask, elem_valid, v_max);
+            const mask_stream_type palindrome = equal(state_fwd, state_rc);
+            const mask_stream_type valid_mask =
+                bit_and_not(palindrome, live_mask);
+            packed_element = if_then_else(valid_mask, elem_valid, v_max);
         } else {
-            packed_element = IfThenElse(live_mask, elem_valid, v_max);
+            packed_element = if_then_else(live_mask, elem_valid, v_max);
         }
 
         ring_buf_elem[ring_idx]        = packed_element;
         ring_buf_hash_strand[ring_idx] = hash_with_strand_lex;
 
         // ---- Prefix-min running update ----
-        const mask_stream_type prefix_better = Lt(packed_element, prefix_min);
-        prefix_min  = IfThenElse(prefix_better, packed_element, prefix_min);
-        prefix_kmer = IfThenElse(prefix_better, hash_with_strand_lex, prefix_kmer);
+        const mask_stream_type prefix_better = less(packed_element, prefix_min);
+        prefix_min = if_then_else(prefix_better, packed_element, prefix_min);
+        prefix_kmer = if_then_else(
+            prefix_better, hash_with_strand_lex, prefix_kmer);
 
         ++ring_idx;
         ++step;
-        pos_local = Add(pos_local, v_one);
+        pos_local = add(pos_local, v_one);
 
         // ---- Suffix-min rebuild every w iterations ----
         if (ring_idx == w) [[unlikely]] {
@@ -442,11 +452,11 @@ struct sequence_simd_iteration_state {
                     constexpr size_t i = p_static_window_size - 1 - decltype(idx_const)::value;
                     const auto current_slot   = ring_buf_elem[i];
                     const auto previous_slot  = ring_buf_elem[i - 1];
-                    const auto current_better = Lt(current_slot, previous_slot);
+                    const auto current_better = less(current_slot, previous_slot);
                     ring_buf_elem[i - 1] =
-                        IfThenElse(current_better, current_slot, previous_slot);
+                        if_then_else(current_better, current_slot, previous_slot);
                     ring_buf_hash_strand[i - 1] =
-                        IfThenElse(current_better,
+                        if_then_else(current_better,
                             ring_buf_hash_strand[i],
                             ring_buf_hash_strand[i - 1]);
                 });
@@ -454,11 +464,11 @@ struct sequence_simd_iteration_state {
                 for (size_t i = w - 1; i > 0; --i) {
                     const auto current_slot   = ring_buf_elem[i];
                     const auto previous_slot  = ring_buf_elem[i - 1];
-                    const auto current_better = Lt(current_slot, previous_slot);
+                    const auto current_better = less(current_slot, previous_slot);
                     ring_buf_elem[i - 1] =
-                        IfThenElse(current_better, current_slot, previous_slot);
+                        if_then_else(current_better, current_slot, previous_slot);
                     ring_buf_hash_strand[i - 1] =
-                        IfThenElse(current_better,
+                        if_then_else(current_better,
                             ring_buf_hash_strand[i],
                             ring_buf_hash_strand[i - 1]);
                 }
@@ -471,33 +481,35 @@ struct sequence_simd_iteration_state {
         // ---- Window-min = min(prefix_min, ring_buf[ring_idx]) ----
         const vector_stream_type  suffix_min  = ring_buf_elem[ring_idx];
         const vector_stream_type  suffix_kmer = ring_buf_hash_strand[ring_idx];
-        const mask_stream_type prefix_wins = Lt(prefix_min, suffix_min);
+        const mask_stream_type prefix_wins = less(prefix_min, suffix_min);
         const vector_stream_type  window_min  =
-            IfThenElse(prefix_wins, prefix_min, suffix_min);
+            if_then_else(prefix_wins, prefix_min, suffix_min);
         const vector_stream_type  window_hs   =
-            IfThenElse(prefix_wins, prefix_kmer, suffix_kmer);
+            if_then_else(prefix_wins, prefix_kmer, suffix_kmer);
 
         // ---- Position wrap (storage-half-bit pos rolls every wrap_period) ----
         if (step == next_wrap_step) [[unlikely]] {
-            pos_local  = Sub(pos_local, v_wrap);
-            prefix_min = Sub(prefix_min, v_wrap);
-            const mask_stream_type emit_seen = Ne(last_emit_pos, v_max);
-            last_emit_pos = IfThenElse(emit_seen,
-                Sub(last_emit_pos, v_wrap), last_emit_pos);
+            pos_local = subtract(pos_local, v_wrap);
+            prefix_min = subtract(prefix_min, v_wrap);
+            const mask_stream_type emit_seen = not_equal(last_emit_pos, v_max);
+            last_emit_pos = if_then_else(
+                emit_seen, subtract(last_emit_pos, v_wrap), last_emit_pos);
             const auto wrap_one = [&](auto idx_const) [[gnu::always_inline]] {
                 constexpr size_t i = decltype(idx_const)::value;
-                const mask_stream_type slot_valid = Ne(ring_buf_elem[i], v_max);
-                ring_buf_elem[i] = IfThenElse(slot_valid,
-                    Sub(ring_buf_elem[i], v_wrap),
+                const mask_stream_type slot_valid =
+                    not_equal(ring_buf_elem[i], v_max);
+                ring_buf_elem[i] = if_then_else(slot_valid,
+                    subtract(ring_buf_elem[i], v_wrap),
                     ring_buf_elem[i]);
             };
             if constexpr (k_has_static_window) {
                 for_each_index<p_static_window_size>(wrap_one);
             } else {
                 for (size_t i = 0; i < w; ++i) {
-                    const mask_stream_type slot_valid = Ne(ring_buf_elem[i], v_max);
-                    ring_buf_elem[i] = IfThenElse(slot_valid,
-                        Sub(ring_buf_elem[i], v_wrap),
+                    const mask_stream_type slot_valid =
+                        not_equal(ring_buf_elem[i], v_max);
+                    ring_buf_elem[i] = if_then_else(slot_valid,
+                        subtract(ring_buf_elem[i], v_wrap),
                         ring_buf_elem[i]);
                 }
             }
@@ -509,14 +521,16 @@ struct sequence_simd_iteration_state {
 
         // ---- Emit ----
         if (step >= emit_warmup) {
-            const vector_stream_type  window_pos    = And(window_min, v_pos_mask);
-            const mask_stream_type pos_changed   = Ne(window_pos, last_emit_pos);
-            const mask_stream_type valid_window  = Ne(window_min, v_max);
-            const mask_stream_type real_emit     = And(pos_changed, valid_window);
-            // AllFalsePerStream returns true when ALL lanes are false (no
+            const vector_stream_type window_pos = bit_and(window_min, v_pos_mask);
+            const mask_stream_type pos_changed =
+                not_equal(window_pos, last_emit_pos);
+            const mask_stream_type valid_window = not_equal(window_min, v_max);
+            const mask_stream_type real_emit = bit_and(pos_changed, valid_window);
+            // collect_all_false_per_stream returns true when ALL lanes are false (no
             // emit candidate this stream). We keep the inverted bool below
             // (`per_stream_emits`) explicit so the predicate reads naturally.
-            const auto no_emit_per_stream     = AllFalsePerStream(d, real_emit);
+            const auto no_emit_per_stream =
+                collect_all_false_per_stream(d, real_emit);
 
             std::array<bool, p_stream_count> per_stream_emits{};
             bool any_stream_emits = false;
@@ -570,7 +584,8 @@ struct sequence_simd_iteration_state {
                             /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
                     }
                 });
-                last_emit_pos = IfThenElse(real_emit, window_pos, last_emit_pos);
+                last_emit_pos =
+                    if_then_else(real_emit, window_pos, last_emit_pos);
             }
         }
     }
@@ -583,7 +598,7 @@ struct sequence_simd_iteration_state {
 /**
  * Run the unified single- or dual-stream two-stack ntHash collector.
  *
- * Per-stream rolling and ring state stays in `vec_stream`, the chosen
+ * Per-stream rolling and ring state stays in `vector_stream`, the chosen
  * canonical hash is scrambled only at emission, and query/target calls share
  * the identical ordering. Palindrome detection is a compile-time route choice.
  */
@@ -679,11 +694,12 @@ collect_minimizers_two_stack_nthash_simd_impl(
     using mask_type = hn::Mask<simd_tag_type>;
 
     // p_stream_count-wide bundle types. With aggressive inlining (the impl is
-    // [[gnu::always_inline]] [[gnu::flatten]] and every vec_stream operation
+    // [[gnu::always_inline]] [[gnu::flatten]] and every vector_stream operation
     // is HWY_INLINE), the bundle's std::array<vector_type, p_window_size> storage gets
     // scalar-replaced back to per-slot NEON registers — same machine code
     // an equivalent named-scalar layout.
-    using vector_stream_type  = vec_stream<simd_tag_type, storage_unit, p_stream_count>;
+    using vector_stream_type =
+        vector_stream<simd_tag_type, storage_unit, p_stream_count>;
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
 
     const size_t lanes_per_stream = hn::Lanes(d);
@@ -764,13 +780,13 @@ collect_minimizers_two_stack_nthash_simd_impl(
         static_cast<p_hash_value>(kmer_mask);
 
     // Build the per-iteration state in declaration order.
-    // Aggregate-init in declaration order so `step_one_bp_vec_stream` sees
+    // Aggregate-init in declaration order so `step_one_bp_vector_stream` sees
     // a fully-populated stack-resident object on its first invocation.
     // Ring-buffer elements are explicitly constructed with Undefined inside
     // target-attributed project code; the meaningful max/zero initialization
     // runs in the loop below before any read (only the first `w` slots are
     // live). With
-    // [[clang::trivial_abi]] on `vec_stream` and the impl being
+    // [[clang::trivial_abi]] on `vector_stream` and the impl being
     // [[gnu::always_inline]] [[gnu::flatten]], SROA should break the struct
     // back apart into per-member NEON-register-resident locals so the
     // inliner sees a small finite-parameter member function.
@@ -789,10 +805,10 @@ collect_minimizers_two_stack_nthash_simd_impl(
         .pos_local                  = vector_stream_type::splat(d, static_cast<storage_unit>(0)),
         .last_emit_pos              = vector_stream_type::splat(d, max_val),
         .ring_buf_elem              = two_stack_internal::
-            make_undefined_vec_stream_array<
+            make_undefined_vector_stream_array<
                 buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
         .ring_buf_hash_strand       = two_stack_internal::
-            make_undefined_vec_stream_array<
+            make_undefined_vector_stream_array<
                 buf_capacity, simd_tag_type, storage_unit, p_stream_count>(d),
         .pos_wrap_delta             = static_cast<storage_unit>(0),
         .step                       = 0,
@@ -842,7 +858,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
             mask_type       live_mask,
             vector_stream_type bp_v
         ) [[gnu::always_inline]] [[gnu::flatten]] {
-            state.template step_one_bp_vec_stream<p_is_full>(
+            state.template step_one_bp_vector_stream<p_is_full>(
                 d_in, offsets_in, live_mask, bp_v);
         },
         // No-op finish_fn — emits are flushed per-step, so the partial-tail

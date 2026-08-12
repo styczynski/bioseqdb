@@ -908,7 +908,7 @@ struct extract_occurrence_body {
     bioseq_cache_occurrence raw{};
 };
 
-[[nodiscard]] bool extract_occurrence_body(
+[[nodiscard]] bool finish_extract_occurrence_call(
         void* opaque, bioseq_cache_status status) {
     auto& body = *static_cast<extract_occurrence_body*>(opaque);
     if (status != bioseq_cache_status_ok) {
@@ -1079,7 +1079,7 @@ void stage_late_fetch_reference_status(
     return true;
 }
 
-[[nodiscard]] bool late_fetch_body(
+[[nodiscard]] bool finish_late_fetch_call(
         void* opaque, bioseq_cache_status status) {
     auto& body = *static_cast<late_fetch_body*>(opaque);
     if (status != bioseq_cache_status_ok) {
@@ -1283,7 +1283,7 @@ struct explain_body {
     return true;
 }
 
-[[nodiscard]] bool explain_body(
+[[nodiscard]] bool finish_explain_call(
         void* opaque, bioseq_cache_status status) {
     auto& body = *static_cast<explain_body*>(opaque);
     if (status != bioseq_cache_status_ok) {
@@ -1963,7 +1963,7 @@ bool invoke_extract_occurrence_fail_open(
         executor_context,
         "bioseq cache provider occurrence",
         nullptr,
-        &detail::extract_occurrence_body,
+        &detail::finish_extract_occurrence_call,
         &body,
         &disposable,
         diagnostic);
@@ -2024,7 +2024,7 @@ bool invoke_late_fetch_batch_fail_open(
         executor_context,
         "bioseq cache provider late fetch",
         &detail::prepare_late_fetch_body,
-        &detail::late_fetch_body,
+        &detail::finish_late_fetch_call,
         &body,
         &disposable,
         diagnostic);
@@ -2062,7 +2062,7 @@ bool invoke_explain_domain_fail_open(
         executor_context,
         "bioseq cache provider explain",
         &detail::prepare_explain_body,
-        &detail::explain_body,
+        &detail::finish_explain_call,
         &body,
         &disposable,
         diagnostic);

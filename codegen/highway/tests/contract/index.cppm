@@ -144,6 +144,14 @@ inline void require_rejected(
     };
 }
 
+inline void seal_policy_digest(target_manifest& targets) {
+    std::string policy_block;
+    for (const auto& [name, value] : targets.policy_definitions) {
+        policy_block += "#define " + name + " " + value + "\n";
+    }
+    targets.policy_digest = bioseq::common::sha256_hex(policy_block);
+}
+
 inline void append_fixture_source(
     generation_plan& plan,
     const std::string_view key,
@@ -438,6 +446,86 @@ inline void verify_complete_table_target_policy() {
                 no_emu128.target_inventory);
         },
         "the complete-table target policy retains HWY_EMU128");
+}
+
+inline void verify_target_compile_policy() {
+    target_manifest valid = two_target_plan().target_inventory;
+    valid.policy_definitions = {
+        {"BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY", std::string(64u, 'a')},
+        {"HWY_COMPILE_ALL_ATTAINABLE", "1"},
+        {"HWY_DISABLED_TARGETS", "(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"},
+        {"HWY_STATIC_DEFINE", "1"},
+        {"TOOLCHAIN_MISS_ASM_HWCAP_H", "1"},
+        {"TOOLCHAIN_MISS_SYS_AUXV_H", "1"},
+    };
+    seal_policy_digest(valid);
+    validate_target_compile_policy(valid);
+
+    target_manifest unauthenticated_extra = valid;
+    unauthenticated_extra.policy_definitions[3].second = "0";
+    require_rejected(
+        [&] { validate_target_compile_policy(unauthenticated_extra); },
+        "every effective Highway/toolchain definition remains authenticated");
+
+    constexpr std::array required_names{
+        std::string_view{"HWY_COMPILE_ALL_ATTAINABLE"},
+        std::string_view{"HWY_DISABLED_TARGETS"},
+    };
+    for (const std::string_view required_name : required_names) {
+        const auto required = std::ranges::find_if(
+            valid.policy_definitions,
+            [required_name](const auto& definition) {
+                return definition.first == required_name;
+            });
+        require(
+            required != valid.policy_definitions.end(),
+            "the positive policy fixture contains every required definition");
+        const std::size_t required_index = static_cast<std::size_t>(
+            required - valid.policy_definitions.begin());
+
+        target_manifest missing = valid;
+        missing.policy_definitions.erase(
+            missing.policy_definitions.begin() + required_index);
+        seal_policy_digest(missing);
+        require_rejected(
+            [&] { validate_target_compile_policy(missing); },
+            "the all-target compile policy rejects a missing required name");
+
+        target_manifest wrong_value = valid;
+        const auto wrong = std::ranges::find_if(
+            wrong_value.policy_definitions,
+            [required_name](const auto& definition) {
+                return definition.first == required_name;
+            });
+        wrong->second = "0";
+        seal_policy_digest(wrong_value);
+        require_rejected(
+            [&] { validate_target_compile_policy(wrong_value); },
+            "the all-target compile policy rejects a wrong required value");
+
+        target_manifest conflicting_duplicate = valid;
+        conflicting_duplicate.policy_definitions.emplace_back(
+            required_name, "0");
+        seal_policy_digest(conflicting_duplicate);
+        require_rejected(
+            [&] { validate_target_compile_policy(conflicting_duplicate); },
+            "the all-target compile policy rejects conflicting duplicates");
+    }
+
+    target_manifest missing_identity = valid;
+    missing_identity.policy_definitions.erase(
+        missing_identity.policy_definitions.begin());
+    seal_policy_digest(missing_identity);
+    require_rejected(
+        [&] { validate_target_compile_policy(missing_identity); },
+        "the authenticated compile policy requires probe identity provenance");
+
+    target_manifest malformed_identity = valid;
+    malformed_identity.policy_definitions.front().second = std::string(64u, 'A');
+    seal_policy_digest(malformed_identity);
+    require_rejected(
+        [&] { validate_target_compile_policy(malformed_identity); },
+        "probe identity provenance remains an exact lowercase SHA-256");
 }
 
 inline void verify_external_domain_topology_contract() {
@@ -1636,6 +1724,7 @@ void run_highway_contract_self_tests() {
     contract_detail::verify_template_flatten_separation();
     contract_detail::verify_slot_callable_ownership();
     contract_detail::verify_complete_table_target_policy();
+    contract_detail::verify_target_compile_policy();
     contract_detail::verify_external_domain_topology_contract();
     contract_detail::verify_shared_target_coordinates();
     contract_detail::verify_generated_closure();

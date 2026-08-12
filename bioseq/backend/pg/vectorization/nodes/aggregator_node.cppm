@@ -254,10 +254,10 @@ extern "C" {
  */
 
 /*
- * Complete PostgreSQL's hash_aggregate_spill declaration in the global module
+ * Complete PostgreSQL's HashAggSpill declaration in the global module
  * fragment so its layout and linkage match execnodes.h.
  */
-struct hash_aggregate_spill
+struct HashAggSpill
 {
 	int			npartitions;	/* number of partitions */
 	LogicalTape **partitions;	/* spill partition tapes */
@@ -390,12 +390,12 @@ static hash_aggregate_batch *hashagg_batch_new(LogicalTape *input_tape, int setn
 									   int64_t input_tuples, double input_card,
 									   int used_bits);
 static MinimalTuple hashagg_batch_read(hash_aggregate_batch *batch, uint32_t *hashp);
-static void hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *lts,
+static void hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *lts,
 							   int used_bits, double input_groups,
 							   double hashentrysize);
-static Size hashagg_spill_tuple(AggState *aggstate, hash_aggregate_spill *spill,
+static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 								TupleTableSlot *slot, uint32_t hash);
-static void hashagg_spill_finish(AggState *aggstate, hash_aggregate_spill *spill,
+static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
 								 int setno);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
 static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
@@ -1818,12 +1818,12 @@ hash_agg_enter_spill_mode(AggState *aggstate)
 		aggstate->hash_tapeset = LogicalTapeSetCreate(true, NULL, -1);
 
 		aggstate->hash_spills =
-			allocate_zeroed_array<hash_aggregate_spill>(aggstate->num_hashes);
+			allocate_zeroed_array<HashAggSpill>(aggstate->num_hashes);
 
 		for (int setno = 0; setno < aggstate->num_hashes; setno++)
 		{
 			AggStatePerHash perhash = &aggstate->perhash[setno];
-			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
+			HashAggSpill *spill = &aggstate->hash_spills[setno];
 
 			hashagg_spill_init(spill, aggstate->hash_tapeset, 0,
 							   perhash->aggnode->numGroups,
@@ -2052,7 +2052,7 @@ lookup_hash_entries(AggState *aggstate)
 		}
 		else
 		{
-			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
+			HashAggSpill *spill = &aggstate->hash_spills[setno];
 			TupleTableSlot *slot = aggstate->tmpcontext->ecxt_outertuple;
 
 			if (spill->partitions == NULL)
@@ -2570,7 +2570,7 @@ agg_refill_hash_table(AggState *aggstate)
 {
 	hash_aggregate_batch *batch;
 	AggStatePerHash perhash;
-	hash_aggregate_spill spill;
+	HashAggSpill spill;
 	LogicalTapeSet *tapeset = aggstate->hash_tapeset;
 	bool		spill_initialized = false;
 
@@ -2868,7 +2868,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
  * of partitions to create, and initializes them.
  */
 static void
-hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *tapeset, int used_bits,
+hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 				   double input_groups, double hashentrysize)
 {
 	int			npartitions;
@@ -2899,7 +2899,7 @@ hashagg_spill_init(hash_aggregate_spill *spill, LogicalTapeSet *tapeset, int use
  * partition.
  */
 static Size
-hashagg_spill_tuple(AggState *aggstate, hash_aggregate_spill *spill,
+hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 					TupleTableSlot *inputslot, uint32_t hash)
 {
 	TupleTableSlot *spillslot;
@@ -3039,7 +3039,7 @@ hashagg_finish_initial_spills(AggState *aggstate)
 	{
 		for (setno = 0; setno < aggstate->num_hashes; setno++)
 		{
-			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
+			HashAggSpill *spill = &aggstate->hash_spills[setno];
 
 			total_npartitions += spill->npartitions;
 			hashagg_spill_finish(aggstate, spill, setno);
@@ -3064,7 +3064,7 @@ hashagg_finish_initial_spills(AggState *aggstate)
  * Transform spill partitions into new batches.
  */
 static void
-hashagg_spill_finish(AggState *aggstate, hash_aggregate_spill *spill, int setno)
+hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 {
 	int			i;
 	int			used_bits = 32 - spill->shift;
@@ -3113,7 +3113,7 @@ hashagg_reset_spill_state(AggState *aggstate)
 
 		for (setno = 0; setno < aggstate->num_hashes; setno++)
 		{
-			hash_aggregate_spill *spill = &aggstate->hash_spills[setno];
+			HashAggSpill *spill = &aggstate->hash_spills[setno];
 
 			pfree(spill->ntuples);
 			pfree(spill->partitions);

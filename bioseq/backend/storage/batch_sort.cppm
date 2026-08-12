@@ -130,7 +130,7 @@ template <class p_lazy_batch>
     }
 
     constexpr std::uint32_t bits_per_symbol =
-        static_cast<std::uint32_t>(traits::logical_bits_per_symbol);
+        static_cast<std::uint32_t>(traits::k_logical_bits_per_symbol);
     const std::uint32_t unit_bits =
         static_cast<std::uint32_t>(resident_width) * 8u;
     const std::uint32_t letters_per_unit = unit_bits / bits_per_symbol;
@@ -143,12 +143,12 @@ template <class p_lazy_batch>
 
     constexpr auto alphabet_kind = [] {
         if constexpr (seqan3::nucleotide_alphabet<alphabet_type>
-                      && traits::logical_bits_per_symbol == 2u
-                      && traits::alphabet_size == 4u) {
+                      && traits::k_logical_bits_per_symbol == 2u
+                      && traits::k_alphabet_size == 4u) {
             return bioseq::gpu::vulkan::alphabet_kernel_kind::dna4_nt4;
         } else if constexpr (seqan3::nucleotide_alphabet<alphabet_type>
-                             && traits::logical_bits_per_symbol == 3u
-                             && traits::alphabet_size == 5u) {
+                             && traits::k_logical_bits_per_symbol == 3u
+                             && traits::k_alphabet_size == 5u) {
             return bioseq::gpu::vulkan::alphabet_kernel_kind::dna5_nt4;
         } else {
             return bioseq::gpu::vulkan::alphabet_kernel_kind::generic;

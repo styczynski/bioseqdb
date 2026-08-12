@@ -112,11 +112,12 @@ struct fake_fragment_storage {
     // ---- error / validation surface (duck-typed; mirrors the pg storage) ----
     [[noreturn]] void index_error(std::string_view m) const { bioseq::indexing::index_corruption_panic(m); }
 
-    [[nodiscard]] minimizer_hashmap_fragment_index::header validate_minimizer_blob_or_error(
+    [[nodiscard]] minimizer_hashmap_fragment_index::encoded_header
+    validate_minimizer_blob_or_error(
             const char* p, std::size_t bytes,
             std::optional<std::uint32_t> expected_bucket_count = std::nullopt) const {
-        using header_type = minimizer_hashmap_fragment_index::header;
-        using bucket_type = minimizer_hashmap_fragment_index::bucket;
+        using header_type = minimizer_hashmap_fragment_index::encoded_header;
+        using bucket_type = minimizer_hashmap_fragment_index::encoded_bucket;
         if (bytes < sizeof(header_type)) index_error("minimizer blob truncated header");
         header_type header{};
         std::memcpy(&header, p, sizeof(header_type));
@@ -712,7 +713,7 @@ struct fake_fragment_storage {
         }
         segment_spill_binding_state_.binding = direct_minimizer_spill_storage_binding{
             .generation_token = token,
-            .mutation_version = 0,
+            .mutation_revision = 0,
         };
         segment_spill_binding_state_.owner = this;
         return segment_spill_binding_state_.binding;
@@ -725,11 +726,11 @@ struct fake_fragment_storage {
             : direct_minimizer_spill_storage_binding{};
     }
 
-    void set_segment_spill_mutation_counter_for_test(
-            std::uint64_t mutation_counter) noexcept {
+    void set_segment_spill_mutation_revision_for_test(
+            std::uint64_t mutation_revision) noexcept {
         if (segment_spill_binding_state_.owner == this) {
-            segment_spill_binding_state_.binding.mutation_version =
-                mutation_counter;
+            segment_spill_binding_state_.binding.mutation_revision =
+                mutation_revision;
         }
     }
 
@@ -738,12 +739,12 @@ struct fake_fragment_storage {
             || !segment_spill_binding_state_.binding.valid()) {
             return;
         }
-        if (segment_spill_binding_state_.binding.mutation_version
+        if (segment_spill_binding_state_.binding.mutation_revision
                 == (std::numeric_limits<std::uint64_t>::max)()) {
             segment_spill_binding_state_ = {};
             return;
         }
-        ++segment_spill_binding_state_.binding.mutation_version;
+        ++segment_spill_binding_state_.binding.mutation_revision;
     }
 
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>> s) {

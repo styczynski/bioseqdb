@@ -3,7 +3,7 @@ module;
 #include <cstdint>
 #include <type_traits>
 
-export module bioseq.postgres.sequences.sample_table:sql_rows;
+export module bioseq.postgres.sequences.sample_table.sql_rows;
 
 export namespace bioseq::sequences::generation::pg::result_rows {
 

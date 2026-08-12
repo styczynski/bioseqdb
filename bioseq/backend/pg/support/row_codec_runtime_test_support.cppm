@@ -72,15 +72,16 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
 namespace {
 
 namespace indexing_rows = bioseq::storage::indexing::catalog_rows;
-namespace indexing_codecs = bioseq::storage::indexing_pg::sql_row_codecs;
+namespace indexing_codecs =
+    bioseq::postgres::storage::indexing::sql_row_codecs;
 namespace load_rows = bioseq::storage::load_pg::composite_rows;
-namespace load_codecs = bioseq::storage::load_pg::sql_row_codecs;
+namespace load_codecs = bioseq::postgres::storage::io::sql_row_codecs;
 namespace manager_rows = bioseq::storage::catalog_rows;
-namespace manager_codecs = bioseq::storage::manager::sql_row_codecs;
+namespace manager_codecs = bioseq::postgres::storage::manager::sql_row_codecs;
 namespace metadata_rows = bioseq::storage::metadata::catalog_rows;
-namespace metadata_codecs = bioseq::storage::metadata::sql_row_codecs;
+namespace metadata_codecs = bioseq::postgres::storage::metadata::sql_row_codecs;
 namespace table_rows = bioseq::table::composite_rows;
-namespace table_codecs = bioseq::table::sql_row_codecs;
+namespace table_codecs = bioseq::postgres::table::sql_row_codecs;
 
 constexpr std::string_view operation_evidence{
     "descriptor+encode+form+deform+update+null-bits"
@@ -211,7 +212,7 @@ template <class p_codec>
 void validate_descriptor_mutations(TupleDesc descriptor) {
   p_codec::validate_descriptor(descriptor);
   if (descriptor == nullptr ||
-      descriptor->natts != static_cast<int>(p_codec::fields_count)) {
+      descriptor->natts != static_cast<int>(p_codec::field_count)) {
     contract_failure(std::string{p_codec::row_name} +
                      " live descriptor arity mismatch");
   }
@@ -247,8 +248,8 @@ void validate_descriptor_mutations(TupleDesc descriptor) {
 
   std::optional<std::pair<std::size_t, std::size_t>> reorder_pair;
   for (std::size_t left = 0;
-       left < p_codec::fields_count && !reorder_pair.has_value(); ++left) {
-    for (std::size_t right = left + 1; right < p_codec::fields_count; ++right) {
+       left < p_codec::field_count && !reorder_pair.has_value(); ++left) {
+    for (std::size_t right = left + 1; right < p_codec::field_count; ++right) {
       const auto &left_field = p_codec::expected_descriptor[left];
       const auto &right_field = p_codec::expected_descriptor[right];
       if (left_field.type_oid == right_field.type_oid &&
@@ -371,7 +372,7 @@ template <class p_codec>
 void require_encoded_null_pattern(
     const typename p_codec::const_encoded_tuple_data &tuple_data,
     bool nullable_fields_are_null) {
-  for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
+  for (std::size_t index = 0; index < p_codec::field_count; ++index) {
     const bool expected =
         nullable_fields_are_null && p_codec::expected_descriptor[index].nullable;
     if (tuple_data.nulls[index] != expected) {
@@ -395,7 +396,7 @@ void verify_row_exact(const typename p_codec::row_type &actual,
         std::as_const(actual_encoded).tuple_data(descriptor);
     const auto expected_data =
         std::as_const(expected_encoded).tuple_data(descriptor);
-    for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
+    for (std::size_t index = 0; index < p_codec::field_count; ++index) {
       if (actual_data.nulls[index] != expected_data.nulls[index]) {
         contract_failure(std::string{p_codec::row_name} + " " +
                          std::string{detail} + " NULL mismatch at attribute " +
@@ -561,7 +562,7 @@ template <class p_codec, class p_live_row_factory, class p_live_updated_row_fact
                      " external carrier tuple was not readable");
   }
   std::size_t verified = 0;
-  for (std::size_t index = 0; index < p_codec::fields_count; ++index) {
+  for (std::size_t index = 0; index < p_codec::field_count; ++index) {
     const Oid type_oid = p_codec::expected_descriptor[index].type_oid;
     if (type_oid != TEXTOID && type_oid != BYTEAOID) {
       continue;
@@ -702,7 +703,7 @@ template <class p_codec, class p_null_row_factory, class p_full_row_factory,
     p_live_updated_row_factory make_live_updated_row, p_apply_update apply_update,
     p_verify_scan verify_scan) {
   using row_type = typename p_codec::row_type;
-  static_assert(p_codec::fields_count == p_codec::expected_descriptor.size());
+  static_assert(p_codec::field_count == p_codec::expected_descriptor.size());
   static_assert(by_reference_field_count<p_codec>() ==
                 context_pointer_field_count<p_codec>() +
                     owned_value_byref_field_count<p_codec>());
@@ -773,8 +774,8 @@ template <class p_codec, class p_null_row_factory, class p_full_row_factory,
   }
 
   constexpr std::size_t nullable_count = nullable_field_count<p_codec>();
-  constexpr std::size_t required_count = p_codec::fields_count - nullable_count;
-  for (std::size_t required_index = 0; required_index < p_codec::fields_count;
+  constexpr std::size_t required_count = p_codec::field_count - nullable_count;
+  for (std::size_t required_index = 0; required_index < p_codec::field_count;
        ++required_index) {
     if (p_codec::expected_descriptor[required_index].nullable) {
       continue;
@@ -974,7 +975,7 @@ template <class p_codec, class p_null_row_factory, class p_full_row_factory,
   return runtime_receipt_entry{
       .identity = std::string{entity_kind} + ":" + std::string{p_codec::row_name},
       .owner = std::string{owner},
-      .fields = p_codec::fields_count,
+      .fields = p_codec::field_count,
       .nullable_fields = nullable_count,
       .by_reference_fields = by_reference_field_count<p_codec>(),
       .toastable_fields = toastable_count,
@@ -1475,7 +1476,7 @@ void exercise_reaper_text_bridge_error_impl() {
 [[nodiscard]] runtime_receipt_entry exercise_index_table_shard() {
   using row = indexing_rows::index_table_shard;
   using codec = indexing_codecs::index_table_shard_codec;
-  static_assert(codec::fields_count == 9);
+  static_assert(codec::field_count == 9);
   return with_relation_descriptor<indexing_codecs::index_table_shard_codec>(
       "bioseq_internal", "index_table_shard",
       [](TupleDesc descriptor, Relation relation) {
@@ -1542,7 +1543,7 @@ void exercise_reaper_text_bridge_error_impl() {
       [](TupleDesc descriptor, Relation relation) {
         using row = metadata_rows::row_mask;
         using codec = metadata_codecs::row_mask_codec;
-        static_assert(codec::fields_count == 8);
+        static_assert(codec::field_count == 8);
         const auto make_null_row = [](MemoryContext) {
           return row{
               .id = probe_int64(1),
@@ -1611,7 +1612,7 @@ void exercise_reaper_text_bridge_error_impl() {
       [](TupleDesc descriptor, Relation relation) {
         using row = metadata_rows::options;
         using codec = metadata_codecs::options_codec;
-        static_assert(codec::fields_count == 5);
+        static_assert(codec::field_count == 5);
         const auto make_row = [](MemoryContext) {
           return row{
               .regclass = probe_oid(11),
@@ -1643,7 +1644,7 @@ void exercise_reaper_text_bridge_error_impl() {
       "bioseq_internal", "stripe", [](TupleDesc descriptor, Relation relation) {
         using row = metadata_rows::stripe;
         using codec = metadata_codecs::stripe_codec;
-        static_assert(codec::fields_count == 9);
+        static_assert(codec::field_count == 9);
         const auto make_row = [](MemoryContext) {
           return row{
               .storage_id = probe_int64(21),
@@ -1680,7 +1681,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = metadata_rows::chunk_group;
             using codec = metadata_codecs::chunk_group_codec;
-            static_assert(codec::fields_count == 5);
+            static_assert(codec::field_count == 5);
             const auto make_row = [](MemoryContext) {
               return row{
                   .storage_id = probe_int64(31),
@@ -1711,7 +1712,7 @@ void exercise_reaper_text_bridge_error_impl() {
       "bioseq_internal", "chunk", [](TupleDesc descriptor, Relation relation) {
         using row = metadata_rows::chunk;
         using codec = metadata_codecs::chunk_codec;
-        static_assert(codec::fields_count == 14);
+        static_assert(codec::field_count == 14);
         const auto null_row = [](MemoryContext) {
           return row{
               .storage_id = probe_int64(41),
@@ -1798,7 +1799,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = indexing_rows::index_policy;
             using codec = indexing_codecs::index_policy_codec;
-            static_assert(codec::fields_count == 7);
+            static_assert(codec::field_count == 7);
             const auto make_row = [](MemoryContext context) {
               return row{
                   .user_relid = probe_oid(51),
@@ -1856,7 +1857,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = indexing_rows::metadata_age_log;
             using codec = indexing_codecs::metadata_age_log_codec;
-            static_assert(codec::fields_count == 5);
+            static_assert(codec::field_count == 5);
             const auto make_row = [](MemoryContext context) {
               return row{
                   .user_relid = probe_oid(61),
@@ -1908,7 +1909,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = metadata_rows::seq_sub_table;
             using codec = metadata_codecs::seq_sub_table_codec;
-            static_assert(codec::fields_count == 11);
+            static_assert(codec::field_count == 11);
             const auto make_row = [](MemoryContext) {
               return row{
                   .database_oid = probe_oid(81),
@@ -1949,7 +1950,7 @@ void exercise_reaper_text_bridge_error_impl() {
       [](TupleDesc descriptor, Relation relation) {
         using row = manager_rows::minimizer_generation_storage;
         using codec = manager_codecs::minimizer_generation_storage_codec;
-        static_assert(codec::fields_count == 18);
+        static_assert(codec::field_count == 18);
         static_assert(nullable_field_count<codec>() == 1);
         const auto null_row = [](MemoryContext) {
           return row{
@@ -2019,7 +2020,7 @@ void exercise_reaper_text_bridge_error_impl() {
       [](TupleDesc descriptor, Relation relation) {
         using row = manager_rows::minimizer_generation_reaper_state;
         using codec = manager_codecs::minimizer_generation_reaper_state_codec;
-        static_assert(codec::fields_count == 5);
+        static_assert(codec::field_count == 5);
         const auto make_row = [](MemoryContext) {
           return row{
               .database_oid = probe_oid(101),
@@ -2072,7 +2073,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = manager_rows::sequence_source_version;
             using codec = manager_codecs::sequence_source_version_codec;
-            static_assert(codec::fields_count == 20);
+            static_assert(codec::field_count == 20);
             const auto null_row = [](MemoryContext) {
               return row{
                   .source_epoch = probe_int64(111),
@@ -2144,7 +2145,7 @@ void exercise_reaper_text_bridge_error_impl() {
           [](TupleDesc descriptor, Relation relation) {
             using row = table_rows::bioseq_aligner_options;
             using codec = table_codecs::bioseq_aligner_options_codec;
-            static_assert(codec::fields_count == 36);
+            static_assert(codec::field_count == 36);
             const auto make_null_row = [](MemoryContext) { return row{}; };
             const auto make_full_row = [](MemoryContext) {
               return full_aligner_options();
@@ -2182,7 +2183,7 @@ void exercise_reaper_text_bridge_error_impl() {
       "bioseq", "column_mapping", [](TupleDesc descriptor, Relation relation) {
         using row = load_rows::column_mapping;
         using codec = load_codecs::column_mapping_codec;
-        static_assert(codec::fields_count == 2);
+        static_assert(codec::field_count == 2);
         if (relation != nullptr) {
           contract_failure("installed column_mapping type unexpectedly "
                            "has a live relation");

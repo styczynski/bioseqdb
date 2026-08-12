@@ -104,15 +104,15 @@ void write_logging_message(
 
 void write_logging_report(const bioseq_report_view& report)
 {
-	const int error_level = report.has_raw_pg_elevel
-		? report.raw_pg_elevel
+	const int error_level = report.has_postgres_error_level
+		? report.postgres_error_level
 		: to_postgres_error_level(report.level);
 
 	if (!errstart(error_level, TEXTDOMAIN)) {
 		return;
 	}
-	if (report.has_sqlerrcode) {
-		errcode(report.sqlerrcode);
+	if (report.has_sql_error_code) {
+		errcode(report.sql_error_code);
 	}
 	if (!report.message.empty()) {
 		errmsg_internal("%.*s",

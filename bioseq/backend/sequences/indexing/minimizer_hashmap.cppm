@@ -329,7 +329,7 @@ collect_exact_simd_index_range_or_throw(
             || descriptor.storage_unit_width != packed_width
             || descriptor.bits_per_symbol
                 != bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                    logical_bits_per_symbol
+                    k_logical_bits_per_symbol
             || descriptor.leading_symbol_offset != 0u
             || descriptor.bit_order
                 != bioseq::storage::lazy_sequence_view<p_alphabet>::
@@ -342,7 +342,7 @@ collect_exact_simd_index_range_or_throw(
         struct sequence_context {
             const void* data{};
             std::size_t unit_count{};
-        } sequence_context{descriptor.units, descriptor.unit_count};
+        } sequence_state{descriptor.units, descriptor.unit_count};
 
         const auto read_fragment = +[](void* opaque, std::size_t fragment_no) {
             const auto& context = *static_cast<sequence_context*>(opaque);
@@ -374,10 +374,10 @@ collect_exact_simd_index_range_or_throw(
                     collector.collect(records[index]);
                 }
                 if constexpr (requires {
-                    { std::as_const(collector).ok() }
+                    { std::as_const(collector).is_ok() }
                         -> std::convertible_to<bool>;
                 }) {
-                    return static_cast<bool>(std::as_const(collector).ok());
+                    return static_cast<bool>(std::as_const(collector).is_ok());
                 }
                 return true;
             } else {
@@ -402,10 +402,10 @@ collect_exact_simd_index_range_or_throw(
                         minimap_sketch_data::from_raw_storage(raw[index]));
                 }
                 if constexpr (requires {
-                    { std::as_const(collector).ok() }
+                    { std::as_const(collector).is_ok() }
                         -> std::convertible_to<bool>;
                 }) {
-                    return static_cast<bool>(std::as_const(collector).ok());
+                    return static_cast<bool>(std::as_const(collector).is_ok());
                 }
                 return true;
             } else {
@@ -416,7 +416,7 @@ collect_exact_simd_index_range_or_throw(
         const exact_simd_index_bridge_result result = collect_exact_simd_index_erased(
             exact_simd_index_bridge_request{
                 .kernels = kernels,
-                .sequence_context = &sequence_context,
+                .sequence_context = &sequence_state,
                 .read_fragment = read_fragment,
                 .release_fragment = release_fragment,
                 .collector_context = &collector,
@@ -427,7 +427,7 @@ collect_exact_simd_index_range_or_throw(
                 .storage_unit_bytes = packed_width,
                 .letters_per_unit = packed_width * 8u
                     / bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                        logical_bits_per_symbol,
+                        k_logical_bits_per_symbol,
                 .total_units = descriptor.unit_count,
                 .total_bp = static_cast<std::size_t>(hi_bp - lo_bp),
                 .fragment_units = std::max<std::size_t>(
@@ -829,7 +829,7 @@ collect_packed_bounded_nthash_index_lazy(
             || descriptor.storage_unit_width != packed_width
             || descriptor.bits_per_symbol
                 != bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                    logical_bits_per_symbol
+                    k_logical_bits_per_symbol
             || descriptor.leading_symbol_offset != 0u
             || descriptor.bit_order
                 != bioseq::storage::lazy_sequence_view<p_alphabet>::
@@ -869,7 +869,7 @@ collect_packed_bounded_nthash_index_lazy(
                 .storage_unit_bytes = packed_width,
                 .letters_per_unit = descriptor.storage_unit_width * 8u
                     / bioseq::storage::lazy_sequence_traits<p_alphabet>::
-                        logical_bits_per_symbol,
+                        k_logical_bits_per_symbol,
                 .storage_units = descriptor.unit_count,
                 .local_bp_size = static_cast<std::size_t>(local_bp_size),
                 .window_size = window_size,
@@ -1633,7 +1633,7 @@ expected_grouped_soa_generation_identity_for_backend(
 /// Logical directory entry; persistence always uses the fixed codec.
 /// `sub_key` is the logical/control key. Position rows use the checked derived
 /// key k_position_extent_sub_key_base + sub_key. Both extent-local chunk sequences start
-/// at zero and use the fixed 96-byte directory ABI.
+/// at zero and use the fixed 128-byte directory ABI.
 struct grouped_soa_bucket_directory_entry {
     static constexpr std::size_t header_bytes = 96u;
     static constexpr std::size_t encoded_bytes = 128u;
@@ -2350,7 +2350,7 @@ validate_minimizer_bucket_dir_entry(
     return std::nullopt;
 }
 
-/// Encode one logical directory entry to the exact 96-byte little-endian ABI.
+/// Encode one logical directory entry to the exact 128-byte little-endian ABI.
 [[nodiscard]] constexpr std::expected<
     encoded_grouped_soa_bucket_directory_entry,
     minimizer_generation_encoding_error>
@@ -2423,7 +2423,7 @@ encode_grouped_soa_bucket_directory_entry(
     return encoded->storage;
 }
 
-/// Decode and intrinsically validate one exact 96-byte directory entry.
+/// Decode and intrinsically validate one exact 128-byte directory entry.
 [[nodiscard]] constexpr std::expected<
     grouped_soa_bucket_directory_entry,
     minimizer_generation_encoding_error>
@@ -3020,7 +3020,7 @@ struct minimizer_hashmap_table_allocation_plan {
 };
 
 [[nodiscard]] constexpr minimizer_hashmap_table_allocation_plan
-minimizer_hashmap_table_allocation_plan(
+plan_minimizer_hashmap_table_allocation(
         std::uint64_t possible_distinct) noexcept {
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
@@ -3100,14 +3100,14 @@ private:
         // therefore stays on the uint64_t radix key.
         using minimizer_layout = typename p_minimizer_type::layout_type;
         using public_kmer = decltype(std::declval<const p_minimizer_type&>().kmer());
-        static_assert(minimizer_layout::hash_bits > 0u);
+        static_assert(minimizer_layout::k_hash_bits > 0u);
         static_assert(std::is_same_v<public_kmer, std::uint64_t>);
         using kmer_radix_key = std::conditional_t<
-            (minimizer_layout::hash_bits <= 8u), std::uint8_t,
+            (minimizer_layout::k_hash_bits <= 8u), std::uint8_t,
             std::conditional_t<
-                (minimizer_layout::hash_bits <= 16u), std::uint16_t,
+                (minimizer_layout::k_hash_bits <= 16u), std::uint16_t,
                 std::conditional_t<
-                    (minimizer_layout::hash_bits <= 32u), std::uint32_t,
+                    (minimizer_layout::k_hash_bits <= 32u), std::uint32_t,
                     std::uint64_t>>>;
         struct kmer_key {
             [[nodiscard, gnu::always_inline]]
@@ -4914,7 +4914,7 @@ protected:
             .injected_failure = injected,
         };
         if (controller_failure != nullptr
-            && controller_failure->failed()) {
+            && controller_failure->has_failure()) {
             stats.controller_reason = controller_failure->reason;
             stats.requested_growth_bytes =
                 controller_failure->requested_bytes;
@@ -5590,14 +5590,14 @@ protected:
             }
         }
 
-        query_radix_plan query_radix_plan{};
+        query_radix_plan radix_plan{};
         prepared_query_scalar_width query_count_width =
             prepared_query_scalar_width::u8;
         if constexpr (p_traits::global_controls_then_positions) {
             const auto planned = plan_query_radix_(
                 protocol_query_hashes_.size(), this->profile_.max_hash);
             if (!planned) return protocol_poison<void>(planned.error());
-            query_radix_plan = *planned;
+            radix_plan = *planned;
             query_count_width = prepared_query_scalar_width_for_max(
                 this->manifest_.position_count);
         }
@@ -5615,7 +5615,7 @@ protected:
                 p_traits::global_controls_then_positions
                     ? static_cast<std::size_t>(
                         static_cast<std::uint8_t>(
-                            query_radix_plan.suffix_width)
+                            radix_plan.suffix_width)
                         + static_cast<std::uint8_t>(query_count_width))
                     : sizeof(query_record)));
         route_vector_bytes = bioseq::common::saturating_add(
@@ -5629,7 +5629,7 @@ protected:
         const std::uint64_t query_radix_bytes =
             p_traits::global_controls_then_positions
             ? bioseq::common::saturating_mul(
-                query_radix_plan.offset_count, sizeof(std::uint32_t))
+                radix_plan.offset_count, sizeof(std::uint32_t))
             : 0u;
         const std::uint64_t route_bytes =
             bioseq::common::saturating_add(
@@ -5684,9 +5684,9 @@ protected:
                 prepared_query_scalar_array exact_counts;
                 radix_offsets =
                     std::make_unique_for_overwrite<std::uint32_t[]>(
-                        query_radix_plan.offset_count);
+                        radix_plan.offset_count);
                 suffixes.allocate(
-                    query_radix_plan.suffix_width,
+                    radix_plan.suffix_width,
                     protocol_query_hashes_.size(), false);
                 exact_counts.allocate(
                     query_count_width,
@@ -5695,20 +5695,20 @@ protected:
                 std::uint64_t nonempty_buckets = 0u;
                 std::uint64_t max_bucket_size = 0u;
                 for (std::size_t bucket = 0u;
-                     bucket < query_radix_plan.bucket_count; ++bucket) {
+                     bucket < radix_plan.bucket_count; ++bucket) {
                     radix_offsets[bucket] =
                         static_cast<std::uint32_t>(query_index);
                     const std::size_t bucket_begin = query_index;
                     while (query_index < protocol_query_hashes_.size()
                         && query_radix_bucket_(
                             protocol_query_hashes_[query_index],
-                            query_radix_plan.hash_bits,
-                            query_radix_plan.radix_bits) == bucket) {
+                            radix_plan.hash_bits,
+                            radix_plan.radix_bits) == bucket) {
                         if (!suffixes.set(
                                 query_index,
                                 query_radix_suffix_(
                                     protocol_query_hashes_[query_index],
-                                    query_radix_plan.suffix_bits))) {
+                                    radix_plan.suffix_bits))) {
                             return protocol_poison<void>(
                                 minimizer_generation_encoding_error::hash_range);
                         }
@@ -5725,19 +5725,19 @@ protected:
                     return protocol_poison<void>(
                         minimizer_generation_encoding_error::hash_range);
                 }
-                radix_offsets[query_radix_plan.bucket_count] =
+                radix_offsets[radix_plan.bucket_count] =
                     static_cast<std::uint32_t>(query_index);
                 protocol_query_count_ = protocol_query_hashes_.size();
                 protocol_query_suffixes_ = std::move(suffixes);
                 protocol_query_exact_counts_ = std::move(exact_counts);
                 protocol_query_radix_offsets_ = std::move(radix_offsets);
                 protocol_query_radix_offset_count_ =
-                    query_radix_plan.offset_count;
-                protocol_query_radix_bits_ = query_radix_plan.radix_bits;
-                protocol_query_hash_bits_ = query_radix_plan.hash_bits;
-                protocol_query_suffix_bits_ = query_radix_plan.suffix_bits;
+                    radix_plan.offset_count;
+                protocol_query_radix_bits_ = radix_plan.radix_bits;
+                protocol_query_hash_bits_ = radix_plan.hash_bits;
+                protocol_query_suffix_bits_ = radix_plan.suffix_bits;
                 protocol_memory_stats_.query_route_radix_bucket_count =
-                    query_radix_plan.bucket_count;
+                    radix_plan.bucket_count;
                 protocol_memory_stats_.
                     query_route_radix_nonempty_bucket_count =
                         nonempty_buckets;
@@ -6847,7 +6847,7 @@ protected:
         std::span<const std::uint64_t> positions{};
     };
 
-    [[nodiscard]] protocol_lookup protocol_lookup(
+    [[nodiscard]] protocol_lookup lookup_protocol(
             std::uint64_t hash) const noexcept {
         if (!protocol_ready_
             || hash > (std::numeric_limits<hash_type>::max)()) return {};
@@ -7140,7 +7140,7 @@ public:
 
     [[nodiscard]] grouped_soa_query_lookup lookup(
             std::uint64_t hash) const noexcept {
-        const auto found = this->protocol_lookup(hash);
+        const auto found = this->lookup_protocol(hash);
         return grouped_soa_query_lookup{
             .global_occurrence_count = found.global_occurrence_count,
             .positions_complete = found.positions_complete,
@@ -7169,7 +7169,7 @@ public:
             throw persisted_minimizer_lookup_error(
                 "grouped-SoA persisted lookup hash was not prepared");
         }
-        const auto found = this->protocol_lookup(hash);
+        const auto found = this->lookup_protocol(hash);
         if (found.global_occurrence_count == 0) {
             return minimizer_lookup_spans::contiguous(
                 std::span<const std::uint64_t>{});
@@ -7475,7 +7475,7 @@ static_assert(std::is_trivially_copyable_v<
 [[nodiscard]] inline std::expected<
     std::optional<compact_direct_selected_page_range>,
     direct_inverted_index_error>
-compact_direct_selected_page_range(
+compact_direct_select_page_range(
         const compact_direct_selected_page_adviser adviser,
         const compact_hash32_direct_index_view& direct,
         const std::span<const std::byte> encoded_bytes) noexcept {
@@ -8554,20 +8554,20 @@ private:
         : permit_(std::move(permit)) {}
 
 public:
-    class query_view {
+    class query_handle {
     private:
         const prepared_fragment_anchor_batch* batch_ = nullptr;
         std::size_t query_index_ = 0u;
 
         friend class prepared_fragment_anchor_batch;
 
-        query_view(
+        query_handle(
                 const prepared_fragment_anchor_batch& batch,
                 std::size_t query_index) noexcept
             : batch_(&batch), query_index_(query_index) {}
 
     public:
-        query_view() = default;
+        query_handle() = default;
 
         [[nodiscard]] std::uint64_t target_length() const noexcept {
             return batch_ == nullptr ? 0u : batch_->target_length_;
@@ -8635,13 +8635,13 @@ public:
     prepared_fragment_anchor_batch& operator=(
             const prepared_fragment_anchor_batch&) = delete;
 
-    [[nodiscard]] query_view query_view(
+    [[nodiscard]] query_handle query_view(
             std::size_t query_index) const {
         if (!ready_ || query_index >= query_count_) {
             throw persisted_minimizer_lookup_error(
                 "prepared fragment anchor query is out of range");
         }
-        return query_view{*this, query_index};
+        return query_handle{*this, query_index};
     }
 
     [[nodiscard]] std::size_t query_count() const noexcept {
@@ -8658,7 +8658,7 @@ public:
     }
 
     [[nodiscard]] const compact_direct_query_set_stats&
-    compact_direct_query_set_stats() const noexcept {
+    compact_direct_query_stats() const noexcept {
         return compact_direct_query_set_stats_;
     }
 };
@@ -9518,7 +9518,7 @@ private:
         for (std::uint8_t span_ordinal = 0u;
              span_ordinal < selected.span_count;
              ++span_ordinal) {
-            const auto page_range = compact_direct_selected_page_range(
+            const auto page_range = compact_direct_select_page_range(
                 adviser,
                 context.reader->compact_direct_->view(),
                 selected.spans[span_ordinal].encoded_bytes);
@@ -9982,46 +9982,48 @@ private:
             "packed occurrence top-byte partition requires payload");
         packed_query_occurrence* const payload_begin = occurrences.data();
         std::array<bucket, 256u> buckets{};
-        for (bucket& bucket : buckets) {
-            bucket.begin = payload_begin;
-            bucket.end = payload_begin;
+        for (bucket& bucket_slot : buckets) {
+            bucket_slot.begin = payload_begin;
+            bucket_slot.end = payload_begin;
         }
         for (packed_query_occurrence& occurrence : occurrences) {
             ++buckets[occurrence.hash >> 24u].end;
         }
-        for (std::size_t bucket = 1u; bucket < buckets.size(); ++bucket) {
-            buckets[bucket].end +=
-                buckets[bucket - 1u].end - payload_begin;
-            buckets[bucket].begin = buckets[bucket - 1u].end;
+        for (std::size_t bucket_index = 1u;
+             bucket_index < buckets.size(); ++bucket_index) {
+            buckets[bucket_index].end +=
+                buckets[bucket_index - 1u].end - payload_begin;
+            buckets[bucket_index].begin = buckets[bucket_index - 1u].end;
         }
 
         for (std::size_t bucket_ordinal = 0u;
              bucket_ordinal < buckets.size();) {
-            bucket& bucket = buckets[bucket_ordinal];
-            if (bucket.begin == bucket.end) {
+            bucket& current_bucket = buckets[bucket_ordinal];
+            if (current_bucket.begin == current_bucket.end) {
                 ++bucket_ordinal;
                 continue;
             }
             bucket* destination =
-                &buckets[bucket.begin->hash >> 24u];
-            if (destination == &bucket) {
-                ++bucket.begin;
+                &buckets[current_bucket.begin->hash >> 24u];
+            if (destination == &current_bucket) {
+                ++current_bucket.begin;
                 continue;
             }
-            packed_query_occurrence displaced = *bucket.begin;
+            packed_query_occurrence displaced = *current_bucket.begin;
             do {
                 const packed_query_occurrence placed = displaced;
                 displaced = *destination->begin;
                 *destination->begin++ = placed;
                 destination = &buckets[displaced.hash >> 24u];
-            } while (destination != &bucket);
-            *bucket.begin++ = displaced;
+            } while (destination != &current_bucket);
+            *current_bucket.begin++ = displaced;
         }
 
         std::array<std::size_t, 257u> bounds{};
-        for (std::size_t bucket = 0u; bucket < buckets.size(); ++bucket) {
-            bounds[bucket + 1u] = static_cast<std::size_t>(
-                buckets[bucket].end - payload_begin);
+        for (std::size_t bucket_index = 0u;
+             bucket_index < buckets.size(); ++bucket_index) {
+            bounds[bucket_index + 1u] = static_cast<std::size_t>(
+                buckets[bucket_index].end - payload_begin);
         }
         return bounds;
     }
@@ -10436,9 +10438,9 @@ private:
         for (std::size_t ordinal = block.entry_begin;
              ordinal < block.entry_end;
             ++ordinal) {
-            const entry_plan& entry_plan = entry_plans_[ordinal];
+            const entry_plan& selected_entry = entry_plans_[ordinal];
             const std::size_t offset_width =
-                entry_plan.offset_byte_width;
+                selected_entry.offset_byte_width;
             std::uint32_t active_bucket =
                 (std::numeric_limits<std::uint32_t>::max)();
             std::uint32_t plan_cursor = 0u;
@@ -10452,7 +10454,7 @@ private:
                 ordinal,
                 [this, &control_ordinal, &callback_error, &active_bucket,
                  &plan_cursor, &plan_end, &context,
-                 offset_width, &entry_plan,
+                 offset_width, &selected_entry,
                  &previous_accepted_position_end, &visitor,
                  accepted_prefix_bytes, rejected_prefix_bytes,
                  validate_rejected_prefixes,
@@ -10500,27 +10502,27 @@ private:
                     }
                     const std::size_t prefix_offset =
                         static_cast<std::size_t>(
-                            entry_plan.prefix_begin)
+                            selected_entry.prefix_begin)
                         + current_ordinal * offset_width;
                     const std::uint64_t position_begin =
                         read_shape_scalar_trusted_(
                             mapped_payload_,
                             prefix_offset,
-                            entry_plan.shape_offset_width);
+                            selected_entry.shape_offset_width);
                     const std::uint64_t position_end =
                         read_shape_scalar_trusted_(
                             mapped_payload_,
                             prefix_offset + offset_width,
-                            entry_plan.shape_offset_width);
+                            selected_entry.shape_offset_width);
                     if (position_end <= position_begin
                         || position_end
-                            > entry_plan.position_element_count
+                            > selected_entry.position_element_count
                         || (current_ordinal == 0u
                             && position_begin != 0u)
                         || (current_ordinal + 1u
-                                == entry_plan.control_count
+                                == selected_entry.control_count
                             && position_end
-                                != entry_plan.position_element_count)
+                                != selected_entry.position_element_count)
                         || (previous_accepted_position_end
                             && position_begin
                                 < *previous_accepted_position_end)) {
@@ -11267,7 +11269,7 @@ private:
         }
 
         const std::uint64_t lookup_started_ns = stage_now_ns_();
-        auto queried = query_direct_compact_hash_lookup_index_unique_projected(
+        auto queried = query_compact_hash32_direct_index_unique_projected(
             compact_direct_->view_,
             direct_query_plan_count,
             [&query_plans = scratch.query_plans_](
@@ -11443,7 +11445,7 @@ private:
         }
 
         const auto selection_access =
-            bind_direct_compact_hash_lookup_index_selection_spans(
+            bind_compact_hash32_direct_index_selection_spans(
                 compact_direct_->view_, plan);
         if (!selection_access
             || selection_access->selection_count()
@@ -11489,7 +11491,7 @@ private:
                                 selection_shard_count,
                                 shard_ordinal);
                         auto visited =
-                            visit_direct_compact_hash_lookup_index_selection_span_range(
+                            visit_compact_hash32_direct_index_selection_span_range(
                                 *selection_access,
                                 range.begin,
                                 range.end,
@@ -11712,7 +11714,7 @@ private:
                                 selection_shard_count,
                                 shard_ordinal);
                         auto visited =
-                            visit_direct_compact_hash_lookup_index_selection_span_range(
+                            visit_compact_hash32_direct_index_selection_span_range(
                                 *selection_access,
                                 range.begin,
                                 range.end,
@@ -12593,24 +12595,24 @@ public:
                     ++reader.oversized_segment_block_count_;
                 }
                 segment_run_begin = ordinal;
-                const entry_plan& entry_plan =
+                const entry_plan& planned_entry =
                     reader.entry_plans_[ordinal];
-                if (entry_plan.position_segment
+                if (planned_entry.position_segment
                         != static_cast<std::uint32_t>(segment)
-                    || entry_plan.reference_end
-                        <= entry_plan.reference_begin
+                    || planned_entry.reference_end
+                        <= planned_entry.reference_begin
                     || (have_core
                         && previous_core_end
-                            > entry_plan.reference_begin)) {
+                            > planned_entry.reference_begin)) {
                     return std::unexpected(
                         minimizer_generation_encoding_error::bp_range);
                 }
                 if (!have_core) {
-                    block.reference_begin = entry_plan.reference_begin;
+                    block.reference_begin = planned_entry.reference_begin;
                     have_core = true;
                 }
-                block.reference_end = entry_plan.reference_end;
-                previous_core_end = entry_plan.reference_end;
+                block.reference_end = planned_entry.reference_end;
+                previous_core_end = planned_entry.reference_end;
                 previous_segment = segment;
             }
             if (end - segment_run_begin
@@ -12830,7 +12832,7 @@ public:
             std::uint64_t largest_query_minimizer_count = 0u;
             for (const fragment_seed_query& query : queries) {
                 if (!bioseq::minimizers::
-                        minimizer_query_length_is_representable<
+                        is_minimizer_query_length_representable<
                             minimap_sketch_data>(
                                 query.query_length)
                     || query.kmer_size <= 0
@@ -14105,13 +14107,13 @@ public:
                                                 control) noexcept
                                             -> std::optional<
                                                 minimizer_generation_encoding_error> {
-                                        const entry_plan& entry_plan =
+                                        const entry_plan& planned_entry =
                                             entry_plans_[entry_ordinal];
                                         auto position_cursor =
                                             position_range_cursor::create(
                                                 mapped_payload_,
                                                 control,
-                                                entry_plan);
+                                                planned_entry);
                                         if (!position_cursor) {
                                             return position_cursor.error();
                                         }
@@ -14152,7 +14154,7 @@ public:
                                         const std::uint64_t position_bytes =
                                             bioseq::common::saturating_mul(
                                                 observed,
-                                                entry_plan.
+                                                planned_entry.
                                                     position_byte_width);
                                         if (position_bytes
                                                 == (std::numeric_limits<
@@ -14409,13 +14411,13 @@ public:
                                                 control) noexcept
                                             -> std::optional<
                                                 minimizer_generation_encoding_error> {
-                                        const entry_plan& entry_plan =
+                                        const entry_plan& planned_entry =
                                             entry_plans_[entry_ordinal];
                                         auto position_cursor =
                                             position_range_cursor::create(
                                                 mapped_payload_,
                                                 control,
-                                                entry_plan);
+                                                planned_entry);
                                         if (!position_cursor) {
                                             return position_cursor.error();
                                         }
@@ -14482,7 +14484,7 @@ public:
                                         const std::uint64_t position_bytes =
                                             bioseq::common::saturating_mul(
                                                 decoded_positions,
-                                                entry_plan.
+                                                planned_entry.
                                                     position_byte_width);
                                         const std::uint64_t constructed =
                                             bioseq::common::saturating_mul(
@@ -14969,7 +14971,7 @@ public:
 static_assert(prepared_fragment_anchor_batch_reader<
     prepared_minimizer_fragment_reader>);
 static_assert(prepared_fragment_anchor_query_index<
-    prepared_fragment_anchor_batch::query_view>);
+    prepared_fragment_anchor_batch::query_handle>);
 static_assert(!minimizer_lookup_index<
     prepared_minimizer_fragment_reader>);
 
@@ -15037,7 +15039,7 @@ concept grouped_soa_event_producer = requires(
         p_producer& producer,
         std::uint64_t position_segment_span_bp,
         canonical_minimizer_event_receiver receiver) {
-    { producer.minimizer_scheme_identity() }
+    { producer.scheme_identity() }
         -> std::same_as<minimizer_scheme_identity>;
     { producer.producer_backend_identity() }
         -> std::same_as<minimizer_producer_identity>;
@@ -15201,7 +15203,7 @@ struct minimizer_generation_publication_binding {
 };
 
 [[nodiscard]] constexpr minimizer_generation_publication_binding
-minimizer_generation_publication_binding(
+make_minimizer_generation_publication_binding(
         const encoded_grouped_soa_generation& generation) noexcept {
     return minimizer_generation_publication_binding{
         .layout = generation.manifest.layout,
@@ -15586,7 +15588,9 @@ struct grouped_soa_plan_pass {
         update_canonical_event_checksum(canonical_event_checksum, event);
         ++segment_positions;
         ++group_positions;
-        if (segment_controls > limits.max_segment_control_count) {
+        if (segment_controls > limits.max_segment_control_count
+            || segment_positions > limits.max_segment_position_count
+            || group_positions > limits.max_hash_position_count) {
             retry_with_smaller_span = true;
             return std::unexpected(
                 minimizer_generation_encoding_error::element_count);
@@ -15614,9 +15618,661 @@ template <grouped_soa_event_producer p_producer>
         const p_producer& producer,
         minimizer_scheme_identity scheme,
         minimizer_producer_identity backend) noexcept {
-    return producer.minimizer_scheme_identity() == scheme
+    return producer.scheme_identity() == scheme
         && producer.producer_backend_identity() == backend;
 }
+
+/// Bounded writer shared by the control and position replay passes.  It owns
+/// exactly one physical row, streams extent bytes into fixed 8064-byte chunks,
+/// and folds the sink-authoritative row CRC receipts into the generation
+/// payload checksum in write order.
+struct grouped_soa_payload_extent_writer {
+    minimizer_generation_row_sink_ref sink{};
+    crc64_ecma182_accumulator* payload_row_checksums = nullptr;
+    index_chunk_address first_address{};
+    std::uint64_t expected_bytes = 0u;
+    std::uint32_t expected_chunks = 0u;
+    std::array<std::byte, k_grouped_soa_extent_payload_bytes> row_bytes{};
+    std::size_t buffered_bytes = 0u;
+    std::uint64_t written_bytes = 0u;
+    std::uint32_t written_chunks = 0u;
+    crc64_ecma182_accumulator extent_checksum{};
+    bool active = false;
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    begin(
+            minimizer_generation_row_sink_ref row_sink,
+            crc64_ecma182_accumulator& generation_payload_checksums,
+            index_chunk_address address,
+            std::uint64_t byte_count,
+            std::uint32_t chunk_count) noexcept {
+        if (active || row_sink.context == nullptr
+            || row_sink.write_fn == nullptr || byte_count == 0u
+            || chunk_count == 0u
+            || grouped_soa_payload_chunk_count(byte_count) != chunk_count) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        sink = row_sink;
+        payload_row_checksums = &generation_payload_checksums;
+        first_address = address;
+        expected_bytes = byte_count;
+        expected_chunks = chunk_count;
+        buffered_bytes = 0u;
+        written_bytes = 0u;
+        written_chunks = 0u;
+        extent_checksum = {};
+        active = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    flush() {
+        if (!active || payload_row_checksums == nullptr) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::row_order);
+        }
+        if (buffered_bytes == 0u) return {};
+        if (written_chunks >= expected_chunks
+            || written_bytes > expected_bytes
+            || buffered_bytes > expected_bytes - written_bytes
+            || first_address.chunk_no
+                > (std::numeric_limits<std::uint32_t>::max)()
+                    - written_chunks) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        index_chunk_address address = first_address;
+        address.chunk_no += written_chunks;
+        const std::span<const std::byte> bytes{
+            row_bytes.data(), buffered_bytes};
+        const auto receipt = sink.write_grouped_soa_payload(
+            unchecked_minimizer_generation_row_view{
+                .address = address,
+                .bytes = bytes,
+            });
+        if (!receipt) return std::unexpected(receipt.error());
+        payload_row_checksums->update_little_endian(
+            receipt->row_checksum);
+        written_bytes += buffered_bytes;
+        ++written_chunks;
+        buffered_bytes = 0u;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    append(std::span<const std::byte> bytes) {
+        if (!active || written_bytes > expected_bytes
+            || buffered_bytes > expected_bytes - written_bytes
+            || bytes.size()
+                > expected_bytes - written_bytes - buffered_bytes) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        extent_checksum.update(bytes);
+        while (!bytes.empty()) {
+            const std::size_t copied = std::min(
+                bytes.size(), row_bytes.size() - buffered_bytes);
+            std::copy_n(
+                bytes.begin(), copied, row_bytes.begin() + buffered_bytes);
+            buffered_bytes += copied;
+            bytes = bytes.subspan(copied);
+            if (buffered_bytes == row_bytes.size()) {
+                if (auto flushed = flush(); !flushed) return flushed;
+            }
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<std::uint64_t,
+        minimizer_generation_encoding_error>
+    finish() {
+        if (auto flushed = flush(); !flushed) {
+            return std::unexpected(flushed.error());
+        }
+        if (written_bytes != expected_bytes
+            || written_chunks != expected_chunks) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        active = false;
+        return extent_checksum.checksum();
+    }
+};
+
+/// Replay pass which materializes one planned control extent at a time.  The
+/// entry image is bounded by the planner's partition target; positions remain
+/// count-only in this pass.  Zero initialization makes every alignment suffix
+/// part of the persisted corruption contract.
+struct grouped_soa_control_emit_pass {
+    grouped_soa_generation_options options{};
+    grouped_soa_minimizer_profile profile{};
+    std::uint64_t span = 0u;
+    std::vector<grouped_soa_bucket_directory_entry>* entries = nullptr;
+    minimizer_generation_row_sink_ref sink{};
+    crc64_ecma182_accumulator* payload_row_checksums = nullptr;
+    std::uint64_t canonical_event_count = 0u;
+    crc64_ecma182_accumulator canonical_event_checksum{};
+    std::size_t entry_ordinal = 0u;
+    std::vector<std::byte> control_image{};
+    std::optional<grouped_soa_control_plane_offsets> control_layout{};
+    canonical_minimizer_event previous_event{};
+    std::uint64_t previous_segment = 0u;
+    std::uint64_t current_hash = 0u;
+    std::uint64_t entry_control_count = 0u;
+    std::uint64_t entry_position_count = 0u;
+    std::uint64_t group_position_count = 0u;
+    bool has_event = false;
+    bool entry_open = false;
+    bool group_open = false;
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    validate_contract() const noexcept {
+        if (entries == nullptr || payload_row_checksums == nullptr
+            || sink.context == nullptr || sink.write_fn == nullptr
+            || options.layout != profile.layout
+            || !is_grouped_soa_payload_profile(profile)
+            || ((!entries->empty() || options.target_length != 0u)
+                && span == 0u)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    open_entry(std::uint64_t segment, std::uint64_t hash) {
+        if (entry_open || entries == nullptr
+            || entry_ordinal >= entries->size()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        grouped_soa_bucket_directory_entry& entry =
+            (*entries)[entry_ordinal];
+        if (const auto error = validate_minimizer_bucket_dir_entry(
+                entry, profile)) {
+            return std::unexpected(*error);
+        }
+        const auto layout = plan_grouped_soa_control_plane(
+            entry.control_element_count,
+            profile.hash_width,
+            entry.shape_offset_width,
+            profile.count_width);
+        if (!layout || layout->encoded_bytes != entry.control_encoded_bytes
+            || entry.control_encoded_bytes
+                > (std::numeric_limits<std::size_t>::max)()
+            || segment != static_cast<std::uint64_t>(
+                entry.position_segment)
+            || hash != entry.lo_hash) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        control_image.assign(
+            static_cast<std::size_t>(entry.control_encoded_bytes),
+            std::byte{0});
+        control_layout = *layout;
+        entry_control_count = 0u;
+        entry_position_count = 0u;
+        group_position_count = 0u;
+        group_open = false;
+        entry_open = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish_group() noexcept {
+        if (!group_open) return {};
+        if (!entry_open || entries == nullptr || !control_layout
+            || entry_ordinal >= entries->size()
+            || group_position_count == 0u) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        const grouped_soa_bucket_directory_entry& entry =
+            (*entries)[entry_ordinal];
+        if (entry_control_count >= entry.control_element_count
+            || entry_position_count < group_position_count) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        const std::size_t hash_width = static_cast<std::uint8_t>(
+            profile.hash_width);
+        const std::size_t offset_width = static_cast<std::uint8_t>(
+            entry.shape_offset_width);
+        const std::size_t count_width = static_cast<std::uint8_t>(
+            profile.count_width);
+        const std::uint64_t prefix =
+            entry_position_count - group_position_count;
+        const std::uint64_t saturated_count = std::min(
+            group_position_count, profile.max_occ_cap + 1u);
+        std::span<std::byte> bytes{control_image};
+        if (!minimizer_generation_wire_detail::write_shape_scalar(
+                bytes,
+                static_cast<std::size_t>(entry_control_count) * hash_width,
+                profile.hash_width,
+                current_hash)
+            || !minimizer_generation_wire_detail::write_shape_scalar(
+                bytes,
+                static_cast<std::size_t>(control_layout->prefix_offset)
+                    + static_cast<std::size_t>(entry_control_count)
+                        * offset_width,
+                entry.shape_offset_width,
+                prefix)
+            || !minimizer_generation_wire_detail::write_shape_scalar(
+                bytes,
+                static_cast<std::size_t>(control_layout->count_offset)
+                    + static_cast<std::size_t>(entry_control_count)
+                        * count_width,
+                profile.count_width,
+                saturated_count)
+            || !minimizer_generation_wire_detail::write_shape_scalar(
+                bytes,
+                static_cast<std::size_t>(control_layout->prefix_offset)
+                    + static_cast<std::size_t>(entry_control_count + 1u)
+                        * offset_width,
+                entry.shape_offset_width,
+                entry_position_count)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        ++entry_control_count;
+        group_position_count = 0u;
+        group_open = false;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish_entry() {
+        if (!entry_open || entries == nullptr
+            || entry_ordinal >= entries->size()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        if (auto finished = finish_group(); !finished) return finished;
+        grouped_soa_bucket_directory_entry& entry =
+            (*entries)[entry_ordinal];
+        if (entry_control_count != entry.control_element_count
+            || entry_position_count != entry.position_element_count
+            || current_hash != entry.hi_hash
+            || control_image.size() != entry.control_encoded_bytes) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        grouped_soa_payload_extent_writer writer;
+        if (auto begun = writer.begin(
+                sink,
+                *payload_row_checksums,
+                index_chunk_address{
+                    .generation_id = options.generation_id,
+                    .position_segment = entry.position_segment,
+                    .sub_key = entry.sub_key,
+                    .chunk_no = entry.control_first_chunk,
+                },
+                entry.control_encoded_bytes,
+                entry.control_chunk_count); !begun) {
+            return begun;
+        }
+        if (auto appended = writer.append(control_image); !appended) {
+            return appended;
+        }
+        const auto checksum = writer.finish();
+        if (!checksum) return std::unexpected(checksum.error());
+        entry.control_checksum = *checksum;
+        ++entry_ordinal;
+        entry_open = false;
+        control_layout.reset();
+        control_image.clear();
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    accept(const canonical_minimizer_event& event) {
+        if (auto valid = validate_contract(); !valid) return valid;
+        const std::uint64_t position = event.encoded_position >> 1u;
+        if (position >= options.target_length || event.hash > profile.max_hash) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        const std::uint64_t segment = position / span;
+        if (!sql_integer_can_represent(segment)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        if (has_event) {
+            const bool before = segment < previous_segment
+                || (segment == previous_segment
+                    && (event.hash < previous_event.hash
+                        || (event.hash == previous_event.hash
+                            && event.encoded_position
+                                < previous_event.encoded_position)));
+            if (before || (segment == previous_segment
+                    && event == previous_event)) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+        }
+        if (!entry_open) {
+            if (auto opened = open_entry(segment, event.hash); !opened) {
+                return opened;
+            }
+        } else {
+            const grouped_soa_bucket_directory_entry& entry =
+                (*entries)[entry_ordinal];
+            if (segment != static_cast<std::uint64_t>(entry.position_segment)
+                || event.hash > entry.hi_hash) {
+                if (segment < static_cast<std::uint64_t>(
+                        entry.position_segment)) {
+                    return std::unexpected(
+                        minimizer_generation_encoding_error::replay_mismatch);
+                }
+                if (auto finished = finish_entry(); !finished) {
+                    return finished;
+                }
+                if (auto opened = open_entry(segment, event.hash); !opened) {
+                    return opened;
+                }
+            } else if (event.hash < entry.lo_hash) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+        }
+        if (group_open && event.hash != current_hash) {
+            if (auto finished = finish_group(); !finished) return finished;
+        }
+        if (!group_open) {
+            if (entry_control_count != 0u && event.hash <= current_hash) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+            current_hash = event.hash;
+            group_open = true;
+        }
+        if (canonical_event_count
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || entry_position_count
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || group_position_count
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::arithmetic_overflow);
+        }
+        ++canonical_event_count;
+        update_canonical_event_checksum(canonical_event_checksum, event);
+        ++entry_position_count;
+        ++group_position_count;
+        previous_segment = segment;
+        previous_event = event;
+        has_event = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish() {
+        if (auto valid = validate_contract(); !valid) return valid;
+        if (entry_open) {
+            if (auto finished = finish_entry(); !finished) return finished;
+        }
+        if (entry_ordinal != entries->size()
+            || (has_event != !entries->empty())) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        return {};
+    }
+};
+
+/// Replay pass which streams segment-local positions directly into bounded
+/// rows.  A heavy hash can therefore own an arbitrarily large planned extent
+/// without creating a correspondingly large transient position buffer.
+struct grouped_soa_position_emit_pass {
+    grouped_soa_generation_options options{};
+    grouped_soa_minimizer_profile profile{};
+    std::uint64_t span = 0u;
+    std::vector<grouped_soa_bucket_directory_entry>* entries = nullptr;
+    minimizer_generation_row_sink_ref sink{};
+    crc64_ecma182_accumulator* payload_row_checksums = nullptr;
+    std::uint64_t canonical_event_count = 0u;
+    crc64_ecma182_accumulator canonical_event_checksum{};
+    std::size_t entry_ordinal = 0u;
+    grouped_soa_payload_extent_writer writer{};
+    canonical_minimizer_event previous_event{};
+    std::uint64_t previous_segment = 0u;
+    std::uint64_t current_hash = 0u;
+    std::uint64_t entry_control_count = 0u;
+    std::uint64_t entry_position_count = 0u;
+    std::uint64_t group_position_count = 0u;
+    bool has_event = false;
+    bool entry_open = false;
+    bool group_open = false;
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    validate_contract() const noexcept {
+        if (entries == nullptr || payload_row_checksums == nullptr
+            || sink.context == nullptr || sink.write_fn == nullptr
+            || options.layout != profile.layout
+            || !is_grouped_soa_payload_profile(profile)
+            || ((!entries->empty() || options.target_length != 0u)
+                && span == 0u)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::storage_contract_mismatch);
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    open_entry(std::uint64_t segment, std::uint64_t hash) {
+        if (entry_open || entries == nullptr
+            || entry_ordinal >= entries->size()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        grouped_soa_bucket_directory_entry& entry =
+            (*entries)[entry_ordinal];
+        if (const auto error = validate_minimizer_bucket_dir_entry(
+                entry, profile)) {
+            return std::unexpected(*error);
+        }
+        const auto position_sub_key =
+            derive_minimizer_position_extent_sub_key(entry.sub_key);
+        if (!position_sub_key
+            || segment != static_cast<std::uint64_t>(entry.position_segment)
+            || hash != entry.lo_hash) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        if (auto begun = writer.begin(
+                sink,
+                *payload_row_checksums,
+                index_chunk_address{
+                    .generation_id = options.generation_id,
+                    .position_segment = entry.position_segment,
+                    .sub_key = *position_sub_key,
+                    .chunk_no = entry.position_first_chunk,
+                },
+                entry.position_encoded_bytes,
+                entry.position_chunk_count); !begun) {
+            return begun;
+        }
+        entry_control_count = 0u;
+        entry_position_count = 0u;
+        group_position_count = 0u;
+        group_open = false;
+        entry_open = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish_group() noexcept {
+        if (!group_open) return {};
+        if (!entry_open || entries == nullptr
+            || entry_ordinal >= entries->size()
+            || group_position_count == 0u
+            || entry_control_count
+                >= (*entries)[entry_ordinal].control_element_count) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        ++entry_control_count;
+        group_position_count = 0u;
+        group_open = false;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish_entry() {
+        if (!entry_open || entries == nullptr
+            || entry_ordinal >= entries->size()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        if (auto finished = finish_group(); !finished) return finished;
+        grouped_soa_bucket_directory_entry& entry =
+            (*entries)[entry_ordinal];
+        if (entry_control_count != entry.control_element_count
+            || entry_position_count != entry.position_element_count
+            || current_hash != entry.hi_hash) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        const auto checksum = writer.finish();
+        if (!checksum) return std::unexpected(checksum.error());
+        entry.position_checksum = *checksum;
+        ++entry_ordinal;
+        entry_open = false;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    accept(const canonical_minimizer_event& event) {
+        if (auto valid = validate_contract(); !valid) return valid;
+        const std::uint64_t position = event.encoded_position >> 1u;
+        if (position >= options.target_length || event.hash > profile.max_hash) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        const std::uint64_t segment = position / span;
+        if (!sql_integer_can_represent(segment)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        if (has_event) {
+            const bool before = segment < previous_segment
+                || (segment == previous_segment
+                    && (event.hash < previous_event.hash
+                        || (event.hash == previous_event.hash
+                            && event.encoded_position
+                                < previous_event.encoded_position)));
+            if (before || (segment == previous_segment
+                    && event == previous_event)) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+        }
+        if (!entry_open) {
+            if (auto opened = open_entry(segment, event.hash); !opened) {
+                return opened;
+            }
+        } else {
+            const grouped_soa_bucket_directory_entry& entry =
+                (*entries)[entry_ordinal];
+            if (segment != static_cast<std::uint64_t>(entry.position_segment)
+                || event.hash > entry.hi_hash) {
+                if (segment < static_cast<std::uint64_t>(
+                        entry.position_segment)) {
+                    return std::unexpected(
+                        minimizer_generation_encoding_error::replay_mismatch);
+                }
+                if (auto finished = finish_entry(); !finished) {
+                    return finished;
+                }
+                if (auto opened = open_entry(segment, event.hash); !opened) {
+                    return opened;
+                }
+            } else if (event.hash < entry.lo_hash) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+        }
+        if (group_open && event.hash != current_hash) {
+            if (auto finished = finish_group(); !finished) return finished;
+        }
+        if (!group_open) {
+            if (entry_control_count != 0u && event.hash <= current_hash) {
+                return std::unexpected(
+                    minimizer_generation_encoding_error::replay_mismatch);
+            }
+            current_hash = event.hash;
+            group_open = true;
+        }
+        const std::uint64_t local_bp = position % span;
+        if (local_bp
+                > ((std::numeric_limits<std::uint64_t>::max)() >> 1u)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::arithmetic_overflow);
+        }
+        const std::uint64_t local_position =
+            (local_bp << 1u) | (event.encoded_position & 1u);
+        std::array<std::byte, sizeof(std::uint64_t)> encoded_position{};
+        const std::size_t position_width = static_cast<std::uint8_t>(
+            profile.position_width);
+        std::span<std::byte> encoded_bytes{
+            encoded_position.data(), position_width};
+        if (!minimizer_generation_wire_detail::write_shape_scalar(
+                encoded_bytes, 0u, profile.position_width, local_position)) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::position_range);
+        }
+        if (auto appended = writer.append(encoded_bytes); !appended) {
+            return appended;
+        }
+        if (canonical_event_count
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || entry_position_count
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || group_position_count
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::arithmetic_overflow);
+        }
+        ++canonical_event_count;
+        update_canonical_event_checksum(canonical_event_checksum, event);
+        ++entry_position_count;
+        ++group_position_count;
+        previous_segment = segment;
+        previous_event = event;
+        has_event = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<void,
+        minimizer_generation_encoding_error>
+    finish() {
+        if (auto valid = validate_contract(); !valid) return valid;
+        if (entry_open) {
+            if (auto finished = finish_entry(); !finished) return finished;
+        }
+        if (entry_ordinal != entries->size()
+            || (has_event != !entries->empty())) {
+            return std::unexpected(
+                minimizer_generation_encoding_error::replay_mismatch);
+        }
+        return {};
+    }
+};
 
 struct grouped_soa_emit_pass {
     template <grouped_soa_event_producer p_producer>
@@ -15674,7 +16330,7 @@ struct grouped_soa_emit_pass {
             return std::unexpected(
                 minimizer_generation_encoding_error::replay_mismatch);
         }
-        if (producer.minimizer_scheme_identity() != profile.minimizer_scheme) {
+        if (producer.scheme_identity() != profile.minimizer_scheme) {
             return std::unexpected(
                 minimizer_generation_encoding_error::storage_contract_mismatch);
         }
@@ -15906,7 +16562,7 @@ plan_minimizer_generation(
         const grouped_soa_generation_options& options,
         const grouped_soa_generation_limits& limits = {}) {
     const minimizer_scheme_identity producer_scheme =
-        producer.minimizer_scheme_identity();
+        producer.scheme_identity();
     const minimizer_producer_identity producer_backend =
         producer.producer_backend_identity();
     const auto profile = derive_grouped_soa_minimizer_profile(
@@ -15943,7 +16599,7 @@ plan_minimizer_generation(
     if (!plan) {
         return std::unexpected(plan.error());
     }
-    if (producer.minimizer_scheme_identity() != producer_scheme
+    if (producer.scheme_identity() != producer_scheme
         || producer.producer_backend_identity() != producer_backend) {
         return std::unexpected(
             minimizer_generation_encoding_error::replay_mismatch);
@@ -16541,16 +17197,16 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
     if (blob_bytes < sizeof(header)) index_corruption_panic("index chunk: truncated header");
-    header header{}; std::memcpy(&header, blob, sizeof(header));
-    if (header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
-        header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
-    const std::size_t expect = sizeof(header) + sizeof(bucket_record)*header.bucket_count + sizeof(std::uint64_t)*header.total_positions;
+    header decoded_header{}; std::memcpy(&decoded_header, blob, sizeof(header));
+    if (decoded_header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
+        decoded_header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
+    const std::size_t expect = sizeof(header) + sizeof(bucket_record)*decoded_header.bucket_count + sizeof(std::uint64_t)*decoded_header.total_positions;
     if (blob_bytes != expect) index_corruption_panic("index chunk: size mismatch (corruption)");
     const char* recs = blob + sizeof(header);
-    const char* pos  = recs + sizeof(bucket_record) * header.bucket_count;
-    for (std::uint32_t bucket_no = 0; bucket_no < header.bucket_count; ++bucket_no) {
+    const char* pos  = recs + sizeof(bucket_record) * decoded_header.bucket_count;
+    for (std::uint32_t bucket_no = 0; bucket_no < decoded_header.bucket_count; ++bucket_no) {
         bucket_record bucket{}; std::memcpy(&bucket, recs + sizeof(bucket_record) * bucket_no, sizeof(bucket_record));
-        if ((std::uint64_t)bucket.pos_offset + bucket.pos_count > header.total_positions)
+        if ((std::uint64_t)bucket.pos_offset + bucket.pos_count > decoded_header.total_positions)
             index_corruption_panic("index chunk: bucket range exceeds total_positions");
         for (std::uint32_t pos_no = 0; pos_no < bucket.pos_count; ++pos_no) {
             std::uint64_t encoded{};
@@ -16567,16 +17223,16 @@ void wire_for_each_bucket(const char* blob, std::size_t blob_bytes,
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
     if (blob_bytes < sizeof(header)) index_corruption_panic("index chunk: truncated header");
-    header header{}; std::memcpy(&header, blob, sizeof(header));
-    if (header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
-        header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
-    const std::size_t expect = sizeof(header) + sizeof(bucket_record)*header.bucket_count + sizeof(std::uint64_t)*header.total_positions;
+    header decoded_header{}; std::memcpy(&decoded_header, blob, sizeof(header));
+    if (decoded_header.magic != minimizer_hashmap_fragment_index::k_encoded_magic ||
+        decoded_header.layout_revision != minimizer_hashmap_fragment_index::k_encoded_layout_revision) index_corruption_panic("index chunk: magic/layout");
+    const std::size_t expect = sizeof(header) + sizeof(bucket_record)*decoded_header.bucket_count + sizeof(std::uint64_t)*decoded_header.total_positions;
     if (blob_bytes != expect) index_corruption_panic("index chunk: size mismatch (corruption)");
     const char* recs = blob + sizeof(header);
-    const char* pos  = recs + sizeof(bucket_record) * header.bucket_count;
-    for (std::uint32_t bucket_no = 0; bucket_no < header.bucket_count; ++bucket_no) {
+    const char* pos  = recs + sizeof(bucket_record) * decoded_header.bucket_count;
+    for (std::uint32_t bucket_no = 0; bucket_no < decoded_header.bucket_count; ++bucket_no) {
         bucket_record bucket{}; std::memcpy(&bucket, recs + sizeof(bucket_record) * bucket_no, sizeof(bucket_record));
-        if ((std::uint64_t)bucket.pos_offset + bucket.pos_count > header.total_positions)
+        if ((std::uint64_t)bucket.pos_offset + bucket.pos_count > decoded_header.total_positions)
             index_corruption_panic("index chunk: bucket range exceeds total_positions");
         pos_scratch.resize(bucket.pos_count);
         if (bucket.pos_count > 0)
@@ -16655,7 +17311,7 @@ inline void serialize_sorted_pairs_to_fragment_blob(
         buckets.push_back(bucket{kmer, offset, count});
     }
 
-    const header header{
+    const header blob_header{
         minimizer_hashmap_fragment_index::k_encoded_magic,
         minimizer_hashmap_fragment_index::k_encoded_layout_revision,
         static_cast<std::uint64_t>(target_len),
@@ -16669,7 +17325,7 @@ inline void serialize_sorted_pairs_to_fragment_blob(
         + positions.size() * sizeof(std::uint64_t);
     out_blob.resize(bytes);
     char* cursor = out_blob.data();
-    std::memcpy(cursor, &header, sizeof(header));
+    std::memcpy(cursor, &blob_header, sizeof(blob_header));
     cursor += sizeof(header);
     if (!buckets.empty()) {
         std::memcpy(cursor, buckets.data(), buckets.size() * sizeof(bucket));
@@ -16684,8 +17340,9 @@ inline void serialize_sorted_pairs_to_fragment_blob(
 }
 
 /// Operation-originated route stats for one complete minimizer-fragment generation encode.
-/// The common encoder replays its producer at least once for planning and once
-/// for emission; every biological core records the branch it actually entered.
+/// The grouped-SoA encoder replays its producer once each for planning,
+/// control emission, and position emission; every biological core records the
+/// branch it actually entered.
 /// Selected SIMD/GPU routes additionally carry their native checked stats, so a
 /// caller cannot accept a backend merely because its enum was requested.
 class minimizer_fragment_generation_execution_receipt {
@@ -16948,7 +17605,7 @@ private:
             minimizer_producer_backend_identity_for_backend(
                 selected_backend);
         publication_binding_ =
-            minimizer_generation_publication_binding(generation);
+            make_minimizer_generation_publication_binding(generation);
         publication_binding_present_ = publication_binding_.valid()
             && route_snapshot_matches_()
             && generation_layout
@@ -17194,7 +17851,7 @@ public:
     }
 
     [[nodiscard]] minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
+    scheme_identity() const noexcept {
         return minimizer_scheme_identity_for_backend(backend_);
     }
 
@@ -17306,15 +17963,16 @@ public:
                 heap.push(cursor{.run = run, .index = 0});
             }
             while (!heap.empty()) {
-                cursor cursor = heap.top();
+                cursor current_cursor = heap.top();
                 heap.pop();
                 if (auto accepted = receiver(
-                        runs[cursor.run][cursor.index]); !accepted) {
+                        runs[current_cursor.run][current_cursor.index]); !accepted) {
                     return accepted;
                 }
-                ++cursor.index;
-                if (cursor.index < runs[cursor.run].size()) {
-                    heap.push(cursor);
+                ++current_cursor.index;
+                if (current_cursor.index
+                        < runs[current_cursor.run].size()) {
+                    heap.push(current_cursor);
                 }
             }
             segment_lo = segment_hi;
@@ -17360,7 +18018,7 @@ public:
     execution_stats() const noexcept {
         minimizer_fragment_generation_execution_receipt stats;
         stats.selected_backend = backend_;
-        stats.minimizer_scheme = minimizer_scheme_identity();
+        stats.minimizer_scheme = scheme_identity();
         stats.target_length =
             sequence_.bp_size();
         stats.window_size = window_size_;
@@ -17459,7 +18117,7 @@ struct minimizers_per_fragment_index {
             stats.bind_publication_(*encoded);
         }
         if (encoded && !stats.publication_accepted(
-                minimizer_generation_publication_binding(*encoded))) {
+                make_minimizer_generation_publication_binding(*encoded))) {
             encoded = std::unexpected(
                 minimizer_generation_encoding_error::storage_contract_mismatch);
         }
@@ -17774,7 +18432,7 @@ struct minimizers_per_fragment_index {
             for (std::size_t wave_lo = 0; wave_lo < nfrag;) {
                 auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
                     pool.maximum_concurrency(), peak_per_fragment);
-                if (!wave.admitted) {
+                if (!wave.is_admitted) {
                     build_and_write_serial(wave_lo);
                     ++wave_lo;
                     continue;

@@ -1164,7 +1164,7 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         ~rank_window_reader() {
             // Free every resident slot's bytes.
             for (std::size_t slot_index = 0;
-                 slot_index < slots_.capacity;
+                 slot_index < slots_.k_capacity;
                  ++slot_index) {
                 slots_.evict_at(
                     slot_index,

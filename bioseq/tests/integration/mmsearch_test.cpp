@@ -16,7 +16,6 @@
 
 #include <tests/support/postgres.hpp>
 #include <bioseq/pg_build_profile.h>
-import bioseq.tests.integration.support;
 
 #include <array>
 #include <bit>
@@ -29,6 +28,8 @@ import bioseq.tests.integration.support;
 #include <span>
 #include <string_view>
 #include <thread>
+
+import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
 

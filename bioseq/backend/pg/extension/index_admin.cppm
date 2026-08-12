@@ -60,9 +60,10 @@ module bioseq.postgres.extension;
 
 import bioseq.common.logging;
 import bioseq.postgres.column;
-import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
 import bioseq.postgres.support;
+import bioseq.postgres.sql_boundary;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif
@@ -289,9 +290,9 @@ list_metadata() {
                     }
 					time_since_update =
 						bioseq::postgres::support::interval_value{
-                        .time = interval->time,
-                        .day = interval->day,
-                        .month = interval->month,
+                        .microseconds = interval->time,
+                        .days = interval->day,
+                        .months = interval->month,
                     };
                 }
                 result.push_back({

@@ -40,7 +40,7 @@ using bioseq::indexing::sequence_index_layout;
 using bioseq::indexing::index_sub_key_t;
 using bioseq::indexing::k_directory_sub_key;
 using index_policy_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         index_policy_codec;
 using index_policy_row = index_policy_codec::row_type;
 

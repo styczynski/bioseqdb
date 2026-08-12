@@ -4898,7 +4898,6 @@ def _validate_guc_manifest_generation(
                 or not isinstance(row[1], str)
                 or not row[1]
                 or not isinstance(row[2], str)
-                or not row[2]
                 or (row[3] is not None and (
                     not isinstance(row[3], str) or not row[3]
                 ))

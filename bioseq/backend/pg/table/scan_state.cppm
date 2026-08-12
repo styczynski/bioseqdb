@@ -178,7 +178,8 @@ export struct index_scan_state {
     /// @brief Returns the wrapped PostgreSQL IndexScan plan node.
     [[nodiscard]] IndexScan* inner_index_scan_plan() noexcept {
         return reinterpret_cast<IndexScan*>(
-            bioseq::postgres::support::postgres_list<Plan>(custom_scan_plan()->custom_plans).first());
+            bioseq::postgres::support::postgres_list<Plan>(
+                custom_scan_plan()->custom_plans).get_first());
     }
 };
 

@@ -52,22 +52,22 @@ import :tuple_ops;
 namespace metadata_entity_handles =
     bioseq::sql::generated::core::storage_metadata_core::entity_handles;
 using row_mask_codec =
-    bioseq::storage::metadata::sql_row_codecs::row_mask_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::row_mask_codec;
 using row_mask_row = row_mask_codec::row_type;
 using options_codec =
-    bioseq::storage::metadata::sql_row_codecs::options_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::options_codec;
 using options_row = options_codec::row_type;
 using stripe_codec =
-    bioseq::storage::metadata::sql_row_codecs::stripe_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::stripe_codec;
 using stripe_row = stripe_codec::row_type;
 using chunk_group_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_group_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_group_codec;
 using chunk_group_row = chunk_group_codec::row_type;
 using chunk_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_codec;
 using chunk_row = chunk_codec::row_type;
 using seq_sub_table_codec =
-    bioseq::storage::metadata::sql_row_codecs::seq_sub_table_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::seq_sub_table_codec;
 using seq_sub_table_row = seq_sub_table_codec::row_type;
 
 inline constexpr std::uint64_t row_mask_chunk_row_capacity = 10'000;

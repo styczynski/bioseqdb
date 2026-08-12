@@ -47,8 +47,11 @@ extern "C" {
 export module bioseq.postgres.sequences.sample_table;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
+import bioseq.postgres.sql_boundary;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.common.seqan_adapter;
 import bioseq.parallelism.memory_admission;
@@ -61,7 +64,7 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.types.compact_sequence;
-import :sql_rows;
+import bioseq.postgres.sequences.sample_table.sql_rows;
 
 using bioseq::storage::sequence_size_t;
 
@@ -375,10 +378,10 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
     const std::uint64_t query_units =
         (mean + k_dna4_letters_per_unit - 1) / k_dna4_letters_per_unit;
     const std::uint64_t query_bytes =
-        bioseq::parallelism::saturating_mul(query_units, sizeof(std::uint64_t));
+        bioseq::common::saturating_mul(query_units, sizeof(std::uint64_t));
     const std::uint64_t rank_scratch =
-        bioseq::parallelism::saturating_mul(mean, 2u);
-    return bioseq::parallelism::saturating_add(query_bytes, rank_scratch);
+        bioseq::common::saturating_mul(mean, 2u);
+    return bioseq::common::saturating_add(query_bytes, rank_scratch);
 }
 
 }  // namespace bioseq::sequences::generation::pg
@@ -744,7 +747,7 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
                     estimate_query_pair_peak_bytes(params));
             const std::size_t batch_count =
                 std::min<std::size_t>(
-                    wave.admitted ? wave.fanout : 1u,
+                    wave.is_admitted ? wave.fanout : 1u,
                     params.fragment_count - first);
             auto batch = generator.generate_fragment_pairs(
                 reference, first, batch_count);

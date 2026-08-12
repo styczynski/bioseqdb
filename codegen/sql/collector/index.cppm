@@ -1786,6 +1786,82 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     return result;
 }
 
+namespace detail {
+
+[[nodiscard]] inline std::vector<
+    structural_analysis::translation_unit>
+collect_direct_import_enum_authorities(
+    const collected_program& program,
+    const structural_analysis::module_graph& module_graph,
+    const std::vector<
+        structural_analysis::dependency_module_identity>&
+        dependency_modules) {
+    std::set<std::string, std::less<>> guc_owner_modules;
+    for (const collected_entity& entity : program.entities) {
+        if (entity.kind == entity_kind::guc) {
+            guc_owner_modules.emplace(entity.source_module);
+        }
+    }
+
+    std::set<std::string, std::less<>> direct_imports;
+    for (const std::string& owner : guc_owner_modules) {
+        const auto graph_unit = std::ranges::find(
+            module_graph.units,
+            owner,
+            &structural_analysis::module_graph_unit::provided_module);
+        if (graph_unit == module_graph.units.end()) {
+            throw std::runtime_error(
+                "registered GUC owner module '" + owner
+                + "' is absent from the validated module graph");
+        }
+        direct_imports.insert(
+            graph_unit->exported_imports.begin(),
+            graph_unit->exported_imports.end());
+        direct_imports.insert(
+            graph_unit->internal_imports.begin(),
+            graph_unit->internal_imports.end());
+    }
+
+    std::map<
+        std::string,
+        const structural_analysis::dependency_module_identity*,
+        std::less<>>
+        dependency_by_module;
+    for (const auto& dependency : dependency_modules) {
+        if (!dependency_by_module.emplace(
+                dependency.module_name, &dependency).second) {
+            throw std::runtime_error(
+                "validated PREPARE module closure duplicates module '"
+                + dependency.module_name + "'");
+        }
+    }
+
+    std::vector<structural_analysis::translation_unit> result;
+    result.reserve(direct_imports.size());
+    for (const std::string& imported : direct_imports) {
+        const auto dependency = dependency_by_module.find(imported);
+        if (dependency == dependency_by_module.end()) {
+            throw std::runtime_error(
+                "registered GUC owner direct import '" + imported
+                + "' is absent from the validated PREPARE module closure");
+        }
+        structural_analysis::translation_unit authority =
+            structural_analysis::scan_token_slice(
+                dependency->second->source_path);
+        if (authority.module_name != imported
+            || authority.source_sha256
+                != dependency->second->source_sha256) {
+            throw std::runtime_error(
+                "registered GUC owner direct import '" + imported
+                + "' disagrees with its validated PREPARE source authority");
+        }
+        result.push_back(std::move(authority));
+    }
+    return result;
+}
+
+}  // namespace detail
+
 [[nodiscard]] inline collected_program collect_sources(
     const std::vector<std::filesystem::path>& source_paths,
     const source_collection_environment& environment) {
@@ -1802,10 +1878,12 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     }
     if (environment.compile_database.empty()
         || environment.pcm_root.empty()
-        || environment.compiler_profile.empty()) {
+        || environment.compiler_profile.empty()
+        || environment.dependency_modules.empty()) {
         throw std::runtime_error(
             "production SQL source collection requires an explicit "
-            "Clang compile database, PCM root, and compiler profile");
+            "Clang compile database, PCM root, compiler profile, and "
+            "validated dependency-module closure");
     }
     try {
         structural_analysis::module_graph module_graph =
@@ -1855,6 +1933,11 @@ inline void resolve_type_of_sql_types(collected_program& program) {
         collected_program result =
             collect_translation_units(
                 std::move(index.translation_units));
+        result.enum_authority_units =
+            detail::collect_direct_import_enum_authorities(
+                result,
+                module_graph,
+                environment.dependency_modules);
         result.module_graph = std::move(module_graph);
         result.compiler_profile =
             environment.compiler_profile;
@@ -1871,14 +1954,75 @@ inline void resolve_type_of_sql_types(collected_program& program) {
 /// Source-only fixture for contract tests that exercise lexical collection.
 /// Production generation never calls this entry point.
 [[nodiscard]] inline collected_program collect_fixture_sources(
-    const std::vector<std::filesystem::path>& source_paths) {
+    const std::vector<std::filesystem::path>& source_paths,
+    const std::vector<std::filesystem::path>&
+        enum_authority_paths = {}) {
     std::vector<structural_analysis::translation_unit> units;
     units.reserve(source_paths.size());
+    std::vector<structural_analysis::translation_unit>
+        enum_authority_units;
+    enum_authority_units.reserve(
+        source_paths.size() + enum_authority_paths.size());
+    structural_analysis::module_graph module_graph;
+    module_graph.units.reserve(source_paths.size());
+    std::set<std::string, std::less<>> provided_modules;
     for (const std::filesystem::path& path : source_paths) {
-        units.push_back(
-            structural_analysis::scan_translation_unit(path));
+        structural_analysis::translation_unit semantic =
+            structural_analysis::scan_translation_unit(path);
+        structural_analysis::translation_unit authority =
+            structural_analysis::scan_token_slice(path);
+        if (authority.module_name.empty()
+            || semantic.module_name != authority.module_name
+            || semantic.source_sha256 != authority.source_sha256
+            || !provided_modules.emplace(authority.module_name).second) {
+            throw std::runtime_error(
+                path.string()
+                + ": fixture SQL owner has inconsistent or duplicate "
+                  "module authority");
+        }
+        std::vector<std::string> internal_imports =
+            authority.source_module.imported_modules;
+        std::ranges::sort(internal_imports);
+        internal_imports.erase(
+            std::ranges::unique(internal_imports).begin(),
+            internal_imports.end());
+        module_graph.units.push_back({
+            .source_identity =
+                structural_analysis::repository_source_identity(
+                    authority.source_path),
+            .provided_module = authority.module_name,
+            .internal_imports = std::move(internal_imports),
+        });
+        units.push_back(std::move(semantic));
+        enum_authority_units.push_back(std::move(authority));
     }
-    return collect_translation_units(std::move(units));
+    for (const std::filesystem::path& path : enum_authority_paths) {
+        structural_analysis::translation_unit authority =
+            structural_analysis::scan_token_slice(path);
+        if (authority.module_name.empty()
+            || !std::ranges::any_of(
+                module_graph.units,
+                [&](const structural_analysis::module_graph_unit& owner) {
+                    return std::ranges::contains(
+                               owner.exported_imports,
+                               authority.module_name)
+                        || std::ranges::contains(
+                               owner.internal_imports,
+                               authority.module_name);
+                })) {
+            throw std::runtime_error(
+                path.string()
+                + ": fixture enum authority must be a direct import of a "
+                  "registered SQL owner");
+        }
+        enum_authority_units.push_back(std::move(authority));
+    }
+    collected_program result =
+        collect_translation_units(std::move(units));
+    result.enum_authority_units =
+        std::move(enum_authority_units);
+    result.module_graph = std::move(module_graph);
+    return result;
 }
 
 [[nodiscard]] inline collected_program collect_source_text(
@@ -1887,7 +2031,20 @@ inline void resolve_type_of_sql_types(collected_program& program) {
     std::vector<structural_analysis::translation_unit> units;
     units.push_back(
         structural_analysis::scan_translation_unit(source_path, source));
-    return collect_translation_units(std::move(units));
+    collected_program result =
+        collect_translation_units(std::move(units));
+    structural_analysis::translation_unit authority =
+        structural_analysis::scan_token_slice(source_path, source);
+    result.module_graph.units.push_back({
+        .source_identity =
+            structural_analysis::repository_source_identity(
+                authority.source_path),
+        .provided_module = authority.module_name,
+        .internal_imports =
+            authority.source_module.imported_modules,
+    });
+    result.enum_authority_units.push_back(std::move(authority));
+    return result;
 }
 
 [[nodiscard]] inline bool contains_structural_terminal_identifier(

@@ -133,7 +133,7 @@ struct dependency_directory_config {
     std::uint32_t generation_reference_limit = k_default_dependency_generation_reference_limit;
     std::uint32_t reserved = 0;
 
-    [[nodiscard]] bool operator_object ==
+    [[nodiscard]] bool operator==
         (const dependency_directory_config&) const noexcept = default;
 };
 
@@ -147,7 +147,7 @@ struct dependency_directory_layout {
     std::uint32_t partition_capacity = 0;
     std::uint32_t reserved = 0;
 
-    [[nodiscard]] bool operator_object ==
+    [[nodiscard]] bool operator==
         (const dependency_directory_layout&) const noexcept = default;
 };
 

@@ -33,7 +33,7 @@ auto tally_symbol_counts(
     using traits = typename bioseq::storage::lazy_sequence_view<
         p_alphabet>::traits;
     constexpr std::size_t rank_count =
-        std::size_t{1} << traits::logical_bits_per_symbol;
+        std::size_t{1} << traits::k_logical_bits_per_symbol;
     std::array<std::int64_t, rank_count> counts{};
     for (auto logical_rank : seq.template iterable<iterator_mode::logical_rank>()) {
         const std::size_t rank = static_cast<std::size_t>(logical_rank);

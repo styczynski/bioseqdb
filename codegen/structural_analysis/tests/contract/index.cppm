@@ -1222,7 +1222,7 @@ inline int invoke() {
                 {"-std=c++20", "-xc++"},
                 "macro_lambda_contract"));
         },
-        "has no proven compound-body attribute insertion point",
+        "has no confirmed compound-body attribute insertion point",
         "macroized lambda declarator rejection");
 
     const configured_toolchain toolchain;
@@ -1656,7 +1656,9 @@ inline int invoke() {
         "dependency scan and PCM compilation disagree",
         "distinct compiler depfile identity immediate retry");
 
-    const std::filesystem::path source_root = root / "sources";
+    // Mirror the current repository-root layout so absolute fixture sources
+    // retain the same canonical identity contract as production sources.
+    const std::filesystem::path source_root = root / "codegen";
     const std::filesystem::path conditional_root =
         source_root / "conditional_root.cppm";
     const std::filesystem::path production_only =
@@ -2390,10 +2392,13 @@ inline int invoke() {
             production_pcm_root);
     require(
         resource_dir_graph.units.size() == 1
+            && resource_dir_graph.units.front().source_identity
+                == "codegen/conditional_root.cppm"
             && resource_dir_graph.units.front().provided_module
                 == "fixture.conditional_root",
-        "owned compile database cannot resolve selected-Clang builtin "
-        "headers in the LibTooling module-graph pass");
+        "owned compile database cannot retain current-root source identity "
+        "and resolve selected-Clang builtin headers in the LibTooling "
+        "module-graph pass");
     const std::filesystem::path pcm =
         first_pcm_dependency(first);
     require(

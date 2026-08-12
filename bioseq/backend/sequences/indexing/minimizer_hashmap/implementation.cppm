@@ -137,7 +137,7 @@ struct minimizer_hashmap_fragment_index_table {
 };
 
 static_assert(BOOST_VERSION == 109000,
-    "Update minimizer_hashmap_table_allocation_plan for a new Boost FOA layout");
+    "Update plan_minimizer_hashmap_table_allocation for a new Boost FOA layout");
 static_assert(sizeof(minimizer_hashmap_fragment_index_table::table_type::value_type)
               == 2u * sizeof(std::uint64_t));
 using pinned_foa_group = boost::unordered::detail::foa::group15<
@@ -823,7 +823,7 @@ void minimizer_hashmap_fragment_index::reserve_table_for_distinct_upper_bound(
         table_ = std::make_unique<detail::minimizer_hashmap_fragment_index_table>();
     }
     const minimizer_hashmap_table_allocation_plan plan =
-        minimizer_hashmap_table_allocation_plan(
+        plan_minimizer_hashmap_table_allocation(
             static_cast<std::uint64_t>(distinct_count));
     if (!plan.valid
         || plan.requested_slots

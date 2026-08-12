@@ -279,9 +279,9 @@ TEST_CASE("compile-time string supports composition and comparison",
     STATIC_REQUIRE(a.size() == 3);
     STATIC_REQUIRE(a == "foo");
     STATIC_REQUIRE((a + b) == "foobar");
-    STATIC_REQUIRE(a.equals_cstr("foo"));
-    STATIC_REQUIRE(!a.equals_cstr("food"));
-    STATIC_REQUIRE(!a.equals_cstr("fo"));
+    STATIC_REQUIRE(a.equals_c_string("foo"));
+    STATIC_REQUIRE(!a.equals_c_string("food"));
+    STATIC_REQUIRE(!a.equals_c_string("fo"));
 }
 
 TEST_CASE("supported alphabet names and codes round-trip",

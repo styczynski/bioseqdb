@@ -5564,8 +5564,9 @@ def _validate_guc_manifest_contract(
                 len(row) != 6
                 or any(
                     not isinstance(row[field], str) or not row[field]
-                    for field in (0, 1, 2)
+                    for field in (0, 1)
                 )
+                or not isinstance(row[2], str)
                 or (
                     row[3] is not None
                     and (not isinstance(row[3], str) or not row[3])

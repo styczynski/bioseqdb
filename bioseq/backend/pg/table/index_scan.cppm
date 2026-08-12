@@ -150,18 +150,19 @@ fetch_next_index_tuple(IndexScanState* node)
          * We reach here if the index scan is not parallel, or if we're
          * serially executing an index scan that was planned to be parallel.
          */
-        bioseq::postgres::support::postgres_bitmapset attr_needed = collect_needed_column_attributes(
-            &node->ss,
-            (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
+        bioseq::postgres::support::postgres_bitmapset attr_needed{
+            collect_needed_column_attributes(
+                &node->ss,
+                (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig)};
 
         scandesc = begin_bioseq_index_scan_descriptor(node->ss.ss_currentRelation,
                                           node->iss_RelationDesc,
                                           estate->es_snapshot,
                                           node->iss_NumScanKeys,
                                           node->iss_NumOrderByKeys,
-                                          attr_needed);
+                                          attr_needed.get());
 
-        attr_needed.free();
+        attr_needed.clear();
 
         node->iss_ScanDesc = scandesc;
 
@@ -343,18 +344,19 @@ fetch_next_reordered_index_tuple(IndexScanState* node)
 
     if (scandesc == nullptr)
     {
-        bioseq::postgres::support::postgres_bitmapset attr_needed = collect_needed_column_attributes(
-            &node->ss,
-            (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
+        bioseq::postgres::support::postgres_bitmapset attr_needed{
+            collect_needed_column_attributes(
+                &node->ss,
+                (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig)};
 
         scandesc = begin_bioseq_index_scan_descriptor(node->ss.ss_currentRelation,
                                           node->iss_RelationDesc,
                                           estate->es_snapshot,
                                           node->iss_NumScanKeys,
                                           node->iss_NumOrderByKeys,
-                                          attr_needed);
+                                          attr_needed.get());
 
-        attr_needed.free();
+        attr_needed.clear();
 
         node->iss_ScanDesc = scandesc;
 

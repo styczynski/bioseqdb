@@ -2062,10 +2062,10 @@ void write_report(
     const std::filesystem::path absolute =
         std::filesystem::absolute(path);
     const auto directories_created =
-        bioseq::durable_file_io::durable_create_directories(
+        bioseq::common::durable_file_io::durable_create_directories(
             absolute.parent_path());
     if (!directories_created.has_value()) {
-        const bioseq::durable_file_io::file_io_error& error =
+        const bioseq::common::durable_file_io::file_error& error =
             directories_created.error();
         throw std::runtime_error(
             "cannot durably create benchmark report directory: operation "
@@ -2086,14 +2086,14 @@ void write_report(
     }
     const std::string serialized = std::move(output).str();
     const auto published =
-        bioseq::durable_file_io::durable_replace_file(
+        bioseq::common::durable_file_io::durable_replace_file(
             absolute,
             std::as_bytes(std::span{
                 serialized.data(), serialized.size()}),
-            bioseq::durable_file_io::durable_publish_options{
+            bioseq::common::durable_file_io::publication_options{
                 .mode = 0666});  // Preserve ofstream mode before umask.
     if (!published.has_value()) {
-        const bioseq::durable_file_io::file_io_error& error =
+        const bioseq::common::durable_file_io::file_error& error =
             published.error();
         throw std::runtime_error(
             "cannot durably publish benchmark report: operation "
@@ -2106,7 +2106,7 @@ void write_report(
             + std::to_string(static_cast<unsigned>(error.publication)));
     }
     if (published->publication
-        != bioseq::durable_file_io::publication_state::durable) {
+        != bioseq::common::durable_file_io::publication_state::durable) {
         throw std::runtime_error(
             "benchmark report publication did not become durable");
     }

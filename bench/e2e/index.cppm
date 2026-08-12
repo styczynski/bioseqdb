@@ -607,6 +607,7 @@ struct e2e_output {
 
 namespace {
 
+using bioseq::bench::e2e::detail::cold_no_index_policy_absence_stats;
 using bioseq::bench::e2e::detail::e2e_input;
 using bioseq::bench::e2e::detail::e2e_just_index_setup_requirements;
 using bioseq::bench::e2e::detail::e2e_output;
@@ -786,7 +787,7 @@ template <sequence_alphabet p_alphabet>
         const bench_sequence_range<p_alphabet>& seq,
         std::size_t unit_off, std::size_t unit_count, std::size_t padding) {
     return bench_view<p_alphabet>{
-        seq._data.data() + unit_off, unit_count, padding};
+        seq.packed_units.data() + unit_off, unit_count, padding};
 }
 
 // ---- §11 — FASTA writers / minimap2 drivers / result parsers ----
@@ -853,7 +854,7 @@ template <sequence_alphabet p_alphabet>
         const std::size_t end_bp) {
     using traits = typename bench_sequence_range<p_alphabet>::traits;
     if (begin_bp > end_bp || end_bp > target.bp_size()) return {};
-    auto iterator = target.template iter<SYMBOL>(
+    auto iterator = target.template iter<alphabet_symbol>(
         target.cbegin() + static_cast<std::ptrdiff_t>(
             begin_bp / traits::letters_per_unit));
     for (std::size_t skip = 0; skip < begin_bp % traits::letters_per_unit;
@@ -9638,7 +9639,7 @@ int run(int argc, char** argv) {
     using bioseq::bench::framework::run_constraints; using bioseq::bench::framework::parameter_map;
     auto est = std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)>{e2e_estimate};
     auto inp = std::function<e2e_input(std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>{build_e2e_input};
-    auto run = std::function<e2e_output(std::string_view, const parameter_map&, const e2e_input&)>{e2e_run};
+    auto e2e_runner = std::function<e2e_output(std::string_view, const parameter_map&, const e2e_input&)>{e2e_run};
     auto evl = std::function<std::map<std::string,double>(std::string_view, const parameter_map&, const e2e_input&, const e2e_output&)>{e2e_eval};
     auto cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const e2e_input&)>{cleanup_e2e_input};
     auto raw = std::function<std::string(std::string_view, const parameter_map&, const e2e_input&, const e2e_output&)>{serialize_e2e_raw_sample};
@@ -9650,13 +9651,13 @@ int run(int argc, char** argv) {
     return bioseq::bench::framework::run(argc, argv, rep, data,
         bioseq::bench::framework::create_benchmark<e2e_input, e2e_output>(
             "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
-            "bench_e2e", cfg, est, inp, run, evl, cln, raw),
+            "bench_e2e", cfg, est, inp, e2e_runner, evl, cln, raw),
         bioseq::bench::framework::create_benchmark<e2e_input, e2e_output>(
             "Five-repeat sign-off SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
-            "bench_e2e_signoff", cfg, est, inp, run, evl, cln, raw),
+            "bench_e2e_signoff", cfg, est, inp, e2e_runner, evl, cln, raw),
         bioseq::bench::framework::create_benchmark<e2e_input, e2e_output>(
             "E2E resident GPU batch validation vs SIMD and minimap2",
-            "bench_e2e_gpu_batch_validation", cfg, est, inp, run, evl, cln, raw),
+            "bench_e2e_gpu_batch_validation", cfg, est, inp, e2e_runner, evl, cln, raw),
         bioseq::bench::framework::create_benchmark<sort_scan_input, sort_scan_output>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
             "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));

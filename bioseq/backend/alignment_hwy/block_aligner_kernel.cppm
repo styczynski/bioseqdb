@@ -49,10 +49,6 @@ export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Both alignment engines share the lazy-view encoder so their orientation and
-// compact-storage handling remain identical.
-using bioseq::storage::encode_region_via_ptr_at;
-
 // =============================================================================
 // Constants
 // =============================================================================
@@ -179,8 +175,9 @@ public:
         data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
         const uint8_t null_byte = static_cast<uint8_t>(p_alphabet_dimension);
         data_[0] = null_byte;
-        encode_region_via_ptr_at<p_is_reversed, p_should_write_reversed>(
-            sequence, data_.subspan(1, length_), region_begin, region_end);
+        sequence.template copy_ranks<
+            p_is_reversed, p_should_write_reversed>(
+                data_.subspan(1, length_), region_begin, region_end);
         std::memset(data_.data() + 1 + length_, null_byte, block_size);
     }
 
@@ -1758,13 +1755,11 @@ try_global_diagonal_certificate(
          chunk_offset += scan_chunk_symbols) {
         const size_t chunk_size = std::min(
             scan_chunk_symbols, sequence_length - chunk_offset);
-        encode_region_via_ptr_at<p_is_reversed, false>(
-            query_seq,
+        query_seq.template copy_ranks<p_is_reversed, false>(
             std::span<std::uint8_t>{query_chunk.data(), chunk_size},
             query_start + chunk_offset,
             query_start + chunk_offset + chunk_size);
-        encode_region_via_ptr_at<false, false>(
-            target_seq,
+        target_seq.template copy_ranks<false, false>(
             std::span<std::uint8_t>{target_chunk.data(), chunk_size},
             target_start + chunk_offset,
             target_start + chunk_offset + chunk_size);

@@ -984,10 +984,15 @@ def verify_compile_contract_fixtures(root: Path) -> None:
         materialization,
         materialization_text,
         (
-            "bioseq::postgres::support::table_rows<",
-            "bioseq::postgres::support::named_output_set<",
-            "bioseq::postgres::support::named_output<",
-            "bioseq::postgres::support::sql_result_to_datum(",
+            "using bioseq::postgres::support::table_rows;",
+            "using bioseq::postgres::support::named_output_set;",
+            "using bioseq::postgres::support::named_output;",
+            "table_rows<reaper_event>",
+            "named_output_set<teardown_diagnostics_row>",
+            "named_output<teardown_diagnostics_row>",
+            "bioseq::postgres::support::encode_result_row(",
+            "bioseq::postgres::support::encode_result(",
+            "encoded_reaper_event::field_count",
         ),
     )
 
@@ -1024,7 +1029,7 @@ def verify_compile_contract_fixtures(root: Path) -> None:
             "active_guc_owner::registration_count == 29U",
             "registration_count == 73U",
             "registration_count == 76U",
-            "&active_guc_owner::register_logging",
+            "&active_guc_owner::register_diagnostics_logging_enabled",
             "&active_guc_registry::register_gucs",
         ),
     )
@@ -1227,6 +1232,64 @@ def verify_proof_vs_scan_wiring(cmake_path: Path, cmake: str) -> None:
     if "BIOSEQ_SQL_POSTGRES_EXTENSION_CXX_DYNDEP" in cmake:
         fail("extension-only SQL PREPARE dyndep wiring was retained")
 
+    active_support_selection = (
+        "set(_bioseq_typed_sql_support_profile production)\n"
+        "if(BIOSEQ_TEST_INDEXES)\n"
+        "  set(_bioseq_typed_sql_support_profile test_indexes)\n"
+        "endif()\n"
+        "set(BIOSEQ_TYPED_SQL_SUPPORT_STAMP\n"
+        "  \"${CMAKE_CURRENT_BINARY_DIR}/generated/sql/profiles/"
+        "${_bioseq_typed_sql_support_profile}/support.stamp\")\n"
+        "unset(_bioseq_typed_sql_support_profile)"
+    )
+    if cmake.count(active_support_selection) != 1:
+        fail(
+            "template-flatten PREPARE does not select exactly one active-"
+            "profile SQL SUPPORT dependency"
+        )
+    if cmake.count(
+        'PREPARE_DEPENDS "${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}"'
+    ) != 1:
+        fail(
+            "template-flatten PREPARE does not consume exactly one active-"
+            "profile SQL SUPPORT stamp"
+        )
+    active_support_guard = (
+        "if(BIOSEQ_TEST_INDEXES)\n"
+        "  set(_bioseq_expected_typed_sql_support_stamp\n"
+        "    \"${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}\")\n"
+        "else()\n"
+        "  set(_bioseq_expected_typed_sql_support_stamp\n"
+        "    \"${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}\")\n"
+        "endif()\n"
+        "if(NOT \"${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}\" STREQUAL\n"
+        "    \"${_bioseq_expected_typed_sql_support_stamp}\")"
+    )
+    if cmake.count(active_support_guard) != 1:
+        fail(
+            "template-flatten SQL SUPPORT dependency is not guarded against "
+            "both configured profiles"
+        )
+
+    typed_prepare_ordering = re.search(
+        r"add_custom_command\(\s*"
+        r"OUTPUT\s*"
+        r'"\$\{BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT\}'
+        r'/pcm/metadata/prepare_compile_commands\.json"\s*'
+        r"APPEND\s*"
+        r"DEPENDS\s*"
+        r'"\$\{BIOSEQ_SQL_CORE_GENERATED_STAMP\}"\s*'
+        r'"\$\{BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP\}"\s*'
+        r"\)",
+        cmake,
+        flags=re.DOTALL,
+    )
+    if typed_prepare_ordering is None:
+        fail(
+            "typed-template PREPARE is not ordered after the exact CORE and "
+            "production SQL SUPPORT stamps"
+        )
+
     anchor_definition = re.search(
         r"set\(_bioseq_sql_target_dyndep_anchors\s+"
         r"(.*?)\)\s*"
@@ -1387,12 +1450,12 @@ def verify_proof_vs_scan_wiring(cmake_path: Path, cmake: str) -> None:
             "  ${_bioseq_sql_external_feature_contract_stamps})",
             "add_custom_target("
             "bioseq_sql_postgres_error_safety_static_evidence\n"
-            '    DEPENDS "${BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT}")',
+            '    DEPENDS "${BIOSEQ_SQL_SAFETY_VALIDATION_REPORT}")',
         ),
     )
     if re.search(
         r"list\(APPEND\s+_bioseq_sql_generation_contract_outputs\b"
-        r".*?BIOSEQ_SQL_SAFETY_EVIDENCE_REPORT",
+        r".*?BIOSEQ_SQL_SAFETY_VALIDATION_REPORT",
         cmake,
         flags=re.DOTALL,
     ):
@@ -1493,6 +1556,34 @@ def run_proof_vs_scan_wiring_mutation_self_tests(root: Path) -> None:
         "",
     )
     expect_rejected(
+        "test-indexes active SQL SUPPORT selection removed",
+        "if(BIOSEQ_TEST_INDEXES)\n"
+        "  set(_bioseq_typed_sql_support_profile test_indexes)\n"
+        "endif()\n",
+        "",
+    )
+    expect_rejected(
+        "active SQL SUPPORT PREPARE dependency bypassed",
+        '  PREPARE_DEPENDS "${BIOSEQ_TYPED_SQL_SUPPORT_STAMP}"\n',
+        '  PREPARE_DEPENDS "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}"\n',
+    )
+    expect_rejected(
+        "production row-codec SUPPORT ordering removed",
+        "  DEPENDS\n"
+        '    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"\n'
+        '    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}")',
+        '  DEPENDS "${BIOSEQ_SQL_CORE_GENERATED_STAMP}")',
+    )
+    expect_rejected(
+        "production row-codec SUPPORT ordering substituted by test indexes",
+        "  DEPENDS\n"
+        '    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"\n'
+        '    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}")',
+        "  DEPENDS\n"
+        '    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"\n'
+        '    "${BIOSEQ_SQL_TEST_INDEXES_SUPPORT_STAMP}")',
+    )
+    expect_rejected(
         "test-index safety PREPARE dyndep dependency removed",
         '      "${BIOSEQ_SQL_SAFETY_PRODUCTION_PREPARE_STAMP}"\n'
         '      "${BIOSEQ_SQL_SAFETY_TEST_INDEXES_PREPARE_STAMP}")',
@@ -1562,6 +1653,7 @@ def verify_sql_codegen_ast_proof_pool_wiring(
     safety_cmake: str | None = None,
 ) -> None:
     root_cmake_path = root / "CMakeLists.txt"
+    bioseq_cmake_path = root / "bioseq/CMakeLists.txt"
     safety_cmake_path = (
         root / "codegen/safety/postgres_error_safety.cmake"
     )
@@ -1747,6 +1839,293 @@ def run_sql_codegen_ast_proof_pool_mutation_self_tests(
     )
 
 
+def verify_fmgr_owner_authority_wiring(
+    root: Path,
+    bioseq_cmake: str,
+) -> None:
+    registry_path = root / "cmake/bioseq_sql_codegen.cmake"
+    registry = read_text(registry_path)
+    require_tokens(
+        registry_path,
+        registry,
+        (
+            "FMGR_OWNER_MODULES",
+            "_natural_fmgr_entrypoints",
+            "_resolved_fmgr_owner_records",
+            "_owner_declared_modules",
+            "_FMGR_OWNER_RECORDS",
+            "synthetic SUPPORT FMGR facet",
+            "multi-facet FMGR owner",
+        ),
+    )
+    if re.search(
+        r"foreach\(_fmgr_owner\s+IN LISTS ARG_FMGR_ENTRYPOINTS\)",
+        registry,
+    ):
+        fail(
+            "SQL registry still maps every FMGR output facet to the "
+            "owner root module"
+        )
+
+    registration_blocks = re.findall(
+        r"bioseq_register_sql_owner\(\s*(.*?)\)",
+        bioseq_cmake,
+        flags=re.DOTALL,
+    )
+    support_owned = {
+        "vector_comparison_registry",
+        "vector_aggregate_registry",
+    }
+    observed_by_profile: dict[str, dict[str, str]] = {
+        "production": {},
+        "test_indexes": {},
+    }
+    vector_facets: set[str] = set()
+    vector_overrides: dict[str, str] = {}
+    for block in registration_blocks:
+        owner_match = re.search(r"\bOWNER_KEY\s+([a-z][a-z0-9_]*)", block)
+        module_match = re.search(
+            r"\bMODULE\s+([A-Za-z_][A-Za-z0-9_.:]*)", block
+        )
+        profiles_match = re.search(
+            r"\bPROFILES\s+(.*?)\s+AUTHORITIES\b",
+            block,
+            flags=re.DOTALL,
+        )
+        facets_match = re.search(
+            r"\bFMGR_ENTRYPOINTS\s+(.*?)(?:\s+FMGR_OWNER_MODULES\b|"
+            r"\s+GUC_OWNERS\b|\s+ANNOTATION_FREE_RESULT_ROWS\b|"
+            r"\s+HANDWRITTEN_FMGR_EXPORTS\b|$)",
+            block,
+            flags=re.DOTALL,
+        )
+        if facets_match is None:
+            continue
+        if owner_match is None or module_match is None or profiles_match is None:
+            fail("FMGR owner registration lacks owner/module/profile authority")
+        facets = re.findall(r"\b[a-z][a-z0-9_]*\b", facets_match.group(1))
+        profiles = re.findall(
+            r"\b(?:production|test_indexes)\b", profiles_match.group(1)
+        )
+        overrides_match = re.search(
+            r"\bFMGR_OWNER_MODULES\s+(.*?)(?:\s+GUC_OWNERS\b|"
+            r"\s+ANNOTATION_FREE_RESULT_ROWS\b|"
+            r"\s+HANDWRITTEN_FMGR_EXPORTS\b|$)",
+            block,
+            flags=re.DOTALL,
+        )
+        overrides = {
+            key: module
+            for key, module in re.findall(
+                r"\b([a-z][a-z0-9_]*)="
+                r"([A-Za-z_][A-Za-z0-9_.:]*)\b",
+                "" if overrides_match is None else overrides_match.group(1),
+            )
+        }
+        natural_facets = [
+            facet for facet in facets if facet not in support_owned
+        ]
+        if len(natural_facets) > 1 and set(overrides) != set(natural_facets):
+            fail(
+                f"multi-facet FMGR owner {owner_match.group(1)} lacks an "
+                "exact per-facet source-module map"
+            )
+        for facet in natural_facets:
+            module = overrides.get(facet, module_match.group(1))
+            for profile in profiles:
+                if facet in observed_by_profile[profile]:
+                    fail(f"duplicate FMGR facet authority for {facet}")
+                observed_by_profile[profile][facet] = module
+        if owner_match.group(1) == "vector_types":
+            vector_facets = set(facets)
+            vector_overrides = overrides
+
+    production_expected = {
+        "mod": "bioseq.postgres.extension",
+        "highway_target_test_support": "bioseq.highway_target_test_support",
+        "storage_manager_sequence_storage_manager":
+            "bioseq.postgres.storage.manager:sequence_storage",
+        "table_access_hooks": "bioseq.postgres.table",
+        "storage_load_pg": "bioseq.postgres.storage.io",
+        "sequences_sample_table_udf":
+            "bioseq.postgres.sequences.sample_table",
+        "postgres_types_compact_sequence":
+            "bioseq.postgres.types.compact_sequence",
+        "vector_types_integer":
+            "bioseq.postgres.vectorization.types.integer",
+        "vector_types_date": "bioseq.postgres.vectorization.types.date",
+        "vector_types_aggregates":
+            "bioseq.postgres.vectorization.types.aggregates",
+    }
+    test_expected = dict(production_expected)
+    test_expected["highway_ksw_target_test_support"] = (
+        "bioseq.highway_ksw_target_test_support"
+    )
+    if observed_by_profile["production"] != production_expected:
+        fail("production FMGR facet/source-module authority map drifted")
+    if observed_by_profile["test_indexes"] != test_expected:
+        fail("test_indexes FMGR facet/source-module authority map drifted")
+    if not support_owned.issubset(vector_facets):
+        fail("synthetic vector registries are absent from FMGR output facets")
+    if support_owned.intersection(vector_overrides):
+        fail("synthetic vector registries claim bogus source-module owners")
+
+    require_tokens(
+        root / "bioseq/CMakeLists.txt",
+        bioseq_cmake,
+        (
+            "BIOSEQ_SQL_BIOSEQ_${_bioseq_sql_profile_key}_"
+            "FMGR_OWNER_RECORDS",
+            "foreach(_bioseq_sql_fmgr_owner_record IN LISTS",
+            "--fmgr-owner-module \"${_bioseq_sql_fmgr_owner_record}\"",
+            "${_bioseq_sql_fmgr_owner_args}",
+        ),
+    )
+
+
+def verify_row_codec_owner_authority_wiring(
+    root: Path,
+    bioseq_cmake: str,
+) -> None:
+    registry_path = root / "cmake/bioseq_sql_codegen.cmake"
+    registry = read_text(registry_path)
+    require_tokens(
+        registry_path,
+        registry,
+        (
+            "_ROW_CODEC_OWNER_RECORDS",
+            "_row_codec_owner_record",
+            "row-codec owner ${ARG_OWNER_KEY} must register exactly one facet",
+            "exactly name its source module",
+        ),
+    )
+
+    observed_by_profile: dict[str, dict[str, str]] = {
+        "production": {},
+        "test_indexes": {},
+    }
+    registration_blocks = re.findall(
+        r"bioseq_register_sql_owner\(\s*(.*?)\)",
+        bioseq_cmake,
+        flags=re.DOTALL,
+    )
+    for block in registration_blocks:
+        facets_match = re.search(
+            r"\bROW_CODECS\s+(.*?)(?:\s+ENTITY_HANDLES\b|"
+            r"\s+FMGR_ENTRYPOINTS\b|\s+FMGR_OWNER_MODULES\b|"
+            r"\s+GUC_OWNERS\b|\s+ANNOTATION_FREE_RESULT_ROWS\b|"
+            r"\s+HANDWRITTEN_FMGR_EXPORTS\b|$)",
+            block,
+            flags=re.DOTALL,
+        )
+        if facets_match is None:
+            continue
+        module_match = re.search(
+            r"\bMODULE\s+([A-Za-z_][A-Za-z0-9_.:]*)", block
+        )
+        profiles_match = re.search(
+            r"\bPROFILES\s+(.*?)\s+AUTHORITIES\b",
+            block,
+            flags=re.DOTALL,
+        )
+        if module_match is None or profiles_match is None:
+            fail("row-codec registration lacks module/profile authority")
+        facets = re.findall(
+            r"\b[a-z][a-z0-9_]*\b", facets_match.group(1)
+        )
+        if len(facets) != 1:
+            fail("row-codec registration is not one facet per source module")
+        for profile in re.findall(
+            r"\b(?:production|test_indexes)\b", profiles_match.group(1)
+        ):
+            facet = facets[0]
+            if facet in observed_by_profile[profile]:
+                fail(f"duplicate row-codec facet authority for {facet}")
+            observed_by_profile[profile][facet] = module_match.group(1)
+
+    expected = {
+        "storage_metadata": "bioseq.postgres.storage.metadata.sql_rows",
+        "storage_indexing_pg":
+            "bioseq.postgres.storage.indexing.sql_rows",
+        "storage_load_pg": "bioseq.postgres.storage.io.sql_rows",
+        "storage_manager": "bioseq.postgres.storage.manager.sql_rows",
+        "table": "bioseq.postgres.table.sql_rows",
+    }
+    for profile, observed in observed_by_profile.items():
+        if observed != expected:
+            fail(
+                f"{profile} row-codec facet/source-module authority map "
+                "drifted"
+            )
+
+    cmake_path = root / "bioseq/CMakeLists.txt"
+    require_tokens(
+        cmake_path,
+        bioseq_cmake,
+        (
+            "BIOSEQ_SQL_BIOSEQ_${_bioseq_sql_profile_key}_"
+            "ROW_CODEC_OWNER_RECORDS",
+            "foreach(_bioseq_sql_row_codec_owner_record IN LISTS",
+            "--row-codec-owner-module",
+            '"${_bioseq_sql_row_codec_owner_record}"',
+            "${_bioseq_sql_row_codec_owner_args}",
+        ),
+    )
+    if bioseq_cmake.count("${_bioseq_sql_row_codec_owner_args}") != 2:
+        fail(
+            "row-codec owner authority is not transported exactly once "
+            "through SUPPORT and FINAL"
+        )
+    output_variables = {
+        "storage_metadata": "STORAGE_METADATA",
+        "storage_indexing_pg": "STORAGE_INDEXING_PG",
+        "storage_load_pg": "STORAGE_LOAD_PG",
+        "storage_manager": "STORAGE_MANAGER",
+        "table": "TABLE",
+    }
+    for facet, variable_suffix in output_variables.items():
+        configured_output = (
+            f'"{facet}=${{BIOSEQ_SQL_${{_bioseq_sql_profile_key}}_'
+            f'ROW_CODECS_{variable_suffix}}}"'
+        )
+        if bioseq_cmake.count(configured_output) != 2:
+            fail(
+                f"row-codec output {facet} is not configured exactly once "
+                "in SUPPORT and FINAL"
+            )
+
+    index_path = root / "codegen/sql/index.cppm"
+    index = read_text(index_path)
+    require_tokens(
+        index_path,
+        index,
+        (
+            "--row-codec-owner-module",
+            "validate_row_codec_owner_modules",
+            "has no configured source-module owner",
+            "has no configured output",
+            "--row-codec-owner-module has invalid C++ module name "
+            "'a::b'",
+        ),
+    )
+    facets_path = root / "codegen/sql/renderer/cpp_facets.cppm"
+    facets = read_text(facets_path)
+    manifest_path = root / "codegen/sql/renderer/manifest.cppm"
+    manifest = read_text(manifest_path)
+    if "row_codec_owner_key" in facets:
+        fail("row-codec renderer retains module-derived owner authority")
+    if re.search(r"render_row_codec_modules\s*\(\s*graph\s*\)", facets + index + manifest):
+        fail("row-codec renderer retains a one-argument fallback")
+    require_tokens(
+        manifest_path,
+        manifest,
+        (
+            "row_codec_owners",
+            "render_row_codec_modules(\n            graph, row_codec_owners)",
+        ),
+    )
+
+
 def verify_cmake_wiring(root: Path) -> None:
     cmake_path = root / "bioseq/CMakeLists.txt"
     cmake = read_text(cmake_path)
@@ -1777,6 +2156,7 @@ def verify_cmake_wiring(root: Path) -> None:
             'postgres_error_safety.cmake"'
         ),
         '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_codegen.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake"',
         '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_gcc_toolchain.cmake"',
         '"${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"',
         '"${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"',
@@ -1789,6 +2169,8 @@ def verify_cmake_wiring(root: Path) -> None:
         "${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})",
     )
     require_tokens(cmake_path, cmake, required)
+    verify_row_codec_owner_authority_wiring(root, cmake)
+    verify_fmgr_owner_authority_wiring(root, cmake)
     verify_proof_vs_scan_wiring(cmake_path, cmake)
     verify_sql_codegen_ast_proof_pool_wiring(root)
     authored_provider_closure = re.search(
@@ -2001,10 +2383,17 @@ def verify_cmake_wiring(root: Path) -> None:
         else:
             owner = "postgresql_bioseq"
         annotation_owners[owner].append(relative)
-    if not all(annotation_owners.values()):
+    required_annotation_owners = (
+        "bioseq_sql_compile_contract_providers",
+        "postgresql_bioseq",
+    )
+    if not all(
+        annotation_owners[owner]
+        for owner in required_annotation_owners
+    ):
         fail(
-            "annotation source ownership map did not cover nopg, provider, "
-            "and PostgreSQL targets"
+            "annotation source ownership map did not cover provider and "
+            "PostgreSQL targets"
         )
 
     root_cmake_path = root / "CMakeLists.txt"
@@ -2386,9 +2775,12 @@ def validate_guc_registration(
         row_label = f"{label}.enum_rows[{row_index}]"
         if not isinstance(row, list) or len(row) != 6:
             fail(f"{row_label} is not a six-field row")
-        if any(
-            not isinstance(row[field], str) or not row[field]
-            for field in (0, 1, 2)
+        if (
+            any(
+                not isinstance(row[field], str) or not row[field]
+                for field in (0, 1)
+            )
+            or not isinstance(row[2], str)
         ):
             fail(f"{row_label} has malformed string provenance")
         if row[3] is not None and (

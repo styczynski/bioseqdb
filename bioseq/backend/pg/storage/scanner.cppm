@@ -152,7 +152,7 @@ struct postgres_sequence_scanner final {
     using traits         = typename compact_sequence_range<p_sequence_instance>::traits;
 
     static constexpr std::size_t fragment_storage_units =
-        SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
+        default_fragment_storage_units;
 
     [[nodiscard]] [[gnu::always_inline]]
     static constexpr bool is_fragmented() noexcept { return true; }
@@ -533,7 +533,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     if (bioseq::settings::diagnostics::logging::enabled) {
         static thread_local std::uint64_t cold_read_count = 0;
         if ((cold_read_count++ % 4000) == 0) {
-            bioseq_log_progress<DBG>("[scanner_pg] cold fragment read #{} (fragment {}/{})",
+            bioseq_log_progress<logging_level::debug>("[scanner_pg] cold fragment read #{} (fragment {}/{})",
                 cold_read_count, fragment_no, fragment_count_);
         }
     }
@@ -2991,8 +2991,8 @@ inline void typed_scanner_read_ranks(
     constexpr std::uint64_t letters_per_fragment =
         static_cast<std::uint64_t>(scanner_type::fragment_storage_units)
         * traits::letters_per_unit;
-    const bool reverse = has_reverse(transform);
-    const bool complement = has_complement(transform);
+    const bool reverse = bioseq::storage::is_reversed(transform);
+    const bool complement = bioseq::storage::is_complemented(transform);
 
     for (std::size_t output_index = 0u;
          output_index < output.size(); ++output_index) {

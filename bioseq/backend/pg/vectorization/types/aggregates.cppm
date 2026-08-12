@@ -91,7 +91,7 @@ template<class p_state, class p_column, class p_fold>
     return state;
 }
 
-template<class p_sql_type, class p_value_type>
+template<auto p_sql_type, class p_value_type>
 [[nodiscard]] std::optional<
     bioseq::postgres::support::int64_array_aggregate_state>
 accumulate_integer_average_state(

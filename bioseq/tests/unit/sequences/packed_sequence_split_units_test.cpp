@@ -55,8 +55,8 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
                                records_of_units), cnt);
         }
         std::vector<p_unit> sub(
-            seq._data.begin() + static_cast<std::ptrdiff_t>(off),
-            seq._data.begin() + static_cast<std::ptrdiff_t>(off + cnt));
+            seq.packed_units.begin() + static_cast<std::ptrdiff_t>(off),
+            seq.packed_units.begin() + static_cast<std::ptrdiff_t>(off + cnt));
         const auto sub_range = range_t::from_packed(std::move(sub), pad);
         reassembled += sub_range.to_string();
         expected_off += cnt;

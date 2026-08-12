@@ -345,7 +345,8 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
     // ~30 µs each, ~1500 per chunk in real DEFLATE. Parallelising
     // across the same N threads we'll use for decoding amortises this
     // back into the overall pipeline.
-    const unsigned hw_threads = bioseq::parallelism::default_concurrency();
+    const unsigned hw_threads =
+        bioseq::parallelism::default_concurrency_limit();
     const std::size_t plan_workers =
         std::min<std::size_t>(hw_threads > 2 ? hw_threads - 2 : 1, 8);
 
@@ -1362,7 +1363,7 @@ private:
 
     std::atomic<bool>              _shutdown{false};
     std::atomic<bool>              _producer_done{false};
-    bioseq::parallelism::ScopedTaskGroup _producer_group;
+    bioseq::parallelism::scoped_task_group _producer_group;
     bool                           _producer_started = false;
     std::string                    _last_error_message;
 };

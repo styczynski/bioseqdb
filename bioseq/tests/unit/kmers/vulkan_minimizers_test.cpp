@@ -455,8 +455,8 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
     REQUIRE(max_minimizers == 150'000'192u);
 
     const std::uint64_t pessimistic_initial_host_bytes =
-        bioseq::parallelism::saturating_mul(
-            bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
+            bioseq::common::saturating_mul(
                 max_minimizers,
                 static_cast<std::uint64_t>(sizeof(minimap_sketch_data))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
@@ -478,7 +478,7 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
     REQUIRE(plan.is_valid);
 
     const std::uint64_t growable_vector_headroom =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             plan.count_submit_host_transient_bytes,
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
     const std::uint64_t host_dispatch_headroom =
@@ -511,7 +511,7 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
             0u,
             resident_requested_bytes);
     const std::uint64_t dispatch_without_host_result =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             resident_requested_bytes,
             vk::vulkan_sketch_transient_reserved_bytes(
                 bp_size,
@@ -522,7 +522,7 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
                 max_minimizers,
                 resident_requested_bytes));
     const std::uint64_t simultaneous_reservation_bytes =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             dispatch_without_host_result,
             pessimistic_initial_host_bytes);
 
@@ -540,7 +540,7 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
     constexpr std::uint64_t captured_packed_sequence_bytes =
         125'000'000u;
     const std::uint64_t padded_fixed_staging_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             captured_packed_sequence_bytes,
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
     const std::uint64_t exact_fixed_staging_bytes =
@@ -594,7 +594,7 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
         vk::vulkan_fixed_host_result_admission_bytes(
             host_payload_bytes);
     const std::uint64_t growable_collector_host_admission =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             host_payload_bytes,
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
     REQUIRE(host_payload_bytes == 746'471'168u);
@@ -628,13 +628,13 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
     // table allocation; a half-size reserve produces a 1-GiB table
     // and then overlapped it with the 2-GiB growth rehash.
     const auto table_plan =
-        idx::minimizer_hashmap_table_allocation_plan(emitted_minimizers);
+        idx::plan_minimizer_hashmap_table_allocation(emitted_minimizers);
     REQUIRE(table_plan.valid);
     REQUIRE(table_plan.group_count == 8'388'608u);
     REQUIRE(table_plan.capacity == 125'829'119u);
     REQUIRE(table_plan.allocation_bytes == 2'147'483'648u);
     const auto half_table_plan =
-        idx::minimizer_hashmap_table_allocation_plan(
+        idx::plan_minimizer_hashmap_table_allocation(
             emitted_minimizers / 2u + 16u);
     REQUIRE(half_table_plan.valid);
     REQUIRE(half_table_plan.allocation_bytes == 1'073'741'824u);
@@ -650,7 +650,7 @@ TEST_CASE("vulkan minimizer: zero-copy handoff fits captured memory pressure",
         vk::vulkan_exact_host_allocation_admission_bytes(
             table_plan.allocation_bytes);
     const std::uint64_t target_index_build_permit =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             position_headroom,
             table_headroom);
     REQUIRE(target_index_build_permit == 2'894'085'888u);
@@ -755,9 +755,9 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
     // The capacity-sized route holds three 8-byte streams plus one 16-byte
     // bucket stream, an exact 6,000,007,680-byte request.
     const std::uint64_t capacity_stream_floor =
-        bioseq::parallelism::saturating_mul(pessimistic_capacity, 40u);
+        bioseq::common::saturating_mul(pessimistic_capacity, 40u);
     const std::uint64_t exact_count_stream_floor =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             exact_minimizer_count, 40u);
     REQUIRE(capacity_stream_floor == 6'000'007'680u);
     REQUIRE(exact_count_stream_floor == 3'732'355'840u);
@@ -810,10 +810,10 @@ TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak
             < capacity_plan.standalone_device_bytes);
 
     const std::uint64_t adopted_resident_bytes =
-        bioseq::parallelism::saturating_add(
-            bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_add(
+            bioseq::common::saturating_mul(
                 exact_minimizer_count, 8u),
-            bioseq::parallelism::saturating_mul(
+            bioseq::common::saturating_mul(
                 distinct_minimizer_count, 16u));
     REQUIRE(adopted_resident_bytes == 1'870'460'992u);
     REQUIRE(adopted_resident_bytes < exact_count_stream_floor);
@@ -913,15 +913,15 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
 
     const std::uint64_t initial_dispatch_peak = dispatch_admission_bytes();
     const std::uint64_t pessimistic_initial_host_bytes =
-        bioseq::parallelism::saturating_mul(
-            bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
+            bioseq::common::saturating_mul(
                 max_minimizers,
                 static_cast<std::uint64_t>(sizeof(p_minimizer_type))),
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
     const std::uint64_t permissive_cap =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline,
-            bioseq::parallelism::saturating_add(
+            bioseq::common::saturating_add(
                 initial_dispatch_peak,
                 pessimistic_initial_host_bytes));
     admission.set_index_memory_cap_bytes(permissive_cap);
@@ -945,7 +945,7 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
         static_cast<std::uint64_t>(calibration->host_minimizers.size())
         * sizeof(p_minimizer_type);
     const std::uint64_t exact_host_headroom_bytes =
-        bioseq::parallelism::saturating_mul(
+        bioseq::common::saturating_mul(
             exact_host_size_bytes,
             bioseq::parallelism::k_vector_preallocation_headroom_factor);
     calibration.reset();
@@ -958,7 +958,7 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
     const std::uint64_t cache_metadata_delta =
         cache_metadata_after - cache_metadata_before;
     REQUIRE(admission.reserved_bytes()
-            == bioseq::parallelism::saturating_add(
+            == bioseq::common::saturating_add(
                 baseline, cache_metadata_delta));
     const std::uint64_t operation_baseline = admission.reserved_bytes();
 
@@ -978,13 +978,13 @@ TEST_CASE("vulkan minimizer: split admission retains exact device and host bytes
     // The simultaneous model keeps the pessimistic host result alive during
     // dispatch; the split model materializes the exact result after dispatch.
     const std::uint64_t simultaneous_reservation_peak =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             dispatch_peak,
             pessimistic_initial_host_bytes);
     REQUIRE(split_admission_peak < simultaneous_reservation_peak);
 
     admission.set_index_memory_cap_bytes(
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             operation_baseline, split_admission_peak));
     bioseq::parallelism::memory_admission_failure simultaneous_failure{};
     auto simultaneous_permit = admission.try_reserve(
@@ -1293,7 +1293,7 @@ TEST_CASE("vulkan minimizer: device-only zero emission is dispatched and sealed"
     REQUIRE(result->query_authority.does_cover_device_output());
     // Structural coverage cannot mint the causal immutable-pipeline stats
     // required by the persisted grouped-SoA consumer.
-    REQUIRE_FALSE(result->query_authority.is_internally_consistent());
+    REQUIRE_FALSE(result->query_authority.is_valid());
     REQUIRE(result->dispatch_stats.is_internally_consistent());
     REQUIRE(result->dispatch_stats.materialization()
             == vk::vulkan_sketch_host_materialization::device_only);
@@ -1782,10 +1782,10 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     const auto arena_mark = arena.mark();
     const auto arena_probe = arena.allocate_device(4096u, 16u);
     REQUIRE(arena_probe.is_valid());
-    const auto arena_handle = arena.device_buffer().buffer;
+    const auto arena_handle = arena.device_buffer().buffer_handle;
     REQUIRE_FALSE(arena.release_idle_capacity());
     REQUIRE(arena.device_buffer().is_valid());
-    REQUIRE(arena.device_buffer().buffer == arena_handle);
+    REQUIRE(arena.device_buffer().buffer_handle == arena_handle);
     arena.rewind(arena_mark);
     REQUIRE(arena.release_idle_capacity());
     REQUIRE_FALSE(arena.device_buffer().is_valid());
@@ -1885,8 +1885,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(built->ownership.peak_observed_bytes
             <= built->ownership.peak_admitted_bytes);
 
-    const auto slots_handle = built->slots.buffer;
-    const auto positions_handle = built->positions.buffer;
+    const auto slots_handle = built->slots.buffer_handle;
+    const auto positions_handle = built->positions.buffer_handle;
     const std::uint64_t slots_allocation = built->slots.allocation_bytes;
     const std::uint64_t positions_allocation =
         built->positions.allocation_bytes;
@@ -1916,8 +1916,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(resident->ownership.resident_transfers == 1u);
     REQUIRE(resident->ownership.adoption_rereserve_attempts == 0u);
     REQUIRE(resident->ownership.adoption_successes == 1u);
-    REQUIRE(resident->slots.buffer == slots_handle);
-    REQUIRE(resident->positions.buffer == positions_handle);
+    REQUIRE(resident->slots.buffer_handle == slots_handle);
+    REQUIRE(resident->positions.buffer_handle == positions_handle);
     REQUIRE(resident->slots.allocation_bytes == slots_allocation);
     REQUIRE(resident->positions.allocation_bytes == positions_allocation);
     const std::uint64_t adopted_reservation = admission.reserved_bytes();
@@ -1958,13 +1958,13 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE_FALSE(arena.device_buffer().is_valid());
     REQUIRE_FALSE(arena.upload_buffer().is_valid());
     REQUIRE_FALSE(arena.download_buffer().is_valid());
-    REQUIRE(resident->slots.buffer == slots_handle);
-    REQUIRE(resident->positions.buffer == positions_handle);
+    REQUIRE(resident->slots.buffer_handle == slots_handle);
+    REQUIRE(resident->positions.buffer_handle == positions_handle);
     const std::uint64_t steady_cache_metadata =
         runtime.pipeline_cache_metadata_reserved_bytes();
     REQUIRE(steady_cache_metadata >= cache_metadata_at_adoption);
     const std::uint64_t steady_adopted_reservation =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             adopted_reservation,
             steady_cache_metadata - cache_metadata_at_adoption);
     REQUIRE(admission.reserved_bytes() == steady_adopted_reservation);
@@ -1974,8 +1974,8 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     REQUIRE(second.count == first.count);
     REQUIRE(second.host_bytes == first.host_bytes);
     REQUIRE_FALSE(arena.device_buffer().is_valid());
-    REQUIRE(resident->slots.buffer == slots_handle);
-    REQUIRE(resident->positions.buffer == positions_handle);
+    REQUIRE(resident->slots.buffer_handle == slots_handle);
+    REQUIRE(resident->positions.buffer_handle == positions_handle);
     REQUIRE(resident->slots.allocation_bytes == slots_allocation);
     REQUIRE(resident->positions.allocation_bytes == positions_allocation);
     REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes()
@@ -1984,7 +1984,7 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
 
     resident.reset();
     REQUIRE(admission.reserved_bytes()
-            == bioseq::parallelism::saturating_add(
+            == bioseq::common::saturating_add(
                 baseline, steady_cache_metadata - cache_metadata_before));
 }
 

@@ -1244,7 +1244,7 @@ private:
     void bind_publication_authority(
             const encoded_grouped_soa_generation& generation) noexcept {
         publication_binding_ =
-            minimizer_generation_publication_binding(generation);
+            make_minimizer_generation_publication_binding(generation);
         publication_binding_present_ = publication_binding_.valid();
     }
 
@@ -1471,7 +1471,7 @@ public:
     }
 
     [[nodiscard]] minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
+    scheme_identity() const noexcept {
         return minimizer_scheme_;
     }
 
@@ -1806,8 +1806,8 @@ public:
     }
 
     [[nodiscard]] minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
-        return producer_.minimizer_scheme_identity();
+    scheme_identity() const noexcept {
+        return producer_.scheme_identity();
     }
     [[nodiscard]] minimizer_producer_identity
     producer_backend_identity() const noexcept {

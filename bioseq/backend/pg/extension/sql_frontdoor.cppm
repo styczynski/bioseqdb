@@ -49,9 +49,10 @@ module bioseq.postgres.extension;
 
 import bioseq.common.logging;
 import bioseq.postgres.column;
-import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.postgres.extension.sql_rows;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 #if defined(BIOSEQ_TEST_INDEXES)
 import bioseq.postgres.support.row_codec_runtime_test_support;
 #endif

@@ -1663,7 +1663,7 @@ bioseq_add_highway_codegen(
     "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils"
     "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
-    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|simd_utils"
+    "indexing|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm|bioseq.highway.sources.indexing|indexing|indexing|"
   SLOT_RECORDS
     ${BIOSEQ_HIGHWAY_MINIMIZER_SLOT_RECORDS}
     ${BIOSEQ_HIGHWAY_ALIGNMENT_SLOT_RECORDS}
@@ -2094,18 +2094,18 @@ list(REMOVE_ITEM SRC_FILES ${BIOSEQ_SQL_GCC_COMPILE_CONTRACT_SOURCES})
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 list(REMOVE_DUPLICATES SRC_FILES)
 
-# External CustomScan (backend/pg/external/scan.cppm) and its row
-# writer (row_writer.cppm) import the external provider stack, so they compile
-# into the extension only when the external API clients are enabled. The rest of
-# backend/pg/external/ (relation/errors/path_builder_slot) imports no provider
-# module and stays unconditional. The option is declared here (before
+# External CustomScan (backend/pg/external/scan.cppm), its row writer
+# (row_writer.cppm), and provider-error translation (errors.cppm) import the
+# external provider stack, so they compile into the extension only when the
+# external API clients are enabled. The provider-free relation and path-builder
+# modules stay unconditional. The option is declared here (before
 # SRC_MOD_FILES is consumed by the postgresql_bioseq target); the later
 # add_subdirectory(external) reuses the same cached value.
 option(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS
   "Configure generated external API clients and their integration tests" OFF)
 if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(FILTER SRC_MOD_FILES EXCLUDE
-    REGEX "/backend/pg/external/(scan|row_writer)\\.cppm$")
+    REGEX "/backend/pg/external/(errors|row_writer|scan)\\.cppm$")
 endif()
 
 # GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
@@ -2405,6 +2405,8 @@ bioseq_add_postgresql_extension_variant(
   ${BIOSEQ_TEST_TARGET_ARGUMENTS})
 set_target_properties(bioseq_integration_tests PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_compile_definitions(bioseq_integration_tests PRIVATE
+  "BIOSEQ_IO_TEST_DATA_DIR=\"${CMAKE_CURRENT_LIST_DIR}/../data\"")
 unset(BIOSEQ_TEST_TARGET_ARGUMENTS)
 
 if(BUILD_TESTING)
@@ -2952,7 +2954,7 @@ bioseq_register_sql_owner(
 
 bioseq_register_sql_owner(
   OWNER_KEY alignment_rows
-  MODULE bioseq.postgres.extension.alignment_sql_rows
+  MODULE bioseq.postgres.extension.alignment.sql_rows
   SOURCES backend/pg/extension/alignment_sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT)
@@ -2971,7 +2973,7 @@ bioseq_register_sql_owner(
   AUTHORITIES SUPPORT)
 bioseq_register_sql_owner(
   OWNER_KEY sequences_sample_table_udf_rows
-  MODULE bioseq.postgres.sequences.sample_table:sql_rows
+  MODULE bioseq.postgres.sequences.sample_table.sql_rows
   SOURCES backend/pg/sequences/sample_table/sql_rows.cppm
   PROFILES production test_indexes
   AUTHORITIES SUPPORT
@@ -3146,7 +3148,11 @@ bioseq_register_sql_owner(
     vector_types_date
     vector_types_aggregates
     vector_comparison_registry
-    vector_aggregate_registry)
+    vector_aggregate_registry
+  FMGR_OWNER_MODULES
+    vector_types_integer=bioseq.postgres.vectorization.types.integer
+    vector_types_date=bioseq.postgres.vectorization.types.date
+    vector_types_aggregates=bioseq.postgres.vectorization.types.aggregates)
 
 set(BIOSEQ_SQL_REGISTRY_DIR
   "${BIOSEQ_SQL_CODEGEN_DIR}/registries")
@@ -3185,6 +3191,17 @@ bioseq_finalize_sql_owner_registry(
     sequences_sample_table_udf
   EXPECTED_HANDWRITTEN_FMGR_EXPORTS
     bioseq_external_handler)
+
+get_property(_bioseq_sql_entity_handle_owner_records GLOBAL
+  PROPERTY BIOSEQ_SQL_BIOSEQ_ENTITY_HANDLE_OWNER_RECORDS)
+list(SORT _bioseq_sql_entity_handle_owner_records)
+set(_bioseq_sql_entity_handle_owner_args)
+foreach(_bioseq_sql_entity_handle_owner_record IN LISTS
+    _bioseq_sql_entity_handle_owner_records)
+  list(APPEND _bioseq_sql_entity_handle_owner_args
+    --entity-handle-owner-module
+    "${_bioseq_sql_entity_handle_owner_record}")
+endforeach()
 
 # Clang collection never consumes a GCC BMI or the main target's compiler
 # cache.  Each authority/profile prepare command derives a normalized,
@@ -3278,6 +3295,17 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
 
   set(_bioseq_sql_row_codec_modules
     ${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODEC_MODULES})
+  get_property(_bioseq_sql_row_codec_owner_records GLOBAL
+    PROPERTY
+      "BIOSEQ_SQL_BIOSEQ_${_bioseq_sql_profile_key}_ROW_CODEC_OWNER_RECORDS")
+  list(SORT _bioseq_sql_row_codec_owner_records)
+  set(_bioseq_sql_row_codec_owner_args)
+  foreach(_bioseq_sql_row_codec_owner_record IN LISTS
+      _bioseq_sql_row_codec_owner_records)
+    list(APPEND _bioseq_sql_row_codec_owner_args
+      --row-codec-owner-module
+      "${_bioseq_sql_row_codec_owner_record}")
+  endforeach()
   set(_bioseq_sql_guc_modules
     ${BIOSEQ_SQL_GUC_${_bioseq_sql_profile}_MODULES})
   set(_bioseq_sql_support_vector_registry_modules
@@ -3325,6 +3353,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "storage_manager=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODECS_STORAGE_MANAGER}"
       --row-codecs-output
         "table=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODECS_TABLE}"
+      ${_bioseq_sql_row_codec_owner_args}
       --fmgr-entrypoints-output
         "vector_comparison_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_COMPARISON_REGISTRY}"
       --fmgr-entrypoints-output
@@ -3447,6 +3476,7 @@ add_custom_command(
       "storage_indexing_pg_chunked_storage=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_INDEXING_CHUNKED}"
     --entity-handles-output
       "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
+    ${_bioseq_sql_entity_handle_owner_args}
     --generated-module-prefix bioseq.postgres.sql.generated
     --extension-schema public
   DEPENDS
@@ -3555,12 +3585,33 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
     "${BIOSEQ_SQL_${_bioseq_sql_profile_key}_GENERATED_STAMP}")
   set(_bioseq_sql_fmgr_modules
     ${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FINAL_FMGR_ENTRYPOINT_MODULES})
+  get_property(_bioseq_sql_row_codec_owner_records GLOBAL
+    PROPERTY
+      "BIOSEQ_SQL_BIOSEQ_${_bioseq_sql_profile_key}_ROW_CODEC_OWNER_RECORDS")
+  list(SORT _bioseq_sql_row_codec_owner_records)
+  set(_bioseq_sql_row_codec_owner_args)
+  foreach(_bioseq_sql_row_codec_owner_record IN LISTS
+      _bioseq_sql_row_codec_owner_records)
+    list(APPEND _bioseq_sql_row_codec_owner_args
+      --row-codec-owner-module
+      "${_bioseq_sql_row_codec_owner_record}")
+  endforeach()
   set(_bioseq_sql_profile_only_fmgr_args)
   if(_bioseq_sql_profile STREQUAL "test_indexes")
     list(APPEND _bioseq_sql_profile_only_fmgr_args
       --fmgr-entrypoints-output
       "highway_ksw_target_test_support=${BIOSEQ_SQL_TEST_INDEXES_FMGR_ENTRYPOINTS_HIGHWAY_KSW_TARGET_TEST_SUPPORT}")
   endif()
+  get_property(_bioseq_sql_fmgr_owner_records GLOBAL
+    PROPERTY
+      "BIOSEQ_SQL_BIOSEQ_${_bioseq_sql_profile_key}_FMGR_OWNER_RECORDS")
+  list(SORT _bioseq_sql_fmgr_owner_records)
+  set(_bioseq_sql_fmgr_owner_args)
+  foreach(_bioseq_sql_fmgr_owner_record IN LISTS
+      _bioseq_sql_fmgr_owner_records)
+    list(APPEND _bioseq_sql_fmgr_owner_args
+      --fmgr-owner-module "${_bioseq_sql_fmgr_owner_record}")
+  endforeach()
 
   add_custom_command(
     OUTPUT "${_bioseq_sql_generated_stamp}"
@@ -3611,6 +3662,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "storage_indexing_pg_chunked_storage=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_INDEXING_CHUNKED}"
       --entity-handles-output
         "storage_manager_sequence_storage_manager=${BIOSEQ_SQL_ENTITY_HANDLES_STORAGE_MANAGER_SEQUENCE}"
+      ${_bioseq_sql_entity_handle_owner_args}
       --row-codecs-output
         "storage_metadata=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODECS_STORAGE_METADATA}"
       --row-codecs-output
@@ -3621,6 +3673,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
         "storage_manager=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODECS_STORAGE_MANAGER}"
       --row-codecs-output
         "table=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_ROW_CODECS_TABLE}"
+      ${_bioseq_sql_row_codec_owner_args}
       --fmgr-entrypoints-output
         "mod=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_FMGR_ENTRYPOINTS_MOD}"
       --fmgr-entrypoints-output
@@ -3646,6 +3699,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       --fmgr-entrypoints-output
         "vector_aggregate_registry=${BIOSEQ_SQL_${_bioseq_sql_profile_key}_VECTOR_AGGREGATE_REGISTRY}"
       ${_bioseq_sql_profile_only_fmgr_args}
+      ${_bioseq_sql_fmgr_owner_args}
       --guc-output-root "${BIOSEQ_SQL_GUC_OUTPUT_ROOT}"
       --guc-active-profile "${_bioseq_sql_profile}"
       ${_bioseq_sql_completion_args}
@@ -3698,18 +3752,23 @@ add_dependencies(
   bioseq_sql_final_production
   bioseq_sql_final_test_indexes)
 
-# The raw compile database names the generated core entity-handle providers
-# before their source files exist on a fresh tree.  Template-flatten PREPARE
-# reaches those providers while recursively scanning the scheduler primary, so
-# order its dependency-only scan after the profile-neutral CORE stage.  Do not
-# wait for either FINAL profile: those much wider closures are not scheduler
-# inputs.  Append the concrete stamp as a file dependency because a target-only
-# edge would allow Ninja to run the two custom commands concurrently.
+# The raw compile database names the generated core entity-handle providers and
+# the active-profile row-codec providers before their source files exist on a
+# fresh tree.  Template-flatten PREPARE reaches both while recursively scanning
+# the scheduler primary.  Namespace materialization selects production compiler
+# authority, so a test-indexes raw-database row is retargeted to its production
+# sibling and both the active SUPPORT stage and production SUPPORT stage must be
+# complete before the scan.  Do not wait for either FINAL profile: those much
+# wider closures are not scheduler inputs.  Append the concrete stamps as file
+# dependencies because target-only edges would allow Ninja to run the custom
+# commands concurrently.
 add_custom_command(
   OUTPUT
     "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}/pcm/metadata/prepare_compile_commands.json"
   APPEND
-  DEPENDS "${BIOSEQ_SQL_CORE_GENERATED_STAMP}")
+  DEPENDS
+    "${BIOSEQ_SQL_CORE_GENERATED_STAMP}"
+    "${BIOSEQ_SQL_PRODUCTION_SUPPORT_STAMP}")
 
 set(BIOSEQ_SQL_REQUIRED_TARGET_DYNDEP_INVENTORY
   "${BIOSEQ_SQL_CODEGEN_DIR}/required-target-dyndeps.tsv")
@@ -3944,6 +4003,7 @@ set(BIOSEQ_SQL_GCC_CONTRACT_SOURCE_INPUTS
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/CMakeLists.txt"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/safety/postgres_error_safety.cmake"
   "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_codegen.cmake"
+  "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake"
   "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_gcc_toolchain.cmake"
   "${CMAKE_CURRENT_LIST_DIR}/../cmake/gcc_hwy_header_unit_launcher.py"
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"

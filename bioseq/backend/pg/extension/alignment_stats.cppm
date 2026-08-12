@@ -25,9 +25,10 @@ extern "C" {
 
 module bioseq.postgres.extension;
 
-import bioseq.postgres.extension.alignment_sql_rows;
+import bioseq.postgres.extension.alignment.sql_rows;
 import bioseq.pipeline.stats;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
@@ -379,7 +380,7 @@ validate_alignment_snapshot_environment(
 		}
 		const bool honest_diagnostic =
 			bioseq::pipeline_stats::pipeline_execution_stats::
-				diagnostic_environment_is_valid(stats);
+				is_diagnostic_environment_valid(stats);
 		if (!honest_diagnostic) {
 			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_DATA_EXCEPTION,

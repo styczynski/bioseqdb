@@ -1011,7 +1011,7 @@ struct pipeline_operational_stats {
     bool are_simd_chaining_policy_stats_saturated = false;
     block_aligner_stage_stats block_aligner_stats{};
     ::bioseq::prefilter::prefilter_execution_stats
-        prefilter_execution_stats{};
+        prefilter_stats{};
     bool prefilter_execution_stats_available = false;
     std::uint64_t cpu_seed_positions_rejected_outside_collection = 0;
     std::uint64_t gpu_partition_select_dispatches = 0;
@@ -1156,10 +1156,10 @@ struct pipeline_operational_stats {
     void record_prefilter_execution_stats(
             const ::bioseq::prefilter::prefilter_execution_stats&
                 stats) noexcept {
-        prefilter_execution_stats.merge(stats);
+        prefilter_stats.merge(stats);
         prefilter_execution_stats_available = true;
-        if (!prefilter_execution_stats.is_internally_consistent()) {
-            prefilter_execution_stats.is_saturated = true;
+        if (!prefilter_stats.is_internally_consistent()) {
+            prefilter_stats.is_saturated = true;
             are_stats_saturated = true;
         }
     }
@@ -1170,21 +1170,21 @@ struct pipeline_operational_stats {
             ::bioseq::prefilter::prefilter_execution_stats;
         const prefilter_stats_type empty_prefilter_stats{};
         if (prefilter_execution_stats_available
-            && !prefilter_execution_stats.is_internally_consistent()) {
-            prefilter_execution_stats.is_saturated = true;
+            && !prefilter_stats.is_internally_consistent()) {
+            prefilter_stats.is_saturated = true;
             are_stats_saturated = true;
         } else if (!prefilter_execution_stats_available
-                   && prefilter_execution_stats != empty_prefilter_stats) {
-            prefilter_execution_stats.is_saturated = true;
+                   && prefilter_stats != empty_prefilter_stats) {
+            prefilter_stats.is_saturated = true;
             prefilter_execution_stats_available = true;
             are_stats_saturated = true;
         }
         if (rhs.prefilter_execution_stats_available) {
             record_prefilter_execution_stats(
-                rhs.prefilter_execution_stats);
-        } else if (rhs.prefilter_execution_stats
+                rhs.prefilter_stats);
+        } else if (rhs.prefilter_stats
                    != empty_prefilter_stats) {
-            prefilter_stats_type malformed = rhs.prefilter_execution_stats;
+            prefilter_stats_type malformed = rhs.prefilter_stats;
             malformed.is_saturated = true;
             record_prefilter_execution_stats(malformed);
         }
@@ -1326,7 +1326,7 @@ struct pipeline_operational_stats {
             || grouped_soa_provider.is_saturated;
         fragment_native_query_stats.merge(
             rhs.fragment_native_query_stats);
-        is_saturated = fragment_native_query_stats.is_saturated || is_saturated;
+        is_saturated = fragment_native_query_stats.saturated || is_saturated;
         is_saturated = hash_major_index_reader.merge(
             rhs.hash_major_index_reader,
             has_operational_identity_conflict) || is_saturated;
@@ -3759,7 +3759,7 @@ is_persisted_grouped_soa_gpu_environment_consistent(
 is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& actual,
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& preview) noexcept {
-    return actual.componentwise_bounded_by(preview);
+    return actual.is_componentwise_bounded_by(preview);
 }
 
 /// Validate a staged persisted-GPU stats delta and the prospective aggregate

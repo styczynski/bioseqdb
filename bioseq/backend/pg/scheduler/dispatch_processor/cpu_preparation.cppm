@@ -19,6 +19,7 @@ module;
 module bioseq.postgres.scheduler.dispatch_processor:cpu_preparation;
 
 import bioseq.postgres.scheduler.dispatch_processor;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.support;
@@ -108,13 +109,13 @@ public:
 
 	template<class p_minimizer = minimap_sketch_data>
 	[[nodiscard, always_inline]] bool append_raw_storage(
-			const typename p_minimizer::storage_t* raw,
+			const typename p_minimizer::storage_type* raw,
 			const std::size_t count)
 		requires (
 			std::same_as<p_minimizer, minimap_sketch_data>
-			&& requires { typename p_minimizer::storage_t; }
+			&& requires { typename p_minimizer::storage_type; }
 			&& std::is_trivially_copyable_v<p_minimizer>
-			&& sizeof(p_minimizer) == sizeof(typename p_minimizer::storage_t))
+			&& sizeof(p_minimizer) == sizeof(typename p_minimizer::storage_type))
 	{
 		const std::size_t old_size = destination_.size();
 		if (count > destination_.max_size() - old_size
@@ -135,7 +136,7 @@ public:
 		return true;
 	}
 
-	[[nodiscard]] bool ok() const noexcept {
+	[[nodiscard]] bool is_ok() const noexcept {
 		return !failed_;
 	}
 
@@ -169,7 +170,7 @@ private:
 			return;
 		}
 		const std::uint64_t released_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				retained_query_->capacity(),
 				sizeof(minimap_sketch_data));
 		{
@@ -222,16 +223,16 @@ private:
 		}
 		requested_capacity = std::max(requested_capacity, required);
 		const std::uint64_t old_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				old_capacity, sizeof(minimap_sketch_data));
 		const std::uint64_t predecessor_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				predecessor_capacity, sizeof(minimap_sketch_data));
 		const std::uint64_t requested_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_capacity, sizeof(minimap_sketch_data));
 		const std::uint64_t allocation_headroom =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_bytes,
 				bioseq::parallelism::
 					k_vector_preallocation_headroom_factor);
@@ -240,10 +241,10 @@ private:
 			? *retained_query_bytes_ - old_bytes
 			: (std::numeric_limits<std::uint64_t>::max)();
 		const std::uint64_t logical_predecessor_peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_other_bytes, predecessor_bytes);
 		const std::uint64_t peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				logical_predecessor_peak, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
 			|| predecessor_bytes
@@ -271,7 +272,7 @@ private:
 			throw;
 		}
 		const std::uint64_t measured_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				retained_query_->capacity(),
 				sizeof(minimap_sketch_data));
 		if (measured_bytes
@@ -287,7 +288,7 @@ private:
 			return false;
 		}
 		const std::uint64_t reconciled_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				*retained_query_bytes_ - old_bytes,
 				measured_bytes);
 		if (reconciled_bytes
@@ -374,16 +375,16 @@ private:
 		requested_capacity = std::max(requested_capacity, required);
 
 		const std::uint64_t old_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				old_capacity, sizeof(std::uint32_t));
 		const std::uint64_t predecessor_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				predecessor_capacity, sizeof(std::uint32_t));
 		const std::uint64_t requested_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_capacity, sizeof(std::uint32_t));
 		const std::uint64_t allocation_headroom =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_bytes,
 				bioseq::parallelism::
 					k_vector_preallocation_headroom_factor);
@@ -392,10 +393,10 @@ private:
 			? retained_bytes_ - old_bytes
 			: (std::numeric_limits<std::uint64_t>::max)();
 		const std::uint64_t logical_predecessor_peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_other_bytes, predecessor_bytes);
 		const std::uint64_t peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				logical_predecessor_peak, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
 			|| predecessor_bytes
@@ -420,7 +421,7 @@ private:
 			throw;
 		}
 		const std::uint64_t measured_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				destination_.capacity(), sizeof(std::uint32_t));
 		if (measured_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
@@ -429,7 +430,7 @@ private:
 			return false;
 		}
 		retained_bytes_ =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_bytes_ - old_bytes, measured_bytes);
 		if (retained_bytes_
 				== (std::numeric_limits<std::uint64_t>::max)()) {
@@ -457,7 +458,7 @@ void release_uncommitted_retained_query(
 		bioseq::parallelism::memory_permit& permit,
 		std::uint64_t& retained_bytes) noexcept {
 	const std::uint64_t released_bytes =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			minimizers.capacity(), sizeof(minimap_sketch_data));
 	{
 		std::vector<minimap_sketch_data> empty;
@@ -497,20 +498,20 @@ void release_uncommitted_retained_query(
 	if (retained_queries.size() == retained_queries.capacity()) {
 		const std::size_t required = retained_queries.size() + 1u;
 		const std::uint64_t old_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				retained_queries.capacity(),
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t requested_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				required,
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		const std::uint64_t allocation_headroom =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				requested_bytes,
 				bioseq::parallelism::
 					k_vector_preallocation_headroom_factor);
 		const std::uint64_t peak =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_bytes, allocation_headroom);
 		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
 			|| requested_bytes
@@ -536,7 +537,7 @@ void release_uncommitted_retained_query(
 			throw;
 		}
 		const std::uint64_t measured_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				retained_queries.capacity(),
 				sizeof(batch_processor::cpu_prepared_query_sketch));
 		if (measured_bytes
@@ -550,7 +551,7 @@ void release_uncommitted_retained_query(
 			pg_unreachable();
 		}
 		retained_bytes =
-			bioseq::parallelism::saturating_add(
+			bioseq::common::saturating_add(
 				retained_bytes - old_bytes, measured_bytes);
 		if (retained_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()) {
@@ -590,7 +591,7 @@ void append_cpu_prepared_query_sketch_view(
 	static_assert(
 		std::is_same_v<p_destination_value, minimap_sketch_data>
 		|| std::is_same_v<p_destination_value, std::uint32_t>);
-	if (!minimizer_query_length_is_representable<minimap_sketch_data>(
+	if (!is_minimizer_query_length_representable<minimap_sketch_data>(
 			query_view.bp_size())) {
 		bioseq::postgres::support::invoke_pg_as_cpp([] {
 			ereport(ERROR,
@@ -635,7 +636,7 @@ void append_cpu_prepared_query_sketch_view(
 			});
 			pg_unreachable();
 		}
-		if (!collector.ok()) {
+		if (!collector.is_ok()) {
 			fail("bioseq batch join canonical query-hash destination growth cannot be admitted");
 		}
 		if (!pipe::minimizer_range_stats_matches_backend(
@@ -668,7 +669,7 @@ void append_cpu_prepared_query_sketch_view(
 	if (!collector_permit) {
 		fail("bioseq batch join query sketch collector admission owner is unavailable");
 	}
-	admitted_sketch_collector_t<
+	admitted_sketch_collector<
 		minimap_sketch_data,
 		bioseq::parallelism::memory_permit> collector{
 			std::move(*collector_permit),
@@ -681,7 +682,7 @@ void append_cpu_prepared_query_sketch_view(
 		static_cast<std::size_t>(kmer_size),
 		sketch_backend,
 		highway_kernels);
-	if (!collector.ok()) {
+	if (!collector.is_ok()) {
 		fail("bioseq batch join query sketch collector growth cannot be admitted");
 	}
 	if (!pipe::minimizer_range_stats_matches_backend(
@@ -698,7 +699,7 @@ void append_cpu_prepared_query_sketch_view(
 	}
 	const auto& sketches = collector.extract_sketches_data();
 	const std::uint64_t measured_collector_bytes =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			sketches.capacity(), sizeof(minimap_sketch_data));
 	if (measured_collector_bytes
 			== (std::numeric_limits<std::uint64_t>::max)()
@@ -712,14 +713,14 @@ void append_cpu_prepared_query_sketch_view(
 	const std::size_t required = destination.size() + sketches.size();
 	if (required > destination.capacity()) {
 		const std::uint64_t old_destination_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				destination.capacity(), sizeof(p_destination_value));
 		const std::uint64_t allocation_headroom =
-			bioseq::parallelism::saturating_mul(
-				bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
+				bioseq::common::saturating_mul(
 					required, sizeof(p_destination_value)),
 				bioseq::parallelism::k_vector_preallocation_headroom_factor);
-		const std::uint64_t peak = bioseq::parallelism::saturating_add(
+		const std::uint64_t peak = bioseq::common::saturating_add(
 			retained_destination_bytes, allocation_headroom);
 		if (old_destination_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
@@ -732,14 +733,14 @@ void append_cpu_prepared_query_sketch_view(
 		}
 		destination.reserve(required);
 		const std::uint64_t measured_destination_bytes =
-			bioseq::parallelism::saturating_mul(
+			bioseq::common::saturating_mul(
 				destination.capacity(), sizeof(p_destination_value));
 		if (measured_destination_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_destination_bytes > allocation_headroom) {
 			fail("bioseq batch join query sketch destination capacity exceeded admission");
 		}
-		retained_destination_bytes = bioseq::parallelism::saturating_add(
+		retained_destination_bytes = bioseq::common::saturating_add(
 			retained_destination_bytes - old_destination_bytes,
 			measured_destination_bytes);
 		if (retained_destination_bytes
@@ -828,7 +829,7 @@ prepare_independently_admitted_query_sketch(
 	auto query_owner = bioseq::storage::make_resident_lazy_sequence(query);
 	const auto query_view =
 		bioseq::storage::make_lazy_sequence_view(query_owner);
-	if (!minimizer_query_length_is_representable<minimap_sketch_data>(
+	if (!is_minimizer_query_length_representable<minimap_sketch_data>(
 			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
 		return batch_processor::cpu_preparation_status::query_length_unsupported;
 	}
@@ -838,7 +839,7 @@ prepare_independently_admitted_query_sketch(
 	if (!permit) {
 		return batch_processor::cpu_preparation_status::admission_unavailable;
 	}
-	admitted_sketch_collector_t<
+	admitted_sketch_collector<
 		minimap_sketch_data,
 		bioseq::parallelism::memory_permit> collector{
 			std::move(*permit),
@@ -851,7 +852,7 @@ prepare_independently_admitted_query_sketch(
 		static_cast<std::size_t>(kmer_size),
 		sketch_backend,
 		highway_kernels);
-	if (!collector.ok()) {
+	if (!collector.is_ok()) {
 		return batch_processor::cpu_preparation_status::collector_growth_failed;
 	}
 	if (!pipe::minimizer_range_stats_matches_backend(
@@ -863,7 +864,7 @@ prepare_independently_admitted_query_sketch(
 	}
 	auto owned = std::move(collector).release_owned_storage();
 	const std::uint64_t measured_bytes =
-		bioseq::parallelism::saturating_mul(
+		bioseq::common::saturating_mul(
 			owned.first.capacity(), sizeof(minimap_sketch_data));
 	if (measured_bytes
 			== (std::numeric_limits<std::uint64_t>::max)()

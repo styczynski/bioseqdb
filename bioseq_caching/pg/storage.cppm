@@ -328,8 +328,8 @@ struct storage_query_io_snapshot {
 struct storage_runtime_snapshot {
     bool bootstrap_ready = false;
     bool dsa_attached = false;
-    bootstrap_state bootstrap_state = bootstrap_state::uninitialized;
-    worker_lifecycle worker_lifecycle = worker_lifecycle::not_registered;
+    bootstrap_state bootstrap_status = bootstrap_state::uninitialized;
+    worker_lifecycle janitor_lifecycle = worker_lifecycle::not_registered;
     cache_correctness_readiness correctness_readiness =
         cache_correctness_readiness::passthrough_only;
     storage_error last_failure = storage_error::none;
@@ -587,12 +587,12 @@ class storage_column_store_block_sink {
     streamed_column_store_blocks<storage_column_store_block_sink>& blocks) {
     auto physical_tokens = sink.manifest_tokens(blocks.tokens());
     if (!physical_tokens.has_value()) {
-        const format_error format_error = physical_tokens.error();
+        const format_error token_format_failure = physical_tokens.error();
         const storage_error sink_error = sink.last_storage_error();
         blocks.discard();
         return publish_manifest_result{
             .error = sink_error != storage_error::none ? sink_error
-                     : format_error == format_error::physical_block_limit_exceeded
+                     : token_format_failure == format_error::physical_block_limit_exceeded
                          ? storage_error::manifest_full
                          : storage_error::invalid_argument,
         };
@@ -909,7 +909,7 @@ registry_preload_request(const storage_config& config) noexcept {
         .dsa_allocator_reserve_bytes = MAXALIGN(config.dsa_initial_bytes),
         .dsa_size_limit_bytes = (std::numeric_limits<std::uint64_t>::max)(),
     };
-    auto preliminary = shared_registry::shared_registry_preload_request(registry_config);
+    auto preliminary = shared_registry::make_shared_registry_preload_request(registry_config);
     if (!preliminary) {
         return preliminary;
     }
@@ -920,7 +920,7 @@ registry_preload_request(const storage_config& config) noexcept {
         return preliminary;
     }
     registry_config.dsa_size_limit_bytes = total_ceiling;
-    return shared_registry::shared_registry_preload_request(registry_config);
+    return shared_registry::make_shared_registry_preload_request(registry_config);
 }
 
 [[nodiscard]] pg_atomic_uint64& hot_reserved_bytes() noexcept {
@@ -1848,7 +1848,7 @@ inline void poll_postgres_interrupts(void*) noexcept {
     CHECK_FOR_INTERRUPTS();
 }
 
-[[nodiscard]] inline constexpr bioseq::durable_file_io::positional_io_operations
+[[nodiscard]] inline constexpr bioseq::common::durable_file_io::positional_io_callbacks
 postgres_positional_io() noexcept {
     return {
         .context = nullptr,
@@ -1860,12 +1860,12 @@ postgres_positional_io() noexcept {
 
 [[nodiscard]] inline storage_error
 write_all_at(int descriptor, std::span<const std::byte> bytes, std::uint64_t offset = 0) noexcept {
-    const auto written = bioseq::durable_file_io::positional_write_all(
+    const auto written = bioseq::common::durable_file_io::write_all_at(
         descriptor, bytes, offset, postgres_positional_io());
     if (written.has_value()) {
         return storage_error::none;
     }
-    return written.error().code == bioseq::durable_file_io::file_io_errc::offset_overflow
+    return written.error().code == bioseq::common::durable_file_io::file_error_code::offset_overflow
                ? storage_error::invalid_argument
                : storage_error::write_failed;
 }
@@ -1933,15 +1933,15 @@ write_all_at(int descriptor, std::span<const std::byte> bytes, std::uint64_t off
 
 [[nodiscard]] inline storage_error
 read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destination) noexcept {
-    const auto read = bioseq::durable_file_io::positional_read_exact(
+    const auto read = bioseq::common::durable_file_io::read_exact_at(
         descriptor, offset, destination, postgres_positional_io());
     if (read.has_value()) {
         return storage_error::none;
     }
     switch (read.error().code) {
-    case bioseq::durable_file_io::file_io_errc::offset_overflow:
+    case bioseq::common::durable_file_io::file_error_code::offset_overflow:
         return storage_error::invalid_argument;
-    case bioseq::durable_file_io::file_io_errc::unexpected_end_of_file:
+    case bioseq::common::durable_file_io::file_error_code::unexpected_end_of_file:
         return storage_error::short_read;
     default:
         return storage_error::read_failed;
@@ -1972,7 +1972,7 @@ read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destinati
         return errno == ENOENT ? storage_error::not_found : storage_error::open_failed;
     }
     storage_error error = storage_error::none;
-    bioseq::durable_file_io::regular_file_identity identity_before{};
+    bioseq::common::durable_file_io::regular_file_identity identity_before{};
     bool captured_identity = false;
     PG_TRY();
     {
@@ -1982,7 +1982,7 @@ read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destinati
                 : (std::numeric_limits<std::uint64_t>::max)();
         {
             const auto captured =
-                bioseq::durable_file_io::capture_regular_file_identity(descriptor);
+                bioseq::common::durable_file_io::capture_regular_file_identity(descriptor);
             if (!captured.has_value() || captured->owner != ::geteuid() ||
                 captured->link_count != 1 ||
                 (captured->mode & (S_IRWXU | S_IRWXG | S_IRWXO)) != (S_IRUSR | S_IWUSR) ||
@@ -1998,7 +1998,7 @@ read_all_at(int descriptor, std::uint64_t offset, std::span<std::byte> destinati
         }
         if (error == storage_error::none && captured_identity) {
             const auto captured =
-                bioseq::durable_file_io::capture_regular_file_identity(descriptor);
+                bioseq::common::durable_file_io::capture_regular_file_identity(descriptor);
             if (!captured.has_value() || *captured != identity_before) {
                 error = storage_error::read_failed;
             }
@@ -2157,92 +2157,92 @@ struct manifest_file_finalization {
     std::string_view directory,
     std::string_view temporary,
     std::string_view final,
-    const bioseq::durable_file_io::regular_file_identity& expected_identity) noexcept {
+    const bioseq::common::durable_file_io::regular_file_identity& expected_identity) noexcept {
     try {
         auto directory_opened =
-            bioseq::durable_file_io::open_directory_descriptor(std::filesystem::path{directory});
+            bioseq::common::durable_file_io::open_directory_descriptor(std::filesystem::path{directory});
         if (!directory_opened.has_value()) {
             return storage_error::unsafe_path;
         }
-        bioseq::durable_file_io::file_descriptor directory_descriptor =
+        bioseq::common::durable_file_io::file_descriptor directory_descriptor =
             std::move(*directory_opened);
         const std::string temporary_name = std::filesystem::path{temporary}.filename().string();
         const std::string final_name = std::filesystem::path{final}.filename().string();
-        const auto identity = bioseq::durable_file_io::same_regular_file_identity_at(
+        const auto identity = bioseq::common::durable_file_io::matches_regular_file_identity_at(
             directory_descriptor.get(), temporary_name, expected_identity);
         if (!identity.has_value() || !*identity) {
             return storage_error::unsafe_path;
         }
         const auto linked =
-            bioseq::durable_file_io::link_file_no_replace_at(directory_descriptor.get(),
+            bioseq::common::durable_file_io::link_file_no_replace_at(directory_descriptor.get(),
                                                              temporary_name,
                                                              directory_descriptor.get(),
                                                              final_name,
                                                              {},
                                                              &expected_identity);
         if (!linked.has_value()) {
-            const auto temporary_removed = bioseq::durable_file_io::remove_file_if_same_inode_at(
+            const auto temporary_removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
                 directory_descriptor.get(), temporary_name, expected_identity);
             const auto cleanup_synced =
-                bioseq::durable_file_io::fsync_directory_descriptor(directory_descriptor.get());
+                bioseq::common::durable_file_io::fsync_directory_descriptor(directory_descriptor.get());
             if (!temporary_removed.has_value() ||
                 *temporary_removed !=
-                    bioseq::durable_file_io::conditional_remove_disposition::removed ||
+                    bioseq::common::durable_file_io::conditional_remove_disposition::removed ||
                 !cleanup_synced.has_value()) {
                 return storage_error::unsafe_path;
             }
             if (linked.error().publication !=
-                    bioseq::durable_file_io::publication_state::unchanged ||
-                linked.error().code == bioseq::durable_file_io::file_io_errc::identity_changed) {
+                    bioseq::common::durable_file_io::publication_state::unchanged ||
+                linked.error().code == bioseq::common::durable_file_io::file_error_code::identity_changed) {
                 return storage_error::unsafe_path;
             }
-            return linked.error().code == bioseq::durable_file_io::file_io_errc::destination_exists
+            return linked.error().code == bioseq::common::durable_file_io::file_error_code::destination_exists
                        ? storage_error::duplicate_generation
                        : storage_error::rename_failed;
         }
-        const auto temporary_removed = bioseq::durable_file_io::remove_file_if_same_inode_at(
+        const auto temporary_removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
             directory_descriptor.get(),
             temporary_name,
             expected_identity,
-            bioseq::durable_file_io::publication_state::visible_not_durable);
+            bioseq::common::durable_file_io::publication_state::visible_not_durable);
         if (!temporary_removed.has_value() ||
             *temporary_removed !=
-                bioseq::durable_file_io::conditional_remove_disposition::removed) {
-            const auto final_removed = bioseq::durable_file_io::remove_file_if_same_inode_at(
+                bioseq::common::durable_file_io::conditional_remove_disposition::removed) {
+            const auto final_removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
                 directory_descriptor.get(),
                 final_name,
                 expected_identity,
-                bioseq::durable_file_io::publication_state::visible_not_durable);
-            const auto reconciled = bioseq::durable_file_io::fsync_directory_descriptor(
+                bioseq::common::durable_file_io::publication_state::visible_not_durable);
+            const auto reconciled = bioseq::common::durable_file_io::fsync_directory_descriptor(
                 directory_descriptor.get(),
                 {},
-                bioseq::durable_file_io::publication_state::visible_not_durable);
+                bioseq::common::durable_file_io::publication_state::visible_not_durable);
             if (!final_removed.has_value() ||
                 *final_removed ==
-                    bioseq::durable_file_io::conditional_remove_disposition::identity_mismatch ||
+                    bioseq::common::durable_file_io::conditional_remove_disposition::identity_mismatch ||
                 !reconciled.has_value()) {
                 return storage_error::unsafe_path;
             }
             return storage_error::unsafe_path;
         }
-        const auto synced = bioseq::durable_file_io::fsync_directory_descriptor(
+        const auto synced = bioseq::common::durable_file_io::fsync_directory_descriptor(
             directory_descriptor.get(),
             {},
-            bioseq::durable_file_io::publication_state::visible_not_durable);
+            bioseq::common::durable_file_io::publication_state::visible_not_durable);
         if (!synced.has_value()) {
             // A surfaced non-EINTR writeback error is final for this publish.
             // A later fsync may return success merely because the kernel has
             // already reported the error; it cannot erase the first failure.
-            const auto removed = bioseq::durable_file_io::remove_file_if_same_inode_at(
+            const auto removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
                 directory_descriptor.get(),
                 final_name,
                 expected_identity,
-                bioseq::durable_file_io::publication_state::visible_not_durable);
+                bioseq::common::durable_file_io::publication_state::visible_not_durable);
             const auto rollback_synced =
-                bioseq::durable_file_io::fsync_directory_descriptor(directory_descriptor.get());
+                bioseq::common::durable_file_io::fsync_directory_descriptor(directory_descriptor.get());
             if (!removed.has_value() ||
                 *removed ==
-                    bioseq::durable_file_io::conditional_remove_disposition::identity_mismatch ||
+                    bioseq::common::durable_file_io::conditional_remove_disposition::identity_mismatch ||
                 !rollback_synced.has_value()) {
                 return storage_error::unsafe_path;
             }
@@ -2257,25 +2257,25 @@ struct manifest_file_finalization {
 [[nodiscard]] inline storage_error remove_cache_file_durably(
     std::string_view path,
     std::uint64_t maximum_link_count = 1,
-    const bioseq::durable_file_io::regular_file_identity* expected_identity = nullptr) noexcept {
+    const bioseq::common::durable_file_io::regular_file_identity* expected_identity = nullptr) noexcept {
     try {
         const std::filesystem::path file_path{path};
         const std::filesystem::path parent =
             file_path.parent_path().empty() ? std::filesystem::path{"."} : file_path.parent_path();
         const std::string name = file_path.filename().string();
-        auto directory_opened = bioseq::durable_file_io::open_directory_descriptor(parent);
+        auto directory_opened = bioseq::common::durable_file_io::open_directory_descriptor(parent);
         if (!directory_opened.has_value()) {
             return storage_error::unsafe_path;
         }
-        bioseq::durable_file_io::file_descriptor directory_descriptor =
+        bioseq::common::durable_file_io::file_descriptor directory_descriptor =
             std::move(*directory_opened);
-        const auto identity = bioseq::durable_file_io::capture_regular_file_identity_at(
+        const auto identity = bioseq::common::durable_file_io::capture_regular_file_identity_at(
             directory_descriptor.get(), name);
         if (!identity.has_value()) {
             if (identity.error().system_error != ENOENT) {
                 return storage_error::unsafe_path;
             }
-            return bioseq::durable_file_io::fsync_directory_descriptor(directory_descriptor.get())
+            return bioseq::common::durable_file_io::fsync_directory_descriptor(directory_descriptor.get())
                            .has_value()
                        ? storage_error::none
                        : storage_error::unsafe_path;
@@ -2287,18 +2287,18 @@ struct manifest_file_finalization {
                                               identity->inode != expected_identity->inode))) {
             return storage_error::unsafe_path;
         }
-        const auto removed = bioseq::durable_file_io::remove_file_if_same_inode_at(
+        const auto removed = bioseq::common::durable_file_io::remove_file_if_same_inode_at(
             directory_descriptor.get(),
             name,
             *identity,
-            bioseq::durable_file_io::publication_state::visible_not_durable);
-        const auto synced = bioseq::durable_file_io::fsync_directory_descriptor(
+            bioseq::common::durable_file_io::publication_state::visible_not_durable);
+        const auto synced = bioseq::common::durable_file_io::fsync_directory_descriptor(
             directory_descriptor.get(),
             {},
-            bioseq::durable_file_io::publication_state::visible_not_durable);
+            bioseq::common::durable_file_io::publication_state::visible_not_durable);
         if (!removed.has_value() ||
             *removed ==
-                bioseq::durable_file_io::conditional_remove_disposition::identity_mismatch ||
+                bioseq::common::durable_file_io::conditional_remove_disposition::identity_mismatch ||
             !synced.has_value()) {
             return storage_error::unsafe_path;
         }
@@ -2413,7 +2413,7 @@ finalize_manifest_file(const manifest_descriptor& descriptor,
     volatile int destination = -1;
     volatile int source = -1;
     std::uint64_t file_offset = 0;
-    bioseq::durable_file_io::regular_file_identity destination_identity{};
+    bioseq::common::durable_file_io::regular_file_identity destination_identity{};
     bool destination_identity_captured = false;
     PG_TRY();
     {
@@ -2442,11 +2442,11 @@ finalize_manifest_file(const manifest_descriptor& descriptor,
                 result.error = storage_error::open_failed;
                 break;
             }
-            bioseq::durable_file_io::regular_file_identity source_identity{};
+            bioseq::common::durable_file_io::regular_file_identity source_identity{};
             bool source_identity_captured = false;
             if (result.error == storage_error::none) {
                 const auto captured =
-                    bioseq::durable_file_io::capture_regular_file_identity(source);
+                    bioseq::common::durable_file_io::capture_regular_file_identity(source);
                 if (!captured.has_value() || captured->owner != ::geteuid() ||
                     captured->link_count != 1 ||
                     (captured->mode & (S_IRWXU | S_IRWXG | S_IRWXO)) != (S_IRUSR | S_IWUSR) ||
@@ -2477,7 +2477,7 @@ finalize_manifest_file(const manifest_descriptor& descriptor,
             }
             if (result.error == storage_error::none && source_identity_captured) {
                 const auto captured =
-                    bioseq::durable_file_io::capture_regular_file_identity(source);
+                    bioseq::common::durable_file_io::capture_regular_file_identity(source);
                 if (!captured.has_value() || *captured != source_identity) {
                     result.error = storage_error::read_failed;
                 }
@@ -2507,7 +2507,7 @@ finalize_manifest_file(const manifest_descriptor& descriptor,
         }
         if (result.error == storage_error::none) {
             const auto captured =
-                bioseq::durable_file_io::capture_regular_file_identity(destination);
+                bioseq::common::durable_file_io::capture_regular_file_identity(destination);
             if (!captured.has_value() || captured->owner != ::geteuid() ||
                 captured->link_count != 1 ||
                 (captured->mode & (S_IRWXU | S_IRWXG | S_IRWXO)) != (S_IRUSR | S_IWUSR) ||
@@ -2519,7 +2519,7 @@ finalize_manifest_file(const manifest_descriptor& descriptor,
             }
         }
         if (result.error == storage_error::none &&
-            !bioseq::durable_file_io::fsync_file_descriptor(destination).has_value()) {
+            !bioseq::common::durable_file_io::fsync_file_descriptor(destination).has_value()) {
             result.error = storage_error::sync_failed;
         }
         if (destination >= 0 && CloseTransientFile(destination) != 0 &&
@@ -3969,14 +3969,14 @@ storage_query_io_snapshot query_io_metrics() noexcept {
 storage_runtime_snapshot runtime_snapshot() noexcept {
     storage_runtime_snapshot snapshot{};
     snapshot.dsa_attached = g_dsa != nullptr;
-    const auto registry = shared_registry::shared_registry_diagnostics();
-    snapshot.bootstrap_state = registry.state;
+    const auto registry = shared_registry::snapshot_shared_registry_diagnostics();
+    snapshot.bootstrap_status = registry.state;
     snapshot.bootstrap_ready = registry.state == bootstrap_state::ready;
     if (g_shared == nullptr || !g_accounting || g_storage_lock == nullptr) {
         return snapshot;
     }
     snapshot.pending_file_bytes_valid = true;
-    snapshot.worker_lifecycle =
+    snapshot.janitor_lifecycle =
         static_cast<worker_lifecycle>(pg_atomic_read_u32(&g_shared->worker_lifecycle));
     snapshot.correctness_readiness = static_cast<cache_correctness_readiness>(
         pg_atomic_read_u32(&g_shared->correctness_readiness));
@@ -4075,7 +4075,7 @@ bool set_test_force_file_tier(bool enabled) noexcept {
 
 storage_bootstrap_test_snapshot test_storage_bootstrap_snapshot() noexcept {
     storage_bootstrap_test_snapshot snapshot{};
-    const auto diagnostics = shared_registry::shared_registry_diagnostics();
+    const auto diagnostics = shared_registry::snapshot_shared_registry_diagnostics();
     snapshot.state = diagnostics.state;
     snapshot.failure = diagnostics.failure;
     snapshot.boot_nonce = diagnostics.boot_nonce;
@@ -4092,7 +4092,7 @@ storage_bootstrap_test_snapshot test_storage_bootstrap_snapshot() noexcept {
     snapshot.cleanup_handle_published = diagnostics.cleanup_handle_published;
     snapshot.ready_handle_published = diagnostics.ready_handle_published;
     snapshot.root_published = diagnostics.root_published;
-    const auto test_status = shared_registry::shared_registry_test_status();
+    const auto test_status = shared_registry::snapshot_shared_registry_test_status();
     snapshot.pause_reached = test_status.reached;
     snapshot.defer_background_initializer = test_status.defer_background_initializer;
     snapshot.last_cleanup_handle_was_pinned = test_status.last_cleanup_handle_was_pinned;
@@ -4135,7 +4135,7 @@ bool test_inject_storage_bootstrap_abi_mismatch(bool enabled) noexcept {
 
 storage_bootstrap_attach_twice_snapshot test_attach_storage_twice() noexcept {
     storage_bootstrap_attach_twice_snapshot snapshot{};
-    const auto before = shared_registry::shared_registry_diagnostics();
+    const auto before = shared_registry::snapshot_shared_registry_diagnostics();
     snapshot.attempts_before = before.initialization_attempt_count;
     snapshot.attaches_before = before.attach_count;
     snapshot.first_attached = attach_storage();
@@ -4147,7 +4147,7 @@ storage_bootstrap_attach_twice_snapshot test_attach_storage_twice() noexcept {
     snapshot.same_area = first_area != nullptr && second != nullptr && first_area == second->area;
     snapshot.same_root = first_root != nullptr && second != nullptr && first_root == second->root;
     snapshot.mapping_pinned = second != nullptr && second->mapping_pinned;
-    const auto after = shared_registry::shared_registry_diagnostics();
+    const auto after = shared_registry::snapshot_shared_registry_diagnostics();
     snapshot.attempts_after = after.initialization_attempt_count;
     snapshot.attaches_after = after.attach_count;
     return snapshot;
@@ -4162,7 +4162,8 @@ bool test_corrupt_storage_bootstrap_manifest(
     }
     const bool rejected = !attach_storage();
     return rejected &&
-           shared_registry::shared_registry_diagnostics().state == bootstrap_state::failed;
+           shared_registry::snapshot_shared_registry_diagnostics().state ==
+               bootstrap_state::failed;
 }
 
 bool test_detach_storage_mapping() noexcept {

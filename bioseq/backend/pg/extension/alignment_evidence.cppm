@@ -199,7 +199,7 @@ using bioseq::pg::detail::fixed_hex_u64;
         append("fragment_native_wide_occurrence_waves",
             stats.wide_occurrence_waves);
         result += R"(,"are_fragment_native_stats_saturated":)";
-        result += stats.is_saturated ? "true" : "false";
+        result += stats.saturated ? "true" : "false";
     }
 	result += R"(,"are_grouped_soa_reader_memory_stats_saturated":)";
 	result += operational.are_grouped_soa_reader_memory_stats_saturated

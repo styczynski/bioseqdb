@@ -133,7 +133,7 @@ struct cigar_consumption {
     sequence_size_t target = 0;
 };
 
-[[nodiscard]] cigar_consumption cigar_consumption(
+[[nodiscard]] cigar_consumption measure_cigar_consumption(
         std::span<const cigar_operation> cigar) {
     cigar_consumption result;
     for (const cigar_operation op : cigar) {
@@ -259,7 +259,7 @@ void check_exact_region(
         sequence_size_t expected_query_length,
         sequence_size_t expected_target_length) {
     CHECK(region.edit_distance == expected_edit_distance);
-    const cigar_consumption consumed = cigar_consumption(
+    const cigar_consumption consumed = measure_cigar_consumption(
         std::span<const cigar_operation>{
             region.cigar.data(), region.cigar.size()});
     CHECK(consumed.query == expected_query_length);
@@ -455,7 +455,7 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
             CHECK(format_cigar(regions.batched.cigar)
                   == format_cigar(regions.ksw2.cigar));
 
-            const cigar_consumption consumed = cigar_consumption(
+            const cigar_consumption consumed = measure_cigar_consumption(
                 std::span<const cigar_operation>{
                     regions.batched.cigar.data(),
                     regions.batched.cigar.size()});

@@ -46,6 +46,7 @@ extern "C" {
 #include <exception>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -65,7 +66,9 @@ extern "C" {
 export module bioseq.postgres.scheduler.dispatch_buffer;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
 import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
 import bioseq.postgres.storage.indexing.handles;
@@ -816,7 +819,7 @@ public:
         bool            target_from_evaluated_expression = false;
 
         /*
-         * Per-row mmsearch query, populated only when mmsearch_context's
+         * Per-row mmsearch query, populated only when mmsearch state's
          * `per_row_query_attno` is set (i.e. the qual is
          * `mmsearch(this_rel.seq_a, this_rel.seq_b)` where the second
          * arg is a Var of the same relation). Holds the detoasted
@@ -963,7 +966,7 @@ public:
 
 private:
     ::bioseq::simd::batch_processor processor;
-    mmsearch_context mmsearch_context;
+    mmsearch_context mmsearch_state;
 
     /*
      * Per-scan base minimap2_parameters, captured when the column scan begins
@@ -1051,7 +1054,7 @@ private:
 
     /*
      * Additional Const-only mmsearch quals that share the primary
-     * mmsearch_context's seq column and (alphabet, width) typmod.
+     * mmsearch state's seq column and (alphabet, width) typmod.
      * Each entry holds the detoasted bioseq.seq varlena bytes for one
      * extra query. After the primary batch runs, run_batch_and_build_cursors
      * dispatches process_sequences once per extra query and intersects
@@ -1071,7 +1074,7 @@ private:
      * Per-bucket deferred-hydration machinery. The custom scan
      * runs with defer_seq_hydration=true, so submit_scan captures only
      * locators; run_batch_and_build_cursors groups the buffered locators by
-     * bucket_idx and issues one fetch_payload_bulk per non-empty bucket
+     * bucket_index and issues one fetch_payload_bulk per non-empty bucket
      * (each opens that bucket's shards once, scanning them row-number-sorted).
      * Hydrated payloads live in batch_payload_ctx (reset per batch); the
      * per-scan db/spc/relfilenode identity is captured by configure_params.
@@ -1211,8 +1214,8 @@ private:
                 classify_and_describe_sequence(datum);
             require_recipe_descriptor_(
                 descriptor,
-                mmsearch_context.alphabet_code,
-                mmsearch_context.storage_unit_byte_width,
+                mmsearch_state.alphabet_code,
+                mmsearch_state.storage_unit_byte_width,
                 "target");
             entry.seq_recipe_datum = retain_expanded_recipe_(datum);
             entry.seq_recipe_descriptor = descriptor;
@@ -1226,9 +1229,9 @@ private:
         if (bioseq::storage::is_locator_stub(header)) {
             entry.seq_loc = bioseq::storage::decode_locator_from_stub(header);
         } else {
-            if (header->alphabet_code != mmsearch_context.alphabet_code
+            if (header->alphabet_code != mmsearch_state.alphabet_code
                 || header->storage_unit_byte_width
-                    != mmsearch_context.storage_unit_byte_width) {
+                    != mmsearch_state.storage_unit_byte_width) {
                 source.free_if_copy();
                 ereport(ERROR,
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -1249,8 +1252,8 @@ private:
                 classify_and_describe_sequence(datum);
             require_recipe_descriptor_(
                 descriptor,
-                mmsearch_context.query_alphabet_code,
-                mmsearch_context.query_storage_unit_byte_width,
+                mmsearch_state.query_alphabet_code,
+                mmsearch_state.query_storage_unit_byte_width,
                 "query");
             entry.per_row_query_recipe_datum =
                 retain_expanded_recipe_(datum);
@@ -1269,9 +1272,9 @@ private:
             source.free_if_copy();
             return;
         }
-        if (header->alphabet_code != mmsearch_context.query_alphabet_code
+        if (header->alphabet_code != mmsearch_state.query_alphabet_code
             || header->storage_unit_byte_width
-                != mmsearch_context.query_storage_unit_byte_width) {
+                != mmsearch_state.query_storage_unit_byte_width) {
             source.free_if_copy();
             ereport(ERROR,
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -1280,12 +1283,12 @@ private:
         const bioseq::pg_types::seq* dispatch_header = header;
         bioseq::pg_types::seq* rewidth = nullptr;
         if (header->storage_unit_byte_width
-                != mmsearch_context.storage_unit_byte_width) {
+                != mmsearch_state.storage_unit_byte_width) {
             rewidth = ::bioseq::simd::stdc_rewidth_to_type_params(
                     *header,
                     compact_sequence_stdc_type_params{
-                        mmsearch_context.alphabet_code,
-                        mmsearch_context.storage_unit_byte_width},
+                        mmsearch_state.alphabet_code,
+                        mmsearch_state.storage_unit_byte_width},
                     pg_alloc);
             if (rewidth == nullptr) {
                 source.free_if_copy();
@@ -1311,8 +1314,8 @@ private:
             buffered_scan_entry& entry,
             TupleTableSlot* slot) {
         if (slot == nullptr || slot->tts_tupleDescriptor == nullptr
-            || mmsearch_context.seq_attno <= 0
-            || mmsearch_context.seq_attno
+            || mmsearch_state.seq_attno <= 0
+            || mmsearch_state.seq_attno
                 > slot->tts_tupleDescriptor->natts) {
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -1320,7 +1323,7 @@ private:
         }
         const Oid sequence_type_oid = TupleDescAttr(
             slot->tts_tupleDescriptor,
-            mmsearch_context.seq_attno - 1)->atttypid;
+            mmsearch_state.seq_attno - 1)->atttypid;
         entry.expanded_sequence_attributes.clear();
         for (int index = 0;
              index < slot->tts_tupleDescriptor->natts; ++index) {
@@ -1342,12 +1345,12 @@ private:
             const AttrNumber attno = static_cast<AttrNumber>(index + 1);
             Datum retained = Datum{0};
             pg_sequence_descriptor descriptor{};
-            if (attno == mmsearch_context.seq_attno
+            if (attno == mmsearch_state.seq_attno
                 && entry.has_seq_recipe()
                 && !entry.target_from_evaluated_expression) {
                 retained = entry.seq_recipe_datum;
                 descriptor = entry.seq_recipe_descriptor;
-            } else if (attno == mmsearch_context.per_row_query_attno
+            } else if (attno == mmsearch_state.per_row_query_attno
                 && entry.has_per_row_query_recipe()
                 && !entry.query_from_evaluated_expression) {
                 retained = entry.per_row_query_recipe_datum;
@@ -1522,7 +1525,7 @@ public:
                         require_compatible_persisted
                 ? true
                 : read_sequence_index;
-        if (mmsearch_context.per_row_evaluated) {
+        if (mmsearch_state.per_row_evaluated) {
             require_evaluated_mmsearch_index_policy_();
         }
         user_relid                   = scan_user_relid;
@@ -1577,10 +1580,10 @@ public:
     [[nodiscard]] const ::bioseq::pipeline_stats::pipeline_execution_stats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
     [[nodiscard]] AttrNumber target_sequence_attno() const noexcept {
-        return mmsearch_context.seq_attno;
+        return mmsearch_state.seq_attno;
     }
     [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept {
-        return mmsearch_context.per_row_query_attno;
+        return mmsearch_state.per_row_query_attno;
     }
 
     /* Per-scan storage-bucket EXPLAIN counters. */
@@ -1608,30 +1611,30 @@ public:
                             uint8_t alphabet_code,
                             uint8_t storage_unit_byte_width,
                             AttrNumber primary_key_attno) {
-        mmsearch_context.seq_attno          = seq_attno;
-        mmsearch_context.primary_key_attno  = primary_key_attno;
-        mmsearch_context.column_name        = std::move(column_name);
-        mmsearch_context.query_varlena      = std::move(query_varlena_bytes);
-        mmsearch_context.alphabet_code      = alphabet_code;
-        mmsearch_context.storage_unit_byte_width         = storage_unit_byte_width;
-        mmsearch_context.query_alphabet_code = alphabet_code;
-        mmsearch_context.query_storage_unit_byte_width =
+        mmsearch_state.seq_attno          = seq_attno;
+        mmsearch_state.primary_key_attno  = primary_key_attno;
+        mmsearch_state.column_name        = std::move(column_name);
+        mmsearch_state.query_varlena      = std::move(query_varlena_bytes);
+        mmsearch_state.alphabet_code      = alphabet_code;
+        mmsearch_state.storage_unit_byte_width         = storage_unit_byte_width;
+        mmsearch_state.query_alphabet_code = alphabet_code;
+        mmsearch_state.query_storage_unit_byte_width =
             storage_unit_byte_width;
-        mmsearch_context.coalesce_active    = false;
-        mmsearch_context.coalesced_query_varlena.clear();
-        mmsearch_context.per_row_query_attno = InvalidAttrNumber;
-        mmsearch_context.per_row_self_alignment = false;
-        mmsearch_context.per_row_evaluated   = false;
-        mmsearch_context.active             = true;
+        mmsearch_state.coalesce_active    = false;
+        mmsearch_state.coalesced_query_varlena.clear();
+        mmsearch_state.per_row_query_attno = InvalidAttrNumber;
+        mmsearch_state.per_row_self_alignment = false;
+        mmsearch_state.per_row_evaluated   = false;
+        mmsearch_state.active             = true;
 
         uint32_t query_bp_size = 0;
-        if (const auto* hdr = mmsearch_context.query_hdr()) {
+        if (const auto* hdr = mmsearch_state.query_hdr()) {
             query_bp_size = hdr->bp_size;
         }
         bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer::configure_mmsearch() seq_attno={} pk_attno={} column='{}' typmod=({},{}) query_bp_size={}",
                 static_cast<int>(seq_attno),
                 static_cast<int>(primary_key_attno),
-                mmsearch_context.column_name,
+                mmsearch_state.column_name,
                 static_cast<unsigned>(alphabet_code),
                 static_cast<unsigned>(storage_unit_byte_width),
                 query_bp_size);
@@ -1665,21 +1668,21 @@ public:
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("bioseq mmsearch requires operands with the same bound alphabet")));
         }
-        mmsearch_context.seq_attno              = seq_attno;
-        mmsearch_context.primary_key_attno      = primary_key_attno;
-        mmsearch_context.column_name            = std::move(column_name);
-        mmsearch_context.query_varlena.clear();
-        mmsearch_context.coalesced_query_varlena.clear();
-        mmsearch_context.coalesce_active        = false;
-        mmsearch_context.alphabet_code          = alphabet_code;
-        mmsearch_context.storage_unit_byte_width             = storage_unit_byte_width;
-        mmsearch_context.query_alphabet_code = query_alphabet_code;
-        mmsearch_context.query_storage_unit_byte_width =
+        mmsearch_state.seq_attno              = seq_attno;
+        mmsearch_state.primary_key_attno      = primary_key_attno;
+        mmsearch_state.column_name            = std::move(column_name);
+        mmsearch_state.query_varlena.clear();
+        mmsearch_state.coalesced_query_varlena.clear();
+        mmsearch_state.coalesce_active        = false;
+        mmsearch_state.alphabet_code          = alphabet_code;
+        mmsearch_state.storage_unit_byte_width             = storage_unit_byte_width;
+        mmsearch_state.query_alphabet_code = query_alphabet_code;
+        mmsearch_state.query_storage_unit_byte_width =
             query_storage_unit_byte_width;
-        mmsearch_context.per_row_query_attno    = per_row_query_attno;
-        mmsearch_context.per_row_self_alignment = per_row_self_alignment;
-        mmsearch_context.per_row_evaluated      = false;
-        mmsearch_context.active                 = true;
+        mmsearch_state.per_row_query_attno    = per_row_query_attno;
+        mmsearch_state.per_row_self_alignment = per_row_self_alignment;
+        mmsearch_state.per_row_evaluated      = false;
+        mmsearch_state.active                 = true;
 
         bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} target_typmod=({},{}) query_typmod=({},{})",
                 static_cast<int>(seq_attno),
@@ -1708,22 +1711,22 @@ public:
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("bioseq mmsearch requires operands with the same bound alphabet")));
         }
-        mmsearch_context.seq_attno = seq_attno;
-        mmsearch_context.primary_key_attno = primary_key_attno;
-        mmsearch_context.column_name = std::move(column_name);
-        mmsearch_context.query_varlena.clear();
-        mmsearch_context.coalesced_query_varlena.clear();
-        mmsearch_context.coalesce_active = false;
-        mmsearch_context.alphabet_code = alphabet_code;
-        mmsearch_context.storage_unit_byte_width =
+        mmsearch_state.seq_attno = seq_attno;
+        mmsearch_state.primary_key_attno = primary_key_attno;
+        mmsearch_state.column_name = std::move(column_name);
+        mmsearch_state.query_varlena.clear();
+        mmsearch_state.coalesced_query_varlena.clear();
+        mmsearch_state.coalesce_active = false;
+        mmsearch_state.alphabet_code = alphabet_code;
+        mmsearch_state.storage_unit_byte_width =
             storage_unit_byte_width;
-        mmsearch_context.query_alphabet_code = query_alphabet_code;
-        mmsearch_context.query_storage_unit_byte_width =
+        mmsearch_state.query_alphabet_code = query_alphabet_code;
+        mmsearch_state.query_storage_unit_byte_width =
             query_storage_unit_byte_width;
-        mmsearch_context.per_row_query_attno = InvalidAttrNumber;
-        mmsearch_context.per_row_self_alignment = false;
-        mmsearch_context.per_row_evaluated = true;
-        mmsearch_context.active = true;
+        mmsearch_state.per_row_query_attno = InvalidAttrNumber;
+        mmsearch_state.per_row_self_alignment = false;
+        mmsearch_state.per_row_evaluated = true;
+        mmsearch_state.active = true;
     }
 
     /* Configure the narrow two-child bioseq batch join seam. */
@@ -1763,16 +1766,16 @@ public:
         join_target_slot_seq_resno = target_slot_seq_resno;
         join_target_slot_rowno_resno = target_slot_rowno_resno;
         join_query_slot_seq_resno = query_slot_seq_resno;
-        mmsearch_context = mmsearch_context{};
-        mmsearch_context.seq_attno = target_slot_seq_resno;
-        mmsearch_context.primary_key_attno = InvalidAttrNumber;
-        mmsearch_context.column_name = std::move(target_column_name);
-        mmsearch_context.alphabet_code = alphabet_code;
-        mmsearch_context.storage_unit_byte_width = storage_unit_byte_width;
-        mmsearch_context.query_alphabet_code = query_alphabet_code;
-        mmsearch_context.query_storage_unit_byte_width =
+        mmsearch_state = mmsearch_context{};
+        mmsearch_state.seq_attno = target_slot_seq_resno;
+        mmsearch_state.primary_key_attno = InvalidAttrNumber;
+        mmsearch_state.column_name = std::move(target_column_name);
+        mmsearch_state.alphabet_code = alphabet_code;
+        mmsearch_state.storage_unit_byte_width = storage_unit_byte_width;
+        mmsearch_state.query_alphabet_code = query_alphabet_code;
+        mmsearch_state.query_storage_unit_byte_width =
             query_storage_unit_byte_width;
-        mmsearch_context.active = true;
+        mmsearch_state.active = true;
         reset_join_runtime_for_rescan();
     }
 
@@ -1931,8 +1934,8 @@ private:
 							classify_and_describe_sequence(query_datum);
 						require_recipe_descriptor_(
 							descriptor,
-							mmsearch_context.query_alphabet_code,
-							mmsearch_context.query_storage_unit_byte_width,
+							mmsearch_state.query_alphabet_code,
+							mmsearch_state.query_storage_unit_byte_width,
 							"query");
 						join_cpu_preparation_scratch.query_headers.push_back(
 							nullptr);
@@ -1960,9 +1963,9 @@ private:
 							 errmsg("bioseq batch join query preparation received a locator stub")));
 					}
 					if (query_header->alphabet_code
-							!= mmsearch_context.query_alphabet_code
+							!= mmsearch_state.query_alphabet_code
 						|| query_header->storage_unit_byte_width
-							!= mmsearch_context.query_storage_unit_byte_width) {
+							!= mmsearch_state.query_storage_unit_byte_width) {
 						if (reinterpret_cast<void*>(query_header)
 							!= reinterpret_cast<void*>(
 								DatumGetPointer(query_datum))) {
@@ -1975,13 +1978,13 @@ private:
 					const bioseq::pg_types::seq* preparation_query_header =
 						query_header;
 					if (query_header->storage_unit_byte_width
-							!= mmsearch_context.storage_unit_byte_width) {
+							!= mmsearch_state.storage_unit_byte_width) {
 						bioseq::pg_types::seq* rewidthed =
 							::bioseq::simd::stdc_rewidth_to_type_params(
 								*query_header,
 								compact_sequence_stdc_type_params{
-									mmsearch_context.alphabet_code,
-									mmsearch_context.storage_unit_byte_width},
+									mmsearch_state.alphabet_code,
+									mmsearch_state.storage_unit_byte_width},
 								pg_alloc);
 						if (rewidthed == nullptr) {
 							if (reinterpret_cast<void*>(query_header)
@@ -2043,8 +2046,8 @@ private:
 						static_cast<std::uint64_t>(
 							join_cpu_prepared_target.target_rowno),
 						join_cpu_prepared_target.target_bp_size,
-						mmsearch_context.alphabet_code,
-						mmsearch_context.storage_unit_byte_width,
+						mmsearch_state.alphabet_code,
+						mmsearch_state.storage_unit_byte_width,
 						join_cpu_preparation_scratch.query_headers,
 						join_cpu_preparation_scratch.query_recipe_datums,
 						join_cpu_preparation_scratch.query_recipe_descriptors,
@@ -2057,8 +2060,8 @@ private:
 						join_cpu_prepared_target);
 				} else {
 					processor.prepare_cpu_shared_query_unions(
-						mmsearch_context.alphabet_code,
-						mmsearch_context.storage_unit_byte_width,
+						mmsearch_state.alphabet_code,
+						mmsearch_state.storage_unit_byte_width,
 						join_cpu_prepared_target.target_bp_size,
 						join_cpu_preparation_scratch.query_headers,
 						join_cpu_preparation_scratch.query_recipe_datums,
@@ -2226,8 +2229,8 @@ public:
 					classify_and_describe_sequence(query_datum);
 				require_recipe_descriptor_(
 					descriptor,
-					mmsearch_context.query_alphabet_code,
-					mmsearch_context.query_storage_unit_byte_width,
+					mmsearch_state.query_alphabet_code,
+					mmsearch_state.query_storage_unit_byte_width,
 					"query");
 				query_headers.push_back(nullptr);
 				query_recipe_datums.push_back(query_datum);
@@ -2249,9 +2252,9 @@ public:
 					 errmsg("bioseq batch join query preparation received a locator stub")));
 			}
 			if (query_header->alphabet_code
-					!= mmsearch_context.query_alphabet_code
+					!= mmsearch_state.query_alphabet_code
 				|| query_header->storage_unit_byte_width
-					!= mmsearch_context.query_storage_unit_byte_width) {
+					!= mmsearch_state.query_storage_unit_byte_width) {
 				if (reinterpret_cast<void*>(query_header)
 					!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
 					pfree(query_header);
@@ -2262,13 +2265,13 @@ public:
 			}
 			const bioseq::pg_types::seq* preparation_query_header = query_header;
 			if (query_header->storage_unit_byte_width
-					!= mmsearch_context.storage_unit_byte_width) {
+					!= mmsearch_state.storage_unit_byte_width) {
 				bioseq::pg_types::seq* rewidthed =
 					::bioseq::simd::stdc_rewidth_to_type_params(
 						*query_header,
 						compact_sequence_stdc_type_params{
-							mmsearch_context.alphabet_code,
-							mmsearch_context.storage_unit_byte_width},
+							mmsearch_state.alphabet_code,
+							mmsearch_state.storage_unit_byte_width},
 						pg_alloc);
 				if (rewidthed == nullptr) {
 					if (reinterpret_cast<void*>(query_header)
@@ -2327,8 +2330,8 @@ public:
 							join_gpu_prepared_grouped_soa_target.target_rowno),
 						target_bp_size,
 						query_headers.size(),
-						mmsearch_context.alphabet_code,
-						mmsearch_context.storage_unit_byte_width,
+						mmsearch_state.alphabet_code,
+						mmsearch_state.storage_unit_byte_width,
 						base_params,
 						*executor_read_context,
 						join_gpu_prepared_grouped_soa_target);
@@ -2408,52 +2411,52 @@ public:
      * true.
      */
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
-        mmsearch_context.coalesced_query_varlena = std::move(coalesced_bytes);
-        mmsearch_context.coalesce_active = true;
-        const bioseq::pg_types::seq* raw_query = mmsearch_context.query_varlena.empty()
+        mmsearch_state.coalesced_query_varlena = std::move(coalesced_bytes);
+        mmsearch_state.coalesce_active = true;
+        const bioseq::pg_types::seq* raw_query = mmsearch_state.query_varlena.empty()
             ? nullptr : reinterpret_cast<const bioseq::pg_types::seq*>(
-                mmsearch_context.query_varlena.data());
+                mmsearch_state.query_varlena.data());
         bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
                 static_cast<unsigned>(raw_query == nullptr
-                    ? mmsearch_context.alphabet_code
+                    ? mmsearch_state.alphabet_code
                     : raw_query->alphabet_code),
                 static_cast<unsigned>(raw_query == nullptr
-                    ? mmsearch_context.storage_unit_byte_width
+                    ? mmsearch_state.storage_unit_byte_width
                     : raw_query->storage_unit_byte_width),
-                static_cast<unsigned>(mmsearch_context.alphabet_code),
-                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
-                mmsearch_context.query_varlena.size(),
-                mmsearch_context.coalesced_query_varlena.size());
+                static_cast<unsigned>(mmsearch_state.alphabet_code),
+                static_cast<unsigned>(mmsearch_state.storage_unit_byte_width),
+                mmsearch_state.query_varlena.size(),
+                mmsearch_state.coalesced_query_varlena.size());
     }
 
     [[nodiscard]] bool per_row_mode() const noexcept {
         return dispatch_uses_per_row_query(
-            mmsearch_context.active,
-            mmsearch_context.per_row_query_attno,
-            mmsearch_context.per_row_evaluated);
+            mmsearch_state.active,
+            mmsearch_state.per_row_query_attno,
+            mmsearch_state.per_row_evaluated);
     }
     [[nodiscard]] AttrNumber per_row_query_attno() const {
-        return mmsearch_context.per_row_query_attno;
+        return mmsearch_state.per_row_query_attno;
     }
     [[nodiscard]] AttrNumber query_source_attno() const noexcept {
         if (!per_row_mode()) {
             return InvalidAttrNumber;
         }
-        return mmsearch_context.per_row_query_attno != InvalidAttrNumber
-            ? mmsearch_context.per_row_query_attno
-            : mmsearch_context.seq_attno;
+        return mmsearch_state.per_row_query_attno != InvalidAttrNumber
+            ? mmsearch_state.per_row_query_attno
+            : mmsearch_state.seq_attno;
     }
     [[nodiscard]] bool coalesce_active() const {
-        return mmsearch_context.coalesce_active;
+        return mmsearch_state.coalesce_active;
     }
     [[nodiscard]] bool per_row_self_alignment() const {
-        return mmsearch_context.per_row_self_alignment;
+        return mmsearch_state.per_row_self_alignment;
     }
     [[nodiscard]] uint8_t mmsearch_alphabet_code() const {
-        return mmsearch_context.alphabet_code;
+        return mmsearch_state.alphabet_code;
     }
     [[nodiscard]] uint8_t mmsearch_storage_unit_byte_width() const {
-        return mmsearch_context.storage_unit_byte_width;
+        return mmsearch_state.storage_unit_byte_width;
     }
 
     /*
@@ -2478,7 +2481,7 @@ public:
      * extras list across rebinds.
      */
     void clear_mmsearch_context(bool clear_extras = false) {
-        mmsearch_context = mmsearch_context{};
+        mmsearch_state = mmsearch_context{};
         if (clear_extras) {
             extra_query_varlenas.clear();
         }
@@ -2553,8 +2556,8 @@ private:
     [[gnu::always_inline]] inline void submit_scan_impl_(
             TupleTableSlot* scan_slot,
             const evaluated_row_operands* evaluated) {
-        if (!mmsearch_context.active) {
-            bioseq_log<logging_level::debug>("[bioseq] pg: submit_scan called while mmsearch_context inactive; skipping");
+        if (!mmsearch_state.active) {
+            bioseq_log<logging_level::debug>("[bioseq] pg: submit_scan called while mmsearch state inactive; skipping");
             return;
         }
         if (scan_slot == nullptr) {
@@ -2598,11 +2601,11 @@ private:
             } else {
                 capture_target_datum_(entry, evaluated->target);
             }
-        } else if (mmsearch_context.seq_attno == InvalidAttrNumber) {
+        } else if (mmsearch_state.seq_attno == InvalidAttrNumber) {
             entry.seq_is_null = true;
         } else {
             bool is_null = true;
-            Datum seq_datum = slot_getattr(scan_slot, mmsearch_context.seq_attno, &is_null);
+            Datum seq_datum = slot_getattr(scan_slot, mmsearch_state.seq_attno, &is_null);
             if (is_null) {
                 entry.seq_is_null = true;
             } else {
@@ -2617,11 +2620,11 @@ private:
         }
 
         /* Extract the primary-key column. */
-        if (mmsearch_context.primary_key_attno == InvalidAttrNumber) {
+        if (mmsearch_state.primary_key_attno == InvalidAttrNumber) {
             entry.primary_key_is_null = true;
         } else {
             bool pk_null = true;
-            Datum pk_datum = slot_getattr(scan_slot, mmsearch_context.primary_key_attno, &pk_null);
+            Datum pk_datum = slot_getattr(scan_slot, mmsearch_state.primary_key_attno, &pk_null);
             if (pk_null) {
                 entry.primary_key_is_null = true;
             } else {
@@ -2656,22 +2659,22 @@ private:
                  * the target recipe merely because the raw attnos match. */
                 capture_query_datum_(entry, evaluated->query);
             }
-        } else if (mmsearch_context.per_row_query_attno
+        } else if (mmsearch_state.per_row_query_attno
                 != InvalidAttrNumber) {
             bool query_null = true;
             Datum query_datum = slot_getattr(scan_slot,
-                mmsearch_context.per_row_query_attno, &query_null);
+                mmsearch_state.per_row_query_attno, &query_null);
             if (query_null) {
                 entry.per_row_query_is_null = true;
-            } else if (mmsearch_context.per_row_query_attno
-                           == mmsearch_context.seq_attno
+            } else if (mmsearch_state.per_row_query_attno
+                           == mmsearch_state.seq_attno
                        && entry.has_seq_recipe()) {
                 /* A self-alignment needs one retained wrapper, not two
                  * independently retained source graphs. */
                 require_recipe_descriptor_(
                     entry.seq_recipe_descriptor,
-                    mmsearch_context.query_alphabet_code,
-                    mmsearch_context.query_storage_unit_byte_width,
+                    mmsearch_state.query_alphabet_code,
+                    mmsearch_state.query_storage_unit_byte_width,
                     "query");
                 entry.per_row_query_recipe_datum = entry.seq_recipe_datum;
                 entry.per_row_query_recipe_descriptor =
@@ -2791,7 +2794,7 @@ public:
     /*
      * Per-bucket bulk hydration of one sequence column. Groups the
      * buffered entries that captured a locator for `column_attno` by
-     * bucket_idx and issues one storage_manager_type::fetch_payload_bulk per non-empty bucket
+     * bucket_index and issues one storage_manager_type::fetch_payload_bulk per non-empty bucket
      * (each opens that bucket's shards once and scans them row-number-sorted).
      * The hydrated payloads (palloc'd in batch_payload_ctx) are recorded on
      * the entry so seq_hdr()/per_row_query_hdr() return them, and written back
@@ -2819,11 +2822,11 @@ public:
         std::size_t lpu_for_column          = 0;
         std::size_t bytes_per_unit_for_col  = 0;
         const std::uint8_t column_alphabet_code = is_query
-            ? mmsearch_context.query_alphabet_code
-            : mmsearch_context.alphabet_code;
+            ? mmsearch_state.query_alphabet_code
+            : mmsearch_state.alphabet_code;
         const std::uint8_t column_storage_unit_byte_width = is_query
-            ? mmsearch_context.query_storage_unit_byte_width
-            : mmsearch_context.storage_unit_byte_width;
+            ? mmsearch_state.query_storage_unit_byte_width
+            : mmsearch_state.storage_unit_byte_width;
         bioseq::pg_types::seq::dispatch_instance(
             column_alphabet_code,
             column_storage_unit_byte_width,
@@ -2879,7 +2882,7 @@ public:
                         bytes_per_unit_for_col, projected_varlena);
                 continue;
             }
-            per_bucket[loc->bucket_idx].push_back(storage_manager_type::fetch_request{i, *loc});
+            per_bucket[loc->bucket_index].push_back(storage_manager_type::fetch_request{i, *loc});
             any = true;
         }
         if (!any) {
@@ -2912,24 +2915,24 @@ public:
             if (is_query) {
                 bioseq::pg_types::seq* source_query = out_payloads[i];
                 if (source_query->alphabet_code
-                        != mmsearch_context.query_alphabet_code
+                        != mmsearch_state.query_alphabet_code
                     || source_query->storage_unit_byte_width
-                        != mmsearch_context.query_storage_unit_byte_width) {
+                        != mmsearch_state.query_storage_unit_byte_width) {
                     ereport(ERROR,
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("bioseq mmsearch hydrated query typmod changed after planning")));
                 }
                 bioseq::pg_types::seq* dispatch_query = source_query;
                 if (source_query->storage_unit_byte_width
-                        != mmsearch_context.storage_unit_byte_width) {
+                        != mmsearch_state.storage_unit_byte_width) {
                     MemoryContext old_context = MemoryContextSwitchTo(
                         batch_payload_ctx);
                     dispatch_query =
                         ::bioseq::simd::stdc_rewidth_to_type_params(
                             *source_query,
                             compact_sequence_stdc_type_params{
-                                mmsearch_context.alphabet_code,
-                                mmsearch_context.storage_unit_byte_width},
+                                mmsearch_state.alphabet_code,
+                                mmsearch_state.storage_unit_byte_width},
                             pg_alloc);
                     MemoryContextSwitchTo(old_context);
                     if (dispatch_query == nullptr) {
@@ -2995,7 +2998,7 @@ public:
         cache->main_relfilenode    = user_main_relfilenode;
 
         hydrate_one_column(rows, cache,
-            static_cast<std::int16_t>(mmsearch_context.seq_attno),
+            static_cast<std::int16_t>(mmsearch_state.seq_attno),
             per_bucket_target_requests, hydrated_target_payloads,
             /*is_query=*/false);
 
@@ -3094,8 +3097,8 @@ public:
 						classify_and_describe_sequence(query_datum);
 					require_recipe_descriptor_(
 						descriptor,
-						mmsearch_context.query_alphabet_code,
-						mmsearch_context.query_storage_unit_byte_width,
+						mmsearch_state.query_alphabet_code,
+						mmsearch_state.query_storage_unit_byte_width,
 						"query");
 					join_query_hdrs[i] = nullptr;
 					scanner_pg_ctx.query_recipe_datums[i] = query_datum;
@@ -3117,9 +3120,9 @@ public:
                          errhint("The bounded query child must materialize its compact sequence before join dispatch.")));
                 }
                 if (query_hdr->alphabet_code
-                        != mmsearch_context.query_alphabet_code
+                        != mmsearch_state.query_alphabet_code
                     || query_hdr->storage_unit_byte_width
-                        != mmsearch_context.query_storage_unit_byte_width) {
+                        != mmsearch_state.query_storage_unit_byte_width) {
                     ereport(ERROR,
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("bioseq batch join query typmod changed after planning")));
@@ -3130,13 +3133,13 @@ public:
                 }
                 const bioseq::pg_types::seq* dispatch_query_hdr = query_hdr;
                 if (query_hdr->storage_unit_byte_width
-                        != mmsearch_context.storage_unit_byte_width) {
+                        != mmsearch_state.storage_unit_byte_width) {
                     bioseq::pg_types::seq* rewidth =
                         ::bioseq::simd::stdc_rewidth_to_type_params(
                             *query_hdr,
                             compact_sequence_stdc_type_params{
-                                mmsearch_context.alphabet_code,
-                                mmsearch_context.storage_unit_byte_width},
+                                mmsearch_state.alphabet_code,
+                                mmsearch_state.storage_unit_byte_width},
                             pg_alloc);
                     if (rewidth == nullptr) {
                         ereport(ERROR,
@@ -3192,9 +3195,9 @@ public:
 			scanner_pg_ctx.mmsearch_query_attno =
 				static_cast<std::int16_t>(join_query_slot_seq_resno);
 			scanner_pg_ctx.query_alphabet_code =
-				mmsearch_context.query_alphabet_code;
+				mmsearch_state.query_alphabet_code;
 			scanner_pg_ctx.query_storage_unit_byte_width =
-				mmsearch_context.query_storage_unit_byte_width;
+				mmsearch_state.query_storage_unit_byte_width;
             scanner_pg_ctx.caches = join_scanner_pg_cache;
             scanner_pg_ctx.parent_mctx = batch_payload_ctx;
             scanner_pg_ctx.snapshot = scan_snapshot;
@@ -3274,8 +3277,8 @@ public:
 
             join_result_scratch = processor.process_sequences(
                 batch_size,
-                mmsearch_context.alphabet_code,
-                mmsearch_context.storage_unit_byte_width,
+                mmsearch_state.alphabet_code,
+                mmsearch_state.storage_unit_byte_width,
                 nullptr,
                 &join_query_hdrs,
                 join_target_hdrs,
@@ -3427,7 +3430,7 @@ public:
 						[&read_delta](const auto& reader) {
 						const auto memory_stats = reader.memory_stats();
 						const std::uint64_t exact_position_bytes =
-							bioseq::parallelism::saturating_mul(
+							bioseq::common::saturating_mul(
 								memory_stats.retained_position_count,
 								sizeof(std::uint64_t));
 						const bool exact_position_image =
@@ -3854,7 +3857,7 @@ public:
          */
         last_stats = ::bioseq::pipeline_stats::pipeline_execution_stats{};
         const bool executed_nonempty_buffer =
-            mmsearch_context.active && batch_size != 0;
+            mmsearch_state.active && batch_size != 0;
         const std::int64_t scheduled_queries =
             static_cast<std::int64_t>(batch_size)
             * static_cast<std::int64_t>(1 + extra_query_varlenas.size());
@@ -3904,7 +3907,7 @@ public:
         std::array<int32_t,                      dispatch_batch_capacity> query_ids{};
 
         const size_t batch_size = buffered_entries.size();
-        if (!mmsearch_context.active || batch_size == 0) {
+        if (!mmsearch_state.active || batch_size == 0) {
             match_map.clear();
             output_cursors.clear();
             output_position = 0;
@@ -3959,8 +3962,8 @@ public:
         std::size_t lpu_for_hydration = 0;
         std::size_t bytes_per_unit_for_hydration = 0;
         bioseq::pg_types::seq::dispatch_instance(
-            mmsearch_context.alphabet_code,
-            mmsearch_context.storage_unit_byte_width,
+            mmsearch_state.alphabet_code,
+            mmsearch_state.storage_unit_byte_width,
             [&lpu_for_hydration, &bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
                 using traits = typename compact_sequence_range<p_sequence>::traits;
                 lpu_for_hydration = traits::letters_per_unit;
@@ -3972,8 +3975,8 @@ public:
             bytes_per_unit_for_hydration;
         if (per_row_mode()) {
             bioseq::pg_types::seq::dispatch_instance(
-                mmsearch_context.query_alphabet_code,
-                mmsearch_context.query_storage_unit_byte_width,
+                mmsearch_state.query_alphabet_code,
+                mmsearch_state.query_storage_unit_byte_width,
                 [&query_lpu_for_hydration,
                  &query_bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
                     using traits =
@@ -4049,8 +4052,8 @@ public:
                     return (std::numeric_limits<std::uint64_t>::max)();
                 }
                 bytes += query_bytes;
-                if (mmsearch_context.query_storage_unit_byte_width
-                        != mmsearch_context.storage_unit_byte_width) {
+                if (mmsearch_state.query_storage_unit_byte_width
+                        != mmsearch_state.storage_unit_byte_width) {
                     const std::uint64_t rewidthed_query_bytes =
                         estimate_flat_sequence_bytes(
                             entry.per_row_query_loc->logical_length,
@@ -4116,12 +4119,12 @@ public:
             waves.emplace_back(wave_begin, batch_size);
         }
 
-        const bioseq::pg_types::seq* query_hdr = mmsearch_context.query_hdr();
+        const bioseq::pg_types::seq* query_hdr = mmsearch_state.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
         bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer calling batch_processor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={}",
                 batch_size,
-                static_cast<unsigned>(mmsearch_context.alphabet_code),
-                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
+                static_cast<unsigned>(mmsearch_state.alphabet_code),
+                static_cast<unsigned>(mmsearch_state.storage_unit_byte_width),
                 query_bp_size,
                 read_sequence_index_active,
                 per_row_mode());
@@ -4153,13 +4156,13 @@ public:
         scanner_pg_ctx.tablespace_oid     = user_main_tablespace_oid;
         scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;
         scanner_pg_ctx.mmsearch_seq_attno =
-            static_cast<std::int16_t>(mmsearch_context.seq_attno);
+            static_cast<std::int16_t>(mmsearch_state.seq_attno);
         scanner_pg_ctx.mmsearch_query_attno =
             static_cast<std::int16_t>(query_source_attno());
         scanner_pg_ctx.query_alphabet_code =
-            mmsearch_context.query_alphabet_code;
+            mmsearch_state.query_alphabet_code;
         scanner_pg_ctx.query_storage_unit_byte_width =
-            mmsearch_context.query_storage_unit_byte_width;
+            mmsearch_state.query_storage_unit_byte_width;
         scanner_pg_ctx.caches             = scanner_pg_cache;
         scanner_pg_ctx.parent_mctx        = batch_payload_ctx;
         scanner_pg_ctx.snapshot           = scan_snapshot;
@@ -4214,9 +4217,9 @@ public:
 			scanner_pg_ctx,
 			bioseq::storage::indexing::resolve_active_read_index_outcome(
 				*executor_read_context,
-				static_cast<std::int16_t>(mmsearch_context.seq_attno)),
+				static_cast<std::int16_t>(mmsearch_state.seq_attno)),
 			user_relid, user_main_relfilenode,
-			static_cast<std::int16_t>(mmsearch_context.seq_attno));
+			static_cast<std::int16_t>(mmsearch_state.seq_attno));
         auto reset_dispatch_arrays =
             [&target_hdrs, &per_row_query_hdrs, &query_ids] {
             target_hdrs.fill(nullptr);
@@ -4403,8 +4406,8 @@ public:
                 if (per_row_mode()) {
                     wave_match_map = processor.process_sequences(
                         batch_size,
-                        mmsearch_context.alphabet_code,
-                        mmsearch_context.storage_unit_byte_width,
+                        mmsearch_state.alphabet_code,
+                        mmsearch_state.storage_unit_byte_width,
                         nullptr,
                         &per_row_query_hdrs,
                         target_hdrs, query_ids,
@@ -4416,8 +4419,8 @@ public:
                 } else {
                     wave_match_map = processor.process_sequences(
                         batch_size,
-                        mmsearch_context.alphabet_code,
-                        mmsearch_context.storage_unit_byte_width,
+                        mmsearch_state.alphabet_code,
+                        mmsearch_state.storage_unit_byte_width,
                         query_hdr,
                         nullptr,
                         target_hdrs, query_ids,
@@ -4447,8 +4450,8 @@ public:
                     auto extra_match_map =
                         processor.process_sequences(
                             batch_size,
-                            mmsearch_context.alphabet_code,
-                            mmsearch_context.storage_unit_byte_width,
+                            mmsearch_state.alphabet_code,
+                            mmsearch_state.storage_unit_byte_width,
                             extra_hdr,
                             nullptr,
                             target_hdrs, query_ids,
@@ -4669,7 +4672,7 @@ public:
      * lifecycle gap this accessor closes.
      */
     [[nodiscard]] constexpr bool mmsearch_active() const {
-        return mmsearch_context.active;
+        return mmsearch_state.active;
     }
 
     [[nodiscard]] size_t buffered_count() const {
@@ -4683,7 +4686,7 @@ public:
     /*
      * Reset writing/reading state so a new scan can start. Frees the
      * MinimalTuple slots allocated in submit_scan; leaves
-     * mmsearch_context untouched so callers can reuse configuration.
+     * mmsearch state untouched so callers can reuse configuration.
      */
     [[gnu::always_inline]] inline void clear_slots() {
         bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer::clear_slots() entered; freeing {} slots, {} outputs",

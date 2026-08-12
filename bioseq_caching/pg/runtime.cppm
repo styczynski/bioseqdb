@@ -401,7 +401,7 @@ struct cache_shared_state {
 #if defined(BIOSEQ_CACHE_TESTING)
     cache_test_control test_control;
     pg_atomic_uint64 next_injected_generation;
-    injected_coverage injected_coverage[k_injected_coverage_capacity];
+    injected_coverage injected_coverage_entries[k_injected_coverage_capacity];
 #endif
     relation_epoch_slot relation_epochs[k_relation_epoch_capacity];
     cache_entry entries[k_registry_capacity];
@@ -541,7 +541,7 @@ struct dirty_relation_observation {
     bool physical_identity_valid;
     bool storage_parent;
     std::array<std::uint8_t, 2> reserved{};
-    physical_identity physical_identity{};
+    physical_identity observed_identity{};
     write_observability observability = write_observability::executor_utility_only;
 
     [[nodiscard]] bool operator==(const dirty_relation_observation&) const noexcept = default;
@@ -581,7 +581,7 @@ inline std::size_t g_transition_relation_count = 0;
 void observe_runtime_database_dependency_write() noexcept;
 void observe_runtime_relation_write(const dirty_relation_observation& observation) noexcept;
 void observe_runtime_provider_relation_write(Oid relation_oid,
-                                             const physical_identity& physical_identity) noexcept;
+                                             const physical_identity& relation_identity) noexcept;
 [[nodiscard]] bool bind_shared_reusable_registry() noexcept;
 void mark_shared_cache_failed() noexcept;
 
@@ -602,13 +602,14 @@ void bind_reusable_registry_for_write_invalidation() noexcept {
      * no published reusable generation; the preallocated emergency write
      * dependency remains the conservative transition authority.
      */
-    const bootstrap_state bootstrap_state = shared_registry::shared_registry_bootstrap_state();
-    if (bootstrap_state != bootstrap_state::ready) {
-        if (bootstrap_state == bootstrap_state::uninitialized ||
-            bootstrap_state == bootstrap_state::initializing) {
+    const bootstrap_state current_bootstrap_state =
+        shared_registry::shared_registry_bootstrap_state();
+    if (current_bootstrap_state != bootstrap_state::ready) {
+        if (current_bootstrap_state == bootstrap_state::uninitialized ||
+            current_bootstrap_state == bootstrap_state::initializing) {
             g_write_invalidation_deferred_to_emergency = true;
             dependency_runtime::force_emergency_fallback();
-        } else if (bootstrap_state == bootstrap_state::failed) {
+        } else if (current_bootstrap_state == bootstrap_state::failed) {
             mark_shared_cache_failed();
         }
         return;
@@ -913,12 +914,12 @@ void mark_current_transaction_relation_dirty(
         mark_current_transaction_dirty();
         return;
     }
-    physical_identity physical_identity{};
+    physical_identity resolved_identity{};
     relation_physical_identity_status identity_status = relation_physical_identity_status::unknown;
-    if (copy_provider_physical_identity(provider_identity, &physical_identity)) {
+    if (copy_provider_physical_identity(provider_identity, &resolved_identity)) {
         identity_status = relation_physical_identity_status::precise;
     } else if (provider_identity == nullptr) {
-        identity_status = relation_physical_identity(relation_oid, &physical_identity);
+        identity_status = relation_physical_identity(relation_oid, &resolved_identity);
     }
     const bool physical_identity_valid =
         identity_status == relation_physical_identity_status::precise;
@@ -928,7 +929,7 @@ void mark_current_transaction_relation_dirty(
         .relation_oid = relation_oid,
         .physical_identity_valid = physical_identity_valid,
         .storage_parent = storage_parent,
-        .physical_identity = physical_identity,
+        .observed_identity = resolved_identity,
         .observability = provider_identity == nullptr ? write_observability::executor_utility_only
                                                       : write_observability::provider_complete,
     };
@@ -942,7 +943,7 @@ void mark_current_transaction_relation_dirty(
     if (provider_identity == nullptr) {
         observe_runtime_relation_write(observation);
     } else if (physical_identity_valid) {
-        observe_runtime_provider_relation_write(relation_oid, physical_identity);
+        observe_runtime_provider_relation_write(relation_oid, resolved_identity);
     }
     bool provisioned = false;
     if (g_shared != nullptr && g_registry_lock != nullptr) {
@@ -960,18 +961,18 @@ void mark_current_transaction_relation_dirty(
 void observe_provider_relation_write(
     std::uint32_t database_oid,
     std::uint32_t relation_oid,
-    const provider_registry::physical_identity* physical_identity) noexcept {
+    const provider_registry::physical_identity* provider_identity) noexcept {
     if (!IsTransactionState() || g_dirty_observations.coarse()) {
         return;
     }
     physical_identity validated_identity{};
     if (database_oid != static_cast<std::uint32_t>(MyDatabaseId) ||
         !OidIsValid(static_cast<Oid>(relation_oid)) ||
-        !copy_provider_physical_identity(physical_identity, &validated_identity)) {
+        !copy_provider_physical_identity(provider_identity, &validated_identity)) {
         mark_current_transaction_dirty();
         return;
     }
-    mark_current_transaction_relation_dirty(static_cast<Oid>(relation_oid), physical_identity);
+    mark_current_transaction_relation_dirty(static_cast<Oid>(relation_oid), provider_identity);
 }
 
 /** Implemented after the reusable-registry lock adapters are available. */
@@ -1114,7 +1115,7 @@ relation_dependency_version(const dirty_relation_observation& observation) noexc
                                                    : dependency_kind::relation_content,
             },
         .committed_epoch = relation_dependency_epoch(observation.relation_oid),
-        .physical_identity = observation.physical_identity_valid ? observation.physical_identity
+        .physical_identity = observation.physical_identity_valid ? observation.observed_identity
                                                                  : physical_identity{},
         .observability = observation.observability,
     };
@@ -1134,7 +1135,7 @@ void observe_runtime_relation_write(const dirty_relation_observation& observatio
     const dependency_version version = relation_dependency_version(observation);
     const dependency_runtime::dependency_runtime_result result =
         observation.physical_identity_valid
-            ? dependency_runtime::observe_dirty_dependency(version, observation.physical_identity)
+            ? dependency_runtime::observe_dirty_dependency(version, observation.observed_identity)
             : dependency_runtime::observe_dirty_dependency(version);
     if (!result) {
         dependency_runtime::force_emergency_fallback();
@@ -1143,17 +1144,17 @@ void observe_runtime_relation_write(const dirty_relation_observation& observatio
 
 /** Provider callbacks establish precise relation ownership before PRE_COMMIT. */
 void observe_runtime_provider_relation_write(Oid relation_oid,
-                                             const physical_identity& physical_identity) noexcept {
+                                             const physical_identity& relation_identity) noexcept {
     const dirty_relation_observation observation{
         .relation_oid = relation_oid,
         .physical_identity_valid = true,
         .storage_parent = false,
-        .physical_identity = physical_identity,
+        .observed_identity = relation_identity,
         .observability = write_observability::provider_complete,
     };
     const dependency_runtime::dependency_runtime_result result =
         dependency_runtime::observe_dirty_dependency(relation_dependency_version(observation),
-                                                     physical_identity);
+                                                     relation_identity);
     if (!result) {
         dependency_runtime::force_emergency_fallback();
     }
@@ -1364,7 +1365,7 @@ void cache_subtransaction_callback(SubXactEvent event,
     }
 }
 
-[[nodiscard]] constexpr reusable_registry_config reusable_registry_config() noexcept {
+[[nodiscard]] constexpr reusable_registry_config make_reusable_registry_config() noexcept {
     return reusable_registry_config{};
 }
 
@@ -1436,7 +1437,7 @@ reusable_backend_nonce(std::uint32_t proc_number, int pid, TimestampTz started_a
 }
 
 [[nodiscard]] reusable_manifest_handle
-reusable_manifest_handle(const storage::manifest_handle& handle) noexcept {
+make_reusable_manifest_handle(const storage::manifest_handle& handle) noexcept {
     return reusable_manifest_handle{
         .slot = handle.slot,
         .reserved = handle.reserved,
@@ -2940,7 +2941,7 @@ struct coverage_current_plan_view {
 
 struct coverage_dependency_ticket {
     cache_digest_256 fingerprint{};
-    physical_identity physical_identity{};
+    physical_identity dependency_physical_identity{};
     dependency_version version{};
     std::uint32_t dependency_count = 0;
     write_observability observability = write_observability::none;
@@ -2950,7 +2951,7 @@ struct coverage_dependency_ticket {
 /** Refuse a reusable snapshot that can observe this backend's own writes. */
 [[nodiscard]] bool
 current_transaction_touches_dependency(Oid relation_oid,
-                                       const physical_identity& physical_identity) noexcept {
+                                       const physical_identity& dependency_identity) noexcept {
     if (g_force_coarse_transition || g_dirty_observations.coarse()) {
         return true;
     }
@@ -2963,7 +2964,7 @@ current_transaction_touches_dependency(Oid relation_oid,
         }
         if (observation.storage_parent || observation.relation_oid == relation_oid ||
             (observation.physical_identity_valid &&
-             observation.physical_identity == physical_identity)) {
+             observation.observed_identity == dependency_identity)) {
             return true;
         }
     }
@@ -2972,9 +2973,9 @@ current_transaction_touches_dependency(Oid relation_oid,
 
 /** The current encoding admits one precise provider leaf plus the coarse overflow epoch. */
 [[nodiscard]] coverage_dependency_ticket
-coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
-                           const provider_registry::provider* provider,
-                           std::uint64_t required_completion_count = 0) noexcept {
+mint_coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
+                                const provider_registry::provider* provider,
+                                std::uint64_t required_completion_count = 0) noexcept {
     coverage_dependency_ticket ticket{};
     if (g_shared == nullptr || provider == nullptr ||
         (provider->provider_flags & bioseq_cache_provider_complete_write_observation) == 0 ||
@@ -3008,11 +3009,13 @@ coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
         return ticket;
     }
     std::sort(relation_oids.begin(), relation_oids.begin() + relation_count);
-    if (relation_physical_identity(relation_oids[0], &ticket.physical_identity) !=
+    if (relation_physical_identity(
+            relation_oids[0], &ticket.dependency_physical_identity) !=
         relation_physical_identity_status::precise) {
         return ticket;
     }
-    if (current_transaction_touches_dependency(relation_oids[0], ticket.physical_identity)) {
+    if (current_transaction_touches_dependency(
+            relation_oids[0], ticket.dependency_physical_identity)) {
         return ticket;
     }
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
@@ -3073,10 +3076,13 @@ coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
             return ticket;
         }
     }
-    const std::uint32_t identity_kind = static_cast<std::uint32_t>(ticket.physical_identity.kind);
+    const std::uint32_t identity_kind =
+        static_cast<std::uint32_t>(ticket.dependency_physical_identity.kind);
     if (!append(&identity_kind, sizeof(identity_kind)) ||
-        !append(&ticket.physical_identity.length, sizeof(ticket.physical_identity.length)) ||
-        !append(ticket.physical_identity.bytes.data(), ticket.physical_identity.length)) {
+        !append(&ticket.dependency_physical_identity.length,
+                sizeof(ticket.dependency_physical_identity.length)) ||
+        !append(ticket.dependency_physical_identity.bytes.data(),
+                ticket.dependency_physical_identity.length)) {
         return ticket;
     }
     postgres_column_checksum_policy checksum;
@@ -3098,7 +3104,8 @@ coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
     LWLockRelease(g_registry_lock);
     LWLockRelease(ProcArrayLock);
     if (!still_stable ||
-        current_transaction_touches_dependency(relation_oids[0], ticket.physical_identity)) {
+        current_transaction_touches_dependency(
+            relation_oids[0], ticket.dependency_physical_identity)) {
         return ticket;
     }
     ticket.fingerprint = *digest;
@@ -3111,7 +3118,7 @@ coverage_dependency_ticket(const bioseq_cache_path_domain& contract,
                 .kind = dependency_kind::relation_content,
             },
         .committed_epoch = relation_epoch,
-        .physical_identity = ticket.physical_identity,
+        .physical_identity = ticket.dependency_physical_identity,
         .observability = write_observability::provider_complete,
     };
     ticket.dependency_count = dependency_count;
@@ -3172,7 +3179,7 @@ void invalidate_dirty_reusable_generations() noexcept {
         }
         bool duplicate = false;
         for (std::size_t prior = 0; prior < identity_count; ++prior) {
-            duplicate = duplicate || identities[prior] == observation.physical_identity;
+            duplicate = duplicate || identities[prior] == observation.observed_identity;
         }
         if (duplicate) {
             continue;
@@ -3181,7 +3188,7 @@ void invalidate_dirty_reusable_generations() noexcept {
             coarse = true;
             break;
         }
-        identities[identity_count++] = observation.physical_identity;
+        identities[identity_count++] = observation.observed_identity;
     }
     coarse = coarse || storage_parent_seen;
     if (!coarse && identity_count == 0) {
@@ -3233,7 +3240,7 @@ void invalidate_dirty_reusable_generations() noexcept {
             for (std::size_t index = 0; precise_ok && index < identity_count; ++index) {
                 precise_ok = run_selector(reusable_invalidation_selector{
                     .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
-                    .physical_identity = identities[index],
+                    .dependency_physical_identity = identities[index],
                     .match_physical_identity = true,
                 });
             }
@@ -5516,7 +5523,7 @@ void sweep_reusable_registry() noexcept {
         return {};
     }
     LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
-    const reusable_registry_snapshot snapshot = reusable_registry_snapshot(g_reusable_registry);
+    const reusable_registry_snapshot snapshot = snapshot_reusable_registry(g_reusable_registry);
     LWLockRelease(g_reusable_membership_lock);
     return snapshot;
 }
@@ -5576,7 +5583,7 @@ struct aggregate_support_functions {
     bool found = false;
 };
 
-[[nodiscard]] aggregate_support_functions aggregate_support_functions(Oid aggregate_oid) {
+[[nodiscard]] aggregate_support_functions load_aggregate_support_functions(Oid aggregate_oid) {
     aggregate_support_functions result{};
     HeapTuple tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggregate_oid));
     if (!HeapTupleIsValid(tuple)) {
@@ -5600,7 +5607,7 @@ struct aggregate_support_functions {
 
 /** Aggregates are immutable only when every executor support function is. */
 [[nodiscard]] bool aggregate_has_mutable_support(Oid aggregate_oid) {
-    const aggregate_support_functions support = aggregate_support_functions(aggregate_oid);
+    const aggregate_support_functions support = load_aggregate_support_functions(aggregate_oid);
     if (!support.found) {
         return true;
     }
@@ -5689,7 +5696,7 @@ append_exact_syscache_dependency(List** dependencies, int cache_id, std::uint32_
 
 /** Add one user aggregate and every user support procedure definition. */
 [[nodiscard]] bool append_aggregate_syscache_dependencies(List** dependencies, Oid aggregate_oid) {
-    const aggregate_support_functions support = aggregate_support_functions(aggregate_oid);
+    const aggregate_support_functions support = load_aggregate_support_functions(aggregate_oid);
     if (!support.found) {
         return false;
     }
@@ -5962,7 +5969,7 @@ struct bioseq_cache_state {
 #if defined(BIOSEQ_CACHE_TESTING)
     bool child_execution_counted;
 #endif
-    runtime_role runtime_role;
+    runtime_role execution_role;
     int registry_index;
     std::uint64_t generation;
     std::uint64_t visibility_database_epoch;
@@ -5970,7 +5977,7 @@ struct bioseq_cache_state {
     std::uint64_t row_count;
     std::uint64_t payload_bytes;
     std::uint64_t logical_bytes;
-    registry_reader_claim registry_reader_claim;
+    registry_reader_claim reader_claim;
     cache_entry_id entry_id;
     reusable_generation_reference registry_reference;
     reusable_reference_token registry_reference_token;
@@ -7021,7 +7028,7 @@ struct registry_waiter_claim {
     }
 };
 
-[[nodiscard]] cache_entry_id cache_entry_id(const cache_entry& entry) noexcept {
+[[nodiscard]] cache_entry_id make_cache_entry_id(const cache_entry& entry) noexcept {
     return cache_entry_id{
         .digest = entry.key_digest,
         .boot_nonce = pg_atomic_read_u64(&g_shared->boot_nonce),
@@ -7512,7 +7519,7 @@ wait_for_producer(int index,
                         decision.index = index;
                         decision.generation = expected.entry_id.generation;
                         decision.reader_claim = reader_claim;
-                        decision.entry_id = cache_entry_id(entry);
+                        decision.entry_id = make_cache_entry_id(entry);
                         decision.manifest_handle = entry.manifest_handle;
                         decision.manifest_waiter_token = waiter_token;
                     } else {
@@ -7749,10 +7756,10 @@ struct exact_dependency_versions {
 
 /** Build the canonical relation/object vector and its conservative backstop. */
 [[nodiscard]] exact_dependency_versions
-exact_dependency_versions(const CustomScan& scan,
-                          EState* estate,
-                          List* relation_oids,
-                          List* syscache_dependencies) noexcept {
+collect_exact_dependency_versions(const CustomScan& scan,
+                                  EState* estate,
+                                  List* relation_oids,
+                                  List* syscache_dependencies) noexcept {
     exact_dependency_versions result{};
     if (estate == nullptr || !OidIsValid(MyDatabaseId)) {
         return result;
@@ -7957,7 +7964,8 @@ acquire_registry_entry(const StringInfo key,
     }
 
     const exact_dependency_versions dependencies =
-        exact_dependency_versions(scan, estate, relation_oids, syscache_dependencies);
+        collect_exact_dependency_versions(
+            scan, estate, relation_oids, syscache_dependencies);
     if (!dependencies.valid || !append_exact_dependency_key_frame(key, dependencies) ||
         !visibility_ticket_still_bound(visibility)) {
         return decision;
@@ -8086,7 +8094,7 @@ void release_registry_reader(int index,
     bool released = false;
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     cache_entry& entry = g_shared->entries[index];
-    if (cache_entry_id(entry) == expected) {
+    if (make_cache_entry_id(entry) == expected) {
         registry_reader_owner& reader = entry.readers[reader_claim.slot];
         if (reader.active && reader.registration_sequence == reader_claim.registration_sequence &&
             registry_owner_identity(reader) == current_reusable_producer_identity()) {
@@ -8227,7 +8235,7 @@ void fail_registry_producer(bioseq_cache_state& state) noexcept {
     } else if (g_shared != nullptr && state.registry_index >= 0) {
         LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
         cache_entry& entry = g_shared->entries[state.registry_index];
-        if (cache_entry_id(entry) == state.entry_id && exact_entry_in_flight(entry.state) &&
+        if (make_cache_entry_id(entry) == state.entry_id && exact_entry_in_flight(entry.state) &&
             exact_producer_identity(entry) == current_reusable_producer_identity()) {
             retired_manifest = entry.manifest_handle;
             entry.manifest_handle = {};
@@ -8250,7 +8258,7 @@ void fail_registry_producer(bioseq_cache_state& state) noexcept {
     discard_unpublished_tokens(state);
     destroy_column_builder(state);
     state.capture_failed = true;
-    state.runtime_role = runtime_role::bypass;
+    state.execution_role = runtime_role::bypass;
 }
 
 /** PostgreSQL memory-context cleanup covers ERROR paths that skip EndCustomScan. */
@@ -8271,11 +8279,11 @@ void cache_state_cleanup(void* argument) noexcept {
     }
     if (state->registry_reader_owned) {
         release_registry_reader(
-            state->registry_index, state->entry_id, state->registry_reader_claim, false);
+            state->registry_index, state->entry_id, state->reader_claim, false);
         state->registry_reader_owned = false;
-        state->registry_reader_claim = {};
+        state->reader_claim = {};
     }
-    if (state->runtime_role == runtime_role::producer && !state->producer_completed) {
+    if (state->execution_role == runtime_role::producer && !state->producer_completed) {
         fail_registry_producer(*state);
     }
     discard_unpublished_tokens(*state);
@@ -8444,7 +8452,7 @@ void cache_state_cleanup(void* argument) noexcept {
         .request =
             {
                 .reference = state.registry_reference,
-                .manifest = reusable_manifest_handle(publication.handle),
+                .manifest = make_reusable_manifest_handle(publication.handle),
                 .completed_monotonic_ns = reusable_monotonic_now_ns(),
                 .row_count = state.row_count,
                 .logical_bytes = state.logical_bytes,
@@ -8849,7 +8857,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
     auto* scan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
     bool fallback_outcome_counted = false;
-    state->runtime_role = runtime_role::bypass;
+    state->execution_role = runtime_role::bypass;
     state->registry_index = -1;
     state->visibility_database_epoch = 0;
     state->visibility_completion_count = 0;
@@ -8872,7 +8880,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
 #if defined(BIOSEQ_CACHE_TESTING)
     state->child_execution_counted = false;
 #endif
-    state->registry_reader_claim = {};
+    state->reader_claim = {};
     state->entry_id = {};
     state->registry_reference = {};
     state->registry_reference_token = {};
@@ -8994,10 +9002,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             if (owned_claims != nullptr) {
                 pfree(owned_claims);
             }
-            state->runtime_role = decision.role;
+            state->execution_role = decision.role;
             state->registry_index = decision.index;
             state->generation = decision.generation;
-            state->registry_reader_claim = decision.reader_claim;
+            state->reader_claim = decision.reader_claim;
             state->entry_id = decision.entry_id;
             state->registry_reference = decision.reference;
             state->registry_reference_token = decision.reference_token;
@@ -9020,7 +9028,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             pfree(key);
         }
 
-        if (state->runtime_role == runtime_role::consumer &&
+        if (state->execution_role == runtime_role::consumer &&
             !visibility_ticket_still_bound(visibility)) {
             if (state->registry_reference_owned) {
                 release_unified_exact_reader(state->registry_reference_token, false, false, false);
@@ -9029,12 +9037,12 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
             if (state->registry_reader_owned) {
                 release_registry_reader(state->registry_index,
                                         state->entry_id,
-                                        state->registry_reader_claim,
+                                        state->reader_claim,
                                         false,
                                         false,
                                         false);
                 state->registry_reader_owned = false;
-                state->registry_reader_claim = {};
+                state->reader_claim = {};
             }
             if (state->manifest_waiter_owned) {
                 static_cast<void>(
@@ -9042,10 +9050,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                 state->manifest_waiter_owned = false;
                 state->manifest_waiter_token = {};
             }
-            state->runtime_role = runtime_role::bypass;
+            state->execution_role = runtime_role::bypass;
         }
 
-        if (state->runtime_role == runtime_role::consumer) {
+        if (state->execution_role == runtime_role::consumer) {
             MemoryContext load_context = CurrentMemoryContext;
             storage::storage_error pin_error = storage::storage_error::none;
             complete_result_load_failure load_failure = complete_result_load_failure::none;
@@ -9093,12 +9101,12 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                     if (state->registry_reader_owned) {
                         release_registry_reader(state->registry_index,
                                                 state->entry_id,
-                                                state->registry_reader_claim,
+                                                state->reader_claim,
                                                 false,
                                                 false,
                                                 false);
                         state->registry_reader_owned = false;
-                        state->registry_reader_claim = {};
+                        state->reader_claim = {};
                     }
                     PG_RE_THROW();
                 }
@@ -9112,10 +9120,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                 state->registry_reference_owned = false;
             }
             release_registry_reader(
-                state->registry_index, state->entry_id, state->registry_reader_claim, loaded);
+                state->registry_index, state->entry_id, state->reader_claim, loaded);
             fallback_outcome_counted = !loaded;
             state->registry_reader_owned = false;
-            state->registry_reader_claim = {};
+            state->reader_claim = {};
             if (loaded) {
                 return;
             }
@@ -9124,10 +9132,10 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
                      errdetail("manifest pin error %u, result load failure %s",
                                static_cast<unsigned>(pin_error),
                                complete_result_load_failure_name(load_failure))));
-            state->runtime_role = runtime_role::bypass;
+            state->execution_role = runtime_role::bypass;
         }
 
-        if (state->runtime_role == runtime_role::producer &&
+        if (state->execution_role == runtime_role::producer &&
             !register_exact_executor_start_claim(*state)) {
             fail_registry_producer(*state);
         }
@@ -9139,13 +9147,13 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
     }
     PG_CATCH();
     {
-        if (state->runtime_role == runtime_role::producer) {
+        if (state->execution_role == runtime_role::producer) {
             fail_registry_producer(*state);
         }
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (!explain_only && state->runtime_role == runtime_role::bypass && !fallback_outcome_counted &&
+    if (!explain_only && state->execution_role == runtime_role::bypass && !fallback_outcome_counted &&
         g_shared != nullptr) {
         pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
     }
@@ -9154,7 +9162,7 @@ void cache_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) 
 /** Execute the retained child and explicitly project its raw slot. */
 TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
-    if (state->runtime_role == runtime_role::consumer) {
+    if (state->execution_role == runtime_role::consumer) {
         ResetExprContext(node->ss.ps.ps_ExprContext);
         TupleTableSlot* slot = state->replay_slot;
         ExecClearTuple(slot);
@@ -9168,14 +9176,14 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
         return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
 #if defined(BIOSEQ_CACHE_TESTING)
-    if (state->runtime_role == runtime_role::producer && !state->child_execution_counted) {
+    if (state->execution_role == runtime_role::producer && !state->child_execution_counted) {
         state->child_execution_counted = true;
         pg_atomic_fetch_add_u64(&g_shared->test_control.exact_child_executions, 1);
     }
 #endif
     TupleTableSlot* raw_slot = ExecProcNode(child);
     if (TupIsNull(raw_slot)) {
-        if (state->runtime_role == runtime_role::producer) {
+        if (state->execution_role == runtime_role::producer) {
             MemoryContext caller_context = CurrentMemoryContext;
             bool completed = false;
             PG_TRY();
@@ -9200,12 +9208,12 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
                     pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
                 }
             } else {
-                state->runtime_role = runtime_role::bypass;
+                state->execution_role = runtime_role::bypass;
             }
         }
         return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
-    if (state->runtime_role == runtime_role::producer) {
+    if (state->execution_role == runtime_role::producer) {
         MemoryContext caller_context = CurrentMemoryContext;
         bool captured = false;
         PG_TRY();
@@ -9237,7 +9245,7 @@ TupleTableSlot* cache_exec_custom_scan(CustomScanState* node) {
 /** End only the child this node initialized. */
 void cache_end_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
-    if (state->runtime_role == runtime_role::producer && !state->producer_completed) {
+    if (state->execution_role == runtime_role::producer && !state->producer_completed) {
         fail_registry_producer(*state);
     }
     cache_state_cleanup(state);
@@ -9251,11 +9259,11 @@ void cache_end_custom_scan(CustomScanState* node) {
 /** Rewind the retained child for supported forward rescans. */
 void cache_rescan_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<bioseq_cache_state*>(node);
-    if (state->runtime_role == runtime_role::consumer && state->replay_store != nullptr) {
+    if (state->execution_role == runtime_role::consumer && state->replay_store != nullptr) {
         tuplestore_rescan(state->replay_store);
         return;
     }
-    if (state->runtime_role == runtime_role::producer) {
+    if (state->execution_role == runtime_role::producer) {
         fail_registry_producer(*state);
         if (g_shared != nullptr) {
             pg_atomic_fetch_add_u64(&g_shared->stats.fallbacks, 1);
@@ -9419,7 +9427,7 @@ void cache_explain_custom_scan(CustomScanState* node, List*, ExplainState* expla
     pfree(registry_reader_diagnostic);
     pfree(planner_pin_diagnostic);
     ExplainPropertyText(
-        "Cache Janitor", worker_lifecycle_name(storage_snapshot.worker_lifecycle), explain_state);
+        "Cache Janitor", worker_lifecycle_name(storage_snapshot.janitor_lifecycle), explain_state);
 }
 
 const CustomExecMethods& cache_exec_methods() {
@@ -9436,7 +9444,7 @@ Node* cache_create_custom_scan_state(CustomScan*) {
         newNode(sizeof(bioseq_cache_state), T_CustomScanState));
     state->css.methods = &cache_exec_methods();
     state->child_initialized = false;
-    state->runtime_role = runtime_role::bypass;
+    state->execution_role = runtime_role::bypass;
     state->registry_index = -1;
     state->column_checksum_policy = nullptr;
     state->column_sink = nullptr;
@@ -10136,7 +10144,7 @@ struct reusable_coverage_state {
     std::uint16_t active_source_count;
     std::uint16_t replay_source_index;
     std::uint16_t reserved;
-    coverage_runtime_role runtime_role;
+    coverage_runtime_role execution_role;
     std::array<std::uint8_t, 7> reserved_role;
     const provider_registry::provider* provider;
     provider_registry::provider_lease provider_lease;
@@ -10444,7 +10452,7 @@ Node* restore_dense_coverage_predicate_mutator(Node* node, void* opaque) {
 }
 
 [[nodiscard]] coverage_occurrence_key
-coverage_occurrence_key(const bioseq_cache_occurrence& occurrence) noexcept {
+make_coverage_occurrence_key(const bioseq_cache_occurrence& occurrence) noexcept {
     return coverage_occurrence_key{
         .rte_ordinal = occurrence.rte_ordinal,
         .logical_relation_oid = occurrence.logical_relation_oid,
@@ -10521,7 +10529,8 @@ tagged_coverage_digest(std::uint32_t tag, std::span<const std::byte> bytes) noex
 }
 
 [[nodiscard]] coverage_semantic_fingerprints
-coverage_semantic_fingerprints(const bioseq_cache_path_domain& contract) noexcept;
+compute_coverage_semantic_fingerprints(
+    const bioseq_cache_path_domain& contract) noexcept;
 
 [[nodiscard]] std::span<const std::byte> binary_node_payload(const void* node) noexcept {
     if (node == nullptr || !IsA(node, Const)) {
@@ -10621,7 +10630,8 @@ coverage_contract_column(const bioseq_cache_path_domain& contract, std::uint32_t
 
 /** Hash explicit ABI scalars only; provider struct padding is never semantic. */
 [[nodiscard]] coverage_semantic_fingerprints
-coverage_semantic_fingerprints(const bioseq_cache_path_domain& contract) noexcept {
+compute_coverage_semantic_fingerprints(
+    const bioseq_cache_path_domain& contract) noexcept {
     coverage_semantic_fingerprints result{};
     try {
         std::vector<std::byte> schema_bytes;
@@ -11018,7 +11028,7 @@ void abort_coverage_capture(reusable_coverage_state& state) noexcept {
 
 void fail_coverage_producer(reusable_coverage_state& state) noexcept {
     abort_coverage_capture(state);
-    state.runtime_role = coverage_runtime_role::bypass;
+    state.execution_role = coverage_runtime_role::bypass;
 }
 
 void coverage_state_cleanup(void* opaque) noexcept {
@@ -11406,7 +11416,7 @@ older_reusable_identity_matches(const reusable_coverage_state& state,
         return false;
     }
     const coverage_semantic_fingerprints fingerprints =
-        coverage_semantic_fingerprints(source.contract.domain);
+        compute_coverage_semantic_fingerprints(source.contract.domain);
     const reusable_generation_metadata& metadata = snapshot.metadata;
     return fingerprints.valid && metadata.provider_id == state.provider->provider_id &&
            metadata.provider_abi_revision == state.provider->abi_revision &&
@@ -11434,13 +11444,14 @@ older_reusable_inflight_identity_matches(const reusable_coverage_state& state,
     const visibility_ticket refreshed = mint_visibility_ticket(
         snapshot.metadata.observability, visibility_ticket_purpose::continuation);
     const coverage_dependency_ticket dependency =
-        refreshed.valid ? coverage_dependency_ticket(
+        refreshed.valid ? mint_coverage_dependency_ticket(
                               source.contract.domain, state.provider, refreshed.completion_count)
                         : coverage_dependency_ticket{};
     return older_reusable_identity_matches(state, source, current_plan, snapshot) &&
            refreshed.valid && dependency.valid &&
            snapshot.metadata.dependency_count == dependency.dependency_count &&
-           snapshot.metadata.physical_identity == dependency.physical_identity &&
+           snapshot.metadata.dependency_physical_identity ==
+               dependency.dependency_physical_identity &&
            validate_reusable_generation_dependencies_locked(snapshot, refreshed.completion_count);
 }
 
@@ -11570,17 +11581,18 @@ current_reusable_snapshot_matches(const reusable_generation_snapshot& snapshot,
     const reusable_generation_metadata& expected_metadata) noexcept {
     return current_reusable_snapshot_matches(snapshot, plan, expected_metadata) &&
            snapshot.metadata.dependency_fingerprint == expected_metadata.dependency_fingerprint &&
-           snapshot.metadata.physical_identity == expected_metadata.physical_identity;
+           snapshot.metadata.dependency_physical_identity ==
+               expected_metadata.dependency_physical_identity;
 }
 
 [[nodiscard]] bool
 current_dependency_ticket_matches(const reusable_coverage_state& state) noexcept {
     const coverage_dependency_ticket ticket =
-        coverage_dependency_ticket(state.current_contract.domain, state.provider);
+        mint_coverage_dependency_ticket(state.current_contract.domain, state.provider);
     return ticket.valid && ticket.dependency_count != 0 &&
            ticket.observability == write_observability::provider_complete &&
            ticket.fingerprint == state.dependency_fingerprint &&
-           ticket.physical_identity == state.dependency_physical_identity &&
+           ticket.dependency_physical_identity == state.dependency_physical_identity &&
            pg_atomic_read_u32(&g_shared->coarse_transition_count) == 0;
 }
 
@@ -11868,7 +11880,7 @@ void release_current_coverage_consumer(reusable_coverage_state& state) noexcept 
     state.current_waited = false;
     state.current_ttl_entitlement_consumed = false;
     destroy_coverage_builder(state);
-    state.runtime_role = coverage_runtime_role::bypass;
+    state.execution_role = coverage_runtime_role::bypass;
 }
 
 [[nodiscard]] bool coverage_stored_row_valid(const coverage_stored_column* columns,
@@ -12328,7 +12340,7 @@ void remove_source_occurrence_owners(reusable_coverage_state& state,
                                           source.replay_slot,
                                           row,
                                           &occurrence)) {
-                const coverage_occurrence_key key = coverage_occurrence_key(occurrence);
+                const coverage_occurrence_key key = make_coverage_occurrence_key(occurrence);
                 auto* owner = static_cast<coverage_occurrence_owner*>(
                     hash_search(state.occurrence_owners, &key, HASH_FIND, nullptr));
                 if (owner != nullptr && owner->source_index == source_index) {
@@ -12430,7 +12442,7 @@ void remove_source_occurrence_owners(reusable_coverage_state& state,
                 duplicate_within_source = true;
                 break;
             }
-            const coverage_occurrence_key key = coverage_occurrence_key(occurrence);
+            const coverage_occurrence_key key = make_coverage_occurrence_key(occurrence);
             auto* owner = static_cast<coverage_occurrence_owner*>(
                 hash_search(state.occurrence_owners, &key, HASH_FIND, nullptr));
             if (owner == nullptr) {
@@ -13122,7 +13134,7 @@ prepare_current_coverage_consumer(reusable_coverage_state& state,
         release_current_coverage_consumer(state);
         return false;
     }
-    state.runtime_role = coverage_runtime_role::current_consumer;
+    state.execution_role = coverage_runtime_role::current_consumer;
     return true;
 }
 
@@ -13247,11 +13259,12 @@ capture_cleanup:
 /** Seal full merged output, publish storage, then make registry COMPLETE last. */
 [[nodiscard]] bool complete_coverage_producer_with_cpp_owners(reusable_coverage_state& state) {
     const coverage_dependency_ticket dependency_ticket =
-        coverage_dependency_ticket(state.current_contract.domain, state.provider);
+        mint_coverage_dependency_ticket(state.current_contract.domain, state.provider);
     if (!state.current_producer_owned || state.column_builder == nullptr ||
         state.column_builder->row_count() != state.row_count || !dependency_ticket.valid ||
         state.dependency_fingerprint != dependency_ticket.fingerprint ||
-        state.dependency_physical_identity != dependency_ticket.physical_identity ||
+        state.dependency_physical_identity !=
+            dependency_ticket.dependency_physical_identity ||
         pg_atomic_read_u32(&g_shared->coarse_transition_count) != 0) {
         return false;
     }
@@ -13316,7 +13329,7 @@ capture_cleanup:
         .request =
             {
                 .reference = state.current_reference,
-                .manifest = reusable_manifest_handle(publication.handle),
+                .manifest = make_reusable_manifest_handle(publication.handle),
                 .completed_monotonic_ns = reusable_monotonic_now_ns(),
                 .row_count = state.row_count,
                 .logical_bytes = state.logical_bytes,
@@ -13354,7 +13367,7 @@ capture_cleanup:
     state.manifest_handle = publication.handle;
     state.producer_completed = true;
     state.current_producer_owned = false;
-    state.runtime_role = coverage_runtime_role::bypass;
+    state.execution_role = coverage_runtime_role::bypass;
     if (g_shared != nullptr) {
         pg_atomic_fetch_add_u64(&g_shared->stats.produced, 1);
         pg_atomic_fetch_add_u64(&g_shared->stats.logical_bytes, state.logical_bytes);
@@ -13627,7 +13640,7 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
     state->source_count = 0;
     state->active_source_count = 0;
     state->replay_source_index = 0;
-    state->runtime_role = coverage_runtime_role::bypass;
+    state->execution_role = coverage_runtime_role::bypass;
     state->provider = nullptr;
     state->provider_lease = {};
     state->current_header = {};
@@ -13843,15 +13856,17 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
     if (runtime_allowed && visibility.valid) {
         if (current_contract_ready) {
             state->current_header = current_plan.header;
-            const coverage_dependency_ticket dependency = coverage_dependency_ticket(
+            const coverage_dependency_ticket dependency = mint_coverage_dependency_ticket(
                 state->current_contract.domain, provider, visibility.completion_count);
             const coverage_semantic_fingerprints fingerprints =
-                coverage_semantic_fingerprints(state->current_contract.domain);
+                compute_coverage_semantic_fingerprints(
+                    state->current_contract.domain);
             if (dependency.valid && fingerprints.valid &&
                 pg_atomic_read_u32(&g_shared->coarse_transition_count) == 0 &&
                 provider_visibility_ticket_still_bound(visibility)) {
                 state->dependency_fingerprint = dependency.fingerprint;
-                state->dependency_physical_identity = dependency.physical_identity;
+                state->dependency_physical_identity =
+                    dependency.dependency_physical_identity;
                 state->visibility_completion_count = visibility.completion_count;
                 state->schema_fingerprint = fingerprints.schema;
                 state->mapping_fingerprint = fingerprints.mapping;
@@ -13870,7 +13885,8 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
                     .mapping_fingerprint = fingerprints.mapping,
                     .lineage_fingerprint = fingerprints.lineage,
                     .dependency_fingerprint = dependency.fingerprint,
-                    .physical_identity = dependency.physical_identity,
+                    .dependency_physical_identity =
+                        dependency.dependency_physical_identity,
                     .observability = write_observability::provider_complete,
                     .estimated_covered_rows = static_cast<std::uint64_t>(
                         scan->scan.plan.plan_rows > 0 ? scan->scan.plan.plan_rows : 0),
@@ -13911,7 +13927,7 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
                     state->current_reference_token = claimed.token;
                     state->current_reference_owned = claimed.token.active;
                     if (claimed.disposition == reusable_claim_disposition::claimed_producer) {
-                        state->runtime_role = coverage_runtime_role::producer;
+                        state->execution_role = coverage_runtime_role::producer;
                         state->current_producer_owned = true;
                         state->producer_started_at = GetCurrentTimestamp();
                         if (register_executor_start_claim(*state) &&
@@ -13989,7 +14005,7 @@ void coverage_begin_custom_scan(CustomScanState* node, EState* estate, int eflag
                                           completed, refreshed.completion_count)
                                     : dependency_runtime::dependency_runtime_result{
                                           .error = dependency_runtime::dependency_runtime_error::
-                                              ReferenceValidationFailed,
+                                              reference_validation_failed,
                                           .fail_open = true,
                                       };
                             complete = semantic_identity_matches && ttl_readable &&
@@ -14281,12 +14297,12 @@ TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
         return raw == nullptr ? ExecClearTuple(node->ss.ps.ps_ResultTupleSlot)
                               : project_coverage_tuple(node, raw);
     }
-    if (state->runtime_role == coverage_runtime_role::current_consumer) {
+    if (state->execution_role == coverage_runtime_role::current_consumer) {
         TupleTableSlot* raw = next_current_coverage_row(*state, node);
         return raw == nullptr ? ExecClearTuple(node->ss.ps.ps_ResultTupleSlot)
                               : project_coverage_tuple(node, raw);
     }
-    if (state->runtime_role == coverage_runtime_role::producer && state->active_source_count != 0) {
+    if (state->execution_role == coverage_runtime_role::producer && state->active_source_count != 0) {
         bioseq_cache_occurrence occurrence{};
         TupleTableSlot* raw = next_selected_older_coverage_row(*state, node, &occurrence);
         if (raw != nullptr) {
@@ -14312,7 +14328,7 @@ TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
     }
     TupleTableSlot* raw = ExecProcNode(child);
     if (TupIsNull(raw)) {
-        if (state->runtime_role == coverage_runtime_role::producer) {
+        if (state->execution_role == coverage_runtime_role::producer) {
             state->output_materialized_complete =
                 !state->producer_spool_failed && state->producer_output_store != nullptr;
             if (state->output_materialized_complete) {
@@ -14327,7 +14343,7 @@ TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
         }
         return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
-    if (state->runtime_role == coverage_runtime_role::producer) {
+    if (state->execution_role == coverage_runtime_role::producer) {
         if (!spool_coverage_output(*state, raw) && !state->capture_failed) {
             abort_coverage_capture(*state);
             if (g_shared != nullptr) {
@@ -14335,7 +14351,7 @@ TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
             }
         }
     }
-    if (state->runtime_role == coverage_runtime_role::producer && !state->capture_failed &&
+    if (state->execution_role == coverage_runtime_role::producer && !state->capture_failed &&
         !capture_coverage_row_fail_open(*state, raw)) {
         abort_coverage_capture(*state);
         if (g_shared != nullptr) {
@@ -14347,7 +14363,7 @@ TupleTableSlot* coverage_exec_custom_scan(CustomScanState* node) {
 
 void coverage_end_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<reusable_coverage_state*>(node);
-    if (state->runtime_role == coverage_runtime_role::producer && state->current_producer_owned &&
+    if (state->execution_role == coverage_runtime_role::producer && state->current_producer_owned &&
         !state->producer_completed) {
         fail_coverage_producer(*state);
     }
@@ -14361,7 +14377,7 @@ void coverage_end_custom_scan(CustomScanState* node) {
 
 void coverage_rescan_custom_scan(CustomScanState* node) {
     auto* state = reinterpret_cast<reusable_coverage_state*>(node);
-    if (state->runtime_role == coverage_runtime_role::current_consumer &&
+    if (state->execution_role == coverage_runtime_role::current_consumer &&
         state->current_replay_store != nullptr) {
         tuplestore_rescan(state->current_replay_store);
         state->row_count = 0;
@@ -14372,7 +14388,7 @@ void coverage_rescan_custom_scan(CustomScanState* node) {
         state->replaying_materialized_output = true;
         return;
     }
-    if (state->runtime_role == coverage_runtime_role::producer) {
+    if (state->execution_role == coverage_runtime_role::producer) {
         if (!state->capture_failed) {
             abort_coverage_capture(*state);
             if (g_shared != nullptr) {
@@ -14424,13 +14440,13 @@ void coverage_rescan_custom_scan(CustomScanState* node) {
 
 [[nodiscard]] const char*
 coverage_actual_action_name(const reusable_coverage_state& state) noexcept {
-    if (state.runtime_role == coverage_runtime_role::current_consumer) {
+    if (state.execution_role == coverage_runtime_role::current_consumer) {
         return "[Read] Read current reusable generation";
     }
     if (state.producer_completed && state.active_source_count != 0) {
         return "[Reuse] Reused selected branches and produced residual";
     }
-    if (state.producer_completed || state.runtime_role == coverage_runtime_role::producer) {
+    if (state.producer_completed || state.execution_role == coverage_runtime_role::producer) {
         return "[Produce] Produce current reusable generation";
     }
     return "[Bypass] Execute retained provider child";
@@ -14566,7 +14582,7 @@ void coverage_explain_custom_scan(CustomScanState* node, List*, ExplainState* ex
             cache_diagnostic_disclosure(superuser_arg(user),
                                         OidIsValid(role) && user == role,
                                         has_privs_of_role(user, ROLE_PG_READ_ALL_STATS)) ==
-            CacheDiagnosticDisclosure::FullText;
+            cache_diagnostic_disclosure_level::full_text;
         if (producer_visible && snapshot.producer.pid > 0) {
             ExplainPropertyInteger("Producer PID", nullptr, snapshot.producer.pid, explain);
         }
@@ -16304,7 +16320,7 @@ void assign_exact_plan_diagnostic(std::array<char, p_destination_capacity>& dest
     Plan* child_plan = scan == nullptr || scan->custom_plans == NIL
                            ? nullptr
                            : static_cast<Plan*>(linitial(scan->custom_plans));
-    if (state.runtime_role != runtime_role::producer || state.producer_completed ||
+    if (state.execution_role != runtime_role::producer || state.producer_completed ||
         state.planned_diagnostics_published || !state.child_initialized ||
         !state.registry_reference || child_state == nullptr || child_plan == nullptr ||
         node->ss.ps.ps_ResultTupleDesc == nullptr) {
@@ -16357,7 +16373,7 @@ void refresh_analyzed_exact_diagnostics(bioseq_cache_state& state) {
     EState* estate = state.css.ss.ps.state;
     auto* scan = reinterpret_cast<CustomScan*>(state.css.ss.ps.plan);
     if (!state.planned_diagnostics_published || state.capture_failed ||
-        (!state.producer_completed && state.runtime_role != runtime_role::producer) ||
+        (!state.producer_completed && state.execution_role != runtime_role::producer) ||
         !state.registry_reference || child == nullptr || child->instrument == nullptr ||
         estate == nullptr || estate->es_instrument == 0 || scan == nullptr ||
         scan->custom_plans == NIL) {
@@ -16549,7 +16565,7 @@ bool visit_reusable_producer_planstate(PlanState* planstate, void* opaque) {
         if (custom->methods == &cache_exec_methods()) {
             auto* state = reinterpret_cast<bioseq_cache_state*>(custom);
             if (context->mode == producer_plan_walk_mode::planned) {
-                if (state->runtime_role == runtime_role::producer &&
+                if (state->execution_role == runtime_role::producer &&
                     !publish_planned_exact_diagnostics(*state)) {
                     fail_registry_producer(*state);
                     if (g_shared != nullptr) {
@@ -16624,7 +16640,7 @@ void fail_executor_start_claims(executor_start_claim_frame& frame, bool only_unp
     }
     for (std::size_t index = 0; index < frame.exact_producer_count; ++index) {
         bioseq_cache_state* state = frame.exact_producers[index];
-        if (state != nullptr && state->runtime_role == runtime_role::producer &&
+        if (state != nullptr && state->execution_role == runtime_role::producer &&
             (!only_unpublished || !state->planned_diagnostics_published) &&
             !state->producer_completed) {
             fail_registry_producer(*state);
@@ -16777,7 +16793,7 @@ struct truncate_replacement_capture {
         .relation_oid = relation_oid,
         .physical_identity_valid = identity_status == relation_physical_identity_status::precise,
         .storage_parent = identity_status == relation_physical_identity_status::storage_parent,
-        .physical_identity = old_identity,
+        .observed_identity = old_identity,
         .observability = write_observability::executor_utility_only,
     };
     const dependency_version old_version = relation_dependency_version(observation);
@@ -16894,7 +16910,7 @@ void stage_truncate_replacements_after_success(
             .physical_identity_valid =
                 identity_status == relation_physical_identity_status::precise,
             .storage_parent = identity_status == relation_physical_identity_status::storage_parent,
-            .physical_identity = new_identity,
+            .observed_identity = new_identity,
             .observability = write_observability::executor_utility_only,
         };
         const dependency_version new_version = relation_dependency_version(observation);
@@ -17120,7 +17136,7 @@ void require_cache_diagnostics_reader(Oid function_oid) {
 }
 
 /** Apply the per-row producer/superuser/policy-monitor text rule. */
-[[nodiscard]] CacheDiagnosticDisclosure
+[[nodiscard]] cache_diagnostic_disclosure_level
 diagnostic_disclosure_for_role(Oid producer_role_oid) noexcept {
     const Oid user_id = GetUserId();
     return cache_diagnostic_disclosure(superuser_arg(user_id),
@@ -17337,7 +17353,7 @@ reusable_wall_timestamp(TimestampTz now_wall,
         const cache_entry& entry = g_shared->entries[index];
         if (exact_entry_in_flight(entry.state)) {
             workspace->producers[index] = exact_producer_wait_token{
-                .entry_id = cache_entry_id(entry),
+                .entry_id = make_cache_entry_id(entry),
                 .producer = exact_producer_identity(entry),
                 .database_epoch = entry.database_epoch,
                 .completion_count = entry.completion_count,
@@ -17724,7 +17740,7 @@ invalidate_reusable_selector_locked(reusable_invalidation_selector selector,
  * locks. A null identity means every database represented in the snapshot.
  */
 [[nodiscard]] std::uint64_t
-invalidate_reusable_registry(const std::optional<physical_identity>& physical_identity) {
+invalidate_reusable_registry(const std::optional<physical_identity>& identity_filter) {
     if (!bind_admin_reusable_registry("bioseq_cache invalidation") || !g_reusable_registry ||
         g_reusable_membership_lock == nullptr || g_reusable_wait_slot_count == 0) {
         return 0;
@@ -17732,7 +17748,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& physical_id
     const std::size_t capacity = g_reusable_wait_slot_count;
     auto* affected = static_cast<reusable_generation_reference*>(
         palloc0(sizeof(reusable_generation_reference) * capacity));
-    auto* diagnostics = physical_identity.has_value()
+    auto* diagnostics = identity_filter.has_value()
                             ? nullptr
                             : static_cast<reusable_generation_diagnostics_row*>(
                                   palloc0(sizeof(reusable_generation_diagnostics_row) * capacity));
@@ -17744,11 +17760,11 @@ invalidate_reusable_registry(const std::optional<physical_identity>& physical_id
     {
         LWLockAcquire(g_reusable_membership_lock, LW_EXCLUSIVE);
         membership_owned = true;
-        if (physical_identity.has_value()) {
+        if (identity_filter.has_value()) {
             complete = invalidate_reusable_selector_locked(
                 reusable_invalidation_selector{
                     .database_oid = static_cast<std::uint32_t>(MyDatabaseId),
-                    .physical_identity = *physical_identity,
+                    .dependency_physical_identity = *identity_filter,
                     .match_physical_identity = true,
                 },
                 std::span<reusable_generation_reference>{affected, capacity},
@@ -17834,10 +17850,10 @@ invalidate_reusable_registry(const std::optional<physical_identity>& physical_id
     if (!bind_admin_reusable_registry("bioseq_cache relation invalidation")) {
         return 0;
     }
-    physical_identity physical_identity{};
-    if (relation_physical_identity(relation_oid, &physical_identity) ==
+    physical_identity relation_identity{};
+    if (relation_physical_identity(relation_oid, &relation_identity) ==
         relation_physical_identity_status::precise) {
-        return invalidate_reusable_registry(physical_identity);
+        return invalidate_reusable_registry(relation_identity);
     }
     if (!g_reusable_registry || g_reusable_membership_lock == nullptr ||
         g_reusable_wait_slot_count == 0) {
@@ -17971,7 +17987,7 @@ invalidate_reusable_registry(const std::optional<physical_identity>& physical_id
 /** Retire one exact generation only after its full ABA identity recheck. */
 [[nodiscard]] bool retire_exact_dependency_entry_locked(cache_entry& entry,
                                                         const cache_entry_id& expected) noexcept {
-    if (cache_entry_id(entry) != expected) {
+    if (make_cache_entry_id(entry) != expected) {
         return false;
     }
     if (exact_entry_in_flight(entry.state)) {
@@ -17998,7 +18014,7 @@ void cache_exact_syscache_invalidation(Datum, int cache_id, std::uint32_t hash_v
         if (!entry_depends_on_syscache(entry, cache_id, hash_value)) {
             continue;
         }
-        const cache_entry_id expected = cache_entry_id(entry);
+        const cache_entry_id expected = make_cache_entry_id(entry);
         if (retire_exact_dependency_entry_locked(entry, expected)) {
             ++invalidated;
         }
@@ -18300,7 +18316,7 @@ entries(const bioseq::postgres::support::function_call_context& call) {
         const bool full_disclosure =
             bioseq::postgres::support::invoke_pg_as_cpp([role_oid = entry.current_role_oid] {
                 return diagnostic_disclosure_for_role(role_oid) ==
-                       CacheDiagnosticDisclosure::FullText;
+                       cache_diagnostic_disclosure_level::full_text;
             });
         sql_rows::cache_entry_row row{
             .entry_key = exact_entry_key(entry.key_hash),
@@ -18376,7 +18392,7 @@ entries(const bioseq::postgres::support::function_call_context& call) {
             const bool full_disclosure = bioseq::postgres::support::invoke_pg_as_cpp(
                 [role_oid = static_cast<Oid>(entry.current_role_oid)] {
                     return diagnostic_disclosure_for_role(role_oid) ==
-                           CacheDiagnosticDisclosure::FullText;
+                           cache_diagnostic_disclosure_level::full_text;
                 });
             const auto key = reusable_digest_hex(entry.reference.id.digest);
             const auto created_at =
@@ -19037,9 +19053,9 @@ void clear_forced_coverage_domain_digest() {
     int selected = -1;
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
     for (std::size_t index = 0; index < k_injected_coverage_capacity; ++index) {
-        if (!g_shared->injected_coverage[index].used ||
-            (g_shared->injected_coverage[index].evictable &&
-             g_shared->injected_coverage[index].database_oid == MyDatabaseId)) {
+        if (!g_shared->injected_coverage_entries[index].used ||
+            (g_shared->injected_coverage_entries[index].evictable &&
+             g_shared->injected_coverage_entries[index].database_oid == MyDatabaseId)) {
             selected = static_cast<int>(index);
             break;
         }
@@ -19052,7 +19068,7 @@ void clear_forced_coverage_domain_digest() {
                 .message = "bioseq_cache injected coverage registry is full",
             });
     }
-    injected_coverage& entry = g_shared->injected_coverage[selected];
+    injected_coverage& entry = g_shared->injected_coverage_entries[selected];
     std::memset(&entry, 0, sizeof(entry));
     entry.used = true;
     entry.database_oid = MyDatabaseId;
@@ -19087,7 +19103,7 @@ lookup_injected_coverage(const bioseq::postgres::support::bytea_value& domain_ke
     require_cache_test_superuser_typed();
     std::vector<sql_rows::injected_coverage_row> rows;
     LWLockAcquire(g_registry_lock, LW_SHARED);
-    for (const injected_coverage& entry : g_shared->injected_coverage) {
+    for (const injected_coverage& entry : g_shared->injected_coverage_entries) {
         if (!entry.used || entry.database_oid != MyDatabaseId ||
             entry.domain_size != domain_key.bytes().size() ||
             std::memcmp(entry.domain, domain_key.bytes().data(), domain_key.bytes().size()) != 0) {
@@ -19110,7 +19126,7 @@ coverage_bucket_states() {
     require_cache_test_superuser_typed();
     std::vector<sql_rows::coverage_bucket_state_row> rows;
     LWLockAcquire(g_registry_lock, LW_SHARED);
-    for (const injected_coverage& entry : g_shared->injected_coverage) {
+    for (const injected_coverage& entry : g_shared->injected_coverage_entries) {
         if (!entry.used || entry.database_oid != MyDatabaseId) {
             continue;
         }
@@ -19142,7 +19158,7 @@ void mutate_coverage_descriptor(std::int64_t generation, const std::string& muta
     require_cache_test_superuser_typed();
     static_cast<void>(mutation);
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-    for (injected_coverage& entry : g_shared->injected_coverage) {
+    for (injected_coverage& entry : g_shared->injected_coverage_entries) {
         if (entry.used && entry.generation == static_cast<std::uint64_t>(generation)) {
             entry.predicate_size = 0;
             break;
@@ -19155,7 +19171,7 @@ void mutate_coverage_descriptor(std::int64_t generation, const std::string& muta
 void mark_generation_evictable(std::int64_t generation) {
     require_cache_test_superuser_typed();
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-    for (injected_coverage& entry : g_shared->injected_coverage) {
+    for (injected_coverage& entry : g_shared->injected_coverage_entries) {
         if (entry.used && entry.generation == static_cast<std::uint64_t>(generation)) {
             entry.evictable = true;
         }
@@ -19172,7 +19188,7 @@ void request_janitor_sweep() {
     drain_reusable_registry_for_testing();
     static_cast<void>(storage::janitor_sweep(0, true));
     LWLockAcquire(g_registry_lock, LW_EXCLUSIVE);
-    for (injected_coverage& entry : g_shared->injected_coverage) {
+    for (injected_coverage& entry : g_shared->injected_coverage_entries) {
         if (entry.used && entry.evictable) {
             entry.used = false;
         }
@@ -19191,7 +19207,7 @@ wait_for_generation_absent(std::int64_t generation,
     for (;;) {
         bool absent = true;
         LWLockAcquire(g_registry_lock, LW_SHARED);
-        for (const injected_coverage& entry : g_shared->injected_coverage) {
+        for (const injected_coverage& entry : g_shared->injected_coverage_entries) {
             if (entry.used && entry.generation == static_cast<std::uint64_t>(generation)) {
                 absent = false;
                 break;

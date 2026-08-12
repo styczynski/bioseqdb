@@ -71,13 +71,13 @@ namespace {
 }
 
 template <std::size_t p_stream_width>
-void check_u128_vec_stream_width() {
+void check_u128_vector_stream_width() {
     for (const auto& input : u128_sort_cases()) {
         auto expected_asc = input;
         std::sort(expected_asc.begin(), expected_asc.end(), u128_less);
 
         auto got_asc = input;
-        bioseq::simd::sorting::sort_u128_ascending_vec_stream<p_stream_width>(
+        bioseq::simd::sorting::sort_unsigned_128_ascending_vector_stream<p_stream_width>(
             got_asc.data(), got_asc.size());
         ASSERT(got_asc == expected_asc);
 
@@ -88,7 +88,7 @@ void check_u128_vec_stream_width() {
             });
 
         auto got_desc = input;
-        bioseq::simd::sorting::sort_u128_descending_vec_stream<p_stream_width>(
+        bioseq::simd::sorting::sort_unsigned_128_descending_vector_stream<p_stream_width>(
             got_desc.data(), got_desc.size());
         ASSERT(got_desc == expected_desc);
     }
@@ -96,21 +96,22 @@ void check_u128_vec_stream_width() {
 
 }  // namespace
 
-TEST_CASE("u128 vec_stream sort matches std::sort",
+TEST_CASE("u128 vector_stream sort matches std::sort",
           "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]") {
-    check_u128_vec_stream_width<1>();
-    check_u128_vec_stream_width<2>();
-    check_u128_vec_stream_width<3>();
-    check_u128_vec_stream_width<4>();
+    check_u128_vector_stream_width<1>();
+    check_u128_vector_stream_width<2>();
+    check_u128_vector_stream_width<3>();
+    check_u128_vector_stream_width<4>();
 }
 
-TEST_CASE("u128 default sort uses vec_stream ordering",
+TEST_CASE("u128 default sort uses vector_stream ordering",
           "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]") {
     auto input = random_u128_case(257);
     auto expected = input;
     std::sort(expected.begin(), expected.end(), u128_less);
 
-    bioseq::simd::sorting::sort_u128_ascending(input.data(), input.size());
+    bioseq::simd::sorting::sort_unsigned_128_ascending(
+        input.data(), input.size());
     ASSERT(input == expected);
 }
 

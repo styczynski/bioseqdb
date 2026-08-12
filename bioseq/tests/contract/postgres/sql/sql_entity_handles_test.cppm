@@ -62,57 +62,57 @@ static_assert(generated_handle_contract(
     "sequence_source_epoch_seq"));
 
 using chunk_group_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_group_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_group_codec;
 using chunk_group_row = chunk_group_codec::row_type;
 using row_mask_codec =
-    bioseq::storage::metadata::sql_row_codecs::row_mask_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::row_mask_codec;
 using row_mask_row = row_mask_codec::row_type;
 using options_codec =
-    bioseq::storage::metadata::sql_row_codecs::options_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::options_codec;
 using options_row = options_codec::row_type;
 using stripe_codec =
-    bioseq::storage::metadata::sql_row_codecs::stripe_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::stripe_codec;
 using stripe_row = stripe_codec::row_type;
 using chunk_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_codec;
 using chunk_row = chunk_codec::row_type;
 using index_policy_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         index_policy_codec;
 using index_policy_row = index_policy_codec::row_type;
 using metadata_age_log_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         metadata_age_log_codec;
 using metadata_age_log_row = metadata_age_log_codec::row_type;
 using index_table_shard_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         index_table_shard_codec;
 using index_table_shard_row = index_table_shard_codec::row_type;
 using seq_sub_table_codec =
-    bioseq::storage::metadata::sql_row_codecs::
+    bioseq::postgres::storage::metadata::sql_row_codecs::
         seq_sub_table_codec;
 using seq_sub_table_row = seq_sub_table_codec::row_type;
 using minimizer_generation_storage_codec =
-    bioseq::storage::manager::sql_row_codecs::
+    bioseq::postgres::storage::manager::sql_row_codecs::
         minimizer_generation_storage_codec;
 using minimizer_generation_storage_row =
     minimizer_generation_storage_codec::row_type;
 using minimizer_generation_reaper_codec =
-    bioseq::storage::manager::sql_row_codecs::
+    bioseq::postgres::storage::manager::sql_row_codecs::
         minimizer_generation_reaper_state_codec;
 using minimizer_generation_reaper_row =
     minimizer_generation_reaper_codec::row_type;
 using sequence_source_version_codec =
-    bioseq::storage::manager::sql_row_codecs::
+    bioseq::postgres::storage::manager::sql_row_codecs::
         sequence_source_version_codec;
 using sequence_source_version_row =
     sequence_source_version_codec::row_type;
 using aligner_options_codec =
-    bioseq::table::sql_row_codecs::
+    bioseq::postgres::table::sql_row_codecs::
         bioseq_aligner_options_codec;
 using aligner_options_row = aligner_options_codec::row_type;
 using column_mapping_codec =
-    bioseq::storage::load_pg::sql_row_codecs::
+    bioseq::postgres::storage::io::sql_row_codecs::
         column_mapping_codec;
 using column_mapping_row = column_mapping_codec::row_type;
 
@@ -121,7 +121,7 @@ concept nullable_deleted_rows = requires(p_update& update) {
     update.template set_null<&chunk_group_row::deleted_rows>();
 };
 
-static_assert(chunk_group_codec::fields_count == 5);
+static_assert(chunk_group_codec::field_count == 5);
 static_assert(
     chunk_group_codec::attribute_number<
         &chunk_group_row::storage_id>() == 1);
@@ -143,19 +143,19 @@ static_assert(
 static_assert(
     !nullable_deleted_rows<chunk_group_codec::update>);
 
-static_assert(row_mask_codec::fields_count == 8);
-static_assert(options_codec::fields_count == 5);
-static_assert(stripe_codec::fields_count == 9);
-static_assert(chunk_codec::fields_count == 14);
-static_assert(index_policy_codec::fields_count == 7);
-static_assert(metadata_age_log_codec::fields_count == 5);
-static_assert(index_table_shard_codec::fields_count == 9);
-static_assert(seq_sub_table_codec::fields_count == 11);
-static_assert(minimizer_generation_storage_codec::fields_count == 18);
-static_assert(minimizer_generation_reaper_codec::fields_count == 5);
-static_assert(sequence_source_version_codec::fields_count == 20);
-static_assert(aligner_options_codec::fields_count == 36);
-static_assert(column_mapping_codec::fields_count == 2);
+static_assert(row_mask_codec::field_count == 8);
+static_assert(options_codec::field_count == 5);
+static_assert(stripe_codec::field_count == 9);
+static_assert(chunk_codec::field_count == 14);
+static_assert(index_policy_codec::field_count == 7);
+static_assert(metadata_age_log_codec::field_count == 5);
+static_assert(index_table_shard_codec::field_count == 9);
+static_assert(seq_sub_table_codec::field_count == 11);
+static_assert(minimizer_generation_storage_codec::field_count == 18);
+static_assert(minimizer_generation_reaper_codec::field_count == 5);
+static_assert(sequence_source_version_codec::field_count == 20);
+static_assert(aligner_options_codec::field_count == 36);
+static_assert(column_mapping_codec::field_count == 2);
 static_assert(
     row_mask_codec::expected_descriptor[7].name == "mask");
 static_assert(

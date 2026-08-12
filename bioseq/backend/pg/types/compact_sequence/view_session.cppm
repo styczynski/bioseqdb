@@ -465,9 +465,9 @@ template<class p_alphabet>
                 using unit = typename traits::storage_unit;
                 auto const* units = reinterpret_cast<unit const*>(literal.bytes);
                 const bool reverse =
-                    bioseq::storage::has_reverse(edge.transform);
+                    bioseq::storage::is_reversed(edge.transform);
                 const bool complement =
-                    bioseq::storage::has_complement(edge.transform);
+                    bioseq::storage::is_complemented(edge.transform);
                 for (std::uint64_t index = from; index < to; ++index) {
                     const std::uint64_t physical = !reverse
                         ? literal.symbol_from + index
@@ -535,7 +535,7 @@ template<class p_alphabet>
         return emit_literal_range<p_alphabet>(edge, from, to, output);
     }
     const auto& source = edge.node->payload.source;
-    const bool reverse = bioseq::storage::has_reverse(edge.transform);
+    const bool reverse = bioseq::storage::is_reversed(edge.transform);
     const std::uint64_t source_from = !reverse
         ? source.from + from
         : source.to - to;
@@ -696,7 +696,7 @@ template <class p_alphabet>
     return descriptor{};
   }
   constexpr std::uint64_t bits = bioseq::storage::lazy_sequence_traits<
-      p_alphabet>::logical_bits_per_symbol;
+      p_alphabet>::k_logical_bits_per_symbol;
   const std::uint64_t letters_per_unit = requested_width * 8u / bits;
   const std::uint64_t first_unit = from / letters_per_unit;
   const std::uint64_t leading = from % letters_per_unit;

@@ -27,21 +27,21 @@ using named_set_result =
 using named_result = bioseq::postgres::support::named_output<result_row>;
 
 using chunk_group_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_group_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_group_codec;
 using chunk_codec =
-    bioseq::storage::metadata::sql_row_codecs::chunk_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::chunk_codec;
 using options_codec =
-    bioseq::storage::metadata::sql_row_codecs::options_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::options_codec;
 using row_mask_codec =
-    bioseq::storage::metadata::sql_row_codecs::row_mask_codec;
+    bioseq::postgres::storage::metadata::sql_row_codecs::row_mask_codec;
 using index_policy_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         index_policy_codec;
 using metadata_age_log_codec =
-    bioseq::storage::indexing_pg::sql_row_codecs::
+    bioseq::postgres::storage::indexing::sql_row_codecs::
         metadata_age_log_codec;
 using minimizer_generation_storage_codec =
-    bioseq::storage::manager::sql_row_codecs::
+    bioseq::postgres::storage::manager::sql_row_codecs::
         minimizer_generation_storage_codec;
 
 struct boundary_callable final {

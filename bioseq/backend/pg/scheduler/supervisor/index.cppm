@@ -217,7 +217,7 @@ enum class compile_slot_state : std::uint32_t {
 struct shader_compile_slot {
     pg_atomic_uint32 state;
     pg_atomic_uint32 generation;
-    bioseq::gpu::vulkan::ShaderVariantKey key{};
+    bioseq::gpu::vulkan::shader_variant_key key{};
     std::uint32_t requester_pid = 0;
     std::uint32_t errc = 0;
 };

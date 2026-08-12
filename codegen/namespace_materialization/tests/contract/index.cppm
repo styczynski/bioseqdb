@@ -893,11 +893,11 @@ inline void verify_production_scheduler_golden() {
     constexpr std::array role_map{
         role_golden{"same_dispatch_target_locator", "root", false, true},
         role_golden{
-            "format6_parallel_reader_identity_valid", "root", false, true},
+            "hash_major_parallel_reader_identity_valid", "root", false, true},
         role_golden{
-            "shape_v5_parallel_reader_identity_valid", "root", false, true},
+            "fragment_parallel_reader_identity_valid", "root", false, true},
         role_golden{
-            "attach_retained_format6_query_proof", "root", false, true},
+            "attach_retained_hash_major_query_stats", "root", false, true},
         role_golden{
             "with_source_provider_pg_locator", "root,scanner_pg", false, true},
         role_golden{
@@ -989,31 +989,31 @@ inline void verify_production_declaration_heads_and_probes() {
         std::pair{
             std::string_view{"process_scanner_pg_row"},
             std::string_view{
-                "68454dfb1fe062a0118f5e7c8971b0b55353f90fd1b0a0ce27f478a6ff17ffa1"}},
+                "300c0cbac4ea28744b51893ad1688fb17bfee0df9c78bbcd64751f764967b3ca"}},
         std::pair{
             std::string_view{"process_inmemory_row"},
             std::string_view{
-                "43b53b927c18e6babcfdf1eab0410e8ad05c68abfa74c0c059460218a2bd9171"}},
+                "e5ac396d95e4783b3efc99d38053f9a700b2088b5af85dee19879c875a742736"}},
         std::pair{
             std::string_view{"process_inmemory_standard_row"},
             std::string_view{
-                "8eb5d9bc26210ecf988673aff5497212be4bcf023a36e5517207e8ae3a92d3a2"}},
+                "53c8202eeb1f468660e70c26e9ca33247ed989718ac8c866dea76b191cd3c06b"}},
         std::pair{
             std::string_view{"process_inmemory_segmented_row"},
             std::string_view{
-                "38061a0c1af4606936b57db30d7dc27745bd41b293052396e2a97db13dbd10fb"}},
+                "0c3dcbabc2cb6be1376a20c95afc014c08662d312b86af5d19adef5a5fc8e88a"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_row"},
             std::string_view{
-                "b81b935da9833ff2a6c01051c12fd37930e0fba9afcb4cc06fcb19ee109aea90"}},
+                "b9e3562bed804b67f4529e8f404cc8c85ef3e3c7a8157fab27a19181bf93d700"}},
         std::pair{
             std::string_view{"process_inmemory_chunked_segmented_row"},
             std::string_view{
-                "76247923be9a2555d59d5ae448cdf6c62221c704a3e088baafe90659ebd60a08"}},
+                "955fc7b563c8d3de235ebcde6f4d81e6ae83ccc54847a65cea82713e550f9325"}},
         std::pair{
             std::string_view{"process_sequences"},
             std::string_view{
-                "2b552fda94dd9d45e5ea5892fed96972aec6b5976e5e2512c57e4eaed163de7d"}},
+                "0e2611246a40e4734b730623f55ea29ec3c0005d51904e4fe28f20514c4a2558"}},
     };
     require(
         generated.artifacts.size() == 66u,
@@ -1063,8 +1063,8 @@ inline void verify_production_declaration_heads_and_probes() {
                     0u, 7u, 14u, 21u, 28u, 35u, 42u, 49u},
         "scheduler API/probe/implementation cardinalities drifted");
     require(
-        !api->content.contains(":cpu_preparation_support")
-            && !selector->content.contains(":cpu_preparation_support"),
+        !api->content.contains(":cpu_preparation")
+            && !selector->content.contains(":cpu_preparation"),
         "scheduler preparation support must remain private to body-bearing units");
 
     const structural_analysis::translation_unit api_unit =
@@ -1125,7 +1125,7 @@ inline void verify_production_declaration_heads_and_probes() {
         require(
             occurrences(
                 implementation.content,
-                "import :cpu_preparation_support;") == 1u
+                "import :cpu_preparation;") == 1u
                 && occurrences(
                     implementation.content,
                     "namespace " + std::string{identity} + " {")
@@ -1334,10 +1334,12 @@ inline void verify_alias_probe_provenance_placement() {
 }
 
 inline void verify_generated_topology() {
-    const generation_result generated = render_generation(fixture_plan(), false);
+    generation_plan plan = fixture_plan();
+    attach_fixture_frontend_evidence(plan);
+    const generation_result generated = render_generation(plan);
     require(
-        generated.artifacts.size() == 8u,
-        "two identities/two shards render API, selector, two probes, and four units");
+        generated.artifacts.size() == 9u,
+        "two identities/two shards render API, selector, two probes, four units, and one topology manifest");
     require(
         generated.topology_manifest_json.contains(
             "\"schema_revision\": 1")
@@ -1349,8 +1351,11 @@ inline void verify_generated_topology() {
     std::size_t instances = 0u;
     for (const materialization_artifact& artifact : generated.artifacts) {
         require(
-            artifact.relative_path.extension() == ".cppm",
-            "every generated C++ artifact is a .cppm");
+            artifact.artifact_kind == materialization_artifact::kind::manifest
+                ? artifact.relative_path == "topology.json"
+                    && artifact.content == generated.topology_manifest_json
+                : artifact.relative_path.extension() == ".cppm",
+            "rendering owns one exact topology manifest and only .cppm C++ artifacts");
         require(
             artifact.content_sha256 == bioseq::common::sha256_hex(artifact.content),
             "artifact content digest covers final bytes");

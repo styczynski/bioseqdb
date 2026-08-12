@@ -56,6 +56,7 @@ extern "C" {
 export module bioseq.postgres.table.batch_sort_scan;
 
 import bioseq.common.logging;          // bioseq_log
+import bioseq.common.checked_arithmetic;
 import bioseq.storage.batch_sort;  // sequence_batch_sorter, sequence_sort_options
 import bioseq.storage.lazy_sequence;             // canonical lazy sequence facade
 import bioseq.storage.scanner;          // sequence_access_requirement
@@ -394,7 +395,7 @@ void release_batch_sort_source_routes(void* arg) {
 									std::move(*permit)));
 							resident.push_back(admitted.back().view());
 							++admitted_rows;
-							admitted_bytes = bioseq::parallelism::saturating_add(
+							admitted_bytes = bioseq::common::saturating_add(
 								admitted_bytes, plan.admission_bytes);
 						}
 						std::span<const view_type> batch;
@@ -405,9 +406,9 @@ void release_batch_sort_source_routes(void* arg) {
 							batch = std::span<const view_type>{
 								original.data(), original.size()};
 						} else {
-							rt->admitted_source_rows = bioseq::parallelism::
+							rt->admitted_source_rows = bioseq::common::
 								saturating_add(rt->admitted_source_rows, admitted_rows);
-							rt->admitted_source_bytes = bioseq::parallelism::
+							rt->admitted_source_bytes = bioseq::common::
 								saturating_add(rt->admitted_source_bytes, admitted_bytes);
 							batch = std::span<const view_type>{
 								resident.data(), resident.size()};

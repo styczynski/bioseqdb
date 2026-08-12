@@ -254,8 +254,7 @@ HWY_INLINE hn::Vec<p_float_simd_tag> approximate_log2(
  */
 template <typename p_simd_tag>
 concept simd_lane_widenable_three_times =
-    sizeof(hwy::MakeWide<hwy::MakeWide<
-        hwy::MakeWide<hn::TFromD<p_simd_tag>>>>) <= 8u;
+    sizeof(hn::TFromD<p_simd_tag>) <= 1u;
 
 /**
  * @brief Checks whether a lane type remains at most 64 bits after two widenings.
@@ -264,7 +263,7 @@ concept simd_lane_widenable_three_times =
  */
 template <typename p_simd_tag>
 concept simd_lane_widenable_twice =
-    sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<p_simd_tag>>>) <= 8u;
+    sizeof(hn::TFromD<p_simd_tag>) <= 2u;
 
 /**
  * @brief Checks whether a lane type remains at most 64 bits after one widening.
@@ -273,7 +272,7 @@ concept simd_lane_widenable_twice =
  */
 template <typename p_simd_tag>
 concept simd_lane_widenable_once =
-    sizeof(hwy::MakeWide<hn::TFromD<p_simd_tag>>) <= 8u;
+    sizeof(hn::TFromD<p_simd_tag>) <= 4u;
 
 /**
  * @brief Loads and transposes one square matrix of active SIMD lanes.
@@ -527,16 +526,17 @@ private:
      * @brief Interleaves corresponding columns from two eight-row matrix halves.
      *
      * @tparam p_select_upper Whether to select the upper interleave result.
+     * @tparam p_triple_wide_simd_tag Deduced descriptor type for eight lanes.
      * @param[in] simd_tag Active Highway descriptor.
      * @param[in] triple_wide_simd_tag Descriptor spanning eight scalar lanes.
      * @param[in] upper_column Column from the first matrix half.
      * @param[in] lower_column Column from the second matrix half.
      * @return One interleaved column of the sixteen-row matrix.
      */
-    template <bool p_select_upper>
+    template <bool p_select_upper, class p_triple_wide_simd_tag>
     static constexpr p_simd_vector interleave_matrix_halves(
         p_simd_tag& simd_tag,
-        const hn::RepartitionToWideX3<p_simd_tag>& triple_wide_simd_tag,
+        const p_triple_wide_simd_tag& triple_wide_simd_tag,
         p_simd_vector upper_column,
         p_simd_vector lower_column) {
         const auto upper_wide =

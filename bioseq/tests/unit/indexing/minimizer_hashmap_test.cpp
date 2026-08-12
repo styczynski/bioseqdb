@@ -36,6 +36,7 @@
 #include <sys/mman.h>
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.context;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
@@ -219,7 +220,8 @@ baseline_dna5_events(
     std::string bases;
     bases.reserve(data.size());
     for (const seq::dna5 symbol : data) bases.push_back(symbol.to_char());
-    const auto entries = ::bioseq::mm_sketch_baseline_ns::mm_sketch(
+    const auto entries =
+        ::bioseq::minimap2_sketch_baseline_detail::collect_minimap2_sketch(
         bases.data(),
         static_cast<int>(bases.size()),
         static_cast<int>(window_size),
@@ -445,6 +447,7 @@ test_expected_storage_contract() noexcept {
             minimizer_producer_backend::scalar,
         .producer_identity_revision = bioseq::indexing::
             k_minimizer_producer_identity_revision,
+        .max_occ_cap = k_test_grouped_soa_profile.max_occ_cap,
     };
 }
 
@@ -655,7 +658,7 @@ struct vector_replay_minimizer_producer {
     }
 
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
+    scheme_identity() const noexcept {
         return scheme;
     }
 
@@ -867,7 +870,7 @@ struct drifting_replay_minimizer_producer {
     std::size_t scan_count = 0;
 
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
+    scheme_identity() const noexcept {
         return bioseq::indexing::k_minimap_scheme_identity;
     }
 
@@ -916,7 +919,7 @@ struct boundary_identity_drifting_producer {
     identity_drift_axis axis = identity_drift_axis::scheme;
 
     [[nodiscard]] bioseq::indexing::minimizer_scheme_identity
-    minimizer_scheme_identity() const noexcept {
+    scheme_identity() const noexcept {
         if (axis == identity_drift_axis::scheme
             && scan_count >= drift_after_scan) {
             return bioseq::indexing::k_bounded_nthash_u32_r7_sum_scheme_identity;
@@ -1552,12 +1555,12 @@ TEST_CASE("canonical reserved generation-head sub-key is range-pinned",
 TEST_CASE("CRC-64/ECMA-182 is exact and incrementally composable",
           "[component:bioseq][layer:unit][feature:storage]") {
     using bioseq::indexing::crc64_ecma182;
-    using bioseq::indexing::crc64_ecma182;
+    using bioseq::indexing::crc64_ecma182_accumulator;
 
     STATIC_REQUIRE(crc64_ecma182(std::string_view{}) == 0);
     STATIC_REQUIRE(crc64_ecma182("123456789") == 0x6C40DF5F0B497347ULL);
 
-    crc64_ecma182 incremental;
+    crc64_ecma182_accumulator incremental;
     incremental.update("1234");
     incremental.update("56789");
     REQUIRE(incremental.checksum() == 0x6C40DF5F0B497347ULL);
@@ -1587,7 +1590,7 @@ TEST_CASE("validated row CRC algebra reconstructs raw extent CRC",
         .chunk_no = 0x89ABCDEFu,
     };
     constexpr std::uint32_t signed_length = 0x10203040u;
-    crc64_ecma182 independently_encoded_prefix;
+    crc64_ecma182_accumulator independently_encoded_prefix;
     independently_encoded_prefix.update_little_endian(
         signed_address.generation_id);
     independently_encoded_prefix.update_little_endian(
@@ -1604,7 +1607,7 @@ TEST_CASE("validated row CRC algebra reconstructs raw extent CRC",
         signed_length) == independently_encoded_prefix.checksum());
 
     std::uint64_t algebraic_extent = 0;
-    crc64_ecma182 direct_extent;
+    crc64_ecma182_accumulator direct_extent;
     std::uint64_t random_state = 0xD1B54A32D192ED03ULL;
     const auto next_random = [&random_state]() noexcept {
         random_state ^= random_state >> 12u;
@@ -1810,6 +1813,7 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         .producer_backend_id = minimizer_producer_backend::scalar,
         .producer_identity_revision =
             k_minimizer_producer_identity_revision,
+        .max_occ_cap = k_test_grouped_soa_profile.max_occ_cap,
     };
     constexpr expected_minimizer_generation_identity bounded_reader{
         .layout = minimizer_generation_layout::grouped_soa_segment_local,
@@ -1823,6 +1827,7 @@ TEST_CASE("canonical manifests distinguish bounded ntHash while preserving minim
         .producer_backend_id = minimizer_producer_backend::bounded_nthash_simd,
         .producer_identity_revision =
             k_minimizer_producer_identity_revision,
+        .max_occ_cap = k_test_bounded_grouped_soa_profile.max_occ_cap,
     };
     STATIC_REQUIRE(validate_minimizer_generation_storage_contract(
         canonical_minimap, minimap_reader).has_value());
@@ -2227,34 +2232,38 @@ TEST_CASE("uniform persisted segment cores and bp ranges are exact at boundaries
         static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)()) + 1u));
 
     STATIC_REQUIRE(k_minimizer_segment_geometry_revision == 2u);
-    STATIC_REQUIRE(POSITION_EXTENT_BASE == (index_sub_key_t{1} << 61));
-    STATIC_REQUIRE(POSITION_EXTENT_BASE * 2 == k_temporary_run_sub_key_base);
+    STATIC_REQUIRE(k_position_extent_sub_key_base
+        == (index_sub_key_t{1} << 61));
+    STATIC_REQUIRE(k_position_extent_sub_key_base * 2
+        == k_temporary_run_sub_key_base);
     constexpr auto first_position_key =
         derive_minimizer_position_extent_sub_key(0);
     constexpr auto last_position_key =
-        derive_minimizer_position_extent_sub_key(POSITION_EXTENT_BASE - 1);
+        derive_minimizer_position_extent_sub_key(
+            k_position_extent_sub_key_base - 1);
     STATIC_REQUIRE(first_position_key.has_value());
-    STATIC_REQUIRE(*first_position_key == POSITION_EXTENT_BASE);
+    STATIC_REQUIRE(*first_position_key == k_position_extent_sub_key_base);
     STATIC_REQUIRE(last_position_key.has_value());
     STATIC_REQUIRE(*last_position_key == k_temporary_run_sub_key_base - 1);
     STATIC_REQUIRE_FALSE(
         derive_minimizer_position_extent_sub_key(-1).has_value());
     STATIC_REQUIRE_FALSE(derive_minimizer_position_extent_sub_key(
-        POSITION_EXTENT_BASE).has_value());
+        k_position_extent_sub_key_base).has_value());
     STATIC_REQUIRE(project_minimizer_extent_sub_key(0, false).has_value());
     STATIC_REQUIRE(*project_minimizer_extent_sub_key(0, false) == 0);
     STATIC_REQUIRE(project_minimizer_extent_sub_key(
-        POSITION_EXTENT_BASE, true).has_value());
+        k_position_extent_sub_key_base, true).has_value());
     STATIC_REQUIRE(*project_minimizer_extent_sub_key(
-        POSITION_EXTENT_BASE, true) == 0);
+        k_position_extent_sub_key_base, true) == 0);
     STATIC_REQUIRE(*project_minimizer_extent_sub_key(
-        k_temporary_run_sub_key_base - 1, true) == POSITION_EXTENT_BASE - 1);
+        k_temporary_run_sub_key_base - 1, true)
+        == k_position_extent_sub_key_base - 1);
     STATIC_REQUIRE_FALSE(project_minimizer_extent_sub_key(
         (std::numeric_limits<index_sub_key_t>::min)(), true).has_value());
     STATIC_REQUIRE_FALSE(project_minimizer_extent_sub_key(
-        POSITION_EXTENT_BASE - 1, true).has_value());
+        k_position_extent_sub_key_base - 1, true).has_value());
     STATIC_REQUIRE_FALSE(project_minimizer_extent_sub_key(
-        POSITION_EXTENT_BASE, false).has_value());
+        k_position_extent_sub_key_base, false).has_value());
     STATIC_REQUIRE_FALSE(project_minimizer_extent_sub_key(
         k_temporary_run_sub_key_base, true).has_value());
 }
@@ -2335,30 +2344,31 @@ TEST_CASE("multi-span lookup carries one global occurrence decision",
     REQUIRE(adapted.global_occurrence_count() == 5);
 }
 
-TEST_CASE("directory entry has an exact 96-byte little-endian layout",
+TEST_CASE("directory entry has an exact 128-byte little-endian layout",
           "[component:bioseq][layer:unit][feature:storage]") {
     using namespace bioseq::indexing;
     constexpr grouped_soa_bucket_directory_entry entry{
         .partition_id = 0x11223344U,
         .position_segment = 0x10203040,
-        .lo_hash = 0x0102030405060708ULL,
-        .hi_hash = 0x1112131415161718ULL,
-        .sub_key = 0x1122232425262728LL,
+        .lo_hash = 0x01020304ULL,
+        .hi_hash = 0x11121314ULL,
+        .sub_key = 0x11223344LL,
         .control_first_chunk = 0,
         .control_chunk_count = 2,
         .position_first_chunk = 0,
         .position_chunk_count = 3,
         .control_element_count = 768,
         .position_element_count = 2304,
-        .control_encoded_bytes = 12288,
-        .position_encoded_bytes = 18432,
+        .control_encoded_bytes = 6152,
+        .position_encoded_bytes = 4608,
         .control_checksum = 0x3132333435363738ULL,
         .position_checksum = 0x4142434445464748ULL,
+        .shape_offset_width = minimizer_scalar_width::u16,
     };
     constexpr auto encoded = encode_minimizer_bucket_dir_entry_record(
         entry, k_test_grouped_soa_profile);
     STATIC_REQUIRE(encoded.has_value());
-    STATIC_REQUIRE(encoded->size() == 96);
+    STATIC_REQUIRE(encoded->size() == 128);
     STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded, 0) == entry.partition_id);
     STATIC_REQUIRE(std::bit_cast<std::int32_t>(
         test_read_le<std::uint32_t>(*encoded, 4)) == entry.position_segment);
@@ -2372,8 +2382,8 @@ TEST_CASE("directory entry has an exact 96-byte little-endian layout",
     STATIC_REQUIRE(test_read_le<std::uint32_t>(*encoded, 44) == 3);
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 48) == 768);
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 56) == 2304);
-    STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 64) == 12288);
-    STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 72) == 18432);
+    STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 64) == 6152);
+    STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 72) == 4608);
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 80)
         == entry.control_checksum);
     STATIC_REQUIRE(test_read_le<std::uint64_t>(*encoded, 88)
@@ -2399,7 +2409,7 @@ TEST_CASE("directory entry has an exact 96-byte little-endian layout",
                            invalid, k_test_grouped_soa_profile),
                        minimizer_generation_encoding_error::hash_range);
     invalid = entry;
-    invalid.sub_key = POSITION_EXTENT_BASE;
+    invalid.sub_key = k_position_extent_sub_key_base;
     require_wire_error(encode_minimizer_bucket_dir_entry_record(
                            invalid, k_test_grouped_soa_profile),
                        minimizer_generation_encoding_error::sub_key);
@@ -2431,9 +2441,10 @@ TEST_CASE("grouped_soa_directory_view owns bytes and rejects unstable directory 
         .control_element_count = 1,
         .position_element_count = 1,
         .control_encoded_bytes = 16,
-        .position_encoded_bytes = 8,
+        .position_encoded_bytes = 2,
         .control_checksum = 1,
         .position_checksum = 2,
+        .shape_offset_width = minimizer_scalar_width::u16,
     };
     auto second = first;
     second.partition_id = 1;
@@ -2470,7 +2481,7 @@ TEST_CASE("grouped_soa_directory_view owns bytes and rejects unstable directory 
     require_wire_error(encode_minimizer_bucket_directory(
                            wrong_ordinals, k_test_grouped_soa_profile),
                        minimizer_generation_encoding_error::partition_id);
-    std::array<std::byte, 95> truncated{};
+    std::array<std::byte, 127> truncated{};
     require_wire_error(grouped_soa_directory_view::decode(
                            truncated, k_test_grouped_soa_profile),
                        minimizer_generation_encoding_error::directory_size);
@@ -2497,7 +2508,7 @@ TEST_CASE("deterministic encoder fixes core ownership and policy bytes",
     auto direct = encode_minimizer_generation(
         direct_producer, direct_sink, options);
     REQUIRE(direct.has_value());
-    REQUIRE(direct_producer.scan_count == 2);
+    REQUIRE(direct_producer.scan_count == 3);
 
     std::reverse(minimizers.begin(), minimizers.end());
     vector_replay_minimizer_producer reversed_producer{minimizers};
@@ -2525,7 +2536,7 @@ TEST_CASE("deterministic encoder fixes core ownership and policy bytes",
         saw_first_core = saw_first_core || entry.position_segment == 0;
         saw_second_core = saw_second_core || entry.position_segment == 1;
         REQUIRE(entry.sub_key >= 0);
-        REQUIRE(entry.sub_key < POSITION_EXTENT_BASE);
+        REQUIRE(entry.sub_key < k_position_extent_sub_key_base);
         REQUIRE(entry.control_first_chunk == 0);
         REQUIRE(entry.position_first_chunk == 0);
         const auto position_sub_key =
@@ -2552,14 +2563,17 @@ TEST_CASE("deterministic encoder fixes core ownership and policy bytes",
         REQUIRE(core.has_value());
         const auto position_bytes = collect_encoded_extent(
             direct_sink.rows, entry, false);
-        for (std::size_t offset = 0; offset < position_bytes.size(); offset += 8u) {
-            const std::uint64_t value = test_read_le<std::uint64_t>(
+        for (std::size_t offset = 0; offset < position_bytes.size(); offset += 4u) {
+            const std::uint32_t local = test_read_le<std::uint32_t>(
                 position_bytes, offset);
-            REQUIRE((value >> 1u) >= core->begin_bp);
-            REQUIRE((value >> 1u) < core->end_bp);
+            const std::uint64_t local_bp = local >> 1u;
+            REQUIRE(local_bp < core->end_bp - core->begin_bp);
+            const std::uint64_t global_bp = core->begin_bp + local_bp;
+            REQUIRE(global_bp >= core->begin_bp);
+            REQUIRE(global_bp < core->end_bp);
         }
-        REQUIRE(entry.control_encoded_bytes % 16u == 0);
-        REQUIRE(entry.position_encoded_bytes % 8u == 0);
+        REQUIRE(entry.control_encoded_bytes % 8u == 0);
+        REQUIRE(entry.position_encoded_bytes % 4u == 0);
     }
     REQUIRE(saw_first_core);
     REQUIRE(saw_second_core);
@@ -2690,7 +2704,7 @@ TEST_CASE("grouped-SoA direct payload is row-exact without tuple callbacks",
             return row.address.position_segment == -1;
         }));
 
-    crc64_ecma182 direct_payload_row_checksums;
+    crc64_ecma182_accumulator direct_payload_row_checksums;
     for (std::size_t index = 0u; index < direct_rows.size(); ++index) {
         const collected_minimizer_row& expected = row_sink.rows[index];
         const collected_minimizer_row& actual = direct_rows[index];
@@ -2758,7 +2772,7 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     auto fragment_encoding = encode_minimizer_generation(
         fragment_producer, fragment_sink, fragment_options);
     REQUIRE(fragment_encoding.has_value());
-    REQUIRE(fragment_producer.scan_count() == 2);
+    REQUIRE(fragment_producer.scan_count() == 3);
     const minimizer_fragment_generation_execution_receipt scalar_execution =
         fragment_producer.execution_stats();
     REQUIRE(scalar_execution.is_accepted());
@@ -2789,13 +2803,13 @@ TEST_CASE("independent fragment halo and spill-run merge producers are canonical
     auto spill_encoding = encode_minimizer_generation(
         spill_producer, spill_sink, spill_options);
     REQUIRE(spill_encoding.has_value());
-    REQUIRE(spill_producer.scan_count() == 2);
-    REQUIRE(spill_producer.merge_pass_count() == 2);
-    REQUIRE(spill_storage.segment_merge_calls() == 3);
+    REQUIRE(spill_producer.scan_count() == 3);
+    REQUIRE(spill_producer.merge_pass_count() == 3);
+    REQUIRE(spill_storage.segment_merge_calls() == 4);
     REQUIRE(spill_storage.segment_merge_run_visits()
-        == 3u * spill_storage.segment_spill_run_count());
+        == 4u * spill_storage.segment_spill_run_count());
     REQUIRE(spill_storage.segment_merge_bytes_visited()
-        == 3u * spill_storage.segment_spill_bytes());
+        == 4u * spill_storage.segment_spill_bytes());
     STATIC_REQUIRE(decltype(spill_producer)::owned_event_capacity() == 0);
     require_encoded_generations_equal_normalized(
         *fragment_encoding, fragment_sink.rows, *spill_encoding, spill_sink.rows);
@@ -2936,8 +2950,10 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
             options.max_occ_cap);
         REQUIRE(canonical_profile.has_value());
         REQUIRE(encoded->directory.profile() == *canonical_profile);
-        REQUIRE(derive_grouped_soa_minimizer_profile(encoded->manifest)
-            == canonical_profile);
+        const auto manifest_profile =
+            derive_grouped_soa_minimizer_profile(encoded->manifest);
+        REQUIRE(manifest_profile.has_value());
+        REQUIRE(*manifest_profile == *canonical_profile);
 
         REQUIRE(execution.is_internally_consistent());
         REQUIRE(execution.generation_layout
@@ -3080,7 +3096,7 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
     auto data = make_dna4(4096, 0x494E4341524E4154ULL);
     range_t range(data);
 
-    SECTION("duplicate physical run advances the storage mutation counter") {
+    SECTION("duplicate physical run advances the storage mutation revision") {
         lazy_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
         const auto lazy_view =
@@ -3103,7 +3119,7 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const direct_minimizer_spill_storage_binding after =
             storage.segment_spill_storage_binding();
         REQUIRE(after.generation_token == before.generation_token);
-        REQUIRE(after.mutation_version == before.mutation_version + 1u);
+        REQUIRE(after.mutation_revision == before.mutation_revision + 1u);
         collecting_minimizer_row_sink sink;
         minimizer_sequence_generation_execution_receipt execution;
         require_wire_error(
@@ -3192,7 +3208,7 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
         const direct_minimizer_spill_storage_binding released =
             storage.segment_spill_storage_binding();
         REQUIRE(released.generation_token == issued.generation_token);
-        REQUIRE(released.mutation_version == issued.mutation_version + 1u);
+        REQUIRE(released.mutation_revision == issued.mutation_revision + 1u);
         const direct_minimizer_spill_storage_binding replacement =
             storage.begin_segment_spill_generation();
         REQUIRE(replacement.valid());
@@ -3301,13 +3317,13 @@ TEST_CASE("inactive spill-run storage incarnation rejects duplicate runs ABA and
             &execution);
         REQUIRE(encoded.has_value());
         REQUIRE(execution.is_internally_consistent());
-        REQUIRE(execution.ready_release_binding_accepted(
+        REQUIRE(execution.allows_ready_release(
             storage.segment_spill_storage_binding()));
         const auto segment = storage.segment_runs_.begin()->first;
         const auto post_encode_splice =
             storage.segment_runs_.begin()->second.front();
         storage.spill_sorted_segment_run(segment, post_encode_splice);
-        REQUIRE_FALSE(execution.ready_release_binding_accepted(
+        REQUIRE_FALSE(execution.allows_ready_release(
             storage.segment_spill_storage_binding()));
         require_complete_generation_rows(*encoded, sink.rows);
     }
@@ -3369,13 +3385,13 @@ TEST_CASE("inactive spill-run storage incarnation counters fail closed at wrap",
     REQUIRE(maximum.valid());
     REQUIRE(maximum.generation_token
         == (std::numeric_limits<std::uint64_t>::max)());
-    REQUIRE(maximum.mutation_version == 0);
+    REQUIRE(maximum.mutation_revision == 0);
 
     wrap_storage_type exhausted;
     REQUIRE_FALSE(exhausted.begin_segment_spill_generation().valid());
     REQUIRE_FALSE(exhausted.begin_segment_spill_generation().valid());
 
-    last_valid.set_segment_spill_mutation_counter_for_test(
+    last_valid.set_segment_spill_mutation_revision_for_test(
         (std::numeric_limits<std::uint64_t>::max)());
     const std::array<std::pair<std::uint64_t, std::uint64_t>, 1> run{{
         {1u, 2u},
@@ -3670,7 +3686,7 @@ TEST_CASE("bounded ntHash fragment replay matches one checked resident execution
     const auto encoded = encode_minimizer_generation(
         producer, sink, options);
     REQUIRE(encoded.has_value());
-    REQUIRE(producer.scan_count() == 2);
+    REQUIRE(producer.scan_count() == 3);
     const minimizer_fragment_generation_execution_receipt execution =
         producer.execution_stats();
     REQUIRE(execution.is_accepted());
@@ -3687,7 +3703,7 @@ TEST_CASE("bounded ntHash fragment replay matches one checked resident execution
     REQUIRE(execution.packed_bounded_stats.fallback_calls == 0);
     REQUIRE(execution.packed_bounded_stats.source_storage_unit_bytes
         == sizeof(std::uint32_t));
-    REQUIRE(producer.minimizer_scheme_identity()
+    REQUIRE(producer.scheme_identity()
         == k_bounded_nthash_u32_r7_sum_scheme_identity);
     REQUIRE(producer.packed_bounded_stats_present());
     REQUIRE(producer.packed_bounded_status()
@@ -3817,7 +3833,7 @@ TEST_CASE("bounded ntHash fragment canonicalizes tied periodic events identicall
     const auto encoded = encode_minimizer_generation(
         encoder_replay, sink, options);
     REQUIRE(encoded.has_value());
-    REQUIRE(encoder_replay.scan_count() == 2u);
+    REQUIRE(encoder_replay.scan_count() == 3u);
     REQUIRE(encoder_replay.execution_stats().is_accepted());
     REQUIRE(decode_generation_events(*encoded, sink.rows) == canonical);
     require_complete_generation_rows(*encoded, sink.rows);
@@ -4028,25 +4044,25 @@ TEST_CASE("actual producers cross the persisted 8MiB core edge bounded",
         &execution);
     REQUIRE(encoded.has_value());
     REQUIRE(execution.is_internally_consistent());
-    REQUIRE(execution.replay_scan_count == 3);
-    REQUIRE(execution.replay_merge_pass_count == 3);
+    REQUIRE(execution.replay_scan_count == 4);
+    REQUIRE(execution.replay_merge_pass_count == 4);
     REQUIRE(execution.replay_reroute_pass_count == 1);
     REQUIRE(execution.replay_failed_scan_count == 1);
     REQUIRE(execution.replay_binding_checked_failed_scan_count == 1);
-    REQUIRE(execution.replay_completed_scan_count == 2);
+    REQUIRE(execution.replay_completed_scan_count == 3);
     REQUIRE(execution.replay_first_completed_content_digest
         == execution.replay_last_completed_content_digest);
     REQUIRE(execution.replay_final_span_bp == half_span);
     REQUIRE(execution.replay_final_storage_binding.generation_token
         == execution.spill_storage_binding.generation_token);
-    REQUIRE(execution.replay_final_storage_binding.mutation_version
-        == execution.spill_storage_binding.mutation_version + 1u);
+    REQUIRE(execution.replay_final_storage_binding.mutation_revision
+        == execution.spill_storage_binding.mutation_revision + 1u);
     REQUIRE(encoded->manifest.position_segment_span_bp == half_span);
     REQUIRE(encoded->manifest.position_segment_count == 3);
     REQUIRE(encoded->manifest.position_count
         == fragment_plan->canonical_event_count);
     REQUIRE(spill_storage.segment_reroute_calls() == 1);
-    REQUIRE(spill_storage.segment_merge_calls() == 4);
+    REQUIRE(spill_storage.segment_merge_calls() == 5);
     require_complete_generation_rows(*encoded, spill_sink.rows);
 }
 
@@ -4143,12 +4159,12 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
     REQUIRE(fragment_producer.exact_simd_stats().ambiguous_symbols > 0);
     REQUIRE(spill_exact_stats.is_internally_consistent(true));
     REQUIRE(spill_exact_stats.ambiguous_symbols > 0);
-    REQUIRE(spill_producer.merge_pass_count() == 2);
-    REQUIRE(spill_storage.segment_merge_calls() == 3);
+    REQUIRE(spill_producer.merge_pass_count() == 3);
+    REQUIRE(spill_storage.segment_merge_calls() == 4);
     REQUIRE(spill_storage.segment_merge_run_visits()
-        == 3u * spill_storage.segment_spill_run_count());
+        == 4u * spill_storage.segment_spill_run_count());
     REQUIRE(spill_storage.segment_merge_bytes_visited()
-        == 3u * spill_storage.segment_spill_bytes());
+        == 4u * spill_storage.segment_spill_bytes());
     require_encoded_generations_equal_normalized(
         *fragment_encoding, fragment_sink.rows, *spill_encoding, spill_sink.rows);
 
@@ -4598,13 +4614,11 @@ TEST_CASE("grouped-SoA derives exact H P C O boundaries and SoA offsets",
     STATIC_REQUIRE(decoded_o64.has_value());
     STATIC_REQUIRE(*decoded_o64 == o64_entry);
 
-    grouped_soa_plan_pass<
-        minimizer_generation_layout::grouped_soa_segment_local>
-        o64_plan{
-            .span = o64_span,
-            .target_length = o64_span,
-            .profile = *o64_profile,
-        };
+    minimizer_generation_stream_detail::grouped_soa_plan_pass o64_plan{
+        .span = o64_span,
+        .target_length = o64_span,
+        .profile = *o64_profile,
+    };
     o64_plan.current_segment = 0u;
     o64_plan.current_hash = 1u;
     o64_plan.group_positions = o64_entry.position_element_count;
@@ -5776,8 +5790,10 @@ TEST_CASE("grouped-SoA narrows positions only with a narrow immutable span",
         generation->manifest.max_occ_cap);
     REQUIRE(canonical_profile.has_value());
     REQUIRE(generation->directory.profile() == *canonical_profile);
-    REQUIRE(derive_grouped_soa_minimizer_profile(generation->manifest)
-        == canonical_profile);
+    const auto manifest_profile =
+        derive_grouped_soa_minimizer_profile(generation->manifest);
+    REQUIRE(manifest_profile.has_value());
+    REQUIRE(*manifest_profile == *canonical_profile);
 
     REQUIRE(generation->directory.entries().size() == 2u);
     std::uint64_t position_count = 0u;
@@ -6255,8 +6271,8 @@ TEST_CASE("canonical anchor sort preserves the 63-bit reference boundary",
     REQUIRE(anchors.data()[1].query_position == low_query_position);
     REQUIRE(anchors.data()[2].ref_position == max_reference);
     REQUIRE(anchors.data()[2].query_position == high_query_position);
-    REQUIRE(anchors.data()[1].query_bits()
-        == anchors.data()[2].query_bits());
+    REQUIRE(anchors.data()[1].query_sort_key()
+        == anchors.data()[2].query_sort_key());
     REQUIRE(anchors.data()[3].is_reverse == 1u);
     REQUIRE(std::ranges::is_sorted(
         std::span<const bioseq::chaining::anchor>{
@@ -6466,7 +6482,7 @@ TEST_CASE("fragment-native anchors are canonical and match ordinary lookup",
         REQUIRE(evidence.peak_query_radix_capacity_bytes > 0u);
         REQUIRE(evidence.peak_occurrence_count_capacity_bytes > 0u);
         REQUIRE(evidence.peak_block_layout_capacity_bytes > 0u);
-        REQUIRE(evidence.peak_block_evidence_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_block_stats_capacity_bytes > 0u);
         REQUIRE_FALSE(evidence.saturated);
         const query_occurrence_capacity_snapshot occurrence_snapshot =
             scratch->occurrence_capacity_snapshot();
@@ -7441,7 +7457,7 @@ TEST_CASE("fragment blocks preserve segment runs beyond ordinal 128",
     append_manual_entry(2, 1u, packed(2u * segment_span + 4u, 0u));
     append_manual_entry(2, 500u, packed(2u * segment_span + 5u, 1u));
 
-    crc64_ecma182 payload_checksum;
+    crc64_ecma182_accumulator payload_checksum;
     for (const std::uint64_t checksum : control_row_checksums) {
         payload_checksum.update_little_endian(checksum);
     }
@@ -8477,7 +8493,7 @@ TEST_CASE("packed and wide query occurrences recycle exact capacities",
                 2u),
             .present = true,
         };
-        REQUIRE(batch.compact_direct_query_set_stats()
+        REQUIRE(batch.compact_direct_query_stats()
             == expected_query_set_stats);
         REQUIRE(batch.stats().unique_query_plans
             == exact_unique_hashes.size());
@@ -8736,7 +8752,7 @@ TEST_CASE("packed and wide query occurrences recycle exact capacities",
                 2u),
             .present = true,
         };
-        REQUIRE(batch.compact_direct_query_set_stats()
+        REQUIRE(batch.compact_direct_query_stats()
             == expected_query_set_stats);
         const auto snapshot = scratch->occurrence_capacity_snapshot();
         REQUIRE(snapshot.route == query_occurrence_route::packed);
@@ -8928,7 +8944,7 @@ TEST_CASE("compact-direct selected-page advice is exact coalesced and fail open"
         const auto adviser = recorder.token();
         const auto posting_span = direct->image.subspan(
             static_cast<std::size_t>(direct->header.postings_offset), 8u);
-        const auto selected = compact_direct_selected_page_range(
+        const auto selected = compact_direct_select_page_range(
             adviser, *direct, posting_span);
         REQUIRE(selected.has_value());
         REQUIRE(selected->has_value());
@@ -8943,19 +8959,19 @@ TEST_CASE("compact-direct selected-page advice is exact coalesced and fail open"
                 direct->header.descriptors_offset
                 + direct->header.descriptor_width_bytes),
             4u);
-        const auto excluded = compact_direct_selected_page_range(
+        const auto excluded = compact_direct_select_page_range(
             adviser, *direct, inline_descriptor);
         REQUIRE(excluded.has_value());
         REQUIRE_FALSE(excluded->has_value());
 
-        const auto outside_sections = compact_direct_selected_page_range(
+        const auto outside_sections = compact_direct_select_page_range(
             adviser, *direct, direct->image.first(1u));
         REQUIRE_FALSE(outside_sections.has_value());
         REQUIRE(outside_sections.error()
             == direct_inverted_index_error::query_plan);
         auto malformed = *direct;
         malformed.header.postings_bytes = malformed.image.size();
-        const auto rejected_bounds = compact_direct_selected_page_range(
+        const auto rejected_bounds = compact_direct_select_page_range(
             adviser, malformed, posting_span);
         REQUIRE_FALSE(rejected_bounds.has_value());
         REQUIRE(rejected_bounds.error()
@@ -9006,7 +9022,7 @@ TEST_CASE("compact-direct selected-page advice is exact coalesced and fail open"
         const auto adviser = recorder.token();
         const auto posting_span = direct->image.subspan(
             static_cast<std::size_t>(direct->header.postings_offset), 8u);
-        const auto selected = compact_direct_selected_page_range(
+        const auto selected = compact_direct_select_page_range(
             adviser, *direct, posting_span);
         REQUIRE(selected.has_value());
         REQUIRE(selected->has_value());
@@ -9348,11 +9364,11 @@ TEST_CASE("compact direct fragment route is exact and scan free",
 				static_cast<std::uint32_t>(runtime_max_occ)),
 			.present = true,
 		};
-		REQUIRE(direct_batch.compact_direct_query_set_stats()
+		REQUIRE(direct_batch.compact_direct_query_stats()
 			== expected_query_set_stats);
 		auto moved_direct_batch = std::move(direct_batch);
-		REQUIRE_FALSE(direct_batch.compact_direct_query_set_stats().present);
-		REQUIRE(moved_direct_batch.compact_direct_query_set_stats()
+		REQUIRE_FALSE(direct_batch.compact_direct_query_stats().present);
+		REQUIRE(moved_direct_batch.compact_direct_query_stats()
 			== expected_query_set_stats);
         require_anchor_bytes_equal(
 			moved_direct_batch.query_view(0u).ordered_fragment_seed_anchors(
@@ -9449,7 +9465,7 @@ TEST_CASE("compact direct fragment route is exact and scan free",
 					static_cast<std::uint32_t>(runtime_max_occ)),
 			.present = true,
 		};
-			REQUIRE(empty_direct_batch.compact_direct_query_set_stats()
+			REQUIRE(empty_direct_batch.compact_direct_query_stats()
 				== expected_empty_stats);
 			REQUIRE(selected_page_recorder.record_count.load() == 2u);
 			direct_scratch->complete_wave_after_join();
@@ -9476,7 +9492,7 @@ TEST_CASE("compact direct fragment route is exact and scan free",
             /*verify_compositional_order_for_testing=*/true,
             minimizer_fragment_lookup_route::direct_compact_hash_lookup);
 		REQUIRE_FALSE(
-			zero_cap_batch.compact_direct_query_set_stats().present);
+			zero_cap_batch.compact_direct_query_stats().present);
         for (std::size_t query_ordinal = 0u;
              query_ordinal < queries.size();
              ++query_ordinal) {
@@ -10507,7 +10523,7 @@ TEST_CASE("transient minimizer index preserves the 128-bit representation kmer d
 TEST_CASE("transient minimizer index consumes source and releases storage",
           "[component:bioseq][layer:unit][feature:index]") {
     constexpr auto large_table_plan =
-        bioseq::indexing::minimizer_hashmap_table_allocation_plan(
+        bioseq::indexing::plan_minimizer_hashmap_table_allocation(
             93'308'896u);
     STATIC_REQUIRE(large_table_plan.valid);
     STATIC_REQUIRE(large_table_plan.group_count == 8'388'608u);
@@ -10556,7 +10572,7 @@ TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
     }
 
     const auto table_plan =
-        bioseq::indexing::minimizer_hashmap_table_allocation_plan(count);
+        bioseq::indexing::plan_minimizer_hashmap_table_allocation(count);
     REQUIRE(table_plan.valid);
     const std::uint64_t position_payload =
         count * sizeof(std::uint64_t);
@@ -10566,7 +10582,7 @@ TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
         vulkan_exact_host_allocation_admission_bytes(
             table_plan.allocation_bytes);
     const std::uint64_t build_permit_bytes =
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             position_headroom, table_headroom);
 
     auto& admission =
@@ -10579,7 +10595,7 @@ TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
         ~restore_cap() { controller.set_index_memory_cap_bytes(value); }
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, build_permit_bytes + (std::uint64_t{1} << 20u)));
     auto reserved = admission.try_reserve(build_permit_bytes);
     REQUIRE(reserved.has_value());
@@ -10610,7 +10626,7 @@ TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
 TEST_CASE("empty one-shot minimizer index has an exact zero-byte plan",
           "[component:bioseq][layer:unit][feature:index]") {
     constexpr auto empty_plan =
-        bioseq::indexing::minimizer_hashmap_table_allocation_plan(0u);
+        bioseq::indexing::plan_minimizer_hashmap_table_allocation(0u);
     STATIC_REQUIRE(empty_plan.valid);
     STATIC_REQUIRE(empty_plan.distinct_upper_bound == 0u);
     STATIC_REQUIRE(empty_plan.requested_slots == 0u);
@@ -11063,10 +11079,10 @@ hash_major_expected(
 }
 
 void recompute_hash_major_control_crc(std::vector<std::byte>& bytes) {
-    using bioseq::indexing::crc64_ecma182;
+    using bioseq::indexing::crc64_ecma182_accumulator;
     REQUIRE(bytes.size()
         >= bioseq::indexing::k_hash_major_minimizer_control_header_bytes);
-    crc64_ecma182 crc;
+    crc64_ecma182_accumulator crc;
     crc.update(std::span<const std::byte>{bytes}.first(48u));
     crc.update(std::span<const std::byte>{bytes}.subspan(
         bioseq::indexing::k_hash_major_minimizer_control_header_bytes));

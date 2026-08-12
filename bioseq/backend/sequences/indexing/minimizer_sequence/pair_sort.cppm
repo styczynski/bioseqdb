@@ -43,3 +43,11 @@ void sort_minimizer_pair_run_keys(
 }
 
 } // namespace bioseq::indexing::detail
+
+extern "C" void bioseq_sort_pair_run_u128_keys(
+        hwy::uint128_t* keys,
+        std::size_t key_count,
+        int sort_impl) noexcept {
+    bioseq::indexing::detail::sort_minimizer_pair_run_keys(
+        keys, key_count, sort_impl);
+}

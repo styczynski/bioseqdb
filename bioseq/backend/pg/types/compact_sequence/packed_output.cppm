@@ -1207,8 +1207,8 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
   const bool incomplete =
       forced_incomplete || error_published || job.error.incomplete != 0u;
   if (outcome_out != nullptr) {
-    outcome_out->incomplete = outcome_out->incomplete || incomplete;
-    outcome_out->failed = outcome_out->failed || error_published;
+    outcome_out->is_incomplete = outcome_out->is_incomplete || incomplete;
+    outcome_out->has_failure = outcome_out->has_failure || error_published;
     if (error_published) {
       outcome_out->sqlstate = job.error.sqlstate;
       outcome_out->message_length = job.error.message_length;
@@ -1980,7 +1980,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   for (auto &submission : probe_submissions) {
     const auto outcome =
         pool.join_and_drain_tracked_task_noexcept(std::addressof(submission));
-    valid = valid && outcome.drained && !outcome.incomplete && !outcome.failed;
+    valid = valid && outcome.is_drained && !outcome.is_incomplete &&
+            !outcome.has_failure;
   }
   const std::uint64_t expected_probe_calls =
       static_cast<std::uint64_t>(probe_iterations) * 2u;
@@ -2072,7 +2073,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
                              std::addressof(failed_incomplete),
                              std::addressof(failed_outcome));
   valid = valid && failed_drained && failed_incomplete &&
-          failed_outcome.incomplete && failed_outcome.failed &&
+          failed_outcome.is_incomplete && failed_outcome.has_failure &&
           failed_outcome.sqlstate == 123u && guard.enrolled_jobs == 0u &&
           attachment.refcount == 32u && cumulative.calls == 128u &&
           cumulative.bytes == 1024u;
@@ -2104,8 +2105,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   valid = valid
       && publication_status
           == bioseq::parallelism::tracked_submit_status::transition_rejected
-      && publication_outcome.drained && publication_outcome.incomplete
-      && !publication_outcome.failed
+      && publication_outcome.is_drained && publication_outcome.is_incomplete
+      && !publication_outcome.has_failure
       && publication_submission.backing_released == 1u
       && guard.enrolled_jobs == 0u && attachment.refcount == 32u
       && cumulative.calls == 128u && cumulative.bytes == 1024u
@@ -2529,7 +2530,7 @@ enum class materialization_size_probe : std::uint8_t {
         return from == 0 && to == 0 && output.empty();
     }
     if (to > edge.node->bp_length
-        || bioseq::storage::has_complement(edge.transform)) {
+        || bioseq::storage::is_complemented(edge.transform)) {
         return false;
     }
     if (from == to) {
@@ -2565,7 +2566,7 @@ enum class materialization_size_probe : std::uint8_t {
     if (literal.encoding != literal_encoding::unbound_ascii) {
         return false;
     }
-    const bool reverse = bioseq::storage::has_reverse(edge.transform);
+    const bool reverse = bioseq::storage::is_reversed(edge.transform);
     for (std::uint64_t index = from; index < to; ++index) {
         const std::uint64_t physical = !reverse
             ? literal.symbol_from + index
@@ -3390,7 +3391,7 @@ export [[nodiscard]] Datum transform_pg_sequence(
 {
     auto acquired = acquire_writable_pg_sequence(input);
     if (!acquired.value->alphabet_bound
-        && bioseq::storage::has_complement(transform)) {
+        && bioseq::storage::is_complemented(transform)) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("reverse complement requires a bound bioseq alphabet"),
@@ -3510,7 +3511,7 @@ read_synthetic_lazy_source(void const *, pg_sequence_read_session &,
     return pg_sequence_source_read_status::wrong_thread;
   }
   std::uint8_t rank = 0u;
-  if (bioseq::storage::has_complement(transform)) {
+  if (bioseq::storage::is_complemented(transform)) {
     rank =
         bioseq::storage::lazy_sequence_traits<seq::dna4>::letter_complement(
             rank);

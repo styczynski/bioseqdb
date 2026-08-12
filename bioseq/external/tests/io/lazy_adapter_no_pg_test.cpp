@@ -22,6 +22,7 @@
 #include <vector>
 
 import bioseq.parallelism.memory_admission;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.rank_pack_core;
@@ -92,7 +93,7 @@ TEST_CASE("external-api executes the PG-free fixed-span and admitted adapters",
                 == fixed_units[0]);
 
         std::array<std::uint8_t, ranks.size()> observed{};
-        owner.view().template to_encoded_into<false, false>(
+        owner.view().template copy_ranks<false, false>(
             observed, 0u, observed.size());
         REQUIRE(observed == ranks);
     }

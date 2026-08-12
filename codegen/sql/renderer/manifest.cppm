@@ -727,6 +727,10 @@ manifest_statement_owner(
     const rendered_sql_artifact& artifact,
     const std::vector<rendered_fmgr_entrypoint_module>&
         fmgr_modules,
+    const std::vector<std::pair<std::string, std::string>>&
+        entity_handle_owners,
+    const std::vector<std::pair<std::string, std::string>>&
+        row_codec_owners,
     bool validate_reviewed_fmgr_target = false) {
     std::size_t routine_entity_count = 0;
     std::map<std::string, std::size_t, std::less<>> entity_counts_by_kind;
@@ -776,7 +780,8 @@ manifest_statement_owner(
         }
     }
     const std::vector<rendered_entity_handle_module>
-        entity_handle_modules = render_entity_handle_modules(graph);
+        entity_handle_modules = render_entity_handle_modules(
+            graph, entity_handle_owners);
     std::size_t entity_handle_count = 0;
     std::map<
         std::string,
@@ -795,7 +800,8 @@ manifest_statement_owner(
         }
     }
     const std::vector<rendered_row_codec_module>
-        row_codec_modules = render_row_codec_modules(graph);
+        row_codec_modules = render_row_codec_modules(
+            graph, row_codec_owners);
     std::size_t row_codec_count = 0;
     std::map<
         std::string,

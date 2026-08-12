@@ -169,7 +169,8 @@ exact_metadata(std::uint64_t producer_ttl_ms = 60'000) noexcept {
     };
 }
 
-[[nodiscard]] physical_identity physical_identity(std::uint8_t seed) noexcept {
+[[nodiscard]] physical_identity make_provider_physical_identity(
+    std::uint8_t seed) noexcept {
     physical_identity result{
         .kind = physical_identity_kind::provider_opaque,
         .length = 4,
@@ -254,7 +255,7 @@ class registry_fixture {
               .partition_count = partitions,
               .byte_arena_bytes = arena_bytes,
           } {
-        const auto request = reusable_registry_preload_request(config_);
+        const auto request = make_reusable_registry_preload_request(config_);
         if (!request.has_value()) {
             throw std::runtime_error("invalid registry test configuration");
         }
@@ -631,7 +632,7 @@ TEST_CASE("unified registry separates exact and coverage digest collisions",
     REQUIRE(release_reusable_reference(fixture.attachment, exact_waiter.token) ==
             reusable_registry_error::none);
 
-    const auto registry = reusable_registry_snapshot(fixture.attachment);
+    const auto registry = snapshot_reusable_registry(fixture.attachment);
     REQUIRE(registry.indexed_generations == 3);
     REQUIRE(registry.exact_final_generations == 2);
     REQUIRE(registry.reusable_coverage_generations == 1);
@@ -663,7 +664,7 @@ TEST_CASE("exact-only retirement unlinks and reclaims without coverage locks",
     const reusable_generation_reference stale_reference = claimed.reference;
     const reusable_manifest_handle manifest = publish(fixture, stale_reference);
     REQUIRE(static_cast<bool>(manifest));
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).coverage_occupied_buckets == 0);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).coverage_occupied_buckets == 0);
 
     diagnostics_partition_trace trace{};
     const reusable_registry_partition_callbacks callbacks{
@@ -680,7 +681,7 @@ TEST_CASE("exact-only retirement unlinks and reclaims without coverage locks",
     REQUIRE(trace.exact_releases == 1);
     REQUIRE(trace.coverage_acquires == 0);
     REQUIRE(trace.coverage_releases == 0);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).coverage_occupied_buckets == 0);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).coverage_occupied_buckets == 0);
 
     auto absent = lookup_cache_generation(fixture.attachment,
                                           cache_entry_kind::exact_final_result,
@@ -733,7 +734,7 @@ TEST_CASE("exact claims keep dependency versions distinct",
         REQUIRE(coalesced.token.active);
         REQUIRE(release_reusable_reference(fixture.attachment, coalesced.token) ==
                 reusable_registry_error::none);
-        REQUIRE(reusable_registry_snapshot(fixture.attachment).indexed_generations == 2);
+        REQUIRE(snapshot_reusable_registry(fixture.attachment).indexed_generations == 2);
         REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
     }
 
@@ -774,7 +775,7 @@ TEST_CASE("exact claims keep dependency versions distinct",
         REQUIRE(old_snapshot->state == cache_entry_state::complete);
         REQUIRE(old_snapshot->metadata.dependency_count == k_test_dependency_count);
         REQUIRE(old_snapshot->conservative_guard == first_guard);
-        REQUIRE(reusable_registry_snapshot(fixture.attachment).indexed_generations == 2);
+        REQUIRE(snapshot_reusable_registry(fixture.attachment).indexed_generations == 2);
         REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
     }
 }
@@ -948,7 +949,7 @@ TEST_CASE("dependency release finalizes an arbitrary retired-list position",
         finalize_reusable_generation_reclaim(fixture.attachment, prepared.ticket);
     REQUIRE(finalized.has_value());
     REQUIRE(*finalized == first_manifest);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).retired_generations == 1);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).retired_generations == 1);
     REQUIRE(release_and_finalize_one_retired(fixture) == reusable_registry_error::none);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
@@ -1164,7 +1165,7 @@ TEST_CASE("exact ninth claim retires the least recently used terminal member",
     REQUIRE(ninth.retired_manifest_count == 1);
     REQUIRE(ninth.retired_manifests[0] == manifests[expected_victim]);
 
-    const auto snapshot = reusable_registry_snapshot(fixture.attachment);
+    const auto snapshot = snapshot_reusable_registry(fixture.attachment);
     REQUIRE(snapshot.indexed_generations == k_maximum_generations_per_exact_digest);
     REQUIRE(snapshot.retired_generations == 1);
     REQUIRE(snapshot.evictions == 1);
@@ -1174,7 +1175,7 @@ TEST_CASE("exact ninth claim retires the least recently used terminal member",
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 
     REQUIRE(release_and_finalize_one_retired(fixture) == reusable_registry_error::none);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).retired_generations == 0);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).retired_generations == 0);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -1208,9 +1209,9 @@ TEST_CASE("saturated exact bucket declines when every terminal member is pinned"
     REQUIRE_FALSE(declined);
     REQUIRE(declined.error == reusable_registry_error::exact_bucket_full);
     REQUIRE(declined.retired_manifest_count == 0);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).indexed_generations ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).indexed_generations ==
             k_maximum_generations_per_exact_digest);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).retired_generations == 0);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).retired_generations == 0);
 
     for (reusable_reference_token& pin : pins) {
         REQUIRE(release_reusable_reference(fixture.attachment, pin) ==
@@ -1243,9 +1244,9 @@ TEST_CASE("saturated admission allocation failure does not retire a victim",
     REQUIRE_FALSE(denied);
     REQUIRE(denied.error == reusable_registry_error::byte_arena_full);
     REQUIRE(denied.retired_manifest_count == 0);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).indexed_generations ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).indexed_generations ==
             k_maximum_generations_per_exact_digest);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).retired_generations == 0);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).retired_generations == 0);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -1306,9 +1307,9 @@ TEST_CASE("coverage sixty fifth claim retires one LRU member from both indexes",
     REQUIRE(candidates->candidate_count == k_maximum_coverage_generations_per_domain);
     REQUIRE(release_reusable_candidate_batch(fixture.attachment, *candidates) ==
             reusable_registry_error::none);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).indexed_generations ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).indexed_generations ==
             k_maximum_coverage_generations_per_domain);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).retired_generations == 1);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).retired_generations == 1);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 
     REQUIRE(release_and_finalize_one_retired(fixture) == reusable_registry_error::none);
@@ -2002,7 +2003,7 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly",
         claim(fixture, coverage_key(54), digest(91), "boundary-domain", "boundary-generation", 1);
     REQUIRE(claimed);
     const std::uint64_t baseline_free =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
 
     const std::string display_below(k_reusable_display_sql_capacity - 1U, 's');
     const std::string canonical_below(k_reusable_canonical_plan_capacity - 1U, 'c');
@@ -2018,7 +2019,7 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly",
     };
     REQUIRE(begin_reusable_build_with_diagnostics(fixture.attachment, update) ==
             reusable_registry_error::none);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes ==
             baseline_free - aligned_eight(display_below.size()) -
                 aligned_eight(canonical_below.size()) - aligned_eight(producer_below.size()));
 
@@ -2036,7 +2037,7 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly",
     const std::uint64_t exact_boundary_bytes = aligned_eight(display_at.size()) +
                                                aligned_eight(canonical_at.size()) +
                                                aligned_eight(producer_at.size());
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes ==
             baseline_free - exact_boundary_bytes);
 
     std::vector<char> display_copy(display_at.size());
@@ -2056,7 +2057,7 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly",
     REQUIRE(std::equal(producer_at.begin(), producer_at.end(), producer_copy.begin()));
 
     const std::uint64_t before_rejections =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
     {
         const std::string too_large(k_reusable_display_sql_capacity + 1U, 'x');
         auto rejected = update;
@@ -2078,7 +2079,7 @@ TEST_CASE("diagnostic arena accepts each independent boundary exactly",
         REQUIRE(store_reusable_diagnostic_text(fixture.attachment, rejected) ==
                 reusable_registry_error::invalid_argument);
     }
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == before_rejections);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == before_rejections);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -2090,7 +2091,7 @@ TEST_CASE("diagnostic replacement and retired reclaim release every range",
         claim(fixture, coverage_key(55), digest(92), "replace-domain", "replace-generation", 2);
     REQUIRE(claimed);
     const std::uint64_t baseline_free =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
 
     const std::string old_sql(9, 's');
     const std::string old_canonical(17, 'c');
@@ -2125,7 +2126,7 @@ TEST_CASE("diagnostic replacement and retired reclaim release every range",
     const std::uint64_t replacement_bytes = aligned_eight(new_sql.size()) +
                                             aligned_eight(new_canonical.size()) +
                                             aligned_eight(new_producer.size());
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes ==
             baseline_free - replacement_bytes);
 
     const reusable_manifest_handle manifest{
@@ -2142,10 +2143,10 @@ TEST_CASE("diagnostic replacement and retired reclaim release every range",
     const auto retired = retire_reusable_generation(fixture.attachment, claimed.reference);
     REQUIRE(retired.has_value());
     REQUIRE(*retired == manifest);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes ==
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes ==
             baseline_free - replacement_bytes);
     REQUIRE(release_and_finalize_one_retired(fixture) == reusable_registry_error::none);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == arena_bytes);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == arena_bytes);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -2165,12 +2166,12 @@ TEST_CASE("diagnostic publication revalidates producer and ABA identity",
         .plan_status = reusable_plan_snapshot_status::planned,
     };
     const std::uint64_t initial_free =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
     auto wrong_producer = update;
     wrong_producer.producer = producer(4);
     REQUIRE(begin_reusable_build_with_diagnostics(fixture.attachment, wrong_producer) ==
             reusable_registry_error::invalid_state);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == initial_free);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == initial_free);
 
     reusable_shared_generation& record = shared_generation(fixture, claimed.reference);
     const std::uint64_t original_slot_sequence = record.slot_sequence;
@@ -2189,7 +2190,7 @@ TEST_CASE("diagnostic publication revalidates producer and ABA identity",
             reusable_registry_error::stale_reference);
     REQUIRE(trace.exact_acquires == 2);
     REQUIRE(trace.exact_releases == 2);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == initial_free);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == initial_free);
     REQUIRE(record.state == cache_entry_state::claimed);
     REQUIRE(record.display_sql.length == 0);
     record.slot_sequence = original_slot_sequence;
@@ -2215,10 +2216,10 @@ TEST_CASE("diagnostic publication revalidates producer and ABA identity",
     REQUIRE(replacement.reference.generation_slot == claimed.reference.generation_slot);
     REQUIRE(replacement.reference.slot_sequence != claimed.reference.slot_sequence);
     const std::uint64_t before_stale =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
     REQUIRE(store_reusable_diagnostic_text(fixture.attachment, update) ==
             reusable_registry_error::stale_reference);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == before_stale);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == before_stale);
     REQUIRE(validate_reusable_registry(fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -2246,7 +2247,7 @@ TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged",
     const reusable_shared_byte_range old_canonical_range = before_record.canonical_plan;
     const reusable_shared_byte_range old_producer_range = before_record.producer_plan;
     const std::uint64_t before_free =
-        reusable_registry_snapshot(fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(fixture.attachment).arena_free_bytes;
 
     const std::string too_large_sql(80, 'S');
     const std::string too_large_canonical(80, 'C');
@@ -2264,7 +2265,7 @@ TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged",
     REQUIRE(after_record.canonical_plan.length == old_canonical_range.length);
     REQUIRE(after_record.producer_plan.offset == old_producer_range.offset);
     REQUIRE(after_record.producer_plan.length == old_producer_range.length);
-    REQUIRE(reusable_registry_snapshot(fixture.attachment).arena_free_bytes == before_free);
+    REQUIRE(snapshot_reusable_registry(fixture.attachment).arena_free_bytes == before_free);
     std::array<char, 16> sql_copy{};
     std::array<char, 16> canonical_copy{};
     std::array<char, 16> producer_copy{};
@@ -2282,7 +2283,7 @@ TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged",
     const std::string begin_sql(40, 's');
     const std::string begin_plan(40, 'p');
     const std::uint64_t begin_free =
-        reusable_registry_snapshot(begin_fixture.attachment).arena_free_bytes;
+        snapshot_reusable_registry(begin_fixture.attachment).arena_free_bytes;
     REQUIRE(begin_reusable_build_with_diagnostics(
                 begin_fixture.attachment,
                 reusable_diagnostic_text_update{
@@ -2295,7 +2296,7 @@ TEST_CASE("diagnostic arena OOM leaves prior text and state unchanged",
     REQUIRE(
         snapshot_reusable_generation(begin_fixture.attachment, begin_claimed.reference)->state ==
         cache_entry_state::claimed);
-    REQUIRE(reusable_registry_snapshot(begin_fixture.attachment).arena_free_bytes == begin_free);
+    REQUIRE(snapshot_reusable_registry(begin_fixture.attachment).arena_free_bytes == begin_free);
     REQUIRE(validate_reusable_registry(begin_fixture.attachment) == reusable_registry_error::none);
 }
 
@@ -2505,9 +2506,9 @@ TEST_CASE("bounded reusable invalidation is collision and ABA safe",
     const cache_digest_256 forced_digest = digest(70);
 
     reusable_generation_metadata shard_a_metadata = metadata();
-    shard_a_metadata.physical_identity = physical_identity(10);
+    shard_a_metadata.dependency_physical_identity = make_provider_physical_identity(10);
     reusable_generation_metadata shard_b_metadata = shard_a_metadata;
-    shard_b_metadata.physical_identity = physical_identity(11);
+    shard_b_metadata.dependency_physical_identity = make_provider_physical_identity(11);
     reusable_generation_metadata other_provider_metadata = shard_a_metadata;
     other_provider_metadata.provider_id = 8;
 
@@ -2560,7 +2561,7 @@ TEST_CASE("bounded reusable invalidation is collision and ABA safe",
         .database_oid = key.security_namespace.database_oid,
         .provider_id = shard_a_metadata.provider_id,
         .security_namespace = key.security_namespace,
-        .physical_identity = shard_a_metadata.physical_identity,
+        .dependency_physical_identity = shard_a_metadata.dependency_physical_identity,
         .dependency_fingerprint = shard_a_metadata.dependency_fingerprint,
         .schema_fingerprint = shard_a_metadata.schema_fingerprint,
         .mapping_fingerprint = shard_a_metadata.mapping_fingerprint,
@@ -2671,7 +2672,7 @@ TEST_CASE("reusable invalidation observability and coarse scope are explicit",
     const auto key = coverage_key(70, 91, 70);
     const auto other_database_key = coverage_key(70, 91, 71);
     reusable_generation_metadata precise_metadata = metadata();
-    precise_metadata.physical_identity = physical_identity(20);
+    precise_metadata.dependency_physical_identity = make_provider_physical_identity(20);
     reusable_generation_metadata other_provider_metadata = precise_metadata;
     other_provider_metadata.provider_id = 8;
 
@@ -2785,7 +2786,7 @@ TEST_CASE("janitor fails dead owners and retires expired manifests",
     auto final_sweep = janitor_reusable_registry(fixture.attachment, 2'000'001);
     REQUIRE(final_sweep.error == reusable_registry_error::none);
     REQUIRE(final_sweep.reclaimed_retired == 0);
-    const auto snapshot = reusable_registry_snapshot(fixture.attachment);
+    const auto snapshot = snapshot_reusable_registry(fixture.attachment);
     REQUIRE(snapshot.indexed_generations == 0);
     REQUIRE(snapshot.retired_generations == 0);
     REQUIRE(snapshot.free_generations == 4);

@@ -194,7 +194,7 @@ TEST_CASE("generator: custom alphabet with uint16 rank extraction",
     auto decode = [](const seq_t& seq) {
         std::vector<typename seq_t::traits::letter_unit> ranks;
         ranks.reserve(seq.bp_size());
-        for (const auto unit : seq._data) {
+        for (const auto unit : seq.packed_units) {
             ranks.push_back(static_cast<typename seq_t::traits::letter_unit>(
                 unit & seq_t::traits::char_mask));
             if (ranks.size() == seq.bp_size()) {
@@ -341,7 +341,7 @@ void for_each_rank_prefix(
     using traits = typename p_sequence::traits;
     const std::size_t limit = std::min<std::size_t>(max_bp, seq.bp_size());
     std::size_t pos = 0;
-    for (const auto unit : seq._data) {
+    for (const auto unit : seq.packed_units) {
         auto value = unit;
         for (std::size_t slot = 0; slot < traits::letters_per_unit && pos < limit; ++slot) {
             fn(static_cast<typename traits::letter_unit>(value & traits::char_mask), pos);
@@ -640,7 +640,7 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
 
     {
         auto repeated_reference = generator_t(gp).generate_reference();
-        ASSERT(reference->_data == repeated_reference->_data
+        ASSERT(reference->packed_units == repeated_reference->packed_units
                    && reference->padding() == repeated_reference->padding(),
                "same-seed references differ");
     }
@@ -660,7 +660,7 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
             ASSERT(after > before,
                    "hardware Vulkan device did not dispatch sequence generation");
             auto cpu = generator_t(gpu_params).debug_generate_sequences_cpu_only(1).front();
-            ASSERT(gpu_or_cpu._data == cpu._data && gpu_or_cpu.padding() == cpu.padding(),
+            ASSERT(gpu_or_cpu.packed_units == cpu.packed_units && gpu_or_cpu.padding() == cpu.padding(),
                    "GPU and CPU references differ");
             report_validation(
                 "GPU parity",
@@ -742,7 +742,7 @@ TEST_CASE("generator: GPU and CPU generation throughput",
         const auto after = runtime.generate_units_dispatch_count();
         {
             const auto cpu_seq = gen_t(gp).debug_generate_sequences_cpu_only(1);
-            ASSERT(gpu_seq.front()._data == cpu_seq.front()._data &&
+            ASSERT(gpu_seq.front().packed_units == cpu_seq.front().packed_units &&
                        gpu_seq.front().padding() == cpu_seq.front().padding(),
                    fmt::format("gpubench GPU != CPU bytes at n={}", n));
         }

@@ -10,6 +10,7 @@ export module bioseq.highway.sources.minimizer_bounded_nthash;
 import std;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
+import bioseq.sequences.simd_iteration_geometry;
 import bioseq.instrumentation;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.sequence_ops;
@@ -123,9 +124,9 @@ template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
     p_simd_tag simd_tag,
     hn::Vec<p_simd_tag> table,
-    const vec_stream<p_simd_tag, std::uint32_t, p_stream_count>& ranks) noexcept
+    const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& ranks) noexcept
 {
-    return make_vec_stream<p_simd_tag, std::uint32_t, p_stream_count>(
+    return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
         [&](auto stream_constant) [[gnu::always_inline]] {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
@@ -136,42 +137,43 @@ template<class p_simd_tag, std::size_t p_stream_count>
 
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream(
-    const vec_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
+    const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
 {
     if constexpr ((p_rotation & 31) == 0) {
         return value;
     } else {
-        return RotateLeft<(p_rotation & 31)>(value);
+        return rotate_left<(p_rotation & 31)>(value);
     }
 }
 
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream_runtime(
-    const vec_stream<p_simd_tag, std::uint32_t, p_stream_count>& value,
+    const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value,
     int rotation) noexcept
 {
     rotation &= 31;
     if (rotation == 0) return value;
-    return Or(
-        ShiftLeftSame(value, rotation),
-        ShiftRightSame(value, 32 - rotation));
+    return bit_or(
+        shift_left_same(value, rotation),
+        shift_right_same(value, 32 - rotation));
 }
 
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_right_stream(
-    const vec_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
+    const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
 {
     if constexpr ((p_rotation & 31) == 0) {
         return value;
     } else {
-        return RotateRight<(p_rotation & 31)>(value);
+        return rotate_right<(p_rotation & 31)>(value);
     }
 }
 
 /** One full-u32 minimum plus RC strand at its two extreme positions. */
 template<class p_simd_tag, std::size_t p_stream_count>
 struct minimum_stream {
-    using vector_stream_type = vec_stream<p_simd_tag, std::uint32_t, p_stream_count>;
+    using vector_stream_type =
+        vector_stream<p_simd_tag, std::uint32_t, p_stream_count>;
     using mask_stream_type = mask_stream<p_simd_tag, p_stream_count>;
 
     vector_stream_type hash;
@@ -257,52 +259,54 @@ template<class p_simd_tag, std::size_t p_stream_count>
     const minimum_stream<p_simd_tag, p_stream_count>& first,
     const minimum_stream<p_simd_tag, p_stream_count>& second) noexcept
 {
-    const auto both_valid = And(first.valid, second.valid);
-    const auto second_smaller = And(
+    const auto both_valid = bit_and(first.valid, second.valid);
+    const auto second_smaller = bit_and(
         second.valid,
-        Or(AndNot(first.valid, second.valid), Lt(second.hash, first.hash)));
-    const auto hashes_equal = And(both_valid, Eq(first.hash, second.hash));
-    const auto second_leftmost = And(
-        hashes_equal, Lt(second.left_position, first.left_position));
-    const auto second_rightmost = And(
-        hashes_equal, Gt(second.right_position, first.right_position));
+        bit_or(
+            bit_and_not(first.valid, second.valid),
+            less(second.hash, first.hash)));
+    const auto hashes_equal = bit_and(both_valid, equal(first.hash, second.hash));
+    const auto second_leftmost = bit_and(
+        hashes_equal, less(second.left_position, first.left_position));
+    const auto second_rightmost = bit_and(
+        hashes_equal, greater(second.right_position, first.right_position));
 
     return minimum_stream<p_simd_tag, p_stream_count>{
-        IfThenElse(second_smaller, second.hash, first.hash),
-        IfThenElse(
+        if_then_else(second_smaller, second.hash, first.hash),
+        if_then_else(
             second_smaller,
             second.left_position,
-            IfThenElse(
+            if_then_else(
                 second_leftmost,
                 second.left_position,
                 first.left_position)),
-        IfThenElse(
+        if_then_else(
             second_smaller,
             second.right_position,
-            IfThenElse(
+            if_then_else(
                 second_rightmost,
                 second.right_position,
                 first.right_position)),
-        IfThenElse(
+        if_then_else(
             second_smaller,
             second.left_strand,
-            IfThenElse(
+            if_then_else(
                 second_leftmost,
                 second.left_strand,
                 first.left_strand)),
-        IfThenElse(
+        if_then_else(
             second_smaller,
             second.right_strand,
-            IfThenElse(
+            if_then_else(
                 second_rightmost,
                 second.right_strand,
                 first.right_strand)),
-        Or(first.valid, second.valid),
+        bit_or(first.valid, second.valid),
     };
 }
 
 /**
- * The iterator supplies one tail mask for the whole vec_stream. Only the final logical
+ * The iterator supplies one tail mask for the whole vector stream. Only the final logical
  * stream actually reaches sequence padding; applying that mask to every
  * stream drops valid bases from all earlier streams. This adapter is the
  * production fork's explicit tail fix.
@@ -329,7 +333,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
     const std::array<std::uint32_t, 8>& values) noexcept
 {
     const std::size_t lanes = hn::Lanes(simd_tag);
-    return make_vec_stream<p_simd_tag, std::uint32_t, p_stream_count>(
+    return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
         [&](auto stream_constant) [[gnu::always_inline]] {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
@@ -349,7 +353,8 @@ struct packed_iteration_state {
     using simd_tag_type = hn::CappedTag<std::uint32_t, 8>;
     using vector_type = hn::Vec<simd_tag_type>;
     using mask_type = hn::Mask<simd_tag_type>;
-    using vector_stream_type = vec_stream<simd_tag_type, std::uint32_t, p_stream_count>;
+    using vector_stream_type =
+        vector_stream<simd_tag_type, std::uint32_t, p_stream_count>;
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
     using minimum_type = minimum_stream<simd_tag_type, p_stream_count>;
 
@@ -417,11 +422,11 @@ struct packed_iteration_state {
             // Initialization runs only p_kmer_size times. The rolling steady state below
             // uses compile-time rotations; this bounded startup uses the
             // target's vector shift-by-scalar lowering.
-            forward_hash = Xor(
+            forward_hash = bit_xor(
                 forward_hash,
                 rotate_left_stream_runtime(
                     forward_value, forward_rotation));
-            reverse_hash = Xor(
+            reverse_hash = bit_xor(
                 reverse_hash,
                 rotate_left_stream_runtime(
                     reverse_value, reverse_rotation));
@@ -441,14 +446,14 @@ struct packed_iteration_state {
                 simd_tag, complement_table, outgoing_rank);
             const auto reverse_in = lookup_table_stream(
                 simd_tag, complement_table, incoming_rank);
-            forward_hash = Xor(
-                Xor(
+            forward_hash = bit_xor(
+                bit_xor(
                     rotate_left_stream<7>(forward_hash),
                     rotate_left_stream<static_cast<int>((p_kmer_size * 7) & 31u)>(
                         forward_out)),
                 forward_in);
-            reverse_hash = Xor(
-                Xor(
+            reverse_hash = bit_xor(
+                bit_xor(
                     rotate_right_stream<7>(reverse_hash),
                     rotate_right_stream<7>(reverse_out)),
                 rotate_left_stream<
@@ -460,11 +465,11 @@ struct packed_iteration_state {
             static_cast<std::uint32_t>(symbols_seen - p_kmer_size);
         const vector_stream_type position = vector_stream_type::splat(
             simd_tag, local_kmer_position);
-        const vector_stream_type canonical_hash = Add(
+        const vector_stream_type canonical_hash = add(
             forward_hash, reverse_hash);
-        const mask_stream_type reverse_strand = Lt(
+        const mask_stream_type reverse_strand = less(
             reverse_hash, forward_hash);
-        const vector_stream_type strand = IfThenElse(
+        const vector_stream_type strand = if_then_else(
             reverse_strand,
             vector_stream_type::splat(simd_tag, 1u),
             vector_stream_type::splat_zero(simd_tag));
@@ -503,12 +508,12 @@ struct packed_iteration_state {
             candidate_index + 1 - p_window_size);
         const vector_stream_type window_index_v = vector_stream_type::splat(
             simd_tag, window_index);
-        const mask_stream_type owned_window = And(
+        const mask_stream_type owned_window = bit_and(
             window_minimum.valid,
-            Lt(window_index_v, window_limits));
-        const mask_stream_type tied = And(
+            less(window_index_v, window_limits));
+        const mask_stream_type tied = bit_and(
             owned_window,
-            Ne(window_minimum.left_position,
+            not_equal(window_minimum.left_position,
                window_minimum.right_position));
 
         emit_selected(
@@ -519,7 +524,7 @@ struct packed_iteration_state {
             window_minimum.left_position,
             window_minimum.left_strand,
             false);
-        const auto no_ties_per_stream = AllFalsePerStream(
+        const auto no_ties_per_stream = collect_all_false_per_stream(
             simd_tag, tied);
         bool any_tie = false;
         for (const bool no_tie : no_ties_per_stream) {
@@ -548,13 +553,13 @@ private:
         const vector_stream_type& strand,
         bool tie_endpoint)
     {
-        const auto same_identity = And(
+        const auto same_identity = bit_and(
             last_emit_valid,
-            And(Eq(hash, last_emit_hash),
-                And(Eq(position, last_emit_position),
-                    Eq(strand, last_emit_strand))));
-        const auto emit = AndNot(same_identity, selected);
-        const auto no_emit_per_stream = AllFalsePerStream(
+            bit_and(equal(hash, last_emit_hash),
+                bit_and(equal(position, last_emit_position),
+                    equal(strand, last_emit_strand))));
+        const auto emit = bit_and_not(same_identity, selected);
+        const auto no_emit_per_stream = collect_all_false_per_stream(
             simd_tag, emit);
         bool any_emit = false;
         for (const bool no_emit : no_emit_per_stream) {
@@ -625,11 +630,11 @@ private:
             }
         }
 
-        last_emit_hash = IfThenElse(emit, hash, last_emit_hash);
-        last_emit_position = IfThenElse(
+        last_emit_hash = if_then_else(emit, hash, last_emit_hash);
+        last_emit_position = if_then_else(
             emit, position, last_emit_position);
-        last_emit_strand = IfThenElse(emit, strand, last_emit_strand);
-        last_emit_valid = Or(last_emit_valid, emit);
+        last_emit_strand = if_then_else(emit, strand, last_emit_strand);
+        last_emit_valid = bit_or(last_emit_valid, emit);
     }
 
 public:
@@ -743,7 +748,8 @@ template<
     bounded_nthash_execution_stats& stats)
 {
     using simd_tag_type = hn::CappedTag<std::uint32_t, 8>;
-    using vector_stream_type = vec_stream<simd_tag_type, std::uint32_t, p_stream_count>;
+    using vector_stream_type =
+        vector_stream<simd_tag_type, std::uint32_t, p_stream_count>;
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
     using state_type = packed_iteration_state<
         p_kmer_size, p_window_size, p_stream_count, p_minimizer_type, p_collector_type>;
@@ -758,7 +764,8 @@ template<
         (k_context_base_pairs + k_letters_per_unit - 1)
         / k_letters_per_unit;
     const auto [units_per_lane, offsets] =
-        calculate_iteration_offsets<k_logical_streams>(
+        ::bioseq::simd::iteration_geometry::calculate_iteration_offsets<
+            k_logical_streams>(
             view.size(), k_logical_streams, k_context_units);
     const std::size_t total_windows =
         view.bp_size() - p_kmer_size - p_window_size + 2;

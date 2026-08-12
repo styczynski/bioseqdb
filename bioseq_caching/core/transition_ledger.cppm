@@ -217,7 +217,7 @@ struct shared_transition_ledger_metrics {
 struct transition_ledger_header {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
-    alignas(4) std::uint32_t bootstrap_state =
+    alignas(4) std::uint32_t bootstrap_state_value =
         static_cast<std::uint32_t>(bootstrap_state::uninitialized);
     std::uint32_t reserved = 0;
     transition_ledger_config config{};
@@ -423,13 +423,15 @@ header(std::span<const std::byte> region) noexcept {
 
 [[nodiscard]] inline bootstrap_state
 load_bootstrap_state(transition_ledger_header& header_value) noexcept {
-    return static_cast<bootstrap_state>(std::atomic_ref<std::uint32_t>(header_value.bootstrap_state)
-                                            .load(std::memory_order_acquire));
+    const std::uint32_t encoded_state =
+        std::atomic_ref<std::uint32_t>(header_value.bootstrap_state_value)
+            .load(std::memory_order_acquire);
+    return static_cast<bootstrap_state>(encoded_state);
 }
 
 inline void store_bootstrap_state(transition_ledger_header& header_value,
                                   bootstrap_state state) noexcept {
-    std::atomic_ref<std::uint32_t>(header_value.bootstrap_state)
+    std::atomic_ref<std::uint32_t>(header_value.bootstrap_state_value)
         .store(static_cast<std::uint32_t>(state), std::memory_order_release);
 }
 
@@ -974,7 +976,7 @@ initialize_transition_ledger(std::span<std::byte> region,
     *header_value = transition_ledger_header{
         .magic = k_transition_ledger_magic,
         .abi_revision = k_transition_ledger_abi_revision,
-        .bootstrap_state = static_cast<std::uint32_t>(bootstrap_state::initializing),
+        .bootstrap_state_value = static_cast<std::uint32_t>(bootstrap_state::initializing),
         .config = request.config,
         .layout = request.layout,
     };

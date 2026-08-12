@@ -387,7 +387,7 @@ void require_bounded_nthash_oracle_parity(
 
 [[nodiscard]] std::uint8_t fixed_dna4_alphabet_code() {
     const auto* table = fixed_highway_kernels();
-    const auto* identity = table == nullptr || !table->complete()
+    const auto* identity = table == nullptr || !table->is_complete()
         ? nullptr : table->resolve_alphabet_identity<seq::dna4>();
     if (identity == nullptr
         || table->resolve_alphabet_identity(identity->alphabet_code)
@@ -442,7 +442,7 @@ template <class p_collector_type>
         ::bioseq::minimizers::packed_sequence_kernel_view sequence) {
     return pipe::invoke_selected_minimizer_kernel<minimap_sketch_data>(
         fixed_highway_kernels(),
-        ::bioseq::simd_dispatch::highway_kernel_id::minimizer_bounded_nthash,
+        ::bioseq::simd_dispatch::highway_kernel::minimizer_bounded_nthash,
         ::bioseq::minimizers::minimizer_kernel_algorithm::bounded_nthash,
         sequence,
         10u,
@@ -1045,7 +1045,7 @@ TEST_CASE("scalar minimizers stream only a sliced composite source range",
 
     reset_source_observation(fixture.source);
     const auto source_view = make_composite_source_view(fixture.source);
-    REQUIRE_FALSE(lazy_is_worker_shareable(source_view));
+    REQUIRE_FALSE(bioseq::storage::is_worker_shareable(source_view));
     REQUIRE_FALSE(source_view.try_resident_packed(
         fixture.selected_from, fixture.selected_to, sizeof(std::uint32_t)));
     const auto source = run_dispatch(

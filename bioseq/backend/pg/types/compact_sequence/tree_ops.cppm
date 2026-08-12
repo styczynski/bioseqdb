@@ -1179,10 +1179,11 @@ export [[nodiscard]] inline logical_children_result logical_children(
                  errmsg("bioseq logical_children requires a branch")));
     }
     auto apply = [transform = edge.transform](piece_edge child) {
-        child.transform = bioseq::storage::compose(transform, child.transform);
+        child.transform = bioseq::storage::compose_sequence_transforms(
+            transform, child.transform);
         return child;
     };
-    if (bioseq::storage::has_reverse(edge.transform)) {
+    if (bioseq::storage::is_reversed(edge.transform)) {
         return {
             apply(edge.node->payload.branch.right),
             apply(edge.node->payload.branch.left),
@@ -1242,7 +1243,7 @@ template<class p_instance>
         right.symbol_to - right.symbol_from;
     const std::uint64_t combined_length = checked_tree_length_add(
         left_length, right_length);
-    const bool reversed = bioseq::storage::has_reverse(transform);
+    const bool reversed = bioseq::storage::is_reversed(transform);
     literal_piece const& physical_first = reversed ? right : left;
     literal_piece const& physical_second = reversed ? left : right;
 
@@ -1359,7 +1360,7 @@ template<class p_instance>
         || left.node->node_kind != right.node->node_kind) {
         return {};
     }
-    const bool reversed = bioseq::storage::has_reverse(left.transform);
+    const bool reversed = bioseq::storage::is_reversed(left.transform);
     if (left.node->node_kind == piece_node::kind::literal) {
         const auto& a = left.node->payload.literal;
         const auto& b = right.node->payload.literal;
@@ -1785,7 +1786,7 @@ transform_piece_edge_error_atomic(
         return {};
     }
     const tracked_piece_edge before_transform = tracked;
-    tracked.edge.transform = bioseq::storage::compose(
+    tracked.edge.transform = bioseq::storage::compose_sequence_transforms(
         transform, tracked.edge.transform);
     transition_piece_edge_cleanup_identity_noexcept(
         &ledger, before_transform, tracked);
@@ -1804,7 +1805,7 @@ export [[nodiscard]] inline split_result split_leaf(
                 (errcode(ERRCODE_INTERNAL_ERROR),
                  errmsg("invalid bioseq leaf split")));
     }
-    const bool reversed = bioseq::storage::has_reverse(edge.transform);
+    const bool reversed = bioseq::storage::is_reversed(edge.transform);
     if (edge.node->node_kind == piece_node::kind::source) {
         const source_piece& original = edge.node->payload.source;
         source_piece prefix = original;
@@ -1939,7 +1940,7 @@ namespace {
             destination, left, right, ledger,
             retired_join_root_policy::proportional_binding);
         const tracked_piece_edge before_transform = joined;
-        joined.edge.transform = bioseq::storage::compose(
+        joined.edge.transform = bioseq::storage::compose_sequence_transforms(
             edge.transform, joined.edge.transform);
         transition_piece_edge_cleanup_identity_noexcept(
             ledger, before_transform, joined);
@@ -3131,8 +3132,8 @@ factory_failure_source_read(
     return pg_sequence_source_read_status::ok;
   }
 
-  const bool reverse = bioseq::storage::has_reverse(transform);
-  const bool complement = bioseq::storage::has_complement(transform);
+  const bool reverse = bioseq::storage::is_reversed(transform);
+  const bool complement = bioseq::storage::is_complemented(transform);
   for (std::size_t output_index = 0u;
        output_index < output.size(); ++output_index) {
     const std::uint64_t physical = source_from

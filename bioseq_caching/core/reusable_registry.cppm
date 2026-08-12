@@ -205,7 +205,7 @@ struct reusable_generation_metadata {
     cache_digest_256 mapping_fingerprint{};
     cache_digest_256 lineage_fingerprint{};
     cache_digest_256 dependency_fingerprint{};
-    physical_identity physical_identity{};
+    physical_identity dependency_physical_identity{};
     write_observability observability = write_observability::database_wide_fallback;
     std::uint32_t reserved = 0;
     std::uint64_t estimated_covered_rows = 0;
@@ -469,7 +469,7 @@ struct reusable_shared_generation {
 struct reusable_registry_header {
     std::uint32_t magic = 0;
     std::uint32_t abi_revision = 0;
-    bootstrap_state bootstrap_state = bootstrap_state::uninitialized;
+    bootstrap_state bootstrap_status = bootstrap_state::uninitialized;
     std::uint32_t reserved = 0;
     reusable_registry_config config{};
     reusable_registry_layout layout{};
@@ -732,7 +732,7 @@ inline void release_coverage(const reusable_registry_partition_callbacks& callba
 
 /** Compute and normalize the exact shared-memory request. */
 [[nodiscard]] inline std::expected<reusable_registry_preload_request, reusable_registry_error>
-reusable_registry_preload_request(reusable_registry_config requested = {}) noexcept {
+make_reusable_registry_preload_request(reusable_registry_config requested = {}) noexcept {
     using namespace reusable_registry_detail;
     if (requested.reserved != 0 || requested.max_generations == 0 ||
         requested.max_generations > k_maximum_reusable_registry_generations ||
@@ -828,10 +828,10 @@ validate_reusable_registry_attachment(const reusable_registry_attachment& attach
     if (shared.abi_revision != k_reusable_registry_abi_revision) {
         return reusable_registry_error::abi_mismatch;
     }
-    if (shared.bootstrap_state != bootstrap_state::ready) {
+    if (shared.bootstrap_status != bootstrap_state::ready) {
         return reusable_registry_error::not_initialized;
     }
-    const auto expected = reusable_registry_preload_request(shared.config);
+    const auto expected = make_reusable_registry_preload_request(shared.config);
     if (!expected.has_value() ||
         std::memcmp(&expected->layout, &shared.layout, sizeof(shared.layout)) != 0 ||
         shared.layout.total_bytes > attachment.region.size() || shared.boot_nonce == 0 ||
@@ -867,7 +867,7 @@ startup_reusable_registry(std::span<std::byte> region,
                           std::uint64_t boot_nonce,
                           reusable_registry_config config = {},
                           bool found = false) noexcept {
-    const auto request = reusable_registry_preload_request(config);
+    const auto request = make_reusable_registry_preload_request(config);
     if (!request.has_value()) {
         return std::unexpected(request.error());
     }
@@ -898,7 +898,7 @@ startup_reusable_registry(std::span<std::byte> region,
     reusable_registry_header& shared = reusable_registry_detail::header(attachment);
     shared.magic = k_reusable_registry_magic;
     shared.abi_revision = k_reusable_registry_abi_revision;
-    shared.bootstrap_state = bootstrap_state::initializing;
+    shared.bootstrap_status = bootstrap_state::initializing;
     shared.config = request->config;
     shared.layout = request->layout;
     shared.boot_nonce = boot_nonce;
@@ -931,7 +931,7 @@ startup_reusable_registry(std::span<std::byte> region,
         .offset = shared.layout.byte_arena_offset,
         .length = shared.config.byte_arena_bytes,
     };
-    shared.bootstrap_state = bootstrap_state::ready;
+    shared.bootstrap_status = bootstrap_state::ready;
     return attachment;
 }
 
@@ -1145,7 +1145,7 @@ struct reusable_invalidation_selector {
     std::uint32_t database_oid = 0;
     std::uint32_t provider_id = 0;
     reusable_security_namespace security_namespace{};
-    physical_identity physical_identity{};
+    physical_identity dependency_physical_identity{};
     cache_digest_256 dependency_fingerprint{};
     cache_digest_256 schema_fingerprint{};
     cache_digest_256 mapping_fingerprint{};
@@ -2300,8 +2300,8 @@ generation_reference_count(const reusable_shared_generation& generation) noexcep
         dependency_vector_validation &&
         dependency_vector_validation.header.entry_count == request.metadata.dependency_count &&
         request.metadata.reserved == 0 &&
-        request.metadata.physical_identity.length <=
-            request.metadata.physical_identity.bytes.size() &&
+        request.metadata.dependency_physical_identity.length <=
+            request.metadata.dependency_physical_identity.bytes.size() &&
         write_observability_valid(request.metadata.observability) &&
         conservative_guard_valid(
             request.conservative_guard, request.metadata, security_namespace) &&
@@ -2642,11 +2642,13 @@ invalidation_selector_valid(const reusable_invalidation_selector& selector) noex
         return false;
     }
     const bool physical_kind_valid =
-        selector.physical_identity.kind == physical_identity_kind::pg_rel_file_locator ||
-        selector.physical_identity.kind == physical_identity_kind::provider_opaque;
+        selector.dependency_physical_identity.kind ==
+            physical_identity_kind::pg_rel_file_locator ||
+        selector.dependency_physical_identity.kind == physical_identity_kind::provider_opaque;
     if (selector.match_physical_identity &&
-        (!physical_kind_valid || selector.physical_identity.length == 0 ||
-         selector.physical_identity.length > selector.physical_identity.bytes.size())) {
+        (!physical_kind_valid || selector.dependency_physical_identity.length == 0 ||
+         selector.dependency_physical_identity.length >
+             selector.dependency_physical_identity.bytes.size())) {
         return false;
     }
     if (selector.match_observability && !write_observability_valid(selector.observability)) {
@@ -2678,7 +2680,8 @@ generation_matches_invalidation(const reusable_shared_generation& generation,
     const reusable_generation_metadata& metadata = generation.metadata;
     return (!selector.match_provider_id || metadata.provider_id == selector.provider_id) &&
            (!selector.match_physical_identity ||
-            physical_identity_equal(metadata.physical_identity, selector.physical_identity)) &&
+            physical_identity_equal(metadata.dependency_physical_identity,
+                                    selector.dependency_physical_identity)) &&
            (!selector.match_dependency_fingerprint ||
             metadata.dependency_fingerprint == selector.dependency_fingerprint) &&
            (!selector.match_schema_fingerprint ||
@@ -4822,7 +4825,7 @@ snapshot_reusable_generation_diagnostics(
 
 /** Snapshot bounded diagnostics without exposing query or canonical bytes. */
 [[nodiscard]] inline reusable_registry_snapshot
-reusable_registry_snapshot(const reusable_registry_attachment& attachment) noexcept {
+snapshot_reusable_registry(const reusable_registry_attachment& attachment) noexcept {
     using namespace reusable_registry_detail;
     reusable_registry_snapshot result{};
     if (validate_reusable_registry_attachment(attachment) != reusable_registry_error::none) {
@@ -4991,8 +4994,8 @@ validate_reusable_registry(const reusable_registry_attachment& attachment) noexc
             !conservative_guard_valid(generation.conservative_guard,
                                       generation.metadata,
                                       generation.coverage_directory_key.security_namespace) ||
-            generation.metadata.physical_identity.length >
-                generation.metadata.physical_identity.bytes.size() ||
+            generation.metadata.dependency_physical_identity.length >
+                generation.metadata.dependency_physical_identity.bytes.size() ||
             !std::all_of(generation.reserved_dependency_release.begin(),
                          generation.reserved_dependency_release.end(),
                          [](std::uint8_t value) noexcept { return value == 0; }) ||

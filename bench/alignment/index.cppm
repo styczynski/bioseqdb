@@ -165,9 +165,9 @@ struct aligner_output {
     bool        edit_threshold_enforced = false;
     std::uint32_t edit_threshold = 0u;
     bool        prefilter_enabled = false;
-    prefilter_backend prefilter_backend = prefilter_backend::automatic;
+    prefilter_backend selected_prefilter_backend = prefilter_backend::automatic;
     prefilter_execution_stats
-        prefilter_execution_stats{};
+        prefilter_stats{};
     bool prefilter_execution_stats_available = false;
     bool prefilter_execution_stats_consistent = false;
     bool        gpu_index_ownership_stats_consistent = false;
@@ -176,16 +176,16 @@ struct aligner_output {
     /// aggregate.  The aggregate counters are additive and therefore cannot
     /// be reinterpreted as one operation after a multi-pair run.
     bool        is_source_direct_gpu_index_materialization_consistent = false;
-    partial_vulkan_execution_stats partial_vulkan_execution_stats{};
+    partial_vulkan_execution_stats partial_vulkan_stats{};
     match_result_set_identity biological_fingerprint{};
     two_stack_execution_stats exact_simd_query_execution_stats{};
     two_stack_execution_stats exact_simd_target_execution_stats{};
     bounded_nthash_execution_stats bounded_nthash_query_execution_stats{};
     bounded_nthash_execution_stats bounded_nthash_target_execution_stats{};
-    simd_chaining_execution_stats simd_chaining_execution_stats{};
-    block_aligner_execution_stats block_aligner_execution_stats{};
-    scalar_pipeline_execution_stats scalar_pipeline_execution_stats{};
-    ksw2_batched_execution_stats ksw2_batched_execution_stats{};
+    simd_chaining_execution_stats simd_chaining_stats{};
+    block_aligner_execution_stats block_aligner_stats{};
+    scalar_pipeline_execution_stats scalar_pipeline_stats{};
+    ksw2_batched_execution_stats ksw2_batched_stats{};
     bool exact_simd_query_execution_stats_available = false;
     bool exact_simd_target_execution_stats_available = false;
     bool bounded_nthash_query_execution_stats_available = false;
@@ -2161,7 +2161,7 @@ static_assert([] {
 
     bool all_dimensions_validated = true;
 
-    const auto& scalar_stats = results.scalar_pipeline_execution_stats;
+    const auto& scalar_stats = results.scalar_pipeline_stats;
     if (scalar_stats.is_saturated) {
         throw std::runtime_error(fmt::format(
             "Bioseq row '{}' emitted saturated scalar execution stats",
@@ -2381,7 +2381,7 @@ static_assert([] {
     if (ksw2_batched_selected) {
         if (!results.is_ksw2_batched_execution_consistent(
                 /*require_nonempty_work=*/strict_xxl_gate)) {
-            const auto& stats = results.ksw2_batched_execution_stats;
+            const auto& stats = results.ksw2_batched_stats;
             throw std::runtime_error(fmt::format(
                 "selected KSW2_BATCHED route '{}' lacks operation stats: "
                 "available={} invocations={} regions={} fills={} calls={} "
@@ -2400,7 +2400,7 @@ static_assert([] {
                 stats.saturated));
         }
     } else if (results.ksw2_batched_execution_stats_available
-               || results.ksw2_batched_execution_stats
+               || results.ksw2_batched_stats
                     != ksw2_batched_execution_stats{}) {
         throw std::runtime_error(fmt::format(
             "non-KSW2_BATCHED route '{}' emitted batched execution stats",
@@ -2424,7 +2424,7 @@ static_assert([] {
             }
         } else if (!results.is_block_aligner_execution_consistent(
                        /*require_nonempty_simd_work=*/strict_xxl_gate)) {
-            const auto& stats = results.block_aligner_execution_stats;
+            const auto& stats = results.block_aligner_stats;
             throw std::runtime_error(fmt::format(
                 "selected Block Aligner lacks accepted SIMD stats: "
                 "algo='{}' cigar={} available={} consistent={} executed={} "
@@ -2478,7 +2478,7 @@ static_assert([] {
                 "explicit Vulkan row '{}' has no execution-stats stage contract", algo));
         }
         const auto& partial_vulkan_stats =
-            results.partial_vulkan_execution_stats;
+            results.partial_vulkan_stats;
         const bool is_exact_stage_mask_consistent =
             expect_source_direct_target_index
             ? partial_vulkan_stats.is_exact_source_direct_stage_mask_consistent(
@@ -2493,7 +2493,7 @@ static_assert([] {
                 expect_seed_lookup,
                 expect_chain_score);
         if (strict_xxl_gate && !is_exact_stage_mask_consistent) {
-            const auto& stats = results.partial_vulkan_execution_stats;
+            const auto& stats = results.partial_vulkan_stats;
             throw std::runtime_error(fmt::format(
                 "strict XXL Vulkan row '{}' lacks exact positive dispatch validation: "
                 "query_sketch={} target_sketch={} target_index_build={} "
@@ -2510,7 +2510,7 @@ static_assert([] {
         }
         if (strict_xxl_gate
             && algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
-            const auto& stats = results.partial_vulkan_execution_stats;
+            const auto& stats = results.partial_vulkan_stats;
             const bool materialization_stats_consistent =
                 is_source_direct_gpu_index_materialization_consistent(stats);
             if (!materialization_stats_consistent) {
@@ -2585,7 +2585,7 @@ static_assert([] {
         }
         if (strict_xxl_gate
             && algo == "bioseq_block_vulkan_resident_gpu_index_frontend") {
-            const auto& stats = results.partial_vulkan_execution_stats;
+            const auto& stats = results.partial_vulkan_stats;
             if (!gpu_index_ownership_stats_consistent(stats)) {
                 throw std::runtime_error(fmt::format(
                     "strict XXL resident GPU-index frontend row lacks exact GPU target-index "
@@ -2644,7 +2644,7 @@ static_assert([] {
         if (strict_xxl_gate
             && (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int"
                 || algo == "bioseq_block_vulkan_resident_gpu_index_frontend")) {
-            const auto& stats = results.partial_vulkan_execution_stats;
+            const auto& stats = results.partial_vulkan_stats;
             if (!is_seed_radix_sort_stats_consistent(stats)) {
                 throw std::runtime_error(fmt::format(
                     "strict XXL Vulkan row '{}' lacks scalable GPU seed-sort validation: "
@@ -2662,7 +2662,7 @@ static_assert([] {
                     stats.seed_host_sort_fallbacks));
             }
         }
-    } else if (results.partial_vulkan_execution_stats.has_any_dispatch()) {
+    } else if (results.partial_vulkan_stats.has_any_dispatch()) {
         throw std::runtime_error(fmt::format(
             "non-Vulkan row '{}' emitted partial Vulkan execution stats", algo));
     }
@@ -2697,7 +2697,7 @@ static_assert([] {
     output.edit_threshold_enforced = dispatch.enforce_edit_threshold;
     output.edit_threshold = dispatch.params.prefilter_max_edits;
     output.prefilter_enabled = dispatch.params.prefilter_enabled;
-    output.prefilter_backend = dispatch.params.prefilter_backend;
+    output.selected_prefilter_backend = dispatch.params.prefilter_backend;
     output.simd_chaining_policy_selected =
         dispatch.params.chaining_algorithm == chaining_algorithm::simd_minimap2;
     output.selected_simd_chaining_policy =
@@ -2809,7 +2809,7 @@ static_assert([] {
         }
         if (source_direct_selected
             && !is_source_direct_gpu_index_materialization_consistent(
-                results.partial_vulkan_execution_stats)) {
+                results.partial_vulkan_stats)) {
             every_source_direct_pair_validated = false;
         }
         if (results.bounded_nthash_query_execution_stats_available) {
@@ -2833,34 +2833,34 @@ static_assert([] {
             output.exact_simd_target_execution_stats_available = true;
         }
         if (results.scalar_pipeline_execution_stats_available) {
-            output.scalar_pipeline_execution_stats.merge(
-                results.scalar_pipeline_execution_stats);
+            output.scalar_pipeline_stats.merge(
+                results.scalar_pipeline_stats);
             output.scalar_pipeline_execution_stats_available = true;
         }
         if (results.ksw2_batched_execution_stats_available) {
-            output.ksw2_batched_execution_stats.merge(
-                results.ksw2_batched_execution_stats);
+            output.ksw2_batched_stats.merge(
+                results.ksw2_batched_stats);
             output.ksw2_batched_execution_stats_available = true;
         }
         if (results.prefilter_execution_stats_available) {
-            output.prefilter_execution_stats.merge(
-                results.prefilter_execution_stats);
+            output.prefilter_stats.merge(
+                results.prefilter_stats);
             output.prefilter_execution_stats_available = true;
         }
         if (capture_full_route_stats) {
             if (results.simd_chaining_execution_stats_available) {
-                output.simd_chaining_execution_stats.merge(
-                    results.simd_chaining_execution_stats);
+                output.simd_chaining_stats.merge(
+                    results.simd_chaining_stats);
                 output.simd_chaining_execution_stats_available = true;
             }
             if (results.block_aligner_execution_stats_available) {
-                output.block_aligner_execution_stats.merge(
-                    results.block_aligner_execution_stats);
+                output.block_aligner_stats.merge(
+                    results.block_aligner_stats);
                 output.block_aligner_execution_stats_available = true;
             }
         }
-        output.partial_vulkan_execution_stats.merge(
-            results.partial_vulkan_execution_stats);
+        output.partial_vulkan_stats.merge(
+            results.partial_vulkan_stats);
         output.biological_fingerprint.merge(
             results.biological_identity());
         bool found_primary = false;
@@ -2900,7 +2900,7 @@ static_assert([] {
     output.gpu_index_ownership_stats_consistent =
         algo == "bioseq_block_vulkan_resident_gpu_index_frontend"
         && gpu_index_ownership_stats_consistent(
-            output.partial_vulkan_execution_stats);
+            output.partial_vulkan_stats);
     output.is_source_direct_gpu_index_materialization_consistent =
         source_direct_selected
         && every_pair_route_validated
@@ -2914,7 +2914,7 @@ static_assert([] {
             algo));
     }
     const bool prefilter_stats_are_zero =
-        output.prefilter_execution_stats
+        output.prefilter_stats
             == prefilter_execution_stats{};
     if (!dispatch.params.prefilter_enabled) {
         if (output.prefilter_execution_stats_available
@@ -2929,13 +2929,13 @@ static_assert([] {
             && dispatch.params.prefilter_max_edits <= 31u;
         output.prefilter_execution_stats_consistent =
             output.prefilter_execution_stats_available
-            && output.prefilter_execution_stats.is_backend_consistent(
+            && output.prefilter_stats.is_backend_consistent(
                 dispatch.params.prefilter_backend,
                 require_evaluated_vulkan_jobs,
                 require_evaluated_vulkan_jobs);
         if (!output.prefilter_execution_stats_consistent) {
             const auto& stats =
-                output.prefilter_execution_stats;
+                output.prefilter_stats;
             throw std::runtime_error(fmt::format(
                 "prefilter row '{}' lacks accepted operation stats: "
                 "present={} backend={} dispatches={} scalar={} simd={} "
@@ -3163,9 +3163,9 @@ run_simd_chaining_endpoint_qualification(
             && minimap_fixture_route_accepted;
 
         qualification.exact_policy_stats.merge(
-            exact.matches.simd_chaining_execution_stats);
+            exact.matches.simd_chaining_stats);
         qualification.bounded_policy_stats.merge(
-            bounded.matches.simd_chaining_execution_stats);
+            bounded.matches.simd_chaining_stats);
         qualification.exact_policy_stats_available =
             qualification.exact_policy_stats_available
             || exact.matches.simd_chaining_execution_stats_available;
@@ -3189,7 +3189,7 @@ run_simd_chaining_endpoint_qualification(
         comparison.exact_endpoint = endpoint_stats(exact_primary);
         comparison.minimap2_endpoint = endpoint_stats(minimap_primary);
         const auto& fixture_stats =
-            bounded.matches.simd_chaining_execution_stats;
+            bounded.matches.simd_chaining_stats;
         comparison.bounded_cutoff_stops =
             fixture_stats.policy.bounded_cutoff_stops;
         comparison.bounded_candidates_skipped =
@@ -3543,22 +3543,22 @@ record_prefilter_pipeline_match_count_parity(
     metrics.emplace("prefilter_backend_off",
         !output.prefilter_enabled
             && !output.prefilter_execution_stats_available
-            && output.prefilter_execution_stats
+            && output.prefilter_stats
                 == prefilter_execution_stats{}
         ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_scalar",
         output.prefilter_execution_stats_available
-            && output.prefilter_execution_stats.is_backend_consistent(
+            && output.prefilter_stats.is_backend_consistent(
                 prefilter_backend::scalar)
         ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_simd",
         output.prefilter_execution_stats_available
-            && output.prefilter_execution_stats.is_backend_consistent(
+            && output.prefilter_stats.is_backend_consistent(
                 prefilter_backend::simd)
         ? 1.0 : 0.0);
     metrics.emplace("prefilter_backend_vulkan",
         output.prefilter_execution_stats_available
-            && output.prefilter_execution_stats.is_backend_consistent(
+            && output.prefilter_stats.is_backend_consistent(
                 prefilter_backend::vulkan,
                 /*require_evaluated_jobs=*/true,
                 /*forbid_unsupported_jobs=*/true)
@@ -3568,54 +3568,54 @@ record_prefilter_pipeline_match_count_parity(
     metrics.emplace("prefilter_execution_stats_consistent",
         output.prefilter_execution_stats_consistent ? 1.0 : 0.0);
     metrics.emplace("prefilter_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.dispatches));
+        output.prefilter_stats.dispatches));
     metrics.emplace("prefilter_sneaky_snake_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.sneaky_snake_dispatches));
+        output.prefilter_stats.sneaky_snake_dispatches));
     metrics.emplace("prefilter_gatekeeper_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.gatekeeper_dispatches));
+        output.prefilter_stats.gatekeeper_dispatches));
     metrics.emplace("prefilter_scalar_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.scalar_dispatches));
+        output.prefilter_stats.scalar_dispatches));
     metrics.emplace("prefilter_simd_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.simd_dispatches));
+        output.prefilter_stats.simd_dispatches));
     metrics.emplace("prefilter_vulkan_dispatches", static_cast<double>(
-        output.prefilter_execution_stats.vulkan_dispatches));
+        output.prefilter_stats.vulkan_dispatches));
     metrics.emplace("prefilter_jobs", static_cast<double>(
-        output.prefilter_execution_stats.jobs));
+        output.prefilter_stats.jobs));
     metrics.emplace("prefilter_evaluated_jobs", static_cast<double>(
-        output.prefilter_execution_stats.evaluated_jobs));
+        output.prefilter_stats.evaluated_jobs));
     metrics.emplace("prefilter_length_difference_jobs", static_cast<double>(
-        output.prefilter_execution_stats
+        output.prefilter_stats
             .length_difference_jobs));
     metrics.emplace("prefilter_unsupported_jobs", static_cast<double>(
-        output.prefilter_execution_stats.unsupported_jobs));
+        output.prefilter_stats.unsupported_jobs));
     metrics.emplace("prefilter_rejected_jobs", static_cast<double>(
-        output.prefilter_execution_stats.rejected_jobs));
+        output.prefilter_stats.rejected_jobs));
     metrics.emplace("prefilter_rejected_regions", static_cast<double>(
-        output.prefilter_execution_stats.rejected_regions));
+        output.prefilter_stats.rejected_regions));
     metrics.emplace("prefilter_surviving_regions", static_cast<double>(
-        output.prefilter_execution_stats.surviving_regions));
+        output.prefilter_stats.surviving_regions));
     metrics.emplace("prefilter_mask_rejection_candidates", static_cast<double>(
-        output.prefilter_execution_stats.mask_rejection_candidates));
+        output.prefilter_stats.mask_rejection_candidates));
     metrics.emplace("prefilter_exact_guard_activations", static_cast<double>(
-        output.prefilter_execution_stats.exact_guard_activations));
+        output.prefilter_stats.exact_guard_activations));
     metrics.emplace("prefilter_guard_confirmed_rejections", static_cast<double>(
-        output.prefilter_execution_stats.guard_confirmed_rejections));
+        output.prefilter_stats.guard_confirmed_rejections));
     metrics.emplace("prefilter_hamming_exact_rejections", static_cast<double>(
-        output.prefilter_execution_stats.hamming_exact_rejections));
+        output.prefilter_stats.hamming_exact_rejections));
     metrics.emplace("prefilter_execution_stats_saturated",
-        output.prefilter_execution_stats.is_saturated ? 1.0 : 0.0);
+        output.prefilter_stats.is_saturated ? 1.0 : 0.0);
     metrics.emplace("ksw2_left_calls", static_cast<double>(
-        output.scalar_pipeline_execution_stats.ksw2_left_calls));
+        output.scalar_pipeline_stats.ksw2_left_calls));
     metrics.emplace("ksw2_gap_calls", static_cast<double>(
-        output.scalar_pipeline_execution_stats.ksw2_gap_calls));
+        output.scalar_pipeline_stats.ksw2_gap_calls));
     metrics.emplace("ksw2_right_calls", static_cast<double>(
-        output.scalar_pipeline_execution_stats.ksw2_right_calls));
+        output.scalar_pipeline_stats.ksw2_right_calls));
     metrics.emplace("ksw2_total_calls", static_cast<double>(
-        output.scalar_pipeline_execution_stats.ksw2_left_calls
-        + output.scalar_pipeline_execution_stats.ksw2_gap_calls
-        + output.scalar_pipeline_execution_stats.ksw2_right_calls));
+        output.scalar_pipeline_stats.ksw2_left_calls
+        + output.scalar_pipeline_stats.ksw2_gap_calls
+        + output.scalar_pipeline_stats.ksw2_right_calls));
     metrics.emplace("ksw2_input_cell_area", static_cast<double>(
-        output.scalar_pipeline_execution_stats.ksw2_input_cell_area));
+        output.scalar_pipeline_stats.ksw2_input_cell_area));
     metrics.emplace("selected_route_execution_stats_consistent",
         output.selected_route_execution_stats_consistent ? 1.0 : 0.0);
     const auto& biological = output.biological_fingerprint;
@@ -3649,7 +3649,7 @@ record_prefilter_pipeline_match_count_parity(
         uint64_lo32_metric(biological.cigar_digest_lane1));
     metrics.emplace("ksw2_batched_execution_stats_consistent",
         output.ksw2_batched_execution_stats_available
-            && output.ksw2_batched_execution_stats.is_coherent(true)
+            && output.ksw2_batched_stats.is_coherent(true)
             ? 1.0 : 0.0);
     metrics.emplace("bounded_nthash_query_execution_stats_consistent",
         output.bounded_nthash_query_execution_stats_available
@@ -3736,26 +3736,26 @@ record_prefilter_pipeline_match_count_parity(
         static_cast<double>(output.exact_simd_target_execution_stats
             .kmer_15_window_10_byte_8_uint32_hash_kernel_calls));
     metrics.emplace("simd_chaining_no_improvement_fast_batches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .no_improvement_fast_batches));
     metrics.emplace("simd_chaining_improvement_replay_batches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .improvement_replay_batches));
     metrics.emplace("simd_chaining_improvement_replay_lanes",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .improvement_replay_lanes));
     metrics.emplace("simd_chaining_scalar_orchestration_steps",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .scalar_orchestration_steps));
     metrics.emplace("simd_chaining_hybrid_stats_coherent",
         output.simd_chaining_execution_stats_available
-            && output.simd_chaining_execution_stats
+            && output.simd_chaining_stats
                 .has_consistent_exact_execution_stats()
             ? 1.0 : 0.0);
     const bool selected_policy_stats_coherent =
         output.simd_chaining_policy_selected
         && output.simd_chaining_execution_stats_available
-        && output.simd_chaining_execution_stats.has_consistent_policy_stats(
+        && output.simd_chaining_stats.has_consistent_policy_stats(
             output.selected_simd_chaining_policy,
             /*require_accelerated_work=*/
                 output.selected_simd_chaining_policy
@@ -3777,63 +3777,63 @@ record_prefilter_pipeline_match_count_parity(
         selected_policy_stats_coherent ? 1.0 : 0.0);
     metrics.emplace("simd_chaining_exact_visited_calls",
         static_cast<double>(
-            output.simd_chaining_execution_stats.policy.exact_visited_calls));
+            output.simd_chaining_stats.policy.exact_visited_calls));
     metrics.emplace("simd_chaining_bounded_batch_approximate_calls",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_batch_approximate_calls));
     metrics.emplace("simd_chaining_bounded_score_batches",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_score_batches));
     metrics.emplace("simd_chaining_bounded_improving_batches",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_improving_batches));
     metrics.emplace("simd_chaining_bounded_nonimproving_batches",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_nonimproving_batches));
     metrics.emplace("simd_chaining_bounded_cutoff_stops",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_cutoff_stops));
     metrics.emplace("simd_chaining_bounded_candidates_skipped",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .bounded_candidates_skipped));
     metrics.emplace("simd_chaining_global_best_rescue_probes",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .global_best_rescue_probes));
     metrics.emplace("simd_chaining_global_best_rescue_wins",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .global_best_rescue_wins));
     metrics.emplace("simd_chaining_policy_rejections",
-        static_cast<double>(output.simd_chaining_execution_stats.policy
+        static_cast<double>(output.simd_chaining_stats.policy
             .policy_rejections));
     metrics.emplace("simd_chaining_policy_stats_saturated",
-        output.simd_chaining_execution_stats.policy.saturated ? 1.0 : 0.0);
+        output.simd_chaining_stats.policy.saturated ? 1.0 : 0.0);
     metrics.emplace("simd_chaining_contiguous_predecessor_store_batches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .contiguous_predecessor_store_batches));
     metrics.emplace(
         "simd_chaining_backtrack_primary_contiguous_batches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .backtrack_primary_contiguous_batches));
     metrics.emplace(
         "simd_chaining_backtrack_all_starts_visited_fast_batches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .backtrack_all_starts_visited_fast_batches));
     metrics.emplace("simd_chaining_execution_stats_consistent",
         output.simd_chaining_policy_selected
             && output.simd_chaining_execution_stats_available
-            && output.simd_chaining_execution_stats
+            && output.simd_chaining_stats
                 .is_internally_consistent(
                     output.selected_simd_chaining_policy,
                     /*require_nonempty_vector_work=*/true)
             ? 1.0 : 0.0);
     metrics.emplace("simd_chaining_scalar_score_branches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .scalar_score_branches));
     metrics.emplace("simd_chaining_scalar_backtrack_branches",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .scalar_backtrack_branches));
     metrics.emplace("simd_chaining_shared_scalar_backtrack_calls",
-        static_cast<double>(output.simd_chaining_execution_stats
+        static_cast<double>(output.simd_chaining_stats
             .shared_scalar_backtrack_calls));
     metrics.emplace("mixed_gpu_pipeline_selected",
                     output.mixed_gpu_pipeline_marker ? 1.0 : 0.0);
@@ -3842,51 +3842,51 @@ record_prefilter_pipeline_match_count_parity(
     metrics.emplace("gpu_index_ownership_validation_consistent",
         output.gpu_index_ownership_stats_consistent ? 1.0 : 0.0);
     metrics.emplace("vulkan_query_sketch_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .query_sketch_dispatches));
     metrics.emplace("vulkan_target_sketch_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .target_sketch_dispatches));
     metrics.emplace("vulkan_target_index_build_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .target_index_build_dispatches));
     metrics.emplace("vulkan_seed_lookup_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_lookup_dispatches));
     metrics.emplace("vulkan_seed_open_addressed_lookup_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_open_addressed_lookup_dispatches));
     metrics.emplace("vulkan_seed_sorted_dense_lookup_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_sorted_dense_lookup_dispatches));
     metrics.emplace("vulkan_chain_score_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .chain_score_dispatches));
     metrics.emplace("vulkan_seed_bitonic_sort_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_bitonic_sort_dispatches));
     metrics.emplace("vulkan_seed_radix_sort_operations",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_sort_operations));
     metrics.emplace("vulkan_seed_radix_anchor_count",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_anchor_count));
     metrics.emplace("vulkan_seed_radix_passes",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_passes));
     metrics.emplace("vulkan_seed_radix_histogram_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_histogram_dispatches));
     metrics.emplace("vulkan_seed_radix_scan_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_scan_dispatches));
     metrics.emplace("vulkan_seed_radix_scatter_dispatches",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_radix_scatter_dispatches));
     metrics.emplace("vulkan_seed_host_sort_fallbacks",
-                    static_cast<double>(output.partial_vulkan_execution_stats
+                    static_cast<double>(output.partial_vulkan_stats
                                             .seed_host_sort_fallbacks));
-    const auto& gpu_index = output.partial_vulkan_execution_stats;
+    const auto& gpu_index = output.partial_vulkan_stats;
     metrics.emplace("vulkan_seed_anchor_validation_operations",
         static_cast<double>(gpu_index.seed_anchor_stats_operations));
     metrics.emplace("vulkan_seed_canonical_anchor_count",
@@ -4551,7 +4551,7 @@ record_prefilter_pipeline_match_count_parity(
     const aligner_input& /*input*/,
     const aligner_output& output)
 {
-    const auto& stats = output.partial_vulkan_execution_stats;
+    const auto& stats = output.partial_vulkan_stats;
     const auto& biological = output.biological_fingerprint;
     return nlohmann::json{
         {"payload_schema", "bioseq.xxl_hifi.route_validation"},
@@ -4600,18 +4600,18 @@ record_prefilter_pipeline_match_count_parity(
             output.bounded_nthash_target_execution_stats,
             output.bounded_nthash_target_execution_stats_available)},
         {"scalar_pipeline_execution_stats", scalar_pipeline_stats_json(
-            output.scalar_pipeline_execution_stats,
+            output.scalar_pipeline_stats,
             output.scalar_pipeline_execution_stats_available)},
         {"ksw2_batched_execution_stats", ksw2_batched_stats_json(
-            output.ksw2_batched_execution_stats,
+            output.ksw2_batched_stats,
             output.ksw2_batched_execution_stats_available)},
         {"simd_chaining_execution_stats", simd_chaining_stats_json(
-            output.simd_chaining_execution_stats,
+            output.simd_chaining_stats,
             output.simd_chaining_execution_stats_available,
             output.selected_simd_chaining_policy,
             output.simd_chaining_policy_selected)},
         {"block_aligner_execution_stats", block_aligner_stats_json(
-            output.block_aligner_execution_stats,
+            output.block_aligner_stats,
             output.block_aligner_execution_stats_available)},
         {"partial_vulkan_execution_stats", {
             {"query_sketch_dispatches", stats.query_sketch_dispatches},

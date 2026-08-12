@@ -31,6 +31,7 @@
 #include <vector>
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.common.context;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
@@ -243,7 +244,7 @@ TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.host_footprint_reflected_delta_bytes =
         original_capacity * sizeof(sketch_type);
     source.arena_trimmed_before_host_materialization = true;
@@ -390,7 +391,7 @@ TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases devic
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.arena_trimmed_before_host_materialization = true;
 
     auto adopted = ::bioseq::simd::pipe_entry_detail::
@@ -425,7 +426,7 @@ TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.arena_trimmed_before_host_materialization = true;
     auto adopted = ::bioseq::simd::pipe_entry_detail::
         adopt_fixed_vulkan_sketch_host_result(std::move(source));
@@ -479,7 +480,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, std::uint64_t{64} << 20u)));
 
     source_type source;
@@ -497,7 +498,7 @@ TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to pos
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.host_footprint_reflected_delta_bytes = source_host_bytes;
     source.arena_trimmed_before_host_materialization = true;
 
@@ -594,7 +595,7 @@ TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, std::uint64_t{64} << 20u)));
 
     source_type source;
@@ -612,7 +613,7 @@ TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.host_footprint_reflected_delta_bytes = source_host_bytes;
     source.arena_trimmed_before_host_materialization = true;
 
@@ -669,7 +670,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, std::uint64_t{64} << 20u)));
 
     constexpr std::size_t minimizer_count = 2u;
@@ -695,7 +696,7 @@ TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through inde
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = false;
+    source.host_permit_released_to_process_footprint = false;
     source.host_footprint_reflected_delta_bytes = 0u;
     source.arena_trimmed_before_host_materialization = true;
 
@@ -761,7 +762,7 @@ TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
         completed_collect_minimizers_roundtrip();
     source.host_ownership_route = bioseq::gpu::vulkan::
         vulkan_sketch_host_ownership_route::fixed_zero_copy_adoption;
-    source.is_host_permit_released_to_process_footprint = true;
+    source.host_permit_released_to_process_footprint = true;
     source.host_footprint_reflected_delta_bytes = sizeof(sketch_type);
     source.arena_trimmed_before_host_materialization = true;
 
@@ -801,7 +802,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, std::uint64_t{512} << 20u)));
 
     seq::dna5 ambiguous{};
@@ -846,12 +847,12 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     const std::uint64_t host_capacity_bytes =
         result->host_minimizers.capacity() * sizeof(sketch_type);
     const bool footprint_authority =
-        result->is_host_permit_released_to_process_footprint
+        result->host_permit_released_to_process_footprint
         && !result->host_permit.has_value()
         && result->host_footprint_reflected_delta_bytes
             >= host_capacity_bytes;
     const bool retained_permit_authority =
-        !result->is_host_permit_released_to_process_footprint
+        !result->host_permit_released_to_process_footprint
         && result->host_permit.has_value()
         && result->host_permit->bytes() == host_capacity_bytes;
     REQUIRE(footprint_authority != retained_permit_authority);
@@ -927,7 +928,7 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
     REQUIRE(pipeline_cache_metadata_after
             >= pipeline_cache_metadata_baseline);
     REQUIRE(admission.reserved_bytes()
-            == bioseq::parallelism::saturating_add(
+            == bioseq::common::saturating_add(
                 baseline,
                 pipeline_cache_metadata_after
                     - pipeline_cache_metadata_baseline));
@@ -1989,10 +1990,10 @@ TEST_CASE("stats merges saturate and identities fail closed",
     REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::simd_cpu)
             == executed_backend::simd_cpu);
     REQUIRE(merge_backend_identity(executed_backend::simd_cpu, executed_backend::vulkan_gpu)
-            == executed_backend::is_mixed_invalid);
+            == executed_backend::mixed_invalid);
     REQUIRE(merge_target_index_identity(target_index_source::recomputed,
                                         target_index_source::persisted)
-            == target_index_source::is_mixed_invalid);
+            == target_index_source::mixed_invalid);
     REQUIRE(merge_simd_chaining_policy_identity(
                 simd_chaining_policy_identity::none,
                 simd_chaining_policy_identity::bounded_batch_approximate)
@@ -2000,15 +2001,15 @@ TEST_CASE("stats merges saturate and identities fail closed",
     REQUIRE(merge_simd_chaining_policy_identity(
                 simd_chaining_policy_identity::exact_visited,
                 simd_chaining_policy_identity::bounded_batch_approximate)
-            == simd_chaining_policy_identity::is_mixed_invalid);
+            == simd_chaining_policy_identity::mixed_invalid);
     REQUIRE(merge_simd_alignment_algorithm_identity(
                 simd_alignment_algorithm_identity::none,
                 simd_alignment_algorithm_identity::block_aligner)
             == simd_alignment_algorithm_identity::block_aligner);
     REQUIRE(merge_simd_alignment_algorithm_identity(
                 simd_alignment_algorithm_identity::block_aligner,
-                simd_alignment_algorithm_identity::is_mixed_invalid)
-            == simd_alignment_algorithm_identity::is_mixed_invalid);
+                simd_alignment_algorithm_identity::mixed_invalid)
+            == simd_alignment_algorithm_identity::mixed_invalid);
 
     execution_environment_snapshot merged{};
     const execution_environment_snapshot cpu = make_cpu_environment(3);
@@ -2211,9 +2212,9 @@ TEST_CASE("pipeline stats retain policy identity and distinct vector activity",
     REQUIRE(is_job_execution_stats_valid(exact));
     aggregate.merge_job(exact);
     REQUIRE(aggregate.requested_simd_chaining_policy
-            == simd_chaining_policy_identity::is_mixed_invalid);
+            == simd_chaining_policy_identity::mixed_invalid);
     REQUIRE(aggregate.observed_simd_chaining_policy
-            == simd_chaining_policy_identity::is_mixed_invalid);
+            == simd_chaining_policy_identity::mixed_invalid);
     REQUIRE(aggregate.attempted_alignment_jobs == 2);
     REQUIRE(aggregate.fully_attested_alignment_jobs == 0);
     REQUIRE(aggregate.unattested_alignment_jobs == 2);
@@ -2224,9 +2225,9 @@ TEST_CASE("pipeline stats retain policy identity and distinct vector activity",
     exact_group.merge_job(exact);
     bounded_group.merge(exact_group);
     REQUIRE(bounded_group.requested_simd_chaining_policy
-            == simd_chaining_policy_identity::is_mixed_invalid);
+            == simd_chaining_policy_identity::mixed_invalid);
     REQUIRE(bounded_group.observed_simd_chaining_policy
-            == simd_chaining_policy_identity::is_mixed_invalid);
+            == simd_chaining_policy_identity::mixed_invalid);
     REQUIRE(bounded_group.fully_attested_alignment_jobs == 0);
     REQUIRE(bounded_group.unattested_alignment_jobs == 2);
 
@@ -2577,7 +2578,7 @@ TEST_CASE("GPU environment requires canonical identity and policy-hit pairs",
 
     auto mixed_policy = make_gpu_environment();
     mixed_policy.gpu_pipeline_cache_policy =
-        pipeline_cache_policy::is_mixed_invalid;
+        pipeline_cache_policy::mixed_invalid;
 
     auto immutable_unset_hit = make_gpu_environment();
     immutable_unset_hit.gpu_pipeline_cache_hit =
@@ -2585,7 +2586,7 @@ TEST_CASE("GPU environment requires canonical identity and policy-hit pairs",
 
     auto immutable_mixed_hit = make_gpu_environment();
     immutable_mixed_hit.gpu_pipeline_cache_hit =
-        optional_observation_bool::is_mixed_invalid;
+        optional_observation_bool::mixed_invalid;
 
     auto isolated_unset_hit = make_gpu_environment();
     isolated_unset_hit.gpu_pipeline_cache_policy =
@@ -2597,7 +2598,7 @@ TEST_CASE("GPU environment requires canonical identity and policy-hit pairs",
     isolated_mixed_hit.gpu_pipeline_cache_policy =
         pipeline_cache_policy::isolated_miss_diagnostic;
     isolated_mixed_hit.gpu_pipeline_cache_hit =
-        optional_observation_bool::is_mixed_invalid;
+        optional_observation_bool::mixed_invalid;
 
     struct invalid_environment_case {
         std::string_view name;
@@ -3039,8 +3040,8 @@ TEST_CASE("mixed CPU diagnostics retain environment without becoming stats",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     using namespace bioseq::pipeline_stats;
     pipeline_job_execution_stats job{};
-    job.requested_backend = executed_backend::is_mixed_invalid;
-    job.actual_backend = executed_backend::is_mixed_invalid;
+    job.requested_backend = executed_backend::mixed_invalid;
+    job.actual_backend = executed_backend::mixed_invalid;
     job.requested_target_index_source = target_index_source::recomputed;
     job.actual_target_index_source = target_index_source::recomputed;
     job.environment = make_cpu_environment();
@@ -3054,7 +3055,7 @@ TEST_CASE("mixed CPU diagnostics retain environment without becoming stats",
 
     pipeline_execution_stats statement{};
     statement.merge(node);
-    REQUIRE(statement.actual_backend == executed_backend::is_mixed_invalid);
+    REQUIRE(statement.actual_backend == executed_backend::mixed_invalid);
     REQUIRE(statement.fully_attested_alignment_jobs == 0);
     REQUIRE(statement.unattested_alignment_jobs == 1);
     REQUIRE_FALSE(statement.environment.is_mixed_invalid);
@@ -3067,7 +3068,7 @@ TEST_CASE("mixed CPU diagnostics retain environment without becoming stats",
     valid_job.query_ordinal = 3;
     valid_sibling.merge_job(valid_job);
     statement.merge(valid_sibling);
-    REQUIRE(statement.actual_backend == executed_backend::is_mixed_invalid);
+    REQUIRE(statement.actual_backend == executed_backend::mixed_invalid);
     REQUIRE(statement.fully_attested_alignment_jobs == 0);
     REQUIRE(statement.unattested_alignment_jobs == 2);
     REQUIRE(pipeline_execution_stats::is_diagnostic_environment_valid(statement));
@@ -3729,7 +3730,7 @@ TEST_CASE("dispatch primary and extra-query aggregates merge once",
         pipeline_execution_stats invocation{};
         pipeline_job_execution_stats job{};
         job.requested_backend = executed_backend::vulkan_gpu;
-        job.actual_backend = executed_backend::is_mixed_invalid;
+        job.actual_backend = executed_backend::mixed_invalid;
         job.requested_target_index_source = target_index_source::recomputed;
         job.actual_target_index_source = target_index_source::recomputed;
         job.logical_target_row = 41;
@@ -3748,7 +3749,7 @@ TEST_CASE("dispatch primary and extra-query aggregates merge once",
     completed_buffer.merge(incomplete_invocation(1, 2, false));
 
     REQUIRE(completed_buffer.requested_backend == executed_backend::vulkan_gpu);
-    REQUIRE(completed_buffer.actual_backend == executed_backend::is_mixed_invalid);
+    REQUIRE(completed_buffer.actual_backend == executed_backend::mixed_invalid);
     REQUIRE(completed_buffer.requested_target_index_source
             == target_index_source::recomputed);
     REQUIRE(completed_buffer.actual_target_index_source
@@ -3772,7 +3773,7 @@ TEST_CASE("persisted request cannot be laundered by recompute outcome",
     pipeline_execution_stats invocation{};
     pipeline_job_execution_stats job{};
     job.requested_backend = executed_backend::simd_cpu;
-    job.actual_backend = executed_backend::is_mixed_invalid;
+    job.actual_backend = executed_backend::mixed_invalid;
     job.requested_simd_chaining_policy =
         simd_chaining_policy_identity::bounded_batch_approximate;
     job.observed_simd_chaining_policy = simd_chaining_policy_identity::none;
@@ -4166,7 +4167,7 @@ TEST_CASE("KSW2 batched stats rejects zero and tampered observations",
     second.record_alignment_result_host_time(31u);
     first.combine_execution_stats(second);
     REQUIRE(first.is_ksw2_batched_execution_consistent(true));
-    REQUIRE(first.ksw2_batched_execution_stats.alignment_region_invocations
+    REQUIRE(first.ksw2_batched_stats.alignment_region_invocations
             == 2u);
     REQUIRE(first.query_sketch_host_wall_ns == 18u);
     REQUIRE(first.seed_lookup_host_wall_ns == 30u);
@@ -4181,10 +4182,10 @@ TEST_CASE("Host timing region handoff is non-overlapping and mergeable",
     using ::bioseq::simd::match_result_collection;
 
     match_result_collection collection;
-    collection.begin_region_host_phase(100u);
-    collection.transition_region_to_alignment_result_host_phase(
+    collection.begin_region_host_stage(100u);
+    collection.transition_region_to_alignment_result_host_stage(
         130u, /*alignment_enabled=*/true);
-    collection.finish_alignment_result_host_phase(180u);
+    collection.finish_alignment_result_host_stage(180u);
 
     REQUIRE(collection.region_generation_host_wall_ns == 30u);
     REQUIRE(collection.alignment_result_host_wall_ns == 50u);
@@ -4213,7 +4214,7 @@ using base_alignment_algorithm_type = ::bioseq::simd::base_alignment_algorithm;
 using chaining_algorithm_type  = ::bioseq::simd::chaining_algorithm;
 using minimizer_algorithm_type  = ::bioseq::simd::minimizer_algorithm;
 
-/// Probe callable for `enum_dispatch_pack` tests.  Stateless POD with a
+/// Probe callable for `dispatch_exact_value_or_default` tests. Stateless POD with a
 /// templated `operator()` whose body forwards the matched IC<T, V> into a
 /// caller-provided reference slot.
 template <class p_t>
@@ -4230,7 +4231,7 @@ struct value_capture_callable {
 
 }  // namespace dispatch_test_support
 
-TEST_CASE("enum_dispatch_pack routes to the matching template branch",
+TEST_CASE("dispatch_exact_value_or_default routes to the matching template branch",
           "[component:bioseq][layer:unit][feature:planner]")
 {
     using dispatch_test_support::base_alignment_algorithm_type;
@@ -4242,7 +4243,7 @@ TEST_CASE("enum_dispatch_pack routes to the matching template branch",
         for (chaining_algorithm_type v : {chaining_algorithm_type::scalar_minimap2, chaining_algorithm_type::simd_minimap2, chaining_algorithm_type::range_minimum_query, chaining_algorithm_type::vulkan_tiled_dynamic_programming}) {
             chaining_algorithm_type captured = static_cast<chaining_algorithm_type>(0xFF);
             dispatch_test_support::value_capture_callable<chaining_algorithm_type> cb{&captured};
-            const chaining_algorithm_type result = enum_dispatch_pack<chaining_algorithm_type, chaining_algorithm_type, registry_type::default_value>(
+            const chaining_algorithm_type result = dispatch_exact_value_or_default<chaining_algorithm_type, chaining_algorithm_type, registry_type::default_value>(
                 registry_type::value_list{}, v, cb);
             REQUIRE(captured == v);
             REQUIRE(result == v);
@@ -4253,7 +4254,7 @@ TEST_CASE("enum_dispatch_pack routes to the matching template branch",
         for (base_alignment_algorithm_type v : {base_alignment_algorithm_type::ksw2, base_alignment_algorithm_type::block_aligner, base_alignment_algorithm_type::ksw2_batched}) {
             base_alignment_algorithm_type captured = static_cast<base_alignment_algorithm_type>(0xFF);
             dispatch_test_support::value_capture_callable<base_alignment_algorithm_type> cb{&captured};
-            const base_alignment_algorithm_type result = enum_dispatch_pack<base_alignment_algorithm_type, base_alignment_algorithm_type, registry_type::default_value>(
+            const base_alignment_algorithm_type result = dispatch_exact_value_or_default<base_alignment_algorithm_type, base_alignment_algorithm_type, registry_type::default_value>(
                 registry_type::value_list{}, v, cb);
             REQUIRE(captured == v);
             REQUIRE(result == v);
@@ -4268,7 +4269,7 @@ TEST_CASE("enum_dispatch_pack routes to the matching template branch",
                      minimizer_algorithm_type::bounded_nthash_simd}) {
             minimizer_algorithm_type captured = static_cast<minimizer_algorithm_type>(0xFF);
             dispatch_test_support::value_capture_callable<minimizer_algorithm_type> cb{&captured};
-            const minimizer_algorithm_type result = enum_dispatch_pack<minimizer_algorithm_type, minimizer_algorithm_type, registry_type::default_value>(
+            const minimizer_algorithm_type result = dispatch_exact_value_or_default<minimizer_algorithm_type, minimizer_algorithm_type, registry_type::default_value>(
                 registry_type::value_list{}, v, cb);
             REQUIRE(captured == v);
             REQUIRE(result == v);
@@ -4384,9 +4385,9 @@ TEST_CASE("scalar pipeline stats is operation-local and rejects mixed routes",
     using ::bioseq::simd::scalar_pipeline_execution_stats;
 
     scalar_minimizer_execution_stats query{};
-    query.record(5'000u);
+    query.record_input(5'000u);
     scalar_minimizer_execution_stats target{};
-    target.record(2'000'000u);
+    target.record_input(2'000'000u);
 
     scalar_pipeline_execution_stats recomputed{};
     recomputed.query_minimizers = query;
@@ -4407,6 +4408,7 @@ TEST_CASE("scalar pipeline stats is operation-local and rejects mixed routes",
     REQUIRE_FALSE(complete.is_all_simd_execution_consistent(
         ::bioseq::simd::minimizer_algorithm::
             two_stack_nthash,
+        ::bioseq::chaining::simd_chaining_policy::exact_visited,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
 
@@ -4492,7 +4494,7 @@ TEST_CASE("scalar pipeline stats is operation-local and rejects mixed routes",
         /*require_alignment=*/true));
 
     match_result_collection saturated = complete;
-    saturated.scalar_pipeline_execution_stats.is_saturated = true;
+    saturated.scalar_pipeline_stats.is_saturated = true;
     REQUIRE_FALSE(saturated.is_all_scalar_execution_consistent(
         /*require_target_sketch=*/true,
         /*require_alignment=*/true));
@@ -4617,7 +4619,7 @@ TEST_CASE("partial Vulkan stats requires the exact positive stage mask",
     partial_vulkan_execution_stats chain_only{};
     chain_only.chain_score_dispatches = 1;
     tiled_chain.record_partial_vulkan_execution_stats(chain_only);
-    REQUIRE(tiled_chain.partial_vulkan_execution_stats
+    REQUIRE(tiled_chain.partial_vulkan_stats
                 .is_exact_stage_mask_consistent(
                     false, false, false, false, true));
 
@@ -4641,9 +4643,9 @@ TEST_CASE("partial Vulkan stats requires the exact positive stage mask",
     frontend.seed_lookup_dispatches = 1;
     frontend.chain_score_dispatches = 1;
     ordered_sketch.record_partial_vulkan_execution_stats(frontend);
-    REQUIRE(ordered_sketch.partial_vulkan_execution_stats
+    REQUIRE(ordered_sketch.partial_vulkan_stats
                 .is_exact_stage_mask_consistent(true, true, true, true, true));
-    REQUIRE_FALSE(ordered_sketch.partial_vulkan_execution_stats
+    REQUIRE_FALSE(ordered_sketch.partial_vulkan_stats
                       .is_exact_stage_mask_consistent(
                           true, true, false, true, true));
     auto tampered_frontend = frontend;
@@ -4761,7 +4763,7 @@ TEST_CASE("ordered sketch query gate becomes immutable after publication",
     const std::array<minimizer_type, 1> minimizers{
         minimizer_type{17u, 0u, 0u}};
     storage.add(std::span<const minimizer_type>{minimizers});
-    const auto identity = storage.identity();
+    const auto identity = storage.canonical_identity();
     const auto gate = storage.vulkan_gate();
 
     REQUIRE(identity.enabled);
@@ -4805,7 +4807,7 @@ TEST_CASE("segmented GPU adoption key preserves the exact frozen gate",
         key = key_type{
             .source_id = 7u,
             .caller_identity = 11u + segment,
-            .target_length = 101u,
+            .target_len = 101u,
             .table_size = 13u,
             .position_count = 17u,
         };
@@ -4897,7 +4899,7 @@ TEST_CASE("Vulkan sketch stats rejects an absent or default operation token",
         minimizer_sketch_role::query);
     record_minimizer_sketch_execution_stats(
         destination, metadata_without_token, minimizer_sketch_role::query);
-    REQUIRE_FALSE(destination.partial_vulkan_execution_stats
+    REQUIRE_FALSE(destination.partial_vulkan_stats
                       .has_any_dispatch());
 }
 
@@ -4949,7 +4951,7 @@ TEST_CASE("Vulkan sketch stats cannot promote a token across a tampered route",
     record_minimizer_sketch_execution_stats(
         repeated_roundtrip_destination, repeated_roundtrip,
         minimizer_sketch_role::query);
-    REQUIRE(repeated_roundtrip_destination.partial_vulkan_execution_stats
+    REQUIRE(repeated_roundtrip_destination.partial_vulkan_stats
                 == ::bioseq::simd::
                     partial_vulkan_execution_stats{});
 
@@ -4957,21 +4959,21 @@ TEST_CASE("Vulkan sketch stats cannot promote a token across a tampered route",
     record_minimizer_sketch_execution_stats(
         tampered_destination, token_with_metadata,
         minimizer_sketch_role::query);
-    REQUIRE(tampered_destination.partial_vulkan_execution_stats
+    REQUIRE(tampered_destination.partial_vulkan_stats
                 == ::bioseq::simd::
                     partial_vulkan_execution_stats{});
 
     match_result_collection query_destination;
     record_minimizer_sketch_execution_stats(
         query_destination, vulkan_sketch, minimizer_sketch_role::query);
-    REQUIRE(query_destination.partial_vulkan_execution_stats
+    REQUIRE(query_destination.partial_vulkan_stats
                 .is_exact_stage_mask_consistent(
                     true, false, false, false, false));
 
     match_result_collection target_destination;
     record_minimizer_sketch_execution_stats(
         target_destination, vulkan_sketch, minimizer_sketch_role::target);
-    REQUIRE(target_destination.partial_vulkan_execution_stats
+    REQUIRE(target_destination.partial_vulkan_stats
                 .is_exact_stage_mask_consistent(
                     false, true, false, false, false));
 }
@@ -5045,7 +5047,7 @@ TEST_CASE("bounded ntHash sketch stats is distinct and cannot be promoted across
     REQUIRE(destination.is_bounded_nthash_query_execution_consistent(true));
     REQUIRE(destination.is_bounded_nthash_target_execution_consistent(true));
     REQUIRE_FALSE(destination.exact_simd_query_execution_stats_available);
-    REQUIRE_FALSE(destination.partial_vulkan_execution_stats.has_any_dispatch());
+    REQUIRE_FALSE(destination.partial_vulkan_stats.has_any_dispatch());
 
     range_stats_type bounded_range{};
     bounded_range.bounded_nthash = operation;
@@ -5073,7 +5075,7 @@ TEST_CASE("bounded ntHash sketch stats is distinct and cannot be promoted across
         backend_type::bounded_nthash_simd, cleared_bounded_flag));
 
     range_stats_type scalar_range{};
-    scalar_range.scalar.record(/*symbols=*/128u);
+    scalar_range.scalar.record_input(/*symbols=*/128u);
     scalar_range.scalar_available = true;
     REQUIRE(minimizer_range_stats_matches_backend(
         backend_type::scalar, scalar_range));
@@ -5102,7 +5104,7 @@ TEST_CASE("bounded ntHash sketch stats is distinct and cannot be promoted across
         == backend_type::exact_simd);
 }
 
-TEST_CASE("enum_dispatch_pack falls back to DefaultValue",
+TEST_CASE("dispatch_exact_value_or_default falls back to DefaultValue",
           "[component:bioseq][layer:unit][feature:planner]")
 {
     using dispatch_test_support::base_alignment_algorithm_type;
@@ -5113,7 +5115,7 @@ TEST_CASE("enum_dispatch_pack falls back to DefaultValue",
         using registry_type = algorithm_enum_values<chaining_algorithm_type>;
         chaining_algorithm_type captured = static_cast<chaining_algorithm_type>(0x00);
         dispatch_test_support::value_capture_callable<chaining_algorithm_type> cb{&captured};
-        enum_dispatch_pack<chaining_algorithm_type, chaining_algorithm_type, registry_type::default_value>(
+        dispatch_exact_value_or_default<chaining_algorithm_type, chaining_algorithm_type, registry_type::default_value>(
             registry_type::value_list{}, static_cast<chaining_algorithm_type>(0xFF), cb);
         REQUIRE(captured == chaining_algorithm_type::scalar_minimap2);
     }
@@ -5121,7 +5123,7 @@ TEST_CASE("enum_dispatch_pack falls back to DefaultValue",
         using registry_type = algorithm_enum_values<base_alignment_algorithm_type>;
         base_alignment_algorithm_type captured = static_cast<base_alignment_algorithm_type>(0x00);
         dispatch_test_support::value_capture_callable<base_alignment_algorithm_type> cb{&captured};
-        enum_dispatch_pack<base_alignment_algorithm_type, base_alignment_algorithm_type, registry_type::default_value>(
+        dispatch_exact_value_or_default<base_alignment_algorithm_type, base_alignment_algorithm_type, registry_type::default_value>(
             registry_type::value_list{}, static_cast<base_alignment_algorithm_type>(0xFF), cb);
         REQUIRE(captured == base_alignment_algorithm_type::block_aligner);
     }
@@ -5129,13 +5131,13 @@ TEST_CASE("enum_dispatch_pack falls back to DefaultValue",
         using registry_type = algorithm_enum_values<minimizer_algorithm_type>;
         minimizer_algorithm_type captured = static_cast<minimizer_algorithm_type>(0x00);
         dispatch_test_support::value_capture_callable<minimizer_algorithm_type> cb{&captured};
-        enum_dispatch_pack<minimizer_algorithm_type, minimizer_algorithm_type, registry_type::default_value>(
+        dispatch_exact_value_or_default<minimizer_algorithm_type, minimizer_algorithm_type, registry_type::default_value>(
             registry_type::value_list{}, static_cast<minimizer_algorithm_type>(0xFF), cb);
         REQUIRE(captured == minimizer_algorithm_type::scalar);
     }
 }
 
-TEST_CASE("value_dispatch_smallest_ge picks the right bucket",
+TEST_CASE("dispatch_smallest_not_less picks the right bucket",
           "[component:bioseq][layer:unit][feature:planner]")
 {
     // The bucket list is the union of `compute_breakpoints_for<K>()` across
@@ -5152,13 +5154,13 @@ TEST_CASE("value_dispatch_smallest_ge picks the right bucket",
         for (const auto& [want, expected] : cases) {
             std::size_t captured = 0u;
             dispatch_test_support::value_capture_callable<std::size_t> cb{&captured};
-            value_dispatch_smallest_ge<std::size_t, std::size_t>(
+            dispatch_smallest_not_less<std::size_t, std::size_t>(
                 detail::seq_len_log2_buckets_seq{}, want, cb);
             REQUIRE(captured == expected);
         }
     } else {
         // Reduced-branching mode (K = {15}). Reuse the K=15 breakpoints:
-        // value_dispatch_smallest_ge picks the smallest L breakpoint >= want.
+        // dispatch_smallest_not_less picks the smallest L breakpoint >= want.
         // Verify the contract holds for a few representative `want` values
         // — the exact breakpoint set is materialised by
         // `compute_breakpoints_for<15>()` so we walk the same sequence.
@@ -5168,7 +5170,7 @@ TEST_CASE("value_dispatch_smallest_ge picks the right bucket",
             const std::size_t want = bp.first[i];
             std::size_t captured = 0u;
             dispatch_test_support::value_capture_callable<std::size_t> cb{&captured};
-            value_dispatch_smallest_ge<std::size_t, std::size_t>(
+            dispatch_smallest_not_less<std::size_t, std::size_t>(
                 detail::seq_len_log2_buckets_seq{}, want, cb);
             REQUIRE(captured >= want);
         }
@@ -5665,11 +5667,11 @@ using range_t  = compact_sequence_range<dna4_u64>;
     for (std::size_t index = 0u; index < left.results.size(); ++index) {
         const match_result& lhs = left.results[index];
         const match_result& rhs = right.results[index];
-        if (lhs.query_length != rhs.query_length
+        if (lhs.query_len != rhs.query_len
             || lhs.query_start != rhs.query_start
             || lhs.query_end != rhs.query_end
             || lhs.is_reverse != rhs.is_reverse
-            || lhs.target_length != rhs.target_length
+            || lhs.target_len != rhs.target_len
             || lhs.target_start != rhs.target_start
             || lhs.target_end != rhs.target_end
             || lhs.num_matches != rhs.num_matches
@@ -5733,7 +5735,7 @@ TEST_CASE("Prefilter stats aggregation preserves runtime identity and fails clos
     }
 
     REQUIRE(aggregate.operational.prefilter_execution_stats_available);
-    const auto& stats = aggregate.operational.prefilter_execution_stats;
+    const auto& stats = aggregate.operational.prefilter_stats;
     CHECK(stats.dispatches == 3u);
     CHECK(stats.gatekeeper_dispatches == 3u);
     CHECK(stats.vulkan_dispatches == 3u);
@@ -5761,12 +5763,12 @@ TEST_CASE("Prefilter stats aggregation preserves runtime identity and fails clos
         0u, 0u, 0u, 0u, 1u);
     valid_then_malformed.record_prefilter_execution_stats(
         valid_single_batch);
-    REQUIRE(valid_then_malformed.prefilter_execution_stats
+    REQUIRE(valid_then_malformed.prefilter_stats
                 .is_internally_consistent());
     valid_then_malformed.record_prefilter_execution_stats(
         prefilter_execution_stats{});
-    CHECK(valid_then_malformed.prefilter_execution_stats.is_saturated);
-    CHECK_FALSE(valid_then_malformed.prefilter_execution_stats
+    CHECK(valid_then_malformed.prefilter_stats.is_saturated);
+    CHECK_FALSE(valid_then_malformed.prefilter_stats
                     .is_internally_consistent());
     CHECK(valid_then_malformed.are_stats_saturated);
 
@@ -5794,8 +5796,8 @@ TEST_CASE("Prefilter stats aggregation preserves runtime identity and fails clos
     increment_batch.record_prefilter_execution_stats(one_more);
     increment.merge_operational(increment_batch);
     at_limit.merge(increment);
-    CHECK(at_limit.operational.prefilter_execution_stats.is_saturated);
-    CHECK_FALSE(at_limit.operational.prefilter_execution_stats
+    CHECK(at_limit.operational.prefilter_stats.is_saturated);
+    CHECK_FALSE(at_limit.operational.prefilter_stats
                     .is_internally_consistent());
     CHECK(at_limit.operational.are_stats_saturated);
 }
@@ -5947,7 +5949,7 @@ TEST_CASE("prefilter_stage composes reverse, unequal, aggregate, and stable rout
         CHECK(observed[0].anchor_start == 0);
         CHECK(observed[1].anchor_start == 7);
         REQUIRE(stats.prefilter_execution_stats_available);
-        const auto& route = stats.prefilter_execution_stats;
+        const auto& route = stats.prefilter_stats;
         CHECK(route.dispatches == 1u);
         CHECK(route.sneaky_snake_dispatches == 1u);
         CHECK(route.gatekeeper_dispatches == 0u);
@@ -6126,9 +6128,9 @@ TEST_CASE("reference SIMD pipe runtime and constexpr dispatch use fixed target t
     auto lazy = bioseq::storage::make_resident_lazy_sequence(resident);
     const auto view = bioseq::storage::make_lazy_sequence_view(lazy);
     const auto* table = fixed_highway_kernels();
-    REQUIRE(table->contains(
+    REQUIRE(table->has_kernel(
         ::bioseq::simd_dispatch::highway_kernel::
-            minimizer_reference_minimap_int));
+            minimizer_minimap2_reference));
 
     collector_type runtime_collector;
     (void)pipe::minimizer_dispatch<
@@ -6314,7 +6316,7 @@ TEST_CASE("production minimizer sink keeps protocol faults distinct from collect
         void collect(const output_type&) noexcept {}
         void collect(output_type&&) noexcept {}
 
-        [[nodiscard]] bool ok() const noexcept { return healthy; }
+        [[nodiscard]] bool is_ok() const noexcept { return healthy; }
     };
 
     constexpr output_type record{0x12345u, 17u, 1u};
@@ -6332,7 +6334,7 @@ TEST_CASE("production minimizer sink keeps protocol faults distinct from collect
 
         ::bioseq::minimizers::minimizer_kernel_result result{};
         result.emitted = 1u;
-        REQUIRE_FALSE(collector.ok());
+        REQUIRE_FALSE(collector.is_ok());
         REQUIRE_NOTHROW(adapter.validate(result));
     }
 
@@ -6730,15 +6732,17 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty stats",
     const auto result = vulkan_pipeline_test_support::run(query, target, params);
     REQUIRE(result.is_exact_simd_query_execution_consistent(true));
     REQUIRE(result.is_exact_simd_target_execution_consistent(true));
-    REQUIRE(result.is_simd_chaining_execution_consistent(true));
+    REQUIRE(result.is_simd_chaining_execution_consistent(
+        params.simd_chaining_policy,
+        /*require_nonempty_vector_work=*/true));
     REQUIRE(result.is_ksw2_batched_execution_consistent(true));
     REQUIRE_FALSE(result.block_aligner_execution_stats_available);
     REQUIRE(result.scalar_pipeline_execution_stats_available);
-    REQUIRE(result.scalar_pipeline_execution_stats.seed_lookup_calls > 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.seed_query_minimizers > 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.query_minimizers
+    REQUIRE(result.scalar_pipeline_stats.seed_lookup_calls > 0u);
+    REQUIRE(result.scalar_pipeline_stats.seed_query_minimizers > 0u);
+    REQUIRE(result.scalar_pipeline_stats.query_minimizers
             == ::bioseq::simd::scalar_minimizer_execution_stats{});
-    REQUIRE(result.scalar_pipeline_execution_stats.target_minimizers
+    REQUIRE(result.scalar_pipeline_stats.target_minimizers
             == ::bioseq::simd::scalar_minimizer_execution_stats{});
     REQUIRE(result.query_sketch_host_wall_ns > 0u);
     REQUIRE(result.seed_lookup_host_wall_ns > 0u);
@@ -6748,18 +6752,18 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty stats",
     REQUIRE_FALSE(result.is_region_host_stage_active);
     REQUIRE_FALSE(result.is_alignment_result_host_stage_active);
     REQUIRE_FALSE(result.is_host_stage_timing_saturated);
-    REQUIRE(result.scalar_pipeline_execution_stats.chain_score_calls == 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.chain_backtrack_calls == 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.ksw2_left_calls == 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.ksw2_gap_calls == 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.ksw2_right_calls == 0u);
+    REQUIRE(result.scalar_pipeline_stats.chain_score_calls == 0u);
+    REQUIRE(result.scalar_pipeline_stats.chain_backtrack_calls == 0u);
+    REQUIRE(result.scalar_pipeline_stats.ksw2_left_calls == 0u);
+    REQUIRE(result.scalar_pipeline_stats.ksw2_gap_calls == 0u);
+    REQUIRE(result.scalar_pipeline_stats.ksw2_right_calls == 0u);
 
     auto missing = result;
     missing.ksw2_batched_execution_stats_available = false;
     REQUIRE_FALSE(missing.is_ksw2_batched_execution_consistent(true));
 
     auto tampered = result;
-    ++tampered.ksw2_batched_execution_stats.long_fill_calls;
+    ++tampered.ksw2_batched_stats.long_fill_calls;
     REQUIRE_FALSE(tampered.is_ksw2_batched_execution_consistent(true));
 }
 
@@ -7132,59 +7136,68 @@ TEST_CASE("bounded ntHash SIMD pipe executes distinct sketch stats without fallb
     const auto result = vulkan_pipeline_test_support::run(query, target, params);
     REQUIRE(result.is_bounded_nthash_query_execution_consistent(true));
     REQUIRE(result.is_bounded_nthash_target_execution_consistent(true));
-    REQUIRE(result.is_simd_chaining_execution_consistent(true));
+    REQUIRE(result.is_simd_chaining_execution_consistent(
+        params.simd_chaining_policy,
+        /*require_nonempty_vector_work=*/true));
     REQUIRE(result.is_block_aligner_execution_consistent(true));
     REQUIRE(result.scalar_pipeline_execution_stats_available);
-    REQUIRE(result.scalar_pipeline_execution_stats.seed_lookup_calls > 0u);
-    REQUIRE(result.scalar_pipeline_execution_stats.seed_query_minimizers > 0u);
+    REQUIRE(result.scalar_pipeline_stats.seed_lookup_calls > 0u);
+    REQUIRE(result.scalar_pipeline_stats.seed_query_minimizers > 0u);
     REQUIRE(result.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     REQUIRE_FALSE(result.is_all_simd_execution_consistent(
         minimizer_algorithm::two_stack_nthash,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     auto mixed_stats = result;
     mixed_stats.exact_simd_query_execution_stats_available = true;
     REQUIRE_FALSE(mixed_stats.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     auto missing_cpu_seed_stats = result;
-    missing_cpu_seed_stats.scalar_pipeline_execution_stats = {};
+    missing_cpu_seed_stats.scalar_pipeline_stats = {};
     missing_cpu_seed_stats.scalar_pipeline_execution_stats_available = false;
     REQUIRE_FALSE(missing_cpu_seed_stats.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     auto presence_only_cpu_seed_stats = missing_cpu_seed_stats;
     presence_only_cpu_seed_stats.scalar_pipeline_execution_stats_available = true;
     REQUIRE_FALSE(presence_only_cpu_seed_stats.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     auto hidden_scalar_chain = result;
-    hidden_scalar_chain.scalar_pipeline_execution_stats
+    hidden_scalar_chain.scalar_pipeline_stats
         .record_scalar_chain(1u);
     REQUIRE_FALSE(hidden_scalar_chain.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     auto saturated_cpu_seed = result;
-    saturated_cpu_seed.scalar_pipeline_execution_stats.is_saturated = true;
+    saturated_cpu_seed.scalar_pipeline_stats.is_saturated = true;
     REQUIRE_FALSE(saturated_cpu_seed.is_all_simd_execution_consistent(
         minimizer_algorithm::bounded_nthash_simd,
+        params.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
     REQUIRE_FALSE(result.exact_simd_query_execution_stats_available);
     REQUIRE_FALSE(result.exact_simd_target_execution_stats_available);
-    REQUIRE_FALSE(result.partial_vulkan_execution_stats.has_any_dispatch());
-    REQUIRE(result.partial_vulkan_execution_stats
+    REQUIRE_FALSE(result.partial_vulkan_stats.has_any_dispatch());
+    REQUIRE(result.partial_vulkan_stats
             == ::bioseq::simd::partial_vulkan_execution_stats{});
 
     auto vulkan_dispatch_tamper = result;
-    vulkan_dispatch_tamper.partial_vulkan_execution_stats
+    vulkan_dispatch_tamper.partial_vulkan_stats
         .query_sketch_dispatches = 1;
     REQUIRE_FALSE(vulkan_dispatch_tamper
         .is_selected_simd_sketch_execution_consistent(
@@ -7193,9 +7206,9 @@ TEST_CASE("bounded ntHash SIMD pipe executes distinct sketch stats without fallb
             /*require_nonempty_vector_work=*/true));
 
     auto vulkan_metadata_tamper = result;
-    vulkan_metadata_tamper.partial_vulkan_execution_stats
+    vulkan_metadata_tamper.partial_vulkan_stats
         .gpu_index_unique_keys = 1;
-    REQUIRE_FALSE(vulkan_metadata_tamper.partial_vulkan_execution_stats
+    REQUIRE_FALSE(vulkan_metadata_tamper.partial_vulkan_stats
         .has_any_dispatch());
     REQUIRE_FALSE(vulkan_metadata_tamper
         .is_selected_simd_sketch_execution_consistent(
@@ -7306,10 +7319,12 @@ TEST_CASE("bounded ntHash segmented pipe globalizes local coordinates without fa
     REQUIRE(result.is_bounded_nthash_query_execution_consistent(true));
     REQUIRE(result.is_bounded_nthash_target_execution_consistent(true));
     REQUIRE(result.bounded_nthash_target_execution_stats.segments_combined >= 2);
-    REQUIRE(result.is_simd_chaining_execution_consistent(true));
+    REQUIRE(result.is_simd_chaining_execution_consistent(
+        params.simd_chaining_policy,
+        /*require_nonempty_vector_work=*/true));
     REQUIRE_FALSE(result.exact_simd_query_execution_stats_available);
     REQUIRE_FALSE(result.exact_simd_target_execution_stats_available);
-    REQUIRE_FALSE(result.partial_vulkan_execution_stats.has_any_dispatch());
+    REQUIRE_FALSE(result.partial_vulkan_stats.has_any_dispatch());
 
     const auto primary = std::ranges::find_if(
         result.results,
@@ -7469,16 +7484,19 @@ TEST_CASE("bounded Vulkan pipe matches complete CPU biological results",
     REQUIRE(cpu.do_cigar);
     REQUIRE(cpu_res.is_exact_simd_query_execution_consistent(true));
     REQUIRE(cpu_res.is_exact_simd_target_execution_consistent(true));
-    REQUIRE(cpu_res.is_simd_chaining_execution_consistent(true));
+    REQUIRE(cpu_res.is_simd_chaining_execution_consistent(
+        cpu.simd_chaining_policy,
+        /*require_nonempty_vector_work=*/true));
     REQUIRE(cpu_res.is_block_aligner_execution_consistent(
         /*require_nonempty_simd_work=*/true));
     REQUIRE(cpu_res.scalar_pipeline_execution_stats_available);
-    REQUIRE(cpu_res.scalar_pipeline_execution_stats.seed_lookup_calls > 0u);
-    REQUIRE(cpu_res.scalar_pipeline_execution_stats.seed_query_minimizers > 0u);
-    REQUIRE(cpu_res.partial_vulkan_execution_stats
+    REQUIRE(cpu_res.scalar_pipeline_stats.seed_lookup_calls > 0u);
+    REQUIRE(cpu_res.scalar_pipeline_stats.seed_query_minimizers > 0u);
+    REQUIRE(cpu_res.partial_vulkan_stats
             == ::bioseq::simd::partial_vulkan_execution_stats{});
     REQUIRE(cpu_res.is_all_simd_execution_consistent(
         minimizer_algorithm::two_stack_nthash,
+        cpu.simd_chaining_policy,
         /*require_target_sketch=*/true,
         /*require_nonempty_vector_work=*/true));
 
@@ -7534,9 +7552,9 @@ TEST_CASE("bounded Vulkan pipe matches complete CPU biological results",
     REQUIRE_FALSE(gpu_res.exact_simd_target_execution_stats_available);
     REQUIRE_FALSE(gpu_res.simd_chaining_execution_stats_available);
     REQUIRE_FALSE(gpu_res.scalar_pipeline_execution_stats_available);
-    REQUIRE(gpu_res.scalar_pipeline_execution_stats
+    REQUIRE(gpu_res.scalar_pipeline_stats
             == ::bioseq::simd::scalar_pipeline_execution_stats{});
-    REQUIRE(gpu_res.partial_vulkan_execution_stats
+    REQUIRE(gpu_res.partial_vulkan_stats
                 .is_exact_stage_mask_consistent(
                     /*query_sketch=*/true,
                     /*target_sketch=*/true,
@@ -7851,7 +7869,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
     } restore{admission, previous_cap};
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
-        bioseq::parallelism::saturating_add(
+        bioseq::common::saturating_add(
             baseline, std::uint64_t{512} << 20u)));
 
     match_result_collection direct_results;
@@ -8006,8 +8024,8 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
 
     REQUIRE_FALSE(direct_results.results.empty());
     REQUIRE_FALSE(ordered_results.results.empty());
-    const auto& direct = direct_results.partial_vulkan_execution_stats;
-    const auto& ordered_sketch = ordered_results.partial_vulkan_execution_stats;
+    const auto& direct = direct_results.partial_vulkan_stats;
+    const auto& ordered_sketch = ordered_results.partial_vulkan_stats;
     REQUIRE_FALSE(direct.is_saturated);
     REQUIRE(direct.gpu_index_source_direct_operations == 1u);
     REQUIRE(direct.gpu_index_source_direct_terminal_successes == 1u);
@@ -8068,7 +8086,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
 
     REQUIRE(empty_minimizer_results.results.empty());
     const auto& empty_minimizer =
-        empty_minimizer_results.partial_vulkan_execution_stats;
+        empty_minimizer_results.partial_vulkan_stats;
     REQUIRE(empty_minimizer.gpu_index_source_direct_operations == 1u);
     REQUIRE(empty_minimizer.gpu_index_source_direct_terminal_successes == 1u);
     REQUIRE(empty_minimizer.gpu_index_source_direct_required_lookups == 1u);
@@ -8094,7 +8112,7 @@ TEST_CASE("bounded real-GPU prepared resident matches independent ordered sketch
     REQUIRE(pipeline_cache_metadata_after
             >= pipeline_cache_metadata_baseline);
     REQUIRE(admission.reserved_bytes()
-            == bioseq::parallelism::saturating_add(
+            == bioseq::common::saturating_add(
                 baseline,
                 pipeline_cache_metadata_after
                     - pipeline_cache_metadata_baseline));
@@ -8318,7 +8336,8 @@ TEST_CASE("Vulkan chaining mapped plan reports exact GPU and CPU scratch peaks",
 TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compaction",
           "[component:bioseq][layer:unit][feature:chaining]") {
     constexpr std::size_t anchor_count =
-        ::bioseq::chaining::detail::k_gpu_chain_compact_range_threshold + 2u;
+        ::bioseq::chaining::vulkan_chaining_detail::
+            k_gpu_chain_compact_range_threshold + 2u;
     std::vector<::bioseq::chaining::anchor> anchors(anchor_count);
     for (std::size_t i = 0; i < anchors.size(); ++i) {
         anchors[i].ref_position = i;
@@ -8327,8 +8346,9 @@ TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compac
     }
 
     const auto shape =
-        ::bioseq::chaining::detail::analyze_gpu_chaining_shape(
-            anchors, /*max_ref_dist=*/10u);
+        ::bioseq::chaining::vulkan_chaining_detail::
+            analyze_gpu_chaining_shape(
+                anchors, /*max_ref_dist=*/10u);
     REQUIRE(shape.range_count == 1u);
     REQUIRE(shape.compaction_required);
     REQUIRE(shape.device_anchor_count < anchors.size());
@@ -8336,12 +8356,14 @@ TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compac
     context::context ctx;
     context::installed_context_scope installed{ctx};
     auto scope = ctx.push<context::arena::chain>();
-    auto ranges = ::bioseq::chaining::detail::build_gpu_chain_ranges(
-        anchors, /*max_ref_dist=*/10u, shape.range_count);
+    auto ranges = ::bioseq::chaining::vulkan_chaining_detail::
+        build_gpu_chain_ranges(
+            anchors, /*max_ref_dist=*/10u, shape.range_count);
     auto compacted = ::bioseq::chaining::make_arena_slab<
         ::bioseq::chaining::anchor>();
-    REQUIRE(::bioseq::chaining::detail::compact_long_gpu_chain_ranges(
-        anchors, ranges, compacted, ranges));
+    REQUIRE(::bioseq::chaining::vulkan_chaining_detail::
+        compact_long_gpu_chain_ranges(
+            anchors, ranges, compacted, ranges));
     REQUIRE(compacted.size() == shape.device_anchor_count);
     REQUIRE(ranges.size() == shape.range_count);
     REQUIRE(ranges[0].begin == 0u);
@@ -8354,11 +8376,11 @@ TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compac
 TEST_CASE("match_result biological fingerprints cover every result and CIGAR field",
           "[component:bioseq][layer:unit][feature:pipeline]") {
     match_result result{
-        .query_length = 101u,
+        .query_len = 101u,
         .query_start = 3u,
         .query_end = 97u,
         .is_reverse = true,
-        .target_length = 1001u,
+        .target_len = 1001u,
         .target_start = 23u,
         .target_end = 117u,
         .num_matches = 90u,
@@ -8442,13 +8464,13 @@ TEST_CASE("match_result biological fingerprints cover every result and CIGAR fie
     for (const auto& mutation : result_mutations) {
         auto mutated = result;
         switch (mutation.field) {
-            case result_field::query_length: ++mutated.query_length; break;
+            case result_field::query_length: ++mutated.query_len; break;
             case result_field::query_start: ++mutated.query_start; break;
             case result_field::query_end: ++mutated.query_end; break;
             case result_field::is_reverse:
                 mutated.is_reverse = !mutated.is_reverse;
                 break;
-            case result_field::target_length: ++mutated.target_length; break;
+            case result_field::target_length: ++mutated.target_len; break;
             case result_field::target_start: ++mutated.target_start; break;
             case result_field::target_end: ++mutated.target_end; break;
             case result_field::num_matches: ++mutated.num_matches; break;
