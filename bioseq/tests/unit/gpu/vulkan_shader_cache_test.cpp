@@ -149,11 +149,11 @@ struct scoped_environment_variable {
 
 struct scoped_archive_helper_store_reset {
     scoped_archive_helper_store_reset() {
-        REQUIRE(gv::qualified_metal_archive_helper_process_store()
+        REQUIRE(gv::qualified_metal_archive_helper_process_store_instance()
                     .reset_for_test());
     }
     ~scoped_archive_helper_store_reset() {
-        (void)gv::qualified_metal_archive_helper_process_store()
+        (void)gv::qualified_metal_archive_helper_process_store_instance()
             .reset_for_test();
     }
 };
@@ -205,7 +205,7 @@ void write_fake_archive_qualification(
 {
 #if defined(__APPLE__)
     const auto helper =
-        gv::qualified_metal_archive_helper_process_store().load_once();
+        gv::qualified_metal_archive_helper_process_store_instance().load_once();
     REQUIRE(helper);
     const std::string helper_source = (**helper).source;
     const std::uint64_t helper_size = (**helper).executable_size;
@@ -1041,7 +1041,7 @@ TEST_CASE("SneakySnake rank batch has an exact provider ABI",
 
     const std::string body = gv::shader_body_for_digest(
         gv::shader_kind::sneaky_snake_rank_batch);
-    CHECK(body.find("MAX_SUPPORTED_EDITS = 31u") != std::string::npos);
+    CHECK(body.find("k_maximum_supported_edits = 31u") != std::string::npos);
     CHECK(body.find("uint query_rank_count;") != std::string::npos);
     CHECK(body.find("uint target_rank_count;") != std::string::npos);
     CHECK(body.find("prefilter_job_is_in_bounds(job)") != std::string::npos);
@@ -1271,9 +1271,9 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
 
     const std::string body = gv::shader_body_for_digest(
         gv::shader_kind::gatekeeper_rank_batch);
-    CHECK(body.find("MAX_GATEKEEPER_LENGTH = 128u")
+    CHECK(body.find("k_maximum_gatekeeper_length = 128u")
           != std::string::npos);
-    CHECK(body.find("MAX_GATEKEEPER_EDITS = 8u")
+    CHECK(body.find("k_maximum_gatekeeper_edits = 8u")
           != std::string::npos);
     CHECK(body.find("prefilter_job_is_in_bounds(job)")
           != std::string::npos);
@@ -1283,7 +1283,7 @@ TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI"
           != std::string::npos);
     CHECK(body.find("exact_edit_distance_is_above_threshold(job)")
           != std::string::npos);
-    CHECK(body.find("HAMMING_EXACT_REJECTION_MASK")
+    CHECK(body.find("k_hamming_exact_rejection_mask")
           != std::string::npos);
     CHECK(body.find("subgroup") == std::string::npos);
     CHECK(body.find("atomic") == std::string::npos);

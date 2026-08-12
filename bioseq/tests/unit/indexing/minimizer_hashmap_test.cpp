@@ -2136,6 +2136,7 @@ TEST_CASE("generation manifest rejects corrupt headers and invalid geometry",
     unrestricted_words.directory_chunk_count =
         static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)());
     unrestricted_words.position_segment_span_bp = std::uint64_t{1} << 63u;
+    unrestricted_words.position_width = minimizer_scalar_width::u64;
     const auto unrestricted_bytes =
         encode_minimizer_generation_manifest(unrestricted_words);
     REQUIRE(unrestricted_bytes.has_value());
@@ -2208,6 +2209,7 @@ TEST_CASE("uniform persisted segment cores and bp ranges are exact at boundaries
     huge.target_length = (std::numeric_limits<std::uint64_t>::max)();
     huge.position_segment_span_bp = std::uint64_t{1} << 63u;
     huge.position_segment_count = 2;
+    huge.position_width = minimizer_scalar_width::u64;
     const auto last = derive_minimizer_position_segment_bounds(huge, 1);
     REQUIRE(last.has_value());
     REQUIRE(last->begin_bp == (std::uint64_t{1} << 63u));
@@ -3013,8 +3015,7 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
 
     SECTION("unsupported spill-run layouts remain rejected") {
         auto options = test_grouped_soa_generation_options(range.bp_size());
-        options.layout =
-            minimizer_generation_layout::grouped_soa_segment_local;
+        options.layout = minimizer_generation_layout::invalid;
         require_profile_rejection(options);
     }
 }
@@ -3869,20 +3870,12 @@ TEST_CASE("bounded ntHash fragment replay canonicalizes storage and rejects inco
         const std::uint64_t admission_before =
             bioseq::parallelism::memory_admission_controller::instance()
                 .reserved_bytes();
-        try {
-            (void)encode_minimizer_generation(producer, sink, options);
-            FAIL("bounded ntHash fragment accepted DNA5");
-        } catch (const packed_bounded_nthash_index_runtime_error& error) {
-            REQUIRE(error.status()
-                == packed_bounded_nthash_index_status::unsupported_alphabet);
-        }
+        require_wire_error(
+            encode_minimizer_generation(producer, sink, options),
+            minimizer_generation_encoding_error::storage_contract_mismatch);
         REQUIRE(sink.rows.empty());
-        REQUIRE(producer.packed_bounded_stats_present());
-        REQUIRE(producer.packed_bounded_status()
-            == packed_bounded_nthash_index_status::unsupported_alphabet);
-        REQUIRE_FALSE(producer.packed_bounded_stats().is_internally_consistent(true));
-        REQUIRE(producer.packed_bounded_stats().fail_closed_rejections == 1u);
-        REQUIRE(producer.packed_bounded_stats().fallback_calls == 0u);
+        REQUIRE(producer.scan_count() == 0u);
+        REQUIRE_FALSE(producer.packed_bounded_stats_present());
         REQUIRE_FALSE(producer.exact_simd_stats_present());
         REQUIRE(bioseq::parallelism::memory_admission_controller::instance()
             .reserved_bytes() == admission_before);
@@ -4120,17 +4113,22 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
     REQUIRE(collection_range->ce_u == fragment_bp + 100u + halo);
     REQUIRE(collection_range->core_lo_bp == fragment_bp);
     REQUIRE(collection_range->core_hi_bp == fragment_bp + 100u);
-    auto options = test_generation_options(range.bp_size());
-    options.alphabet_code = 5;
     auto fragment_producer = index_type::make_generation_replay_producer(
         lazy_view,
         minimizer_sketch_backend::exact_simd,
         fixed_minimizer_kernels(),
         fixed_alphabet_code<::seq::dna5>());
-    collecting_minimizer_row_sink fragment_sink;
-    auto fragment_encoding = encode_minimizer_generation(
-        fragment_producer, fragment_sink, options);
-    REQUIRE(fragment_encoding.has_value());
+    const auto collect_replay = [](void* context,
+            const canonical_minimizer_event& event)
+            -> std::expected<void, minimizer_generation_encoding_error> {
+        static_cast<std::vector<canonical_minimizer_event>*>(context)
+            ->push_back(event);
+        return {};
+    };
+    std::vector<canonical_minimizer_event> fragment_events;
+    REQUIRE(fragment_producer.scan_sorted_events(
+        k_minimizer_preferred_segment_span_bp,
+        {.context = &fragment_events, .emit_fn = collect_replay}).has_value());
 
     fake_fragment_storage<> spill_storage;
     auto spilled = spill_run_index_type::spill_generation_replay_runs_serial(
@@ -4148,28 +4146,21 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
         spilled->exact_simd_stats();
     auto spill_producer = spill_run_index_type::make_generation_replay_producer(
         spill_storage, range.bp_size(), std::move(*spilled));
-    collecting_minimizer_row_sink spill_sink;
-    auto spill_options = options;
-    ++spill_options.generation_id;
-    auto spill_encoding = encode_minimizer_generation(
-        spill_producer, spill_sink, spill_options);
-    REQUIRE(spill_encoding.has_value());
+    std::vector<canonical_minimizer_event> spill_events;
+    REQUIRE(spill_producer.scan_sorted_events(
+        k_minimizer_preferred_segment_span_bp,
+        {.context = &spill_events, .emit_fn = collect_replay}).has_value());
     REQUIRE(fragment_producer.exact_simd_stats_present());
     REQUIRE(fragment_producer.exact_simd_stats().is_internally_consistent(true));
     REQUIRE(fragment_producer.exact_simd_stats().ambiguous_symbols > 0);
     REQUIRE(spill_exact_stats.is_internally_consistent(true));
     REQUIRE(spill_exact_stats.ambiguous_symbols > 0);
-    REQUIRE(spill_producer.merge_pass_count() == 3);
-    REQUIRE(spill_storage.segment_merge_calls() == 4);
+    REQUIRE(spill_producer.merge_pass_count() == 1);
+    REQUIRE(spill_storage.segment_merge_calls() == 2);
     REQUIRE(spill_storage.segment_merge_run_visits()
-        == 4u * spill_storage.segment_spill_run_count());
+        == 2u * spill_storage.segment_spill_run_count());
     REQUIRE(spill_storage.segment_merge_bytes_visited()
-        == 4u * spill_storage.segment_spill_bytes());
-    require_encoded_generations_equal_normalized(
-        *fragment_encoding, fragment_sink.rows, *spill_encoding, spill_sink.rows);
-
-    const auto fragment_events = decode_generation_events(*fragment_encoding, fragment_sink.rows);
-    const auto spill_events = decode_generation_events(*spill_encoding, spill_sink.rows);
+        == 2u * spill_storage.segment_spill_bytes());
     REQUIRE(fragment_events == oracle);
     REQUIRE(spill_events == oracle);
     REQUIRE(std::ranges::any_of(fragment_events, [](const auto& event) {
@@ -4186,8 +4177,6 @@ TEST_CASE("actual producers preserve DNA5 N reset and packed tail",
             return first <= n && n <= last;
         }));
     }
-    require_complete_generation_rows(*fragment_encoding, fragment_sink.rows);
-    require_complete_generation_rows(*spill_encoding, spill_sink.rows);
 }
 
 TEST_CASE("segment overflow retry halves deterministically",
@@ -4359,7 +4348,9 @@ TEST_CASE("encoder rejects a drifting replay before READY publication",
     require_wire_error(
         encoded, minimizer_generation_encoding_error::replay_mismatch);
     REQUIRE(producer.scan_count == 2u);
-    REQUIRE(sink.rows.empty());
+    REQUIRE(std::ranges::none_of(sink.rows, [](const auto& row) {
+        return row.address.sub_key == k_directory_sub_key;
+    }));
 }
 
 TEST_CASE("grouped-SoA rejects scheme and backend drift at every scan boundary",

@@ -3806,7 +3806,9 @@ protected:
     minimizer_generation_head head_{};
     minimizer_generation_manifest manifest_{};
     expected_minimizer_generation_identity expected_{};
-    grouped_soa_minimizer_profile profile_{};
+    grouped_soa_minimizer_profile profile_{
+        .layout = minimizer_generation_layout::invalid,
+    };
 
     admitted_prepared_reader_core() = default;
     admitted_prepared_reader_core(admitted_prepared_reader_core&&) noexcept = default;

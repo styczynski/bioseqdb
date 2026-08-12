@@ -4095,9 +4095,9 @@ TEST_CASE("KSW2BatchedParity — trait surface matches KSW2",
         REQUIRE(ksw2_params[i].name == batched_params[i].name);
         REQUIRE(ksw2_params[i].value == batched_params[i].value);
     }
-    REQUIRE(std::string{ksw2_kernel_type::algorithm_label()} == "KSW2");
+    REQUIRE(std::string{ksw2_kernel_type::algorithm_label()} == "ksw2");
     REQUIRE(std::string{batched_kernel_type::algorithm_label()}
-            == "KSW2 (inter-region batched)");
+            == "ksw2 (inter-region batched)");
     static_assert(!ksw2_kernel_type::emits_ksw2_batched_execution_stats);
     static_assert(batched_kernel_type::emits_ksw2_batched_execution_stats);
 }
