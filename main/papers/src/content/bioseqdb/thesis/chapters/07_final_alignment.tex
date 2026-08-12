@@ -1,138 +1,74 @@
-\section{From a chain of seeds to a base-level alignment}
+\section{From a seed chain to a base-level alignment}
 \label{sec:final-alignment-role}
 
-The chaining stage identifies an ordered set of anchors that is plausible at
-the scale of genomic coordinates. It does not yet say which bases are
-substituted, inserted, or deleted between those anchors. The final-alignment
-stage resolves that ambiguity. It refines the ends of a candidate region,
-assigns a dynamic-programming score, and, when requested, reconstructs a CIGAR
-edit path. In BioSeqDB this is a conditional stage. If an SQL statement needs
-only seed-derived coordinates and does not request either CIGAR or exact edit
-accounting, \texttt{AlignStage} is disabled. If
-\texttt{bioseq.cigar(...)} or an exact \texttt{bioseq.edit(...)} predicate is
-present, the stage is enabled and traceback is mandatory.
+Chaining identifies an ordered set of anchors with plausible query and target
+coordinates. It does not determine the substitutions, insertions, and
+deletions between those anchors. Final alignment resolves this remaining
+ambiguity. It refines the outer coordinates, assigns a dynamic-programming
+score, and reconstructs an edit path when the query requests a CIGAR or an
+exact edit count.
 
-Calling this operation ``final'' does not imply that every configuration
-computes an unconstrained optimum over the whole query and target. KSW2 uses a
-finite band and may stop on Z-drop. Block Aligner deliberately explores an
-adaptive subset of the matrix. The dedicated GPU route first obtains a
-coordinate window from its seeding and chaining stages, then aligns that
-window when CIGAR is requested. These are controlled approximations around an
-already selected chain. Within the admitted cells, however, the score
-recurrences and trace decisions are explicit. When BioSeqDB reports an exact
-edit count, it counts substitutions and gaps on the emitted path rather than
-using a divergence estimate.
+BioSeqDB treats final alignment as an optional pipeline stage. Coordinate-only
+queries can return regions derived from seeds and chains. A request for a
+base-level path enables traceback, while an exact edit predicate also requires
+the traced path because a seed-derived divergence estimate is insufficient.
+Avoiding dynamic programming when these outputs are absent is important for
+database workloads that project many candidate coordinates.
 
-The current CPU implementation exposes two selectable algorithms:
+The stage has three execution routes. KSW2 supplies two-piece affine scoring,
+a static band, Z-drop, and minimap-style endpoint rules. Block Aligner uses a
+single affine model and an adaptive SIMD block. A restricted GPU route aligns
+windows produced by GPU seeding and chaining. These routes do not have
+identical scoring or endpoint semantics. Route selection is explicit, and
+each route has a distinct scoring and result contract.
 
-\begin{enumerate}
-    \item a Highway port of KSW2, retaining minimap2's single- or
-    two-piece-affine recurrence, diagonal-difference representation, banding,
-    Z-drop, endpoint selection, and packed CIGAR convention.
-    \item a native Highway port of Block Aligner, using a single affine gap
-    model, an adaptive block that shifts, grows, and shrinks, and native
-    global or X-drop termination.
-\end{enumerate}
-
-The generic C++ parameter object selects Block Aligner by default. Its current
-in-process block interval is 16--32 cells. The PostgreSQL configuration layer
-also selects Block Aligner, but its GUC defaults are still 32--256 and the
-custom scan copies those values into the parameter object. This distinction
-matters when interpreting the benchmark in
-Section~\ref{sec:final-alignment-results}. The source annotation for the
-broader tuning grid reports about 22\% lower CPU time for 16--32. The displayed
-129\,ms and 172\,ms pair yields a 25.0\% reduction. Neither percentage is
-automatically obtained by an unmodified SQL installation using 32--256.
-
-The dedicated all-GPU route adds a third execution contract. Admission
-requires the configuration tuple to name Block Aligner, but no CPU Block
-kernel runs inside that route. Vulkan seeding and chaining produce coordinate
-windows directly. If CIGAR is requested, a separate Vulkan
-two-piece-affine CIGAR shader solves those windows. The enum value is thus a
-route-admission identity, not evidence that the CPU Block recurrence executed.
-BioSeqDB records execution proofs and fails closed so that these two meanings
-cannot be silently conflated.
-
-\begin{table}[H]
-\centering
-\caption{Current production source map for final alignment.}
-\label{tab:final-alignment-source-map}
-\footnotesize
-\setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.08}
-\begin{tabularx}{\linewidth}{@{}
-  >{\raggedright\arraybackslash}p{0.24\linewidth}
-  >{\raggedright\arraybackslash}X@{}}
-\toprule
-\textbf{Responsibility} & \textbf{Current source}\\
-\midrule
-CIGAR representation and replay &
-\path{main/bioseq/backend/sequences/cigar.cppm}\\
-KSW2 implementation &
-\path{main/bioseq/backend/alignment_hwy/ksw2.cppm}\\
-Block Aligner implementation &
-\path{main/bioseq/backend/alignment_hwy/block_aligner.cppm}\\
-Batched KSW2 execution &
-\path{main/bioseq/backend/alignment_hwy/ksw2_batched.cppm}\\
-Region and anchor integration &
-\path{main/bioseq/backend/pipeline/minimap_port.cppm}\\
-Pipeline-stage admission &
-\path{main/bioseq/backend/pipeline/pipe.cppm}\\
-GPU Phase C interface &
-\path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm}\\
-GPU shader compilation &
-\path{main/bioseq/backend/gpu/vulkan/shader_compiler.cppm}\\
-GPU execution runtime &
-\path{main/bioseq/backend/gpu/vulkan/runtime.cppm}\\
-\bottomrule
-\end{tabularx}
-\end{table}
+The alignment modes in Section~\ref{subsec:alignment-modes} determine which
+matrix borders are fixed and which endpoints are free. BioSeqDB applies these
+conditions at the level of subproblems. Inter-anchor rectangles are global
+fills with fixed endpoints. The two outer rectangles are extension problems
+whose endpoint may be selected before the end of the available flank. This
+distinction is more accurate than describing an entire chained region as one
+global or local matrix.
 
 \section{Affine-gap dynamic programming}
 \label{sec:final-alignment-affine}
 
-\subsection{Why one gap-open cost is not enough}
-
 Let \(Q=q_1\ldots q_n\) be a query and \(T=t_1\ldots t_m\) a target interval.
-Let \(s(q_i,t_j)\) be a substitution score. A linear gap model charges the same
-amount for every missing symbol. Biologically, opening a gap and extending an
-existing gap are different events. A single insertion of length ten is
-usually more plausible than ten independent single-base insertions. An affine
-model therefore charges
+For substitution score \(s(q_i,t_j)\), an affine gap of length \(k\geq 1\)
+has penalty
 \[
-    g(k) = q + k e,\qquad k\geq 1,
+    g(k)=q+ke,
 \]
-where \(q>0\) is the open penalty and \(e>0\) is the extension penalty. This is
-the convention used by minimap2 and BioSeqDB. The first gap symbol costs
-\(q+e\).
-
-With target positions on the horizontal axis and query positions on the
-vertical axis, a global Needleman--Wunsch--Gotoh recurrence is
+where \(q>0\) is the gap-open penalty and \(e>0\) is the extension penalty.
+The first gap symbol therefore costs \(q+e\). With query positions on the
+vertical axis and target positions on the horizontal axis, the global
+Needleman, Wunsch, and Gotoh recurrence is
 \begin{align}
-    I(i,j) &= \max\{H(i-1,j)-q-e,\ I(i-1,j)-e\}, \label{eq:affine-i}\\
-    D(i,j) &= \max\{H(i,j-1)-q-e,\ D(i,j-1)-e\}, \label{eq:affine-d}\\
-    H(i,j) &= \max\{H(i-1,j-1)+s(q_i,t_j),\ I(i,j),\ D(i,j)\}.
-    \label{eq:affine-h}
+ I(i,j) &= \max\{H(i-1,j)-q-e,\ I(i-1,j)-e\},
+ \label{eq:affine-i}\\
+ D(i,j) &= \max\{H(i,j-1)-q-e,\ D(i,j-1)-e\},
+ \label{eq:affine-d}\\
+ H(i,j) &= \max\{H(i-1,j-1)+s(q_i,t_j),\ I(i,j),\ D(i,j)\}.
+ \label{eq:affine-h}
 \end{align}
-The \(I\) and \(D\) states remember whether the best partial path already ends
-in a gap. For global alignment the axes are initialized by cumulative gap
-costs. Local alignment additionally permits zero in the maximum. A full
-matrix costs \(O(nm)\) time and, if every trace decision is stored,
-\(O(nm)\) memory \cite{gotoh_1982_affine}.
+The insertion and deletion states record whether a path already ends in a
+gap. A global fill initializes both axes with cumulative gap costs. An
+extension changes the boundary and endpoint rules while retaining the same
+cell recurrence. A full matrix takes \(O(nm)\) time and \(O(nm)\) trace memory
+when every decision is retained \cite{gotoh_1982_affine}.
 
-BioSeqDB inherits minimap2's default nucleotide scores:
+The default nucleotide model uses match score \(a=2\), mismatch penalty
+\(b=4\), and two affine families
 \[
- a=2,\quad b=4,\quad (q_1,e_1)=(4,2),\quad
- (q_2,e_2)=(24,1).
+   (q_1,e_1)=(4,2), \qquad (q_2,e_2)=(24,1).
 \]
-A match scores \(+2\), an ordinary mismatch scores \(-4\), and the two gap
-families define
+KSW2 assigns a gap the lower of the two costs,
 \[
     g(k)=\min\{4+2k,\ 24+k\}.
 \]
-The short family is strictly cheaper for \(k<20\), the two families tie at
-\(k=20\), and the long family is cheaper for \(k>20\). Algebraically, KSW2
-maintains two insertion states and two deletion states:
+The short family is cheaper below length 20, both are equal at 20, and the
+long family is cheaper above 20. The recurrence keeps two insertion states
+and two deletion states:
 \begin{align}
  I_r(i,j)&=\max\{H(i-1,j)-q_r-e_r,\ I_r(i-1,j)-e_r\},\\
  D_r(i,j)&=\max\{H(i,j-1)-q_r-e_r,\ D_r(i,j-1)-e_r\},
@@ -140,140 +76,100 @@ maintains two insertion states and two deletion states:
  H(i,j)&=\max\{H(i-1,j-1)+s(q_i,t_j),
  I_1,I_2,D_1,D_2\}.
 \end{align}
-This two-piece concave cost is important for long reads, where a structural
-variant should not be penalized as a series of unrelated short errors.
+This model charges short sequencing errors and long gaps differently. Block
+Aligner instead uses only the first affine family. Selecting Block Aligner is
+therefore a scoring choice as well as a performance choice.
 
-Block Aligner uses only \((q_1,e_1)\). Its recurrence is therefore not a
-drop-in semantic replacement for KSW2 under the default two-piece model. This
-is an intentional production trade-off. The adapter projects the short pair,
-the block interval, and the X-drop threshold. It does not pretend to honor
-the second affine pair, KSW2's band, right-alignment tie flag, end bonus, or
-approximate-maximum flag.
+\subsection{Banding and stopping criteria}
 
-\subsection{Banding and Z-drop}
-
-Anchors imply that the desired path should remain near a diagonal. A band of
-half-width \(w\) discards cells satisfying
+Anchors suggest an expected diagonal \(d_0\). KSW2 can restrict evaluation to
+cells satisfying
 \[
-        |i-j| > w
+        |(i-j)-d_0|\leq w,
 \]
-after accounting for the interval's coordinate offset. This changes work from
-\(O(nm)\) to approximately \(O(w(n+m))\). The saving is substantial when
-\(w\ll \min(n,m)\), but the optimum is lost if a true insertion or deletion
-leaves the band. BioSeqDB derives the ordinary alignment width as
+where \(w\) is the half-width of the band. Work is then approximately
+\(O(w(n+m))\), but an optimum that leaves the band cannot be recovered. The
+ordinary alignment width is derived from the chaining width as
 \[
-        w_{\mathrm{align}}=\lfloor 1.5\,w_{\mathrm{chain}}+1\rfloor.
+        w_{\mathrm{align}}=\lfloor 1.5w_{\mathrm{chain}}+1\rfloor.
 \]
-With the default chaining bandwidth 500, this is 751.
 
-Z-drop supplies a second early-termination rule. Let \(S^\star\) be the best
-score seen at \((i^\star,j^\star)\), and let \(S(i,j)\) be the current
-anti-diagonal maximum. KSW2 may terminate when both coordinates have advanced
-past the best cell and
+Z-drop terminates an extension whose score has deteriorated sufficiently from
+the best cell. If \(S^\star\) is the best score at
+\((i^\star,j^\star)\), termination is permitted when
 \begin{equation}
  S^\star-S(i,j)>
  Z+e_z\left|(i-i^\star)-(j-j^\star)\right|.
  \label{eq:zdrop}
 \end{equation}
-The diagonal-displacement term does not punish a long gap as harshly as an
-equal score drop along the same diagonal. In the dual-affine kernel BioSeqDB
-uses the long-gap extension penalty \(e_2\) in this test. The default threshold
-is \(Z=400\). Block Aligner does not implement Equation~\ref{eq:zdrop}. Its
-left and right extensions use the original Block algorithm's X-drop rule and
-require two consecutive below-threshold steps before termination.
+The displacement term allows a long gap to move away from the best diagonal
+without receiving the same stopping penalty as a score loss along that
+diagonal. In the two-piece kernel, \(e_z\) is the long-gap extension penalty.
+Block Aligner does not use this rule. Its outer extensions apply X-drop and
+require two consecutive steps below the threshold before stopping.
 
-When an exact SQL edit predicate requires traceable gap fills, the KSW2 path
-sets both band and Z-drop to \(-1\) for those mandatory fills. This removes two
-sources of premature truncation. It does not turn the whole mapper into a
-full-matrix aligner. Seed selection, chain selection, the outer coordinate
-window, and any Block configuration remain part of the search contract.
+For mandatory KSW2 fills used by an exact edit predicate, banding and Z-drop
+are disabled. This prevents the path between two fixed anchors from ending
+early. The outer candidate window and the selected chain still constrain the
+search, so this setting does not turn the complete mapping task into an
+unbounded full-matrix comparison.
 
-\section{The minimap2 extension strategy and BioSeqDB's port}
+\clearpage
+\section{Alignment around a chain}
 \label{sec:final-alignment-three-phase}
 
-\subsection{Three different DP problems, not one matrix}
+BioSeqDB follows the ordinary DNA extension structure of minimap2
+\cite{minimap2_paper}. It solves three kinds of subproblem rather than one
+matrix over the complete region. The left flank is reversed and aligned as an
+extension. Rectangles between selected anchors are global fills. The right
+flank is a forward extension.
 
-The current implementation follows the central shape of minimap2's
-\texttt{mm\_align1}: extend left of the first seed, fill between seeds, then
-extend right of the last seed \cite{minimap2_paper}. These phases have
-different endpoint semantics:
-
-\begin{center}
-\begin{tabular}{p{0.18\textwidth}p{0.20\textwidth}p{0.23\textwidth}p{0.29\textwidth}}
+\begin{table}[htbp]
+\centering
+\small
+\caption{Boundary conditions of the three alignment phases.}
+\label{tab:alignment-phase-contracts}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}p{0.19\linewidth}X X@{}}
 \toprule
-\textbf{Phase} & \textbf{Input orientation} & \textbf{KSW2 contract} &
-\textbf{Block contract}\\
+\textbf{Phase} & \textbf{Orientation} & \textbf{KSW2} & \textbf{Block Aligner}\\
 \midrule
-left extension & reversed subranges & extension-only, right-aligned,
-reverse CIGAR, band and Z-drop & native X-drop on directly emitted reversed
-compact input\\
-seed-to-seed fill & forward & global fill, approximate maximum by default,
-two-piece affine & native global adaptive block, single affine\\
-right extension & forward & extension-only, band and Z-drop & native X-drop\\
+Left flank & reversed & extension endpoint, band, and Z-drop & native X-drop
+extension\\
+Between anchors & forward & global two-piece affine fill & global
+single-affine adaptive block\\
+Right flank & forward & extension endpoint, band, and Z-drop & native X-drop
+extension\\
 \bottomrule
-\end{tabular}
-\end{center}
+\end{tabularx}
+\end{table}
 
-The first and last anchor delimit the inner seeded interval. BioSeqDB expands
-an outer interval on either side, bounded by \texttt{max\_gap} and by an
-additional score-derived allowance. Left extension is solved in reverse so
-that both end extensions can use a forward DP recurrence. Current compact and
-lazy sequence views can emit this reversed orientation directly. They do not
-first materialize an entire reversed query.
-
-The seed-to-seed walk is especially consequential. A cursor begins at the
-first seed. Intermediate anchors whose accumulated query or target distance
-is below \texttt{min\_ksw\_len} are skipped without advancing the cursor. Once
-both accumulated distances reach the threshold, a global fill is emitted and
-the cursor advances. The last anchor always forces the remaining positive
-rectangle. With the default threshold 200, a megabase-scale region becomes a
-sequence of DP problems often near \(200\times200\), not one
-million-by-million matrix. A source-embedded engineering note attributes
-roughly a sevenfold total improvement at 903\,kbp to this decomposition. That
-number is historical and configuration-specific, but the mechanism remains
-in current code.
+Short distances between consecutive anchors are accumulated. A fill is
+started only after both the query and target spans reach a minimum length, or
+when the last anchor forces the remaining rectangle. This reduces a long
+region to a sequence of moderate subproblems. It also prevents the overhead of
+running dynamic programming separately for every closely spaced seed.
 
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
-    x=0.92cm,y=0.92cm,scale=0.97,transform shape,>=Latex,
-    seed/.style={circle,fill=black,inner sep=1.7pt},
-    phase/.style={rounded corners,draw,fill=blue!7,align=center,
-                  minimum height=0.65cm,font=\small},
-    lab/.style={font=\small},
-    annotation/.style={font=\small,fill=white,text opacity=1,
-                       inner xsep=2pt,inner ysep=1.5pt,rounded corners=1pt}
+  >=Latex,
+  box/.style={draw,rounded corners,fill=blue!7,align=center,
+              minimum width=3.25cm,minimum height=1.15cm,font=\small},
+  note/.style={align=center,font=\small}
 ]
-  \draw[->,thick] (0,0) -- (12.4,0) node[right,lab]{target coordinate};
-  \draw[->,thick] (0,0) -- (0,4.4) node[above,lab]{query coordinate};
-  \draw[gray!45,dashed] (0.5,0.5) -- (11.8,4.0);
-  \coordinate (a0) at (2.6,1.15);
-  \coordinate (a1) at (4.0,1.62);
-  \coordinate (a2) at (5.2,2.02);
-  \coordinate (a3) at (7.7,2.91);
-  \coordinate (a4) at (9.4,3.45);
-  \foreach \p in {a0,a1,a2,a3,a4} {\node[seed] at (\p) {};}
-  \draw[very thick,teal!70!black] (a0)--(a1)--(a2)--(a3)--(a4);
-
-  \draw[<->,orange!85!black,thick] (0.7,0.65) -- (2.55,1.10);
-  \node[phase,anchor=east] at (2.25,0.35) {left extension\\reverse input};
-
-  \draw[<->,purple!75!black,thick] (2.65,1.36) -- (5.15,2.23);
-  \node[phase] at (4.0,2.75) {short anchor intervals\\accumulate};
-
-  \draw[<->,purple!75!black,thick] (5.25,2.22) -- (7.65,3.08);
-  \node[phase] at (6.6,1.25) {mandatory global\\seed-to-seed fill};
-
-  \draw[<->,orange!85!black,thick] (9.45,3.67) -- (11.5,4.05);
-  \node[phase] at (10.35,2.72) {right extension\\forward input};
-
-  \node[annotation,anchor=south east] at (11.85,4.20)
-        {$\texttt{min\_ksw\_len}=200$ governs fill boundaries};
+  \node[box] (left) at (1.9,0) {left extension\\reversed flank};
+  \node[box] (acc) at (5.6,0) {accumulate nearby\\anchor intervals};
+  \node[box] (fill) at (9.3,0) {mandatory global\\fills};
+  \node[box] (right) at (13.0,0) {right extension\\forward flank};
+  \draw[->,thick] (left.east) to (acc.west);
+  \draw[->,thick] (acc.east) to (fill.west);
+  \draw[->,thick] (fill.east) to (right.west);
+  \node[note] at (7.45,-1.05)
+    {ordered anchors preserve the query and target coordinate direction};
 \end{tikzpicture}
-\caption{BioSeqDB's three-phase region alignment. The drawing reconstructs
-the implemented control flow. It is not a copy of a minimap2 figure. Seed- or
-hash-supported anchors constrain the path, short intervals accumulate, mandatory global fills
-resolve gaps, and end extensions refine the outer coordinates.}
+\caption{Decomposition of a chained region into two extensions and a set of
+global inter-anchor fills. Several short anchor intervals may form one fill.}
 \label{fig:three-phase-alignment}
 \end{figure}
 
@@ -282,1156 +178,375 @@ resolve gaps, and end extensions refine the outer coordinates.}
 \label{alg:three-phase-alignment}
 \begin{minipage}{\linewidth}
 \small
-\textbf{Input.} Query view \(Q\), target view \(T\), ordered anchors \(A\),
-and parameters \(P\).
+\textbf{Input.} Query \(Q\), target \(T\), ordered anchors \(A\), parameters
+\(P\), and a selected backend.
 \begin{enumerate}
-    \item Derive the inner seed bounds and the bounded outer extension bounds.
-    \item Reserve region CIGAR capacity from the outer query and target extents.
-    \item If both left outer intervals are non-empty:
+    \item Derive inner anchor bounds and bounded outer extension intervals.
+    \item If both left intervals are nonempty, align them in reverse
+          orientation and update the left endpoint.
+    \item Place a cursor at the first anchor.
+    \item Visit each later anchor in order.
     \begin{enumerate}
-        \item Run reverse-oriented extension with KSW2 or Block X-drop.
-        \item Update the left endpoint from the selected maximum or query-end
-              score.
+        \item Accumulate query and target distance while either span is below
+              \(P.\mathit{minLen}\), except at the final anchor.
+        \item Solve each resulting positive rectangle as a global fill.
+        \item Append its CIGAR and move the cursor to the current anchor.
     \end{enumerate}
-    \item Set \((q_s,t_s)\gets\) the start of the first seed.
-    \item For each later anchor \(a_i\):
-    \begin{enumerate}
-        \item Set \((q_e,t_e)\gets\) the end coordinates of \(a_i\).
-        \item If \(a_i\) is not the last anchor and either
-              \(q_e-q_s<P.\textit{minLen}\) or
-              \(t_e-t_s<P.\textit{minLen}\), continue without advancing
-              \((q_s,t_s)\).
-        \item Otherwise, if both accumulated intervals are non-empty, solve
-              one mandatory global fill, append its packed CIGAR, and set
-              \((q_s,t_s)\gets(q_e,t_e)\).
-    \end{enumerate}
-    \item If the right outer intervals are non-empty and the selected contract
-          permits it, run forward extension and update the right endpoint.
-    \item Project reverse-strand query coordinates and final score metadata.
+    \item If both right intervals are nonempty, run the permitted forward
+          extension and update the right endpoint.
+    \item Merge adjacent equal CIGAR operations and project reverse-strand
+          coordinates when required.
 \end{enumerate}
 \end{minipage}
 \end{algorithm}
 
-Algorithm~\ref{alg:three-phase-alignment} makes the cursor semantics explicit.
-The left extension runs only when both outer slices are nonempty. Inside the
-anchor loop, skipping a short interval does not advance \((q_s,t_s)\), so
-several short intervals accumulate into one mandatory fill. The right
-extension then runs only when the selected backend contract permits it.
-Reverse-strand projection and final score metadata are applied after these
-three phases. This order preserves the chain geometry while allowing KSW2 and
-Block Aligner to implement different phase contracts.
+Each phase returns a score, consumed lengths, endpoint information, and an
+optional trace. A non-dropped global fill consumes both slices. Ordinary KSW2
+fills may instead stop under Z-drop and use their maximum-scoring positions as
+truncated endpoints. Exact-edit KSW2 disables Z-drop. An extension may consume
+only a prefix of the available oriented slices, which moves the
+reported outer coordinate to its selected endpoint. The region result is
+formed by adding phase scores and concatenating phase traces in coordinate
+order. Reversing the left input changes the direction of computation, but not
+the final order of the reported path.
 
-\subsection{Where the port intentionally stops matching minimap2}
+Stopping state is also phase-specific. A KSW2 Z-drop in an earlier phase can
+suppress a later right extension because the minimap-style control flow treats
+the region as dropped. Block global fills do not use Z-drop. Its left and
+right X-drop extensions are separate searches, so the right extension remains
+eligible after an earlier Block phase. This is a material behavioural
+difference and is retained as a backend rule rather than normalised through a
+shared option.
 
-The inspected minimap2 reference contains more policy than the three boxes in
-Figure~\ref{fig:three-phase-alignment}. It handles:
-\begin{itemize}
-    \item ignored and tandem seeds,
-    \item long-join bandwidth expansion,
-    \item short-read ungapped shortcuts,
-    \item splice-junction scores,
-    \item RNA-specific paths,
-    \item an approximate first pass followed by \texttt{mm\_test\_zdrop},
-    \item inversion Z-drop, and
-    \item region splitting after a dropped gap.
-\end{itemize}
-The current BioSeqDB path implements the ordinary DNA
-seed-to-seed and end-extension core. It does not contain the splice, long-join,
-inversion-retry, or second-pass logic in its alignment modules. Consequently,
-``minimap2-derived'' is more accurate than ``minimap2-equivalent'' for those
-special modes.
+The port differs from minimap2 in its supported policy surface. It implements
+the ordinary DNA seed-gap and end-extension structure, but not the splice,
+RNA, inversion-retry, or long-join policies. It also obtains slices from lazy
+sequence representations, including reverse-oriented slices, without first
+copying a complete region. These differences concern the surrounding
+pipeline. The KSW2 recurrence remains recognisable, while Block Aligner uses a
+separate phase contract instead of imitating KSW2 options that it does not
+support.
 
-The ordinary paths also differ at an anchor boundary. BioSeqDB derives the
-boundary from the stored \texttt{cur\_anchor.query\_position} and
-\texttt{cur\_anchor.ref\_position}, then adds one. Upstream minimap2 normally
-calls \texttt{mm\_adjust\_minier} before extension. Its short-read special path
-with homopolymer compression (HPC) disabled is an exception. BioSeqDB does not
-perform that adjustment here,
-so the DP windows can differ even when the chain anchors agree.
-
-There is also a subtle difference after a dropped phase. KSW2 suppresses the
-right extension if a prior phase Z-dropped. The Block path still admits a
-right extension because its gap fills are global and its two end extensions
-use their own native X-drop domains. This is encoded in the compile-time
-algorithm branch rather than hidden in a common KSW-shaped adapter.
-
-\section{KSW2 in BioSeqDB}
+\section{KSW2 with portable SIMD}
 \label{sec:final-alignment-ksw2}
 
-\subsection{The Suzuki--Kasahara difference representation}
+\subsection{Difference representation}
 
-A straightforward SIMD implementation stores absolute \(H\), \(I\), and \(D\)
-scores. Long alignments require wide integers because absolute scores grow with
-sequence length. Wide lanes reduce the number of cells processed per vector.
-Suzuki and Kasahara observed that neighboring-score differences remain
-bounded by the scoring parameters even when the absolute score is large.
-KSW2 therefore represents quantities related to
+A direct SIMD implementation stores absolute \(H\), \(I\), and \(D\) scores.
+Absolute values grow with sequence length and may require wide lanes. KSW2
+uses the Suzuki and Kasahara observation that differences between neighbouring
+scores remain bounded by the scoring parameters even when the absolute score
+is large \cite{suzuki_kasahara_2018}. Representative differences are
 \[
-    U(i,j)=H(i,j)-H(i-1,j),\qquad
-    V(i,j)=H(i,j)-H(i,j-1),
+    U(i,j)=H(i,j)-H(i-1,j), \qquad
+    V(i,j)=H(i,j)-H(i,j-1).
 \]
-together with transformed gap offsets. The hot recurrence operates on signed
-8-bit partial values. An absolute 32-bit score row is reconstructed only for
-exact maximum tracking and endpoints \cite{suzuki_kasahara_2018}.
+The main recurrence operates on signed byte values derived from these
+differences. Wider scores are reconstructed where exact maxima and endpoints
+are needed. More cells therefore fit in each SIMD vector.
 
-BioSeqDB ports that organization to Highway. A scalable byte tag supplies the
-partial-score lanes, while a scalable 32-bit tag reduces reconstructed maxima.
-The source instantiates a single-affine kernel only when
-\((q_1,e_1)=(q_2,e_2)\). Under the ordinary defaults the pairs differ, so the
-dual-affine kernel is selected. The band is stored by anti-diagonal, and one
-direction byte encodes the winning state plus continuation bits for each of
-the four gap states.
+BioSeqDB expresses this recurrence with portable SIMD operations. Lanes hold
+cells from one alignment problem, usually along an anti-diagonal. This is
+intra-sequence parallelism. It differs from placing several independent
+sequence pairs in the lanes of one vector. A single-affine specialization is
+used when the two penalty pairs are equal. The default parameters select the
+two-piece specialization, with four gap states and their continuation bits.
+Trace decisions are stored for cells inside the admitted band.
 
-This representation is \emph{intra-sequence} SIMD: lanes represent cells from
-one DP problem. It should not be confused with batching independent sequence
-pairs into lanes. The latter was explored separately and is discussed in
-Section~\ref{sec:final-alignment-batching}.
+\subsection{Endpoint and traceback rules}
 
-\subsection{Endpoint and CIGAR semantics}
+KSW2 tracks the best internal cell, the best score at each sequence end, and
+the bottom-right score when that cell is reached. A global fill traces from
+the bottom-right cell. An extension normally traces from the best admitted
+endpoint, with the query-end score and end bonus considered by the selected
+mode. A left extension is computed on reversed slices, after which its CIGAR
+runs are restored to source order.
 
-KSW2 tracks several endpoint summaries:
+The BioSeqDB port changes data access and allocation rather than the scoring
+model. It encodes only each requested subrange from a lazy view, reuses
+operation-local scratch, and dispatches the same recurrence to supported CPU
+targets. The second affine family, band, Z-drop, endpoint bonus, and tie rules
+remain reasons to select KSW2. They are not projected onto Block Aligner.
 
-\begin{itemize}
-    \item the best score and its query/target coordinates.
-    \item the best score at the query end, with the associated target
-    coordinate.
-    \item the best score at the target end, with the associated query
-    coordinate.
-    \item the bottom-right global score if the band reaches it.
-\end{itemize}
-
-Traceback starts from the bottom-right cell for an undropped global fill. For
-an extension-only call, reaching the end of the query wins when its score plus
-the end bonus exceeds the internal maximum. Otherwise traceback starts at the
-best observed cell. Left-extension operations are emitted in reverse and then
-reversed back into source order.
-
-The KSW packed representation stores one run as
-\[
-        \textit{word}=(\textit{length}\ll4)\mid\textit{opcode}.
-\]
-The shared opcodes are \(0=M\), \(1=I\), \(2=D\), \(3=N\),
-\(7={=}\), and \(8=X\). Adjacent equal opcodes are merged both within a
-traceback and when fills are appended to a region. A CIGAR such as
-\texttt{58M1I33M} is therefore three integers, not 92 per-base records.
-
-\subsection{Port-specific memory and hot-loop changes}
-
-The port is not merely the upstream SSE file wrapped in a module. The current
-implementation makes several changes needed by BioSeqDB's data model and
-execution engine:
-
-\begin{enumerate}
-    \item It accepts an alphabet-generic lazy sequence view. Only the admitted
-    subrange is encoded, through the view's \texttt{ptr\_at} slot ring. A
-    fragmented or PostgreSQL-backed sequence need not be flattened in advance.
-    \item DP state, exact-score rows, encoded scratch, and the backtrack matrix
-    live in a per-alignment arena. The returned CIGAR has independent lifetime.
-    \item Buffers that are overwritten before first read are not eagerly
-    zero-filled. In the dual-affine state, the short and long gap arrays are
-    initialized directly to their required offsets. The trace matrix likewise
-    skips a full clear.
-    \item The common nucleotide scoring layout uses a fused equality-based
-    score selection. Generic matrices retain a table path.
-    \item Exact anti-diagonal maxima are reduced with Highway 32-bit vectors.
-    The same source dispatches to supported x86 and Arm targets.
-    \item The single- and dual-affine kernels share one compile-time core,
-    removing runtime checks from the inner cell loop.
-\end{enumerate}
-
-These changes preserve the KSW2 recurrence and result structure while moving
-allocation, encoding, and instruction selection into BioSeqDB's common
-infrastructure. They also explain why a comparison with standalone minimap2
-must include more than the arithmetic kernel. BioSeqDB saves conversions when
-the source is already compact, but pays PostgreSQL, batching, and lazy-view
-costs that minimap2 does not have.
-
-\section{Block Aligner: adaptive SIMD dynamic programming}
+\section{Adaptive block alignment}
 \label{sec:final-alignment-block}
 
-\subsection{The original algorithm}
+\subsection{Block movement and growth}
 
-Block Aligner starts from the same single-affine recurrence as
-Equations~\ref{eq:affine-i}--\ref{eq:affine-h}, but it does not fill a static
-band~\cite{block_aligner_paper}. It keeps a square \(B\times B\) block
-positioned over the DP matrix. A
-step computes only a strip of width \(S\) on the right or bottom edge, where
-the paper's stated AVX setting and the copied reference implementation use
-\(S=8\). The next direction is selected by
-comparing the first \(S\) scores on the two outgoing borders:
-\[
-\operatorname{direction}=
-\begin{cases}
-\mathrm{down},&
-\max_{0\le k<S} H(i+B-1,j+k)>
-\max_{0\le k<S} H(i+k,j+B-1),\\
-\mathrm{right},&\text{otherwise}.
-\end{cases}
-\]
-The block follows the region in which scores appear most promising. Unlike a
-static diagonal band, it may drift far from the main diagonal.
+Block Aligner evaluates the single-affine recurrence in a moving
+\(B\times B\) square rather than a fixed diagonal band
+\cite{block_aligner_paper}. Each step computes a strip of width \(S\) on the
+right or lower edge. The maximum over the two outgoing border prefixes chooses
+whether the block moves right or down. The block can therefore follow a path
+that moves far from the original diagonal.
 
-Greedy direction selection can be fooled by a long gap or a low-similarity
-island. The defining contribution of Block Aligner is therefore adaptive
-geometry. When several steps fail to produce a new maximum, it restores a
-checkpoint and doubles \(B\). The larger block spans more competing paths. If
-a later maximum lies near the suffix of either outgoing border, the block may
-halve and advance diagonally. The implementation tests the larger suffix
-maximum from the row and column borders. This recovers the speed of a narrow
-block in easy regions while retaining a chance of crossing a difficult region.
-
-The original paper reports global, local, and X-drop modes, nucleotide and
-protein matrices, and position-specific scoring matrices. Across its chosen
-datasets it reports more than five- to tenfold speedups over some comparison
-methods with an error rate below 3\% on the evaluated protein and long-read
-sets. These are paper results on the authors' hardware and workloads. They are
-not BioSeqDB speedups and are not directly comparable with the SQL E2E
-measurements in Section~\ref{sec:final-alignment-results}.
+Greedy movement can miss a path after a long gap or a low-scoring interval.
+When several steps fail to find a new maximum, the algorithm restores a
+checkpoint and increases \(B\). The larger region admits more alternatives.
+After progress resumes near an outgoing border suffix, the block may shrink
+and move diagonally. The minimum and maximum block sizes bound this adaptation.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[
-  x=0.48cm,y=0.48cm,scale=0.91,transform shape,>=Latex,font=\scriptsize]
-  \def\gridpanel#1{
-    \begin{scope}[xshift=#1]
-      \draw[step=1,gray!28,very thin] (0,0) grid (8,8);
-      \draw[->] (0,0)--(8.5,0) node[right]{$T$};
-      \draw[->] (0,0)--(0,8.5) node[above]{$Q$};
-      \draw[orange!80!black,very thick] (0,0)--(7.7,7.2);
-    \end{scope}
-  }
-
-  \gridpanel{0cm}
+\begin{tikzpicture}[x=0.42cm,y=0.42cm,>=Latex,font=\small]
   \begin{scope}[xshift=0cm]
-    \draw[blue!75!black,very thick] (0,0) rectangle (3,3);
-    \fill[blue!18] (2,0) rectangle (3,3);
-    \fill[purple!18] (0,2) rectangle (3,3);
-    \draw[->,thick] (3.1,1.4)--(4.1,1.4);
-    \node[align=center] at (4.2,5.9) {\textbf{1. Shift}\\compare \(S\)-score\\border prefixes};
-    \node at (1.5,-1.0) {(a) right/down decision};
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (0,0) rectangle (3,3);
+    \fill[blue!16] (2,0) rectangle (3,3);
+    \draw[->,thick] (3.2,1.4) to (4.5,1.4);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shift toward the stronger outgoing border};
+    \node at (3,-1) {(a) move};
   \end{scope}
-
-  \gridpanel{5.6cm}
-  \begin{scope}[xshift=5.6cm]
-    \draw[blue!75!black,very thick] (1,1) rectangle (4,4);
-    \draw[teal!75!black,dashed,very thick] (0,0) rectangle (6,6);
+  \begin{scope}[xshift=5.2cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[blue!70!black,very thick] (1.5,1.5) rectangle (4.5,4.5);
+    \draw[teal!70!black,dashed,very thick] (0,0) rectangle (6,6);
     \fill[red!65] (2.7,2.7) circle (0.12);
-    \node[red!65!black,anchor=west] at (3.0,2.7) {checkpoint};
-    \draw[->,thick] (4.2,4.2)--(5.6,5.6);
-    \node[align=center] at (4.5,7.2) {\textbf{2. Grow}\\restore checkpoint\\and double \(B\)};
-    \node at (3.0,-1.0) {(b) no new maximum};
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {restore a checkpoint and enlarge the block};
+    \node at (3,-1) {(b) grow};
   \end{scope}
-
-  \gridpanel{11.2cm}
-  \begin{scope}[xshift=11.2cm]
-    \draw[teal!75!black,very thick] (0,0) rectangle (6,6);
-    \fill[green!25] (4.8,4.8) rectangle (6,6);
-    \fill[black] (5.35,5.25) circle (0.12);
-    \draw[->,thick] (5.8,5.8)--(7.1,7.1);
-    \draw[blue!75!black,dashed,very thick] (3,3) rectangle (6,6);
-    \node[align=center] at (3.3,7.3) {\textbf{3. Shrink}\\maximum in border\\suffix};
-    \node at (3.0,-1.0) {(c) halve and move diagonally};
+  \begin{scope}[xshift=10.4cm]
+    \draw[step=1,gray!28,very thin] (0,0) grid (6,6);
+    \draw[teal!70!black,very thick] (0,0) rectangle (6,6);
+    \fill[green!22] (4,4) rectangle (6,6);
+    \draw[blue!70!black,dashed,very thick] (3,3) rectangle (6,6);
+    \draw[->,thick] (5.3,5.3) to (6.5,6.1);
+    \node[align=center,text width=3.7cm] at (3,7.4)
+      {shrink after progress reaches a border suffix};
+    \node at (3,-1) {(c) shrink};
   \end{scope}
 \end{tikzpicture}
-\caption{Reconstruction of the adaptive-block mechanism described by Liu and
-Steinegger. A step computes an outgoing strip, growth replays from a saved
-checkpoint, and shrinking retains the promising suffix. The orange line
-illustrates a possible optimum path. This TikZ drawing was rebuilt from the
-algorithm and the paper's Figure~2, not copied from the paper artwork.}
+\caption{Adaptive block movement. Border scores guide each shift. Lack of
+progress causes replay with a larger block, while later progress permits a
+smaller block.}
 \label{fig:block-adaptive-reconstruction}
 \end{figure}
 
-Figure~\ref{fig:block-adaptive-reconstruction} should be read from left to
-right. Panel~(a) chooses the next strip from the competing border-prefix
-maxima. Panel~(b) restores a checkpoint and enlarges the search after progress
-stalls. Panel~(c) halves the block only after a maximum reaches an outgoing
-border suffix. The figure therefore depicts an adaptive search trajectory, not
-a fixed diagonal band.
+\subsection{SIMD recurrence within a block}
 
-\subsection{SIMD inside a block}
-
-Block Aligner lays vectors vertically or horizontally rather than on
-anti-diagonals. One gap dependency therefore runs between lanes of the same
-vector. For a vector \(x_0,\ldots,x_{L-1}\), the needed prefix operation has
-the form
+Vectors are laid out vertically or horizontally inside the block. One gap
+state then has a dependency between lanes. For vector values
+\(x_0,\ldots,x_{L-1}\), the required affine prefix operation is
 \begin{equation}
-    y_i=\max_{0\le k\le i}\{x_k+(i-k)g\},
+    y_i=\max_{0\leq k\leq i}\{x_k+(i-k)g\},
+    \qquad g=-e.
     \label{eq:block-prefix}
 \end{equation}
-where \(g=-e\). It is evaluated by shift-and-maximum stages of distances
-1, 2, 4, and, for 16 lanes, 8. This takes \(O(\log L)\) vector operations.
-A correction carries the last value of the preceding vector into the next
-one. The other gap direction and the diagonal transition have ordinary
-vector dependencies.
+Shift-and-maximum stages at distances \(1,2,4\), and then higher powers of two
+compute this scan in \(O(\log L)\) vector operations. A carry connects the end
+of one vector with the next. The diagonal transition and the other gap state
+use ordinary vector dependencies.
 
-Only four score borders and their checkpoint copies are needed for score
-computation, giving \(O(B)\) working score memory. Traceback increases storage
-to \(O(B_{\max}(n+m))\) because every computed strip must retain decisions
-that the adaptive path may later traverse. A checkpoint also stores the trace
-cursor so speculative strips can be discarded when growth replays the region.
+Score computation retains only the block borders and checkpoint copies, so
+its working score memory is \(O(B)\). Traceback needs additional strip records
+along the adaptive trajectory. A checkpoint includes the trace position, which
+allows speculative strips to be discarded when the algorithm grows and
+replays a region.
 
-\subsection{The current Highway port}
+BioSeqDB keeps the reference step geometry and admits SIMD lane shapes that
+preserve it. Global mode fills the fixed rectangles between anchors. X-drop
+mode handles the outer extensions. Input ranks are obtained from the same
+lazy views as KSW2. SIMD masks encode direction and gap continuation decisions,
+and traceback decodes these masks directly into packed runs. The main material
+difference from KSW2 remains the adaptive search with one affine family.
 
-BioSeqDB's implementation is based on
-\path{block-aligner-research/src/scan_block.rs}, but it is a native C++26
-module rather than a foreign-library call. The production core has the
-following concrete geometry:
-
-\begin{itemize}
-    \item a fixed step \(S=8\).
-    \item signed 16-bit lanes with saturating arithmetic and a bias of
-    \(2^{14}\), together with a 32-bit step offset.
-    \item a Highway capped tag of at most 16 lanes.
-    \item admitted lane counts of exactly 8 or 16, corresponding to the
-    proven reference geometries.
-    \item power-of-two minimum and maximum block sizes.
-    \item global mode for mandatory seed gaps and two-confirmation X-drop for
-    left and right extension.
-\end{itemize}
-
-At 8 lanes, a shift step is one full vector. At 16 lanes, it is half a
-vector. Wider Highway targets are deliberately capped rather than allowed to
-change the algorithm's step semantics. An unsupported lane shape, penalty,
-coordinate range, matrix layout, or block geometry aborts the selected route.
-There is no scalar biological implementation hidden beneath this module. The
-16-bit representation is safe for the tuned and tested score and block
-geometries. The current runtime contract does not prove a
-substitution-score-to-block-size range invariant for every SQL-admitted
-configuration. Rejecting unsupported shapes therefore does not by itself prove
-that every admitted score and block pairing remains within the tested
-saturating-arithmetic range.
-
-The hot rectangle kernel loads a scoring-matrix row once per target column and
-reuses it for all query vectors in that column. It computes diagonal,
-column-gap, and row-gap candidates, using
-Equation~\ref{eq:block-prefix} for the row state. Border arrays are the only
-scores written back. Trace masks are compressed with Highway's
-\texttt{BitsFromMask}. Two masks are interleaved into a direction word, while
-two gap-open and continuation masks are interleaved into a second word. Each
-cell therefore contributes four trace bits across two words. This replaces
-repeated vector stores followed by scalar bit-shifting.
-
-The traceback itself is a lookup-table state machine over diagonal, row-gap,
-and column-gap states. It walks the recorded adaptive strips backward and
-accumulates run lengths directly into packed \(M/I/D\) operations. If exact
-edit accounting was requested, a diagonal step compares the already resident
-padded ranks, while an insertion or deletion contributes one edit. The forward
-DP commits the alignment score. The backward trace produces the CIGAR and, when
-requested, the exact edit count.
-
-\subsection{BioSeqDB-specific adaptations}
-
-\begin{center}
+\begin{algorithm}[htbp]
+\caption{Adaptive block alignment}
+\label{alg:adaptive-block-alignment}
+\begin{minipage}{\linewidth}
 \small
-\begin{tabular}{p{0.20\textwidth}p{0.32\textwidth}p{0.38\textwidth}}
-\toprule
-\textbf{Aspect} & \textbf{Original Block Aligner} & \textbf{BioSeqDB port}\\
-\midrule
-Implementation & Rust with explicit SSE2, AVX2, Arm NEON, WebAssembly SIMD and C
-bindings & C++26 module with Highway target dispatch and a capped, proven
-8/16-lane geometry\\
-Input & contiguous sequence or position-specific scoring matrix (PSSM) buffers &
-alphabet-generic lazy views over
-packed, fragmented, or PostgreSQL-backed storage\\
-Reverse extension & caller-provided reversed input & direct reverse-oriented
-emission from compact storage, with no whole-buffer reverse copy\\
-Production modes & global, local, and X-drop are library features & global
-seed-gap fill and X-drop end extension only\\
-Gap model & single affine, including position-specific variants in the paper
-& one generated score matrix and the short minimap2 affine pair\\
-Scratch lifetime & library allocation objects & per-alignment BioSeqDB arena,
-with bounded subregion encoding\\
-Trace & four-bit decisions decoded by a LUT & lane masks compressed with
-\texttt{BitsFromMask}, LUT trace, direct packed run construction, optional
-edit count\\
-Fast exact case & no equivalent resident packed proof & DNA4 packed in 64-bit
-words or byte-rank diagonal certificate can bypass DP\\
-Route integrity & library call selected by caller & execution proof records
-phase, lane width, cells, growth, shrinking, trace, certificate, and forbidden
-fallbacks\\
-\bottomrule
-\end{tabular}
-\end{center}
+\textbf{Input.} Encoded slices, affine scores, block bounds, and either global
+or X-drop mode.
+\begin{enumerate}
+    \item Place a minimum-size block at the initial matrix corner and save a
+          checkpoint.
+    \item Compute the next outgoing strip with the vector prefix recurrence.
+    \item Record score and trace borders, then update the best score.
+    \item If progress continues, move toward the stronger outgoing border.
+    \item If progress stalls and growth is possible, restore the checkpoint,
+          enlarge the block, and recompute that region.
+    \item If the best score reaches a suitable border suffix, shrink the block
+          and advance diagonally.
+    \item Repeat until the global endpoint or the X-drop condition is reached.
+    \item Trace backward through the retained strips and emit packed runs.
+\end{enumerate}
+\end{minipage}
+\end{algorithm}
 
-The adapter intentionally omits KSW-only fields. A request that depends on the
-second affine pair or KSW tie and endpoint flags must select KSW2. Reusing the
-shared \texttt{KswAlignResult} structure is only an output-storage
-convenience. It does not make the Block recurrence KSW-compatible.
-
-\subsection{A proof that can avoid the DP entirely}
+\subsection{Exact diagonal certificate}
 \label{sec:block-diagonal-certificate}
 
-Many mandatory fills are equal-length and nearly identical. BioSeqDB tests
-whether their coordinate diagonal is provably the unique global optimum
-before constructing Block scratch. Let the common length be \(n\), let
+An equal-length fill can sometimes be resolved without constructing a block.
+Let its common length be \(n\), let \(D\) be the exact score of the coordinate
+diagonal, and let \(M\) be the largest substitution score. Any different
+global path must contain the same positive number of inserted and deleted
+symbols. Its score is at most
 \[
- D=\sum_{i=1}^{n}s(q_i,t_i)
+    U=(n-1)M-2(q+e).
 \]
-be the exact coordinate-diagonal score, and let \(M\) be the largest entry in
-the admitted generated matrix. Any different global path between equal-length
-strings must contain the same positive number \(d\) of inserted and deleted
-symbols. It has at most \(n-d\) diagonal pairs and at least one gap run in
-each direction. Its score is bounded above by
-\[
-    (n-d)M-2q-2ed
-    \le (n-1)M-2(q+e)=U.
-\]
-Therefore
+It follows that
 \begin{equation}
-        D>U
-        \quad\Longrightarrow\quad
-        \text{the coordinate diagonal is the unique optimum}.
-        \label{eq:block-certificate}
+    D>U \quad\Longrightarrow\quad
+    \text{the coordinate diagonal is the unique optimum}.
+    \label{eq:block-certificate}
 \end{equation}
-Strict inequality is essential. Equality could expose a different traceback
-tie policy.
+Strict inequality excludes a competing path with an equal score. When the
+condition holds, BioSeqDB can return the diagonal score, a single match run,
+and the exact mismatch count. Otherwise it runs the adaptive dynamic program.
+The certificate proves only this specific geometry and does not make Block
+Aligner exact for every admitted input.
 
-For resident DNA4 storage packed in 64-bit words, the fast certificate reads
-packed two-bit symbols directly, reverses packed groups when required, XORs
-query and target, and collapses each two-bit mismatch group for a population count. It computes
-the score and, when requested, the edit count without byte expansion. When
-CIGAR output is requested, the caller emits one \(nM\) run. A score-only call
-does not materialize that run. Its decision is three-valued:
-
-\begin{enumerate}
-    \item \emph{not eligible}: no packed scan ran, so the ordinary path,
-    including the generic byte certificate, remains available.
-    \item \emph{rejected}: exact packed content was scanned but
-    Equation~\ref{eq:block-certificate} did not prove uniqueness, so Block DP
-    runs with the byte certificate disabled to avoid scanning twice.
-    \item \emph{certified}: score and endpoint are committed. A requested edit
-    count and requested \(nM\) CIGAR are also committed without constructing
-    padded buffers, scratch, or trace. The result CIGAR vector is not allocated
-    before the proof succeeds.
-\end{enumerate}
-
-This is an exact fast path inside an otherwise heuristic adaptive algorithm.
-It does not claim that every Block result is an unconstrained optimum. It
-proves one common geometry and delegates all other cases to the normal Block
-search.
-
-\subsection{Why fail-closed attestation is part of the algorithm}
-
-Runtime algorithm selection is resolved to a template registry before the hot
-loop. For Block Aligner the operation-local proof derives, from immutable
-region geometry, how many left, gap, and right calls should be eligible. The
-kernel then records:
-\begin{itemize}
-  \setlength{\itemsep}{0pt}
-  \setlength{\parsep}{0pt}
-  \item how many calls actually ran,
-  \item which lane width was used,
-  \item how many SIMD vectors and cells were evaluated,
-  \item whether native X-drop ran,
-  \item whether the block grew or shrank, and
-  \item whether a diagonal certificate replaced DP.
-\end{itemize}
-The proof also counts forbidden KSW2 and scalar fallback attempts. A selected
-Block route is accepted only if the derived and observed phase counts agree
-and all forbidden counters are zero.
-
-This is stronger than logging an enum. It makes a common benchmark error
-observable: a test can request a fast backend, encounter an unsupported
-shape, and silently measure a slower fallback while still printing the
-requested label. BioSeqDB instead aborts that operation. The price is a
-narrower admitted contract, but the reported algorithm identity is
-falsifiable.
-
-\section{Traceback, CIGAR, and exact edit accounting}
+\section{Traceback, CIGAR, and edit counting}
 \label{sec:final-alignment-cigar}
 
-The forward score alone cannot explain an alignment. Variant calling,
-coordinate projection, and an SQL edit predicate need the path. BioSeqDB uses
-one common \texttt{CigarOp} representation after backend-specific traceback:
-a 32-bit run length and a 32-bit opcode. KSW2, Block Aligner, and Vulkan all
-cross their low-level boundary in KSW's packed
-\((\textit{length}\ll4)\mid\textit{opcode}\) form, then append into this
-common vector.
-
-Before aligning a region, the CPU path estimates CIGAR capacity from the
-outer query and target extents. The reserve hint is capped at
-\(4\,\texttt{max\_gap}+64\) operations so a megabase seed span does not
-preallocate a gigabyte-scale vector. This cap is a performance hint, not a
-semantic maximum. The vector can still grow if a highly alternating path
-needs more runs.
-
-There are three cases worth separating:
-
-\begin{enumerate}
-    \item A region with several seeds appends the left trace, every mandatory
-    fill trace, and the right trace. Adjacent runs with the same opcode merge
-    at phase boundaries.
-    \item A single-seed region has no seed-to-seed DP rectangle. Its implicit
-    seeded interval emits a generic \(M\) run over the common length, followed
-    by \(I\) or \(D\) for any length difference.
-    \item A certified Block diagonal emits one \(nM\) run without allocating
-    trace storage.
-\end{enumerate}
-
-The implicit interval in the single-seed case contributes its CIGAR and, when
-requested, its exact edit accounting. It does not contribute an implicit seed
-score to \texttt{dp\_score}. That field accumulates only actual left, fill, and
-right DP calls. The path fields can therefore cover the seeded interval even
-when the score field has no corresponding seed contribution.
-
-Block Aligner internally knows whether a diagonal step was an equality or a
-mismatch. The common minimap-style ABI deliberately projects \(M\), \(=\), and
-\(X\) from Block traceback to generic \(M\). It then coalesces adjacent runs
-again so an equality-to-mismatch boundary does not become
-\texttt{32M1M}. Exact edit distance must consequently not be inferred by
-counting only \(I\) and \(D\) in the displayed Block CIGAR.
-
-When exact edit accounting is requested, Block counts mismatching diagonal
-steps during its existing trace. KSW2 reconstructs the same quantity by
-walking its packed CIGAR over the clipped query and target ranks. The result is
-the unit-cost edit count of the emitted path:
+All alignment routes cross their low-level boundary using packed CIGAR runs
+of the form
 \[
- E_{\mathrm{path}} =
+        \mathit{word}=(\mathit{length}\ll4)\mid\mathit{opcode}.
+\]
+The common opcodes include \(M\) for a diagonal step, \(I\) for an insertion,
+\(D\) for a deletion, and the more explicit equality and mismatch variants
+\(=\) and \(X\). A run records one opcode and its length. Adjacent equal runs
+are merged within a traceback and across phase boundaries.
+
+The forward calculation and backward trace have separate roles. The forward
+pass selects scores and endpoints. The trace reconstructs the path through
+diagonal and gap states. KSW2 records decisions for its admitted band. Block
+Aligner records decisions for computed strips. The GPU route either retains a
+bounded direction matrix or reconstructs directions tile by tile. All three
+then produce the same run-oriented interface.
+
+A generic \(M\) run does not reveal whether its diagonal symbols are equal.
+The edit count is therefore computed from the emitted path and the
+corresponding sequence symbols:
+\[
+ E_{\mathrm{path}}=
  \#\{\text{unequal diagonal steps}\}
- +\sum_{\mathrm{I\ runs}}\textit{length}
- +\sum_{\mathrm{D\ runs}}\textit{length}.
+ +\sum_{I\text{ runs}}\mathit{length}
+ +\sum_{D\text{ runs}}\mathit{length}.
 \]
-This count is exact for that path. It should not be confused with the affine
-score, where a gap run contributes \(q+ke\), or with seed-derived divergence.
-Chapter~8 explains how an exact SQL predicate first uses a safe prefilter and
-then applies its strict bound to this traced count.
+Block Aligner counts unequal diagonal steps during traceback, while KSW2 can
+replay diagonal runs against the sequence ranks. These CPU routes return the
+unit-cost edit count of the chosen path. It is distinct from the affine score
+and from a seed-derived estimate.
 
-After alignment, BioSeqDB stores the accumulated DP score as both
-\texttt{dp\_score} and the current simplified
-\texttt{dp\_max\_score}. It derives block length by summing diagonal and gap
-runs. For a Vulkan CIGAR it replays diagonal runs against the packed symbol
-arrays to obtain the number of equal symbols, because the shader likewise
-emits generic \(M\).
+The CIGAR also defines coordinate consumption. A diagonal run consumes query
+and target symbols, an insertion consumes query symbols, and a deletion
+consumes target symbols. Replaying these rules checks the reported span and
+allows CPU routes to derive aligned lengths and edit count. The complete GPU
+route currently returns CIGAR and match counts, but it does not expose the
+chosen-path edit-count field or accept an exact edit predicate. Reverse-strand
+coordinates are converted only after the phase CIGARs have been assembled in
+alignment order.
 
-\section{Runtime dispatch and the batched-KSW2 experiment}
-\label{sec:final-alignment-batching}
-
-\subsection{Enum outside, templates inside}
-
-PostgreSQL and the C++ API expose a runtime base-alignment selector. The
-pipeline registry instantiates a kernel trait for each enum value, dispatches
-once, then uses \texttt{if constexpr} inside the region loop. A KSW2 fill does
-not test on every cell whether it should have been Block Aligner, and a Block
-fill cannot quietly call KSW2. The current internal enum contains:
-
-\begin{center}
-\begin{tabular}{lp{0.65\textwidth}}
-\toprule
-\textbf{Value} & \textbf{Implemented meaning}\\
-\midrule
-\texttt{KSW2} & Highway intra-sequence single- or dual-affine KSW2\\
-\texttt{BLOCK\_ALIGNER} & Highway adaptive-block single-affine alignment\\
-\texttt{KSW2\_BATCHED} & deferred fill collection, geometry bucketing,
-lane-by-lane KSW2 execution, and ordered restitching\\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The generated PostgreSQL enum omits \texttt{ksw2\_batched}, although the
-internal registry still instantiates it. Ordinary SQL users choose KSW2 or
-Block Aligner. This omission reflects the true implementation state.
-
-\subsection{What was built for inter-sequence SIMD}
-
-The batched design first converts each left extension, global gap, and right
-extension into a descriptor. It records:
-\begin{itemize}
-  \setlength{\itemsep}{0pt}
-  \setlength{\parsep}{0pt}
-  \item subrange coordinates,
-  \item strand,
-  \item phase,
-  \item bandwidth,
-  \item owning region,
-  \item order within the region,
-  \item scratch CIGAR,
-  \item score,
-  \item edit count, and
-  \item final offsets.
-\end{itemize}
-Descriptors are stably sorted into length brackets
-\[
-       32,\ 64,\ 128,\ 256
-\]
-and band brackets
-\[
-       16,\ 32,\ 64.
-\]
-Reverse and forward fills are kept separate. A fill with either dimension
-above 256 is marked long and routed to ordinary KSW2. After execution,
-descriptors are sorted back by region and fill order. CIGARs, scores, edit
-counts, and endpoints are stitched into their original chains.
-
-This is useful scheduling infrastructure. It is not yet an inter-sequence
-SIMD recurrence. The current function named
-\texttt{ksw2\_extz2\_batched\_inner} loops over occupied lanes and calls
-\texttt{run\_single\_fill}. That function invokes the ordinary intra-sequence
-KSW2 kernel once per lane. Execution evidence deliberately calls them bucket
-lanes rather than SIMD DP lanes. The earlier DOC0254 design and some source
-comments describe the intended fused-lane endpoint, but current code is
-authoritative.
-
-The experiment still yielded two lasting design lessons. First, separating
-fill collection from execution is sufficient to expose batch geometry without
-changing region semantics. Second, a label such as ``batched'' does not prove
-that the arithmetic itself is vectorized across independent sequences.
-BioSeqDB's final public CPU choice therefore remains native Block Aligner or
-intra-sequence KSW2.
-
-\section{GPU extension and gridded traceback}
+\section{Accelerator boundary and gridded traceback}
 \label{sec:final-alignment-gpu}
 
-\subsection{The G3SA idea}
+The GPU route begins after candidate windows have been chosen by GPU seeding
+and chaining. If a query needs coordinates only, those windows can be returned
+without base alignment. If it needs CIGAR, each selected query and target
+window is packed as symbol ranks and submitted as one job in a batch. The
+result contains score, endpoints, status, and a slice of packed CIGAR runs.
 
-The G3SA extending stage addresses a conflict between the forward pass and
-traceback~\cite{g3sa_paper}. GPU forward DP is fastest when scores remain in
-registers or shared memory. Conventional traceback wants one direction value
-per cell in global memory. Writing that direction matrix can remove the benefit
-of the GPU kernel.
+This route has an explicit ownership boundary. Its configuration must select
+the complete GPU frontend and an admitted base-alignment identity. The latter
+does not mean that the CPU Block Aligner recurrence runs on the device. It is
+a route selection condition. The general CIGAR kernel uses its own two-piece
+affine global recurrence over the selected coordinate window. Unsupported
+geometry or an unavailable GPU component rejects the route instead of
+continuing with a CPU alignment under the same label.
 
-G3SA's gridded traceback stores only score states on regularly spaced tile
-boundaries. Once the final endpoint is known, the backward kernel loads the
-nearest upper-left boundaries and recomputes one tile in fast memory. It traces
-through that tile, discards its directions, and repeats for the next tile on the
-path. Forward memory traffic falls from an entire direction matrix to a
-grid of borders. Traceback performs additional arithmetic only in tiles
-touched by the final path.
+Conventional GPU traceback writes one direction value for every computed
+cell. G3SA reduces this traffic by retaining score states at tile boundaries
+and recomputing directions only for tiles reached by the final path
+\cite{g3sa_paper}. BioSeqDB applies the same memory principle in Vulkan. The
+forward pass stores five affine score states along tile borders. Starting from
+the global endpoint, traceback reloads a border, recomputes one tile in fast
+memory, traces to the next boundary, and discards the temporary directions.
+For tile dimensions \(b_q\) and \(b_t\), border storage is proportional to
+\[
+  \left\lceil\frac{n}{b_q}\right\rceil
+  \left\lceil\frac{m}{b_t}\right\rceil
+  \bigl(b_q+b_t\bigr),
+\]
+apart from the constant number of affine states. One reusable tile needs
+\(O(b_qb_t)\) direction storage. The scheme replaces a full \(O(nm)\)
+direction matrix with tile borders and additional arithmetic during
+traceback. It is most useful when writing the full trace matrix would dominate
+device memory traffic.
 
 \begin{figure}[htbp]
 \centering
-\begin{tikzpicture}[x=0.55cm,y=0.55cm,>=Latex,font=\scriptsize]
+\begin{tikzpicture}[x=0.48cm,y=0.48cm,>=Latex,font=\small]
   \begin{scope}
-    \draw[step=1,gray!22,very thin] (0,0) grid (9,9);
-    \foreach \x in {0,3,6,9} {
-      \draw[blue!65!black,thick] (\x,0)--(\x,9);
-    }
-    \foreach \y in {0,3,6,9} {
-      \draw[blue!65!black,thick] (0,\y)--(9,\y);
-    }
-    \draw[orange!85!black,very thick]
-      (0.1,0.2)..controls (2.2,1.5) and (2.0,3.0)..(3.2,3.2)
-      ..controls (5.5,3.6) and (5.2,6.0)..(6.3,6.2)
-      ..controls (7.7,7.0) and (8.2,8.1)..(8.9,8.8);
-    \node[align=center] at (4.5,10.0)
-      {\textbf{BioSeqDB forward pass}\\store five-state tile borders};
-    \node at (4.5,-0.9) {(a) boundary spill};
+    \draw[step=1,gray!24,very thin] (0,0) grid (6,6);
+    \foreach \x in {0,2,4,6} {\draw[blue!65!black,thick] (\x,0) to (\x,6);}
+    \foreach \y in {0,2,4,6} {\draw[blue!65!black,thick] (0,\y) to (6,\y);}
+    \draw[orange!80!black,very thick]
+      (0.1,0.2) .. controls (1.6,1.0) and (1.4,2.0) .. (2.2,2.2)
+      .. controls (3.8,2.5) and (3.5,4.0) .. (4.2,4.1)
+      .. controls (5.0,4.8) and (5.4,5.4) .. (5.9,5.8);
+    \node[align=center,text width=4.8cm] at (3,7.2)
+      {forward pass stores tile borders};
+    \node at (3,-0.9) {(a) boundary state};
   \end{scope}
-
-  \begin{scope}[xshift=7.4cm]
-    \draw[step=1,gray!22,very thin] (0,0) grid (9,9);
-    \foreach \x in {0,3,6,9} {
-      \draw[blue!65!black,thick] (\x,0)--(\x,9);
-    }
-    \foreach \y in {0,3,6,9} {
-      \draw[blue!65!black,thick] (0,\y)--(9,\y);
-    }
-    \fill[purple!18] (6,6) rectangle (9,9);
-    \fill[purple!18] (3,3) rectangle (6,6);
-    \fill[purple!18] (0,0) rectangle (3,3);
-    \draw[orange!85!black,very thick,<-]
-      (0.1,0.2)..controls (2.2,1.5) and (2.0,3.0)..(3.2,3.2)
-      ..controls (5.5,3.6) and (5.2,6.0)..(6.3,6.2)
-      ..controls (7.7,7.0) and (8.2,8.1)..(8.9,8.8);
-    \node[align=center] at (4.5,10.0)
-      {\textbf{Backward pass}\\recompute one purple tile, trace, discard};
-    \node at (4.5,-0.9) {(b) tile-local replay};
+  \begin{scope}[xshift=7.3cm]
+    \draw[step=1,gray!24,very thin] (0,0) grid (6,6);
+    \foreach \x in {0,2,4,6} {\draw[blue!65!black,thick] (\x,0) to (\x,6);}
+    \foreach \y in {0,2,4,6} {\draw[blue!65!black,thick] (0,\y) to (6,\y);}
+    \fill[purple!18] (0,0) rectangle (2,2);
+    \fill[purple!18] (2,2) rectangle (4,4);
+    \fill[purple!18] (4,4) rectangle (6,6);
+    \draw[orange!80!black,very thick,<-]
+      (0.1,0.2) .. controls (1.6,1.0) and (1.4,2.0) .. (2.2,2.2)
+      .. controls (3.8,2.5) and (3.5,4.0) .. (4.2,4.1)
+      .. controls (5.0,4.8) and (5.4,5.4) .. (5.9,5.8);
+    \node[align=center,text width=4.8cm] at (3,7.2)
+      {backward pass recomputes visited tiles};
+    \node at (3,-0.9) {(b) local replay};
   \end{scope}
 \end{tikzpicture}
-\caption{Reconstruction of G3SA's boundary/recompute mechanism as instantiated
-by the current BioSeqDB Vulkan shader. The five-state border is
-BioSeqDB-specific. Blue grid boundaries survive the forward pass. Purple tiles
-are recomputed only while the orange path is traced. The drawing is a new TikZ
-reconstruction, not copied paper artwork.}
+\caption{Gridded traceback. Blue tile borders persist after the forward pass.
+Only the purple tiles crossed by the selected path are recomputed during
+traceback.}
 \label{fig:gridded-traceback}
 \end{figure}
 
-Figure~\ref{fig:gridded-traceback} separates persisted state from replayed
-work. The left panel shows the forward pass spilling only tile-border score
-states. The right panel shows traceback recomputing only the purple tiles
-touched by the orange path. The design trades extra arithmetic during
-traceback for a much smaller forward-pass memory footprint.
+Short or structurally simple windows first use specialized scripts, including
+greedy gap scripts that are not guaranteed to maximize the affine score.
+Moderate windows can retain a bounded direction matrix. Longer
+admitted windows use gridded traceback. The current GPU CIGAR recurrence is
+global over the chosen window. It does not apply the KSW2 band, Z-drop, or end
+bonus even if related values are present in the broader request. It should
+therefore be described as a GPU-specific alignment contract, not as a device
+implementation of KSW2 or Block Aligner.
 
-G3SA's CUDA implementation uses subwarps, packed bases, anti-diagonal
-forward computation, a separate traceback kernel, and a principal grid size
-of 64 selected by sensitivity analysis. Its paper reports at most 1.80-fold
-end-to-end speedup with one GPU and 6.21-fold with four GPUs over its CPU
-baselines. It reports up to 9.73-fold for an individual stage comparison.
-Those values describe G3SA's datasets, hardware, and baselines. They motivate
-the memory strategy, but they are not evidence about BioSeqDB.
-
-\subsection{BioSeqDB's Vulkan implementation}
-
-BioSeqDB transfers the border-and-recompute idea to Vulkan and to its
-PostgreSQL execution boundary. The current dedicated route proceeds as
-follows:
-
-\begin{enumerate}
-    \item A resident Vulkan minimizer and chaining route emits candidate
-    coordinate windows.
-    \item If CIGAR is not requested, those coordinate results are returned
-    without running the CPU \texttt{AlignStage}.
-    \item If CIGAR is requested, the PostgreSQL scheduler packs only each
-    selected query and target window into 32-bit symbol ranks and plans
-    traceback capacity from host-visible bounds. Inside the shader, subpath
-    selection follows an exact, simple, greedy, or dynamic-programming route.
-    \item One Vulkan dispatch solves the batch. Results contain score,
-    endpoints, a packed-CIGAR slice, and status. The host verifies every
-    slice, replays generic \(M\) against the rank buffers to count equal
-    symbols, and constructs the SQL result.
-\end{enumerate}
-
-The selected all-GPU tuple is deliberately narrow. It requires:
-\begin{enumerate}
-    \item Vulkan to be enabled,
-    \item GPU seed lookup and the fused frontend to be selected,
-    \item the target index to be built on the GPU,
-    \item minimizer extraction to use the Vulkan minimap-integer variant,
-    \item chaining to use Vulkan tiled DP, and
-    \item the base-alignment selector to use Block Aligner.
-\end{enumerate}
-Divergence, mapping quality, exact edit filtering, and
-the prefilter are excluded from this dedicated tuple. CIGAR additionally
-requires \texttt{vulkan\_extend\_enabled}. If any selected component cannot
-execute, the statement errors before entering the generic CPU/SIMD pipeline.
-
-The CIGAR shader implements a two-piece-affine global recurrence with five
-score states \(H,I_1,I_2,D_1,D_2\). For jobs not solved by a script shortcut,
-spans up to 512 symbols use a bounded full direction matrix. Longer general
-spans, up to the current 16,384-symbol
-admission limit, use a 128-by-128 grid. For a job with tile dimensions
-\(b_q,b_t\), the planned traceback capacity in 32-bit words is
-\begin{equation}
- \left\lceil\frac{n}{b_q}\right\rceil
- \left\lceil\frac{m}{b_t}\right\rceil
- 5\bigl[(b_q+1)+(b_t+1)\bigr]
- +(b_q+1)(b_t+1).
- \label{eq:gpu-trace-capacity}
-\end{equation}
-The first term stores five states along the bottom and right border of every
-tile. The second is one reusable tile-local direction scratch matrix.
-
-The forward invocation visits every tile in row-major order and stores only
-those borders. Traceback begins at the bottom-right global endpoint. It
-recomputes the containing tile, records source and gap-continuation bits in
-the shared scratch slice, walks until it crosses a tile boundary, then
-recomputes the next tile. Packed \(M/I/D\) runs are generated backward and
-reversed at completion.
-
-\begin{samepage}
-Several constrained scripts avoid DP altogether:
-\begin{itemize}
-  \item exact equal-length spans
-  \item one-gap scripts
-  \item two-gap scripts that pair a deletion with an insertion in either order
-  \item a bounded unit-gap walk
-  \item a greedy anchored gap walk
-\end{itemize}
-\end{samepage}
-Exact and recognized unit-gap jobs can reserve zero traceback words. The
-simple-gap search length is capped at 256 symbols, while repeated anchored or unit-gap
-discovery is capped at 64 operations. Greedy terminal-tail branches may append
-operations after that repeated-discovery check.
-
-\subsection{What was inherited and what was not}
-
-\begin{center}
-\small
-\begin{tabular}{p{0.20\textwidth}p{0.32\textwidth}p{0.38\textwidth}}
-\toprule
-\textbf{Aspect} & \textbf{G3SA} & \textbf{BioSeqDB}\\
-\midrule
-Programming model & CUDA kernels integrated with modified minimap2 &
-Vulkan compute shaders invoked by a PostgreSQL custom-scan scheduler\\
-Forward parallelism & subwarps cooperate on packed anti-diagonal blocks &
-current CIGAR shader assigns one scalar DP job to each invocation, relying on
-batch-level parallelism\\
-Grid size & principal experimental setting 64 & fixed traceback tile length
-128 in the current ABI\\
-Stored boundary & compact row/column states used by the CUDA kernels & five
-two-piece-affine states on each bottom and right tile border\\
-Trace endpoint & exact global maximum for full extension, while lightweight
-extension greedily tracks an approximate maximum &
-bottom-right of the selected global coordinate window in the CIGAR shader\\
-Gap model & inspected gridded CUDA trace uses one affine family & two affine
-families with short and long gaps\\
-Input & packed CUDA query/reference batches & alphabet-rank arrays packed
-from lazy/PostgreSQL views after coordinate selection\\
-Fast paths & GPU extension kernels and G3SA scheduling optimizations & exact,
-simple-script, unit-gap, bounded full-trace, and gridded routes\\
-Integration proof & standalone end-to-end aligner comparisons & SQL E2E
-counters include selected branch, jobs, waves, CIGAR jobs, traceback words,
-declines, and forbidden fallbacks\\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Two current-source limitations prevent an over-broad equivalence claim.
-First, invocations within a CIGAR workgroup do not cooperate on one matrix.
-The batch is parallel, but each admitted job executes scalar row loops. This
-is unlike G3SA's subwarp-level forward kernel. Second, the CIGAR wire carries
-band width, Z-drop, and end bonus, but the current bounded and gridded global
-CIGAR recurrences use neither Z-drop nor end bonus, and their cell loops do
-not prune by the supplied band. Band width is validated at admission. A
-separate score-only Vulkan prototype does implement single-affine local
-banding for spans up to 512, but that runtime surface is not the same as the
-dedicated SQL CIGAR route.
-
-The result is best described as a G3SA-inspired traceback memory layout, not a
-Vulkan translation of G3SA. BioSeqDB gains the border/recompute trade-off and
-batch amortization, while retaining its own SQL admission rules, alphabet
-surface, gap model, result ABI, and fail-closed evidence.
-
-\section{Intermediate measurements and current evidence}
-\label{sec:final-alignment-results}
-
-\subsection{CPU block-size sweep}
-
-The current \texttt{Minimap2Params} source preserves a tuning sweep performed
-on an Apple M1 with Arm NEON over a long, very-long, and extra-long circular
-consensus sequencing (CCS) benchmark grid. It
-used ntHash minimizers and SIMD chaining, with KSW2 reported at 172\,ms for
-the cited very-long baseline. Table~\ref{tab:block-sweep} reproduces the
-displayed Block timings. The final column is calculated directly from the two
-printed millisecond values as \(1-t_{\mathrm{Block}}/172\). It is not copied
-from the nearby rounded source annotations, which aggregate the broader grid
-and do not always equal the single displayed ratio. In particular, the
-displayed 16--32 pair gives 25.0\%, while the broader-grid annotation reports
-about 22\%.
-
-\begin{table}[htbp]
-\centering
-\caption{Historical Block Aligner interval sweep embedded in current source.
-Positive reduction means lower time than the displayed 172\,ms KSW2
-reference. This was not rerun during thesis drafting.}
-\label{tab:block-sweep}
-\begin{tabular}{rrr r}
-\toprule
-\(\boldsymbol{B_{\min}}\) & \(\boldsymbol{B_{\max}}\) &
-\textbf{Block time (ms)} & \textbf{Derived reduction}\\
-\midrule
-32 & 256 & 191 & \(-11.0\%\)\\
-32 & 128 & 163 & \(5.2\%\)\\
-32 & 64  & 161 & \(6.4\%\)\\
-8  & 32  & 139 & \(19.2\%\)\\
-8  & 16  & 132 & \(23.3\%\)\\
-8  & 64  & 137 & \(20.3\%\)\\
-16 & 64  & 135 & \(21.5\%\)\\
-16 & 32  & 129 & \(25.0\%\)\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The trend explains the implementation decision. Most production rectangles in
-that workload were short gap fills. A maximum of 256 enlarged eight border and
-checkpoint buffers plus the trace geometry even though growth rarely passed
-32. The in-process parameter default was therefore changed to 16--32. A
-smaller maximum is not universally superior. High-error legacy Oxford
-Nanopore Technologies (ONT) reads and long unseeded gaps are exactly the
-shapes for which Block growth was designed. PostgreSQL's retained 32--256
-defaults are conservative
-for those shapes but forgo the measured short-fill win.
-
-The sweep also does not establish score equivalence with KSW2. KSW2 uses two
-affine families and a static band. Block uses one affine family and an
-adaptive heuristic. A faster time can coexist with a different optimum or a
-different placement of a tied gap. Performance and semantic-distance tests
-must therefore be reported separately.
-
-\subsection{Resident GPU evidence}
-
-The newest authoritative final-alignment discussion in DOC0356/DOC0357 is the
-2026-06-28 signoff addendum over
-\path{main/reporting/bioseq_bench_e2e_batch_gpu_proof/report_47.json}.  The
-artifact was created at 2026-06-28T00:55:32Z from commit
-\texttt{ac58f88500}\allowbreak\texttt{d4ad8652e2}\allowbreak
-\texttt{6e163d2840}\allowbreak\texttt{e5713346b4}. Its metadata records
-\texttt{dirty=true} and \texttt{fast=false}. Each displayed tuple and case had
-one sample, so the timings are scoped signoff observations rather than
-variability estimates. The report recorded no rule violations or regressions
-and retained nonblocking report-level sanity warnings. Earlier chronological
-sections in the documents say that general gridded traceback was incomplete.
-The final addenda explicitly supersede those statements, and the current shader
-contains the implemented boundary/recompute path.
-
-\begin{table}[htbp]
-\centering
-\small
-\caption{Selected one-sample PostgreSQL E2E evidence from
-\texttt{report\_47.json}. ``Gate result'' is the report's case-specific
-acceptance measure. All three GPU rows recorded zero CPU fallbacks, zero SIMD
-fallbacks, and zero Vulkan declines.}
-\label{tab:gpu-alignment-evidence}
-\begin{tabular}{p{0.34\textwidth}rrrp{0.20\textwidth}}
-\toprule
-\textbf{Case} & \textbf{GPU (s)} & \textbf{SIMD (s)} &
-\textbf{Speedup} & \textbf{Gate result}\\
-\midrule
-\texttt{E2E\_BATCH\_512\_MANY\_GAP\_CIGAR}
-& 1.241472 & 1.240568 & \(0.999\times\)
-& 512 correct matches and 512 fixture-accepted CIGARs\\
-\texttt{E2E\_BATCH\_4096\_MANY\_GAP\_CIGAR}
-& 1.809468 & 4.511529 & \(2.493\times\)
-& 4096 correct matches and 4096 fixture-accepted CIGARs\\
-\texttt{E2E\_BATCH\_16\_300M\_SEG\_COORD}
-& 10.585378 & 25.746413 & \(2.432\times\)
-& 16/16 expected queries found\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Table~\ref{tab:gpu-alignment-evidence} separates elapsed time from each
-fixture's acceptance gate. The 512-job row establishes fixture acceptance
-without a speed advantage. The 4096-job row combines the same class of gate
-with a \(2.493\times\) ratio. The 300\,Mbp row uses a coordinate-tolerance
-gate, not CIGAR-path comparison or row-set parity. These rows therefore cannot
-be treated as one uniform equivalence test.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[x=2.65cm,y=1.45cm,font=\scriptsize]
-  \draw[->] (-0.45,0)--(3.45,0) node[right]{benchmark case};
-  \draw[->] (-0.45,0)--(-0.45,3.05) node[above]{SIMD time / GPU time};
-  \foreach \y in {1,2,3} {
-    \draw[gray!25] (-0.45,\y)--(3.25,\y);
-    \node[anchor=east] at (-0.5,\y) {\y};
-  }
-  \draw[red!65!black,dashed,thick] (-0.45,1)--(3.25,1);
-  \fill[blue!55] (0.15,0) rectangle (0.85,0.999);
-  \fill[blue!70] (1.15,0) rectangle (1.85,2.493);
-  \fill[blue!70] (2.15,0) rectangle (2.85,2.432);
-  \node[above] at (0.50,0.999) {\(0.999\times\)};
-  \node[above] at (1.50,2.493) {\(2.493\times\)};
-  \node[above] at (2.50,2.432) {\(2.432\times\)};
-  \node[align=center] at (0.50,-0.28) {512\\many-gap};
-  \node[align=center] at (1.50,-0.28) {4096\\many-gap};
-  \node[align=center] at (2.50,-0.28) {16 queries\\300\,Mbp target};
-\end{tikzpicture}
-\caption{Workload-size pattern in the selected E2E evidence. The dashed line
-is break-even. A 512-job many-gap batch with host-planned storage capacity for
-gridded traceback is tied, while the two
-higher-work cases are consistent with amortization of PostgreSQL and Vulkan
-fixed costs. The one-sample cases do not isolate batch size or target size as
-the cause.}
-\label{fig:gpu-alignment-speedups}
-\end{figure}
-
-Figure~\ref{fig:gpu-alignment-speedups} plots the ratio of SIMD time to GPU
-time, not either raw duration. A value above one favors the GPU. The 512-job
-many-gap case sits at break-even, while the two larger-work cases exceed
-\(2.4\times\). The figure is consistent with fixed-cost amortization in these
-scoped cases, but it does not establish that explanation causally because the
-routes and workloads differ and each case has one sample.
-
-For the 4096-job CIGAR case, the host classified all 4096 jobs and planned
-gridded traceback capacity for them, reserving 327,069,696 words, and issued one
-extension dispatch. The receipt does not identify the shader-internal subpath
-used by each job. The case reduced wall time by 59.892\%.
-The 512-job version passed its fixture gate and used 40,883,712 traceback
-words, but GPU
-and SIMD wall times were effectively equal. This is a useful negative result:
-host-planned traceback capacity alone does not make a small batch fast. Runtime initialization,
-rank packing, job classification, allocation, submission, and result
-construction remain.
-
-The 300\,Mbp coordinate case gives a different view of amortization. Its GPU
-region time was 3.857821\,s versus 25.612293\,s for the SIMD control, a
-6.639-fold region speedup. Total wall time improved by 2.432-fold. The GPU
-path spent approximately 12.082\,ms in query sketching and 1547.931\,ms in
-target deduplication. It spent another 785.808\,ms in index building and
-70.653\,ms in seed/chaining runtime. It processed 608 problems in 38 waves,
-built 38 segment indexes, and reused them 570 times.
-
-Correctness for that coordinate case means at least one in-tolerance hit for
-each of 16 expected queries. It is not exact row-set parity. The GPU tuple
-emitted 233 match rows while the SIMD tuple emitted 16. This caveat is
-material for downstream SQL that expects one row per query. It does not affect
-the 4096-job CIGAR case's reported 4096-of-4096 fixture acceptance, but it
-prevents using the coordinate benchmark as a blanket equivalence proof.
-
-The CIGAR fixture gate did not compare the literal GPU CIGAR text, traceback
-path, or alignment score with the SIMD result. The gate required one returned
-row per query. Its \texttt{correct\_cigar\_count} additionally required the
-expected strand, a target-coordinate offset below 15 bases, a syntactically
-valid CIGAR, and replay that consumed the reported query and target spans. Replay also
-validated explicit \(=\) and \(X\) operations. The many-gap fixtures imposed
-their own operation constraint, including at least 17 deletion operations.
-The table therefore reports fixture-accepted CIGARs, not CIGAR path identity.
-
-Other source-config proof rows in the same report covered 64- and 512-job
-long CIGARs, 512- and 4096-job bounded CIGARs, a 4096-job indel case, and an
-8192-job bounded case. They reported non-empty CIGARs passing the case-specific
-acceptance gate and zero
-fallback/decline counters. The final unit and integration gate contained 196
-test cases, of which 195 passed and one was skipped, with 3071 of 3071
-assertions passing. That contemporaneous gate provides stronger repeatable
-correctness coverage than the one-sample benchmark receipt. It proves the
-checked-in acceptance matrix, but does not remove the length cap,
-scalar-per-job limitation, or row-set caveat.
-
-\subsection{Why the paper and project numbers should not be merged}
-
-The chapter contains four evidence classes that answer different questions.
-
-\begin{table}[htbp]
-\centering
-\small
-\caption{Evidence classes used for final-alignment claims.}
-\label{tab:alignment-evidence-classes}
-\begin{tabular}{p{0.19\textwidth}p{0.22\textwidth}p{0.25\textwidth}p{0.24\textwidth}}
-\toprule
-\textbf{Evidence class} & \textbf{Measured scope} &
-\textbf{What it supports} & \textbf{What it does not support}\\
-\midrule
-Block Aligner paper & standalone CPU library on the authors' workloads &
-algorithm motivation and published score-error behavior &
-BioSeqDB or PostgreSQL speed\\
-BioSeqDB M1 sweep & historical integrated CPU tuning with Arm NEON &
-the 16--32 in-process Block interval for that workload &
-semantic equivalence to KSW2 or the SQL 32--256 default\\
-G3SA paper & modified standalone mapper using CUDA &
-the border-storage and tile-replay design trade-off &
-BioSeqDB Vulkan or SQL performance\\
-BioSeqDB report 47 & one-sample dirty PostgreSQL E2E signoff &
-case-scoped route execution, acceptance gates, and elapsed times &
-algorithm-only speed, literal CIGAR identity, or row-set parity\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Table~\ref{tab:alignment-evidence-classes} prevents a single ``alignment
-speedup'' column from collapsing incompatible scopes. The Block paper isolates
-a library algorithm. The M1 sweep chooses CPU scratch geometry. G3SA measures
-a CUDA mapper. Report 47 includes PostgreSQL planning, data preparation, target
-index handling, batching, GPU submission, and SQL projection. Each number is
-used only for the design decision that its evidence class supports.
-
-\section{The final solution and its boundaries}
+\section{Runtime selection and design limits}
+\label{sec:final-alignment-batching}
 \label{sec:final-alignment-decision}
 
-\subsection{What was retained}
+The alignment route is selected explicitly before region alignment. The
+selected CPU kernel is then specialized for KSW2 or Block Aligner, so the
+inner recurrence does not branch on the backend for each cell. Output needs
+are resolved separately. A coordinate-only query may omit base alignment,
+while CIGAR or exact edit output makes traceback mandatory.
 
-The resulting architecture is a portfolio with explicit route contracts,
-rather than one kernel forced onto every query:
+The GPU route additionally requires the complete accelerated frontend and an
+admitted feature tuple before alignment begins.
 
-\begin{enumerate}
-    \item The region geometry remains minimap2-derived. Left extension,
-    accumulated seed-gap fills, and right extension preserve the useful
-    decomposition that prevents enormous DP matrices.
-    \item KSW2 remains the semantic reference option for two-piece-affine
-    scoring, finite bands, Z-drop, and minimap-style endpoint selection. The
-    BioSeqDB port adds lazy subrange encoding, arena allocation, eliminated
-    clears, and portable Highway dispatch.
-    \item Native Block Aligner is the default CPU selection. It is favored for
-    the many short mandatory fills exposed by the seed walk. The implementation
-    adds direct compact input, compressed trace masks, fused edit counting,
-    exact diagonal certificates, and fail-closed phase evidence.
-    \item Batched KSW2 retains descriptor collection, geometry grouping, and
-    deterministic restitching as an internal experiment. It is not exposed as
-    a generated PostgreSQL GUC because its arithmetic remains lane-by-lane.
-    \item The optional dedicated GPU tuple uses resident Vulkan seeding and
-    chaining. Its CIGAR route applies a 128-cell border/recompute scheme
-    inspired by G3SA. The two-piece-affine shader and its SQL evidence are
-    BioSeqDB-specific.
-\end{enumerate}
+Several limits follow from these contracts. First, KSW2 and Block Aligner can
+return different scores because their gap models and search regions differ.
+Second, the ordinary DNA extension port does not implement every specialised
+minimap2 mode. Third, the GPU route uses a global coordinate window and lacks
+the current CPU endpoint rules. Fourth, adaptive search and finite bands can
+both omit cells that an unrestricted matrix would examine.
 
-\begin{table}[htbp]
-\centering
-\small
-\caption{Current final-alignment selection rules. ``Default'' is stated at
-the layer where it is actually defined.}
-\label{tab:final-alignment-selection}
-\begin{tabular}{p{0.20\textwidth}p{0.21\textwidth}p{0.25\textwidth}p{0.24\textwidth}}
-\toprule
-\textbf{Route} & \textbf{How selected} & \textbf{Best reason to select} &
-\textbf{Main limitation}\\
-\midrule
-CPU Block & C++ and PostgreSQL base-alignment default & many short fills,
-portable SIMD, low scratch at tuned block sizes & single affine and adaptive
-heuristic. C++ 16--32 and SQL 32--256 defaults differ\\
-CPU KSW2 & explicit base-alignment option & two-piece affine, band/Z-drop,
-closest current path to minimap2's ordinary extension core & missing
-minimap2 splice, inversion, and second-pass policies in the surrounding port\\
-internal batched KSW2 & internal enum only. Generated SQL value omitted &
-experimentation with deferred fill scheduling and restitching & no fused
-inter-sequence SIMD DP yet\\
-dedicated Vulkan & complete all-GPU tuple, plus explicit extension enable for
-CIGAR & sufficiently large batches or targets, resident index reuse, gridded
-CIGAR memory & narrow SQL feature tuple, 16,384-symbol CIGAR span cap,
-scalar-per-job DP, no band/Z-drop in current CIGAR recurrence\\
-no base DP & neither CIGAR nor exact edit requested & avoid work when
-seed/chain coordinates satisfy projection needs & no base-level path or exact
-edit result\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Table~\ref{tab:final-alignment-selection} shows that ``default'' is
-layer-specific. CPU Block is the C++ and PostgreSQL base-alignment default, but
-that choice does not force the dedicated Vulkan route. KSW2 remains available
-when its two-piece-affine and endpoint semantics matter. The no-base-DP row is
-valid only when neither CIGAR nor an exact edit count is requested. Route
-selection therefore depends on requested outputs and admitted geometry, not
-only on the backend name.
-
-\subsection{How the final design differs from the starting point}
-
-The starting point was conceptually simple: port minimap2's KSW2 calls and
-obtain a CIGAR. The final design differs at every surrounding boundary.
-Sequences are not eagerly converted whole. A chain is split into accumulated
-mandatory fills. The kernel is selected once and compiled into a branch-free
-inner path. Block Aligner is not disguised behind all KSW flags. Traceback can
-produce the exact SQL edit count. A packed diagonal proof can eliminate DP.
-Algorithm execution is attested. A GPU route owns its whole selected
-seed--chain--coordinate--CIGAR path and is forbidden from falling back.
-
-The changes also reveal which optimizations did \emph{not} become the final
-solution. The first idea of inter-sequence KSW2 batching stopped at scheduling
-and stitching. A Block interval of 32--256 was too expensive for the measured
-short-fill CPU workload, although it remains the SQL safety-oriented default.
-The first bounded GPU CIGAR route was insufficient for long many-gap cases,
-which motivated support for gridded traceback capacity. After that support was
-added, the 512-job many-gap case did not beat SIMD. Measured fixed costs
-remained. The final system therefore retains multiple routes and reports the
-break-even behavior instead of declaring one accelerator universally faster.
-
-\subsection{Open technical limitations}
-
-Four limitations define useful future work:
-
-\begin{enumerate}
-    \item \textbf{Semantic modes.} The BioSeqDB minimap2 port needs explicit
-    splice/RNA, long-join, inversion, and two-pass Z-drop support before those
-    minimap2 modes can be claimed. Block Aligner would need a two-piece-affine
-    extension, or a documented routing rule back to KSW2, for closer default
-    score compatibility.
-    \item \textbf{Configuration convergence.} The 16--32 C++ tuning choice and
-    32--256 PostgreSQL GUC defaults should be reconciled through an
-    error-profile-aware policy. A single hard-coded interval is unlikely to be
-    optimal for both high-accuracy CCS and noisy legacy reads.
-    \item \textbf{True inter-sequence parallelism.} The descriptor buckets in
-    KSW2-batched and the Vulkan CIGAR job batch are scheduling parallelism.
-    A fused CPU lane recurrence or cooperative Vulkan tile would add arithmetic
-    parallelism within one dispatch.
-    \item \textbf{GPU parity and endpoint policy.} The CIGAR shader should
-    either implement its admitted band, Z-drop, and endpoint fields or remove
-    them from that wire contract. Exact emitted row-set parity should be added
-    to the 300\,Mbp E2E gate, not inferred from one correct hit per query.
-\end{enumerate}
-
-The central conclusion is therefore narrower and more useful than ``GPU DP is
-fast'' or ``Block Aligner replaces KSW2''. BioSeqDB makes final alignment a
-query-dependent, inspectable execution stage. It preserves KSW2 where its
-two-piece-affine and endpoint semantics are required, uses native Block
-geometry for the measured short-fill CPU regime, and admits a gridded Vulkan
-route only for a complete, fail-closed GPU statement shape. CIGAR, edit
-distance, score, route identity, and benchmark scope remain separate pieces
-of evidence. That separation is what allows a database-resident mapper to
-evolve without hiding algorithmic changes behind one SQL function name.
-
-The exposition now steps back by one runtime stage. Final alignment was
-described first so that its scoring semantics, cost, and exact edit result are
-available when judging a cheaper rejection procedure. In the executed
-pipeline, however, the prefilter in the next chapter lies between chaining and
-this alignment stage. It may eliminate work only within a proved safe domain.
-Every surviving region still follows the alignment and exact post-filter
-contracts established in this chapter.
+These differences are exposed through route selection rather than hidden
+behind a single claim of algorithmic equivalence. KSW2 is appropriate when
+two-piece affine scoring and minimap-style stopping rules are required. Block
+Aligner is appropriate when its single-affine adaptive search matches the
+requested semantics. The GPU path is appropriate only when the complete
+accelerated route and its global window contract are admitted. When available,
+CIGAR and edit count describe the path produced by the selected route.
