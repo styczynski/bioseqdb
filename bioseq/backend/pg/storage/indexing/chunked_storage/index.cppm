@@ -18690,7 +18690,8 @@ drop_index_relations(drop_index_relation_selector selector)
         "SELECT c.relname "
         "FROM pg_catalog.pg_class AS c "
         "WHERE c.relnamespace = $1::oid "
-        "AND starts_with(c.relname::text, $2::text)";
+        "AND starts_with(c.relname::text, $2::text) "
+        "ORDER BY (c.relkind = 'r'::\"char\") DESC, c.oid";
 
     const std::string owned_prefix{selector.prefix};
     const Oid internal_namespace =

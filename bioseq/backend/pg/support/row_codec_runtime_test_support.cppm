@@ -19,6 +19,7 @@ extern "C" {
 #include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_type_d.h"
 #include "commands/extension.h"
 #include "executor/spi.h"
@@ -288,7 +289,8 @@ template <class p_codec, auto p_member, class p_value>
       key.sk_func.fn_oid !=
           field_type::comparison_procedure(scan_comparison::equal) ||
       key.sk_flags != 0 || key.sk_subtype != InvalidOid ||
-      key.sk_collation != InvalidOid || key.sk_argument != expected_argument) {
+      key.sk_collation != C_COLLATION_OID ||
+      key.sk_argument != expected_argument) {
     contract_failure(std::string{p_codec::row_name} +
                      " generated equality scan key mismatch");
   }
