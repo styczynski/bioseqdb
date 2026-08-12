@@ -16,11 +16,6 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-#if defined(BIOSEQ_TEST_INDEXES)
-constexpr bool k_indexes_profile_enabled = true;
-#else
-constexpr bool k_indexes_profile_enabled = false;
-#endif
 constexpr std::string_view k_alter_table = "sql_boundary_table_options";
 constexpr std::string_view k_vacuum_table = "sql_boundary_vacuum_rows";
 constexpr std::string_view k_empty_vacuum_table = "sql_boundary_empty_vacuum";
@@ -2963,8 +2958,10 @@ TEST_CASE("generated SQL preserves the extension catalog surface",
       "  FROM pg_catalog.pg_settings "
       " WHERE name LIKE 'bioseq.%';");
   REQUIRE(guc_profile.size() == 1);
-  REQUIRE(guc_profile[0].value() ==
-          (k_indexes_profile_enabled ? "76" : "73"));
+  // The generated registries own 73 production and 76 test-profile GUCs.
+  // Eleven production and fourteen test-profile controls deliberately carry
+  // GUC_NO_SHOW_ALL, leaving the same public pg_settings cardinality in both.
+  REQUIRE(guc_profile[0].value() == "62");
 
   const auto profile_guc = query_one(
       ctx,

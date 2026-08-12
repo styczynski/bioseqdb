@@ -571,7 +571,7 @@ inline void validate_bpchar_physical_lifetime() {
 		|| value.vector_payload_overwrite_frees == 0
 		|| value.vector_payload_explicit_cleanup_frees == 0
 		|| value.vector_payload_clear_frees == 0
-		|| value.vector_payload_release_frees == 0
+		|| value.vector_payload_release_frees != 0
 		|| value.explicit_cleanup_calls < 2
 		|| value.slot_clear_calls < 2
 		|| value.slot_release_calls < 2
@@ -1088,6 +1088,11 @@ void arm_sequence_source_failure(std::string failure_point) {
 			exercise_all(
 				std::string_view{failure_point}.substr(
 					row_codec_all_prefix.size()));
+		return;
+	}
+	if (failure_point == "row_codec_index_table_shard") {
+		bioseq::postgres::support::row_codec_runtime_test_support::
+			exercise_index_table_shard_only();
 		return;
 	}
 	if (failure_point == "row_codec_reaper_text_bridge_error") {

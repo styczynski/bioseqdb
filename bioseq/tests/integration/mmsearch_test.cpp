@@ -295,9 +295,9 @@ void require_explain_property_uint(
 void require_gatekeeper_explain_attestation(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "prefilter_stage"));
     REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
-    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exact_edit_filter_stage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
     require_explain_property_value(
         plan, "Prefilter Stats Available", "true");
@@ -342,7 +342,7 @@ void require_gatekeeper_explain_attestation(
 void require_gatekeeper_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "prefilter_stage"));
     REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE(plan_contains(plan, "backend: vulkan"));
     REQUIRE(plan_contains(
@@ -350,26 +350,26 @@ void require_gatekeeper_explain_selection(
     REQUIRE(plan_contains(plan, "max_edits: 4"));
     REQUIRE(plan_contains(
         plan, "gatekeeper_auto_domain: length in {32,64}, E in {2,4}"));
-    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exact_edit_filter_stage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
 }
 
 void require_cpu_prefilter_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "prefilter_stage"));
     REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE(plan_contains(plan, "backend: highway_simd"));
     REQUIRE(plan_contains(plan, "algorithm: sneaky_snake"));
     REQUIRE_FALSE(plan_contains(plan, "backend: vulkan"));
-    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exact_edit_filter_stage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
 }
 
 void require_no_prefilter_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE_FALSE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE_FALSE(plan_contains(plan, "prefilter_stage"));
     REQUIRE_FALSE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE_FALSE(find_explain_property(
         plan, "Prefilter Stats Available").has_value());
@@ -4818,10 +4818,10 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
 
     const auto plan = explain_text<true>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
-    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "prefilter_stage"));
     REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE(plan_contains(plan, "max_edits: 9"));
-    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exact_edit_filter_stage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 10"));
 
     REQUIRE(query_scalar_int(ctx, fmt::format(

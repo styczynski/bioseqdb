@@ -5131,7 +5131,7 @@ struct prefilter_stage
             algorithm.computed_properties.push_back({
                 "survivor_check", "exact post-alignment edit distance"});
             algorithm.computed_properties.push_back({
-                "gatekeeper_auto_domain", "length in {32,64}, p_element in {2,4}"});
+                "gatekeeper_auto_domain", "length in {32,64}, E in {2,4}"});
             if (params.prefilter_backend == backend_type::simd
                 || params.prefilter_backend == backend_type::automatic) {
                 algorithm.highway_kernels = ::bioseq::simd_dispatch::

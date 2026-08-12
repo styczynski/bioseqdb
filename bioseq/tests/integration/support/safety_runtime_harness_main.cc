@@ -1025,6 +1025,7 @@ parse_internal_guc_contract(std::string_view raw) {
         const guc_manifest_contract& manifest) {
     std::map<std::string, std::size_t, std::less<>>
         manifest_index_by_name;
+    std::set<std::string, std::less<>> visible_manifest_names;
     for (const json& registration : manifest.registrations) {
         const std::string name = require_string_field(
             registration,
@@ -1033,6 +1034,21 @@ parse_internal_guc_contract(std::string_view raw) {
         if (!manifest_index_by_name.emplace(
                 name, manifest_index_by_name.size()).second) {
             fail("installed GUC profile", "manifest name is duplicated");
+        }
+        bool visible = true;
+        for (const json& flag : require_field(
+                 registration,
+                 "flags",
+                 "GUC manifest registration")) {
+            if (require_string(
+                    flag,
+                    "GUC manifest registration flag")
+                == "no_show_all") {
+                visible = false;
+            }
+        }
+        if (visible) {
+            visible_manifest_names.insert(name);
         }
     }
     const pg_result result = connection.execute(
@@ -1080,43 +1096,48 @@ parse_internal_guc_contract(std::string_view raw) {
         }
     }
     const guc_profile_counts observed{
-        .total = live_rows_by_name.size(),
+        .total = internal.size(),
         .test_only = static_cast<std::uint64_t>(
-            live_rows_by_name.contains(
+            internal.contains(
                 "bioseq.testing.chunked_scanner.enabled"))
             + static_cast<std::uint64_t>(
-                live_rows_by_name.contains(
+                internal.contains(
                     "bioseq.testing.in_memory_scanner.enabled"))
             + static_cast<std::uint64_t>(
-                live_rows_by_name.contains(
+                internal.contains(
                     "bioseq.testing.persisted_index.failure_mode")),
     };
     const guc_profile_counts expected =
         expected_guc_profile(manifest.profile);
+    constexpr std::size_t expected_visible_count = 62;
     if (observed.total != expected.total
         || observed.test_only != expected.test_only
-        || live_rows_by_name.size() != manifest_index_by_name.size()
+        || visible_manifest_names.size() != expected_visible_count
+        || live_rows_by_name.size() != visible_manifest_names.size()
         || internal.size() != manifest_index_by_name.size()) {
         fail(
             "installed GUC profile",
             fmt::format(
                 "profile '{}' expected total={} test_only={}, "
-                "observed total={} test_only={}",
+                "visible={}; observed total={} test_only={}, visible={}",
                 manifest.profile,
                 expected.total,
                 expected.test_only,
+                expected_visible_count,
                 observed.total,
-                observed.test_only));
+                observed.test_only,
+                live_rows_by_name.size()));
     }
     for (const auto& [name, index] : manifest_index_by_name) {
         static_cast<void>(index);
-        if (!live_rows_by_name.contains(name)
-            || !internal.contains(name)) {
+        if (!internal.contains(name)
+            || live_rows_by_name.contains(name)
+                != visible_manifest_names.contains(name)) {
             fail(
                 "installed GUC profile",
                 fmt::format(
-                    "manifest GUC '{}' is missing from an unfiltered "
-                    "live inventory",
+                    "manifest GUC '{}' differs between the internal "
+                    "inventory and pg_settings visibility",
                     name));
         }
     }
@@ -1158,29 +1179,8 @@ parse_internal_guc_contract(std::string_view raw) {
                 registration,
                 "name",
                 "GUC manifest registration");
-        const auto& row = live_rows_by_name.at(expected_name);
         const internal_guc_property& internal_property =
             internal.at(expected_name);
-        json enum_values = nullptr;
-        if (row[9].has_value()) {
-            enum_values = parse_json_value(
-                *row[9],
-                fmt::format(
-                    "installed GUC profile {} enum values",
-                    expected_name));
-            if (!enum_values.is_array()) {
-                fail(
-                    "installed GUC profile",
-                    "enum values are not a JSON array");
-            }
-        }
-        const auto property_cell =
-            [&row](std::size_t index) -> json {
-                if (!row[index].has_value()) {
-                    return nullptr;
-                }
-                return *row[index];
-            };
         const auto hook =
             [](bool present, std::string_view behavior) {
                 return json{
@@ -1191,38 +1191,87 @@ parse_internal_guc_contract(std::string_view raw) {
             };
         const std::uint64_t raw_flags =
             internal_property.raw_flags;
-        json live{
-            {"vartype", property_cell(1)},
-            {"context", property_cell(2)},
-            {"unit", property_cell(3)},
-            {"boot_value", property_cell(5)},
-            {"reset_value", property_cell(6)},
-            {"current_value", property_cell(4)},
-            {"minimum", property_cell(7)},
-            {"maximum", property_cell(8)},
-            {"visible_enum_values",
-             enum_values.is_null() ? json::array() : std::move(enum_values)},
-            {"short_description", property_cell(10)},
-            {"extra_description", property_cell(11)},
-            {"raw_flags", raw_flags},
-            {"visible_in_show_all",
-             show_all_names.contains(expected_name)},
-            {"included_in_sample",
-             (raw_flags & 0x000080U) == 0},
-            {"hooks",
-             json{
-                 {"check",
-                  hook(
-                      internal_property.check_hook_present,
-                      "custom_check")},
-                 {"assign",
-                  hook(
-                      internal_property.assign_hook_present,
-                      "custom_assign")},
-                 {"show",
-                  hook(
-                      internal_property.show_hook_present,
-                      "custom_show")}}}};
+        const json hooks{
+            {"check",
+             hook(
+                 internal_property.check_hook_present,
+                 "custom_check")},
+            {"assign",
+             hook(
+                 internal_property.assign_hook_present,
+                 "custom_assign")},
+            {"show",
+             hook(
+                 internal_property.show_hook_present,
+                 "custom_show")}};
+        json live;
+        if (visible_manifest_names.contains(expected_name)) {
+            const auto& row = live_rows_by_name.at(expected_name);
+            json enum_values = nullptr;
+            if (row[9].has_value()) {
+                enum_values = parse_json_value(
+                    *row[9],
+                    fmt::format(
+                        "installed GUC profile {} enum values",
+                        expected_name));
+                if (!enum_values.is_array()) {
+                    fail(
+                        "installed GUC profile",
+                        "enum values are not a JSON array");
+                }
+            }
+            const auto property_cell =
+                [&row](std::size_t index) -> json {
+                    if (!row[index].has_value()) {
+                        return nullptr;
+                    }
+                    return *row[index];
+                };
+            live = json{
+                {"vartype", property_cell(1)},
+                {"context", property_cell(2)},
+                {"unit", property_cell(3)},
+                {"boot_value", property_cell(5)},
+                {"reset_value", property_cell(6)},
+                {"current_value", property_cell(4)},
+                {"minimum", property_cell(7)},
+                {"maximum", property_cell(8)},
+                {"visible_enum_values",
+                 enum_values.is_null()
+                     ? json::array()
+                     : std::move(enum_values)},
+                {"short_description", property_cell(10)},
+                {"extra_description", property_cell(11)},
+                {"raw_flags", raw_flags},
+                {"visible_in_show_all",
+                 show_all_names.contains(expected_name)},
+                {"included_in_sample",
+                 (raw_flags & 0x000080U) == 0},
+                {"hooks", hooks}};
+        } else {
+            // GUC_NO_SHOW_ALL removes the row from pg_settings.  The
+            // internal contract proves registration metadata while
+            // current_setting proves that the hidden live GUC exists.
+            const auto current_row = one_row(
+                connection.execute(
+                    "SELECT pg_catalog.current_setting("
+                    + sql_literal(expected_name)
+                    + ", true);"),
+                fmt::format(
+                    "installed hidden GUC {}", expected_name));
+            live = generated_live_authority;
+            live["current_value"] = nonnull_cell(
+                current_row,
+                0,
+                fmt::format(
+                    "installed hidden GUC {}", expected_name));
+            live["raw_flags"] = raw_flags;
+            live["visible_in_show_all"] =
+                show_all_names.contains(expected_name);
+            live["included_in_sample"] =
+                (raw_flags & 0x000080U) == 0;
+            live["hooks"] = hooks;
+        }
         validate_live_guc_property(
             generated_live_authority,
             live,

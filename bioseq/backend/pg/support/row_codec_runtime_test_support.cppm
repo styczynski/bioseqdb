@@ -2277,6 +2277,18 @@ void exercise_all(std::string_view expected_receipt) {
   }
 }
 
+/** Exercise only the generated index-table-shard codec and roll it back. */
+void exercise_index_table_shard_only() {
+  auto transaction = subtransaction::begin();
+  try {
+    advance_probe_invocation();
+    static_cast<void>(exercise_index_table_shard());
+    transaction.rollback();
+  } catch (...) {
+    rethrow_after_rollback(transaction);
+  }
+}
+
 /**
  * Reach the generated reaper text decoder's real detoast/copy bridge with a
  * valid external pointer whose referenced TOAST relation does not exist.

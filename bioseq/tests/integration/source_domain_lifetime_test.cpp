@@ -372,15 +372,16 @@ TEST_CASE("partial final fragment is reusable through one callback scanner",
         sequence));
 
     reset_source_counters(ctx);
-    const auto result = query_one(ctx,
-        "SELECT bioseq.to_text(s[32768:32792]), "
-        "       bioseq.to_text(bioseq.reverse(s[32768:32792])), "
-        "       bioseq.to_text(s[32768:32792]) "
+    const auto result = query_scalar(ctx,
+        "SELECT bioseq.to_text("
+        " s[32768:32792] OPERATOR(bioseq.||) "
+        " bioseq.reverse(s[32768:32792]) OPERATOR(bioseq.||) "
+        " s[32768:32792]) "
         "FROM source_lifetime_partial_fragment_repeat;");
     const std::string tail = sequence.substr(32'768u);
-    REQUIRE(result[0] == tail);
-    REQUIRE(result[1] == std::string(tail.rbegin(), tail.rend()));
-    REQUIRE(result[2] == tail);
+    const std::string expected =
+        tail + std::string(tail.rbegin(), tail.rend()) + tail;
+    REQUIRE(result == expected);
     REQUIRE(source_counter(ctx, "scanner_entries_created") == 1);
     REQUIRE(source_counter(ctx, "scanner_entry_hits") >= 2);
 }
