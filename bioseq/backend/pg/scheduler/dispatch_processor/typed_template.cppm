@@ -4738,20 +4738,23 @@ template <class p_sequence>
 
     const minimap2_parameters& dispatch_params = base_params;
 
-#if defined(BIOSEQ_TEST_INDEXES)
+	    const std::optional<std::string> chunked_scanner_guc =
+	        pg_guc_value_as_cpp(
+	            "bioseq.testing.chunked_scanner.enabled");
 	    const bool chunked_scanner_forced =
-	        bioseq::settings::testing::chunked_scanner::enabled;
+	        chunked_scanner_guc.has_value()
+	        && *chunked_scanner_guc == "on";
             // Test parity knob. When on, the dispatch
             // loop forces the in-memory baseline (with_lazy_in_memory). Otherwise
             // (default) and given a non-null scanner_pg_context, the loop uses
             // the canonical PostgreSQL-backed facade (for stub targets,
             // in-memory for the query literal / inline targets).
+	    const std::optional<std::string> inmemory_scanner_guc =
+	        pg_guc_value_as_cpp(
+	            "bioseq.testing.in_memory_scanner.enabled");
 	    const bool inmemory_scanner_forced =
-	        bioseq::settings::testing::in_memory_scanner::enabled;
-#else
-	    constexpr bool chunked_scanner_forced = false;
-	    constexpr bool inmemory_scanner_forced = false;
-#endif
+	        inmemory_scanner_guc.has_value()
+	        && *inmemory_scanner_guc == "on";
             bool scanner_has_recipe = false;
             if (scanner_pg_ctx != nullptr) {
                 for (std::size_t row = 0u;
