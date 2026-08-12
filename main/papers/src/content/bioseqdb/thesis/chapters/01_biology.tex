@@ -1,15 +1,3 @@
-% Chapter 1 draft: General biological introduction.
-% Internal provenance and chronology audit:
-%   research_audit/ch01_docs.md
-% Current implementation anchors:
-%   DOC0321
-%   main/bioseq/backend/sequences/sequences.cppm
-%   main/bioseq/io/{fasta,fastq,pipeline,public_api}.cppm
-%   main/bioseq/sql/bioseq--1.0.sql
-% Scholarly references are given as full footnotes so this chapter remains
-% readable independently. Primary sources are also registered in the thesis
-% bibliography where they are reused by later chapters.
-
 \section{Biological sequences as information-bearing observations}
 \label{sec:biology-sequences}
 
@@ -53,10 +41,11 @@ are uncertainty symbols, not additional chemical bases. Treating
 \(\mathtt{N}\) as if it were an ordinary fifth base would change the meaning of
 exact matches, hashes and alignment scores. A sequence type therefore needs an
 explicit alphabet and an explicit policy for symbols outside that alphabet.
-The current BioSeqDB sequence core follows this principle at the software level:
-its compact ranges are parameterized by an alphabet, and current code paths
-instantiate both four-symbol and five-symbol DNA representations. The later
-sequence-abstraction chapter explains how those symbols are packed and viewed.
+The BioSeqDB sequence core follows this principle at the software level. Its
+compact ranges are parameterized by an alphabet. The source supports build
+profiles containing four-symbol and five-symbol DNA representations, while the
+default build exposes the four-symbol form. The later sequence-abstraction
+chapter explains how those symbols are packed and viewed.
 
 RNA uses adenine, cytosine, guanine and uracil, so a basic RNA alphabet replaces
 \(\mathtt{T}\) with \(\mathtt{U}\). Many RNA molecules are transcribed from
@@ -141,7 +130,7 @@ Sequencing and assembly software nevertheless have to produce finite records.
 A \emph{contig} is a contiguous consensus sequence assembled from overlapping
 evidence. Scaffolds can order or orient contigs while retaining unresolved
 gaps. A \emph{reference assembly} is a selected set of such sequences used as a
-coordinate system and comparison target. It is extremely useful, but it is not
+coordinate system and comparison target. It is useful, but it is not
 the unique biological truth for every sample. Regions absent from the
 reference, alternative haplotypes and repeated segments can all make a
 reference-centered explanation incomplete.
@@ -424,11 +413,10 @@ This organization is valuable for five reasons.
 \end{enumerate}
 
 BioSeqDB implements this idea as a PostgreSQL extension rather than as a
-standalone aligner wrapped by SQL text. Current source exposes alphabet-aware
-sequence values and an \texttt{mmsearch} similarity predicate. Integration
-tests exercise searches over stored columns, constants, slices and joins.
-PostgreSQL custom scans then provide execution paths that can batch sequence
-work and return relational tuples. Later chapters explain the planner
+standalone aligner wrapped by SQL text. It exposes alphabet-aware sequence
+values and an \texttt{mmsearch} similarity predicate over stored columns,
+constants, slices, and joins. PostgreSQL custom scans provide execution paths
+that can batch sequence work and return relational tuples. Later chapters explain the planner
 rewrites, storage layout, index persistence, caching and vectorized aggregates
 that make this interface more than a scalar function call.
 
@@ -450,7 +438,7 @@ alphabet-compatible query, orientation and coordinate conventions, and
 metadata describing the origin of both values. Differences can arise from
 evolution, within-population variation, transcript structure, sequencing error
 or incomplete representation. The required output is therefore not only a
-similarity decision. It is a defensible correspondence between positions,
+similarity decision. It is a scored correspondence between positions,
 accompanied by enough score and coordinate information for later
 interpretation.
 

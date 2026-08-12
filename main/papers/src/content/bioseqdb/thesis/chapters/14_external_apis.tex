@@ -1,908 +1,110 @@
-% Chapter 14 draft: External sequence providers.
-% Internal provenance and chronology audit:
-%   research_audit/ch14_docs.md
-% The chapter deliberately distinguishes implemented behavior from the broader
-% target architecture in DOC0372.  DOC0374 and the current source tree take
-% precedence where the documents disagree.
-
-\section{Remote biological databases as relations}
+\section{Remote databases as relations}
 \label{sec:external-relations}
 
-Public sequence databases are indispensable, but they do not expose one common
-data model. NCBI separates taxonomy, gene, assembly, and sequence retrieval
-among several services~\cite{ncbi_datasets_v2_api}. The University of
-California, Santa Cruz (UCSC), organizes sequence by genome assembly and
-genomic interval~\cite{ucsc_rest_api}. UniProt centers its interface on
-protein accessions and protein-specific
-annotations~\cite{uniprot_programmatic_access}, while the European
-Bioinformatics Institute (EBI) Search API provides discovery over several
-domains~\cite{ebi_search_rest_api}. Their
-identifiers, paging rules, response schemas, rate
-limits and failure modes differ. A conventional analysis script therefore
-contains substantial code that is unrelated to the biological question. It
-constructs uniform resource locators (URLs), authenticates requests, decodes
-JSON, and retries failures. It also parses FASTA, translates identifiers, and
-converts results into local records.
+\begingroup
+\setlength{\emergencystretch}{3em}
+Public sequence databases differ in identifiers, response formats, and
+retrieval models. NCBI separates taxonomy, assembly, gene, and sequence
+services~\cite{ncbi_datasets_v2_api}. UCSC provides assembly and interval
+retrieval~\cite{ucsc_rest_api}. UniProt serves protein records and
+annotations~\cite{uniprot_programmatic_access}, while EBI supports cross-domain
+discovery~\cite{ebi_search_rest_api}.
+\par
+\endgroup
 
-BioSeqDB treats this integration problem as a database access problem.  It
-exposes six logical relations in the \texttt{bioseq\_external} schema:
-\texttt{taxonomy}, \texttt{catalog}, \texttt{record\_genes},
-\texttt{record\_locations}, \texttt{sequences} and
-\texttt{sequence\_chunks}.  A query against one of these relations does not read
-a local heap. PostgreSQL constructs a \texttt{BioseqExternalScan}. The scan
-translates supported SQL predicates into a provider-neutral query, contacts the
-selected service, and returns ordinary typed tuples.  Consequently, a remote
-record can participate in a join, projection or residual PostgreSQL filter
-without first being downloaded by an external script.
+BioSeqDB defines six remote relation shapes in the \texttt{bioseq\_external}
+schema, but the generated table definitions currently omit the required
+relation-entity option. An installation must add that option before the custom
+scan can execute them. They cover taxonomy, provider catalogs, genes,
+locations, complete sequences, and bounded sequence chunks.
 
-This design is not equivalent to wrapping a Hypertext Transfer Protocol (HTTP)
-call in a scalar SQL function.  A scalar function has no natural place to
-represent a stream of records, cannot conveniently expose provider capabilities
-to planning, and encourages one remote request per evaluated row.  It also
-makes cancellation and memory bounds accidental properties of the function
-implementation.  The external table instead gives the remote operation a
-PostgreSQL Custom Scan lifecycle~\cite{postgresql17_custom_scan}:
-\texttt{Begin\allowbreak Custom\allowbreak Scan}, repeated
-\texttt{Exec\allowbreak Custom\allowbreak Scan},
-\texttt{ReScan\allowbreak Custom\allowbreak Scan},
-\texttt{End\allowbreak Custom\allowbreak Scan}, and
-\texttt{Explain\allowbreak Custom\allowbreak Scan}. The scan can defer network
-access until the first
-tuple is requested, retain state between calls, apply backpressure, and cancel
-its producer during rescan or query teardown.
-
-The six relation declarations are not handwritten SQL.  The annotated C++ row
-types in
-\path{main/bioseq/backend/pg/external/sql_catalog.cppm}, namespace
-\texttt{bioseq::\allowbreak external::\allowbreak sql\_\allowbreak rows}, are
-consumed by the SQL generation
-machinery described in the following source-generation chapter. Every type
-specifies \texttt{access\_method = "bioseq\_external"}.  The sequence-bearing
-columns use the real \texttt{bioseq.seq} PostgreSQL type, while provenance and
-provider attributes are typed as \texttt{jsonb}.  The schema revokes public
-access by default, which is important because a SELECT can cause outbound
-network traffic.
-
-\subsection{What each relation means}
-
-The schema separates discovery from retrieval. \texttt{taxonomy} normalizes
-taxon identifiers, names, ranks and lineage.  \texttt{catalog} is the
-cross-provider record inventory. It carries the original identifier,
-normalized accession, molecule kind, and title. It also carries sequence
-length, assembly information, and a \texttt{retrievable} flag.
-\texttt{record\_genes} and \texttt{record\_locations} explode nested provider
-metadata into relational rows with stable per-record indices.
-\texttt{sequences} returns a complete record as one \texttt{bioseq.seq}
-datum.  \texttt{sequence\_chunks} returns an ordered sequence of datums with
-\texttt{chunk\_index},
-\texttt{base\_offset} and \texttt{end\_of\_record}.
-
-The distinction between the last two relations is a resource contract, not
-only a presentational choice.  A complete \texttt{sequences} row must
-materialize one record or assembly segment. In contrast,
-\texttt{sequence\_chunks} can keep its working set independent of a
-multi-megabase record's length.  The current NCBI chunk size is
-\(1\,048\,572\) bases. It is four symbols below one Mi-symbol. Because the
-payload owns one-byte raw letters at this boundary, it is also four bytes below
-one MiB. The default chunk size is a multiple of 21 because DNA5 in 64-bit
-storage units packs 21 symbols per unit. Other
-compilation profiles may end a chunk with a
-padded storage unit. A one-chunk
-look-ahead keeps the final non-empty chunk pending, so a record whose length is
-an exact multiple of the chunk size receives no spurious empty row and exactly
-one row has \texttt{end\_of\_record=true}.
-
-Table~\ref{tab:external-provider-capabilities} summarizes the capabilities
-compiled into the configured provider pack.
+When configured, these relations have no local heap data. PostgreSQL replaces
+a physical scan with a custom scan~\cite{postgresql17_custom_scan}. Every
+qualification remains a local PostgreSQL check. Supported equality and array
+predicates are also lowered into a provider-neutral query that constrains the
+remote request. The scan selects a provider adapter and emits ordinary typed tuples. A
+remote record can therefore participate in a projection, filter, or join
+without a separate download script.
 
 \begin{table}[htbp]
   \centering
   \small
-  \caption{Provider capabilities compiled into the source snapshot inspected on
-  28 July 2026. The table describes BioSeqDB adapter behavior, not a guarantee
-  that every upstream service remains available or unchanged.}
-  \label{tab:external-provider-capabilities}
-  \begin{tabularx}{\linewidth}{p{.12\linewidth}p{.27\linewidth}X}
+  \caption{External relation groups and their resource contracts.}
+  \label{tab:external-relations}
+  \begin{tabularx}{\linewidth}{p{.25\linewidth}p{.31\linewidth}X}
     \toprule
-    Provider & Implemented use & Current boundary \\
+    Relation group & Result & Resource behavior \\
     \midrule
-    NCBI &
-    taxonomy, catalog, gene locations, nucleotide sequences and chunks &
-    Generated Oat++ client for JSON metadata. Direct libcurl FASTA stream for
-    nucleotide accessions. Bounded NCBI Datasets ZIP path for
-    \texttt{GCF\_}/\texttt{GCA\_} assemblies. \\
-    UCSC &
-    genome catalog and interval DNA &
-    Generated client calls the JSON endpoints, including
-    \texttt{getDnaSequence}.  The result is currently collected before tuple
-    production. \\
-    UniProt &
-    protein catalog and gene metadata &
-    Generated client normalizes protein metadata. Protein sequence
-    materialization deliberately raises SQLSTATE \texttt{0A000}. \\
-    EBI &
-    taxonomy/catalog discovery &
-    Generated EBI Search client. No sequence retrieval capability. \\
+    Taxonomy and catalog & Normalized metadata rows & Provider response is
+    decoded before row production \\
+    Gene and location & One row per nested item & PostgreSQL applies residual
+    predicates after normalization \\
+    Sequences & One packed sequence value & Memory may depend on record length \\
+    Sequence chunks & Ordered packed values & Accession-based NCBI retrieval
+    uses a bounded queue \\
     \bottomrule
   \end{tabularx}
 \end{table}
 
-The configured pack is defined by
-\texttt{configured\_external\_api\_provider} in
-\path{main/bioseq/external/providers/configured.cppm}.  It contains NCBI, UCSC,
-UniProt and EBI in that order.  A SWISS-MODEL API descriptor and generated
-client also exist, but there is no SWISS-MODEL adapter in the configured
-runtime pack.  This illustrates a useful separation: generating a safe
-transport client is necessary, but it does not by itself define BioSeqDB's
-canonical records or SQL semantics.
+A custom scan retains state between tuple requests, postpones network access
+until execution, and reports the chosen provider through \texttt{EXPLAIN}.
+Ordinary \texttt{EXPLAIN} performs no network request, while \texttt{EXPLAIN
+ANALYZE} consumes the remote stream.
 
-\section{Evolution from generated calls to a streaming table provider}
-\label{sec:external-evolution}
+\section{Provider and execution boundaries}
+\label{sec:external-provider-boundary}
 
-The external subsystem progressed through five documented stages. Because the
-identifiers DOC0370 to DOC0374 are duplicated elsewhere in the project corpus,
-Table~\ref{tab:external-chronology} identifies each source by date and title.
-Later-dated evidence and current source take precedence. A document number is
-only a secondary locator.
+Provider integration combines a capability descriptor, a generated typed HTTPS
+client, and a handwritten adapter. The client handles validation, encoding,
+size limits, and transport. The adapter maps provider fields to a canonical
+query and message model, keeping provider-specific formats outside PostgreSQL
+planning.
 
-\begin{table}[htbp]
-  \centering
-  \small
-  \caption{Chronology of the external API subsystem. Each row identifies its
-  source by date and title because the DOC number is not globally unique.
-  Later-dated implementation evidence and current source override earlier
-  intentions.}
-  \label{tab:external-chronology}
-  \begin{tabularx}{\linewidth}{
-      >{\raggedright\arraybackslash}p{.18\linewidth}
-      >{\raggedright\arraybackslash}p{.29\linewidth}
-      X}
-    \toprule
-    Dated document & Title and role & Result \\
-    \midrule
-    DOC0370, 10 July 2026 &
-    \textit{Generate HTTP Client for External Sequence Database}, initial prompt &
-    Proposed deriving typed GET clients from embedded OpenAPI descriptions
-    rather than maintaining provider-specific URL code by hand. \\
-    DOC0371, 10 July 2026 &
-    \textit{Generated External API Clients with cppast and Oat++}, specification &
-    Defined cppast/libclang annotation discovery, a validated OpenAPI subset,
-    build-tree-only C++ module generation, Oat++ transport, manifests and live
-    integration fixtures. \\
-    DOC0372, 11 July 2026 &
-    \textit{Common External Sequence Table Provider}, specification &
-    Defined the provider concepts, canonical query and message model, logical
-    PostgreSQL relations, a separate streaming data plane, resource admission,
-    locator security and request policy. \\
-    DOC0373, 12 July 2026 &
-    \textit{External Table Provider Data-Plane Implementation and PostgreSQL
-    Proof}, first implementation report &
-    Proved all six relations through a real PostgreSQL custom scan. Q1--Q8 used
-    NCBI, UCSC, and UniProt. EBI catalog access was shown separately. Sequence
-    retrieval still used whole-response collection. \\
-    DOC0374, report dated 12 July 2026 with session-5 evidence dated 13 July 2026 &
-    \textit{NCBI Streaming Sequence Data Plane}, implementation report &
-    Added the NCBI libcurl pull stream, backpressured channel, archive path,
-    multi-record FASTA handling, process-local rate-policy implementation and
-    live PostgreSQL evidence. It also records the remaining deferrals
-    explicitly. \\
-    \bottomrule
-  \end{tabularx}
-\end{table}
+The adapters have different capabilities. NCBI covers metadata and nucleotide
+retrieval, UCSC covers catalogs and intervals, UniProt supplies protein
+metadata, and EBI supports discovery. Protein sequence materialization is not
+available through the nucleotide-oriented sequence type. A request that no
+selected provider can serve fails explicitly. In a multi-provider scan, an
+adapter error can be suppressed when another adapter returns rows, so such a
+result may be partial.
 
-The first implementation therefore solved the \emph{control-plane} problem:
-turn a supported SQL predicate into a provider request, validate and execute
-that request, parse the response, and normalize it into rows. It did not yet
-solve the \emph{data-plane} problem for large nucleotide assets. A generated
-client returned a heap-owned \texttt{std::string} response body, and the
-provider adapter parsed it after the complete response arrived.  This is
-appropriate for bounded metadata pages, but makes peak memory proportional to
-the size of a genome.
-
-The final architecture keeps generated clients for metadata and adds a
-separate byte-streaming route for large assets.  The two routes converge only
-after provider-specific parsing, at the
-\texttt{owning\_provider\_message} model.  Figure~\ref{fig:external-dataflow}
-shows the implemented paths and, crucially, where whole-response ownership
-still exists.
-
-\begin{figure}[htbp]
-  \centering
-  \begin{tikzpicture}[
-      scale=.72,transform shape,
-      x=1cm,y=1cm,>=Latex,font=\footnotesize,
-      box/.style={draw,rounded corners,align=center,minimum height=.8cm},
-      flow/.style={->,thick}
-    ]
-    \node[box,text width=2.5cm] (sql) at (0,0)
-      {SQL over\\\texttt{bioseq\_\allowbreak external.*}};
-    \node[box,text width=3.05cm] (scan) at (3.35,0)
-      {\texttt{BioseqExternalScan}\\qual translation};
-    \node[box,text width=2.65cm] (pack) at (6.8,0)
-      {normalized query\\compile-time provider pack\\one runtime dispatch};
-
-    \node[box,text width=3.0cm] (meta) at (10.7,1.75)
-      {metadata/control plane\\generated GET client\\Oat++ + full bounded body};
-    \node[box,text width=3.0cm] (stream) at (10.7,-1.75)
-      {NCBI sequence data plane\\validated locator + libcurl\\FASTA or Datasets ZIP};
-
-    \node[box,text width=2.8cm] (messages1) at (14.5,1.75)
-      {normalized owning messages\\collected vector};
-    \node[box,text width=2.8cm] (messages2) at (14.5,-1.75)
-      {sequence payload messages\\byte/item bounded channel};
-    \node[box,text width=2.75cm] (writer) at (18.2,0)
-      {PostgreSQL thread\\\texttt{row\_writer}\\pack \texttt{bioseq.seq}};
-
-    \draw[flow] (sql) -- (scan);
-    \draw[flow] (scan) -- (pack);
-    \draw[flow] (pack) -- (meta);
-    \draw[flow] (pack) --
-      node[pos=.38,below=2pt,fill=white,inner sep=1pt,align=center]
-      {NCBI\\accession}
-      (stream);
-    \draw[flow] (meta) -- (messages1);
-    \draw[flow] (stream) -- (messages2);
-    \draw[flow] (messages1) -- (writer);
-    \draw[flow] (messages2) -- (writer);
-  \end{tikzpicture}
-  \caption{Implemented external-provider data flow.  Metadata and non-streaming
-  retrieval are collected before tuple production.  NCBI accession retrieval
-  can instead publish sequence payloads through a backpressured channel.}
-  \label{fig:external-dataflow}
-\end{figure}
-
-This split is more than a transport optimization. Metadata requests and asset
-transfers have different correctness criteria.  Metadata is usually a bounded
-JSON document whose value lies in its structure.  A sequence asset may be
-hundreds of megabytes, and its useful representation is a stream of symbols.
-The control plane needs typed parameter validation and provider-specific JSON
-normalization. The data plane needs byte caps, incremental decoding, archive
-safety, record boundaries, backpressure and an emission rule that determines
-whether a failed request may be retried.
-
-\section{Generated clients and handwritten adapters}
-\label{sec:external-generated-boundary}
-
-Provider integration is divided into three layers.  The descriptor layer
-states what an upstream API accepts.  The generated client layer implements
-safe, typed HTTP mechanics for the supported OpenAPI subset.  The handwritten
-adapter layer assigns BioSeqDB meaning to the response.
-
-Source descriptors are the C++ modules
-\path{main/bioseq/external/ncbi.cppm},
-\path{main/bioseq/external/ucsc.cppm},
-\path{main/bioseq/external/ebi.cppm},
-\path{main/bioseq/external/uniprot.cppm} and
-\path{main/bioseq/external/swiss_model.cppm}.  They contain the
-\texttt{bioseq::\allowbreak api\_\allowbreak client} annotation and embedded
-OpenAPI input. They should
-not be confused with the runtime provider adapters under
-\path{main/bioseq/external/providers/}.
-
-The current generator is implemented under
-\path{main/codegen/external/}. The annotation parser uses cppast/libclang on a
-normalized shadow source. The OpenAPI parser accepts GET operations, typed
-path/query/header parameters, Hypertext Transfer Protocol Secure (HTTPS) server
-metadata and a restricted API-key security model.  It rejects unsupported or
-ambiguous constructs at build time.
-The client renderer emits a C++ module named
-\texttt{bioseq.external.api.<provider>}.  The artifact handler writes
-\texttt{client/index.cppm}, a generated integration test, a CMake fragment,
-\texttt{manifest.tsv} and \texttt{provenance.txt}.  Artifacts live in the build
-tree and are updated with \texttt{write\_if\_different}. Generated source is not
-treated as a manually maintained copy in the repository.
-
-The generated public API is intentionally small.  A request consists of an
-operation identifier and a span of typed \texttt{parameter\_value} objects.
-The client validates required parameters, multiplicity and location before
-percent-encoding the path and query.  It then executes \texttt{get},
-\texttt{get\_with\_accept}, or \texttt{get\_batch}.  Batch transport work is
-distributed through \texttt{GlobalPool}. Completed responses are materialized
-serially.  A response owns its body as \texttt{std::string}, with a default
-64~MiB limit.  This heap ownership is deliberate: an earlier attempt to place a
-large transient HTTP body into the small-block result arena could exceed the
-arena's allocation geometry.  Provider adapters parse the body once into
-bounded owning messages, after which the transient string can be released.
-
-The following simplified C++26 model captures the actual provider contract:
-
-\begin{verbatim}
-template<class S>
-concept external_api_session_implementation =
-  requires(S& s, provider_message_sink_ref out, std::stop_token stop) {
-    { s.run(out, stop) }
-      -> std::same_as<std::expected<provider_statistics, external_error>>;
-    { s.request_stop() } noexcept -> std::same_as<void>;
-  };
-
-template<class P>
-concept external_api_provider_implementation =
-  requires(normalized_external_query const& q,
-           typename P::plan_type const& plan,
-           external_slot_budget const& budget) {
-    typename P::plan_type;
-    typename P::session_type;
-    requires external_api_session_implementation<typename P::session_type>;
-    { P::plan(q, provider_capability_snapshot{}, budget) };
-    { plan.execution_fingerprint() };
-    { P::open(/* memory, pool, runtime, credentials, */ plan, budget) };
-  };
-\end{verbatim}
-
-The complete definitions are in
-\path{main/bioseq/external/provider/concepts.cppm}.  There is no virtual
-provider base class.  The template
-\texttt{external\_\allowbreak api\_\allowbreak provider<%
-\allowbreak Providers...>} in
-\path{main/bioseq/external/provider/pack.cppm} checks type and stable-ID
-uniqueness at compile time.  At run time it performs one dispatch from the
-provider string to the concrete adapter type.  Dispatch does not occur for each
-row or chunk.  Adding a provider therefore means implementing one type that
-satisfies the concept and adding it to the configured pack. The hot row path
-does not gain a virtual call.
-
-Each adapter lowers a provider-neutral query into an immutable plan, opens a
-session, calls the generated client, and converts provider JSON into the
-canonical model.  NCBI reads \texttt{NCBI\_API\_KEY} for generated metadata
-calls and passes it as an owning generated \texttt{credentials} value.  UCSC
-maps BioSeqDB's zero-based half-open interval directly to its sequence
-endpoint. UniProt normalizes protein catalog and gene fields but rejects
-sequence targets because the PostgreSQL sequence materializer is currently
-nucleotide-oriented.  EBI is discovery-only.  The generator thus owns
-syntactic HTTP correctness. The adapter owns biological and relational
-semantics.
-
-\section{Planning and executing a remote table scan}
-\label{sec:external-custom-scan}
-
-\subsection{A table access method with no local tuples}
-
-The \texttt{bioseq\_\allowbreak external} table access method is defined in
-\path{main/bioseq/backend/pg/external/relation.cppm}.  It does not create a
-physical storage fork and does not contact a provider.  Its ordinary physical
-scan callbacks cannot produce tuples. The custom scan is the legal read path.
-The path builder in
-\path{main/bioseq/backend/pg/external/scan.cppm},
-\texttt{bioseq\_\allowbreak{}external\_\allowbreak{}try\_\allowbreak{}add\_%
-\allowbreak{}paths}, recognizes the access method,
-removes core-generated paths and inserts one non-parallel
-\texttt{CustomPath}.  Its current cost is a fixed \(1.0\), and its row estimate
-falls back to \(1000\).  This differs from BioSeqDB's alignment-function custom
-scan: there is no competing scalar remote-table implementation whose high cost
-must be beaten.  A physical sequential scan would be semantically invalid, so
-the external custom path is exclusive.
-
-\texttt{bioseq\_external\_plan\_custom\_path} preserves the real relation OID
-in \texttt{scanrelid}.  PostgreSQL therefore provisions a scan slot with the
-declared table descriptor and applies the plan's projection and residual
-filters normally.
-\texttt{Bioseq\allowbreak External\allowbreak Scan\allowbreak State} places
-\texttt{Custom\allowbreak Scan\allowbreak State} at offset zero, as required by
-PostgreSQL's node ABI.
-The C++ runtime object is separately allocated and registered with the query
-memory context's reset callback.  This prevents a C++ container from being
-silently abandoned when PostgreSQL exits through its error long jump.
-
-Network execution is postponed from \texttt{BeginCustomScan} until the first
-call that requests a tuple.  Consequently, ordinary \texttt{EXPLAIN} without
-\texttt{ANALYZE} reports the selected provider and entity without issuing a
-remote request.  \texttt{EXPLAIN ANALYZE} exercises the provider, because the
-executor must consume rows.
-
-\subsection{Predicate lowering and provider selection}
-
-PostgreSQL calls WHERE-clause expressions qualifications, or \emph{quals}.
-Every relation has a \texttt{provider} column. An equality predicate selects
-one provider, while \texttt{provider = ANY(array)} selects several.  Without an
-explicit predicate, the current defaults are NCBI for taxonomy, locations and
-sequence retrieval, UniProt for gene rows, and UCSC for the catalog.  Column
-names are mapped back to the canonical \texttt{external\_field} enumeration.
-The scan currently pushes equality predicates over text, integer and boolean
-constants, plus \texttt{= ANY(...)}.  Unsupported expression shapes and types
-remain PostgreSQL residual filters.
-
-The canonical query model in
-\path{main/bioseq/external/provider/query.cppm} is broader than this first
-lowering implementation.  It represents targets, typed scalar values, flat
-post-order predicate nodes and pushdown quality.  The executor currently sets a
-provider request limit of \(1000\). An SQL \texttt{LIMIT} is still enforced by
-PostgreSQL rather than being derived into that value.  Likewise, inequalities
-such as \texttt{start0 < end0} remain local even though the provider-neutral
-model can represent richer operators.
-
-An array predicate is expanded into equality-only subqueries because the
-current adapters consume equality accessions. The Cartesian expansion emits at
-most 64 combinations. When the bound is reached, the scan warns that further
-combinations were not queried. PostgreSQL residual filtering cannot recover
-rows that were never requested, so the returned union is incomplete in this
-case.
-
-Rows from successful provider/query pairs are unioned and de-duplicated by
-stable keys. If another pair fails, its first error is surfaced only when the
-complete union contains no rows. A query can therefore return a partial union
-without reporting the failed pair as an SQL error. This behavior is an explicit
-current limitation rather than ordinary fault tolerance.
-
-Algorithm~\ref{alg:external-scan} summarizes first-fetch initialization and
-subsequent row production.
+At scan initialization, provider predicates select adapters, while supported equality
+and constant array predicates constrain remote requests. Array predicate
+expansion is currently capped at 64 equality-query combinations. Excess
+combinations are omitted with a warning, so callers that require complete
+results must remain below this limit. At execution time, the scan opens a
+provider session on first demand. Metadata queries can collect a bounded set of
+owning messages. Large NCBI nucleotide queries instead use an incremental
+FASTA source and a queue bounded by both bytes and item count. Only the
+PostgreSQL backend thread creates \texttt{bioseq.seq} values and writes tuple
+slots. Network workers exchange ordinary owning values and never call the
+PostgreSQL API.
 
 \begin{algorithm}[htbp]
-  \caption{Current external-scan execution, simplified from
-  \texttt{bioseq\_external\_scan\_next}.}
-  \label{alg:external-scan}
-  \begin{description}
-    \item[Input:] relation entity, SQL quals, and provider set.
-  \end{description}
-  \begin{enumerate}
-    \item Lower supported quals to a normalized external query.
-    \item On the first tuple request:
-      \begin{enumerate}
-        \item If the entity is a sequence or sequence chunk, the provider is
-        NCBI, and an accession exists, start the NCBI producer and a bounded
-        message channel.
-        \item Otherwise:
-          \begin{enumerate}
-            \item expand \texttt{ANY} predicates and run provider plans to
-            completion.
-            \item collect and de-duplicate owning messages.
-          \end{enumerate}
-      \end{enumerate}
-    \item If the query is streaming:
-      \begin{enumerate}
-        \item Repeat until an item or terminal state is observed:
-          \begin{enumerate}
-            \item timed-pop one charged message lease.
-            \item on timeout, call \texttt{CHECK\_FOR\_INTERRUPTS}.
-          \end{enumerate}
-        \item Pack one payload into the PostgreSQL slot and release its charge.
-      \end{enumerate}
-    \item Otherwise, translate the next collected message or sub-row into the
-    scan slot.
-    \item Let \texttt{ExecScan} apply residual quals and projection.
-  \end{enumerate}
+  \caption{External relation scan}
+  \label{alg:external-relation-scan}
+  \begin{algorithmic}[1]
+    \Require relation kind, predicates, requested columns
+    \State retain all predicates locally and lower supported predicates remotely
+    \State select the requested or default adapter
+    \State open the provider session when the first row is requested
+    \State \textbf{while} the executor requests another row \textbf{do}
+      \State obtain the next provider message and convert required sequence values
+      \State place typed fields in the tuple slot for residual SQL processing
+    \State \textbf{end while}
+    \State cancel and close the session on rescan, error, or query completion
+  \end{algorithmic}
 \end{algorithm}
 
-\section{The NCBI streaming data plane}
-\label{sec:ncbi-streaming}
+The streaming transport verifies its HTTPS destination, restricts redirects,
+and applies connection and progress time limits. The archive path also applies
+explicit wire-size and decoded-size limits. Incremental NCBI FASTA retrieval
+bounds queue and carry memory but does not impose a total response-size limit.
+The NCBI streaming scan checks PostgreSQL cancellation between bounded waits.
+Retry is allowed only before the first row is emitted, which prevents duplicated
+visible chunks.
 
-The streaming path is selected by
-\texttt{is\_\allowbreak streaming\_\allowbreak query} in
-\path{main/bioseq/backend/pg/external/scan.cppm}: the target must be
-\texttt{sequences} or \texttt{sequence\_chunks}, the provider set must contain
-only NCBI, and an equality-constrained accession must be recoverable from the
-normalized query. Other provider/target combinations use the synchronous
-\texttt{run\_external\_query} bridge in
-\path{main/bioseq/external/providers/run.cppm}, which collects messages in a
-vector.
-
-\subsection{Pulling bytes without buffering the body}
-
-For an ordinary nucleotide accession, the producer constructs an NCBI
-E-utilities FASTA request. Before opening a socket,
-\texttt{validate\_candidate} in
-\path{main/bioseq/external/transport/locator.cppm} checks the HTTPS scheme,
-allowed host suffix, URL length, absence of user information and the currently
-implemented address-scope rules.  It resolves the host and requires every
-returned address to pass the classifier.  The numeric addresses are attached
-to an otherwise non-constructible
-\texttt{validated\_transfer\_request}, and libcurl receives them through
-\texttt{CURLOPT\_RESOLVE}~\cite{libcurl_url_api}. Redirects, proxies and
-automatic decoding are disabled.  These controls prevent redirect-based
-allowlist bypasses and pin the approved Domain Name System (DNS) result for
-the lifetime of the transfer.
-
-The address classifier is an explicit deny list rather than a complete
-global-unicast test.  It rejects the implemented unspecified, loopback,
-private or unique-local, link-local, carrier-grade network address translation
-(CGNAT) and multicast ranges.  It does not
-yet exhaust every special-use range or comprehensively handle Internet Protocol
-version 4 (IPv4) addresses mapped into the Internet Protocol version 6 (IPv6)
-address space.  The implementation therefore narrows the usual DNS-rebinding
-and private-service exposure, but the stronger claim that every non-public
-endpoint is excluded remains a security-hardening objective.
-
-\texttt{remote\_byte\_source} in
-\path{main/bioseq/external/transport/remote_source.cppm} satisfies the shared
-\texttt{bioseq::io::io\_source} concept.  It cooperatively drives a libcurl
-multi handle on the producer thread.  The write callback appends into a carry
-buffer whose default capacity is 256~KiB.  If the next callback would exceed
-that capacity, it returns \texttt{CURL\_WRITEFUNC\_PAUSE}. Draining
-\texttt{read\_into} resumes the transfer. Hence BioSeqDB's carry buffer retains
-at most the configured capacity rather than a complete FASTA response. This is
-not a bound on libcurl or Transport Layer Security (TLS) internal allocations.
-The source
-also applies a 15-second connect timeout, a low-speed threshold of one byte per
-second over 120 seconds, and an optional total timeout. It verifies the TLS peer
-and host, enforces a wire-byte cap, and limits each poll interval to one second
-for cooperative stop checks.
-
-The incremental
-\texttt{fasta\_\allowbreak chunk\_\allowbreak emitter} in
-\path{main/bioseq/external/io/sequence_stream.cppm} discards headers and
-whitespace while retaining the first header token as the record identifier.
-For \texttt{sequence\_chunks}, it flushes fixed-size base chunks and holds one
-chunk until it knows whether it is final.  For \texttt{sequences}, it
-intentionally accumulates a complete record before publication. This is
-necessary to return one SQL datum and means that the whole-record relation is
-not record-size-independent.  Multi-record archive members reset
-\texttt{base\_offset} for each record while keeping a global
-\texttt{chunk\_index}, so the pair \((\textit{queried accession},
-\textit{chunk index})\) remains unique.
-
-NCBI assembly accessions beginning with \texttt{GCF\_} or \texttt{GCA\_} take a
-different route through
-\path{main/bioseq/external/io/datasets_stream.cppm}. The Datasets API returns a
-ZIP package~\cite{ncbi_datasets_v2_api}. The current implementation downloads
-the compressed ZIP into a bounded in-memory vector with a 64~MiB default wire
-cap, then makes two libarchive passes.  The first pass reads bounded control
-members.  During the second pass, the extractor materializes one selected
-decoded member in a \texttt{std::string}. It validates the member against its
-Message Digest Algorithm 5 (MD5) checksum before feeding the verified bytes to
-the shared FASTA emitter.  The configured path enforces a 512~MiB total decoded
-cap and an expansion-ratio cap, while its per-member decoded cap is zero.  A
-single selected member may therefore approach the total cap.  For the
-whole-record \texttt{sequences} target, an additional
-record-sized payload may coexist with the buffered member.
-
-This path is verify-before-emit and bounded by explicit caps, but neither the
-package transport nor selected-member extraction is incremental.  A seekable
-temporary spool for packages above the in-memory cap, a bounded member spool
-that preserves verify-before-emit, and the dehydrated \texttt{fetch.txt}
-re-fetch strategy remain explicitly deferred.
-
-\subsection{Backpressure and PostgreSQL cancellation}
-
-The producer must never call PostgreSQL APIs. \texttt{start\_streaming} creates
-a \texttt{std::jthread}. That thread runs either
-\texttt{run\_ncbi\_sequence\_stream} or
-\texttt{run\_ncbi\_datasets\_stream} and communicates only by owning messages.
-This current implementation differs from the project guideline, which
-normally prefers TBB work submission, and from the fused provider tasks
-proposed by the dated common-provider specification.
-The current channel is bounded to 8~MiB and four items.  Its implementation in
-\path{main/bioseq/external/provider/bounded_channel.cppm} charges both bytes and
-items.  A popped item remains charged until its move-only lease is released,
-preventing the consumer from nominally emptying the queue while retaining
-unaccounted payload memory.  One oversized item may enter an otherwise empty
-channel. The admission equation accounts for that staging item and thereby
-avoids producer deadlock.
-
-The PostgreSQL thread calls \texttt{pop\_for} with a 100~ms timeout.  A timeout
-releases the channel mutex before \texttt{CHECK\_FOR\_INTERRUPTS} is invoked.
-This ordering is essential: PostgreSQL cancellation may long-jump, and jumping
-while holding a C++ mutex would permanently block the producer.  Teardown first
-cancels the channel, waking a producer blocked in \texttt{push}, and then lets
-the \texttt{jthread} join before destroying the channel. Rescan follows the
-same sequence of cancellation, join, and state reset.
-
-Retries obey an \emph{emission barrier}.  The direct FASTA path retries
-transport errors, HTTP 408, 429 and selected 5xx statuses with bounded
-exponential backoff and jitter, but only while the emitter has published zero
-rows.  Once a chunk is visible to the executor, restarting the transfer could
-duplicate rows.  A subsequent failure is terminal.  The archive path similarly
-retries the download before extraction, but never restarts after extraction has
-begun to emit.  The current backoff waits use
-\texttt{std::this\_thread::sleep\_for} rather than a stop-token-aware wait.
-Cancellation requested during a retry delay is observed only after the current
-interval completes, which can be about 1.8 seconds including jitter on the
-direct path and 1.6 seconds on the archive path.
-
-\section{From remote letters to a compact PostgreSQL sequence}
-\label{sec:external-packing}
-
-Provider messages remain PostgreSQL-independent.  The current
-\texttt{owning\_sequence\_payload} in
-\path{main/bioseq/external/provider/model.cppm} owns raw base letters in a
-\texttt{std::string}, together with accession, interval, chunk and audit
-metadata. It is not itself a
-\texttt{compact\_\allowbreak sequence\_\allowbreak range}. This is a
-deliberate boundary: network parsing can be built and tested without PostgreSQL
-headers or memory contexts.
-
-Packing occurs on the PostgreSQL thread in
-\texttt{set\_seq} within
-\path{main/bioseq/backend/pg/external/row_writer.cppm}.  The function calls the
-active SIMD target's
-\texttt{stdc\_\allowbreak{}convert\_\allowbreak{}from\_\allowbreak{}cstr<%
-\allowbreak{}bioseq::\allowbreak{}pg\_\allowbreak{}types::\allowbreak{}seq,...>}
-with
-\texttt{pg\_alloc}. It normalizes nucleotide input according to the configured
-PostgreSQL sequence alphabet and creates a varlena \texttt{bioseq.seq} datum in
-the current memory context.  A chunk lease is released only after this datum
-has been copied into the virtual tuple slot.  Downstream operators therefore
-receive exactly the same packed type as locally loaded sequences. Alignment
-code does not need a provider-specific representation.
-
-This conversion currently involves one raw-letter payload and one packed
-PostgreSQL allocation per emitted row. The common-provider specification dated
-11 July 2026 proposed a richer
-\texttt{sink\_control} and packing-parser path that could write directly into a
-reserved sink.  That refactor is not yet part of the proven implementation.
-The existing boundary trades one bounded conversion for a much simpler
-ownership rule: worker code owns ordinary C++ values, while only the backend
-thread owns PostgreSQL datums.
-
-\section{Authentication, transport policy and errors}
-\label{sec:external-policy}
-
-\subsection{Authentication and configuration}
-
-Generated clients support an OpenAPI API-key scheme in either a header or query
-parameter. Credentials are currently stored as owning \texttt{std::string}
-values. The
-NCBI adapter reads \texttt{NCBI\_API\_KEY} when it creates the generated
-metadata client. The direct nucleotide FASTA path is unauthenticated and does
-not place the key in its URL.  The broader DOC0372 design proposed
-non-owning/redacted credential views and richer per-provider policy profiles.
-The concepts expose \texttt{request\_policy\_profiles()} and
-\texttt{locator\_policy\_profiles()}, but all four current provider adapters
-return empty spans.  Locator enforcement for the NCBI stream is instead
-provided directly by \texttt{ncbi\_eutils\_policy}.
-
-The metadata transport in
-\path{main/bioseq/external/https.cppm} uses blocking Oat++ I/O over a custom
-OpenSSL stream.  It requires TLS~1.2 or newer, system trust roots, Server Name
-Indication (SNI),
-certificate-chain verification and hostname verification.  Socket reads and
-writes have 30-second timeouts.  A per-client connection pool is configured
-for up to 32 connections, a 30-second idle lifetime and a 10-second acquisition
-timeout.  Request targets, header names and header values are validated before
-transmission, and decoded response bodies are bounded.
-
-The streaming transport has the stricter locator firewall described in
-Section~\ref{sec:external-policy}.
-Its current DNS resolution uses the system \texttt{getaddrinfo} call before
-pinning the result.  The proposed cancellable c-ares/OpenSSL endpoint connector
-for the Oat++ control plane remains deferred. Cancellation is therefore
-cooperative rather than immediate.  A blocking \texttt{getaddrinfo} call can
-defer stop observation according to the system resolver, and a retry backoff
-can defer it until the current interval finishes.  Once libcurl is actively
-driving the transfer, its poll and timeout settings bound the regular stop
-checks.  There is no immediate cross-thread socket close.
-
-\subsection{Rate limits and failure representation}
-
-The provider core defines a structured, bounded
-\texttt{external\_error} in
-\path{main/bioseq/external/provider/errors.cppm}.  Its kinds distinguish:
-\begin{itemize}
-  \item Invalid queries.
-  \item Unsupported capabilities.
-  \item Transport and timeout failures.
-  \item HTTP errors.
-  \item Rate limits.
-  \item Incomplete responses.
-  \item Size limits.
-  \item Parsing.
-  \item Integrity.
-  \item Cancellation.
-  \item Provider-contract violations.
-\end{itemize}
-Diagnostics, response excerpts, operation names and identifiers have
-compile-time length caps, so an untrusted upstream body cannot become an
-unbounded error object.
-
-\texttt{gcra\_request\_policy} in
-\path{main/bioseq/external/provider/rate_limit.cppm} implements a process-local
-generic cell-rate algorithm (GCRA) with burst tolerance, in-flight slots,
-\texttt{Retry-After} penalties and a credential/origin/tier bucket key. The
-DOC0374 session-5 receipt dated 13 July 2026 reports tests for atomic rollback
-and concurrent slot accounting. The policy is not yet wired into
-the provider request path, and it is not cluster-wide across PostgreSQL
-backends.  The current NCBI stream instead uses local per-request retry loops.
-Consequently, several simultaneous backends can still exceed a shared public
-quota. The same report records implementation of a shared-memory GCRA variant
-and a multi-backend proof as future work.
-
-The intended PostgreSQL mapping assigns \texttt{0A000} to unsupported
-capabilities, \texttt{08000} to connection-class failures, \texttt{22000} to
-data/parse/integrity failures, \texttt{54000} to size limits and
-\texttt{57014} to cancellation.  The current custom scan implements only the
-most important distinction: unsupported or unimplemented operations become
-\texttt{0A000}. Other provider errors are presently collapsed to
-\texttt{38000} (external routine exception).  C++ exceptions are caught at
-every PostgreSQL callback boundary, and message text is copied into
-PostgreSQL-managed storage before \texttt{ereport(ERROR)} performs a long jump.
-The richer mapping documented in
-\path{main/bioseq/backend/pg/external/errors.cppm} is therefore a design
-contract that has not yet been fully connected to the scan.
-
-\section{Measured behavior and limits of the evidence}
-\label{sec:external-evidence}
-
-The evidence used here is the session-5 update dated 13 July 2026 in
-\texttt{main/DOCS/CURRENT/REPORTS/0374\_\allowbreak DOC0372\_\allowbreak
-NCBI\_\allowbreak STREAMING\_\allowbreak DATA\_\allowbreak PLANE\_\allowbreak
-IMPLEMENTATION\_\allowbreak AND\_\allowbreak POSTGRES\_\allowbreak PROOF.md}.
-It reports that all six external relations planned as
-\texttt{Custom Scan (BioseqExternalScan)} and that no \texttt{Seq Scan}
-appeared. The Q1--Q8 transcript exercised NCBI, UCSC, and UniProt. EBI was
-exercised separately through the catalog relation. This is not a complete
-relation-by-provider Cartesian proof.
-
-In that recorded run, UniProt metadata returned TP53 accession
-\texttt{P04637}, while protein sequence materialization produced the intended
-SQLSTATE \texttt{0A000}. The report records \texttt{P62988} as demerged at that
-time. These are dated observations from a public-service fixture, not
-permanent statements about current provider state.
-
-Table~\ref{tab:external-proof} records the principal dated PostgreSQL
-observations.
-
-\begin{table}[htbp]
-  \centering
-  \small
-  \caption{Selected observations from the live PostgreSQL runs recorded on
-  13 July 2026. Provider contents and availability may change after that date.}
-  \label{tab:external-proof}
-  \begin{tabularx}{\linewidth}{p{.26\linewidth}p{.22\linewidth}X}
-    \toprule
-    Case & Observed result & Interpretation \\
-    \midrule
-    Human mitochondrial accession \texttt{NC\_012920.1} &
-    16,569 bases. One final chunk &
-    Correct short-record boundary handling. \\
-    \emph{E. coli} K-12 \texttt{NC\_000913.3} &
-    \(4\times1\,048\,572 + 447\,364 = 4\,641\,652\) bases &
-    Five ordered chunks. Offsets monotonic. Only the tail is final. \\
-    SARS-CoV-2 assembly \texttt{GCF\_009858895.2} &
-    one 29,903-base final chunk &
-    Live Datasets ZIP, manifest/archive and PostgreSQL path. \\
-    Influenza A assembly \texttt{GCF\_000865725.1} &
-    eight segments, 13,588 bases &
-    Multi-record archive. Distinct original identifiers and globally unique
-    chunk indices.  The \texttt{sequences} relation also returned eight
-    whole-segment rows. \\
-    External automated suite &
-    24 cases and 108 assertions in the isolated target. The whole-suite run
-    had 949 assertions in 53 cases &
-    Contemporaneous transfer, archive, rate-policy, and provider-integration
-    coverage from one recorded test run. \\
-    \bottomrule
-  \end{tabularx}
-\end{table}
-
-A live NCBI source test recorded on 13 July 2026 streamed the
-\(4.64\)-Mbp \emph{E. coli} record with a measured BioSeqDB carry-buffer peak
-no greater than 256~KiB.
-
-Table~\ref{tab:external-streaming-benchmark} compares the bounded streaming
-emitter with the whole-body comparator.
-
-\begin{table}[htbp]
-  \centering
-  \small
-  \caption{DOC0374 session-2 offline FASTA comparison. The later session-5
-  update did not rerun this benchmark. It recorded the measured hot path as
-  byte-identical.}
-  \label{tab:external-streaming-benchmark}
-  \begin{tabular}{lrrr}
-    \toprule
-    Path & Throughput & Peak live buffer & Buffer ratio \\
-    \midrule
-    Production streaming emitter & 206.3 MiB/s & 1.06 MiB & \(1.0\times\) \\
-    Whole-body comparator & 274.6 MiB/s & 32.00 MiB & \(30.2\times\) \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-Table~\ref{tab:external-streaming-benchmark} demonstrates a memory trade-off,
-not a throughput improvement. The whole-body comparator only counted letters,
-whereas the streaming path constructed payload messages. The throughput
-difference therefore does not estimate network or SQL overhead. Relative to
-the 32.00~MiB comparator peak, the 1.06~MiB streaming peak is a \(96.7\%\)
-reduction. The \(30.2\times\) value in the table is the ratio between the two
-peaks, not a ``fold reduction.''
-
-The benchmark is a standalone Catch2 measurement, not a case in the formal
-\texttt{bench-io} matrix. The performance values are from DOC0374 session 2.
-Session 5 did not rerun them and instead recorded the measured path as
-byte-identical. The PostgreSQL transcript gives an end-to-end
-functional proof but not a statistically repeated latency study. Its recorded
-202.533~ms mitochondrial \texttt{EXPLAIN ANALYZE} run includes public-network
-conditions and cannot serve as a stable performance baseline. The defensible
-conclusions are narrower: plan selection was correct, emitted sequence lengths
-matched source truth, record boundaries were preserved, and the direct FASTA
-working set was bounded independently of record size.
-
-\section{Final architecture and remaining work}
-\label{sec:external-final}
-
-The retained solution is a two-plane system. Generated Oat++ clients provide
-a reproducible, validated control plane for small JSON responses.
-Concept-checked provider adapters translate these responses into one canonical query
-and message model.  A storage-free PostgreSQL access method forces reads
-through a custom scan.  For the large NCBI nucleotide path, a validated
-libcurl source, incremental FASTA emitter and byte/item bounded channel form a
-separate data plane.  The PostgreSQL thread alone packs letters into
-\texttt{bioseq.seq} and interacts with executor slots.
-
-Relative to the generated-client-only baseline, direct NCBI
-\texttt{sequence\_chunks} retrieval removes the complete response body from
-the record-length-dependent working set. Sections~\ref{sec:ncbi-streaming},
-\ref{sec:external-packing}, and \ref{sec:external-policy} delimit the
-exceptions. Metadata, non-NCBI retrieval, Datasets archive verification, and
-whole-record \texttt{sequences} still retain bounded but package-sized or
-record-sized values. The remaining security, admission, scheduling,
-rate-policy, and SQLSTATE work defines the scope of the result without
-changing this measured distinction.
-
-Within that scope, remote biological databases appear as typed PostgreSQL
-relations. Provider-specific HTTP details remain outside SQL. Nucleotide
-chunks enter the same compact sequence type as local data. The direct NCBI
-FASTA path has explicit backpressure and measured memory bounds.
-
-\clearpage
-\section{Implementation reference map}
-\label{sec:external-reference-map}
-
-Table~\ref{tab:external-reference-map} maps each runtime responsibility to its
-authoritative source file.
-
-\begin{table}[H]
-  \centering
-  \footnotesize
-  \caption{Authoritative current source locations for the external-provider
-  chapter.}
-  \label{tab:external-reference-map}
-  \begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}X}
-    \toprule
-    Source and principal symbols or responsibility \\
-    \midrule
-    \path{main/bioseq/external/provider/concepts.cppm} \\
-    \textit{Responsibility:}
-    \texttt{external\_api\_session\_implementation},
-    \texttt{external\_api\_provider\_implementation}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/provider/pack.cppm} \\
-    \textit{Responsibility:}
-    \texttt{external\_api\_provider<...>} and one-time runtime dispatch. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/providers/configured.cppm} \\
-    \textit{Responsibility:}
-    \texttt{configured\_external\_api\_provider}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/providers/run.cppm} \\
-    \textit{Responsibility:}
-    \texttt{run\_external\_query}, the current collecting bridge. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/transport/locator.cppm} \\
-    \textit{Responsibility:}
-    \texttt{validate\_candidate},
-    \texttt{validated\_transfer\_request}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/transport/remote_source.cppm} \\
-    \textit{Responsibility:}
-    \texttt{remote\_byte\_source}, bounded libcurl pull source. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/io/sequence_stream.cppm} \\
-    \textit{Responsibility:}
-    \texttt{fasta\_chunk\_emitter},
-    \texttt{run\_ncbi\_sequence\_stream}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/external/io/datasets_stream.cppm} \\
-    \textit{Responsibility:}
-    \texttt{run\_ncbi\_datasets\_stream}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/backend/pg/external/scan.cppm} \\
-    \textit{Responsibility:}
-    \texttt{BioseqExternalScanState}, path/plan/executor callbacks,
-    producer and channel drain. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/backend/pg/external/row_writer.cppm} \\
-    \textit{Responsibility:}
-    \texttt{bioseq\_external\_fill\_slot}, \texttt{set\_seq}. \\
-    \addlinespace[0.3em]
-    \path{main/bioseq/backend/pg/external/sql_catalog.cppm} \\
-    \textit{Responsibility:}
-    Annotated definitions of the six SQL relations. \\
-    \addlinespace[0.3em]
-    \path{main/codegen/external/client_renderer.cppm} \\
-    \textit{Responsibility:}
-    Generated request/response API and Oat++ client implementation. \\
-    \bottomrule
-  \end{tabularx}
-\end{table}
-
-The six external relations are themselves generated from annotated C++
-declarations. The following chapter examines that source-driven SQL boundary.
+Whole-record retrieval still requires record-sized memory, and archive
+retrieval requires bounded buffering before decoding. Requests are not currently
+rate-coordinated across backends. Chunked retrieval is preferable for large
+records.

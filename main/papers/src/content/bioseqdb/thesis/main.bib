@@ -13,6 +13,16 @@
   url          = {https://doi.org/10.1093/bioinformatics/bty191},
 }
 
+@article{blend,
+  author       = {Firtina, Can and Park, Jisung and Alser, Mohammed and Kim, Jeremie and Senol Cali, Damla and Shahroodi, Taha-Michael and Mansouri Ghiasi, Nika and Singh, Gagandeep and Kanellopoulos, Konstantinos and Alkan, Can and Mutlu, Onur},
+  title        = {{BLEND}: a fast, memory-efficient and accurate mechanism to find fuzzy seed matches in genome analysis},
+  journaltitle = {NAR Genomics and Bioinformatics},
+  volume       = {5},
+  year         = {2023},
+  doi          = {10.1093/nargab/lqad004},
+  url          = {https://doi.org/10.1093/nargab/lqad004},
+}
+
 @article{crick_central_dogma_1970,
   author       = {Crick, Francis},
   title        = {Central Dogma of Molecular Biology},
@@ -318,11 +328,11 @@
 
 @online{postgresql17_placeholdervar,
   author  = {{PostgreSQL Global Development Group}},
-  title   = {{PlaceHolderVar} definition in the {PostgreSQL 17.10} source tree},
+  title   = {{PlaceHolderVar} in the {PostgreSQL 17.10} source tree},
   version = {REL\_17\_10},
-  url     = {https://github.com/postgres/postgres/blob/REL_17_10/src/include/nodes/pathnodes.h},
+  url     = {https://github.com/postgres/postgres/tree/REL_17_10},
   urldate = {2026-07-28},
-  note    = {Undated online source. The structure is defined in src/include/nodes/pathnodes.h.},
+  note    = {Undated online source.},
 }
 
 @online{postgresql17_set_returning_functions,
@@ -355,30 +365,29 @@
 @online{paradedb_pg_search_customscan,
   author  = {{ParadeDB contributors}},
   title   = {{ParadeDB pg\_search} Custom Scan implementation},
-  version = {0.20.5-era local snapshot},
+  version = {0.20.5},
   date    = {2025-12-17},
-  url     = {https://github.com/paradedb/paradedb/tree/7f20649d6980e06579999600dd582710939ca4ce/pg_search/src/postgres/customscan},
+  url     = {https://github.com/paradedb/paradedb},
   urldate = {2026-07-28},
-  note    = {AGPL-3.0. The local paradedb-experiments subtree is pinned by \mbox{BioSeqDB} commit 17cfcab6174c8ba2b3b4421c5f7214472c6b53c0 and identifies itself as version 0.20.5. The whole local tree is not claimed to be byte-identical to upstream commit 7f20649d6980e06579999600dd582710939ca4ce, although the relevant custom-scan builder matches that public snapshot.},
+  note    = {AGPL-3.0.},
 }
 
 @online{citus_columnar_storage,
   author  = {{Citus Data contributors}},
   title   = {{Citus Columnar} storage implementation},
-  version = {14.0.0, commit dfe71fc40f15b4f3c546964bc8d26d375c0b4957},
+  version = {14.0.0},
   date    = {2026-02-17},
-  url     = {https://github.com/citusdata/citus/tree/dfe71fc40f15b4f3c546964bc8d26d375c0b4957/src/backend/columnar},
+  url     = {https://github.com/citusdata/citus},
   urldate = {2026-07-28},
-  note    = {AGPL-3.0. The local citus-main subtree is pinned by BioSeqDB commit 74dfd2c3e79540babd51543458357481cd6898b4 and identifies itself as Citus 14.0devel. The cited columnar implementation matches the public Citus v14.0.0 snapshot, but whole-tree identity is not claimed.},
+  note    = {AGPL-3.0.},
 }
 
 @software{minimap2_software,
   author  = {Li, Heng},
   title   = {{minimap2}},
-  version = {2.30, commit 79c9cc186b95f50bd899f69b48eba995ced810c6},
+  version = {2.30},
   url     = {https://github.com/lh3/minimap2/tree/79c9cc186b95f50bd899f69b48eba995ced810c6},
   urldate = {2026-07-28},
-  note    = {The bundled BioSeqDB comparator identifies itself as 2.30-r1290-dirty and is not claimed to be byte-identical to this upstream release snapshot.},
 }
 
 @article{tarjan_1972_depth_first_search,

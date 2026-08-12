@@ -1,97 +1,43 @@
 \section{From local seed hits to candidate mappings}
 \label{sec:chaining-purpose}
 
-Minimizers identify short local agreements between a query and a reference, but
-they do not by themselves constitute an alignment.  A repetitive genome can
-produce thousands of mutually incompatible hits, while a true mapping is
-usually represented by a sparse, approximately collinear subset.  The purpose
-of chaining is to select that subset.  It is therefore the first stage at which
-the mapper reasons about the geometry of a complete candidate mapping rather
-than about individual \(k\)-mers.
+Minimizers identify short agreements between a query and a reference, but a
+set of minimizer hits is not yet an alignment. Repetitive sequence can produce
+many incompatible hits. A plausible mapping is usually represented by a
+sparser subset that advances in both coordinate systems and stays near one
+diagonal. Chaining selects this subset before base-level alignment.
 
-This chapter presents the chaining implementation that BioSeqDB uses.  The
-project contains four generations of designs.  A minimap2-compatible scalar
-dynamic program provides the semantic baseline.  An augmented tree implements
-range minimum queries (RMQs).  Two single instruction, multiple data (SIMD)
-policies accelerate execution on the central processing unit (CPU).  A Vulkan
-path inspired by G3SA targets a graphics processing unit (GPU).
+BioSeqDB supports scalar dynamic programming, range minimum query (RMQ)
+chaining, two single instruction, multiple data (SIMD) policies, and a Vulkan
+graphics processing unit (GPU) path. These choices share an anchor model, but
+do not all use the same edge score or stopping rule. The
+scalar algorithm defines the main forward-pass semantics. Exact SIMD preserves
+that contract. Bounded SIMD and GPU execution use stated approximations. RMQ
+changes both candidate selection and part of the pair score.
 
-These policies do not have identical semantics.  Historical SIMD variants
-traded exact stopping behavior for speed.  Other SIMD changes regressed after
-increasing instruction-cache pressure.  The GPU path changes the candidate set
-for very long ranges.  BioSeqDB therefore exposes the implementations as
-explicit policies.
-
-\begin{table}[H]
-\centering
-\caption{Current production source map for chaining.}
-\label{tab:chaining-source-map}
-\footnotesize
-\setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.08}
-\begin{tabularx}{\linewidth}{@{}
-  >{\raggedright\arraybackslash}p{0.24\linewidth}
-  >{\raggedright\arraybackslash}X@{}}
-\toprule
-\textbf{Responsibility} & \textbf{Current source}\\
-\midrule
-Anchor layout and order &
-\path{main/bioseq/backend/sequences/chaining/chaining_utils.cppm}\\
-Scalar chaining &
-\path{main/bioseq/backend/sequences/chaining/chaining_scalar.cppm}\\
-RMQ chaining &
-\path{main/bioseq/backend/sequences/chaining/chaining_rmq.cppm}\\
-SIMD chaining policies &
-\path{main/bioseq/backend/sequences/chaining/chaining_simd.cppm}\\
-Vulkan chaining &
-\path{main/bioseq/backend/sequences/chaining/chaining_vulkan.cppm}\\
-Region integration &
-\path{main/bioseq/backend/pipeline/minimap_port.cppm}\\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-\begin{samepage}
-\section{The geometric problem}
+\section{Anchor geometry and ordering}
 \label{sec:chaining-geometry}
 
-After seed lookup, BioSeqDB represents a hit by an anchor
+A seed hit is represented by an anchor
 \[
   a_i=(r_i,q_i,\sigma_i,\ell_i,g_i,\phi_i),
 \]
-\begin{description}
-    \item[\(r_i,q_i\)] Reference and query end coordinates.
-    \item[\(\sigma_i\)] Strand.
-    \item[\(\ell_i\)] Query span contributed by the seed.
-    \item[\(g_i\)] Query segment identifier.
-    \item[\(\phi_i\)] Remaining flags.
-\end{description}
-\end{samepage}
-The current C++ object occupies 24 bytes.  Both positions are
-stored as full 64-bit values, the strand has a dedicated 32-bit field, the span
-is an 8-bit value, and the segment and flags occupy the remaining fields.  The
-64-bit physical storage matters for database-resident references because a
-concatenated collection need not fit in the 32-bit coordinate model assumed by
-older standalone mappers.  The canonical reference key reserves its high bit
-for the strand, however, and the region conversion casts coordinates to signed
-64-bit values.  The supported canonical reference-coordinate domain is
-therefore below \(2^{63}\).  Nor does the physical layout imply end-to-end
-64-bit chaining arithmetic.  The current scalar and SIMD pair scorers narrow
-coordinate differences to signed 32-bit values and are valid only when the
-positive differences fit that domain.
-Section~\ref{sec:chaining-scalar} examines this limitation.
+where \(r_i\) and \(q_i\) are inclusive seed-end coordinates on the reference
+and query, \(\sigma_i\) is the strand, \(\ell_i\) is the query span, \(g_i\)
+identifies a query segment, and \(\phi_i\) stores additional ordering flags.
+Reference and query positions are stored as 64-bit values. The scalar and SIMD
+pair scorers nevertheless require local coordinate differences to fit signed
+32-bit arithmetic. Full-width storage therefore permits large absolute
+coordinates, but it does not remove the bound on a single predecessor gap.
 
-Figure~\ref{fig:chaining-dotplot} gives the usual dot-plot interpretation.
-Each anchor is a point.  A plausible chain advances in both axes and remains
-near one diagonal.  Isolated points and points on an incompatible diagonal are
-decoys.  A deletion relative to the reference increases \(r\) faster than
-\(q\).  An insertion does the opposite.  Chaining does not resolve either event
-base by base.  It merely pays a gap cost and passes the selected region to the
-final aligner.
+Figure~\ref{fig:chaining-dotplot} shows the geometric interpretation. Valid
+predecessors lie below and to the left of the current anchor. A chain can move
+between nearby diagonals to represent an insertion or deletion, but large
+diagonal changes receive a penalty or fall outside the chaining bandwidth.
 
-\begin{figure}[H]
+\begin{figure}[tbp]
 \centering
-\begin{tikzpicture}[x=0.075cm,y=0.055cm]
+\begin{tikzpicture}[x=0.12cm,y=0.075cm,font=\small]
   \draw[->] (0,0) -- (78,0) node[right] {reference coordinate \(r\)};
   \draw[->] (0,0) -- (0,66) node[above] {query coordinate \(q\)};
   \draw[dashed,gray!65] (4,5) -- (70,58);
@@ -103,22 +49,30 @@ final aligner.
     \draw[red!75!black,thick] (\x-1.6,\y-1.6)--(\x+1.6,\y+1.6)
       (\x-1.6,\y+1.6)--(\x+1.6,\y-1.6);
   \draw[<->,orange!80!black,thick] (39,32) -- (39,38);
-  \node[orange!80!black,anchor=south west] at (42,29)
+  \node[orange!80!black,anchor=west] at (42,32)
     {diagonal deviation};
-  \node[blue!70!black,below right] at (55,50) {selected collinear chain};
+  \node[blue!70!black,below right] at (54,50) {selected chain};
   \node[red!75!black,above] at (18,39) {incompatible hits};
 \end{tikzpicture}
-\caption{Anchor geometry.  Chaining selects an increasing, approximately
-collinear path.  The final alignment stage subsequently explains the gaps
-between its anchors.}
+\caption{Anchor geometry. Chaining selects an increasing, approximately
+collinear path. Base-level alignment later explains the intervals between
+anchors.}
 \label{fig:chaining-dotplot}
 \end{figure}
 
-\subsection{Canonical order is part of the contract}
+The diagonal coordinate \(r_i-q_i\) is constant for anchors from an exact,
+gap-free segment. An increasing diagonal coordinate indicates that reference
+advance has exceeded query advance, as expected across a deletion relative to
+the query. A decreasing value indicates the converse. Chaining does not decide
+the base-level gap placement. It tests whether the displacement is plausible,
+charges the corresponding edge cost, and passes the interval between selected
+anchors to extension. This separation lets sparse seed geometry restrict the
+expensive alignment problem without treating each seed as an independent
+mapping.
 
-All forward dynamic programs assume anchors are sorted first by strand and
-reference coordinate, then by query metadata and coordinate.  BioSeqDB obtains
-this order through two packed keys:
+The dynamic program requires a deterministic topological order. Anchors are
+sorted first by strand and reference coordinate, then by query metadata and
+coordinate. Two packed comparison keys express the established order:
 \begin{equation}
 \begin{split}
  K_r(a_i) &=
@@ -129,68 +83,54 @@ this order through two packed keys:
    \mathbin{\vert}(\ell_i\ll32)
    \mathbin{\vert}(q_i\bmod 2^{32}).
 \end{split}
+\label{eq:chaining-order}
 \end{equation}
-The comparison is lexicographic in \(K_r\), \(K_q\), and finally the full
-\(q_i\).  Thus the reference projection is the strand bit followed by the low
-63 coordinate bits.  Physical storage remains 64-bit, but a reference position
-at or above \(2^{63}\) is outside the ordering and region-conversion contract.
-The last query comparison is not redundant: the packed query key retains
-only the low 32 coordinate bits, so it disambiguates anchors only when those
-packed low words are equal.  The resulting order is a compatibility order, not
-a globally increasing full-\(q\) order once coordinates exceed \(2^{32}\).
-The present pipeline normally chains one query whose length is far below that
-boundary.  A future database-wide query-coordinate space would require a
-different key and arithmetic contract.
+Comparison is lexicographic in \(K_r\), \(K_q\), and the full \(q_i\). The
+final comparison resolves equal packed low words. The reference ordering
+reserves its high bit for strand, so canonical reference positions must be
+below \(2^{63}\). The query projection is a compatibility order rather than a
+globally increasing full-width order once query coordinates exceed \(2^{32}\).
+Ordinary per-query mapping remains well below this boundary.
 
-The packed keys should not be confused with the physical representation of an
-anchor.  They are comparison projections.  Earlier project reports describe
-a 16-byte anchor and sorting networks designed around that historical layout.
-The present implementation is the 24-byte, full-coordinate representation.
-This is one example of why the thesis gives precedence to current source and
-to the most recent design documents over older benchmark notes.
+The first and last anchor endpoints are converted to half-open mapping
+coordinates after chaining. On the forward strand,
+\[
+ q_{\mathrm{start}}=q_{\mathrm{first}}+1-\ell_{\mathrm{first}},
+ \qquad
+ q_{\mathrm{end}}=q_{\mathrm{last}}+1.
+\]
+For a reverse-strand query of length \(L\), the normalized interval is mapped
+back to \([L-q_{\mathrm{end}},L-q_{\mathrm{start}})\).
 
-The stored seed positions are inclusive \(k\)-mer end coordinates.  For a
-forward chain, the region stage converts the first anchor to
-\(q_{\mathrm{start}}=q_{\mathrm{first}}+1-\ell_{\mathrm{first}}\) and the
-last anchor to \(q_{\mathrm{end}}=q_{\mathrm{last}}+1\).  Reverse-strand
-anchors are normalized before chaining and converted back as
-\([L-q_{\mathrm{end}},L-q_{\mathrm{start}})\), where \(L\) is query length.
-External mapping regions are consequently conventional zero-based,
-half-open intervals even though the dynamic program (DP) operates on inclusive
-seed endpoints.
-
-\section{The scalar dynamic program}
+\section{Scalar chaining recurrence}
 \label{sec:chaining-scalar}
 
-The scalar implementation is the semantic reference when chaining is invoked
-through Structured Query Language (SQL).  It is derived from minimap2's
-single-segment, non-cDNA recurrence, where cDNA denotes complementary DNA,
-while specializing away branches that BioSeqDB does not need at this
-stage \cite{minimap2_paper}.  The exact code comparison in this chapter uses
-the bundled \path{main/bench/tool_minimap2/minimap2/lchain.c}.  Let
+The scalar algorithm follows the single-segment, non-complementary-DNA branch
+of minimap2 chaining \cite{minimap2_paper}. For a current anchor \(i\) and an
+earlier anchor \(j\), define
 \[
-  d_r(i,j)=r_i-r_j,\qquad
-  d_q(i,j)=q_i-q_j,\qquad
-  \delta(i,j)=|d_r(i,j)-d_q(i,j)|,
+ d_r(i,j)=r_i-r_j,
+ \qquad
+ d_q(i,j)=q_i-q_j,
+ \qquad
+ \delta(i,j)=|d_r(i,j)-d_q(i,j)|,
 \]
-and let
-\begin{equation}
-  h(i,j)=\min\{d_r(i,j),d_q(i,j)\}.
-\end{equation}
-A predecessor is geometrically admissible only when it is earlier on the same
-strand, both coordinate differences are positive, it lies within the active
-reference and query windows, and
-\(\delta(i,j)\le B\), where \(B\) is the chaining bandwidth.  The outer loop
-maintains the reference-distance condition.  The pair scorer checks the
-remaining conditions.  Writing \(\lambda_g\) and \(\lambda_s\) for the gap
-and skip coefficients, BioSeqDB assigns the edge contribution
+and
+\[
+ h(i,j)=\min\{d_r(i,j),d_q(i,j)\}.
+\]
+A candidate is admissible when both differences are positive, both anchors
+have the same strand, the coordinate differences fall inside their active
+windows, and \(\delta(i,j)\le B\), where \(B\) is the chaining bandwidth.
+
+The reward for linking \(j\) to \(i\) is
 \begin{equation}
 \begin{aligned}
 \alpha(i,j)
 &=\min\{\ell_j,h(i,j)\}\\
 &\quad-
 \begin{cases}
-0,&\delta(i,j)=0\ \land\ h(i,j)\le \ell_j,\\[2mm]
+0,&\delta(i,j)=0\ \land\ h(i,j)\le \ell_j,\\[1mm]
 \left\lfloor
  \lambda_g\delta(i,j)+\lambda_s h(i,j)
  +\frac{1}{2}\operatorname{fastlog}_2(\delta(i,j)+1)
@@ -199,1017 +139,688 @@ and skip coefficients, BioSeqDB assigns the edge contribution
 \end{aligned}
 \label{eq:chaining-edge-score}
 \end{equation}
-All terms inside the floor are non-negative, so the conversion in the C++
-implementation is equivalent to truncation toward zero.  The logarithmic term
-is evaluated only for a nonzero diagonal difference.  The default coefficients
-are derived from the minimizer length \(k\):
-\(\lambda_g=0.01k\,s_g\) and
-\(\lambda_s=0.01k\,s_s\), with default scales \(s_g=0.8\) and
-\(s_s=0\).  Other default limits are a reference gap of 5000 bases, bandwidth
-500, \(25\) skip events, and at most \(5000\) examined predecessors.
+The first term rewards newly covered query sequence. The remaining terms
+penalize diagonal drift and long skips. The default coefficients are derived
+from minimizer length \(k\):
+
+\[
+ \lambda_g=0.01k\,s_g,
+ \qquad
+ \lambda_s=0.01k\,s_s,
+ \qquad
+ s_g=0.8,
+ \qquad
+ s_s=0.
+\]
 
 The best score ending at anchor \(i\) and its predecessor are
 \begin{equation}
 \begin{split}
  f_i &=
    \max\left(
-     \ell_i,\;
+     \ell_i,
      \max_{j\in W_i}\{f_j+\alpha(i,j)\}
    \right),\\
  p_i &=
- \arg\max_{j\in W_i}\{f_j+\alpha(i,j)\},
+   \arg\max_{j\in W_i}\{f_j+\alpha(i,j)\}.
 \end{split}
 \label{eq:chaining-dp}
 \end{equation}
-where \(W_i\) is the bounded set of admissible earlier anchors.  A chain may
-begin at \(i\), in which case \(f_i=\ell_i\) and \(p_i=-1\).  This is a sparse
-longest-path problem in a directed acyclic graph: sorting provides the
-topological order, and every admissible edge points forward.
+If no predecessor improves the seed span, the chain starts at \(i\) and
+\(p_i=-1\). Sorting makes the recurrence a sparse longest-path calculation in
+a directed acyclic graph.
 
-The effective reference and query search limits in the scalar entry point are
-both raised to at least the bandwidth,
-\(M=\max(\text{max-gap},B)\).  This avoids the contradictory state in which a
-configured diagonal band is wider than the coordinate window that is supposed
-to contain it.  The iteration cap then takes the newest
-\(\text{max-iterations}\) anchors from that geometric window.
+Candidate search is bounded in three ways. Reference and query windows are
+raised to at least the bandwidth, so their effective limit is
+\(M=\max(\text{max-gap},B)\). At most the newest \(I\) anchors in the active
+window are examined, with a default \(I=5000\). The ordered scan can also stop
+after the visited-generation skip counter exceeds its limit, which is 25 by
+default. These bounds make dense repetitive regions tractable, but they make
+control order part of the algorithm.
 
-Algorithm~\ref{alg:scalar-chaining} makes the ordered stopping behavior and the
-global-best rescue explicit around the recurrence.
+The standard reference-gap limit is 5000 bases and the standard bandwidth is
+500 bases. Increasing the gap limit expands the active predecessor set.
+Increasing the bandwidth admits larger insertion and deletion candidates.
+Changing the iteration or skip limit changes only how much of that admissible
+set is inspected. These parameters are related, but none can replace the
+others without changing the selected graph edges.
 
-\begin{algorithm}[tb]
-\caption{BioSeqDB scalar chaining, with control semantics made explicit}
+The three bounds serve different purposes. The reference window permits an
+ordered expiry pointer because anchors are sorted by reference position. The
+query window and diagonal bandwidth are pairwise tests because query
+coordinates need not increase monotonically across all active anchors. The
+iteration limit restricts the number of newest candidates considered after
+geometric expiry. The skip rule can end this restricted scan even earlier
+when recent predecessor paths repeatedly indicate that older candidates are
+unlikely to improve the score.
+
+Equation~\ref{eq:chaining-edge-score} also distinguishes seed overlap from a
+true gap. When two anchors lie on one diagonal and their displacement does not
+exceed the predecessor span, the new contribution is only the non-overlapping
+coverage and no gap penalty is charged. For a diagonal change or a larger
+displacement, the linear diagonal term is supplemented by a logarithmic
+correction. The optional skip term depends on the smaller coordinate advance.
+An edge contribution may be negative. It can still be selected when the
+predecessor's accumulated score makes the total exceed the current best.
+
+\begin{algorithm}[tbp]
+\caption{Scalar chaining with bounded predecessor search}
 \label{alg:scalar-chaining}
 \small
-\textbf{Input:} anchors sorted by the canonical order and the chaining
-parameters.
+\textbf{Input:} canonically sorted anchors and chaining parameters
 
-\textbf{Output:} score vector \(f\) and predecessor vector \(p\).
+\textbf{Output:} endpoint scores \(f\) and predecessor indices \(p\)
 
 \begin{enumerate}
-  \item For \(i=0,\ldots,n-1\), perform the following steps.
+  \item For each anchor \(i\), expire anchors outside the strand and reference
+    window, then set \(f_i\gets\ell_i\), \(p_i\gets-1\), and \(c\gets0\).
+  \item Visit at most \(I\) active candidates \(j\) from newest to oldest.
+    Ignore candidates that fail the geometric tests.
+  \item For an admissible candidate, set \(v\gets f_j+\alpha(i,j)\).
     \begin{enumerate}
-      \item Expire predecessors outside the strand/reference window.
-      \item Set
-        \[
-          f_i\gets\ell_i,\qquad p_i\gets-1,\qquad c\gets0.
-        \]
-      \item Set
-        \[
-          j_{\min}\gets
-          \max(\text{window-begin},i-\text{max-iterations}).
-        \]
-      \item Visit \(j=i-1,\ldots,j_{\min}\) in descending order. Whenever
-        \((a_j,a_i)\) is geometrically admissible, perform the following
-        updates.
-        \begin{itemize}
-          \item Set \(v\gets f_j+\alpha(i,j)\).
-          \item If \(v>f_i\), set
-            \[
-              f_i\gets v,\qquad
-              p_i\gets j,\qquad
-              c\gets\max(0,c-1).
-            \]
-          \item Otherwise, if candidate \(j\) is already marked for generation
-            \(i\), set \(c\gets c+1\). Break the descending visit when
-            \(c>\text{max-skip}\).
-          \item If the descending visit was not broken and \(p_j\ge0\), mark
-            predecessor \(p_j\) for generation \(i\).
-        \end{itemize}
-      \item If the best earlier global endpoint was not scanned and improves
-        \(f_i\), adopt it as \(p_i\). This is the global-best rescue.
+      \item If \(v>f_i\), set \(f_i\gets v\), \(p_i\gets j\), and
+        \(c\gets\max(0,c-1)\).
+      \item Otherwise, increment \(c\) when \(j\) carries the current
+        generation mark. Stop when \(c\) exceeds the skip limit.
+      \item If the scan continues and \(p_j\ge0\), mark \(p_j\) for the
+        current generation.
     \end{enumerate}
-  \item Produce \(f,p\).
+  \item If the strongest completed endpoint was outside the scanned suffix,
+    evaluate it once and accept it only on a strict improvement.
 \end{enumerate}
 \end{algorithm}
 
-\subsection{Why the control flow is semantically observable}
+Strict improvement means that the newest candidate wins a score tie. The
+visited-generation rule is not a count of arbitrary non-improving anchors. It
+increments only for marked candidates, marks \(p_j\) rather than \(j\), and
+decrements after a later improvement. Reordering candidates or reducing a
+batch before replaying these events can change the stopping point. The final
+step in Algorithm~\ref{alg:scalar-chaining} is the global-best rescue. It
+preserves a strong older endpoint that early stopping would otherwise omit,
+but it does not make the search exhaustive.
 
-Equation~\ref{eq:chaining-dp} is the conceptual objective, but a faithful
-implementation must also preserve several details of minimap2's bounded
-search.  Candidates are visited newest-to-oldest, an update requires a strict
-improvement, and therefore the newest predecessor wins a score tie.  The
-\texttt{max\_skip} condition is not simply ``stop after 25 bad anchors.''
-The algorithm stores generation marks and increments the counter when a
-non-improving candidate was previously marked as the predecessor of a newer
-candidate in the same descending scan.  After processing candidate \(j\), it
-marks \(p_j\), not \(j\), for the current generation.  A later improvement
-decrements the counter.  Reordering the scan or reducing a vector batch before
-replaying these events can therefore change both the stopping point and the
-selected predecessor even when every pair score is numerically exact.
+\subsection{Relation to minimap2}
 
-The global-best rescue is a second subtlety.  Early stopping can leave an old,
-high-scoring endpoint outside the scanned suffix.  BioSeqDB tracks the best
-completed endpoint and tests it separately if it was not visited.  This does
-not turn the bounded heuristic into exhaustive dynamic programming, but it
-protects an important class of long-range paths.  Both the exact SIMD
-implementation and the endpoint-qualification corpus test this behavior
-explicitly.
+The recurrence and scalar stopping behavior are close to minimap2's
+single-segment, non-complementary-DNA path, but BioSeqDB chaining is not a
+literal copy. Table~\ref{tab:chaining-minimap2-differences} lists the
+differences that affect interpretation.
 
-The scalar score corresponds to the non-cDNA, single-segment path of the
-bundled minimap2 \texttt{lchain.c}.  Upstream minimap2 also carries
-multi-segment and cDNA-specific branches in the same routine.  Those branches
-are not latent features of BioSeqDB's scorer and should not be inferred from
-the common ancestry.  Conversely, BioSeqDB preserves full 64-bit reference
-and query coordinates in the anchor object rather than relying on a 32-bit
-stored position.
+\begin{table}[tbp]
+\centering
+\caption{Material differences between BioSeqDB chaining and the corresponding
+minimap2 path.}
+\label{tab:chaining-minimap2-differences}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabularx}{\linewidth}{@{}
+  >{\raggedright\arraybackslash}p{0.22\linewidth}
+  >{\raggedright\arraybackslash}X@{}}
+\toprule
+\textbf{Aspect} & \textbf{BioSeqDB behavior}\\
+\midrule
+Feature scope & Uses one sequence segment and omits complementary-DNA branches.\\
+Coordinates & Stores full 64-bit positions, while scalar and SIMD pair
+differences remain valid only in the stated signed 32-bit domain.\\
+Backtracking & Uses a shared chain recovery procedure without minimap2's full
+drop parameter and final target-order compaction behavior.\\
+RMQ & Uses a related augmented-tree formulation, but its simplified scorer and
+query boundaries do not define the same candidate set.\\
+SIMD and GPU & Add BioSeqDB policies whose exact or approximate contracts are
+stated separately. They are not upstream minimap2 modes.\\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-There is nevertheless a live large-coordinate boundary.  The scalar scorer
-casts \(q_i-q_j\) and \(r_i-r_j\) to signed 32-bit integers before testing
-them, and the SIMD scorer intentionally subtracts low 32-bit words.  The
-full-width reference window prevents ordinary distant reference candidates
-from reaching the scorer, but a query difference larger than \(2^{31}\), or
-one congruent to a small value modulo \(2^{32}\), can be misinterpreted.
-The Vulkan shader checks unsigned 64-bit distances before narrowing and does
-not share this particular failure mode.  Thus BioSeqDB has 64-bit anchor
-\emph{storage}, but scalar/SIMD chaining is presently proven only for bounded
-per-query coordinate differences.
-
-\section{Recovering chains and competing mappings}
+\section{Endpoint selection and backtracking}
 \label{sec:chaining-backtracking}
 
-The forward pass computes an endpoint score for every anchor, not a single
-mapping.  Backtracking ranks endpoints by the pair \((f_i,i)\), walks them in
-descending score order, and follows \(p_i\) until the path terminates or reaches
-an anchor already claimed by a stronger path.  A newly recovered path is kept
-only when it satisfies both the minimum chain score and minimum seed-count
-thresholds (defaults 40 and 3).  The stored chain record contains its score,
-number of anchors, and offset into the compacted anchor array.
+The forward pass computes a possible chain endpoint at every anchor.
+Backtracking ranks endpoints by \((f_i,i)\) in descending order, then follows
+predecessors until the path ends or reaches an anchor already claimed by a
+stronger path. A path is retained only if it meets the minimum chain score and
+minimum anchor count, whose defaults are 40 and 3.
 
-If a walk merges into an already claimed path, the score attributed to the new
-prefix is reduced by the score at the merge endpoint.  This prevents a weak
-alternative from inheriting the entire score of a stronger chain merely
-because the two share a suffix.  Rejected traversals remain marked, which also
-affects later candidate endpoints.  The resulting list represents competing
-candidate regions.  Later mapping-region logic decides parent/secondary
-relationships and computes mapping quality.
+When a new walk joins a claimed suffix, its attributed score is reduced by the
+score at the merge endpoint. This prevents a weak prefix from inheriting the
+complete score of a stronger path. Claimed anchors also make endpoint order
+observable. Path discovery may proceed in parallel, but commits must respect
+the endpoint ranking when paths overlap.
 
-The shared scalar/RMQ backtracker is intentionally simpler than upstream
-minimap2.  It does not reproduce the complete
-\path{mg_chain_backtrack}-plus-\path{compact_a} sequence.  In particular, the
-current \mbox{BioSeqDB} helper has no explicit \path{max_drop} parameter and
-does not reproduce minimap2's
-final target-position ordering step byte for byte.  The forward peak-score
-array is passed to the helper but currently unused.  Thus ``minimap2-compatible
-score and predecessor search'' is a more accurate description than
-``identical minimap2 chaining.''  This boundary is consequential when
-interpreting exactness tests: they verify the project-defined contract and
-selected endpoint coordinates, not every internal array permutation of the
-upstream program.
+\begin{algorithm}[tbp]
+\caption{Ranked chain recovery}
+\label{alg:chain-backtracking}
+\small
+\textbf{Input:} scores \(f\), predecessors \(p\), and chain thresholds
 
-\subsection{From competing chains to primary and secondary regions}
+\textbf{Output:} compacted chains in descending endpoint order
 
-After coordinate derivation, the pipeline score-sorts chain regions and treats
-the highest-scoring region as primary.  For each later region it computes the
-union of query overlap with existing primaries and the query span not explained
-by that overlap.  Let \(o\) denote overlap, \(u\) uncovered length, and
-\(m_{\min},m_{\max}\) the smaller and larger spans of the two regions.  The
-candidate becomes secondary when
+\begin{enumerate}
+  \item Rank all endpoint indices by descending \((f_i,i)\).
+  \item For each unclaimed endpoint in that order, follow \(p\) and collect
+    anchors until the walk terminates or reaches a claimed anchor.
+  \item If the walk reaches a claimed suffix, subtract the score at the merge
+    endpoint from the candidate prefix score.
+  \item Mark the traversed anchors. Retain the path only when its adjusted
+    score and anchor count meet their thresholds.
+  \item Reverse each retained predecessor walk into forward coordinate order
+    and append it to the compact chain array.
+\end{enumerate}
+\end{algorithm}
+
+Rejected walks remain claimed. This detail prevents later, weaker endpoints
+from traversing the same prefix and changes which alternatives survive. The
+forward peak-score vector is not used to reproduce every upstream drop rule.
+The resulting contract is therefore a ranked recovery of BioSeqDB predecessor
+paths, not the complete minimap2 chain-compaction procedure.
+
+Recovered paths are compacted into chain records that contain the score,
+anchor count, and offset into the ordered anchor array. The mapping stage then
+classifies the highest-scoring region as primary. For a later region, let \(o\)
+be query overlap with existing primaries, \(u\) be uncovered query length, and
+\(m_{\min}\), \(m_{\max}\) be the smaller and larger region spans. The region
+is secondary when
 \[
-  \frac{o}{m_{\min}}-\frac{u}{m_{\max}}
-    > \text{mask-level}
-  \quad\land\quad
-  u\le\text{mask-length}.
+ \frac{o}{m_{\min}}-\frac{u}{m_{\max}}>\text{mask-level}
+ \quad\land\quad
+ u\le\text{mask-length}.
 \]
-This formulation discounts a candidate that overlaps strongly but also adds a
-substantial novel query interval.  The defaults use a mask level of \(0.5\)
-and an effectively unbounded mask length.
-
-Filtering always retains primary regions.  A secondary is retained only when
-its score is sufficiently close to its parent:
+A secondary region is retained when its score is sufficiently close to its
+parent:
 \[
- s_{\mathrm{secondary}}\ge
-   \rho\,s_{\mathrm{parent}}
+ s_{\mathrm{secondary}}\ge \rho s_{\mathrm{parent}}
  \quad\lor\quad
- s_{\mathrm{secondary}}+\Delta_{\min}\ge s_{\mathrm{parent}},
+ s_{\mathrm{secondary}}+\Delta_{\min}\ge s_{\mathrm{parent}}.
 \]
-subject to a global \texttt{best\_n} limit (default 5).  Coordinate-identical
-duplicates are removed.  The default score ratio is \(\rho=0.8\).  These rules
-are downstream of the chaining DP, so a change in backtracking order can still
-change which candidate is presented first and hence influence classification.
+The default ratio is \(\rho=0.8\). A global secondary limit and
+parent-coordinate duplicate removal follow this comparison. Primary regions
+are retained.
+This classification occurs after chaining, yet a change in endpoint or
+backtracking order can still change which region becomes primary.
 
-\section{An augmented-tree RMQ formulation}
+\section{Range minimum query chaining}
 \label{sec:chaining-rmq}
 
-The scalar recurrence can examine up to \(I\) predecessors per anchor, giving
-\(O(nI)\) work in a dense range.  BioSeqDB also implements the RMQ
-reformulation used by modern minimap2.  The insight is to separate the part of
-the edge penalty that is linear in the predecessor coordinates.  Candidate
-\(j\) receives the priority
+The scalar method can evaluate \(O(nI)\) pairs for \(n\) anchors and a maximum
+of \(I\) predecessors per anchor. RMQ chaining reduces candidate lookup to
+\(O(\log n)\) operations by isolating the part of the gap cost that is linear
+in predecessor coordinates. Each active predecessor receives the priority
 \begin{equation}
-  \pi_j =
-  -\left[
-    f_j+\frac{\lambda_g}{2}(r_j+q_j)
-  \right].
+ \pi_j=-\left[f_j+\frac{\lambda_g}{2}(r_j+q_j)\right].
 \label{eq:rmq-priority}
 \end{equation}
-An Adelson-Velsky and Landis (AVL) tree is keyed by \((q_j,j)\), and every node
-caches the minimum priority in its subtree.  This supports insertion, expiry,
-and a minimum query over a query-coordinate interval in \(O(\log n)\).  Ties
-remain deterministic because the anchor index is part of the key.
+An augmented balanced tree is keyed by \((q_j,j)\). Every node caches the
+minimum priority in its subtree. A query interval can therefore combine the
+nodes on its boundary with cached values from fully covered subtrees.
 
-Figure~\ref{fig:rmq-augmented-tree} illustrates how a cached subtree minimum
-reduces a range query to the boundary path and fully covered subtrees.
+For each reference-coordinate group, RMQ chaining performs four operations:
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[xscale=1.12,font=\scriptsize, every node/.style={align=center}]
-  \node[draw,rounded corners,fill=blue!12,minimum width=2.05cm]
-    (root) at (4.0,3.2) {\((q,j)=(46,9)\)\\
-      \(\pi=-81,\ m=-96\)};
-  \node[draw,rounded corners,fill=blue!12,minimum width=2.05cm]
-    (left) at (2.0,2.0) {\((31,4)\)\\\(\pi=-96,\ m=-96\)};
-  \node[draw,rounded corners,fill=gray!12,minimum width=2.05cm]
-    (right) at (6.0,2.0) {\((61,12)\)\\\(\pi=-74,\ m=-88\)};
-  \node[draw,rounded corners,fill=blue!12,minimum width=1.75cm]
-    (ll) at (.8,.75) {\((24,1)\)\\\(\pi=-70,\ m=-70\)};
-  \node[draw,rounded corners,fill=blue!12,minimum width=1.75cm]
-    (lr) at (3.0,.75) {\((39,7)\)\\\(\pi=-78,\ m=-78\)};
-  \node[draw,rounded corners,fill=blue!12,minimum width=1.75cm]
-    (rl) at (5.2,.75) {\((52,10)\)\\\(\pi=-88,\ m=-88\)};
-  \node[draw,rounded corners,fill=gray!12,minimum width=1.75cm]
-    (rr) at (7.4,.75) {\((69,15)\)\\\(\pi=-66,\ m=-66\)};
-  \draw[->] (root) -- (left);
-  \draw[->] (root) -- (right);
-  \draw[->] (left) -- (ll);
-  \draw[->] (left) -- (lr);
-  \draw[->] (right) -- (rl);
-  \draw[->] (right) -- (rr);
-  \draw[orange!80!black,thick,rounded corners]
-    (-.35,.15) rectangle (4.15,2.58);
-  \node[orange!80!black,anchor=west] at (.08,-.05)
-    {fully covered subtree contributes cached \(m=-96\)};
-  \node[blue!65!black,anchor=west] at (4.35,3.75)
-    {range query \(24\le q\le52\)};
-\end{tikzpicture}
-\caption{Schematic augmented AVL query.  Each label gives the key, node
-priority \(\pi\), and cached subtree minimum \(m\).  A fully covered subtree
-contributes one cached minimum, while the boundary path checks the remaining
-included nodes.  The live implementation's correctness qualifications are
-stated in Section~\ref{sec:chaining-rmq}.}
-\label{fig:rmq-augmented-tree}
-\end{figure}
+\begin{enumerate}
+  \item Remove anchors whose reference positions are outside the active
+    window.
+  \item Query the tree over the permitted query-coordinate interval and obtain
+    the index with minimum cached priority.
+  \item Re-evaluate the proposed edge with the RMQ pair score, then compare it
+    with starting a new chain.
+  \item Insert the newly scored group and update subtree minima during tree
+    rebalancing.
+\end{enumerate}
 
-Anchors sharing a reference position are inserted only after that complete
-position group has been scored.  Otherwise an anchor could become the
-predecessor of another hit with zero reference distance.  Entries expire when
-they leave the reference window, and an explicit tree-size cap prevents
-unbounded storage under pathological repetition.  The tree proposes an
-endpoint.  BioSeqDB then evaluates that endpoint with the RMQ path's simplified
-pair scorer rather than treating the tree priority as a final chain score.
+The delayed insertion preserves the strict positive reference difference.
+Including the anchor index in the tree key gives deterministic behavior when
+query coordinates are equal. Expiry and insertion each cost
+\(O(\log n)\). A covered-subtree query also costs \(O(\log n)\), while the
+stored tree and its augmentation require \(O(n)\) space in the worst case.
 
-There are two qualifications.  First, the RMQ path calls a simplified scoring
-routine whose penalty trigger tests whether the query distance exceeds the
-predecessor span, whereas the scalar routine tests the minimum of reference
-and query distance.  The paths are consequently algorithmic variants, not
-merely two data structures around one bit-identical kernel.  Second, the code
-contains an optional inner-tree refinement, but the standard trait dispatch
-sets its inner distance to zero.  The common SQL RMQ path therefore uses the
-primary augmented tree only.  Its attraction is asymptotic behavior on dense
-anchor sets, while its cost is pointer-rich tree maintenance and a semantic
-surface distinct from the scalar oracle.
+A capacity limit bounds the active tree in highly repetitive input. The tree
+result is only a predecessor proposal. The RMQ pair scorer assigns the edge
+value, and starting a new chain remains an alternative.
 
-\subsection{Current RMQ correctness boundary}
-
-Source inspection found two live differences from the bundled minimap2 RMQ
-routine that are more serious than the intentional simplified score.  The
-primary BioSeqDB query computes the diagonal width but does not reject a
-candidate whose width exceeds the configured bandwidth.  Its closed query
-interval can also include an equal-\(q\) predecessor, while minimap2's sentinel
-keys exclude both the lower boundary and equal-query hits.  Since the
-simplified pair scorer does not repeat the full validity checks, such a
-candidate can be selected.
-
-The disabled inner-tree path has additional differences in its skip
-accounting and capacity management.  No direct RMQ unit test or operation-level
-RMQ proof record was found in the current tree.  For this reason the RMQ
-implementation is documented here as an important intermediate algorithm and
-an optimization target, not as an exact replacement for either scalar
-BioSeqDB or minimap2 RMQ.  Existing benchmark rows labeled
-\texttt{minimap2\_rmq} cannot close this gap: the wrapper does not set
-minimap2's \texttt{MM\_F\_RMQ} flag, so that comparison actually executes its
-scalar dynamic program.
+The current RMQ path is an algorithmic variant rather than a faster execution
+of Equation~\ref{eq:chaining-dp}. Its simplified penalty condition tests the
+query distance against predecessor span, while the scalar condition uses the
+minimum of reference and query distance. Its primary range query can admit an
+equal-query predecessor and does not independently reject every candidate
+outside the diagonal bandwidth. An optional second tree is inactive in the
+standard configuration. RMQ is therefore useful for dense anchor sets, but it
+does not provide scalar-equivalent endpoint selection.
 
 \section{SIMD chaining on the CPU}
 \label{sec:chaining-simd}
 
-Chaining resists naive vectorization.  Pair scores for a fixed \(i\) are
-independent, but the decision to stop scanning is an ordered state machine.
-Backtracking is even less regular because predecessor paths have data-dependent
-lengths and collide through a shared visited array.  BioSeqDB uses the Highway
-portability library to select vector widths at compile time while retaining one
-source for supported vector instruction targets.
-
-\subsection{Structure-of-arrays scoring}
-
-The SIMD forward pass projects anchors into 32-bit structure-of-arrays (SoA)
-buffers
-for reference position, query position, and span.  Pairwise differences are
-formed modulo \(2^{32}\).  Low-word subtraction equals the full difference only
-when the actual values satisfy
+For one target anchor, pair-score arithmetic over several predecessors is
+independent. BioSeqDB stores reference positions, query positions, and spans in
+structure-of-arrays buffers and evaluates these pairs with portable SIMD.
+Coordinate subtraction uses low 32-bit words, so the full differences must
+satisfy
 \[
-  0<d_r(i,j)\le\texttt{INT32\_MAX}
-  \quad\text{and}\quad
-  0<d_q(i,j)\le\texttt{INT32\_MAX}.
+ 0<d_r(i,j)\le\operatorname{INT32\_MAX},
+ \qquad
+ 0<d_q(i,j)\le\operatorname{INT32\_MAX}.
 \]
-The reference window helps establish the first bound, but it does not by itself
-prove the query-distance bound.  Absolute 64-bit coordinates may be large if
-their local differences satisfy both conditions.  Outside this domain,
-wraparound can alias a distinct difference to the same low word.  The full
-anchor representation and ordering remain 64-bit.  Only the local arithmetic
-projection is narrow.
+The reference window supports the first bound. The query bound must also hold
+for the input. Admissibility masks suppress invalid lanes, and explicit masks
+protect the final partial vector.
 
-For each predecessor vector, Highway first evaluates admissibility masks and
-coordinate-derived gaps.  It then computes base rewards, linear penalties, and
-the logarithmic correction under those masks.  Tail lanes are masked
-explicitly.  When the default skip scale is zero, a specialized instantiation
-removes the corresponding multiplication and loads instead of relying on
-cross-template constant propagation.
+\subsection{Exact ordered decisions}
 
-\subsection{\texttt{exact\_visited}: vector arithmetic, scalar decisions}
+The exact policy vectorizes score production and preserves scalar decision
+order. A batch that cannot improve the current best can process its generation
+marks together. If any lane can improve, candidates are replayed from newest
+to oldest. This replay preserves strict ties, skip-counter decrements, marked
+predecessors, and early termination. The global-best rescue is found with a
+vector scan and then applied through the scalar eligibility rule.
 
-The exact policy vectorizes score production but preserves the scalar
-candidate event order.  A batch that cannot improve the current best can count
-its visited-generation hits in bulk.  If any lane may improve, the relevant
-lanes are replayed newest-to-oldest so that strict ties, counter decrement, and
-early termination match the scalar control path.  Since the common
-predecessor relation is \(p_j=j-1\), contiguous generation marks can be stored
-as a vector.  The global-best rescue is likewise located with a vector scan,
-then applied under the scalar eligibility rule.
+This division is necessary because the arithmetic is lane-independent while
+the stopping state is ordered. Exact SIMD therefore means equality with the
+BioSeqDB scalar score and predecessor contract, not that every decision is a
+vector reduction.
 
-This design illustrates a useful principle: exact SIMD need not mean that
-every operation is vectorized.  It means that vectorization is placed where
-lanes are independent and ordered effects are retained where they are
-observable.  Historical attempts to replace small reductions with horizontal
-SIMD operations did not automatically improve this balance.  A May 2026
-regression report measured a 39.1\% slowdown in one very-long-read chaining
-configuration after such a reducer change.  Template duplication also increased
-instruction-cache pressure.  The change was reverted.  Those measurements are
-historical and configuration-specific, but they explain why the current code
-avoids equating ``more vector instructions'' with ``faster chaining.''
+For each vector batch, the exact policy first computes coordinate masks,
+coverage rewards, penalties, and candidate scores. A comparison mask identifies
+lanes that can exceed the current best. If this mask is empty, only the marked
+lane count can affect the ordered state. If the mask is nonempty, scalar replay
+consumes the batch in descending predecessor order and can stop before reaching
+its oldest lane. This two-level procedure avoids scalar pair arithmetic while
+retaining the event sequence that determines \(p_i\).
 
-\subsection{\texttt{bounded\_batch\_approximate}: a deliberate speed policy}
+\subsection{Bounded batch approximation}
 
-The bounded policy processes candidates newest-to-oldest in Highway batches
-and maintains lane-resident best values.  Its non-improving-batch budget is
+The bounded policy processes candidates in newest-first batches of \(L\)
+lanes. Its non-improving batch budget is
 \begin{equation}
-  C_{\max}=
-  \max\left(1,\left\lfloor
-    \frac{\text{max-skip}}{L}
-  \right\rfloor+1\right),
+ C_{\max}=\max\left(1,
+ \left\lfloor\frac{\text{max-skip}}{L}\right\rfloor+1\right).
 \label{eq:bounded-batch-budget}
 \end{equation}
-where \(L\) is the hardware lane count.  Any improvement resets the counter.
-After \(C_{\max}\) consecutive non-improving batches, the older unscanned
-interval is discarded.  When different lanes produce an equal maximum, the
-largest predecessor index wins, recovering the newest-candidate tie rule
-within the examined interval.  A global-best candidate is tested only when it
-lies in the discarded interval.
+Any improvement resets the counter. When the budget is reached, older batches
+are omitted. Equal maxima within the examined interval select the largest
+predecessor index. The global-best candidate is tested only if it lies beyond
+the cutoff.
 
-This policy does \emph{not} simulate the scalar visited-generation heuristic.
-An adversarial old predecessor can be placed beyond the batch cutoff, so no
-static proof can guarantee the same endpoint for all anchor sets.  BioSeqDB
-therefore names it approximate and qualifies it empirically.  The qualification
-metric compares primary chain endpoints against both the exact SIMD policy and
-the bundled minimap2 executable:
-\begin{equation}
- D=\max\{
- |q_s-q'_s|,\ |q_e-q'_e|,\
- |r_s-r'_s|,\ |r_e-r'_e|
- \}.
-\label{eq:endpoint-distance}
-\end{equation}
-The fixed corpus accepts a comparison only for \(D<15\) bases and also checks
-missing mappings, endpoint mismatches, and a dedicated global-rescue fixture.
-Passing that corpus is evidence about the tested distribution.  It is not a
-mathematical equivalence result.
+This rule does not reproduce visited-generation events. A valid older
+predecessor can lie beyond the omitted interval, so bounded SIMD cannot
+guarantee the same endpoint for every anchor set. Its name and policy boundary
+make this approximation explicit.
 
-Figure~\ref{fig:simd-batch-control} contrasts the complete ordered replay of the
-exact policy with the explicit cutoff used by the bounded policy.
+The bounded rule gains regularity by replacing per-candidate marks with one
+counter per completed vector batch. It can reduce all lane maxima before making
+a control decision. The trade-off is structural rather than numerical. Pair
+scores inside the visited interval use the same arithmetic, but the set of
+visited predecessors can differ from both scalar and exact SIMD.
 
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[font=\scriptsize]
-  \node[anchor=east,font=\bfseries] at (1.55,2.55) {exact};
-  \foreach \x/\lab in {1.8/\(B_0\) newest,4.15/\(B_1\),6.5/\(B_2\)} {
-    \draw[fill=blue!18,rounded corners] (\x,2.1) rectangle ++(1.95,.85);
-    \node at (\x+.975,2.525) {\lab};
-  }
-  \draw[fill=blue!8,rounded corners] (8.85,2.1) rectangle ++(1.95,.85);
-  \node at (9.825,2.525) {older batches};
-  \draw[->,thick] (3.78,2.525) -- (4.08,2.525);
-  \draw[->,thick] (6.13,2.525) -- (6.43,2.525);
-  \draw[->,thick] (8.48,2.525) -- (8.78,2.525);
-  \node[anchor=west,text width=3.7cm,align=left] at (11.05,2.55)
-    {score lanes, then replay improving lanes in order};
+Both SIMD forward policies use vector-assisted backtracking. Independent
+ranked starts occupy lanes and contiguous predecessor runs use a fast path.
+Commits still follow endpoint rank because paths can meet through the shared
+claimed-anchor state. A selected SIMD policy also fails when no valid
+multi-lane target is available instead of silently switching algorithms.
 
-  \node[anchor=east,font=\bfseries] at (1.55,.95) {bounded};
-  \foreach \x/\lab in {1.8/\(B_0\colon C=0\),4.15/\(B_1\colon C=1\),6.5/\(B_2\colon C=C_{\max}\)} {
-    \draw[fill=orange!22,rounded corners] (\x,.5) rectangle ++(1.95,.85);
-    \node at (\x+.975,.925) {\lab};
-  }
-  \draw[fill=gray!20,rounded corners] (8.85,.5) rectangle ++(1.95,.85);
-  \node at (9.825,.925) {discarded};
-  \draw[->,thick] (3.78,.925) -- (4.08,.925);
-  \draw[->,thick] (6.13,.925) -- (6.43,.925);
-  \draw[->,thick] (8.48,.925) -- (8.78,.925);
-  \draw[red!70!black,very thick] (8.7,.35) -- (8.7,1.5);
-  \draw[->,orange!80!black] (9.825,.42)
-    .. controls (10.2,-.15) and (7.2,-.15) .. (7.2,.42);
-  \node[orange!80!black] at (8.7,-.2)
-    {test the global best if it lies beyond the cutoff};
-\end{tikzpicture}
-\caption{Newest-to-oldest SIMD batch control.  Exact-visited uses vector score
-production but replays observable improving events in scalar order.  The
-bounded policy stops after its non-improving-batch budget and may discard older
-candidates, with only the conditional global-best rescue shown below the
-timeline.}
-\label{fig:simd-batch-control}
-\end{figure}
-
-\subsection{Vector backtracking}
-
-Both SIMD forward policies use a dedicated SIMD backtracker.  Primary paths
-are consumed in vector chunks, with a fast path for contiguous predecessor
-indices.  Remaining ranked starts occupy independent lanes, but lanes are
-committed in endpoint-rank order because overlap through the visited array is
-observable.  Consequently the implementation vectorizes path discovery while
-retaining scalar orchestration at collision points.  There is no hidden call
-to the shared scalar backtracker and no scalar fallback if a selected SIMD
-target cannot provide a valid multi-lane implementation.  Selection is a
-contract rather than a best-effort hint.
-
-\section{From G3SA to the Vulkan implementation}
+\section{Memory locality in GPU chaining}
 \label{sec:chaining-vulkan}
 
-The GPU implementation began from the observation developed by G3SA: chaining
-is expensive not only because it performs many score evaluations, but because
-the conventional CUDA organization repeatedly reads source anchors and
-writes target scores through global memory.  G3SA tiles the dynamic program.
-In a \emph{prologue}, anchors within one tile depend on earlier anchors in that
-same tile, producing a triangular dependency pattern.  In the \emph{tail},
-completed source values reside in shared memory while target accumulators stay
-in registers.  Threads rotate their source assignment so that a tile-to-tile
-all-pairs comparison reuses shared data.
+GPU chaining is limited by dependency order and memory traffic. A
+source-at-a-time organization repeatedly reads one completed source score and
+scatters updates across separated target scores. Tiled chaining first resolves
+the triangular dependencies within a tile. It then keeps completed sources in
+shared memory and target accumulators in registers while evaluating the
+tile-to-tile pairs. Figure~\ref{fig:chaining-memory-access} reconstructs these
+two access patterns. The tiled organization follows the locality argument used
+by G3SA \cite{g3sa_paper}.
 
-Figure~\ref{fig:g3sa-reconstruction} reconstructs this idea rather than copying
-the paper artwork.  The left panel represents repeated global-memory traffic
-in the earlier source-at-a-time organization.  The right panel separates the
-within-tile prologue from the register-accumulating tail.  It is based on
-Figure~6 in the G3SA paper by Y.~Han and colleagues
-\cite{g3sa_paper}.
-
-\begin{figure}[H]
+\begin{figure}[tbp]
 \centering
-\begin{tikzpicture}[font=\small]
-  % left panel
-  \node[font=\bfseries] at (2.7,4.9) {source-at-a-time};
-  \draw[rounded corners,fill=gray!12] (0,0.2) rectangle (5.4,4.45);
-  \node[draw,fill=blue!25,minimum width=1.0cm,minimum height=.55cm]
-    (sleft) at (1.0,3.7) {\(s_0\)};
-  \foreach \k/\x in {0/1.0,1/2.1,2/3.2,3/4.3} {
-    \node[draw,fill=orange!28,minimum width=.72cm,minimum height=.52cm]
-      (t\k) at (\x,1.0) {\(t_{\k}\)};
-    \draw[->,thick,red!65!black] (sleft.south)
-      .. controls (1.0,2.8) and (\x,2.1) .. (t\k.north);
+\begin{tikzpicture}[font=\footnotesize]
+  \node[draw,fill=blue!25,minimum width=.42cm,minimum height=.30cm] at (-3.9,0) {};
+  \node[anchor=west] at (-3.62,0) {source anchors};
+  \node[draw,fill=magenta!20,minimum width=.42cm,minimum height=.30cm] at (-.7,0) {};
+  \node[anchor=west] at (-.42,0) {target anchors};
+  \node[draw,fill=orange!25,minimum width=.42cm,minimum height=.30cm] at (2.55,0) {};
+  \node[anchor=west] at (2.83,0) {prologue anchors};
+\end{tikzpicture}
+
+\noindent\begin{minipage}[t]{0.49\linewidth}
+\centering
+\begin{tikzpicture}[x=.44cm,y=.55cm,font=\footnotesize]
+  \node[font=\bfseries] at (8.1,10.0) {(a) Scattered predecessor updates};
+  \node[anchor=east] at (2.4,8.9) {DP index};
+  \foreach \i in {0,...,11} {
+    \draw[fill=blue!25] (2.6+0.86*\i,8.45) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,8.90) {\(\i\)};
   }
-  \node[align=center,fill=gray!12,inner sep=2pt] at (2.7,2.5)
-    {source reloads and target\\updates cross global memory};
+  \draw[fill=magenta!20] (2.6+0.86*11,8.45) rectangle ++(.86,.9);
+  \node at (3.03+0.86*11,8.90) {\(11\)};
+  \node[anchor=west] at (2.6,7.6)
+    {\(s_{11}\gets\operatorname{update}(s_0,\ldots,s_{10})\)};
 
-  % right panel
-  \begin{scope}[xshift=6.3cm]
-    \node[font=\bfseries] at (3.6,4.9) {tiled score generation};
-    \draw[rounded corners,fill=gray!12] (0,0.2) rectangle (7.2,4.45);
-    \node[font=\itshape] at (1.65,4.0) {prologue};
-    \foreach \i/\x in {0/.65,1/1.35,2/2.05,3/2.75} {
-      \node[draw,fill=green!28,minimum width=.55cm,minimum height=.48cm]
-        (p\i) at (\x,2.8) {\(s_{\i}\)};
-    }
-    \draw[->,blue!65!black] (p0.south) -- (p1.north west);
-    \draw[->,blue!65!black] (p0.south) -- (p2.north west);
-    \draw[->,blue!65!black] (p1.south) -- (p2.north);
-    \draw[->,blue!65!black] (p0.south) -- (p3.north west);
-    \draw[->,blue!65!black] (p1.south) -- (p3.north);
-    \draw[->,blue!65!black] (p2.south) -- (p3.north east);
-    \node[align=center] at (1.45,1.05)
-      {within-tile\\triangular\\dependencies};
+  \node[anchor=east] at (2.4,6.5) {access 1};
+  \node[anchor=east] at (2.4,5.3) {access 2};
+  \node[anchor=east] at (2.4,4.1) {access 3};
+  \node[anchor=east] at (2.4,2.9) {access 4};
+  \foreach \y in {6.05,4.85,3.65,2.45} {
+    \foreach \i in {0,...,11}
+      \draw[fill=white] (2.6+0.86*\i,\y) rectangle ++(.86,.9);
+  }
+  \draw[fill=blue!25] (2.6,6.05) rectangle ++(.86,.9);
+  \node at (3.03,6.50) {\(t_0\)};
+  \foreach \i/\lab in {1/1,2/2,3/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,6.05) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,6.50) {\(t_{\lab}\)};
+  }
+  \draw[->,thick] (3.03,5.98) .. controls (3.2,5.65) and (5.25,5.65) .. (5.61,5.98);
 
-    \draw[dashed] (3.45,.45) -- (3.45,4.2);
-    \node[font=\itshape] at (5.3,4.0) {tail};
-    \foreach \i/\y/\j in {0/3.25/4,1/2.65/5,2/2.05/6,3/1.45/7} {
-      \node[draw,fill=green!28,minimum width=.55cm,minimum height=.42cm]
-        (ss\i) at (4.1,\y) {\(s_{\i}\)};
-      \node[draw,fill=orange!28,minimum width=.55cm,minimum height=.42cm]
-        (rr\i) at (6.4,\y) {\(s_{\j}\)};
-      \draw[->,gray!75] (ss\i.east) -- (rr\i.west);
-    }
-    \draw[->,gray!75] (ss0.east) -- (rr3.west);
-    \draw[->,gray!75] (ss3.east) -- (rr0.west);
-    \node[align=center] at (5.25,.82)
-      {shared sources\\register targets};
-  \end{scope}
+  \draw[fill=blue!25] (2.6,4.85) rectangle ++(.86,.9);
+  \node at (3.03,5.30) {\(s_0\)};
+  \foreach \i/\lab in {4/0,5/1,6/2,7/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,4.85) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,5.30) {\(t_{\lab}\)};
+  }
+  \draw[->,thick] (3.03,4.78) .. controls (3.4,4.45) and (8.0,4.45) .. (8.63,4.78);
 
-  \node[draw,fill=blue!25,minimum width=.38cm,minimum height=.28cm]
-    at (3.4,-.35) {};
-  \node[right] at (3.65,-.35) {source};
-  \node[draw,fill=green!28,minimum width=.38cm,minimum height=.28cm]
-    at (5.5,-.35) {};
-  \node[right] at (5.75,-.35) {shared};
-  \node[draw,fill=orange!28,minimum width=.38cm,minimum height=.28cm]
-    at (7.75,-.35) {};
-  \node[right] at (8.0,-.35) {target/register};
+  \draw[fill=blue!25] (2.6,3.65) rectangle ++(.86,.9);
+  \node at (3.03,4.10) {\(s_0\)};
+  \foreach \i/\lab in {8/0,9/1,10/2,11/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,3.65) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,4.10) {\(t_{\lab}\)};
+  }
+  \draw[->,thick] (3.03,3.58) .. controls (3.6,3.2) and (11.0,3.2) .. (12.07,3.58);
+
+  \draw[fill=blue!25] (2.6+.86,2.45) rectangle ++(.86,.9);
+  \node at (3.89,2.90) {\(t_0\)};
+  \foreach \i/\lab in {2/1,3/2,4/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,2.45) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,2.90) {\(t_{\lab}\)};
+  }
+
+  \draw[rounded corners,fill=gray!10] (3.2,.05) rectangle (12.8,1.90);
+  \node[anchor=west,font=\bfseries] at (3.45,1.55) {intermediate update};
+  \node[align=center] at (4.9,.65) {register\\source \(s_0\)};
+  \draw[->] (6.35,.65) -- (8.20,.65);
+  \node[align=center] at (10.4,.65) {global\\stores};
 \end{tikzpicture}
-\caption{Reconstruction of the memory-locality argument in G3SA Figure~6.
-This explains the research lineage, but it is not a diagram of BioSeqDB's
-current shader, which uses a different 32-lane subgroup organization.}
-\label{fig:g3sa-reconstruction}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\centering
+\begin{tikzpicture}[x=.44cm,y=.55cm,font=\footnotesize]
+  \node[font=\bfseries] at (8.1,10.0) {(b) Tiled predecessor updates};
+  \node[anchor=east] at (2.4,8.85) {DP index};
+  \foreach \i in {0,...,11}
+    \node at (3.03+0.86*\i,8.85) {\(\i\)};
+  \node[anchor=east] at (2.4,7.7) {prologue};
+  \node[anchor=east] at (2.4,6.3) {tile};
+  \node[anchor=east] at (2.4,4.9) {tile};
+  \node[anchor=east] at (2.4,3.5) {prologue};
+  \node[anchor=east] at (2.4,2.1) {tile};
+  \foreach \y in {7.25,5.85,4.45,3.05,1.65} {
+    \foreach \i in {0,...,11}
+      \draw[fill=white] (2.6+0.86*\i,\y) rectangle ++(.86,.9);
+  }
+  \foreach \i/\lab in {0/0,1/1,2/2,3/3} {
+    \draw[fill=orange!25] (2.6+0.86*\i,7.25) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,7.70) {\(t_{\lab}\)};
+  }
+  \foreach \i in {0,...,3} {
+    \draw[fill=blue!25] (2.6+0.86*\i,5.85) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,6.30) {\(s_{\i}\)};
+  }
+  \foreach \i/\lab in {4/0,5/1,6/2,7/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,5.85) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,6.30) {\(t_{\lab}\)};
+  }
+  \draw[->,thick] (5.18,5.78) .. controls (5.7,5.4) and (7.5,5.4) .. (7.77,5.78);
+
+  \foreach \i in {0,...,3} {
+    \draw[fill=blue!25] (2.6+0.86*\i,4.45) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,4.90) {\(s_{\i}\)};
+  }
+  \foreach \i/\lab in {8/0,9/1,10/2,11/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,4.45) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,4.90) {\(t_{\lab}\)};
+  }
+  \draw[->,thick] (5.18,4.38) .. controls (6.0,4.0) and (10.6,4.0) .. (11.21,4.38);
+
+  \foreach \i/\lab in {4/0,5/1,6/2,7/3} {
+    \draw[fill=orange!25] (2.6+0.86*\i,3.05) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,3.50) {\(t_{\lab}\)};
+  }
+  \foreach \i in {4,...,7} {
+    \draw[fill=blue!25] (2.6+0.86*\i,1.65) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,2.10) {\(s_{\i}\)};
+  }
+  \foreach \i/\lab in {8/0,9/1,10/2,11/3} {
+    \draw[fill=magenta!20] (2.6+0.86*\i,1.65) rectangle ++(.86,.9);
+    \node at (3.03+0.86*\i,2.10) {\(t_{\lab}\)};
+  }
+
+  \draw[rounded corners,fill=gray!10] (3.2,-.10) rectangle (12.8,1.35);
+  \node[anchor=west,font=\bfseries] at (3.45,1.02) {tiled update};
+  \node[align=center] at (5.0,.35) {shared\\sources};
+  \draw[->] (6.35,.35) -- (8.25,.35);
+  \node[align=center] at (10.4,.35) {register\\targets};
+\end{tikzpicture}
+\end{minipage}
+\caption{Scattered and tiled chaining memory access. The scattered method
+reuses one source while writing separated target groups. The tiled method
+resolves within-tile dependencies in prologue rows, then reads contiguous
+source blocks from shared memory and retains target scores in registers.}
+\label{fig:chaining-memory-access}
 \end{figure}
 
-\subsection{What the original G3SA implementation did}
+The G3SA CUDA design applies this decomposition with different kernels for
+short, medium, and long ranges. Its larger paths stage tiles in shared memory
+and rotate source assignments across threads. BioSeqDB adopts the goal of
+reducing memory traffic, but its current Vulkan score generator has a different
+execution structure.
 
-The copied G3SA CUDA source classifies the inclusive range by its endpoint span,
-\(end-st\): short (\(\le512\)), medium (\(513\) to \(5120\)), and long
-(\(>5120\)).  Equivalently, these contain at most 513, 514--5121, and more than
-5121 anchors, respectively.  The short kernel uses 32 threads.  The medium and long
-kernels use 512 and 1024 threads respectively, and their tiled path stages
-1024 anchors in shared memory.  It rotates source assignments with a
-modulo-1024 index.  A temporary predecessor within the tile is represented as
-a signed 16-bit relative distance.  The global predecessor array stores a
-signed 64-bit relative distance.
+\subsection{Vulkan score generation}
 
-The copied wrapper compiles a chaining search cap of 5000 into
-\path{MAX_ITER_CHAIN}. The initial dynamic-programming pass uses
-reference-distance and query-distance limits of 5000. The later RMQ pass uses
-limits of 20000 for both distances. The compile-time
-\path{MAX_ITER_CHAIN} cap remains 5000. The bandwidth is zero, and the
-gap-penalty scale is \(0.12\). The skip-penalty scale
-(\path{chn_pen_skip}) is zero, while the executable sets
-\path{opt.max_chain_skip} to 5000 and the initial DP path assumes a query span
-of 15. No \path{max_chain_skip} argument reaches the kernel. The kernel
-therefore does not implement minimap2's visited-generation heuristic and
-instead updates source-to-target scores within the fixed iteration cap.
-Agreement with minimap2 endpoints is consequently an empirical property of an
-evaluated corpus, not semantic identity.
+BioSeqDB divides anchors into hard ranges when strand changes or the reference
+gap between adjacent anchors exceeds the configured maximum. One 32-lane
+subgroup processes each range. Targets advance sequentially because target
+\(i+1\) may depend on the score for target \(i\). For each target, the subgroup
+scores predecessor batches from newest to oldest, reduces the batch maximum,
+and chooses the largest predecessor index on a tie. A workgroup barrier follows
+each completed target.
 
-G3SA keeps its bulk RMQ, backtracking, and compaction intermediates on the GPU,
-which reduces round trips through the mapping pipeline.  It does not eliminate
-every host interaction.  The copied runtime transfers medium- and long-range
-counts to the host, and the paper allows exceptionally complex branching reads
-to be resent to the CPU.  On the paper's single RTX A6000 and Threadripper PRO
-7985WX system, the reported stage-wise chaining geometric mean was \(3.15\times\)
-relative to mm2-fast and \(1.24\times\) relative to mm2-gb.  The authors also
-reported 100\% chaining accuracy on their evaluated datasets under the
-same-chained-seeds metric \cite{g3sa_paper}.  Maximum-score and position
-agreement is the paper's extending metric, not its chaining metric.  Those
-measurements use different hardware, baselines, inputs, and pipeline boundaries
-from BioSeqDB's PostgreSQL experiments, so they are context for the design
-lineage rather than a direct performance comparison.
+The shader reads each anchor span and checks 64-bit coordinate differences
+before narrowing. It stores absolute predecessor indices. These choices differ
+from fixed-span and relative-predecessor layouts used by the original CUDA
+design. Chaining remains independent of alphabet after anchors have been
+formed.
 
-Those choices target a CUDA program tuned to a fixed GPU.  They do not transfer
-directly to a PostgreSQL extension that may be called with different alphabets,
-seed lengths, devices, and projection requirements.  BioSeqDB adopted the
-score-generation motivation and an explicit GPU execution contract, but not
-the complete kernel topology.
+Table~\ref{tab:gpu-chaining-comparison} separates the shared memory-locality
+idea from the execution details. G3SA uses a prologue and a rotated tiled tail
+for its larger ranges. The Vulkan implementation uses sequential target
+completion with 32-wide predecessor batches. It therefore should not be
+described as a direct translation of the CUDA kernels.
 
-\subsection{The live Vulkan kernel}
-
-The current shader assigns one 32-lane subgroup to one hard range.  Hard ranges
-are split when orientation changes or when the reference gap between adjacent
-anchors exceeds the configured maximum.  Anchors are advanced sequentially.
-For each target anchor, the subgroup scores predecessors in newest-first
-batches of 32 and reduces the batch maximum.  Equal scores select the largest
-predecessor index.  A workgroup barrier follows every completed target because
-the next target can depend on it.
-
-This organization differs from the older 384/512/1024-workgroup selector still
-mentioned in comments and old tests.  The live selector returns a 32-thread
-subgroup key.  It also differs from G3SA in three parameter-handling choices.
-The shader reads each anchor's span instead of assuming 15.  It checks full
-64-bit coordinate differences before scoring.  It stores absolute predecessor
-indices.  Chaining itself is alphabet-neutral once anchors have been produced.
-
-It is also deliberately approximate.  The device iteration limit is
-\[
-  I_{\mathrm{GPU}}=\min(I_{\mathrm{requested}},3000),
-\]
-so the standard CPU limit of 5000 is not honored.  When
-\texttt{max\_chain\_skip} is positive, the shader stops after
-\(\lfloor\text{max-skip}/32\rfloor+1\) consecutive non-improving predecessor batches
-instead of replaying scalar visited-generation events.  A nonpositive value
-disables this batch cutoff.  The normal default is positive, and the shader has
-no global-best rescue.  A hard range longer than 131072 anchors is thinned
-toward 65536 anchors by preserving its endpoints and sampling the interior at
-an adaptive stride.  Experiments with targets of 16384, 32768, and 49152 moved
-endpoints beyond the accepted tolerance.  The 65536 target was the last focused
-configuration to pass, not a proof that it preserves every input.
-
-\raggedbottom
-\subsection{Standalone and resident completion routes}
-
-The standalone rich-projection route allocates \(f\) and \(p\) in
-host-visible coherent mapped buffers.  After fence completion it validates
-score and predecessor invariants, then invokes the shared CPU backtracker.  The
-operation named \texttt{download\_locked} returns spans that alias those mapped
-buffers.  It is a logical host read, not a device-to-host copy.
-
-The standalone coordinate route still allocates and fills the complete device
-\(f\) and \(p\) arrays.  A GPU reducer probes the best currently unvisited
-start, marks an unsuccessful trace visited, and repeats for at most 16 starts.
-It returns one selected trace, so the host does not run the shared CPU
-backtracker or consume the full arrays.  This removes host-side completion
-work rather than the device DP storage.  A valid seventeenth start can be
-missed after sixteen rejected probes.  The host also contains a
-coordinate-chain helper with equivalent intent, but it has no current caller.
-
-Resident Phase~C has both single-query and batched paths.  Its strict eligibility
-gate requires Vulkan minimizer extraction, Vulkan seed-hit processing, the
-fused front end, Vulkan chaining, and a coordinate-only projection.  Edit
-distance, exact-edit, and prefilter modes must be inactive.  Seed-hit emission,
-sorting, hard-range construction, DP, and reduction remain device-resident, and
-only a compact result crosses the boundary.  These routes still allocate
-device \(f\) and \(p\) storage internally.
-
-The Vulkan route is fail-closed rather than opportunistic.  It rejects software
-devices, requires host-visible coherent unified buffers, performs an explicit
-memory-admission check, and does not silently fall back to the CPU.  This makes
-an EXPLAINed GPU choice meaningful, but it also means the caller must opt in
-with a trusted device.  Some trait metadata still says that
-\texttt{max\_chain\_skip} is unused and that backtracking is always on the CPU.
-It also labels score generation as \texttt{g3sa-tiled-dp} and retains the
-historical mode name \texttt{VULKAN\_TILED\_DP}.  The live subgroup shader,
-standalone reducer, and resident Phase~C routes make all four descriptions
-stale.
-
-Table~\ref{tab:g3sa-vulkan-comparison} separates the shared research lineage
-from the execution contracts that differ between the two implementations.
-
-\begin{table}[htbp]
+\begin{table}[tbp]
 \centering
-\caption{G3SA and BioSeqDB Vulkan chaining are related designs, not equivalent
-implementations.}
-\label{tab:g3sa-vulkan-comparison}
-\footnotesize
-\begin{tabular}{p{0.18\textwidth}p{0.33\textwidth}p{0.34\textwidth}}
-\toprule
-Aspect & G3SA CUDA source & Current BioSeqDB Vulkan source\\
-\midrule
-Parallel unit &
-32 threads for short ranges.  Medium and long use 512 and 1024 threads with
-1024-anchor tiles &
-One 32-lane subgroup per hard range\\
-Score locality &
-Explicit prologue and rotated tile-to-tile tail &
-Sequential targets, predecessor batches of 32\\
-Coordinates &
-SoA tuned to minimap2 assumptions &
-Full 64-bit distance checks in shader\\
-Seed span &
-DP path assumes \(15\) &
-Reads each anchor's span\\
-Predecessor &
-Signed 16-bit relative distance within a tile, signed 64-bit relative distance
-in global \(p\) &
-Absolute index\\
-Search bounds &
-Compile-time cap of 5000, no minimap2 visited-generation cutoff &
-At most 3000 predecessors, positive max-skip enables a batch cutoff\\
-Very long ranges &
-Dedicated long-range CUDA path &
-Stride compaction toward 65536 anchors\\
-Backtracking &
-GPU RMQ, backtracking, and compaction, with exceptional CPU resend permitted &
-Standalone CPU for rich output, standalone at-most-16 best-unvisited
-start-probe reducer, and resident Phase~C compact coordinate output\\
-Bulk residency &
-GPU intermediates reduce transfers, while count copies and exceptional host
-work remain &
-Resident Phase~C keeps the fused front end through reduction on device\\
-Portability &
-CUDA/NVIDIA-specific tuning &
-Vulkan device contract, but current subgroup width fixed at 32\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\section{How the implementation evolved}
-\label{sec:chaining-evolution}
-
-The current policy split is the result of intermediate failures as well as
-successful optimizations.
-
-\paragraph{Template and reducer experiments.}
-Early 2026 work attempted wider template dispatch, SIMD sorting, horizontal
-maximum reducers, and multiple \texttt{SIMD\_MM2} variants.  Some experiments
-improved isolated operations but harmed the complete chaining stage through
-extra dispatch, code size, or scratch traffic.  The regression investigation
-superseded the earlier optimistic implementation notes and restored the
-baseline reducer.  A separate \texttt{SIMD\_MM2\_V2} route was removed rather
-than retained as an ambiguous second ``SIMD'' mode.
-
-\paragraph{Exact SIMD as an oracle.}
-The next milestone separated pair-score vectorization from ordered decisions.
-Exact-visited SIMD gained bit-for-bit forward-state comparisons against the
-BioSeqDB scalar path, dedicated overlap tests for the vector backtracker, and
-fail-closed target checks.  This provided an executable oracle that was faster
-on the qualified cases without weakening the contract.
-
-\paragraph{Approximation as a named policy.}
-Historical very-fast SIMD results came from a batch cutoff that did not
-preserve minimap2's visited-generation control.  Rather than describe the
-speedup as exact, the final design names the behavior
-\texttt{bounded\_batch\_approximate}, retains a constructed counterexample,
-and requires endpoint qualification.  The exact and bounded policies share
-the vector score and vector backtracking infrastructure but differ in their
-forward stopping semantics.
-
-\paragraph{GPU specialization.}
-The G3SA port first motivated larger tiled workgroups.  The live Vulkan code
-instead converged on a one-subgroup kernel, range compaction, and a projection-
-dependent coordinate reducer.  This is a database-oriented compromise:
-the standalone coordinate path avoids CPU backtracking even though it still
-creates complete device score and predecessor arrays.  Resident Phase~C keeps
-the fused front end, chaining, and reduction on the device and returns a compact
-result.  Richer standalone projections retain CPU backtracking.  The accepted
-65536-anchor compaction target emerged from failed more-aggressive targets and
-remains an empirical operating point.
-
-\section{Measured behavior}
-\label{sec:chaining-benchmarks}
-
-Figure~\ref{fig:chaining-report192} reports chaining-focused 50th-percentile
-(P50) measurements from \path{report_192.json}. The artifact was created on
-27 July 2026 from
-commit \texttt{f9570f4f3da3} with a dirty worktree.  The XXL high-fidelity
-(HiFi) case used a 0.5-gigabase-pair (Gbp) reference and a 5-megabase-pair
-(Mbp) query.  Each displayed region has two samples, and the report defines P50
-as the lower of the two observations.
-Because the report is marked \path{history_eligible=false}, it is a
-reproducible development snapshot, not a promoted release baseline.
-The outer \path{mg_lchain_dp} and \path{mg_lchain_simd} scopes include
-the nested \path{backtrack_chains} region.  The left panel is an inclusive
-chaining-kernel measurement, while the right panel isolates that nested
-backtracking component.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[font=\small]
-  % inclusive chaining panel
-  \begin{scope}
-    \node[font=\bfseries] at (3.4,7.4) {inclusive chaining-kernel P50};
-    \draw[->] (.45,.65) -- (.45,6.9);
-    \draw[->] (.45,.65) -- (6.55,.65);
-    \foreach \v/\y in {0/.65,40/2.55,80/4.45,120/6.35} {
-      \draw (.35,\y)--(.45,\y);
-      \node[left] at (.35,\y) {\v};
-    }
-    \node[rotate=90] at (-.45,3.75) {time (ms)};
-    \fill[gray!65] (1.1,.65) rectangle (2.25,6.13);
-    \fill[blue!55] (2.8,.65) rectangle (3.95,5.49);
-    \fill[orange!75] (4.5,.65) rectangle (5.65,3.83);
-    \draw[black] (1.675,6.13)--(1.675,6.27);
-    \draw[black] (1.52,6.27)--(1.83,6.27);
-    \draw[black] (3.375,5.49)--(3.375,5.54);
-    \draw[black] (3.22,5.54)--(3.53,5.54);
-    \draw[black] (5.075,3.83)--(5.075,4.02);
-    \draw[black] (4.92,4.02)--(5.23,4.02);
-    \node[above left] at (1.675,6.13) {115.286};
-    \node[above left] at (3.375,5.49) {101.885};
-    \node[above left] at (5.075,3.83) {67.012};
-    \node[align=center] at (1.675,.15) {scalar};
-    \node[align=center] at (3.375,.15) {SIMD\\exact};
-    \node[align=center] at (5.075,.15) {SIMD\\bounded};
-  \end{scope}
-  % backtrack panel
-  \begin{scope}[xshift=8.0cm]
-    \node[font=\bfseries] at (3.4,7.4) {nested backtracking P50};
-    \draw[->] (.45,.65) -- (.45,6.9);
-    \draw[->] (.45,.65) -- (6.55,.65);
-    \foreach \v/\y in {0/.65,5/2.65,10/4.65,15/6.65} {
-      \draw (.35,\y)--(.45,\y);
-      \node[left] at (.35,\y) {\v};
-    }
-    \node[rotate=90] at (-.45,3.75) {time (ms)};
-    \fill[gray!65] (1.1,.65) rectangle (2.25,5.36);
-    \fill[blue!55] (2.8,.65) rectangle (3.95,4.07);
-    \fill[orange!75] (4.5,.65) rectangle (5.65,3.99);
-    \draw[black] (1.675,5.36)--(1.675,6.08);
-    \draw[black] (1.52,6.08)--(1.83,6.08);
-    \draw[black] (3.375,4.07)--(3.375,5.21);
-    \draw[black] (3.22,5.21)--(3.53,5.21);
-    \draw[black] (5.075,3.99)--(5.075,4.07);
-    \draw[black] (4.92,4.07)--(5.23,4.07);
-    \node[above left] at (1.675,5.36) {11.769};
-    \node[above left] at (3.375,4.07) {8.549};
-    \node[above left] at (5.075,3.99) {8.345};
-    \node[align=center] at (1.675,.15) {scalar};
-    \node[align=center] at (3.375,.15) {SIMD\\exact};
-    \node[align=center] at (5.075,.15) {SIMD\\bounded};
-  \end{scope}
-\end{tikzpicture}
-\caption{Chaining-only development measurements from report 192.  Bars show
-P50 and thin whiskers extend to the other observation, so each whisker spans
-the complete two-sample range.  Exact SIMD reduces inclusive chaining-kernel
-P50 by 11.6\% relative to scalar.  Bounded SIMD reduces it by 41.9\% while
-using explicitly approximate stopping semantics.}
-\label{fig:chaining-report192}
-\end{figure}
-
-For this case, exact SIMD used 88.4\% of scalar inclusive chaining-kernel P50,
-while bounded SIMD used 58.1\%.  Bounded SIMD was 34.2\% lower than exact SIMD
-on the same measure.  All three modes produced one match with zero reported
-endpoint offset.  Each bounded-policy sample recorded \(914{,}453\) cutoff
-stops and skipped \(786{,}467{,}451\) candidate evaluations.  The removed work
-explains the observed reduction more directly than instruction-level
-vectorization alone.
-
-\begin{table}[H]
-\centering
-\caption{Intermediate inclusive CPU chaining-kernel snapshots in milliseconds.
-Each timing cell gives P50 on the first line and the complete
-\([\mathrm{minimum},\mathrm{maximum}]\) range on the second.  Every cited
-aggregate has two samples, and every report came from a development worktree.}
-\label{tab:chaining-history}
-\small
-\begin{tabular}{lcccc}
-\toprule
-Snapshot & Scalar & Exact SIMD & Bounded SIMD & Best/scalar ratio\\
-\midrule
-report 112 &
-\shortstack{\(107.671\)\\\([107.671,109.504]\)} &
-\shortstack{\(97.373\)\\\([97.373,100.677]\)} &
-not measured & 0.904\\
-report 118 &
-\shortstack{\(109.844\)\\\([109.844,112.922]\)} &
-\shortstack{\(95.573\)\\\([95.573,98.549]\)} &
-\shortstack{\(63.263\)\\\([63.263,64.261]\)} & 0.576\\
-report 192 &
-\shortstack{\(115.286\)\\\([115.286,118.354]\)} &
-\shortstack{\(101.885\)\\\([101.885,102.897]\)} &
-\shortstack{\(67.012\)\\\([67.012,70.843]\)} & 0.581\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Report 112 records the exact-SIMD milestone, report 118 the first
-bounded-policy measurement used in qualification work, and report 192 the most
-recent focused snapshot in the audited evidence.  Report 118 was
-\texttt{dirty=true} and its global report contained two rule violations and
-thirteen sanity warnings.  It is therefore a scoped kernel snapshot rather than
-a repository-wide sign-off.  The absolute values
-in Table~\ref{tab:chaining-history} should not be compared as a time series
-without controlling the host, build, and worktree.  Within every displayed
-report, exact SIMD is lower than scalar.  Bounded SIMD is lower still in the
-reports where it was measured.  Whole-row wall time is not
-a chaining metric because choosing a row can also select a different minimizer
-implementation.
-
-\subsection{Endpoint qualification}
-
-Table~\ref{tab:bounded-endpoint-proof} summarizes the 16-fixture endpoint suite
-from report 192.  The global-best counters show that the rescue fixture
-exercised the path rather than checking a dormant counter.
-
-\begin{table}[H]
-\centering
-\caption{Fixed-corpus endpoint evidence for bounded SIMD in report 192.}
-\label{tab:bounded-endpoint-proof}
-\begin{tabular}{lr}
-\toprule
-Observation & Result\\
-\midrule
-Fixtures mapped & \(16/16\)\\
-Maximum delta versus exact SIMD & \(0\) bp\\
-Maximum delta versus bundled minimap2 DP & \(0\) bp\\
-Missing or mismatched mappings & \(0\)\\
-Global-best rescue probes / wins & \(205/1\)\\
-Scalar score or shared-backtrack calls & \(0\)\\
-Bounded-policy cutoff stops & \(1{,}110{,}558\)\\
-Candidate evaluations skipped & \(942{,}275{,}290\)\\
-\bottomrule
-\end{tabular}
-\end{table}
-
-These data support enabling bounded SIMD for an explicitly selected PostgreSQL
-SIMD request on the qualified workload.  They do not establish equivalence
-outside that workload or erase the constructed counterexample.
-Table~\ref{tab:historical-gpu-simd-context} records the only available
-GPU-versus-SIMD pair separately because it is not a valid speed comparison.
-
-\begin{table}[htbp]
-\centering
-\caption{Historical non-equivalent whole-region observations from June 2026.
-Different endpoint offsets prevent a speed comparison, and no equivalent GPU
-observation exists for the more recent source.}
-\label{tab:historical-gpu-simd-context}
+\caption{G3SA and BioSeqDB GPU chaining use different execution contracts.}
+\label{tab:gpu-chaining-comparison}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.08}
+\renewcommand{\arraystretch}{1.07}
 \begin{tabularx}{\linewidth}{@{}
-  >{\raggedright\arraybackslash}p{0.17\linewidth}
-  >{\raggedright\arraybackslash}X
-  >{\raggedleft\arraybackslash}p{0.17\linewidth}
-  >{\raggedleft\arraybackslash}p{0.10\linewidth}@{}}
+  >{\raggedright\arraybackslash}p{0.19\linewidth}
+  >{\raggedright\arraybackslash}p{0.34\linewidth}
+  >{\raggedright\arraybackslash}X@{}}
 \toprule
-\textbf{Route} & \textbf{Artifact} & \textbf{Wall time} & \textbf{Offset}\\
+\textbf{Aspect} & \textbf{G3SA CUDA} & \textbf{BioSeqDB Vulkan}\\
 \midrule
-GPU coordinate-only &
-\path{bioseq_bench_e2e_chain_probe_gpu_coord_only/report_7.json} &
-\(4.414989792\) s & \(48\) bp\\
-SIMD &
-\path{bioseq_bench_e2e_chain_probe_simd_current/report_1.json} &
-\(4.928971958\) s & \(3\) bp\\
+Parallel unit & Range-dependent kernels, with large workgroups and shared
+tiles for longer ranges & One 32-lane subgroup for each hard range\\
+Score order & Within-tile prologue followed by a rotated tile-to-tile tail &
+Sequential targets with newest-first predecessor batches\\
+Anchor data & Fixed assumptions in the principal dynamic-programming path and
+relative predecessor offsets & Per-anchor span, full-width distance checks,
+and absolute predecessor indices\\
+Search control & Fixed predecessor cap without minimap2 generation-mark replay
+& Device cap, batch-based stopping, and no global-best rescue\\
+Completion & GPU-oriented range processing, backtracking, and compaction &
+CPU recovery for rich output or compact GPU reduction for coordinate output\\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-The rows use different endpoint offsets and are not current chaining-only
-measurements.  They therefore provide historical context but no route speed
-claim.
+GPU candidate search is approximate. The device examines at most
+\[
+ I_{\mathrm{GPU}}=\min(I_{\mathrm{requested}},3000)
+\]
+predecessors. When the skip limit is positive, it stops after
+\(\lfloor\text{max-skip}/32\rfloor+1\) non-improving batches. It does not
+replay visited-generation events and has no global-best rescue. A hard range
+longer than 131072 anchors is sampled toward 65536 anchors while retaining its
+endpoints. These rules bound GPU work and memory, but they can alter a chain.
 
-\section{The final execution policy}
+Figure~\ref{fig:gpu-chaining-workflow} compares the CUDA design that motivated
+the path with BioSeqDB's Vulkan execution. The upper boxes summarize the CUDA
+scheduling techniques. In the lower rich-projection path, dark boxes identify
+GPU stages. BioSeqDB uses CPU hard-range construction and GPU score generation
+without reproducing the CUDA kernel topology.
+
+\begin{figure}[tbp]
+\vspace*{0.8cm}
+\centering
+\begin{tikzpicture}[x=.93cm,y=.66cm,font=\footnotesize,>=stealth]
+  \draw[blue!80!black,dashed,thick,rounded corners]
+    (5.15,5.15) rectangle (11.95,7.40);
+  \node[blue!80!black,font=\bfseries,anchor=west] at (5.35,7.02)
+    {GPU scheduling and range organization};
+  \draw[rounded corners,fill=gray!18] (5.40,5.48) rectangle (7.25,6.50);
+  \node[blue!80!black,align=center] at (6.325,5.99) {segment\\cutting};
+  \draw[rounded corners,fill=gray!18] (7.55,5.48) rectangle (9.40,6.50);
+  \node[blue!80!black,align=center] at (8.475,5.99) {split score\\kernels};
+  \draw[rounded corners,fill=gray!18] (9.70,5.48) rectangle (11.55,6.50);
+  \node[blue!80!black,align=center] at (10.625,5.99) {prioritized\\scheduling};
+
+  \draw[fill=gray!18] (.25,4.15) -- (2.45,4.15) -- (2.20,5.35)
+    -- (0,5.35) -- cycle;
+  \node[align=center] at (1.22,4.75) {build or load\\reference index};
+  \draw[fill=gray!18] (.25,.65) -- (2.45,.65) -- (2.20,1.85)
+    -- (0,1.85) -- cycle;
+  \node[align=center] at (1.22,1.25) {load query\\sequence};
+
+  \draw[rounded corners,fill=gray!18] (2.90,2.25) rectangle (4.80,3.75);
+  \node[font=\bfseries] at (3.85,3.00) {seeding};
+  \draw[->,thick] (2.20,4.15) -- (3.30,3.75);
+  \draw[->,thick] (2.20,1.85) -- (3.30,2.25);
+  \node[anchor=east] at (2.80,2.00) {bases};
+
+  \draw[rounded corners,thick] (5.20,1.85) rectangle (11.85,4.25);
+  \node[font=\bfseries,anchor=west] at (5.35,2.10) {chaining};
+  \draw[rounded corners,fill=gray!18] (5.45,2.45) rectangle (7.25,3.65);
+  \node[align=center] at (6.35,3.05) {range\\construction};
+  \draw[rounded corners,fill=black!65] (7.65,2.45) rectangle (9.45,3.65);
+  \node[text=white,align=center] at (8.55,3.05) {score\\generation};
+  \draw[rounded corners,fill=gray!18] (9.85,2.45) rectangle (11.60,3.65);
+  \node[align=center] at (10.725,3.05) {back\\tracking};
+  \draw[->,thick] (4.80,3.05) -- (5.45,3.05);
+  \node at (5.00,4.02) {anchors};
+  \draw[->,thick] (7.25,3.05) -- (7.65,3.05);
+  \node at (7.45,4.02) {ranges};
+  \draw[->,thick] (9.45,3.05) -- (9.85,3.05);
+  \node at (9.65,4.02) {scores};
+
+  \draw[blue!80!black,->,thick] (6.325,5.48) -- (6.35,3.65);
+  \draw[blue!80!black,->,thick] (8.475,5.48) -- (8.55,3.65);
+  \draw[blue!80!black,->,thick] (10.625,5.48) -- (8.90,3.65);
+
+  \draw[dashed,rounded corners,fill=gray!18] (13.10,2.30) rectangle (15.40,3.80);
+  \node[align=center] at (14.25,3.05) {base-level\\alignment};
+  \draw[->,thick] (11.85,3.55) -- (13.10,3.55);
+  \node[above,align=center] at (12.475,3.58) {primary\\chains};
+
+  \draw[fill=gray!18] (9.75,.20) -- (11.85,.20) -- (11.60,1.30)
+    -- (9.50,1.30) -- cycle;
+  \node[align=center] at (10.675,.75) {mapping output\\coordinates};
+  \draw[->,thick] (10.725,2.45) -- (10.725,1.30);
+  \draw[fill=gray!18] (13.10,.20) -- (15.40,.20) -- (15.15,1.30)
+    -- (12.85,1.30) -- cycle;
+  \node[align=center] at (14.125,.75) {mapping output\\with alignment};
+  \draw[->,thick] (14.25,2.30) -- (14.25,1.30);
+
+  \draw[rounded corners,fill=black!65] (3.15,.35) rectangle (4.15,.95);
+  \node[anchor=west] at (4.35,.65) {performed on the GPU};
+\end{tikzpicture}
+\caption{Vulkan chaining for rich projections. CPU range construction precedes
+GPU scoring and CPU backtracking. Coordinate-only resident execution can retain
+all three chaining stages on the device.}
+\label{fig:gpu-chaining-workflow}
+\end{figure}
+
+\subsection{Completion and result projection}
+
+Rich result projections expose the complete score and predecessor arrays to a
+CPU backtracker after GPU completion. Coordinate-only projections can instead
+use a GPU reducer that repeatedly chooses the strongest unclaimed endpoint and
+traces one chain. The standalone reducer examines at most 16 endpoint starts,
+so a valid later start can be missed after 16 rejected traces. An eligible
+resident path keeps seed-hit processing, sorting, range construction, score
+generation, and coordinate reduction on the device. It returns only a compact
+mapping result.
+
+GPU selection is explicit. It requires a suitable device, coherent mapped
+buffers, and successful memory admission. Failure does not cause an implicit
+switch to the CPU. This behavior makes the selected execution contract visible
+to a database query and prevents an approximate GPU request from being
+reported as a scalar execution.
+
+\section{Execution policy}
 \label{sec:chaining-final-policy}
 
-The final design does not choose a single universally best chainer.  It defines
-a policy boundary that exposes semantic and hardware trade-offs.  Both the
-\texttt{Minimap2Params} object and the PostgreSQL configuration parameter
-default to the scalar minimap2-compatible implementation.  A C++ caller that
-selects SIMD without
-overriding its policy receives \texttt{exact\_visited}.  PostgreSQL finalization
-maps an explicitly selected SIMD algorithm to
-\texttt{bounded\_batch\_approximate}.  Every non-SIMD backend resets the SIMD
-policy to exact so stale options cannot leak across calls.  Vulkan and RMQ are
-explicit choices, and selected backends fail instead of falling back silently.
+No chaining method is best for every anchor distribution and output
+projection. Table~\ref{tab:chaining-policy} summarizes the available contracts.
+The scalar policy is the default. A direct SIMD request can select exact
+ordered decisions, while the database SIMD policy may select bounded batches.
+RMQ and Vulkan remain explicit choices.
 
-Table~\ref{tab:chaining-policy} summarizes where each policy is exact,
-approximate, experimental, or projection-dependent.
-
-\begin{table}[H]
+\begin{table}[tbp]
 \centering
-\caption{Chaining modes and their intended roles in the final system.}
+\caption{Chaining policies and their semantic boundaries.}
 \label{tab:chaining-policy}
-\small
-\setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.08}
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.07}
 \begin{tabularx}{\linewidth}{@{}
   >{\raggedright\arraybackslash}p{0.14\linewidth}
   >{\raggedright\arraybackslash}p{0.20\linewidth}
-  >{\raggedright\arraybackslash}p{0.23\linewidth}
+  >{\raggedright\arraybackslash}p{0.24\linewidth}
   >{\raggedright\arraybackslash}X@{}}
 \toprule
-\textbf{Mode} & \textbf{Contract} & \textbf{Principal advantage} &
-\textbf{Current boundary}\\
+\textbf{Policy} & \textbf{Search structure} & \textbf{Semantic relation} &
+\textbf{Main limit}\\
 \midrule
-Scalar minimap2 &
-Default semantic baseline &
-Closest forward control to bundled minimap2 and simplest oracle &
-Bounded \(O(nI)\) search, with BioSeqDB backtracking distinct from upstream\\
-SIMD exact-visited &
-Exact to BioSeqDB scalar \(f/p\) contract &
-Vector score and backtracking with ordered decisions &
-CPU coordinate deltas remain 32-bit, and selected targets must support lanes\\
-SIMD bounded-batch &
-Named approximation, endpoint-qualified &
-Largest measured CPU reduction by skipping old batches &
-No universal endpoint equivalence, and PostgreSQL SIMD maps here\\
-RMQ &
-Experimental asymptotic variant &
-\(O(n\log n)\) augmented-tree candidate search &
-Live bandwidth and equal-\(q\) gaps, with the benchmark reference row miswired\\
-Vulkan &
-Explicit GPU approximation &
-Full-width shader checks and standalone or resident coordinate routes &
-Range thinning, 3000 cap, positive max-skip batch stop, no rescue, standalone
-at-most-16 best-unvisited start-probe reducer, no fallback\\
+Scalar & Newest-first bounded dynamic program & Closest BioSeqDB form of
+single-segment minimap2 forward chaining & \(O(nI)\) pair search and signed
+32-bit local differences\\
+RMQ & Augmented balanced tree & Related scoring variant, not scalar-equivalent
+& Simplified pair test and broader query boundary\\
+SIMD exact & Vector pair scores with ordered replay & Exact to BioSeqDB scalar
+\(f,p\) behavior & Ordered events restrict full-lane execution\\
+SIMD bounded & Vector batches with an early cutoff & Explicit approximation &
+May omit an older valid predecessor\\
+Vulkan & One subgroup per hard range & Explicit GPU approximation inspired by
+G3SA & 3000-candidate cap, batch stopping, range sampling, and projection-specific
+backtracking\\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-This separation prevents three category errors.  A benchmark-qualified
-approximation is not treated as a theorem.  Shared ancestry with minimap2 is
-not treated as byte-identical behavior.  A G3SA-inspired Vulkan shader is not
-presented as a direct CUDA port.  The separation also lets the planner and a
-future cost model account for projection requirements.  A coordinate-only
-query can use standalone GPU reduction or an eligible resident Phase~C route.
-A caller that requires scalar stopping behavior can retain the scalar or exact
-SIMD contract.
-
 \section{Summary}
 
-Chaining converts a cloud of minimizer hits into a small set of collinear
-candidate mappings.  BioSeqDB's scalar recurrence rewards non-overlapping seed
-coverage and penalizes diagonal drift, while bounded predecessor windows,
-visited-generation stopping, strict ties, and global-best rescue make its
-control behavior more subtle than the recurrence alone suggests.  Backtracking
-then claims ranked predecessor paths and leaves primary/secondary
-classification to the region stage.
+Chaining turns local seed hits into a small set of collinear candidate
+mappings. The scalar recurrence rewards newly covered sequence and penalizes
+diagonal drift. Its bounded windows, visited-generation rule, strict tie
+handling, and global-best rescue make scan order observable. Ranked
+backtracking then recovers competing chains for primary and secondary region
+selection.
 
-The implementation history produced three different acceleration strategies.
-RMQ changes the data structure and asymptotic search, but the current port
-still needs correctness repairs.  Highway SIMD preserves the scalar contract
-under exact-visited replay or trades it explicitly for batch-bounded speed.
-Vulkan adopts the GPU locality motivation of G3SA while using a distinct
-32-lane kernel, full-width shader checks, range compaction, and
-projection-dependent completion.  Report 192 shows why the distinction
-matters: exact SIMD reduced inclusive chaining-kernel P50 by 11.6\%, while
-bounded SIMD reached 41.9\% by skipping hundreds of millions of candidates.
-The latter passed the fixed endpoint corpus with zero observed difference, but
-remains approximate by construction.
+RMQ replaces repeated candidate scans with an augmented tree but has distinct
+pair and boundary semantics. Exact SIMD vectorizes independent arithmetic and
+replays ordered decisions. Bounded SIMD trades scalar equivalence for a fixed
+batch cutoff. GPU chaining reduces memory traffic through range-oriented score
+generation and compact result routes, while candidate caps and long-range
+sampling make it approximate. Keeping these contracts separate allows callers
+to choose an execution method without confusing algorithmic ancestry with
+equivalent behavior.
