@@ -60,11 +60,11 @@ public:
     }
 
     [[nodiscard]] bool* value_data() {
-        return result->values().data();
+        return result->value_data();
     }
 
     [[nodiscard]] bool* null_data() {
-        return result->nulls().data();
+        return result->null_data();
     }
 
     [[nodiscard]] result_type release() && {
@@ -83,10 +83,12 @@ template<comparison_operation p_operation, class p_column, class p_constant>
         static_cast<std::uint32_t>(column.size());
     postgres_comparison_result_sink<
         bioseq::sql::pg::boolean, bool> sink;
-    const auto values = column.contiguous_values();
-    const auto nulls = column.nulls();
     bioseq::column::vec::compare_column<p_operation>(
-        values.data(), nulls.data(), lane_count, constant, sink);
+        column.contiguous_data(),
+        column.null_data(),
+        lane_count,
+        constant,
+        sink);
     return std::move(sink).release();
 }
 

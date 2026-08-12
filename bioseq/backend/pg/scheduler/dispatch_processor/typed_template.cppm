@@ -2390,15 +2390,12 @@ template <sequence_alphabet p_alphabet>
                 "transient minimizer-sequence build has no selected Highway minimizer table");
         }
 
-        const bool scalar_query_selected =
-			minimizer_sequence_params.minimizer_algorithm
-                == minimizer_algorithm::scalar
-			&& minimizer_sequence_params.chaining_algorithm
-                == chaining_algorithm::scalar_minimap2
-			&& minimizer_sequence_params.base_alignment_algorithm
-                == base_alignment_algorithm::ksw2;
 		const auto backend =
 			target_backend_from_params_for_recompute(minimizer_sequence_params);
+		const bool scalar_sketch_selected =
+			backend == bioseq::simd::minimizer_sketch_backend::scalar;
+		const bool exact_simd_sketch_selected =
+			backend == bioseq::simd::minimizer_sketch_backend::exact_simd;
 		bioseq::indexing::direct_minimizer_bucket_build_stats
 			scalar_target_build_stats{};
         bioseq::indexing::direct_minimizer_bucket_index<
@@ -2407,7 +2404,7 @@ template <sequence_alphabet p_alphabet>
                 target_view,
                 backend,
 				&minimizer_sequence_params.highway_kernels->minimizers,
-                scalar_query_selected
+				scalar_sketch_selected
 					? &scalar_target_build_stats : nullptr,
 				minimizer_sequence_params.alphabet_code);
 
@@ -2487,14 +2484,7 @@ template <sequence_alphabet p_alphabet>
             }
             collection = std::move(merged_collection);
         }
-        const bool exact_simd_query_selected =
-			minimizer_sequence_params.minimizer_algorithm
-                == minimizer_algorithm::two_stack_nthash
-			&& minimizer_sequence_params.chaining_algorithm
-                == chaining_algorithm::simd_minimap2
-			&& minimizer_sequence_params.base_alignment_algorithm
-                == base_alignment_algorithm::block_aligner;
-        if (exact_simd_query_selected) {
+		if (exact_simd_sketch_selected) {
 			if (!query_sketch.exact_simd_execution_stats_available
 				|| !query_sketch.exact_simd_execution_stats.is_internally_consistent(
                     /*require_nonempty_vector_work=*/false)) {
@@ -2504,7 +2494,7 @@ template <sequence_alphabet p_alphabet>
             }
 			collection.record_exact_simd_query_execution_stats(
 				query_sketch.exact_simd_execution_stats);
-		} else if (scalar_query_selected) {
+		} else if (scalar_sketch_selected) {
 			if (!query_sketch.scalar_execution_stats_available
 				|| !query_sketch.scalar_execution_stats.is_coherent()
 				|| query_sketch.exact_simd_execution_stats_available
@@ -4748,19 +4738,20 @@ template <class p_sequence>
 
     const minimap2_parameters& dispatch_params = base_params;
 
-	    const std::optional<std::string> force_chunked_guc =
-	        pg_guc_value_as_cpp("bioseq.test_force_chunked_scanner");
+#if defined(BIOSEQ_TEST_INDEXES)
 	    const bool chunked_scanner_forced =
-	        force_chunked_guc.has_value() && *force_chunked_guc == "on";
+	        bioseq::settings::testing::chunked_scanner::enabled;
             // Test parity knob. When on, the dispatch
             // loop forces the in-memory baseline (with_lazy_in_memory). Otherwise
             // (default) and given a non-null scanner_pg_context, the loop uses
             // the canonical PostgreSQL-backed facade (for stub targets,
             // in-memory for the query literal / inline targets).
-	    const std::optional<std::string> force_inmemory_guc =
-	        pg_guc_value_as_cpp("bioseq.test_force_inmemory_scanner");
 	    const bool inmemory_scanner_forced =
-	        force_inmemory_guc.has_value() && *force_inmemory_guc == "on";
+	        bioseq::settings::testing::in_memory_scanner::enabled;
+#else
+	    constexpr bool chunked_scanner_forced = false;
+	    constexpr bool inmemory_scanner_forced = false;
+#endif
             bool scanner_has_recipe = false;
             if (scanner_pg_ctx != nullptr) {
                 for (std::size_t row = 0u;
@@ -7957,7 +7948,7 @@ template <class p_sequence>
 									 errdetail("row=%d target_bp=%llu exceeds MaxAllocSize",
 										query_id,
 										static_cast<unsigned long long>(target_bp_size)),
-									 errhint("Set bioseq.test_force_inmemory_scanner=off to use the streaming scanner_pg path.")));
+								 errhint("Set bioseq.testing.in_memory_scanner.enabled=off to use the streaming scanner_pg path.")));
 							});
 						pg_unreachable();
                     } else {

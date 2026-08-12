@@ -87,7 +87,7 @@ from postgres_runtime import (
     _cmake_install_cmd,
     _postgresql_discovery_cache_reset_args,
     _postgresql_e2e_restart_shell_command,
-    _prepare_aws_postgresql_test_database,
+    _prepare_postgresql_test_database,
     _restart_postgresql,
 )
 from postgres_safety import (
@@ -2459,8 +2459,8 @@ def _run_only_from_build_receipt(
                 f"{rc}")
         _restart_postgresql(
             active_build_dir, active_preset, log_handle, deadline)
-        _prepare_aws_postgresql_test_database(
-            active_preset, log_handle, deadline)
+        _prepare_postgresql_test_database(
+            active_build_dir, active_preset, log_handle, deadline, env=env)
 
     _update_entry(mode, step="running from build receipt")
     run_env = env
@@ -3342,8 +3342,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         f"exited with code {rc}")
                 _restart_postgresql(active_build_dir, active_preset,
                                     log_handle, deadline)
-                _prepare_aws_postgresql_test_database(
-                    active_preset, log_handle, deadline)
+                _prepare_postgresql_test_database(
+                    active_build_dir, active_preset, log_handle, deadline,
+                    env=env)
 
             for post_target in post_build_targets_for(mode, build_only):
                 _update_entry(

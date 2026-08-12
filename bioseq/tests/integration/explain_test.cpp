@@ -65,11 +65,11 @@ void require_complete_generic_highway_pipeline(
         std::span<const std::string> plan) {
     constexpr std::array expected{
         expected_highway_stage_function{
-            "minimizer::two_stack_nthash", "QuerySketchStage"},
+            "minimizer::two_stack_nthash", "query sketch"},
         expected_highway_stage_function{
-            "chaining::chain_anchors_simd", "ChainStage"},
+            "chaining::chain_anchors_simd", "chain_stage"},
         expected_highway_stage_function{
-            "alignment::block_aligner", "AlignStage"},
+            "alignment::block_aligner", "align_stage"},
     };
     std::array<bool, expected.size()> seen{};
     std::size_t planned_function_count = 0;

@@ -107,7 +107,7 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
             fixed_highway_params()));
 
     // Fragmented — exercise the same storage-owned facade callback used by
-    // bioseq.test_force_chunked_scanner, including the requested boundaries.
+    // bioseq.testing.chunked_scanner.enabled, including the requested boundaries.
     std::vector<std::string> fragmented;
     bioseq::storage::with_chunked_lazy_sequence<p_fragment_units>(
         q_range, t_range,

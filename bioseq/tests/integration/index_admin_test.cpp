@@ -1368,7 +1368,7 @@ TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer r
     const auto before_sidecars = query_rows(ctx,
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
         "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
-        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_minimizer\\_fragment\\_%' "
+        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
         "ESCAPE '\\' ORDER BY c.relname;");
     exec_sql(ctx,
         "SELECT bioseq.update_index('index_admin_no_index_absence'::regclass, "
@@ -1388,7 +1388,7 @@ TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer r
     const auto after_sidecars = query_rows(ctx,
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n "
         "ON n.oid=c.relnamespace WHERE n.nspname='bioseq_internal' "
-        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_minimizer\\_fragment\\_%' "
+        "AND c.relkind='r' AND c.relname LIKE 'seqidx\\_mpf\\_%' "
         "ESCAPE '\\' ORDER BY c.relname;");
     std::vector<std::string> prior_names;
     for (const auto& row : before_sidecars) {
@@ -1421,7 +1421,7 @@ TEST_CASE("cold no-index audit is metadata-only and detects physical minimizer r
         "'index_admin_no_index_absence'::regclass, 'symbol_counts');");
     REQUIRE(unsupported.sqlstate == "55000");
     REQUIRE(unsupported.contains(
-        "minimizers_per_fragment or minimizers_per_sequence"));
+        "minimizer fragment or sequence policy"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -2051,7 +2051,7 @@ TEST_CASE("PostgreSQL full-generation reader rejects same-scheme producer relabe
 	const auto expect_producer_rejection = [&](std::string_view backend) {
 		const auto error = sql_error(ctx, read(backend));
 		REQUIRE(error.contains(
-			"full-generation backend/source authorization disagrees"));
+			"READY generation minimizer storage contract disagrees"));
 		REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 	};
 
@@ -2338,7 +2338,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
         failure_probe{"scalar_fail_pg_spill", "58030",
             "injected PostgreSQL generation failure\nDETAIL: failure_point=minimizer_sequence_spill\nHINT: retry the failed index build in a fresh transaction"},
         failure_probe{"scalar_fail_pg_merge", "58030",
-            "injected PostgreSQL generation failure\nDETAIL: failure_point=minimizer_sequence_merge\nHINT: retry the failed index build in a fresh transaction"},
+            "injected PostgreSQL generation failure\nDETAIL: failure_point=minimizer_sequence_merge_callback\nHINT: retry the failed index build in a fresh transaction"},
         failure_probe{"scalar_fail_pg_tts_create", "58030",
             "injected PostgreSQL generation failure\nDETAIL: failure_point=generation_tts_create\nHINT: retry the failed index build in a fresh transaction"},
         failure_probe{"scalar_fail_pg_tuple_form", "58030",
@@ -2621,7 +2621,7 @@ TEST_CASE("hash-major replacement reuses its sidecar and retains the replaced ge
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
         "JOIN pg_index i ON i.indrelid=c.oid AND i.indisprimary "
         "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
-        "AND c.relname LIKE 'seqidx_minimizer_sequence_%' "
+        "AND c.relname LIKE 'seqidx_mps_%' "
         "AND EXISTS (SELECT 1 FROM pg_attribute a "
         "WHERE a.attrelid=c.oid AND a.attname='generation_id' "
         "AND a.attnum>0 AND NOT a.attisdropped) "
@@ -2739,7 +2739,7 @@ TEST_CASE("ordinary hash-major replacement preserves its active generation when 
         "SELECT c.relname, c.oid::text FROM pg_class c "
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
-        "AND c.relname LIKE 'seqidx_minimizer_sequence_%' "
+        "AND c.relname LIKE 'seqidx_mps_%' "
         "AND EXISTS (SELECT 1 FROM pg_attribute a "
         "WHERE a.attrelid=c.oid AND a.attname='generation_id' "
         "AND a.attnum>0 AND NOT a.attisdropped) "
@@ -3393,9 +3393,9 @@ TEST_CASE("prefix index clearing selects the exact prefix and preserves "
         "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
         "WHERE n.nspname = 'bioseq_internal' "
         "AND c.relkind = 'r' "
-        "AND starts_with(c.relname::text, 'seqidx_minimizer_fragment_') "
+        "AND starts_with(c.relname::text, 'seqidx_mpf_') "
         "ORDER BY c.oid LIMIT 1;");
-    constexpr std::string_view physical_name_stem = "seqidx_minimizer_fragment_";
+    constexpr std::string_view physical_name_stem = "seqidx_mpf_";
     constexpr std::size_t identity_hash_hex_size = 16;
     const std::size_t clear_prefix_size =
         physical_name_stem.size() + identity_hash_hex_size + 1;
@@ -3538,7 +3538,7 @@ TEST_CASE("prefix index clearing rejects a wrong relation kind and rolls back "
         "JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace "
         "WHERE n.nspname = 'bioseq_internal' "
         "AND c.relkind = 'r' "
-        "AND starts_with(c.relname::text, 'seqidx_minimizer_fragment_') "
+        "AND starts_with(c.relname::text, 'seqidx_mpf_') "
         "ORDER BY c.oid LIMIT 1;");
     const long long original_oid = query_scalar_int(ctx, fmt::format(
         "SELECT 'bioseq_internal.{}'::regclass::oid::bigint;",

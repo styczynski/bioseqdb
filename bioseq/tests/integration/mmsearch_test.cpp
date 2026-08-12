@@ -2094,6 +2094,7 @@ TEST_CASE("BioseqBatchJoin emits a match after a zero-match full first wave",
 TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-generation failure",
           "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_batch_join_target});
+    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 2);
     const std::string sql = batch_join_sql(2, "q.id, t.pk");
@@ -5616,6 +5617,13 @@ TEST_CASE("Asynchronous minimizers_per_sequence staging and worker PostgreSQL le
 	exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = on;");
 	exec_sql(ctx,
 		"SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';");
+	// The transient minimizer-sequence sketch backend is selected independently
+	// of the downstream chaining/base-alignment tuple. Keep that mixed tuple
+	// explicit: staging must reach the injected PostgreSQL leaf without aborting.
+	exec_sql(ctx,
+		"SET bioseq.aligner.chaining.algorithm = 'scalar_minimap2';");
+	exec_sql(ctx,
+		"SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
 	exec_sql(ctx,
 		"SET bioseq.scheduler.pipeline.mode = 'task_parallel';");
 	exec_sql(ctx, "SET bioseq.index.memory_cap_mb = 256;");
@@ -5860,7 +5868,7 @@ TEST_CASE("PostgreSQL finalizes SIMD chaining policy after the last override",
             k_hoe,
             hoe_probe_literal());
         const auto plan = explain_text<true>(ctx, sql);
-        REQUIRE(plan_contains(plan, "| ChainStage: Minimap2 SIMD"));
+        REQUIRE(plan_contains(plan, "| chain_stage: Minimap2 SIMD"));
         REQUIRE(plan_contains(
             plan,
             "simd_chaining_policy: bounded_batch_approximate"));
@@ -5875,7 +5883,7 @@ TEST_CASE("PostgreSQL finalizes SIMD chaining policy after the last override",
             k_hoe,
             hoe_probe_literal());
         const auto plan = explain_text<true>(ctx, sql);
-        REQUIRE(plan_contains(plan, "| ChainStage: Minimap2 Scalar"));
+        REQUIRE(plan_contains(plan, "| chain_stage: Minimap2 Scalar"));
         REQUIRE_FALSE(plan_contains(
             plan,
             "simd_chaining_policy: bounded_batch_approximate"));
@@ -5898,7 +5906,7 @@ TEST_CASE("PostgreSQL finalizes SIMD chaining policy after the last override",
                 plan,
                 "simd_chaining_policy: bounded_batch_approximate"));
             if (ordinal == 3) {
-                REQUIRE(plan_contains(plan, "| ChainStage: Vulkan tiled DP"));
+                REQUIRE(plan_contains(plan, "| chain_stage: Vulkan tiled DP"));
             }
         }
     }

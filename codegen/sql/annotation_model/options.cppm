@@ -277,7 +277,6 @@ struct type_options {
     char delimiter{','};
     bool collatable{};
     pg_type element{};
-    pg_type array{};
     checked_sql default_value{};
 };
 

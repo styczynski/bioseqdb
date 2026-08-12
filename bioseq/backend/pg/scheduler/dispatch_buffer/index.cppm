@@ -57,9 +57,9 @@ extern "C" {
 
 // The chunked-scanner dispatch path is always compiled as a permanent part of
 // the fragmented pipeline tree.
-// The `bioseq.test_force_chunked_scanner` GUC routes row sequences through a
+// The `bioseq.testing.chunked_scanner.enabled` GUC routes row sequences through a
 // synthetic chunked scanner end-to-end. The
-// `bioseq.test_force_inmemory_scanner` GUC forces the materialise-then-
+// `bioseq.testing.in_memory_scanner.enabled` GUC forces the materialise-then-
 // in_memory baseline. Without either GUC the production path promotes locator
 // values through the statement-owned source provider and runs from its
 // canonical lazy facade.
@@ -3938,10 +3938,14 @@ public:
                 return entry.has_seq_recipe()
                     || entry.has_per_row_query_recipe();
             });
+#if defined(BIOSEQ_TEST_INDEXES)
         const bool forced_flat_baseline =
             (bioseq::settings::testing::in_memory_scanner::enabled
                 || bioseq::settings::testing::chunked_scanner::enabled)
             && !batch_has_recipe;
+#else
+        constexpr bool forced_flat_baseline = false;
+#endif
         const bool vulkan_requested =
             ::bioseq::simd::pipe::
                 vulkan_components_requested(base_params);

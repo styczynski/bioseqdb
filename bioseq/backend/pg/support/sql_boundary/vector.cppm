@@ -365,6 +365,10 @@ public:
         return {column_->is_null, column_->lane_count};
     }
 
+    [[nodiscard]] const bool* null_data() const noexcept {
+        return column_->is_null;
+    }
+
     [[nodiscard]] bool is_null(std::size_t lane_index) const {
         require_lane(lane_index);
         return column_->is_null[lane_index];
@@ -383,13 +387,15 @@ public:
         return traits::decode(values[lane_index], collation_);
     }
 
+    /* Clang reduced-BMI module calls must expose the contiguous comparison
+     * payload as a register-returned pointer. Do not replace this accessor
+     * with a by-value span: the comparison kernel's module boundary is
+     * deliberately pointer + count. */
     template<class p_contiguous_lane = p_lane>
-    [[nodiscard]] std::span<const p_contiguous_lane> contiguous_values() const
+    [[nodiscard]] const p_contiguous_lane* contiguous_data() const noexcept
         requires vector_lane_traits<
             p_sql_type, p_contiguous_lane>::is_contiguous {
-        return {
-            reinterpret_cast<const p_contiguous_lane*>(column_->data),
-            column_->lane_count};
+        return reinterpret_cast<const p_contiguous_lane*>(column_->data);
     }
 
     [[nodiscard]] Oid collation() const noexcept {
@@ -558,8 +564,16 @@ public:
             column_->lane_count};
     }
 
+    [[nodiscard]] p_lane* value_data() noexcept {
+        return reinterpret_cast<p_lane*>(column_->data);
+    }
+
     [[nodiscard]] std::span<bool> nulls() noexcept {
         return {column_->is_null, column_->lane_count};
+    }
+
+    [[nodiscard]] bool* null_data() noexcept {
+        return column_->is_null;
     }
 
     [[nodiscard]] std::size_t size() const noexcept {

@@ -568,7 +568,8 @@ export inline void reset_extension(const connection_test_context& ctx,
     const auto bioseq_gucs = query_single_column(
         ctx,
         "SELECT quote_ident(name) FROM pg_settings "
-        "WHERE name LIKE 'bioseq.%' ORDER BY name;");
+        "WHERE name LIKE 'bioseq.%' "
+        "AND context IN ('user','superuser') ORDER BY name;");
     for (const auto& guc : bioseq_gucs) {
         if (!guc.has_value())
             continue;

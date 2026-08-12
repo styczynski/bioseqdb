@@ -1,7 +1,9 @@
 module;
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -252,18 +254,243 @@ namespace detail {
 [[nodiscard]] inline std::vector<std::size_t> reference_candidates(
     const std::vector<normalized_entity>& entities,
     std::string_view expression) {
-    const std::string name = referenced_cpp_name(std::string{expression});
+    std::string name = referenced_cpp_name(std::string{expression});
+    const bool globally_qualified = name.starts_with("::");
+    if (globally_qualified) name.erase(0, 2);
+    const bool qualified_reference = globally_qualified
+        || name.contains("::");
     std::vector<std::size_t> result;
+    std::set<std::string_view, std::less<>> matched_declarations;
+    bool has_natural_owner = false;
     for (std::size_t index = 0; index < entities.size(); ++index) {
         const std::string& qualified =
             entities[index].source.cpp_qualified_name;
         if (qualified == name
-            || (qualified.size() > name.size()
+            || (!qualified_reference
+                && qualified.size() > name.size()
                 && qualified.ends_with("::" + name))) {
+            result.push_back(index);
+            matched_declarations.insert(qualified);
+            has_natural_owner = has_natural_owner
+                || !entities[index].source.companion;
+        }
+    }
+    if (matched_declarations.size() == 1 && has_natural_owner) {
+        // A declaration reference names the emitting annotation, not a grant,
+        // operator, or other companion co-located on that declaration.
+        std::erase_if(
+            result,
+            [&entities](std::size_t index) {
+                return entities[index].source.companion;
+            });
+    }
+    return result;
+}
+
+[[nodiscard]] inline bool sql_type_space(char value) noexcept {
+    return value == ' ' || value == '\t' || value == '\n'
+        || value == '\r';
+}
+
+[[nodiscard]] inline std::string canonical_sql_type_reference(
+    std::string_view value) {
+    const auto trim = [&value] {
+        while (!value.empty() && sql_type_space(value.front())) {
+            value.remove_prefix(1);
+        }
+        while (!value.empty() && sql_type_space(value.back())) {
+            value.remove_suffix(1);
+        }
+    };
+    trim();
+    if (value.contains("custom_type<")) {
+        const std::size_t quote = value.find('"');
+        const std::size_t close = quote == std::string_view::npos
+            ? std::string_view::npos
+            : value.find('"', quote + 1);
+        if (close != std::string_view::npos) {
+            value = value.substr(quote + 1, close - quote - 1);
+            trim();
+        }
+    }
+    constexpr std::string_view setof{"setof"};
+    if (value.size() > setof.size()
+        && value.substr(0, setof.size()) == setof
+        && sql_type_space(value[setof.size()])) {
+        value.remove_prefix(setof.size());
+        trim();
+    }
+    while (value.ends_with("[]")) {
+        value.remove_suffix(2);
+        trim();
+    }
+    if (value.ends_with(')')) {
+        const std::size_t typmod = value.find('(');
+        if (typmod != std::string_view::npos) {
+            value = value.substr(0, typmod);
+            trim();
+        }
+    }
+    while (value.ends_with("[]")) {
+        value.remove_suffix(2);
+        trim();
+    }
+    if (value.starts_with("table ") || value == "table"
+        || value == "record" || value == "void") {
+        return {};
+    }
+    return std::string{value};
+}
+
+[[nodiscard]] inline std::vector<std::size_t>
+annotated_type_reference_candidates(
+    const std::vector<normalized_entity>& entities,
+    std::string_view expression,
+    std::string_view extension_schema) {
+    if (expression.contains("type_of<")) {
+        std::string reference = referenced_cpp_name(
+            std::string{expression});
+        const bool globally_qualified = reference.starts_with("::");
+        if (reference.starts_with("::")) {
+            reference.erase(0, 2);
+        }
+        const bool qualified = globally_qualified
+            || reference.contains("::");
+        std::vector<std::size_t> result;
+        for (std::size_t index = 0; index < entities.size(); ++index) {
+            const collected_entity& candidate = entities[index].source;
+            if (candidate.kind != entity_kind::type) continue;
+            if (candidate.cpp_qualified_name == reference
+                || (!qualified
+                    && candidate.cpp_qualified_name.ends_with(
+                        "::" + reference))) {
+                result.push_back(index);
+            }
+        }
+        return result;
+    }
+    const std::string reference =
+        canonical_sql_type_reference(expression);
+    if (reference.empty()) return {};
+    const bool qualified = reference.contains('.');
+    std::vector<std::size_t> result;
+    for (std::size_t index = 0; index < entities.size(); ++index) {
+        const collected_entity& type = entities[index].source;
+        if (type.kind != entity_kind::type) continue;
+        if ((!qualified && type.name == reference)
+            || (qualified
+                && (type.schema + "." + type.name == reference
+                    || (type.schema == "$extension"
+                        && std::string{extension_schema} + "."
+                                + type.name
+                            == reference)))) {
             result.push_back(index);
         }
     }
     return result;
+}
+
+[[nodiscard]] inline std::vector<std::size_t>
+resolve_annotated_type_reference(
+    const std::vector<normalized_entity>& entities,
+    std::string_view expression,
+    std::string_view extension_schema,
+    bool exact,
+    std::string_view owner,
+    std::string_view position) {
+    const std::string reference =
+        canonical_sql_type_reference(expression);
+    std::vector<std::size_t> candidates =
+        annotated_type_reference_candidates(
+            entities, expression, extension_schema);
+    const bool explicit_reference = exact
+        || expression.contains("type_of<")
+        || reference.contains('.');
+    if (candidates.empty() && explicit_reference) {
+        throw std::runtime_error(
+            "unresolved annotated SQL type reference '"
+            + std::string{expression} + "' in " + std::string{position}
+            + " of '" + std::string{owner} + "'");
+    }
+    if (candidates.size() > 1) {
+        throw std::runtime_error(
+            "ambiguous annotated SQL type reference '"
+            + std::string{expression} + "' in " + std::string{position}
+            + " of '" + std::string{owner} + "'");
+    }
+    return candidates;
+}
+
+[[nodiscard]] inline std::vector<std::size_t>
+routine_annotated_type_references(
+    const std::vector<normalized_entity>& entities,
+    const normalized_entity& entity,
+    std::string_view extension_schema,
+    const std::vector<collected_result_row>& result_rows) {
+    std::set<std::size_t> resolved;
+    for (const routine_parameter* parameter :
+         sql_parameters(entity.source)) {
+        const std::string& reference =
+            parameter->stable_identity_sql_type.empty()
+            ? parameter->sql_type
+            : parameter->stable_identity_sql_type;
+        const std::vector<std::size_t> candidates =
+            resolve_annotated_type_reference(
+                entities,
+                reference,
+                extension_schema,
+                !parameter->stable_identity_sql_type.empty(),
+                entity.stable_identity,
+                "parameter '" + parameter->name + "'");
+        resolved.insert(candidates.begin(), candidates.end());
+    }
+    const std::string& result_reference =
+        entity.source.result.stable_identity_sql_type.empty()
+        ? entity.source.result.sql_type.empty()
+            ? entity.source.result_sql_type
+            : entity.source.result.sql_type
+        : entity.source.result.stable_identity_sql_type;
+    const std::vector<std::size_t> result_candidates =
+        resolve_annotated_type_reference(
+            entities,
+            result_reference,
+            extension_schema,
+            !entity.source.result.stable_identity_sql_type.empty(),
+            entity.stable_identity,
+            "result");
+    resolved.insert(
+        result_candidates.begin(), result_candidates.end());
+    if (entity.source.result.form == routine_result_form::table_rows
+        || entity.source.result.form
+            == routine_result_form::named_output
+        || entity.source.result.form
+            == routine_result_form::named_output_set) {
+        const auto row = std::ranges::find(
+            result_rows,
+            entity.source.result.row_cpp_name,
+            &collected_result_row::cpp_qualified_name);
+        if (row == result_rows.end()) {
+            throw std::runtime_error(
+                "unresolved result-row contract for '"
+                + entity.stable_identity + "'");
+        }
+        for (const collected_result_field& field : row->fields) {
+            const std::string& reference =
+                field.stable_identity_sql_type.empty()
+                ? field.sql_type
+                : field.stable_identity_sql_type;
+            const std::vector<std::size_t> candidates =
+                resolve_annotated_type_reference(
+                    entities,
+                    reference,
+                    extension_schema,
+                    !field.stable_identity_sql_type.empty(),
+                    entity.stable_identity,
+                    "result field '" + field.name + "'");
+            resolved.insert(candidates.begin(), candidates.end());
+        }
+    }
+    return {resolved.begin(), resolved.end()};
 }
 
 [[nodiscard]] inline bool identifier_character(char value) noexcept {
@@ -318,7 +545,12 @@ declaration_reference_tokens(std::string_view expression) {
             ++cursor;
             continue;
         }
-        const std::size_t begin = cursor++;
+        const std::size_t begin =
+            cursor >= 2 && expression[cursor - 2] == ':'
+                    && expression[cursor - 1] == ':'
+            ? cursor - 2
+            : cursor;
+        ++cursor;
         while (cursor < expression.size()
                && identifier_character(expression[cursor])) {
             ++cursor;
@@ -341,8 +573,11 @@ declaration_reference_tokens(std::string_view expression) {
 [[nodiscard]] inline bool declaration_reference_matches(
     std::string_view candidate,
     std::string_view token) noexcept {
+    const bool globally_qualified = token.starts_with("::");
+    if (globally_qualified) token.remove_prefix(2);
+    const bool qualified = globally_qualified || token.contains("::");
     return candidate == token
-        || (candidate.size() > token.size() + 2
+        || (!qualified && candidate.size() > token.size() + 2
             && candidate[candidate.size() - token.size() - 2] == ':'
             && candidate[candidate.size() - token.size() - 1] == ':'
             && candidate.ends_with(token));
@@ -393,7 +628,7 @@ declaration_reference_tokens(std::string_view expression) {
             && (routine || candidate_kind == entity_kind::operator_);
     }
     if (owner_kind == entity_kind::type
-        && (option_name == "element" || option_name == "array")) {
+        && option_name == "element") {
         return candidate_kind == entity_kind::type;
     }
     return false;
@@ -444,12 +679,549 @@ option_reference_candidates(
     return result;
 }
 
+struct numbered_reference {
+    std::uint16_t number{};
+    std::string expression;
+};
+
+[[nodiscard]] inline std::string_view trim_sql_expression(
+    std::string_view value) noexcept {
+    while (!value.empty()
+           && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty()
+           && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+[[nodiscard]] inline std::vector<numbered_reference>
+parse_numbered_references(
+    std::string_view expression,
+    std::string_view helper_name) {
+    std::vector<numbered_reference> result;
+    std::size_t offset = 0;
+    const std::string needle = std::string{helper_name} + "(";
+    while ((offset = expression.find(needle, offset))
+           != std::string_view::npos) {
+        const std::size_t open = offset + needle.size() - 1;
+        std::size_t comma = std::string_view::npos;
+        std::size_t close = std::string_view::npos;
+        int depth = 0;
+        for (std::size_t index = open; index < expression.size(); ++index) {
+            if (expression[index] == '(') {
+                ++depth;
+            } else if (expression[index] == ')') {
+                if (--depth == 0) {
+                    close = index;
+                    break;
+                }
+            } else if (expression[index] == ',' && depth == 1
+                       && comma == std::string_view::npos) {
+                comma = index;
+            }
+        }
+        if (comma == std::string_view::npos
+            || close == std::string_view::npos) {
+            throw std::runtime_error(
+                "malformed " + std::string{helper_name}
+                + " declaration");
+        }
+        const std::string number_text{
+            trim_sql_expression(
+                expression.substr(open + 1, comma - open - 1))};
+        std::size_t consumed = 0;
+        const unsigned long number = std::stoul(number_text, &consumed);
+        if (consumed != number_text.size() || number == 0
+            || number > 65535) {
+            throw std::runtime_error(
+                "invalid operator-class entry number '"
+                + number_text + "'");
+        }
+        result.push_back({
+            .number = static_cast<std::uint16_t>(number),
+            .expression = std::string{trim_sql_expression(
+                expression.substr(comma + 1, close - comma - 1))},
+        });
+        offset = close + 1;
+    }
+    if (result.empty()) {
+        throw std::runtime_error(
+            std::string{helper_name} + " list is empty");
+    }
+    std::set<std::uint16_t> numbers;
+    for (const numbered_reference& entry : result) {
+        if (!numbers.insert(entry.number).second) {
+            throw std::runtime_error(
+                "duplicate operator-class entry number "
+                + std::to_string(entry.number));
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] inline const collected_entity*
+resolve_opclass_routine_before_identity(
+    const std::vector<normalized_entity>& entities,
+    std::string_view expression) {
+    const option_value reference{
+        .name = "functions",
+        .expression = std::string{expression},
+    };
+    const collected_entity* result = nullptr;
+    for (const std::size_t candidate : option_reference_candidates(
+             entities, entity_kind::opclass, reference)) {
+        const collected_entity& routine = entities[candidate].source;
+        if (routine.kind != entity_kind::function
+            && routine.kind != entity_kind::sql_function
+            && routine.kind != entity_kind::procedure) {
+            continue;
+        }
+        if (result != nullptr
+            && result->cpp_qualified_name
+                != routine.cpp_qualified_name) {
+            throw std::runtime_error(
+                "ambiguous operator-class routine reference '"
+                + std::string{expression} + "'");
+        }
+        result = &routine;
+    }
+    if (result == nullptr) {
+        throw std::runtime_error(
+            "unresolved operator-class routine reference '"
+            + std::string{expression} + "'");
+    }
+    return result;
+}
+
+inline void inherit_opclass_indexed_type_schemas(
+    std::vector<normalized_entity>& entities,
+    std::string_view extension_schema) {
+    for (normalized_entity& entity : entities) {
+        if (entity.source.kind != entity_kind::opclass) continue;
+        const option_value* operators =
+            find_option(entity.source, "operators");
+        const option_value* functions =
+            find_option(entity.source, "functions");
+        if (operators == nullptr || functions == nullptr) {
+            continue;
+        }
+
+        std::string indexed_type;
+        for (const numbered_reference& entry :
+             parse_numbered_references(
+                 operators->expression, "opclass_operator")) {
+            const collected_entity* routine =
+                resolve_opclass_routine_before_identity(
+                    entities, entry.expression);
+            const std::vector<const routine_parameter*> parameters =
+                sql_parameters(*routine);
+            if (parameters.empty() || parameters.size() > 2) {
+                throw std::runtime_error(
+                    "opclass '" + entity.source.name
+                    + "' operator routine must accept one or two SQL operands");
+            }
+            for (const routine_parameter* parameter : parameters) {
+                if (indexed_type.empty()) {
+                    indexed_type = parameter->sql_type;
+                } else if (parameter->sql_type != indexed_type) {
+                    throw std::runtime_error(
+                        "opclass '" + entity.source.name
+                        + "' has mixed indexed operand types");
+                }
+            }
+        }
+        for (const numbered_reference& entry :
+             parse_numbered_references(
+                 functions->expression, "opclass_function")) {
+            const collected_entity* routine =
+                resolve_opclass_routine_before_identity(
+                    entities, entry.expression);
+            const std::vector<const routine_parameter*> parameters =
+                sql_parameters(*routine);
+            if (parameters.empty()
+                || parameters.front()->sql_type != indexed_type) {
+                throw std::runtime_error(
+                    "opclass '" + entity.source.name
+                    + "' support function does not accept the indexed type");
+            }
+        }
+        if (indexed_type.empty()) {
+            throw std::runtime_error(
+                "opclass '" + entity.source.name
+                + "' has no inferred indexed type");
+        }
+
+        const std::vector<std::size_t> indexed_type_owners =
+            annotated_type_reference_candidates(
+                entities, indexed_type, extension_schema);
+        if (indexed_type_owners.size() > 1) {
+            throw std::runtime_error(
+                "ambiguous annotated SQL type reference '" + indexed_type
+                + "' for opclass '" + entity.source.name + "'");
+        }
+        entity.source.schema = indexed_type_owners.empty()
+            ? "$extension"
+            : entities[indexed_type_owners.front()].source.schema;
+    }
+}
+
 [[nodiscard]] inline bool allowed_cycle_kind(entity_kind kind) noexcept {
     return kind == entity_kind::type
         || kind == entity_kind::type_role
         || kind == entity_kind::function
         || kind == entity_kind::operator_
         || kind == entity_kind::cast;
+}
+
+[[nodiscard]] inline bool dependency_reaches(
+    const std::vector<std::vector<std::size_t>>& dependencies,
+    std::size_t start,
+    std::size_t target) {
+    std::vector<std::size_t> pending{start};
+    std::vector<bool> visited(dependencies.size());
+    while (!pending.empty()) {
+        const std::size_t current = pending.back();
+        pending.pop_back();
+        if (current == target) return true;
+        if (visited[current]) continue;
+        visited[current] = true;
+        pending.insert(
+            pending.end(),
+            dependencies[current].begin(),
+            dependencies[current].end());
+    }
+    return false;
+}
+
+[[nodiscard]] inline bool callback_owner_type(
+    std::string_view sql_type,
+    const normalized_entity& type,
+    std::string_view extension_schema) {
+    while (!sql_type.empty() && sql_type_space(sql_type.front())) {
+        sql_type.remove_prefix(1);
+    }
+    while (!sql_type.empty() && sql_type_space(sql_type.back())) {
+        sql_type.remove_suffix(1);
+    }
+    if (sql_type.contains("custom_type<")) {
+        const std::size_t quote = sql_type.find('"');
+        const std::size_t close = quote == std::string_view::npos
+            ? std::string_view::npos
+            : sql_type.find('"', quote + 1);
+        if (close == std::string_view::npos) return false;
+        sql_type = sql_type.substr(quote + 1, close - quote - 1);
+        while (!sql_type.empty() && sql_type_space(sql_type.front())) {
+            sql_type.remove_prefix(1);
+        }
+        while (!sql_type.empty() && sql_type_space(sql_type.back())) {
+            sql_type.remove_suffix(1);
+        }
+    }
+    constexpr std::string_view setof{"setof"};
+    const bool set_returning = sql_type.size() > setof.size()
+        && sql_type_space(sql_type[setof.size()])
+        && std::ranges::equal(
+            sql_type.substr(0, setof.size()),
+            setof,
+            [](char left, char right) {
+                if (left >= 'A' && left <= 'Z') {
+                    left = static_cast<char>(left - 'A' + 'a');
+                }
+                return left == right;
+            });
+    if (set_returning
+        || sql_type.contains('(') || sql_type.contains(')')
+        || sql_type.ends_with("[]")) {
+        return false;
+    }
+    const std::string reference{sql_type};
+    return reference == type.source.name
+        || reference == type.source.schema + "." + type.source.name
+        || (type.source.schema == "$extension"
+            && reference == std::string{extension_schema} + "."
+                    + type.source.name);
+}
+
+[[nodiscard]] inline std::string callback_signature_sql_type(
+    std::string_view value) {
+    while (!value.empty() && sql_type_space(value.front())) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && sql_type_space(value.back())) {
+        value.remove_suffix(1);
+    }
+    return std::string{value};
+}
+
+inline void validate_base_type_callback_signature(
+    const normalized_entity& role,
+    const normalized_entity& function,
+    const normalized_entity& type,
+    std::string_view extension_schema) {
+    std::vector<std::string> parameters;
+    for (const routine_parameter* parameter :
+        sql_parameters(function.source)) {
+        parameters.push_back(callback_signature_sql_type(
+            parameter->sql_type));
+    }
+    const std::string result = callback_signature_sql_type(
+        function.source.result_sql_type);
+    const auto owner = [&type, extension_schema](std::string_view value) {
+        return callback_owner_type(value, type, extension_schema);
+    };
+    const std::string_view name = role.source.annotation_name;
+    bool valid = false;
+    if (name == "type_input") {
+        valid = owner(result)
+            && (parameters == std::vector<std::string>{"cstring"}
+                || parameters == std::vector<std::string>{
+                    "cstring", "oid", "integer"});
+    } else if (name == "type_output") {
+        valid = result == "cstring" && parameters.size() == 1
+            && owner(parameters.front());
+    } else if (name == "type_receive") {
+        valid = owner(result)
+            && (parameters == std::vector<std::string>{"internal"}
+                || parameters == std::vector<std::string>{
+                    "internal", "oid", "integer"});
+    } else if (name == "type_send") {
+        valid = result == "bytea" && parameters.size() == 1
+            && owner(parameters.front());
+    } else if (name == "type_typmod_in") {
+        valid = result == "integer"
+            && parameters == std::vector<std::string>{"cstring[]"};
+    } else if (name == "type_typmod_out") {
+        valid = result == "cstring"
+            && parameters == std::vector<std::string>{"integer"};
+    } else if (name == "type_analyze") {
+        valid = result == "boolean"
+            && parameters == std::vector<std::string>{"internal"};
+    } else if (name == "type_subscript") {
+        valid = result == "internal"
+            && parameters == std::vector<std::string>{"internal"};
+    }
+    if (!valid) {
+        throw std::runtime_error(
+            "base-type callback '" + function.stable_identity
+            + "' has an invalid " + std::string{name}
+            + " SQL signature");
+    }
+}
+
+inline void inherit_base_type_callback_dependencies(
+    sql_graph& graph,
+    std::vector<std::vector<std::size_t>>& dependency_indexes) {
+    std::vector<std::set<std::size_t>> inherited(graph.entities.size());
+    std::map<std::size_t, std::size_t> function_owner;
+    for (std::size_t role_index = 0;
+         role_index < graph.entities.size();
+         ++role_index) {
+        const normalized_entity& role = graph.entities[role_index];
+        if (role.source.kind != entity_kind::type_role) continue;
+        std::vector<std::size_t> functions;
+        for (const std::size_t dependency :
+             dependency_indexes[role_index]) {
+            const collected_entity& candidate =
+                graph.entities[dependency].source;
+            if (candidate.kind == entity_kind::function
+                && candidate.cpp_qualified_name
+                    == role.source.cpp_qualified_name) {
+                functions.push_back(dependency);
+            }
+        }
+        const auto type_position = std::ranges::find(
+            graph.entities,
+            role.type_role_owner_identity,
+            &normalized_entity::stable_identity);
+        if (functions.size() != 1
+            || role.type_role_owner_identity.empty()
+            || type_position == graph.entities.end()) {
+            throw std::runtime_error(
+                "type callback '" + role.source.name
+                + "' must resolve one function and one owning type");
+        }
+        const std::size_t function_index = functions.front();
+        const std::size_t type_index = static_cast<std::size_t>(
+            std::distance(graph.entities.begin(), type_position));
+        validate_base_type_callback_signature(
+            role,
+            graph.entities[function_index],
+            graph.entities[type_index],
+            graph.extension_schema);
+        const auto [previous_owner, inserted] =
+            function_owner.emplace(function_index, type_index);
+        if (!inserted && previous_owner->second != type_index) {
+            throw std::runtime_error(
+                "base-type callback '"
+                + graph.entities[function_index].stable_identity
+                + "' is shared by more than one owning type");
+        }
+        for (const std::size_t dependency :
+             dependency_indexes[function_index]) {
+            if (dependency == type_index
+                || dependency == function_index) {
+                continue;
+            }
+            if (dependency_reaches(
+                    dependency_indexes, dependency, type_index)) {
+                throw std::runtime_error(
+                    "unsupported base-type callback dependency cycle for '"
+                    + graph.entities[type_index].stable_identity
+                    + "' through '"
+                    + graph.entities[dependency].stable_identity + "'");
+            }
+            inherited[type_index].insert(dependency);
+        }
+    }
+    for (std::size_t type_index = 0;
+         type_index < inherited.size();
+         ++type_index) {
+        if (inherited[type_index].empty()) continue;
+        std::set<std::size_t> dependencies{
+            dependency_indexes[type_index].begin(),
+            dependency_indexes[type_index].end()};
+        dependencies.insert(
+            inherited[type_index].begin(),
+            inherited[type_index].end());
+        dependencies.erase(type_index);
+        dependency_indexes[type_index].assign(
+            dependencies.begin(), dependencies.end());
+        normalized_entity& type = graph.entities[type_index];
+        type.dependency_identities.clear();
+        for (const std::size_t dependency :
+             dependency_indexes[type_index]) {
+            type.dependency_identities.push_back(
+                graph.entities[dependency].stable_identity);
+        }
+        std::ranges::sort(type.dependency_identities);
+    }
+}
+
+inline void inherit_inline_column_dependencies(
+    sql_graph& graph,
+    std::vector<std::vector<std::size_t>>& dependency_indexes) {
+    std::vector<std::set<std::size_t>> inherited(graph.entities.size());
+    for (std::size_t column_index = 0;
+         column_index < graph.entities.size();
+         ++column_index) {
+        const normalized_entity& column = graph.entities[column_index];
+        if (column.source.kind != entity_kind::column) continue;
+        std::vector<std::size_t> owners;
+        for (std::size_t candidate = 0;
+             candidate < graph.entities.size();
+             ++candidate) {
+            const collected_entity& owner = graph.entities[candidate].source;
+            if ((owner.kind == entity_kind::table
+                 || owner.kind == entity_kind::type)
+                && (owner.cpp_qualified_name
+                        == column.source.enclosing_cpp_name
+                    || owner.cpp_qualified_name
+                        == column.source.cpp_qualified_name)) {
+                owners.push_back(candidate);
+            }
+        }
+        if (owners.empty()) {
+            const std::string& module = column.source.source_module;
+            if (module.ends_with(".sql_rows")
+                || module.ends_with(".rows")) {
+                continue;
+            }
+        }
+        if (owners.size() != 1) {
+            throw std::runtime_error(
+                "inline SQL column '" + column.stable_identity
+                + "' must resolve one emitting table/composite owner");
+        }
+        const std::size_t owner_index = owners.front();
+        const std::string sql_type = find_option(column.source, "sql_type")
+            ? option_literal(column.source, "sql_type")
+            : infer_sql_type_from_cpp(column.source.cpp_return_type);
+        const std::vector<std::size_t> types =
+            resolve_annotated_type_reference(
+                graph.entities,
+                sql_type,
+                graph.extension_schema,
+                sql_type.contains("type_of<"),
+                graph.entities[owner_index].stable_identity,
+                "column '" + column.source.name + "'");
+        if (std::ranges::contains(types, owner_index)) {
+            throw std::runtime_error(
+                "unsupported inline SQL type self-dependency for '"
+                + graph.entities[owner_index].stable_identity + "'");
+        }
+        inherited[owner_index].insert(types.begin(), types.end());
+        for (const std::size_t dependency :
+             dependency_indexes[column_index]) {
+            if (dependency != owner_index) {
+                inherited[owner_index].insert(dependency);
+            }
+        }
+    }
+    for (std::size_t child_index = 0;
+         child_index < graph.entities.size();
+         ++child_index) {
+        const normalized_entity& child = graph.entities[child_index];
+        const bool inline_constraint =
+            child.source.kind == entity_kind::primary_key
+            || child.source.kind == entity_kind::unique
+            || child.source.kind == entity_kind::foreign_key
+            || child.source.kind == entity_kind::check;
+        if (!inline_constraint
+            || detail::option_identifier(
+                    child.source, "placement", "inline_")
+                == "alter_table") {
+            continue;
+        }
+        std::vector<std::size_t> owners;
+        for (std::size_t candidate = 0;
+             candidate < graph.entities.size();
+             ++candidate) {
+            const collected_entity& owner = graph.entities[candidate].source;
+            if (owner.kind == entity_kind::table
+                && (owner.cpp_qualified_name
+                        == child.source.enclosing_cpp_name
+                    || owner.cpp_qualified_name
+                        == child.source.cpp_qualified_name)) {
+                owners.push_back(candidate);
+            }
+        }
+        if (owners.size() != 1) {
+            throw std::runtime_error(
+                "inline SQL constraint '" + child.stable_identity
+                + "' must resolve one emitting table owner");
+        }
+        const std::size_t owner_index = owners.front();
+        for (const std::size_t dependency :
+             dependency_indexes[child_index]) {
+            if (dependency != owner_index) {
+                inherited[owner_index].insert(dependency);
+            }
+        }
+    }
+    for (std::size_t owner_index = 0;
+         owner_index < inherited.size();
+         ++owner_index) {
+        if (inherited[owner_index].empty()) continue;
+        std::set<std::size_t> dependencies{
+            dependency_indexes[owner_index].begin(),
+            dependency_indexes[owner_index].end()};
+        dependencies.insert(
+            inherited[owner_index].begin(),
+            inherited[owner_index].end());
+        dependencies.erase(owner_index);
+        dependency_indexes[owner_index].assign(
+            dependencies.begin(), dependencies.end());
+        normalized_entity& owner = graph.entities[owner_index];
+        owner.dependency_identities.clear();
+        for (const std::size_t dependency : dependencies) {
+            owner.dependency_identities.push_back(
+                graph.entities[dependency].stable_identity);
+        }
+        std::ranges::sort(owner.dependency_identities);
+    }
 }
 
 [[nodiscard]] inline int kind_order(entity_kind kind) noexcept {
@@ -683,18 +1455,20 @@ inline void inherit_natural_column_schemas(
             std::move(handwritten_fmgr_export_owners),
     };
     graph.result_rows = std::move(program.result_rows);
-    std::vector<std::string> stable_identities;
-    stable_identities.reserve(program.entities.size());
-    for (const collected_entity& entity : program.entities) {
-        stable_identities.push_back(
-            detail::stable_identity(entity));
-    }
     graph.entities.reserve(program.entities.size());
+    for (collected_entity& entity : program.entities) {
+        graph.entities.push_back(normalized_entity{
+            .source = std::move(entity),
+        });
+    }
+    detail::inherit_opclass_indexed_type_schemas(
+        graph.entities, graph.extension_schema);
     std::map<std::string, std::size_t, std::less<>> identity_owner;
     for (std::size_t entity_index = 0;
-         entity_index < program.entities.size();
+         entity_index < graph.entities.size();
          ++entity_index) {
-        collected_entity& entity = program.entities[entity_index];
+        normalized_entity& normalized = graph.entities[entity_index];
+        collected_entity& entity = normalized.source;
         const bool valid_name =
             entity.kind == entity_kind::session_setting
             ? detail::sql_guc_name(entity.name)
@@ -720,10 +1494,9 @@ inline void inherit_natural_column_schemas(
             throw std::runtime_error(
                 "invalid SQL schema name '" + entity.schema + "'");
         }
-        std::string identity =
-            std::move(stable_identities[entity_index]);
+        std::string identity = detail::stable_identity(entity);
         const auto [owner, inserted] =
-            identity_owner.emplace(identity, graph.entities.size());
+            identity_owner.emplace(identity, entity_index);
         if (!inserted) {
             const collected_entity& previous =
                 graph.entities[owner->second].source;
@@ -734,12 +1507,9 @@ inline void inherit_natural_column_schemas(
                 + " and " + entity.source_path.string() + ":"
                 + std::to_string(entity.source_range.begin.line));
         }
-        graph.entities.push_back(normalized_entity{
-            .source = std::move(entity),
-            .stable_identity = std::move(identity),
-            .installed_identity = detail::installed_identity(
-                owner->first, graph.extension_schema),
-        });
+        normalized.stable_identity = std::move(identity);
+        normalized.installed_identity = detail::installed_identity(
+            owner->first, graph.extension_schema);
     }
 
     std::vector<std::vector<std::size_t>> dependency_indexes(
@@ -769,9 +1539,35 @@ inline void inherit_natural_column_schemas(
         for (const option_value& option : entity.source.options) {
             if (detail::option_has_declaration_references(
                     entity.source.kind, option.name)) {
+                const bool type_storage_reference =
+                    entity.source.kind == entity_kind::type
+                    && option.name == "element";
+                const bool role_owner_reference =
+                    entity.source.kind == entity_kind::type_role
+                    && option.name == "for_type";
+                const bool opclass_storage_reference =
+                    entity.source.kind == entity_kind::opclass
+                    && option.name == "storage";
+                const bool annotated_type_option =
+                    type_storage_reference || role_owner_reference
+                    || opclass_storage_reference;
+                const bool annotated_type_expression =
+                    option.expression.contains("type_of<")
+                    || option.expression.contains("custom_type<");
                 const std::vector<std::size_t> candidates =
-                    detail::option_reference_candidates(
+                    annotated_type_option && annotated_type_expression
+                    ? detail::annotated_type_reference_candidates(
+                        graph.entities,
+                        option.expression,
+                        graph.extension_schema)
+                    : detail::option_reference_candidates(
                         graph.entities, entity.source.kind, option);
+                if (candidates.size() > 1
+                    && annotated_type_option) {
+                    throw std::runtime_error(
+                        "ambiguous typed SQL declaration reference in ."
+                        + option.name + " = " + option.expression);
+                }
                 if (candidates.empty()
                     && ((entity.source.kind
                              == entity_kind::aggregate
@@ -786,13 +1582,45 @@ inline void inherit_natural_column_schemas(
                         "unresolved typed SQL declaration reference in ."
                         + option.name + " = " + option.expression);
                 }
+                if (role_owner_reference && candidates.size() == 1) {
+                    entity.type_role_owner_identity =
+                        graph.entities[candidates.front()].stable_identity;
+                }
+                if (annotated_type_option) {
+                    if (candidates.empty()
+                        && option.expression.contains("type_of<")) {
+                        throw std::runtime_error(
+                            "unresolved typed SQL declaration reference in ."
+                            + option.name + " = " + option.expression);
+                    }
+                    if (candidates.size() == 1
+                        && type_storage_reference) {
+                        if (candidates.front() == index) {
+                            throw std::runtime_error(
+                                "base type '" + entity.stable_identity
+                                + "' cannot reference itself through ."
+                                + option.name);
+                        }
+                        entity.type_element_identity =
+                            graph.entities[candidates.front()]
+                                .stable_identity;
+                    }
+                    if (candidates.size() == 1
+                        && opclass_storage_reference) {
+                        entity.opclass_storage_identity =
+                            graph.entities[candidates.front()]
+                                .stable_identity;
+                    }
+                }
                 resolved.insert(candidates.begin(), candidates.end());
                 continue;
             }
             if (option.expression.contains("type_of<")) {
                 const std::vector<std::size_t> candidates =
-                    detail::reference_candidates(
-                        graph.entities, option.expression);
+                    detail::annotated_type_reference_candidates(
+                        graph.entities,
+                        option.expression,
+                        graph.extension_schema);
                 if (candidates.size() != 1) {
                     throw std::runtime_error(
                         candidates.empty()
@@ -802,6 +1630,74 @@ inline void inherit_natural_column_schemas(
                                   + option.expression + "'");
                 }
                 resolved.insert(candidates.front());
+            }
+        }
+        if (detail::routine_identity_kind(entity.source.kind)) {
+            const std::vector<std::size_t> type_references =
+                detail::routine_annotated_type_references(
+                    graph.entities,
+                    entity,
+                    graph.extension_schema,
+                    graph.result_rows);
+            resolved.insert(
+                type_references.begin(), type_references.end());
+        }
+        if (entity.source.kind == entity_kind::function) {
+            const option_value* support =
+                find_option(entity.source, "support");
+            const std::string support_name = support == nullptr
+                ? std::string{"none"}
+                : detail::option_literal(support->expression);
+            if (support_name != "none") {
+                if (!detail::sql_identifier(support_name)
+                    || detail::reserved_sql_identifier(support_name)) {
+                    throw std::runtime_error(
+                        "invalid planner support function name '"
+                        + support_name + "'");
+                }
+                std::vector<std::size_t> named_support_functions;
+                std::vector<std::size_t> exact_support_functions;
+                for (std::size_t candidate = 0;
+                     candidate < graph.entities.size();
+                     ++candidate) {
+                    const collected_entity& provider =
+                        graph.entities[candidate].source;
+                    if (provider.kind != entity_kind::function
+                        || provider.name != support_name) {
+                        continue;
+                    }
+                    named_support_functions.push_back(candidate);
+                    if (detail::routine_signature(provider)
+                            == "(internal)"
+                        && provider.result_sql_type == "internal") {
+                        exact_support_functions.push_back(candidate);
+                    }
+                }
+                if (named_support_functions.empty()) {
+                    throw std::runtime_error(
+                        "unresolved planner support function '"
+                        + support_name + "(internal)'");
+                }
+                if (exact_support_functions.empty()) {
+                    throw std::runtime_error(
+                        "planner support function '" + support_name
+                        + "' must have signature (internal) -> internal");
+                }
+                if (exact_support_functions.size() != 1) {
+                    throw std::runtime_error(
+                        "ambiguous planner support function '"
+                        + support_name + "(internal)'");
+                }
+                const std::size_t support_index =
+                    exact_support_functions.front();
+                if (support_index == index) {
+                    throw std::runtime_error(
+                        "function '" + entity.stable_identity
+                        + "' cannot use itself as planner support");
+                }
+                entity.planner_support_identity =
+                    graph.entities[support_index].stable_identity;
+                resolved.insert(support_index);
             }
         }
         if (entity.source.kind == entity_kind::table) {
@@ -871,7 +1767,10 @@ inline void inherit_natural_column_schemas(
                 }
             }
             if (inferred_types.size() == 1) {
-                resolved.insert(*inferred_types.begin());
+                const std::size_t owner = *inferred_types.begin();
+                resolved.insert(owner);
+                entity.type_role_owner_identity =
+                    graph.entities[owner].stable_identity;
             } else if (inferred_types.empty()) {
                 throw std::runtime_error(
                     "type callback '" + entity.source.name
@@ -940,6 +1839,11 @@ inline void inherit_natural_column_schemas(
         std::ranges::sort(entity.dependency_identities);
     }
 
+    detail::inherit_base_type_callback_dependencies(
+        graph, dependency_indexes);
+    detail::inherit_inline_column_dependencies(
+        graph, dependency_indexes);
+
     const std::size_t size = graph.entities.size();
     std::vector<int> discovery(size, -1);
     std::vector<int> low(size, -1);
@@ -987,12 +1891,35 @@ inline void inherit_natural_column_schemas(
                 && std::ranges::contains(
                     dependency_indexes[components[component].front()],
                     components[component].front()));
-        if (cyclic && !std::ranges::all_of(
+        const bool statement_lifecycle_cycle = cyclic
+            && std::ranges::any_of(
                 components[component],
                 [&graph](std::size_t member) {
-                    return detail::allowed_cycle_kind(
-                        graph.entities[member].source.kind);
-                })) {
+                    return graph.entities[member].source.kind
+                        == entity_kind::type;
+                });
+        const bool planner_support_cycle = cyclic
+            && std::ranges::any_of(
+                components[component],
+                [&components, component, &graph](std::size_t member) {
+                    const std::string& provider =
+                        graph.entities[member].planner_support_identity;
+                    return !provider.empty()
+                        && std::ranges::any_of(
+                            components[component],
+                            [&graph, &provider](std::size_t candidate) {
+                                return graph.entities[candidate]
+                                    .stable_identity == provider;
+                            });
+                });
+        if (cyclic && (statement_lifecycle_cycle
+                      || planner_support_cycle
+                      || !std::ranges::all_of(
+                          components[component],
+                          [&graph](std::size_t member) {
+                              return detail::allowed_cycle_kind(
+                                  graph.entities[member].source.kind);
+                          }))) {
             throw std::runtime_error(
                 "unsupported SQL dependency cycle containing '"
                 + graph.entities[components[component].front()]
@@ -1080,6 +2007,28 @@ inline void inherit_natural_column_schemas(
             "internal SQL graph ordering failed to consume every entity");
     }
     graph.entities = std::move(ordered);
+    for (const normalized_entity& entity : graph.entities) {
+        if (!detail::routine_identity_kind(entity.source.kind)) {
+            continue;
+        }
+        const std::vector<std::size_t> type_references =
+            detail::routine_annotated_type_references(
+                graph.entities,
+                entity,
+                graph.extension_schema,
+                graph.result_rows);
+        for (const std::size_t type_index : type_references) {
+            const std::string& type_identity =
+                graph.entities[type_index].stable_identity;
+            if (!std::ranges::contains(
+                    entity.dependency_identities, type_identity)) {
+                throw std::runtime_error(
+                    "internal SQL graph lost annotated type dependency '"
+                    + type_identity + "' for '"
+                    + entity.stable_identity + "'");
+            }
+        }
+    }
     return graph;
 }
 

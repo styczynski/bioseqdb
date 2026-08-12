@@ -2987,7 +2987,7 @@ TEST_CASE("source-domain faults unwind every partial lifetime stage",
     REQUIRE(translated_cpp.contains(
         "bioseq sequence callback raised a C++ exception"));
     REQUIRE(translated_cpp.contains(
-        "injected diagnostic C++ exception"));
+        "injected sequence-source diagnostic C++ exception"));
 
     constexpr std::array failure_points{
         "provider_after_registry_control",

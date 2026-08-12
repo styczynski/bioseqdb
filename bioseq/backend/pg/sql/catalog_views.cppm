@@ -87,6 +87,8 @@ WHERE o.regclass = c.oid
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
@@ -113,6 +115,8 @@ WHERE stripe.storage_id = storage.storage_id
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
@@ -134,6 +138,8 @@ WHERE cg.storage_id = storage.storage_id
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]

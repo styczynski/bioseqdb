@@ -64,6 +64,45 @@ _POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS = (
     "-UFIND_PACKAGE_MESSAGE_DETAILS_PostgreSQL",
 )
 
+_LIBPQ_CONNECTION_ENVIRONMENT_KEYS = (
+    "PGAPPNAME",
+    "PGCHANNELBINDING",
+    "PGCLIENTENCODING",
+    "PGCONNECT_TIMEOUT",
+    "PGDATABASE",
+    "PGGSSENCMODE",
+    "PGGSSLIB",
+    "PGHOST",
+    "PGHOSTADDR",
+    "PGKRBSRVNAME",
+    "PGLOADBALANCEHOSTS",
+    "PGOPTIONS",
+    "PGPASSFILE",
+    "PGPASSWORD",
+    "PGPORT",
+    "PGREQUIREAUTH",
+    "PGREQUIREPEER",
+    "PGREQUIRESSL",
+    "PGSERVICE",
+    "PGSERVICEFILE",
+    "PGSSLCERT",
+    "PGSSLCOMPRESSION",
+    "PGSSLCRL",
+    "PGSSLCRLDIR",
+    "PGSSLKEY",
+    "PGSSLMAXPROTOCOLVERSION",
+    "PGSSLMINPROTOCOLVERSION",
+    "PGSSLMODE",
+    "PGSSLNEGOTIATION",
+    "PGSSLROOTCERT",
+    "PGSSLSNI",
+    "PGSYSCONFDIR",
+    "PGTARGETSESSIONATTRS",
+    "PGUSER",
+)
+
+_REQUIRED_MAX_PREPARED_TRANSACTIONS = 16
+
 def _postgresql_discovery_cache_reset_args(
         build_dir: Path,
         preset: str,
@@ -110,44 +149,95 @@ def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
         return ["sudo", "-n", *cmd]
     return cmd
 
-def _prepare_aws_postgresql_test_database(active_preset: str, log_handle,
-                                          deadline: float) -> None:
-    """Make the AWS PostgreSQL instance match integration-test defaults."""
-    if (not sys.platform.startswith("linux")
-            or not _is_aws_preset(active_preset)):
-        return
-
+def _prepare_postgresql_test_database(
+        active_build_dir: Path,
+        active_preset: str,
+        log_handle,
+        deadline: float,
+        *,
+        env: Mapping[str, str] | None = None) -> None:
+    """Make PostgreSQL match the integration-test connection defaults."""
+    is_aws = (
+        sys.platform.startswith("linux")
+        and _is_aws_preset(active_preset)
+    )
     log_handle.write(
-        "\n# Preparing AWS PostgreSQL test auth/database "
+        "\n# Preparing PostgreSQL test auth/database "
         "(postgres/postgres, database bioseq) ...\n")
     log_handle.flush()
 
-    psql = shutil.which("psql") or "psql"
+    pg_config = _pg_config_from_cache(active_build_dir)
+    try:
+        bindir_result = subprocess.run(
+            [pg_config, "--bindir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"pg_config --bindir failed while preparing PostgreSQL "
+            f"test database: {exc}") from exc
+    if bindir_result.returncode != 0:
+        raise RuntimeError(
+            "pg_config --bindir failed while preparing PostgreSQL "
+            f"test database: {bindir_result.stderr.strip()}")
+
+    pg_bindir = Path(bindir_result.stdout.strip())
+    psql = pg_bindir / "psql"
+    createdb = pg_bindir / "createdb"
+    for executable in (psql, createdb):
+        if not executable.is_file():
+            raise RuntimeError(
+                f"PostgreSQL test database tool not found: {executable}")
+
+    # _query_postgresql_data_directory() has already proven that the
+    # configured cluster admits this builder (or the AWS postgres uid) over
+    # its Unix socket.  Use that administrator path to establish the test
+    # role/password; trying the password before setting it would make clean
+    # clusters circular.  Ambient libpq selectors must not redirect setup.
+    test_env = dict(os.environ if env is None else env)
+    for key in _LIBPQ_CONNECTION_ENVIRONMENT_KEYS:
+        test_env.pop(key, None)
+
+    role_argv = [
+        str(psql),
+        "-v", "ON_ERROR_STOP=1",
+        "--dbname", "postgres",
+        "--command", "ALTER ROLE postgres WITH LOGIN PASSWORD 'postgres';",
+    ]
+    if is_aws:
+        role_argv = ["sudo", "-n", "-u", "postgres", *role_argv]
+
     rc = _stream_subprocess(
-        ["sudo", "-n", "-u", "postgres", psql,
-         "-v", "ON_ERROR_STOP=1",
-         "--dbname", "postgres",
-         "--command", "ALTER ROLE postgres WITH LOGIN PASSWORD 'postgres';"],
-        log_handle,
-        deadline,
-    )
+        role_argv, log_handle, deadline, env=test_env)
     if rc != 0:
         raise RuntimeError(
             f"PostgreSQL test role setup exited with code {rc}")
 
+    query = shlex.join([
+        str(psql),
+        "-Atq", "--dbname", "postgres",
+        "--command",
+        "SELECT 1 FROM pg_database WHERE datname = 'bioseq';",
+    ])
+    create = shlex.join([
+        str(createdb),
+        "--owner", "postgres", "bioseq",
+    ])
     create_db_script = (
         "set -euo pipefail\n"
-        "if ! psql -Atq --dbname=postgres "
-        "--command \"SELECT 1 FROM pg_database WHERE datname = 'bioseq';\" "
-        "| grep -qx 1; then\n"
-        "  createdb --owner=postgres bioseq\n"
+        f"if ! {query} | grep -qx 1; then\n"
+        f"  {create}\n"
         "fi\n"
     )
+    database_argv = ["/bin/bash", "-lc", create_db_script]
+    if is_aws:
+        database_argv = [
+            "sudo", "-n", "-u", "postgres", *database_argv]
     rc = _stream_subprocess(
-        ["sudo", "-n", "-u", "postgres", "bash", "-lc", create_db_script],
-        log_handle,
-        deadline,
-    )
+        database_argv, log_handle, deadline, env=test_env)
+
     if rc != 0:
         raise RuntimeError(
             f"PostgreSQL test database setup exited with code {rc}")
@@ -180,6 +270,209 @@ def _run_postgresql_restart_cmd(
         msg = "PostgreSQL restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
         _log(f"ERROR: {msg}")
         raise RuntimeError(msg) from exc
+
+def _postgresql_admin_psql_argv(
+        psql: str, active_preset: str, *arguments: str) -> list[str]:
+    """Address the configured cluster through its proven local admin path."""
+    argv = [psql, *arguments]
+    if sys.platform.startswith("linux") and _is_aws_preset(active_preset):
+        return ["sudo", "-n", "-u", "postgres", *argv]
+    return argv
+
+def _postgresql_admin_environment() -> dict[str, str]:
+    """Prevent ambient libpq selectors from redirecting cluster mutation."""
+    environment = dict(os.environ)
+    for key in _LIBPQ_CONNECTION_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    return environment
+
+def _shared_preload_contains_bioseq(setting: str) -> bool:
+    for entry in setting.split(","):
+        normalized = entry.strip()
+        if len(normalized) >= 2 and normalized[0] == normalized[-1] == '"':
+            normalized = normalized[1:-1]
+        if normalized in {"bioseq", "$libdir/bioseq"}:
+            return True
+    return False
+
+def _ensure_postgresql_shared_preload(
+        psql: str, active_preset: str, log_handle,
+        deadline: float) -> None:
+    """Persistently add bioseq to shared_preload_libraries before restart."""
+    environment = _postgresql_admin_environment()
+    show_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-Atq", "--dbname", "postgres",
+        "--command", "SHOW shared_preload_libraries;",
+    )
+    try:
+        shown = subprocess.run(
+            show_argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "could not inspect PostgreSQL shared_preload_libraries: "
+            f"{exc}") from exc
+    if shown.returncode != 0:
+        detail = (shown.stderr or shown.stdout).strip()
+        raise RuntimeError(
+            "could not inspect PostgreSQL shared_preload_libraries: "
+            f"{detail or f'exit {shown.returncode}'}")
+
+    current = shown.stdout.strip()
+    if _shared_preload_contains_bioseq(current):
+        return
+    desired = "bioseq" if not current else f"{current},bioseq"
+    if "\x00" in desired or "\n" in desired or "\r" in desired:
+        raise RuntimeError(
+            "shared_preload_libraries contains an invalid line break")
+    sql_literal = desired.replace("'", "''")
+    alter_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-v", "ON_ERROR_STOP=1", "--dbname", "postgres",
+        "--command",
+        "ALTER SYSTEM SET shared_preload_libraries = "
+        f"'{sql_literal}';",
+    )
+    log_handle.write(
+        "\n# Enabling bioseq in PostgreSQL shared_preload_libraries ...\n")
+    log_handle.flush()
+    rc = _stream_subprocess(
+        alter_argv, log_handle, deadline, env=environment)
+    if rc != 0:
+        raise RuntimeError(
+            "PostgreSQL shared_preload_libraries setup exited with code "
+            f"{rc}")
+
+def _verify_postgresql_shared_preload(
+        psql: str, active_preset: str) -> None:
+    """Fail closed when a higher-priority setting defeated ALTER SYSTEM."""
+    environment = _postgresql_admin_environment()
+    show_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-Atq", "--dbname", "postgres",
+        "--command", "SHOW shared_preload_libraries;",
+    )
+    try:
+        shown = subprocess.run(
+            show_argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "could not verify PostgreSQL shared_preload_libraries after "
+            f"restart: {exc}") from exc
+    if shown.returncode != 0:
+        detail = (shown.stderr or shown.stdout).strip()
+        raise RuntimeError(
+            "could not verify PostgreSQL shared_preload_libraries after "
+            f"restart: {detail or f'exit {shown.returncode}'}")
+    if not _shared_preload_contains_bioseq(shown.stdout.strip()):
+        raise RuntimeError(
+            "PostgreSQL restarted without bioseq in "
+            "shared_preload_libraries")
+
+def _max_prepared_transactions_value(setting: str) -> int:
+    try:
+        value = int(setting.strip(), 10)
+    except ValueError as exc:
+        raise RuntimeError(
+            "PostgreSQL returned an invalid max_prepared_transactions "
+            f"value: {setting!r}") from exc
+    if value < 0:
+        raise RuntimeError(
+            "PostgreSQL returned a negative max_prepared_transactions "
+            f"value: {value}")
+    return value
+
+def _ensure_postgresql_max_prepared_transactions(
+        psql: str, active_preset: str, log_handle,
+        deadline: float) -> None:
+    """Persist the project minimum before restarting the shared cluster."""
+    environment = _postgresql_admin_environment()
+    show_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-Atq", "--dbname", "postgres",
+        "--command", "SHOW max_prepared_transactions;",
+    )
+    try:
+        shown = subprocess.run(
+            show_argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "could not inspect PostgreSQL max_prepared_transactions: "
+            f"{exc}") from exc
+    if shown.returncode != 0:
+        detail = (shown.stderr or shown.stdout).strip()
+        raise RuntimeError(
+            "could not inspect PostgreSQL max_prepared_transactions: "
+            f"{detail or f'exit {shown.returncode}'}")
+
+    current = _max_prepared_transactions_value(shown.stdout)
+    if current >= _REQUIRED_MAX_PREPARED_TRANSACTIONS:
+        return
+
+    alter_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-v", "ON_ERROR_STOP=1", "--dbname", "postgres",
+        "--command",
+        "ALTER SYSTEM SET max_prepared_transactions = "
+        f"'{_REQUIRED_MAX_PREPARED_TRANSACTIONS}';",
+    )
+    log_handle.write(
+        "\n# Enabling PostgreSQL prepared transactions for bioseq tests ...\n")
+    log_handle.flush()
+    rc = _stream_subprocess(
+        alter_argv, log_handle, deadline, env=environment)
+    if rc != 0:
+        raise RuntimeError(
+            "PostgreSQL max_prepared_transactions setup exited with code "
+            f"{rc}")
+
+def _verify_postgresql_max_prepared_transactions(
+        psql: str, active_preset: str) -> None:
+    """Fail closed if restart did not activate the project minimum."""
+    environment = _postgresql_admin_environment()
+    show_argv = _postgresql_admin_psql_argv(
+        psql, active_preset,
+        "-X", "-Atq", "--dbname", "postgres",
+        "--command", "SHOW max_prepared_transactions;",
+    )
+    try:
+        shown = subprocess.run(
+            show_argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "could not verify PostgreSQL max_prepared_transactions after "
+            f"restart: {exc}") from exc
+    if shown.returncode != 0:
+        detail = (shown.stderr or shown.stdout).strip()
+        raise RuntimeError(
+            "could not verify PostgreSQL max_prepared_transactions after "
+            f"restart: {detail or f'exit {shown.returncode}'}")
+    actual = _max_prepared_transactions_value(shown.stdout)
+    if actual < _REQUIRED_MAX_PREPARED_TRANSACTIONS:
+        raise RuntimeError(
+            "PostgreSQL restarted with max_prepared_transactions="
+            f"{actual}; bioseq tests require at least "
+            f"{_REQUIRED_MAX_PREPARED_TRANSACTIONS}")
 
 def _is_homebrew_arm64_pg_ctl(pg_ctl: str) -> bool:
     """Whether pg_ctl is from the native /opt/homebrew arm64 installation."""
@@ -215,10 +508,12 @@ def _postgresql_restart_environment(
 def _query_postgresql_data_directory(psql: str, active_preset: str) -> str:
     """Query directly, with a narrowly validated AWS postgres-uid fallback."""
     argv = [psql, "-t", "-c", "SHOW data_directory;", "postgres"]
+    environment = _postgresql_admin_environment()
     direct_detail = ""
     try:
         direct = subprocess.run(
-            argv, capture_output=True, text=True, timeout=10)
+            argv, capture_output=True, text=True, timeout=10,
+            env=environment)
         if direct.returncode == 0:
             return direct.stdout.strip()
         direct_detail = (direct.stderr or direct.stdout).strip()
@@ -240,6 +535,7 @@ def _query_postgresql_data_directory(psql: str, active_preset: str) -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(
@@ -265,16 +561,6 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     postmaster restart evicts the stale mapping; the first CREATE EXTENSION
     after restart loads the freshly installed dylib.
     """
-    if sys.platform != "darwin" and _is_aws_preset(active_preset):
-        systemctl = shutil.which("systemctl")
-        if systemctl:
-            _log("Restarting PostgreSQL via systemd service to evict stale dylib cache ...")
-            _run_postgresql_restart_cmd(
-                ["sudo", "-n", systemctl, "restart", "postgresql"],
-                log_handle,
-            )
-            return
-
     cmake_cache = active_build_dir / "CMakeCache.txt"
     pg_config: str | None = None
     if cmake_cache.exists():
@@ -322,6 +608,11 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
         _log(f"ERROR: {msg}")
         raise RuntimeError(msg)
 
+    _ensure_postgresql_shared_preload(
+        psql, active_preset, log_handle, deadline)
+    _ensure_postgresql_max_prepared_transactions(
+        psql, active_preset, log_handle, deadline)
+
     restart_env = _postgresql_restart_environment()
     sanitizer_runtime = restart_env.get(SANITIZER_RUNTIME_ENV)
 
@@ -354,6 +645,8 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     # (after the postmaster signals readiness), regardless of what the
     # postmaster does with the file handle afterwards.
     _run_postgresql_restart_cmd(restart_cmd, log_handle, env=restart_env)
+    _verify_postgresql_shared_preload(psql, active_preset)
+    _verify_postgresql_max_prepared_transactions(psql, active_preset)
 
 def _pg_config_from_cache(active_build_dir: Path) -> str:
     cmake_cache = active_build_dir / "CMakeCache.txt"

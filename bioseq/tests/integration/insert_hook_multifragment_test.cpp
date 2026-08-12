@@ -77,9 +77,39 @@ TEST_CASE("a manual symbol_counts policy still gives the correct fallback tally"
     // per-fragment chunks materialise; symbol_counts does NOT (manual policy).
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "insert_hook_manual_symbol_counts") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_manual_symbol_counts") == 0);
-    // symbol_count still returns the correct real tally via the unconditional recompute fallback.
-    guc_scope off(ctx, "bioseq.index.sequence_read.enabled", "off");
+    // symbol_count still returns the correct real tally via the unconditional
+    // recompute fallback. First isolate row admission from projection: the
+    // scalar and vector executors must see the same freshly inserted pk=1 row,
+    // and EXPLAIN ANALYZE must prove that chunk pruning retained its only chunk.
+    guc_scope sequence_read_off(
+        ctx, "bioseq.index.sequence_read.enabled", "off");
     ctx.clear_notices();
+    constexpr std::string_view row_count_query =
+        "SELECT count(*) FROM insert_hook_manual_symbol_counts WHERE pk=1";
+    {
+        guc_scope vectorization_off(
+            ctx, "bioseq.vectorization.enabled", "off");
+        REQUIRE(query_scalar_int(ctx, row_count_query) == 1);
+    }
+
+    {
+        guc_scope vectorization_on(
+            ctx, "bioseq.vectorization.enabled", "on");
+        const auto plan = explain_text(ctx, row_count_query);
+        std::string plan_text;
+        for (const auto& line : plan) {
+            plan_text += line;
+            plan_text += '\n';
+        }
+        INFO(plan_text);
+        REQUIRE(plan_contains(plan, "BioseqScan"));
+        REQUIRE(plan_contains(plan, "Bioseq Vectorized Filter"));
+        REQUIRE(find_explain_property(
+                    plan, "Bioseq Chunk Groups Removed by Filter")
+                == "0");
+        REQUIRE(query_scalar_int(ctx, row_count_query) == 1);
+    }
+
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq.symbol_count(seq0,'A') FROM insert_hook_manual_symbol_counts WHERE pk=1") == 4);
     REQUIRE(query_scalar_int(ctx,

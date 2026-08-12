@@ -694,10 +694,13 @@ def _verify_enabled_manifest(
         )
     for table_name in EXPECTED_TABLES:
         identity = f"sql:table:bioseq_external.{table_name}"
-        if set(by_identity[identity].get("dependencies", [])) != {
+        expected_dependencies = {
             "sql:schema:bioseq_external",
             access_method_identity,
-        }:
+        }
+        if table_name in {"sequences", "sequence_chunks"}:
+            expected_dependencies.add("sql:type:bioseq.seq")
+        if set(by_identity[identity].get("dependencies", [])) != expected_dependencies:
             raise RuntimeError(
                 f"external table has incomplete natural dependencies: "
                 f"{identity}"
@@ -740,6 +743,24 @@ def _verify_enabled_manifest(
             "enabled package statements do not exactly cover the reviewed "
             "external owner set"
         )
+    statement_positions = {
+        statement.get("owner_identity"): index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, dict)
+    }
+    seq_position = statement_positions.get("sql:type:bioseq.seq")
+    for table_name in ("sequences", "sequence_chunks"):
+        table_position = statement_positions.get(
+            f"sql:table:bioseq_external.{table_name}"
+        )
+        if (
+            not isinstance(seq_position, int)
+            or not isinstance(table_position, int)
+            or seq_position >= table_position
+        ):
+            raise RuntimeError(
+                f"external table {table_name} was rendered before bioseq.seq"
+            )
 
 
 def verify(args: argparse.Namespace) -> str:

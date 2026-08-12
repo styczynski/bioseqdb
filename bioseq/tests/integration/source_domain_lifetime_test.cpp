@@ -360,6 +360,31 @@ TEST_CASE("repeated source leaves reuse one callback scanner entry",
     REQUIRE(source_counter(ctx, "scanner_entry_hits") >= 2);
 }
 
+TEST_CASE("partial final fragment is reusable through one callback scanner",
+          "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
+    auto ctx = fresh_context({"source_lifetime_partial_fragment_repeat"});
+    const std::string sequence = source_domain_high_entropy_dna4(32'792u);
+    exec_sql(ctx, fmt::format(
+        "CREATE TABLE source_lifetime_partial_fragment_repeat "
+        " (id int, s bioseq.seq('dna4',64)) USING bioseq;"
+        "INSERT INTO source_lifetime_partial_fragment_repeat VALUES "
+        " (1, '{}'::bioseq.seq('dna4',64));",
+        sequence));
+
+    reset_source_counters(ctx);
+    const auto result = query_one(ctx,
+        "SELECT bioseq.to_text(s[32768:32792]), "
+        "       bioseq.to_text(bioseq.reverse(s[32768:32792])), "
+        "       bioseq.to_text(s[32768:32792]) "
+        "FROM source_lifetime_partial_fragment_repeat;");
+    const std::string tail = sequence.substr(32'768u);
+    REQUIRE(result[0] == tail);
+    REQUIRE(result[1] == std::string(tail.rbegin(), tail.rend()));
+    REQUIRE(result[2] == tail);
+    REQUIRE(source_counter(ctx, "scanner_entries_created") == 1);
+    REQUIRE(source_counter(ctx, "scanner_entry_hits") >= 2);
+}
+
 TEST_CASE("cached readers survive serial per-tuple resets",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     constexpr std::string_view table = "source_lifetime_source_reader_context";
@@ -1654,7 +1679,7 @@ TEST_CASE("parallel worker ERROR preserves DSM cleanup and original error",
     const auto injected = sql_error(ctx, error_sql);
     REQUIRE(injected.sqlstate == "XX000");
     REQUIRE(injected.contains(
-        "injected SliceProject parallel worker failure"));
+        "injected compact-sequence parallel worker failure"));
     require_source_resources_balanced(ctx);
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 

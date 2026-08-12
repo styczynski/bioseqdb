@@ -540,7 +540,9 @@ sql_dollar_delimiter(
 }
 
 [[nodiscard]] inline std::string routine_properties(
-    const collected_entity& entity) {
+    const normalized_entity& normalized,
+    const sql_graph& graph) {
+    const collected_entity& entity = normalized.source;
     std::string result;
     if (option_is(entity, "volatility_value", "immutable")
         || option_is(entity, "volatility", "immutable")) {
@@ -600,8 +602,22 @@ sql_dollar_delimiter(
     if (const option_value* support = find_option(entity, "support");
         support != nullptr
         && option_literal(entity, "support", "none") != "none") {
+        const normalized_entity* provider = nullptr;
+        for (const normalized_entity& candidate : graph.entities) {
+            if (candidate.stable_identity
+                == normalized.planner_support_identity) {
+                provider = &candidate;
+                break;
+            }
+        }
+        if (provider == nullptr
+            || provider->source.kind != entity_kind::function) {
+            throw std::runtime_error(
+                "function '" + normalized.stable_identity
+                + "' has no resolved planner support provider");
+        }
         result += "\nSUPPORT "
-            + option_literal(entity, "support", "none");
+            + qualified_sql_name(*provider, graph);
     }
     if (const option_value* configuration =
             find_option(entity, "configuration")) {
@@ -712,29 +728,12 @@ sql_dollar_delimiter(
 [[nodiscard]] inline bool expression_mentions_declaration(
     std::string_view expression,
     const collected_entity& declaration) {
-    const auto identifier_character = [](char value) noexcept {
-        return (value >= 'a' && value <= 'z')
-            || (value >= 'A' && value <= 'Z')
-            || (value >= '0' && value <= '9') || value == '_';
-    };
-    const auto contains_token =
-        [expression, identifier_character](std::string_view token) {
-            std::size_t offset = expression.find(token);
-            while (offset != std::string_view::npos) {
-                const bool left =
-                    offset == 0
-                    || !identifier_character(expression[offset - 1]);
-                const std::size_t end = offset + token.size();
-                const bool right =
-                    end == expression.size()
-                    || !identifier_character(expression[end]);
-                if (left && right) return true;
-                offset = expression.find(token, offset + 1);
-            }
-            return false;
-        };
-    return contains_token(declaration.cpp_qualified_name)
-        || contains_token(cpp_leaf(declaration.cpp_qualified_name));
+    return std::ranges::any_of(
+        declaration_reference_tokens(expression),
+        [&declaration](std::string_view token) {
+            return declaration_reference_matches(
+                declaration.cpp_qualified_name, token);
+        });
 }
 
 template<class p_predicate>
@@ -859,7 +858,8 @@ struct type_role_binding {
     for (const normalized_entity& role : graph.entities) {
         if (role.source.kind != entity_kind::type_role) continue;
         const normalized_entity* function = nullptr;
-        const normalized_entity* type = nullptr;
+        const normalized_entity* type = find_entity(
+            graph, role.type_role_owner_identity);
         for (const std::string& identity : role.dependency_identities) {
             const normalized_entity* candidate = find_entity(graph, identity);
             if (!candidate) continue;
@@ -867,16 +867,10 @@ struct type_role_binding {
                 && candidate->source.cpp_qualified_name
                     == role.source.cpp_qualified_name) {
                 function = candidate;
-            } else if (candidate->source.kind == entity_kind::type) {
-                if (type && type != candidate) {
-                    throw std::runtime_error(
-                        "type callback '" + role.source.name
-                        + "' resolves more than one owning type");
-                }
-                type = candidate;
             }
         }
-        if (!function || !type) {
+        if (!function || !type
+            || type->source.kind != entity_kind::type) {
             throw std::runtime_error(
                 "type callback '" + role.source.name
                 + "' must resolve one function and one owning type");
@@ -1038,7 +1032,7 @@ struct type_role_binding {
             ? "\nSECURITY DEFINER"
             : "\nSECURITY INVOKER";
     } else {
-        result += routine_properties(source);
+        result += routine_properties(entity, graph);
     }
     result += ";";
     return result;
@@ -1047,23 +1041,48 @@ struct type_role_binding {
 [[nodiscard]] inline const normalized_entity* primary_parent(
     const normalized_entity& entity,
     const sql_graph& graph) {
-    const normalized_entity* result = nullptr;
+    const normalized_entity* same_declaration = nullptr;
+    const normalized_entity* enclosing_declaration = nullptr;
+    std::size_t same_declaration_count = 0;
+    std::size_t enclosing_declaration_count = 0;
     for (const std::string& identity : entity.dependency_identities) {
         const normalized_entity* dependency = find_entity(graph, identity);
         if (!dependency || dependency->source.companion) continue;
-        const bool owns = dependency->source.cpp_qualified_name
-                == entity.source.cpp_qualified_name
-            || dependency->source.cpp_qualified_name
+        const bool same = dependency->source.cpp_qualified_name
+            == entity.source.cpp_qualified_name;
+        const bool enclosing = !same
+            && dependency->source.cpp_qualified_name
                 == entity.source.enclosing_cpp_name;
-        if (!owns) continue;
-        if (result) {
-            throw std::runtime_error(
-                "companion SQL entity '" + entity.stable_identity
-                + "' has more than one natural parent");
-        }
+        if (!same && !enclosing) continue;
+        const normalized_entity*& result = same
+            ? same_declaration
+            : enclosing_declaration;
+        std::size_t& count = same
+            ? same_declaration_count
+            : enclosing_declaration_count;
         result = dependency;
+        ++count;
     }
-    return result;
+    const bool enclosing_owned =
+        entity.source.kind == entity_kind::column
+        || entity.source.kind == entity_kind::primary_key
+        || entity.source.kind == entity_kind::unique
+        || entity.source.kind == entity_kind::foreign_key
+        || entity.source.kind == entity_kind::check
+        || entity.source.kind == entity_kind::type_role
+        || entity.source.kind == entity_kind::guc_value;
+    const bool use_enclosing =
+        enclosing_owned && enclosing_declaration != nullptr;
+    if ((use_enclosing
+             ? enclosing_declaration_count
+             : same_declaration_count) > 1) {
+        throw std::runtime_error(
+            "companion SQL entity '" + entity.stable_identity
+            + "' has more than one natural parent");
+    }
+    return use_enclosing
+        ? enclosing_declaration
+        : same_declaration;
 }
 
 [[nodiscard]] inline std::string leaf_cpp_name(std::string_view name) {
@@ -1275,7 +1294,27 @@ natural_type_statements(
         type_roles_for(entity, graph);
     const option_value* internal_length =
         find_option(source, "internal_length");
-    const bool base_type = internal_length || !roles.empty();
+    const option_value* variable_length =
+        find_option(source, "variable_length");
+    static constexpr std::string_view base_option_names[] = {
+        "internal_length",
+        "variable_length",
+        "passed_by_value",
+        "alignment",
+        "storage",
+        "category",
+        "preferred",
+        "delimiter",
+        "collatable",
+        "element",
+        "default_value",
+    };
+    const bool base_type = !roles.empty()
+        || std::ranges::any_of(
+            base_option_names,
+            [&source](std::string_view name) {
+                return find_option(source, name) != nullptr;
+            });
     if (!base_type) {
         std::vector<const normalized_entity*> columns;
         for (const normalized_entity* child : children) {
@@ -1299,7 +1338,9 @@ natural_type_statements(
             const collected_entity& column = columns[index]->source;
             if (index != 0) result += ",\n";
             std::string sql_type;
-            if (find_option(column, "sql_type")) {
+            if (!column.resolved_sql_type.empty()) {
+                sql_type = column.resolved_sql_type;
+            } else if (find_option(column, "sql_type")) {
                 sql_type = option_literal(column, "sql_type", "");
                 if (sql_type.contains("type_of<")) {
                     const std::size_t open = sql_type.find('<');
@@ -1324,10 +1365,22 @@ natural_type_statements(
             .text = result + "\n);",
         }};
     }
-    if (!internal_length) {
+    const bool variable =
+        variable_length && option_is(source, "variable_length", "true");
+    if (variable_length && !variable) {
         throw std::runtime_error(
             "base type '" + source.name
-            + "' has callback roles but no .internal_length");
+            + "' requires .variable_length to be true when specified");
+    }
+    if (internal_length && variable) {
+        throw std::runtime_error(
+            "base type '" + source.name
+            + "' cannot specify both .internal_length and .variable_length");
+    }
+    if (!internal_length && !variable) {
+        throw std::runtime_error(
+            "base type '" + source.name
+            + "' requires .internal_length or .variable_length");
     }
     std::map<std::string, const type_role_binding*, std::less<>>
         role_by_name;
@@ -1353,7 +1406,9 @@ natural_type_statements(
             type_role_sql_keyword(role.role->source.annotation_name)
             + " = " + qualified_sql_name(*role.function, graph));
     }
-    std::string length = internal_length->expression;
+    std::string length = variable
+        ? std::string{"VARIABLE"}
+        : internal_length->expression;
     if (length.contains("variable_length") || length == "-1") {
         length = "VARIABLE";
     }
@@ -1392,23 +1447,34 @@ natural_type_statements(
     if (option_is(source, "collatable", "true")) {
         append("COLLATABLE = true");
     }
-    for (const std::string_view option_name :
-         {"element", "array"}) {
+    for (const std::string_view option_name : {"element"}) {
         if (const option_value* value =
                 find_option(source, option_name)) {
-            std::string type_name = value->expression;
-            if (const std::size_t open = type_name.find('<');
-                open != std::string::npos) {
-                const std::size_t close = type_name.rfind('>');
-                type_name = cpp_leaf(type_name.substr(
-                    open + 1, close - open - 1));
+            const std::string& identity = entity.type_element_identity;
+            std::string type_name;
+            if (!identity.empty()) {
+                const normalized_entity* referenced =
+                    find_entity(graph, identity);
+                if (!referenced
+                    || referenced->source.kind != entity_kind::type) {
+                    throw std::runtime_error(
+                        "base type '" + source.name
+                        + "' lost its resolved ."
+                        + std::string{option_name} + " type");
+                }
+                type_name = qualified_sql_name(*referenced, graph);
+            } else if (value->expression.contains("custom_type<")) {
+                type_name = leaf_identifier(value->expression);
+            } else if (value->expression.contains("type_of<")) {
+                throw std::runtime_error(
+                    "base type '" + source.name
+                    + "' has an unresolved ."
+                    + std::string{option_name} + " type");
             } else {
-                type_name = enum_leaf(type_name);
+                type_name = enum_leaf(value->expression);
             }
             append(
-                std::string{option_name == "element"
-                                ? "ELEMENT = "
-                                : "ARRAY = "}
+                std::string{"ELEMENT = "}
                 + type_name);
         }
     }
@@ -1701,89 +1767,6 @@ natural_type_statements(
     return result + ");";
 }
 
-struct numbered_reference {
-    std::uint16_t number{};
-    std::string expression;
-};
-
-[[nodiscard]] inline std::string_view trim_sql_expression(
-    std::string_view value) noexcept {
-    while (!value.empty()
-           && std::isspace(static_cast<unsigned char>(value.front()))) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty()
-           && std::isspace(static_cast<unsigned char>(value.back()))) {
-        value.remove_suffix(1);
-    }
-    return value;
-}
-
-[[nodiscard]] inline std::vector<numbered_reference>
-parse_numbered_references(
-    std::string_view expression,
-    std::string_view helper_name) {
-    std::vector<numbered_reference> result;
-    std::size_t offset = 0;
-    const std::string needle = std::string{helper_name} + "(";
-    while ((offset = expression.find(needle, offset))
-           != std::string_view::npos) {
-        const std::size_t open = offset + needle.size() - 1;
-        std::size_t comma = std::string_view::npos;
-        std::size_t close = std::string_view::npos;
-        int depth = 0;
-        for (std::size_t index = open; index < expression.size(); ++index) {
-            if (expression[index] == '(') {
-                ++depth;
-            } else if (expression[index] == ')') {
-                if (--depth == 0) {
-                    close = index;
-                    break;
-                }
-            } else if (expression[index] == ',' && depth == 1
-                       && comma == std::string_view::npos) {
-                comma = index;
-            }
-        }
-        if (comma == std::string_view::npos
-            || close == std::string_view::npos) {
-            throw std::runtime_error(
-                "malformed " + std::string{helper_name}
-                + " declaration");
-        }
-        const std::string number_text{
-            trim_sql_expression(
-                expression.substr(open + 1, comma - open - 1))};
-        std::size_t consumed = 0;
-        const unsigned long number = std::stoul(number_text, &consumed);
-        if (consumed != number_text.size() || number == 0
-            || number > 65535) {
-            throw std::runtime_error(
-                "invalid operator-class entry number '"
-                + number_text + "'");
-        }
-        result.push_back({
-            .number = static_cast<std::uint16_t>(number),
-            .expression = std::string{trim_sql_expression(
-                expression.substr(comma + 1, close - comma - 1))},
-        });
-        offset = close + 1;
-    }
-    if (result.empty()) {
-        throw std::runtime_error(
-            std::string{helper_name} + " list is empty");
-    }
-    std::set<std::uint16_t> numbers;
-    for (const numbered_reference& entry : result) {
-        if (!numbers.insert(entry.number).second) {
-            throw std::runtime_error(
-                "duplicate operator-class entry number "
-                + std::to_string(entry.number));
-        }
-    }
-    return result;
-}
-
 [[nodiscard]] inline const normalized_entity* routine_from_expression(
     const normalized_entity& owner,
     const sql_graph& graph,
@@ -1954,14 +1937,23 @@ parse_numbered_references(
         result += "    " + clauses[index] + ",\n";
     }
     if (const option_value* storage = find_option(source, "storage")) {
-        std::string type_name = storage->expression;
-        if (const std::size_t open = type_name.find('<');
-            open != std::string::npos) {
-            const std::size_t close = type_name.rfind('>');
-            type_name = cpp_leaf(
-                type_name.substr(open + 1, close - open - 1));
+        std::string type_name;
+        if (!entity.opclass_storage_identity.empty()) {
+            const normalized_entity* referenced =
+                find_entity(graph, entity.opclass_storage_identity);
+            if (!referenced
+                || referenced->source.kind != entity_kind::type) {
+                throw std::runtime_error(
+                    "operator class '" + source.name
+                    + "' lost its resolved storage type");
+            }
+            type_name = qualified_sql_name(*referenced, graph);
+        } else if (storage->expression.contains("type_of<")) {
+            throw std::runtime_error(
+                "operator class '" + source.name
+                + "' has an unresolved storage type");
         } else {
-            type_name = enum_leaf(type_name);
+            type_name = leaf_identifier(storage->expression);
         }
         result += "    STORAGE " + type_name + "\n";
     } else {
@@ -2233,11 +2225,14 @@ parse_numbered_references(
                 if (!first) result += ",\n";
                 first = false;
                 if (child->source.kind == entity_kind::column) {
-                    const std::string sql_type = option_literal(
-                        child->source,
-                        "sql_type",
-                        infer_sql_type_from_cpp(
-                            child->source.cpp_return_type));
+                    const std::string sql_type =
+                        child->source.resolved_sql_type.empty()
+                        ? option_literal(
+                            child->source,
+                            "sql_type",
+                            infer_sql_type_from_cpp(
+                                child->source.cpp_return_type))
+                        : child->source.resolved_sql_type;
                     const std::string rendered_sql_type =
                         sql_type.contains("custom_type<")
                         ? leaf_identifier(sql_type)
@@ -2331,7 +2326,7 @@ parse_numbered_references(
                 + render_parameters(source) + ")\nRETURNS "
                 + source.result_sql_type + "\nLANGUAGE SQL\nAS "
                 + delimiter + "\n" + body + "\n" + delimiter;
-            result += routine_properties(source);
+            result += routine_properties(entity, graph);
             result += ";";
             return result;
         }
@@ -2623,12 +2618,68 @@ inline void append_entity_statement_candidates(
     if (entity.source.kind == entity_kind::type) {
         std::vector<natural_type_statement> statements =
             natural_type_statements(entity, graph, children);
-        local.reserve(statements.size() + 1);
-        for (natural_type_statement& statement : statements) {
+        if (statements.empty() || statements.size() > 2) {
+            throw std::runtime_error(
+                "annotated type '" + entity.stable_identity
+                + "' rendered an unsupported statement shape");
+        }
+        local.reserve(statements.size() + 16);
+        local.push_back(statement_candidate{
+            .owner = &entity,
+            .statement_kind = entity_kind::type,
+            .text = std::move(statements.front().text),
+        });
+        if (statements.size() == 2) {
+            std::set<std::string, std::less<>> emitted_callbacks;
+            for (const type_role_binding& role :
+                 type_roles_for(entity, graph)) {
+                if (!emitted_callbacks.insert(
+                        role.function->stable_identity).second) {
+                    continue;
+                }
+                for (const std::string& dependency :
+                     role.function->dependency_identities) {
+                    if (dependency == entity.stable_identity) continue;
+                    const auto dependency_position = std::ranges::find(
+                        graph.entities,
+                        dependency,
+                        &normalized_entity::stable_identity);
+                    const auto type_position = std::ranges::find(
+                        graph.entities,
+                        entity.stable_identity,
+                        &normalized_entity::stable_identity);
+                    if (dependency_position == graph.entities.end()
+                        || type_position == graph.entities.end()
+                        || dependency_position >= type_position) {
+                        throw std::runtime_error(
+                            "base-type callback '"
+                            + role.function->stable_identity
+                            + "' has an unsatisfied prerequisite '"
+                            + dependency + "'");
+                    }
+                }
+                local.push_back(statement_candidate{
+                    .owner = role.function,
+                    .statement_kind = role.function->source.kind,
+                    .prefix = remark_prefix(role.function->source),
+                    .text = render_entity_statement(
+                        *role.function,
+                        graph,
+                        {}),
+                });
+                if (const std::optional<std::string> comment =
+                        comment_statement(*role.function, graph)) {
+                    local.push_back(statement_candidate{
+                        .owner = role.function,
+                        .statement_kind = entity_kind::comment,
+                        .text = *comment,
+                    });
+                }
+            }
             local.push_back(statement_candidate{
                 .owner = &entity,
                 .statement_kind = entity_kind::type,
-                .text = std::move(statement.text),
+                .text = std::move(statements.back().text),
             });
         }
     } else {
@@ -2683,17 +2734,9 @@ inline void validate_statement_candidates(
         children;
     for (const normalized_entity& entity : graph.entities) {
         if (!entity.source.companion) continue;
-        for (const std::string& dependency :
-             entity.dependency_identities) {
-            const normalized_entity* parent =
-                detail::find_entity(graph, dependency);
-            if (parent && !parent->source.companion
-                && (parent->source.cpp_qualified_name
-                        == entity.source.cpp_qualified_name
-                    || parent->source.cpp_qualified_name
-                        == entity.source.enclosing_cpp_name)) {
-                children[parent->stable_identity].push_back(&entity);
-            }
+        if (const normalized_entity* parent =
+                detail::primary_parent(entity, graph)) {
+            children[parent->stable_identity].push_back(&entity);
         }
     }
     std::vector<detail::statement_candidate> candidates;
@@ -2705,6 +2748,10 @@ inline void validate_statement_candidates(
             graph.entities[graph_ordinal];
         if (entity.source.kind == entity_kind::guc
             || entity.source.kind == entity_kind::guc_value) {
+            continue;
+        }
+        if (entity.source.kind == entity_kind::function
+            && detail::function_is_type_callback(entity, graph)) {
             continue;
         }
         const bool inline_companion =

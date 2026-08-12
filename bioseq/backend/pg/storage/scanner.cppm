@@ -47,6 +47,7 @@ extern "C" {
 export module bioseq.postgres.storage.scanner;
 
 import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 import bioseq.common.seqan_adapter;              // seq::dna4 in static_assert below
@@ -424,6 +425,30 @@ private:
     // release_fragment so the ring is rarely full. Used only in PG-backed mode.
     mutable std::array<slot_t, 16>                       slots_{};
 
+    [[nodiscard]] std::size_t exposed_fragment_storage_units_(
+            std::size_t fragment_no) const {
+        const auto offset = bioseq::common::checked_mul(
+            static_cast<std::uint64_t>(fragment_no),
+            static_cast<std::uint64_t>(fragment_storage_units));
+        const std::uint64_t total = storage_unit_count();
+        if (!offset.has_value() || *offset >= total) {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [fragment_no, total] {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("postgres_sequence_scanner fragment span is invalid"),
+                         errdetail(
+                            "fragment=%zu total_storage_units=%llu",
+                            fragment_no,
+                            static_cast<unsigned long long>(total))));
+                });
+            return 0u;
+        }
+        return static_cast<std::size_t>(std::min(
+            static_cast<std::uint64_t>(fragment_storage_units),
+            total - *offset));
+    }
+
     enum class bulk_copy_status : std::uint8_t {
         ok,
         missing_start_stripe,
@@ -507,9 +532,11 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         return in_memory_data_.subspan(start, end - start);
     }
 
+    const std::size_t exposed_storage_units =
+        exposed_fragment_storage_units_(fragment_no);
     if (auto* s = find_slot_(fragment_no); s != nullptr) {
         poisoned_ = false;
-        return base_container(s->bytes, fragment_storage_units);
+        return base_container(s->bytes, exposed_storage_units);
     }
 
     // Cold fragment read: a cache miss that reaches columnar storage.
@@ -765,7 +792,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
 
     slot->fragment_no = fragment_no;
     poisoned_ = false;
-    return base_container(dst, fragment_storage_units);
+    return base_container(dst, exposed_storage_units);
 }
 
 template <class p_sequence_instance>

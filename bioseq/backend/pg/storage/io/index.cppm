@@ -1,4 +1,4 @@
-// bioseq/backend/storage/io/index.cppm
+// bioseq/backend/pg/storage/io/index.cppm
 //
 // Streams FASTA/FASTQ records through the PostgreSQL-independent IO reader
 // into a Bioseq table without materializing whole sequences.
@@ -1009,7 +1009,7 @@ void finish_load_write_states(load_context& ctx) {
 
 struct column_attr { std::int16_t attno; Oid atttypid; std::int32_t atttypmod; };
 
-/// Decode bioseq.postgres.column_mapping[] using the element OID carried by the array.
+/// Decode bioseq.column_mapping[] using the element OID carried by the array.
 /// Returned string views remain in the caller's memory context for the load.
 [[nodiscard]] std::vector<idp::user_column_mapping>
 parse_column_mapping_array(ArrayType* arr) {
@@ -1439,7 +1439,7 @@ export namespace bioseq::storage::load_pg::sql_routines {
         std::optional<std::string> header_format,
         [[bioseq_sql::param({
             .sql_type =
-                bioseq::sql::custom_type<"bioseq.postgres.column_mapping[]">,
+                bioseq::sql::custom_type<"bioseq.column_mapping[]">,
             .default_value = bioseq::sql::checked_sql{"NULL"},
         })]]
         std::optional<ArrayType*> columns) {
@@ -1469,7 +1469,7 @@ export namespace bioseq::storage::load_pg::sql_routines {
     }
     const bioseq::io::identifier_parser::header_format requested_fmt = *fmt_or;
 
-    // 3. columns => bioseq.postgres.column_mapping[] (may be NULL).
+    // 3. columns => bioseq.column_mapping[] (may be NULL).
     std::vector<bioseq::io::identifier_parser::user_column_mapping> user_maps;
     if (columns.has_value()) {
         user_maps = parse_column_mapping_array(*columns);

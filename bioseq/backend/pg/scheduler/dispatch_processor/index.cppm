@@ -1068,7 +1068,7 @@ public:
      * attno/seq_caches/parent_mctx) plus the per-row optional locator the
      * caller decoded at submit_scan time. When `scanner_pg_ctx` is non-null
      * AND the user has not forced the in-memory baseline via
-     * `bioseq.test_force_inmemory_scanner = on`, the loop dispatches:
+     * `bioseq.testing.in_memory_scanner.enabled = on`, the loop dispatches:
      *   - target through a source-backed facade when a locator is present,
      *     or an in-memory facade for an inline value;
      *   - query through an in-memory facade over the batch literal.

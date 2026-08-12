@@ -118,16 +118,16 @@ TEST_CASE("Python coordinates and letter access are exact",
     REQUIRE(unbound.sqlstate == "42804");
 }
 
-TEST_CASE("letter validation hook chains and walks nested queries",
+TEST_CASE("letter validation hook walks nested queries without reentry",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({"sequence_slicing_letter_hook_ctas"});
     exec_sql(ctx, "SET statement_timeout='2s';");
 
     REQUIRE(query_scalar(
         ctx,
-        "SELECT current_setting('shared_preload_libraries') LIKE "
-        "       '%auth_permission_dialog%' "
-        "   AND current_setting('shared_preload_libraries') LIKE '%bioseq%';")
+        "SELECT EXISTS (SELECT 1 FROM unnest(string_to_array("
+        "       current_setting('shared_preload_libraries'), ',')) AS entry "
+        "       WHERE btrim(entry) = 'bioseq');")
         == "t");
 
     const auto simple_before = query_scalar_int(
@@ -137,9 +137,8 @@ TEST_CASE("letter validation hook chains and walks nested queries",
         ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
     // The second diagnostic query contributes one call itself.  The other
     // delta entry is the probe SELECT, confirming bioseq is reached exactly once
-    // through the installed preload-hook chain rather than skipped or
-    // recursively re-entered.  This remains exact whichever preload hook was
-    // installed last and therefore owns the outermost callback.
+    // through the installed preload hook rather than skipped or recursively
+    // re-entered.
     REQUIRE(simple_after - simple_before == 2);
 
     const auto nested_before = query_scalar_int(
