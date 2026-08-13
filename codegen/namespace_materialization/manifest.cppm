@@ -62,6 +62,7 @@ struct previous_publication {
 struct configure_topology_provenance {
     std::string generator_identity;
     std::string policy;
+    emission_policy emission{emission_policy::selector_api};
     std::string name;
     std::filesystem::path source_path;
     std::string source_sha256;
@@ -396,6 +397,10 @@ inline void validate_plan_identity(const generation_plan& plan) {
         throw std::runtime_error(
             "materialization source and output module names must be non-empty");
     }
+    if (plan.policy != plan.topology.region.policy) {
+        throw std::runtime_error(
+            "generation-plan emission policy disagrees with authenticated topology");
+    }
     if (plan.source_sha256 != bioseq::common::sha256_hex(plan.source_text)) {
         throw std::runtime_error(
             "materialization source SHA-256 does not match the authored bytes");
@@ -513,8 +518,12 @@ inline void validate_plan_identity(const generation_plan& plan) {
             "rendering, or the "
             "zero body-bearing compiler-action invariant");
     }
-    if (plan.compilation_obligations.api_partition_units != 1u
-        || plan.compilation_obligations.selector_partition_units != 1u
+    const std::uint32_t expected_partition_units =
+        plan.policy == emission_policy::selector_api ? 1u : 0u;
+    if (plan.compilation_obligations.api_partition_units
+            != expected_partition_units
+        || plan.compilation_obligations.selector_partition_units
+            != expected_partition_units
         || plan.compilation_obligations.body_bearing_implementation_units
             != plan.enabled_ordinals.size()) {
         throw std::runtime_error(
@@ -525,7 +534,12 @@ inline void validate_plan_identity(const generation_plan& plan) {
          plan.declaration_probes) {
         if (probe.mode != structural_analysis::collection_mode::declaration_probe
             || probe.clang_release != plan.clang_release
-            || probe.source_module.provided_module.empty()) {
+            || probe.source_module.provided_module.empty()
+            || (plan.policy == emission_policy::implementation_owners
+                && (probe.source_module.provided_module
+                        != plan.topology.region.configured_output_module_name
+                    || probe.source_module.is_interface
+                    || probe.source_module.is_partition))) {
             throw std::runtime_error(
                 "declaration probes require body-free mode, the authenticated "
                 "Clang version, and a unique module provider");
@@ -1278,6 +1292,7 @@ inline void validate_template_flatten_publication_manifest(
         std::array{
             std::string_view{"schema_revision"},
             std::string_view{"generator_identity"},
+            std::string_view{"emission_policy"},
             std::string_view{"profile"},
             std::string_view{"source"},
             std::string_view{"source_module"},
@@ -1305,6 +1320,9 @@ inline void validate_template_flatten_publication_manifest(
             std::string{owner}
             + ": unsupported materialization generator identity");
     }
+    const emission_policy emission = parse_emission_policy(require_string(
+        require_member(root, "emission_policy", owner),
+        "evidence.emission_policy"));
     for (const std::string_view field :
          std::array{
              std::string_view{"profile"},
@@ -1317,6 +1335,9 @@ inline void validate_template_flatten_publication_manifest(
                 + std::string{field} + "' must be non-empty");
         }
     }
+    const std::string output_module{require_string(
+        require_member(root, "output_module", owner),
+        "evidence.output_module")};
 
     const json_value& source = require_member(root, "source", owner);
     require_exact_members(
@@ -1403,18 +1424,19 @@ inline void validate_template_flatten_publication_manifest(
             std::string_view{"body_bearing_implementation_units"},
         },
         "template_flatten evidence cmake_compilation_obligations");
+    const std::uint64_t expected_partition_units =
+        emission == emission_policy::selector_api ? 1u : 0u;
     if (require_unsigned(
             require_member(obligations, "api_partition_units", owner),
             "cmake_compilation_obligations.api_partition_units")
-            != 1u
+            != expected_partition_units
         || require_unsigned(
                require_member(obligations, "selector_partition_units", owner),
                "cmake_compilation_obligations.selector_partition_units")
-            != 1u) {
+            != expected_partition_units) {
         throw std::runtime_error(
             std::string{owner}
-            + ": CMake compilation obligations require one API and one "
-              "selector partition");
+            + ": CMake partition obligations disagree with emission policy");
     }
     const std::uint64_t body_bearing_obligation_count = require_unsigned(
         require_member(
@@ -1480,6 +1502,8 @@ inline void validate_template_flatten_publication_manifest(
         const std::string probe_module{require_string(
             require_member(probe, "module", owner), "probe.module")};
         if (probe_module.empty()
+            || (emission == emission_policy::implementation_owners
+                && probe_module != output_module)
             || require_string(
                    require_member(probe, "clang_version", owner),
                    "probe.clang_version")
@@ -1545,7 +1569,10 @@ inline void validate_template_flatten_publication_manifest(
                 || (linkage != "none" && linkage != "internal"
                     && linkage != "module" && linkage != "external")
                 || (attachment != "global_module"
-                    && attachment != "named_module")) {
+                    && attachment != "named_module")
+                || (emission == emission_policy::implementation_owners
+                    && ((linkage != "module" && linkage != "external")
+                        || attachment != "named_module"))) {
                 throw std::runtime_error(
                     std::string{owner}
                     + ": declaration probe identity facts are invalid");
@@ -1626,6 +1653,12 @@ inline void validate_template_flatten_publication_manifest(
                 + ": template_flatten artifact evidence disagrees with its "
                   "ownership class");
         }
+        if (emission == emission_policy::implementation_owners
+            && kind == "implementation_unit" && module != output_module) {
+            throw std::runtime_error(
+                std::string{owner}
+                + ": implementation-owner artifact is not attached to its configured primary module");
+        }
         const json_value& coordinates = require_member(
             artifact, "logical_coordinates", owner);
         if (coordinates.kind != json_kind::array) {
@@ -1661,10 +1694,17 @@ inline void validate_template_flatten_publication_manifest(
                   "artifact path, module, and digest");
         }
     }
-    if (api_partition_count != 1u || selector_partition_count != 1u
-        || declaration_probe_count != body_free_probe_count
+    const std::uint64_t expected_published_probe_count =
+        emission == emission_policy::selector_api ? body_free_probe_count : 0u;
+    const bool probe_evidence_bound =
+        emission == emission_policy::selector_api
+        ? unmatched_probe_evidence.empty()
+        : unmatched_probe_evidence.size() == body_free_probe_count;
+    if (api_partition_count != expected_partition_units
+        || selector_partition_count != expected_partition_units
+        || declaration_probe_count != expected_published_probe_count
         || implementation_unit_count != body_bearing_obligation_count
-        || manifest_count != 1u || !unmatched_probe_evidence.empty()) {
+        || manifest_count != 1u || !probe_evidence_bound) {
         throw std::runtime_error(
             std::string{owner}
             + ": rendered artifacts disagree with distinct CMake "
@@ -1784,15 +1824,14 @@ parse_configure_cases(
         if (assignment.group == "alphabet") alphabet = &assignment;
         if (assignment.group == "width") width = &assignment;
     }
-    if (alphabet == nullptr || width == nullptr) return true;
     if (profile == "dna4_uint64") {
-        return alphabet->case_label == "dna4"
-            && width->case_label == "w8";
+        return (alphabet == nullptr || alphabet->case_label == "dna4")
+            && (width == nullptr || width->case_label == "w8");
     }
     if (profile == "all_alphabets_uint64") {
-        return (alphabet->case_label == "dna4"
+        return (alphabet == nullptr || alphabet->case_label == "dna4"
                 || alphabet->case_label == "dna5")
-            && width->case_label == "w8";
+            && (width == nullptr || width->case_label == "w8");
     }
     return true;
 }
@@ -1812,6 +1851,7 @@ parse_configure_topology_provenance(
             std::string_view{"schema_revision"},
             std::string_view{"generator_identity"},
             std::string_view{"policy"},
+            std::string_view{"emission_policy"},
             std::string_view{"name"},
             std::string_view{"source_path"},
             std::string_view{"source_sha256"},
@@ -1841,6 +1881,9 @@ parse_configure_topology_provenance(
         "generator_identity")};
     const std::string policy{require_string(
         require_member(root, "policy", owner), "policy")};
+    const emission_policy emission = parse_emission_policy(require_string(
+        require_member(root, "emission_policy", owner),
+        "emission_policy"));
     if (parsed_generator_identity != materialization_generator_identity
         || policy != template_flatten_policy) {
         throw std::runtime_error(
@@ -1861,15 +1904,30 @@ parse_configure_topology_provenance(
         "configure topology output root");
     const std::string output_module{require_string(
         require_member(root, "output_module", owner), "output_module")};
-    const fs::path api_partition = checked_absolute_path(
-        fs::path{require_string(
-            require_member(root, "api_partition", owner), "api_partition")},
-        "configure topology API partition");
-    const fs::path selector_partition = checked_absolute_path(
-        fs::path{require_string(
-            require_member(root, "selector_partition", owner),
-            "selector_partition")},
-        "configure topology selector partition");
+    std::optional<fs::path> api_partition;
+    const json_value& api_partition_value =
+        require_member(root, "api_partition", owner);
+    if (api_partition_value.kind == json_kind::string) {
+        api_partition = checked_absolute_path(
+            fs::path{api_partition_value.scalar},
+            "configure topology API partition");
+    } else if (api_partition_value.kind != json_kind::null) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": api_partition must be an absolute path or null");
+    }
+    std::optional<fs::path> selector_partition;
+    const json_value& selector_partition_value =
+        require_member(root, "selector_partition", owner);
+    if (selector_partition_value.kind == json_kind::string) {
+        selector_partition = checked_absolute_path(
+            fs::path{selector_partition_value.scalar},
+            "configure topology selector partition");
+    } else if (selector_partition_value.kind != json_kind::null) {
+        throw std::runtime_error(
+            std::string{owner}
+            + ": selector_partition must be an absolute path or null");
+    }
     const std::string profile{require_string(
         require_member(root, "profile", owner), "profile")};
     if (!template_flatten_profile_supported(profile)) {
@@ -2197,8 +2255,10 @@ parse_configure_topology_provenance(
 
     std::ostringstream canonical;
     canonical << "bioseq-template-flatten-topology\n"
-                 "revision=1\n";
+                 "revision=2\n";
     canonical << "output-module\t" << output_module << '\n';
+    canonical << "emission-policy\t" << spell_emission_policy(emission)
+              << '\n';
     for (std::size_t group_index = 0;
          group_index < groups.size();
          ++group_index) {
@@ -2270,16 +2330,23 @@ parse_configure_topology_provenance(
             std::string{owner}
             + ": enabled output lists contain unauthoritative entries");
     }
-    if (api_partition != output_root / "typed_flat_api.cppm"
-        || selector_partition != output_root / "typed_flat_selector.cppm") {
+    const bool selector_api_partitions =
+        emission == emission_policy::selector_api
+        && api_partition == output_root / "typed_flat_api.cppm"
+        && selector_partition == output_root / "typed_flat_selector.cppm";
+    const bool implementation_owner_partitions =
+        emission == emission_policy::implementation_owners
+        && !api_partition.has_value() && !selector_partition.has_value();
+    if (!selector_api_partitions && !implementation_owner_partitions) {
         throw std::runtime_error(
             std::string{owner}
-            + ": fixed partition paths disagree with the output root");
+            + ": configured API/selector fields disagree with emission policy");
     }
 
     return configure_topology_provenance{
         .generator_identity = parsed_generator_identity,
         .policy = policy,
+        .emission = emission,
         .name = name,
         .source_path = source_path,
         .source_sha256 = source_sha256,
@@ -2488,6 +2555,8 @@ inline void prune_empty_publication_directories(
     detail::write_string(output, materialization_generator_identity);
     output << ",\n  \"policy\": ";
     detail::write_string(output, template_flatten_policy);
+    output << ",\n  \"emission_policy\": ";
+    detail::write_string(output, spell_emission_policy(plan.policy));
     output << ",\n  \"name\": ";
     detail::write_string(output, plan.name);
     output << ",\n  \"source\": {\"path\":";
@@ -2920,50 +2989,59 @@ render_publication_manifest(const publication_manifest_request& request) {
             }
         }
     }
-    std::set<const materialization_artifact*> matched_probe_artifacts;
-    for (const structural_analysis::translation_unit& probe :
-         plan.declaration_probes) {
-        const std::filesystem::path probe_source = detail::path_beneath_root(
-            probe.source_path,
-            plan.output_root,
-            "declaration probe source");
-        const std::vector<const materialization_artifact*>::const_iterator
-            artifact = std::ranges::find_if(
-            ordered,
-            [&probe, &probe_source, &matched_probe_artifacts](
-                const materialization_artifact* candidate) {
-                return candidate->artifact_kind
-                        == materialization_artifact::kind::declaration_probe
-                    && candidate->relative_path == probe_source
-                    && candidate->module_name
-                        == probe.source_module.provided_module
-                    && bioseq::common::sha256_hex(candidate->content) == probe.source_sha256
-                    && !matched_probe_artifacts.contains(candidate);
-            });
-        if (artifact == ordered.end()) {
+    const std::size_t rendered_probe_count = std::ranges::count_if(
+        ordered,
+        [](const materialization_artifact* artifact) {
+            return artifact->artifact_kind
+                == materialization_artifact::kind::declaration_probe;
+        });
+    if (plan.policy == emission_policy::implementation_owners) {
+        if (rendered_probe_count != 0u) {
             throw std::runtime_error(
-                "body-free declaration probe evidence does not match its "
-                "rendered artifact: "
-                + probe_source.string());
+                "implementation-owner declaration probes are provisional and must not be published");
         }
-        matched_probe_artifacts.insert(*artifact);
-    }
-    if (matched_probe_artifacts.size()
-        != std::ranges::count_if(
-            ordered,
-            [](const materialization_artifact* artifact) {
-                return artifact->artifact_kind
-                    == materialization_artifact::kind::declaration_probe;
-            })) {
-        throw std::runtime_error(
-            "body-free declaration probe evidence must bijectively cover its "
-            "rendered artifacts");
+    } else {
+        std::set<const materialization_artifact*> matched_probe_artifacts;
+        for (const structural_analysis::translation_unit& probe :
+             plan.declaration_probes) {
+            const std::filesystem::path probe_source = detail::path_beneath_root(
+                probe.source_path,
+                plan.output_root,
+                "declaration probe source");
+            const std::vector<const materialization_artifact*>::const_iterator
+                artifact = std::ranges::find_if(
+                ordered,
+                [&probe, &probe_source, &matched_probe_artifacts](
+                    const materialization_artifact* candidate) {
+                    return candidate->artifact_kind
+                            == materialization_artifact::kind::declaration_probe
+                        && candidate->relative_path == probe_source
+                        && candidate->module_name
+                            == probe.source_module.provided_module
+                        && bioseq::common::sha256_hex(candidate->content)
+                            == probe.source_sha256
+                        && !matched_probe_artifacts.contains(candidate);
+                });
+            if (artifact == ordered.end()) {
+                throw std::runtime_error(
+                    "body-free declaration probe evidence does not match its "
+                    "rendered artifact: "
+                    + probe_source.string());
+            }
+            matched_probe_artifacts.insert(*artifact);
+        }
+        if (matched_probe_artifacts.size() != rendered_probe_count) {
+            throw std::runtime_error(
+                "body-free declaration probe evidence must bijectively cover its rendered artifacts");
+        }
     }
 
     std::ostringstream evidence;
     evidence << "{\n  \"schema_revision\": " << artifact_schema_revision
            << ",\n  \"generator_identity\": ";
     detail::write_string(evidence, materialization_generator_identity);
+    evidence << ",\n  \"emission_policy\": ";
+    detail::write_string(evidence, spell_emission_policy(plan.policy));
     evidence << ",\n  \"profile\": ";
     detail::write_string(evidence, plan.profile);
     evidence << ",\n  \"source\": {\"path\":";
@@ -3236,6 +3314,13 @@ read_previous_publication_snapshot(
         throw std::runtime_error(
             manifest_path.string() + ": artifacts manifest contains NUL");
     }
+    if (expected_policy == template_flatten_policy) {
+        detail::validate_template_flatten_publication_manifest(
+            content,
+            manifest_path.string(),
+            expected_output_root,
+            expected_topology_digest);
+    }
     previous_publication publication = detail::parse_publication_manifest(
         content, manifest_path.string(), expected_output_root, expected_policy,
         expected_topology_digest);
@@ -3419,6 +3504,13 @@ read_pending_publication(
     if (content.contains('\0')) {
         throw std::runtime_error(
             "pending publication intent contains NUL bytes");
+    }
+    if (expected_policy == template_flatten_policy) {
+        validate_template_flatten_publication_manifest(
+            content,
+            "pending publication intent",
+            protocol.output_root,
+            std::string_view{});
     }
     previous_publication desired = parse_publication_manifest(
         content,
@@ -3657,6 +3749,13 @@ inline void publish_artifacts(const publication_request& request) {
             request.output_root,
             std::string_view{},
             std::string_view{});
+    if (desired_manifest.policy == template_flatten_policy) {
+        detail::validate_template_flatten_publication_manifest(
+            request.artifact_manifest_json,
+            "desired artifacts manifest",
+            request.output_root,
+            desired_manifest.topology_digest);
+    }
 
     // Defense in depth for direct callers. Production generators recover
     // before reading the predecessor so changed inputs can render from the

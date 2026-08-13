@@ -1,5 +1,5 @@
 /**
- * @file pipeline/pipe/index.cppm
+ * @file pipeline/pipe.cppm
  * @brief Compile-time dispatched sequence-alignment pipeline.
  *
  * This module implements the compile-time dispatched stage graph used by the
@@ -38,7 +38,7 @@ module;
 // to compile in that mode.
 #if !defined(__OPTIMIZE__) && !defined(BIOSEQ_PACKAGE_O0_PROFILE)
 # error "pipeline chain primitive requires -O1 or higher. " \
-        "Use -Og or -O1 -g for debug builds of pipeline/pipe/index.cppm; only the explicit " \
+        "Use -Og or -O1 -g for debug builds of pipeline/pipe.cppm; only the explicit " \
         "distribution package O0 profile may disable this guard."
 #endif
 
@@ -800,7 +800,7 @@ template <auto p_algorithm>
 struct algorithm_traits {
     static_assert(no_kernel_for_v<p_algorithm>,
         "algorithm_traits<X>: no specialisation for this algorithm enum value. "
-        "Declare one in pipeline/pipe/index.cppm next to the chaining_algorithm / "
+        "Declare one in pipeline/pipe.cppm next to the chaining_algorithm / "
         "minimizer_algorithm blocks.");
 };
 
@@ -6560,7 +6560,7 @@ template <is_constexpr_aligner_params p_aligner_parameters,
 // =============================================================================
 //
 // `value_sequence<p_type, p_values...>` lives in `bioseq.common.templating` (
-//); re-exported here so the existing pipeline/pipe module body keeps the
+//); re-exported here so the existing bioseq.pipeline.pipe module body keeps the
 // unqualified name. See
 
 using ::bioseq::common::templating::value_sequence;
@@ -8036,20 +8036,7 @@ template <class p_minimizer,
 // compatibility templates above and let the implementation units remain
 // private to the PostgreSQL DSO.
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
-    bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
-    bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
-    const std::vector<::bioseq::minimizers::minimap_sketch_data>&
-        query_minimizers,
-    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
-        prebuilt_target_index,
-    const minimap2_parameters& params = minimap2_parameters{},
-    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-    bool allow_gpu_target_index_build = false);
-
-[[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_index_batch_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const ::bioseq::simd::pipe::minimizer_batch_view<
@@ -8062,7 +8049,20 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_index_vector_owned(
+    bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
+    bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
+    const std::vector<::bioseq::minimizers::minimap_sketch_data>&
+        query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
+        prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false);
+
+[[nodiscard, gnu::noinline]] match_result_collection
+minimap_port_hash_major_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8075,7 +8075,7 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_grouped_soa_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8088,7 +8088,7 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_query_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8100,22 +8100,8 @@ minimap2_port_with_index_owned(
     bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false);
 
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
-    bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
-    bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
-    const std::vector<::bioseq::minimizers::minimap_sketch_data>&
-        query_minimizers,
-    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
-        prebuilt_target_index,
-    const minimap2_parameters& params = minimap2_parameters{},
-    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
-    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
-    bool allow_gpu_target_index_build = false);
-
-[[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_index_batch_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const ::bioseq::simd::pipe::minimizer_batch_view<
@@ -8128,7 +8114,20 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_index_vector_owned(
+    bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
+    bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
+    const std::vector<::bioseq::minimizers::minimap_sketch_data>&
+        query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
+        prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false);
+
+[[nodiscard, gnu::noinline]] match_result_collection
+minimap_port_hash_major_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8141,7 +8140,7 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_grouped_soa_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8154,7 +8153,7 @@ minimap2_port_with_index_owned(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index_owned(
+minimap_port_fragment_query_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8165,7 +8164,6 @@ minimap2_port_with_index_owned(
     bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
     bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false);
-#endif
 
 /**
  * @brief Run the minimap2 pipeline against pre-built target minimizers.
@@ -9395,17 +9393,15 @@ match_result_collection minimap_port(
 // definitions live in same-module ordinary implementation units so the
 // force-inline dispatch cascade is instantiated once per alphabet rather than
 // once per generated scheduler leaf.
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port_owned(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_raw_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
 
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port_owned(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_raw_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
-#endif
 
 /**
  * @brief Memory-bounded recompute entry for arbitrarily large targets on a
@@ -9789,7 +9785,7 @@ struct segmented_owned_index_dispatch {
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity)
     {
-        return minimap2_port_with_index_owned(
+        return minimap_port_fragment_index_batch_owned(
             query_seq, target_seq, query_minimizers, target_index, params,
             gpu_index_cache, gpu_index_identity);
     }
@@ -10993,12 +10989,10 @@ template <sequence_alphabet p_alphabet>
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
 
-#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 [[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
-#endif
 
 } // namespace bioseq::simd
 

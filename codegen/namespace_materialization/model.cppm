@@ -17,8 +17,8 @@ import bioseq.codegen.structural_analysis;
 export namespace bioseq::codegen::namespace_materialization {
 
 /// Revisions of the stable JSON schemas emitted by this generator.
-inline constexpr std::uint32_t topology_schema_revision = 1;
-inline constexpr std::uint32_t artifact_schema_revision = 3;
+inline constexpr std::uint32_t topology_schema_revision = 2;
+inline constexpr std::uint32_t artifact_schema_revision = 4;
 inline constexpr std::uint32_t publication_schema_revision = 1;
 
 /// Stable identity written into generated source and metadata.
@@ -31,6 +31,23 @@ enum class axis_role : std::uint8_t {
     shard,
     external,
 };
+
+/// Closed generated-source ownership policy.
+enum class emission_policy : std::uint8_t {
+    selector_api,
+    implementation_owners,
+};
+
+/// Returns the stable wire spelling for an emission policy.
+[[nodiscard]] inline constexpr std::string_view spell_emission_policy(
+    emission_policy policy) noexcept {
+    switch (policy) {
+        case emission_policy::selector_api: return "selector_api";
+        case emission_policy::implementation_owners:
+            return "implementation_owners";
+    }
+    return {};
+}
 
 /// One closed replacement spelling accepted for an axis.
 struct replacement_case {
@@ -65,6 +82,7 @@ struct owned_declaration {
 struct materialization_region {
     structural_analysis::module_record source_module;
     std::string configured_output_module_name;
+    emission_policy policy{emission_policy::selector_api};
     structural_analysis::namespace_record boundary;
     std::optional<structural_analysis::namespace_record> support_island;
     std::vector<binding_record> bindings;
@@ -178,6 +196,7 @@ struct topology_plan {
 /// Complete authenticated input to rendering and publication.
 struct generation_plan {
     topology_plan topology;
+    emission_policy policy{emission_policy::selector_api};
     std::filesystem::path repository_root;
     std::filesystem::path source_path;
     std::filesystem::path output_root;
@@ -309,6 +328,7 @@ struct command_line {
     std::filesystem::path source;
     std::filesystem::path repository_root;
     std::string output_module;
+    emission_policy policy{emission_policy::selector_api};
     std::string profile;
     std::filesystem::path configure_topology_manifest;
     std::string expected_topology_digest;

@@ -58,6 +58,19 @@ inline void require_rejected(p_callable&& callable, std::string_view message) {
     return source;
 }
 
+[[nodiscard]] inline std::string resealed_replace_once(
+    std::string_view sealed,
+    std::string_view before,
+    std::string_view after) {
+    std::string unsigned_content =
+        verify_manifest_self_seal(
+            sealed, "contract manifest mutation").first;
+    unsigned_content = replace_once(
+        std::move(unsigned_content), before, after);
+    return seal_manifest(
+        unsigned_content, bioseq::common::sha256_hex(unsigned_content));
+}
+
 [[nodiscard]] inline std::size_t occurrences(
     std::string_view source,
     std::string_view needle) noexcept {
@@ -69,6 +82,27 @@ inline void require_rejected(p_callable&& callable, std::string_view message) {
         position += needle.size();
     }
     return count;
+}
+
+[[nodiscard]] inline std::size_t artifact_count(
+    const generation_result& result,
+    const materialization_artifact::kind kind) noexcept {
+    return static_cast<std::size_t>(std::ranges::count_if(
+        result.artifacts,
+        [kind](const materialization_artifact& artifact) {
+            return artifact.artifact_kind == kind;
+        }));
+}
+
+[[nodiscard]] inline std::vector<std::string> case_projection(
+    const axis_group& group) {
+    std::vector<std::string> result;
+    for (const replacement_case& replacement : group.cases) {
+        result.push_back(
+            replacement.label + '=' + replacement.spelling + '@'
+            + std::to_string(replacement.ordinal));
+    }
+    return result;
 }
 
 [[nodiscard]] inline std::string normalized_token_digest(
@@ -101,6 +135,8 @@ struct production_scheduler_fixture final {
     std::filesystem::path repository_root;
     std::filesystem::path source_path;
 };
+
+using production_pipe_fixture = production_scheduler_fixture;
 
 [[nodiscard]] inline production_scheduler_fixture
 production_scheduler_source() {
@@ -159,13 +195,17 @@ production_scheduler_source() {
     const structural_analysis::translation_unit sliced =
         structural_analysis::scan_token_slice(source_path, source);
     materialization_region region = extract_materialization_region(
-        sliced, "bioseq.postgres.scheduler.dispatch_processor", source);
+        sliced,
+        "bioseq.postgres.scheduler.dispatch_processor",
+        emission_policy::selector_api,
+        source);
     topology_plan topology = build_topology_plan(std::move(region));
     std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
     validate_enabled_ordinals(topology, profile, enabled);
     validate_entry_ownership(topology);
     return generation_plan{
         .topology = std::move(topology),
+        .policy = emission_policy::selector_api,
         .repository_root = fixture.repository_root,
         .source_path = source_path,
         .output_root = std::filesystem::absolute(
@@ -173,6 +213,77 @@ production_scheduler_source() {
         .source_text = source,
         .source_sha256 = bioseq::common::sha256_hex(source),
         .name = "dispatch_processor_typed",
+        .profile = std::move(profile),
+        .enabled_ordinals = std::move(enabled),
+        .clang_release = "contract-test",
+        .compilation_signature = "contract-test",
+        .compiler_module_inventory_sha256 =
+            "00000000000000000000000000000000"
+            "00000000000000000000000000000000",
+    };
+}
+
+[[nodiscard]] inline production_pipe_fixture production_pipe_source() {
+#ifndef BIOSEQ_NAMESPACE_MATERIALIZATION_TEST_REPOSITORY_ROOT
+    throw std::runtime_error(
+        "namespace-materialization production contracts require the configured "
+        "BIOSEQ_REPOSITORY_ROOT");
+#else
+    std::error_code error;
+    const std::filesystem::path configured_root{
+        BIOSEQ_NAMESPACE_MATERIALIZATION_TEST_REPOSITORY_ROOT};
+    if (!configured_root.is_absolute()) {
+        throw std::runtime_error(
+            "configured namespace-materialization repository root is not absolute");
+    }
+    const std::filesystem::path repository_root =
+        std::filesystem::weakly_canonical(configured_root, error);
+    if (error || repository_root != configured_root
+        || !std::filesystem::is_directory(repository_root, error) || error) {
+        throw std::runtime_error(
+            "configured namespace-materialization repository root is not its "
+            "canonical directory identity");
+    }
+    const std::filesystem::path pipe = repository_root
+        / "bioseq/backend/pipeline/pipe_owners_template.cppm";
+    if (!std::filesystem::is_regular_file(pipe, error) || error) {
+        throw std::runtime_error(
+            "production pipe-owner materialization source is unavailable: "
+            + pipe.string());
+    }
+    return {
+        .repository_root = repository_root,
+        .source_path = std::filesystem::weakly_canonical(pipe),
+    };
+#endif
+}
+
+[[nodiscard]] inline generation_plan production_pipe_plan(
+    std::string profile = "all_coordinates") {
+    const production_pipe_fixture fixture = production_pipe_source();
+    const std::filesystem::path& source_path = fixture.source_path;
+    const std::string source = read_artifact_bytes(source_path);
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(source_path, source);
+    materialization_region region = extract_materialization_region(
+        sliced,
+        "bioseq.pipeline.pipe",
+        emission_policy::implementation_owners,
+        source);
+    topology_plan topology = build_topology_plan(std::move(region));
+    std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
+    validate_enabled_ordinals(topology, profile, enabled);
+    validate_entry_ownership(topology);
+    return generation_plan{
+        .topology = std::move(topology),
+        .policy = emission_policy::implementation_owners,
+        .repository_root = fixture.repository_root,
+        .source_path = source_path,
+        .output_root = fixture.repository_root
+            / "generated/template_flatten/pipe_owners",
+        .source_text = source,
+        .source_sha256 = bioseq::common::sha256_hex(source),
+        .name = "pipe_owners",
         .profile = std::move(profile),
         .enabled_ordinals = std::move(enabled),
         .clang_release = "contract-test",
@@ -293,11 +404,15 @@ long root(std::uint8_t abi_code, int value) {
     const structural_analysis::translation_unit sliced =
         structural_analysis::scan_token_slice(source_path, source);
     materialization_region region = extract_materialization_region(
-        sliced, "fixture.output", source);
+        sliced,
+        "fixture.output",
+        emission_policy::selector_api,
+        source);
     topology_plan topology = build_topology_plan(std::move(region), 16u);
     validate_entry_ownership(topology);
     return generation_plan{
         .topology = std::move(topology),
+        .policy = emission_policy::selector_api,
         .repository_root = repository_root,
         .source_path = source_path,
         .output_root = repository_root / "generated/flatten_fixture",
@@ -306,6 +421,79 @@ long root(std::uint8_t abi_code, int value) {
         .name = "flatten_fixture",
         .profile = "all_coordinates",
         .enabled_ordinals = {0u, 1u, 2u, 3u},
+        .clang_release = "contract-test",
+        .compilation_signature = "contract-test",
+        .compiler_module_inventory_sha256 =
+            "00000000000000000000000000000000"
+            "00000000000000000000000000000000",
+    };
+}
+
+[[nodiscard]] inline std::string_view owner_fixture_source() {
+    return R"CPP(export module bioseq.codegen.inputs.owner_fixture;
+
+import fixture.owner;
+import fixture.neutral;
+
+namespace fixture::owner {
+
+static constexpr bool OwnerDna5
+    [[bioseq::template_flatten(
+        "identity", "alphabet",
+        "dna4", "false",
+        "dna5", "true")]]
+    = false;
+
+static constexpr unsigned OwnerRoute
+    [[bioseq::template_flatten(
+        "shard", "route",
+        "raw", "0u",
+        "segmented", "1u")]]
+    = 0u;
+
+[[bioseq::template_flatten_when("route", "raw")]]
+int owner_raw(int value) {
+    return value + (OwnerDna5 ? 10 : 0) + static_cast<int>(OwnerRoute);
+}
+
+[[bioseq::template_flatten_when("route", "segmented")]]
+int owner_segmented(int value) {
+    return value + (OwnerDna5 ? 20 : 1) + static_cast<int>(OwnerRoute);
+}
+
+}  // namespace fixture::owner
+)CPP";
+}
+
+[[nodiscard]] inline generation_plan owner_fixture_plan(
+    std::string profile = "all_coordinates") {
+    const std::string source{owner_fixture_source()};
+    const std::filesystem::path repository_root =
+        std::filesystem::absolute(".").lexically_normal();
+    const std::filesystem::path source_path =
+        repository_root / "owner_fixture.cppm";
+    const structural_analysis::translation_unit sliced =
+        structural_analysis::scan_token_slice(source_path, source);
+    materialization_region region = extract_materialization_region(
+        sliced,
+        "fixture.owner",
+        emission_policy::implementation_owners,
+        source);
+    topology_plan topology = build_topology_plan(std::move(region), 16u);
+    std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
+    validate_enabled_ordinals(topology, profile, enabled);
+    validate_entry_ownership(topology);
+    return generation_plan{
+        .topology = std::move(topology),
+        .policy = emission_policy::implementation_owners,
+        .repository_root = repository_root,
+        .source_path = source_path,
+        .output_root = repository_root / "generated/owner_fixture",
+        .source_text = source,
+        .source_sha256 = bioseq::common::sha256_hex(source),
+        .name = "owner_fixture",
+        .profile = std::move(profile),
+        .enabled_ordinals = std::move(enabled),
         .clang_release = "contract-test",
         .compilation_signature = "contract-test",
         .compiler_module_inventory_sha256 =
@@ -331,18 +519,48 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
         probe.clang_release = plan.clang_release;
         probe.mode = structural_analysis::collection_mode::declaration_probe;
         probe.source_module.provided_module = artifact.module_name;
-        structural_analysis::declaration_record identity;
-        identity.stable_usr = "c:@F@fixture_probe_"
-            + std::to_string(artifact.logical_coordinate_ordinals.front());
-        identity.qualified_name = "fixture::probe_identity";
-        identity.source_identity = "fixture-provenance-"
-            + std::to_string(artifact.logical_coordinate_ordinals.front());
-        identity.source_coordinate =
-            std::to_string(artifact.logical_coordinate_ordinals.front());
-        identity.linkage = structural_analysis::entity_linkage::module;
-        identity.attachment =
-            structural_analysis::module_attachment::named_module;
-        probe.declarations.push_back(std::move(identity));
+        if (plan.policy == emission_policy::implementation_owners) {
+            for (const std::uint32_t ordinal :
+                 artifact.logical_coordinate_ordinals) {
+                const materialization_coordinate& coordinate =
+                    plan.topology.coordinates.at(ordinal);
+                for (const owned_declaration& owned :
+                     plan.topology.region.controlled_declarations) {
+                    if (!owned.declaration.specifiers.is_definition
+                        || owned.declaration.linkage
+                            == structural_analysis::entity_linkage::internal
+                        || !coordinate_matches(coordinate, owned.clauses)) {
+                        continue;
+                    }
+                    structural_analysis::declaration_record identity =
+                        owned.declaration;
+                    identity.stable_usr =
+                        "c:@F@fixture_owner_probe_" + owned.declaration.name
+                        + '_' + std::to_string(ordinal);
+                    identity.source_coordinate = std::to_string(ordinal);
+                    identity.specifiers.is_definition = false;
+                    identity.payload_kind =
+                        structural_analysis::declaration_payload_kind::none;
+                    identity.body_or_initializer_range = {};
+                    probe.declarations.push_back(std::move(identity));
+                }
+            }
+        } else {
+            structural_analysis::declaration_record identity;
+            identity.stable_usr = "c:@F@fixture_probe_"
+                + std::to_string(
+                    artifact.logical_coordinate_ordinals.front());
+            identity.qualified_name = "fixture::probe_identity";
+            identity.source_identity = "fixture-provenance-"
+                + std::to_string(
+                    artifact.logical_coordinate_ordinals.front());
+            identity.source_coordinate = std::to_string(
+                artifact.logical_coordinate_ordinals.front());
+            identity.linkage = structural_analysis::entity_linkage::module;
+            identity.attachment =
+                structural_analysis::module_attachment::named_module;
+            probe.declarations.push_back(std::move(identity));
+        }
         plan.declaration_probes.push_back(std::move(probe));
     }
     plan.frontend_actions = frontend_action_counts{
@@ -355,9 +573,10 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
         .artifact_render_passes = 2u,
         .body_bearing_compiler_invocations = 0u,
     };
+    const bool selector = plan.policy == emission_policy::selector_api;
     plan.compilation_obligations = cmake_compilation_obligations{
-        .api_partition_units = 1u,
-        .selector_partition_units = 1u,
+        .api_partition_units = selector ? 1u : 0u,
+        .selector_partition_units = selector ? 1u : 0u,
         .body_bearing_implementation_units =
             static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
     };
@@ -419,13 +638,17 @@ enum class topology_mutation : std::uint8_t {
         structural_analysis::scan_token_slice(
             source_path, source);
     materialization_region region = extract_materialization_region(
-        sliced, "fixture.output", source);
+        sliced,
+        "fixture.output",
+        emission_policy::selector_api,
+        source);
     topology_plan topology = build_topology_plan(std::move(region), 16u);
     validate_entry_ownership(topology);
     std::vector<std::uint32_t> enabled = enabled_ordinals(
         topology, "all_coordinates");
     return generation_plan{
         .topology = std::move(topology),
+        .policy = emission_policy::selector_api,
         .repository_root = repository_root,
         .source_path = source_path,
         .output_root = repository_root / "generated/flatten_fixture_mutation",
@@ -443,6 +666,33 @@ enum class topology_mutation : std::uint8_t {
 }
 
 inline void verify_closed_grammar() {
+    require(
+        topology_schema_revision == 2u
+            && artifact_schema_revision == 4u
+            && publication_schema_revision == 1u
+            && parse_emission_policy("selector_api")
+                == emission_policy::selector_api
+            && parse_emission_policy("implementation_owners")
+                == emission_policy::implementation_owners
+            && spell_emission_policy(emission_policy::selector_api)
+                == "selector_api"
+            && spell_emission_policy(
+                   emission_policy::implementation_owners)
+                == "implementation_owners",
+        "emission policy has two exact stable wire spellings and only topology/artifact schemas advance");
+    for (const std::string_view malformed : {
+             std::string_view{},
+             std::string_view{"selector"},
+             std::string_view{"owner"},
+             std::string_view{"implementation-owner"},
+             std::string_view{"implementation_owners "},
+         }) {
+        require_rejected(
+            [malformed] {
+                static_cast<void>(parse_emission_policy(malformed));
+            },
+            "emission policy accepted a non-canonical spelling");
+    }
     const std::vector<std::string> parsed = parse_closed_string_arguments(
         R"("identity", "abi", "i32", "::std::int32_t")");
     require(
@@ -520,7 +770,10 @@ inline void verify_malformed_materialization_sources() {
                     structural_analysis::scan_token_slice(
                         "malformed_template_flatten.cppm", source);
                 materialization_region region = extract_materialization_region(
-                    sliced, "fixture.output", source);
+                    sliced,
+                    "fixture.output",
+                    emission_policy::selector_api,
+                    source);
                 static_cast<void>(build_topology_plan(std::move(region), 32u));
             },
             message);
@@ -593,18 +846,74 @@ inline void verify_zip_product_and_digest() {
     require(
         digest != changed.topology_digest,
         "topology digest authenticates every zipped binding replacement");
+
+    generation_plan owner = owner_fixture_plan();
+    require(
+        owner.topology.canonical_digest_input.contains(
+            "revision=2\noutput-module\tfixture.owner\n"
+            "emission-policy\timplementation_owners\n")
+            && plan.topology.canonical_digest_input.contains(
+                "revision=2\noutput-module\tfixture.output\n"
+                "emission-policy\tselector_api\n")
+            && owner.topology.topology_digest != digest,
+        "topology digest authenticates the closed emission policy");
+    topology_plan tampered = owner.topology;
+    tampered.region.policy = emission_policy::selector_api;
+    require_rejected(
+        [&tampered] {
+            generation_plan invalid = owner_fixture_plan();
+            invalid.topology = tampered;
+            static_cast<void>(render_topology_manifest(invalid));
+        },
+        "a policy mutation cannot retain a stale topology digest");
+}
+
+inline void verify_owner_entry_rejection() {
+    const auto reject_owner = [](std::string source, std::string_view message) {
+        require_rejected(
+            [&source] {
+                const structural_analysis::translation_unit sliced =
+                    structural_analysis::scan_token_slice(
+                        "owner_entry_rejection.cppm", source);
+                materialization_region region = extract_materialization_region(
+                    sliced,
+                    "fixture.owner",
+                    emission_policy::implementation_owners,
+                    source);
+                topology_plan topology =
+                    build_topology_plan(std::move(region), 16u);
+                validate_entry_ownership(topology);
+            },
+            message);
+    };
+    reject_owner(
+        replace_once(
+            std::string{owner_fixture_source()},
+            "[[bioseq::template_flatten_when(\"route\", \"raw\")]]\nint owner_raw",
+            "[[bioseq::template_flatten_when(\"route\", \"raw\")]]\n"
+            "[[bioseq::template_flatten_entry(\"root\")]]\n"
+            "int owner_raw"),
+        "implementation owners reject a root entry");
+    reject_owner(
+        replace_once(
+            std::string{owner_fixture_source()},
+            "[[bioseq::template_flatten_when(\"route\", \"segmented\")]]\nint owner_segmented",
+            "[[bioseq::template_flatten_when(\"route\", \"segmented\")]]\n"
+            "[[bioseq::template_flatten_entry(\"leaf\")]]\n"
+            "int owner_segmented"),
+        "implementation owners reject every generated API entry, not only root");
 }
 
 inline void verify_configure_structural_digest_mutations() {
     constexpr std::array expected_digests{
         std::string_view{
-            "e97ead358799c54147182004259e7f5a8ab6992094cf31b4fa5ff816bb695561"},
+            "f0a6a63d968e422eefdae2912997fbec2df1592fc74a2d8b26d37fee83a52bb8"},
         std::string_view{
-            "3c7692b6d3be17a4719670c5b0e25fc8729af4e38f8dc9051a70cafe03fd9aaa"},
+            "817700a8d9a98ffc0757325da633d38229d8999e5b04b8b45fd35721e0788b93"},
         std::string_view{
-            "7c41e4433682c0f51bfbeea6e269873de8e96f322a5b1190f489af073bbabe6d"},
+            "881fb36ea89da2cd7d84e5033386228b8a3d715d8b49aa54e8cd7050b172ec1a"},
         std::string_view{
-            "18180e4fa629891eb7fe8eb8a4f0a025020f4fe054f16a2d5081fc9e3a0b0632"},
+            "8d7878969841fd89d88d2472a217c4443bc2ec61839b04df206d1b95cbd6080d"},
     };
     std::array<generation_plan, 4u> plans{
         fixture_plan(),
@@ -775,6 +1084,81 @@ inline void verify_scheduler_profile_policy() {
     require(
         !coordinate_enabled_for_profile(known, "all_alphabets_uint64"),
         "all_alphabets_uint64 rejects labels outside its closed policy");
+
+    const auto coordinate = [](
+                                std::initializer_list<axis_case_assignment>
+                                    assignments) {
+        return materialization_coordinate{
+            .assignments = assignments,
+        };
+    };
+    const materialization_coordinate alphabet_dna4 = coordinate({
+        axis_case_assignment{
+            .group = "alphabet",
+            .role = axis_role::identity,
+            .case_label = "dna4",
+        },
+    });
+    const materialization_coordinate alphabet_dna5 = coordinate({
+        axis_case_assignment{
+            .group = "alphabet",
+            .role = axis_role::identity,
+            .case_label = "dna5",
+        },
+    });
+    const materialization_coordinate width_w4 = coordinate({
+        axis_case_assignment{
+            .group = "width",
+            .role = axis_role::identity,
+            .case_label = "w4",
+        },
+    });
+    const materialization_coordinate width_w8 = coordinate({
+        axis_case_assignment{
+            .group = "width",
+            .role = axis_role::identity,
+            .case_label = "w8",
+        },
+    });
+    const materialization_coordinate both = coordinate({
+        axis_case_assignment{
+            .group = "alphabet",
+            .role = axis_role::identity,
+            .case_label = "dna5",
+        },
+        axis_case_assignment{
+            .group = "width",
+            .role = axis_role::identity,
+            .case_label = "w8",
+        },
+    });
+    const materialization_coordinate absent = coordinate({
+        axis_case_assignment{
+            .group = "route",
+            .role = axis_role::shard,
+            .case_label = "raw",
+        },
+    });
+    require(
+        coordinate_enabled_for_profile(alphabet_dna4, "dna4_uint64")
+            && !coordinate_enabled_for_profile(
+                alphabet_dna5, "dna4_uint64")
+            && !coordinate_enabled_for_profile(width_w4, "dna4_uint64")
+            && coordinate_enabled_for_profile(width_w8, "dna4_uint64")
+            && coordinate_enabled_for_profile(
+                alphabet_dna5, "all_alphabets_uint64")
+            && coordinate_enabled_for_profile(
+                width_w8, "all_alphabets_uint64")
+            && !coordinate_enabled_for_profile(
+                width_w4, "all_alphabets_uint64")
+            && !coordinate_enabled_for_profile(both, "dna4_uint64")
+            && coordinate_enabled_for_profile(
+                both, "all_alphabets_uint64")
+            && coordinate_enabled_for_profile(absent, "dna4_uint64")
+            && coordinate_enabled_for_profile(
+                absent, "all_alphabets_uint64"),
+        "profile projection independently constrains present alphabet/width "
+        "axes and leaves absent axes unconstrained");
 }
 
 inline constexpr std::array<std::string_view, 8u>
@@ -793,11 +1177,11 @@ inline void verify_production_scheduler_golden() {
     generation_plan plan = production_scheduler_plan();
     require(
         plan.topology.topology_digest
-            == "4d20a72fb4fa5f4137ccbd56bc2e396fbf387126baaf4bdaea08d45a773d405c",
+            == "2ae12145f57a4deaae2edff7c05f4ddd668a7bdfd8354fdb0fc3082373b5ff64",
         "production scheduler topology digest drifted from the reviewed golden");
     validate_configure_topology_digest(
         plan.topology,
-        "4d20a72fb4fa5f4137ccbd56bc2e396fbf387126baaf4bdaea08d45a773d405c");
+        "2ae12145f57a4deaae2edff7c05f4ddd668a7bdfd8354fdb0fc3082373b5ff64");
     require(
         plan.topology.groups.size() == 3u
             && plan.topology.groups[0].name == "alphabet"
@@ -807,15 +1191,6 @@ inline void verify_production_scheduler_golden() {
             && plan.topology.groups[2].name == "shape"
             && plan.topology.groups[2].role == axis_role::shard,
         "production scheduler group order/roles drifted");
-    const auto case_projection = [](const axis_group& group) {
-        std::vector<std::string> result;
-        for (const replacement_case& replacement : group.cases) {
-            result.push_back(
-                replacement.label + '=' + replacement.spelling + '@'
-                + std::to_string(replacement.ordinal));
-        }
-        return result;
-    };
     require(
         case_projection(plan.topology.groups[0])
                 == std::vector<std::string>{
@@ -980,6 +1355,207 @@ inline void verify_production_scheduler_golden() {
                 && inside_support == expected.support_member,
             "production scheduler support/role map drifted");
     }
+}
+
+inline void verify_production_pipe_owner_golden() {
+    generation_plan plan = production_pipe_plan();
+    require(
+        plan.policy == emission_policy::implementation_owners
+            && plan.topology.region.policy
+                == emission_policy::implementation_owners
+            && plan.topology.region.source_module.provided_module
+                == "bioseq.codegen.inputs.pipe_owners"
+            && plan.topology.region.configured_output_module_name
+                == "bioseq.pipeline.pipe"
+            && plan.name == "pipe_owners",
+        "production pipe golden authenticates its scan-only source and owner policy");
+    require(
+        plan.topology.canonical_digest_input.contains(
+            "revision=2\noutput-module\tbioseq.pipeline.pipe\n"
+            "emission-policy\timplementation_owners\n")
+            && plan.topology.topology_digest
+                == bioseq::common::sha256_hex(
+                    plan.topology.canonical_digest_input),
+        "production pipe topology digest seals schema and emission policy");
+    require(
+        plan.topology.groups.size() == 2u
+            && plan.topology.groups[0].name == "alphabet"
+            && plan.topology.groups[0].role == axis_role::identity
+            && plan.topology.groups[0].binding_indices
+                == std::vector<std::size_t>{0u}
+            && plan.topology.groups[1].name == "route"
+            && plan.topology.groups[1].role == axis_role::shard
+            && plan.topology.groups[1].binding_indices
+                == std::vector<std::size_t>{1u}
+            && plan.topology.region.bindings.size() == 2u
+            && plan.topology.region.bindings[0].declaration.name
+                == "owner_dna5"
+            && plan.topology.region.bindings[1].declaration.name
+                == "owner_route"
+            && case_projection(plan.topology.groups[0])
+                == std::vector<std::string>{
+                    "dna4=false@0", "dna5=true@1"}
+            && case_projection(plan.topology.groups[1])
+                == std::vector<std::string>{
+                    "raw=0@0",
+                    "segmented=1@1",
+                    "fragment_index=2@2",
+                    "hash_major=3@3",
+                    "grouped_soa=4@4",
+                    "fragment_query=5@5",
+                },
+        "production pipe owns exactly two alphabets by six ordered routes");
+    constexpr std::array<std::string_view, 6u> routes{
+        "raw",
+        "segmented",
+        "fragment_index",
+        "hash_major",
+        "grouped_soa",
+        "fragment_query",
+    };
+    require(
+        plan.topology.coordinates.size() == 12u
+            && plan.topology.identity_representative_ordinals
+                == std::vector<std::uint32_t>{0u, 6u},
+        "pipe product is twelve units with two alphabet identities");
+    for (std::size_t ordinal = 0u;
+         ordinal < plan.topology.coordinates.size();
+         ++ordinal) {
+        const materialization_coordinate& coordinate =
+            plan.topology.coordinates[ordinal];
+        require(
+            coordinate.ordinal == ordinal
+                && coordinate.assignments.size() == 2u
+                && coordinate.assignments[0].case_label
+                    == (ordinal < routes.size() ? "dna4" : "dna5")
+                && coordinate.assignments[1].case_label
+                    == routes[ordinal % routes.size()]
+                && coordinate.identity_namespace == "bioseq::simd"
+                && coordinate.module_name == "bioseq.pipeline.pipe"
+                && coordinate.relative_path
+                    == std::filesystem::path{
+                        "instance_" + std::to_string(ordinal) + ".cppm"},
+            "pipe coordinate order/path/direct namespace drifted");
+    }
+    require(
+        enabled_ordinals(plan.topology, "dna4_uint64")
+                == std::vector<std::uint32_t>{0u, 1u, 2u, 3u, 4u, 5u}
+            && enabled_ordinals(plan.topology, "all_alphabets_uint64")
+                == std::vector<std::uint32_t>{
+                    0u, 1u, 2u, 3u, 4u, 5u,
+                    6u, 7u, 8u, 9u, 10u, 11u}
+            && enabled_ordinals(plan.topology, "all_coordinates").size()
+                == 12u
+            && enabled_ordinals(
+                   plan.topology,
+                   "all_coordinates_adaptive_lengths")
+                   .size()
+                == 12u
+            && enabled_ordinals(
+                   plan.topology, "extended_kmer_coordinates")
+                   .size()
+                == 12u
+            && enabled_ordinals(plan.topology, "full_specialization").size()
+                == 12u,
+        "pipe profiles project to exact 6/12 owner obligations without reordering");
+
+    struct owner_golden final {
+        std::string_view name;
+        std::string_view route;
+    };
+    constexpr std::array owners{
+        owner_golden{"minimap_port_raw_owned", "raw"},
+        owner_golden{"minimap_port_segmented_owned", "segmented"},
+        owner_golden{
+            "minimap_port_fragment_index_batch_owned", "fragment_index"},
+        owner_golden{
+            "minimap_port_fragment_index_vector_owned", "fragment_index"},
+        owner_golden{"minimap_port_hash_major_owned", "hash_major"},
+        owner_golden{"minimap_port_grouped_soa_owned", "grouped_soa"},
+        owner_golden{"minimap_port_fragment_query_owned", "fragment_query"},
+    };
+    require(
+        plan.topology.region.controlled_declarations.size() == owners.size(),
+        "pipe owns seven external definitions across six routes");
+    for (std::size_t index = 0u; index < owners.size(); ++index) {
+        const owned_declaration& declaration =
+            plan.topology.region.controlled_declarations[index];
+        require(
+            declaration.declaration.name == owners[index].name
+                && declaration.declaration.specifiers.is_definition
+                && !declaration.generated_api_entry
+                && declaration.clauses.size() == 1u
+                && declaration.clauses.front().group == "route"
+                && declaration.clauses.front().accepted_case_labels
+                    == std::vector<std::string>{
+                        std::string{owners[index].route}},
+            "pipe declaration-to-route ownership map drifted");
+    }
+
+    const generation_result generated = render_generation(plan, false);
+    require(
+        artifact_count(
+            generated, materialization_artifact::kind::api_partition)
+                == 0u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::selector_partition)
+                == 0u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::declaration_probe)
+                == 2u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::implementation_unit)
+                == 12u,
+        "full pipe rendering has two inspection probes and 0/0/12 body obligations");
+    std::size_t rendered_definitions = 0u;
+    for (const materialization_artifact& artifact : generated.artifacts) {
+        require(
+            !artifact.content.contains("typed_flat_api")
+                && !artifact.content.contains("typed_flat_selector")
+                && !artifact.content.contains("bioseq_flattened")
+                && !artifact.content.contains("bioseq_flatten_probe_"),
+            "production pipe rendering contains no selector-policy artifact or wrapper");
+        if (artifact.artifact_kind
+            != materialization_artifact::kind::implementation_unit) {
+            continue;
+        }
+        require(
+            occurrences(artifact.content, "module bioseq.pipeline.pipe;") == 1u
+                && occurrences(
+                       artifact.content, "namespace bioseq::simd {")
+                    == 1u,
+            "every pipe owner unit attaches and opens its direct boundary once");
+        const structural_analysis::translation_unit unit =
+            structural_analysis::scan_token_slice(
+                artifact.relative_path, artifact.content);
+        for (const structural_analysis::declaration_record& declaration :
+             unit.declarations) {
+            if (declaration.specifiers.is_definition
+                && std::ranges::find(
+                       owners,
+                       declaration.name,
+                       &owner_golden::name)
+                    != owners.end()) {
+                ++rendered_definitions;
+            }
+        }
+    }
+    require(
+        rendered_definitions == 14u,
+        "twelve pipe units own fourteen definitions because each alphabet's "
+        "fragment-index coordinate owns batch then vector");
+
+    generation_plan dna4 = production_pipe_plan("dna4_uint64");
+    const generation_result dna4_generated = render_generation(dna4, false);
+    require(
+        artifact_count(
+            dna4_generated,
+            materialization_artifact::kind::implementation_unit)
+            == 6u,
+        "dna4 pipe profile has exactly six body-bearing owner units");
 }
 
 inline void verify_production_declaration_heads_and_probes() {
@@ -1338,14 +1914,34 @@ inline void verify_generated_topology() {
     attach_fixture_frontend_evidence(plan);
     const generation_result generated = render_generation(plan);
     require(
-        generated.artifacts.size() == 9u,
+        plan.policy == emission_policy::selector_api
+            && plan.topology.region.policy == emission_policy::selector_api
+            && generated.artifacts.size() == 9u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::api_partition)
+                == 1u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::selector_partition)
+                == 1u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::declaration_probe)
+                == 2u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::implementation_unit)
+                == 4u,
         "two identities/two shards render API, selector, two probes, four units, and one topology manifest");
     require(
         generated.topology_manifest_json.contains(
-            "\"schema_revision\": 1")
+            "\"schema_revision\": 2")
             && generated.topology_manifest_json.contains(
                 "\"generator_identity\": "
-                "\"bioseq-namespace-materialization\""),
+                "\"bioseq-namespace-materialization\"")
+            && generated.topology_manifest_json.contains(
+                "\"emission_policy\": \"selector_api\""),
         "topology manifest uses the current schema and generator identity");
     std::size_t probes = 0u;
     std::size_t instances = 0u;
@@ -1382,6 +1978,203 @@ inline void verify_generated_topology() {
         }
     }
     require(probes == 2u && instances == 4u, "probe/heavy action counts are exact");
+
+    generation_plan mismatch = plan;
+    mismatch.policy = emission_policy::implementation_owners;
+    require_rejected(
+        [&mismatch] { static_cast<void>(render_generation(mismatch, false)); },
+        "generation rejects a command/structural emission-policy mismatch");
+}
+
+inline void verify_owner_generated_topology() {
+    generation_plan plan = owner_fixture_plan();
+    const generation_result provisional = render_generation(plan, false);
+    require(
+        plan.policy == emission_policy::implementation_owners
+            && plan.topology.region.policy
+                == emission_policy::implementation_owners
+            && plan.topology.coordinates.size() == 4u
+            && plan.topology.identity_representative_ordinals
+                == std::vector<std::uint32_t>{0u, 2u}
+            && artifact_count(
+                   provisional,
+                   materialization_artifact::kind::api_partition)
+                == 0u
+            && artifact_count(
+                   provisional,
+                   materialization_artifact::kind::selector_partition)
+                == 0u
+            && artifact_count(
+                   provisional,
+                   materialization_artifact::kind::declaration_probe)
+                == 2u
+            && artifact_count(
+                   provisional,
+                   materialization_artifact::kind::implementation_unit)
+                == 4u,
+        "owner provisional rendering has body-free probes and exactly four "
+        "implementation units, with no typed API or selector");
+    for (const materialization_artifact& artifact : provisional.artifacts) {
+        require(
+            !artifact.content.contains("typed_flat_api")
+                && !artifact.content.contains("typed_flat_selector")
+                && !artifact.content.contains("bioseq_flattened")
+                && !artifact.content.contains("bioseq_flatten_probe_"),
+            "owner rendering must not reuse selector-policy partitions or wrappers");
+        if (artifact.artifact_kind
+            == materialization_artifact::kind::declaration_probe) {
+            std::size_t expected_heads = 0u;
+            for (const std::uint32_t ordinal :
+                 artifact.logical_coordinate_ordinals) {
+                const materialization_coordinate& coordinate =
+                    plan.topology.coordinates.at(ordinal);
+                for (const owned_declaration& owned :
+                     plan.topology.region.controlled_declarations) {
+                    if (!coordinate_matches(coordinate, owned.clauses)) {
+                        continue;
+                    }
+                    ++expected_heads;
+                    require(
+                        occurrences(
+                            artifact.content,
+                            render_entry_head(
+                                plan, owned, coordinate, true)
+                                + ";")
+                            == 1u,
+                        "owner probe must carry every exact selected external declaration head once");
+                }
+            }
+            require(
+                occurrences(artifact.content, "module fixture.owner;") == 1u
+                    && artifact.content.contains("namespace fixture::owner {")
+                    && !artifact.content.contains("return value +")
+                    && expected_heads == 2u,
+                "owner probes attach to the primary and contain only direct-boundary declaration heads");
+        } else if (artifact.artifact_kind
+                   == materialization_artifact::kind::implementation_unit) {
+            require(
+                occurrences(artifact.content, "module fixture.owner;") == 1u
+                    && occurrences(
+                           artifact.content,
+                           "import fixture.neutral;")
+                        == 1u
+                    && occurrences(
+                           artifact.content,
+                           "namespace fixture::owner {")
+                        == 1u
+                    && artifact.logical_coordinate_ordinals.size() == 1u,
+                "owner units attach once, import neutral dependencies once, "
+                "and render directly in the authored namespace");
+        }
+    }
+
+    attach_fixture_frontend_evidence(plan);
+    const generation_result generated = render_generation(plan);
+    require(
+        plan.compilation_obligations.api_partition_units == 0u
+            && plan.compilation_obligations.selector_partition_units == 0u
+            && plan.compilation_obligations
+                   .body_bearing_implementation_units
+                == 4u
+            && generated.artifacts.size() == 5u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::declaration_probe)
+                == 0u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::implementation_unit)
+                == 4u
+            && artifact_count(
+                   generated,
+                   materialization_artifact::kind::manifest)
+                == 1u,
+        "owner publication owns 0/0/N compilable outputs and excludes inspection-only probes");
+    require(
+        generated.topology_manifest_json.contains(
+            "\"schema_revision\": 2")
+            && generated.topology_manifest_json.contains(
+                "\"emission_policy\": \"implementation_owners\"")
+            && generated.artifact_manifest_json.contains(
+                "\"schema_revision\": 4")
+            && generated.artifact_manifest_json.contains(
+                "\"emission_policy\": \"implementation_owners\"")
+            && generated.artifact_manifest_json.contains(
+                "\"api_partition_units\":0")
+            && generated.artifact_manifest_json.contains(
+                "\"selector_partition_units\":0")
+            && generated.artifact_manifest_json.contains(
+                "\"body_bearing_implementation_units\":4"),
+        "owner topology/evidence authenticate policy, schema, and 0/0/N obligations");
+
+    generation_plan mismatch = plan;
+    mismatch.policy = emission_policy::selector_api;
+    require_rejected(
+        [&mismatch] { static_cast<void>(render_generation(mismatch, false)); },
+        "owner rendering rejects a selector-labelled generation plan");
+}
+
+inline void verify_emission_policy_manifest_tamper() {
+    generation_plan selector = fixture_plan();
+    attach_fixture_frontend_evidence(selector);
+    const generation_result generated = render_generation(selector);
+    const auto reject_artifact_manifest = [&](
+                                              std::string_view before,
+                                              std::string_view after,
+                                              std::string_view contract) {
+        const std::string tampered = resealed_replace_once(
+            generated.artifact_manifest_json, before, after);
+        require_rejected(
+            [&] {
+                validate_template_flatten_publication_manifest(
+                    tampered,
+                    "emission-policy contract mutation",
+                    selector.output_root,
+                    selector.topology.topology_digest);
+            },
+            contract);
+    };
+    reject_artifact_manifest(
+        "\"schema_revision\": 4",
+        "\"schema_revision\": 3",
+        "artifact evidence rejects the stale pre-policy schema");
+    reject_artifact_manifest(
+        "\"emission_policy\": \"selector_api\"",
+        "\"emission_policy\": \"implementation_owners\"",
+        "selector artifact evidence cannot be relabelled as owner evidence");
+    reject_artifact_manifest(
+        "\"emission_policy\": \"selector_api\"",
+        "\"emission_policy\": \"unknown_policy\"",
+        "artifact evidence rejects an unknown emission policy");
+
+    generation_plan stale_topology = selector;
+    stale_topology.topology.canonical_digest_input = replace_once(
+        stale_topology.topology.canonical_digest_input,
+        "revision=2\n",
+        "revision=1\n");
+    require_rejected(
+        [&stale_topology] {
+            static_cast<void>(render_topology_manifest(stale_topology));
+        },
+        "topology rendering rejects stale canonical-schema bytes under the current digest");
+
+    generation_plan false_selector_obligation = selector;
+    false_selector_obligation.compilation_obligations.api_partition_units = 0u;
+    require_rejected(
+        [&false_selector_obligation] {
+            static_cast<void>(render_generation(false_selector_obligation));
+        },
+        "selector evidence rejects owner-style 0/1/N obligations");
+
+    generation_plan owner = owner_fixture_plan();
+    attach_fixture_frontend_evidence(owner);
+    generation_plan false_owner_obligation = owner;
+    false_owner_obligation.compilation_obligations.api_partition_units = 1u;
+    require_rejected(
+        [&false_owner_obligation] {
+            static_cast<void>(render_generation(false_owner_obligation));
+        },
+        "owner evidence rejects selector-style 1/0/N obligations");
 }
 
 inline void verify_template_flatten_manifest_evidence() {
@@ -1397,7 +2190,9 @@ inline void verify_template_flatten_manifest_evidence() {
     require(
         generated.manifest_identity.size() == 64u
             && generated.artifact_manifest_json.contains(
-                "\"schema_revision\": 3")
+                "\"schema_revision\": 4")
+            && generated.artifact_manifest_json.contains(
+                "\"emission_policy\": \"selector_api\"")
             && generated.artifact_manifest_json.contains(
                 "\"generator_identity\": "
                 "\"bioseq-namespace-materialization\"")
@@ -2334,16 +3129,20 @@ inline void run_namespace_materialization_contract_tests() {
     detail::verify_closed_grammar();
     detail::verify_malformed_materialization_sources();
     detail::verify_zip_product_and_digest();
+    detail::verify_owner_entry_rejection();
     detail::verify_configure_structural_digest_mutations();
     detail::verify_scheduler_highway_separation();
     detail::verify_scheduler_profile_policy();
     detail::verify_production_scheduler_golden();
+    detail::verify_production_pipe_owner_golden();
     detail::verify_production_declaration_heads_and_probes();
     detail::verify_exact_edits();
     detail::verify_coordinate_axis_domains();
     detail::verify_record_probe_provenance_placement();
     detail::verify_alias_probe_provenance_placement();
     detail::verify_generated_topology();
+    detail::verify_owner_generated_topology();
+    detail::verify_emission_policy_manifest_tamper();
     detail::verify_template_flatten_manifest_evidence();
     detail::verify_policy_neutral_publication_envelope();
     detail::verify_authenticated_incremental_publication();

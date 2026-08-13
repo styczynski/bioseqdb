@@ -1713,11 +1713,13 @@ template <class p_function>
 }
 
 template <class... p_arguments>
-[[nodiscard]] match_result_collection minimap_port_pg_checked(p_arguments&&... args) {
+[[nodiscard]] match_result_collection minimap_port_raw_pg_checked(
+        p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap_port",
         [&args...]() -> match_result_collection {
-            return minimap_port_owned(std::forward<p_arguments>(args)...);
+            return minimap_port_raw_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 
@@ -1733,12 +1735,34 @@ template <class... p_arguments>
 }
 
 template <class... p_arguments>
-[[nodiscard]] match_result_collection minimap2_port_with_index_pg_checked(
+[[nodiscard]] match_result_collection minimap_port_fragment_index_vector_pg_checked(
         p_arguments&&... args) {
     return run_aligner_pg_checked(
         "minimap2_port_with_index",
         [&args...]() -> match_result_collection {
-            return minimap2_port_with_index_owned(
+            return minimap_port_fragment_index_vector_owned(
+                std::forward<p_arguments>(args)...);
+		});
+}
+
+template <class... p_arguments>
+[[nodiscard]] match_result_collection minimap_port_hash_major_pg_checked(
+        p_arguments&&... args) {
+    return run_aligner_pg_checked(
+        "minimap2_port_with_index",
+        [&args...]() -> match_result_collection {
+            return minimap_port_hash_major_owned(
+                std::forward<p_arguments>(args)...);
+		});
+}
+
+template <class... p_arguments>
+[[nodiscard]] match_result_collection minimap_port_grouped_soa_pg_checked(
+        p_arguments&&... args) {
+    return run_aligner_pg_checked(
+        "minimap2_port_with_index",
+        [&args...]() -> match_result_collection {
+            return minimap_port_grouped_soa_owned(
                 std::forward<p_arguments>(args)...);
 		});
 }
@@ -2450,7 +2474,7 @@ template <sequence_alphabet p_alphabet>
                     clip_lo_bp,
                     clip_hi_bp,
                     backend);
-            return minimap2_port_with_index_pg_checked(
+            return minimap_port_fragment_index_vector_pg_checked(
                 lazy_query_view,
                 target_view,
                 query_sketch.minimizers,
@@ -3272,7 +3296,7 @@ template <class p_sequence>
         collection = target_bp_size > postgres_segmentation_threshold_bp
             ? minimap_port_segmented_pg_checked(
                 lazy_query_view, observed_target, params)
-            : minimap_port_pg_checked(
+            : minimap_port_raw_pg_checked(
                 lazy_query_view, observed_target, params);
     } else if (loc_opt.has_value()) {
         // Compute last-fragment padding from the canonical facade
@@ -3587,7 +3611,7 @@ template <class p_sequence>
 									? retained_prepared_query_sketch->minimizers
 									: *query_minimizers;
 							if (has_hash_major_reader) {
-							collection = minimap2_port_with_index_pg_checked(
+							collection = minimap_port_hash_major_pg_checked(
 								fq_pg_view,
 								ft_pg_view,
 							alignment_query_minimizers,
@@ -3640,7 +3664,7 @@ template <class p_sequence>
 									const std::uint64_t prepare_host_wall_ns =
 										elapsed_dispatch_host_ns(prepare_started_ns);
 									match_result_collection out =
-										minimap2_port_with_index_owned(
+										minimap_port_fragment_query_owned(
 										fq_pg_view,
 										ft_pg_view,
 										alignment_query_minimizers,
@@ -3655,7 +3679,7 @@ template <class p_sequence>
 										return out;
 								});
 							} else {
-							collection = minimap2_port_with_index_pg_checked(
+							collection = minimap_port_grouped_soa_pg_checked(
 								fq_pg_view,
 								ft_pg_view,
 								alignment_query_minimizers,
@@ -3684,7 +3708,7 @@ template <class p_sequence>
 				&& prepared_group != nullptr
 				&& prepared_group->target_index) {
 				ensure_q();
-				collection = minimap2_port_with_index_pg_checked(
+				collection = minimap_port_fragment_index_vector_pg_checked(
 					fq_pg_view,
 					ft_pg_view,
 					*query_minimizers,
@@ -3819,7 +3843,7 @@ template <class p_sequence>
 	                                        if (prepared_group == nullptr) if (auto hit =
 	                                                bioseq::storage::indexing::lookup_assembled_index(
 	                                                    cache_key)) {
-	                                            return minimap2_port_with_index_pg_checked(
+	                                            return minimap_port_fragment_index_vector_pg_checked(
 	                                                fq_pg_view,
 	                                                ft_pg_view,
 	                                                *query_minimizers,
@@ -3862,7 +3886,7 @@ template <class p_sequence>
 	                                                    prepared_group->key_set_checksum;
 	                                                ++cpu_prepared_target->physical_target_index_reads;
 	                                            }
-	                                            return minimap2_port_with_index_pg_checked(
+	                                            return minimap_port_fragment_index_vector_pg_checked(
 	                                                fq_pg_view,
 	                                                ft_pg_view,
 	                                                *query_minimizers,
@@ -3874,7 +3898,7 @@ template <class p_sequence>
 	                                                        prepared_group->key_set_checksum});
 	                                        }
 	                                        match_result_collection out =
-	                                            minimap2_port_with_index_pg_checked(
+	                                            minimap_port_fragment_index_vector_pg_checked(
 	                                                fq_pg_view,
 	                                                ft_pg_view,
 	                                                *query_minimizers,
@@ -4003,7 +4027,7 @@ template <class p_sequence>
 	                                                if (prepared_group == nullptr) if (auto hit =
 	                                                        bioseq::storage::indexing::lookup_assembled_index(
 	                                                            cache_key)) {
-	                                                    return minimap2_port_with_index_pg_checked(
+	                                                    return minimap_port_fragment_index_vector_pg_checked(
 	                                                        fq_pg_view,
 	                                                        ft_pg_view,
 	                                                        query_vec,
@@ -4054,7 +4078,7 @@ template <class p_sequence>
 	                                                            prepared_group->key_set_checksum;
 	                                                        ++cpu_prepared_target->physical_target_index_reads;
 	                                                    }
-	                                                    return minimap2_port_with_index_pg_checked(
+	                                                    return minimap_port_fragment_index_vector_pg_checked(
 	                                                        fq_pg_view,
 	                                                        ft_pg_view,
 	                                                        query_vec,
@@ -4066,7 +4090,7 @@ template <class p_sequence>
 	                                                                prepared_group->key_set_checksum});
 	                                                }
 	                                                match_result_collection out =
-	                                                    minimap2_port_with_index_pg_checked(
+	                                                    minimap_port_fragment_index_vector_pg_checked(
 	                                                        fq_pg_view,
 	                                                        ft_pg_view,
 	                                                        query_vec,
@@ -4284,7 +4308,7 @@ template <class p_sequence>
                             if (auto hit =
                                 bioseq::storage::indexing::lookup_assembled_index(
                                     cache_key)) {
-                                return minimap2_port_with_index_pg_checked(
+                                return minimap_port_fragment_index_vector_pg_checked(
                                     fq_pg_view,
                                     ft_pg_view,
                                     *query_minimizers,
@@ -4296,7 +4320,7 @@ template <class p_sequence>
                         }
                         auto idx = assemble_ram_one(cs_u, ce_u);
                         match_result_collection out =
-                            minimap2_port_with_index_pg_checked(
+                            minimap_port_fragment_index_vector_pg_checked(
                                 fq_pg_view,
                                 ft_pg_view,
                                 *query_minimizers,
@@ -4527,7 +4551,7 @@ template <class p_sequence>
                     (target_bp_size > postgres_segmentation_threshold_bp)
                         ? minimap_port_segmented_pg_checked(
                             fq_pg_view, ft_pg_view, params)
-                        : minimap_port_pg_checked(
+                        : minimap_port_raw_pg_checked(
                             fq_pg_view, ft_pg_view, params);
                 stage_recompute_minimizer_sequence_build_if_selected(
                     *scanner_pg_ctx,
@@ -4550,7 +4574,7 @@ template <class p_sequence>
             (target_bp_size > postgres_segmentation_threshold_bp)
                 ? minimap_port_segmented_pg_checked(
                     lazy_query_view, target_view, params)
-                : minimap_port_pg_checked(
+                : minimap_port_raw_pg_checked(
                     lazy_query_view, target_view, params);
     }
 
@@ -4623,7 +4647,7 @@ template <class p_sequence>
         bioseq::storage::make_lazy_sequence_view(query_seq);
     const auto lazy_target_view =
         bioseq::storage::make_lazy_sequence_view(target_seq);
-    return minimap_port_pg_checked(
+    return minimap_port_raw_pg_checked(
         lazy_query_view, lazy_target_view, params);
 }
 
@@ -4657,7 +4681,7 @@ template <class p_sequence>
     bioseq::storage::with_chunked_lazy_sequence(
         query_seq, target_seq,
         [&collection, &params](auto query_view, auto target_view) {
-            collection = minimap_port_pg_checked(
+            collection = minimap_port_raw_pg_checked(
                 query_view, target_view, params);
         });
     return collection;
@@ -4855,7 +4879,7 @@ template <class p_sequence>
             /*
              * Query minimizers are computed once per batch for the
              * prebuilt-index path (every row reuses the same query).
-             * Recompute-path rows use minimap_port_pg_checked(), which does its
+             * Recompute-path rows use minimap_port_raw_pg_checked(), which does its
              * own sketching; the extra allocation here is avoided
              * for those rows via the optional nested-scope.
              */
@@ -7111,14 +7135,16 @@ template <class p_sequence>
 							 worker_bounded_fragment_wave_size,
 							 fragment_wave_size]()
                                     -> match_result_collection {
-                                const auto align_query =
+                                const auto align_hash_major_query =
                                     [&native_collections,
                                      &native_query_params,
                                      resident_target_view,
                                      &retained_query_sketches,
                                      per_row_query_hdrs](
                                             const std::size_t row,
-                                            const auto& target_index) {
+                                            const bioseq::indexing::
+                                                hash_major_minimizer_selective_reader&
+                                                    target_index) {
                                         compact_sequence_range<p_sequence>
                                             query_seq{
                                                 *(*per_row_query_hdrs)[row]};
@@ -7127,7 +7153,36 @@ template <class p_sequence>
                                                 make_lazy_sequence_view(
                                                     query_seq);
                                         native_collections[row] =
-                                            minimap2_port_with_index_owned(
+                                            minimap_port_hash_major_owned(
+                                                lazy_query_view,
+                                                resident_target_view,
+                                                retained_query_sketches[row]
+                                                    ->minimizers,
+                                                target_index,
+                                                native_query_params[row],
+                                                /*gpu_index_cache=*/nullptr,
+                                                bioseq::indexing::
+                                                    gpu_index_cache_identity{});
+                                    };
+                                const auto align_fragment_query =
+                                    [&native_collections,
+                                     &native_query_params,
+                                     resident_target_view,
+                                     &retained_query_sketches,
+                                     per_row_query_hdrs](
+                                            const std::size_t row,
+                                            const bioseq::indexing::
+                                                prepared_fragment_anchor_batch::
+                                                    query_handle& target_index) {
+                                        compact_sequence_range<p_sequence>
+                                            query_seq{
+                                                *(*per_row_query_hdrs)[row]};
+                                        const auto lazy_query_view =
+                                            bioseq::storage::
+                                                make_lazy_sequence_view(
+                                                    query_seq);
+                                        native_collections[row] =
+                                            minimap_port_fragment_query_owned(
                                                 lazy_query_view,
                                                 resident_target_view,
                                                 retained_query_sketches[row]
@@ -7150,14 +7205,14 @@ template <class p_sequence>
                                             bioseq::parallelism::
                                                 task_parallel_region::
                                                     query_batch,
-                                            [&align_query,
+                                            [&align_hash_major_query,
                                              hash_major_reader](
                                                     const std::size_t lo,
                                                     const std::size_t hi) {
                                                 for (std::size_t row = lo;
                                                      row < hi;
                                                      ++row) {
-                                                    align_query(
+                                                    align_hash_major_query(
                                                         row,
                                                         *hash_major_reader);
                                                 }
@@ -7363,8 +7418,8 @@ template <class p_sequence>
 													bioseq::parallelism::
 												task_parallel_region::
 															query_batch,
-													[&align_query,
-													 &prepared_seed_batch,
+											[&align_fragment_query,
+											 &prepared_seed_batch,
 													 wave_begin](
 															const std::size_t lo,
 															const std::size_t hi) {
@@ -7376,8 +7431,8 @@ template <class p_sequence>
 																	query_view(
 																		row
 																			- wave_begin);
-															align_query(
-																row,
+													align_fragment_query(
+														row,
 																query_index);
 														}
 													});

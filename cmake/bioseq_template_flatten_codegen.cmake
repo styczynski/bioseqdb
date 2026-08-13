@@ -194,30 +194,44 @@ endfunction()
 
 function(_bioseq_template_flatten_profile_enabled
     profile alphabet_label width_label output_variable)
+  set(_enabled TRUE)
   if(profile STREQUAL "dna4_uint64")
-    if(alphabet_label STREQUAL "dna4" AND width_label STREQUAL "w8")
-      set(_enabled TRUE)
-    else()
+    if((NOT alphabet_label STREQUAL "" AND
+        NOT alphabet_label STREQUAL "dna4") OR
+       (NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8"))
       set(_enabled FALSE)
     endif()
   elseif(profile STREQUAL "all_alphabets_uint64")
-    if((alphabet_label STREQUAL "dna4" OR alphabet_label STREQUAL "dna5")
-        AND width_label STREQUAL "w8")
-      set(_enabled TRUE)
-    else()
+    if((NOT alphabet_label STREQUAL "" AND
+        NOT (alphabet_label STREQUAL "dna4" OR
+             alphabet_label STREQUAL "dna5")) OR
+       (NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8"))
       set(_enabled FALSE)
     endif()
-  else()
-    set(_enabled TRUE)
   endif()
   set(${output_variable} ${_enabled} PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_template_flatten_resolve_emission_policy
+    requested output_variable)
+  if("${requested}" STREQUAL "")
+    set(_resolved selector_api)
+  elseif("${requested}" STREQUAL "selector_api" OR
+      "${requested}" STREQUAL "implementation_owners")
+    set(_resolved "${requested}")
+  else()
+    _bioseq_template_flatten_fail(
+      "EMISSION_POLICY must be selector_api or implementation_owners; "
+      "got '${requested}'")
+  endif()
+  set(${output_variable} "${_resolved}" PARENT_SCOPE)
 endfunction()
 
 # Performs bounded configure-time lexical topology discovery without rendering
 # or compiling production C++.
 function(bioseq_template_flatten_probe)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
-    "NAME;SOURCE;OUTPUT_ROOT;OUTPUT_MODULE;PROFILE;OUT_CONFIGURE_TOPOLOGY_MANIFEST;OUT_TOPOLOGY_DIGEST;OUT_ENABLED_ORDINALS;OUT_ENABLED_SOURCES"
+    "NAME;SOURCE;OUTPUT_ROOT;OUTPUT_MODULE;PROFILE;EMISSION_POLICY;OUT_CONFIGURE_TOPOLOGY_MANIFEST;OUT_TOPOLOGY_DIGEST;OUT_ENABLED_ORDINALS;OUT_ENABLED_SOURCES"
     "")
   foreach(_required IN ITEMS NAME SOURCE OUTPUT_ROOT OUTPUT_MODULE PROFILE
       OUT_CONFIGURE_TOPOLOGY_MANIFEST OUT_TOPOLOGY_DIGEST
@@ -231,6 +245,8 @@ function(bioseq_template_flatten_probe)
     _bioseq_template_flatten_fail(
       "unknown probe arguments: ${ARG_UNPARSED_ARGUMENTS}")
   endif()
+  _bioseq_template_flatten_resolve_emission_policy(
+    "${ARG_EMISSION_POLICY}" _emission_policy)
   if(NOT ARG_NAME MATCHES "^[a-z][a-z0-9_]*$")
     _bioseq_template_flatten_fail("invalid NAME '${ARG_NAME}'")
   endif()
@@ -258,8 +274,13 @@ function(bioseq_template_flatten_probe)
   _bioseq_template_flatten_canonical_root(
     "${ARG_OUTPUT_ROOT}" _output_root)
   set(_configure_manifest "${_output_root}/topology.configure.json")
-  set(_api_partition "${_output_root}/typed_flat_api.cppm")
-  set(_selector_partition "${_output_root}/typed_flat_selector.cppm")
+  if(_emission_policy STREQUAL "selector_api")
+    set(_api_partition "${_output_root}/typed_flat_api.cppm")
+    set(_selector_partition "${_output_root}/typed_flat_selector.cppm")
+  else()
+    set(_api_partition "")
+    set(_selector_partition "")
+  endif()
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${_source_path}")
   file(READ "${_source_path}" _source)
@@ -406,8 +427,9 @@ function(bioseq_template_flatten_probe)
   endif()
 
   set(_canonical
-    "bioseq-template-flatten-topology\nrevision=1\n")
+    "bioseq-template-flatten-topology\nrevision=2\n")
   string(APPEND _canonical "output-module\t${ARG_OUTPUT_MODULE}\n")
+  string(APPEND _canonical "emission-policy\t${_emission_policy}\n")
   set(_group_ordinal 0)
   foreach(_group IN LISTS _groups)
     set(_role_variable "_bioseq_tf_group_${_group}_role")
@@ -471,17 +493,8 @@ function(bioseq_template_flatten_probe)
       math(EXPR _group_ordinal "${_group_ordinal} + 1")
     endforeach()
     string(APPEND _canonical "\n")
-    if(_alphabet STREQUAL "" OR _width STREQUAL "")
-      if(ARG_PROFILE STREQUAL "dna4_uint64"
-          OR ARG_PROFILE STREQUAL "all_alphabets_uint64")
-        _bioseq_template_flatten_fail(
-          "PROFILE ${ARG_PROFILE} requires identity groups alphabet and width")
-      endif()
-      set(_enabled TRUE)
-    else()
-      _bioseq_template_flatten_profile_enabled(
-        ${ARG_PROFILE} "${_alphabet}" "${_width}" _enabled)
-    endif()
+    _bioseq_template_flatten_profile_enabled(
+      ${ARG_PROFILE} "${_alphabet}" "${_width}" _enabled)
     set(_relative_path "instance_${_ordinal}.cppm")
     string(REPLACE ";" "," _assignments_encoded "${_assignments}")
     list(APPEND _coordinate_records
@@ -493,7 +506,8 @@ function(bioseq_template_flatten_probe)
   endforeach()
   string(SHA256 _topology_digest "${_canonical}")
 
-  if(ARG_NAME STREQUAL "dispatch_processor_typed")
+  if(ARG_NAME STREQUAL "dispatch_processor_typed" AND
+      _emission_policy STREQUAL "selector_api")
     list(LENGTH _enabled_ordinals _enabled_count)
     if(ARG_PROFILE STREQUAL "dna4_uint64"
         AND NOT _enabled_count EQUAL 7)
@@ -514,6 +528,8 @@ function(bioseq_template_flatten_probe)
   _bioseq_template_flatten_json_quote(
     "bioseq-namespace-materialization" _q_generator_identity)
   _bioseq_template_flatten_json_quote("template_flatten" _q_policy)
+  _bioseq_template_flatten_json_quote(
+    "${_emission_policy}" _q_emission_policy)
   _bioseq_template_flatten_json_quote("${ARG_NAME}" _q_name)
   _bioseq_template_flatten_json_quote("${_source_path}" _q_source)
   _bioseq_template_flatten_json_quote("${_source_sha256}" _q_source_sha)
@@ -521,12 +537,19 @@ function(bioseq_template_flatten_probe)
   _bioseq_template_flatten_json_quote("${ARG_OUTPUT_MODULE}" _q_module)
   _bioseq_template_flatten_json_quote("${ARG_PROFILE}" _q_profile)
   _bioseq_template_flatten_json_quote("${_topology_digest}" _q_digest)
-  _bioseq_template_flatten_json_quote("${_api_partition}" _q_api)
-  _bioseq_template_flatten_json_quote("${_selector_partition}" _q_selector)
-  set(_json "{\n  \"schema_revision\": 1,\n")
+  if(_emission_policy STREQUAL "selector_api")
+    _bioseq_template_flatten_json_quote("${_api_partition}" _q_api)
+    _bioseq_template_flatten_json_quote(
+      "${_selector_partition}" _q_selector)
+  else()
+    set(_q_api null)
+    set(_q_selector null)
+  endif()
+  set(_json "{\n  \"schema_revision\": 2,\n")
   string(APPEND _json
     "  \"generator_identity\": ${_q_generator_identity},\n"
     "  \"policy\": ${_q_policy},\n"
+    "  \"emission_policy\": ${_q_emission_policy},\n"
     "  \"name\": ${_q_name},\n"
     "  \"source_path\": ${_q_source},\n"
     "  \"source_sha256\": ${_q_source_sha},\n"
@@ -693,7 +716,7 @@ endfunction()
 
 function(bioseq_template_flatten_read_group)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
-    "TOPOLOGY_MANIFEST;ROLE;GROUP;OUT_LABELS;OUT_REPLACEMENTS;OUT_ORDINALS"
+    "TOPOLOGY_MANIFEST;ROLE;GROUP;EMISSION_POLICY;OUT_LABELS;OUT_REPLACEMENTS;OUT_ORDINALS"
     "")
   foreach(_required IN ITEMS TOPOLOGY_MANIFEST ROLE GROUP OUT_LABELS
       OUT_REPLACEMENTS OUT_ORDINALS)
@@ -706,15 +729,25 @@ function(bioseq_template_flatten_read_group)
     _bioseq_template_flatten_fail(
       "unknown read_group arguments: ${ARG_UNPARSED_ARGUMENTS}")
   endif()
+  _bioseq_template_flatten_resolve_emission_policy(
+    "${ARG_EMISSION_POLICY}" _emission_policy)
   _bioseq_template_flatten_canonical_source(
     "${ARG_TOPOLOGY_MANIFEST}" TOPOLOGY_MANIFEST _manifest)
   file(READ "${_manifest}" _json)
   string(JSON _schema_type TYPE "${_json}" schema_revision)
   string(JSON _schema_revision GET "${_json}" schema_revision)
+  string(JSON _generator_identity GET "${_json}" generator_identity)
+  string(JSON _policy GET "${_json}" policy)
+  string(JSON _recorded_emission_policy GET
+    "${_json}" emission_policy)
   if(NOT _schema_type STREQUAL "NUMBER"
-      OR NOT _schema_revision STREQUAL "1")
+      OR NOT _schema_revision STREQUAL "2"
+      OR NOT _generator_identity STREQUAL
+        "bioseq-namespace-materialization"
+      OR NOT _policy STREQUAL "template_flatten"
+      OR NOT _recorded_emission_policy STREQUAL _emission_policy)
     _bioseq_template_flatten_fail(
-      "unsupported configure topology schema revision")
+      "configure topology identity, schema, or emission policy mismatch")
   endif()
   string(JSON _group_count LENGTH "${_json}" groups)
   set(_found FALSE)
@@ -775,12 +808,12 @@ endfunction()
 
 function(bioseq_add_template_flatten_codegen)
   cmake_parse_arguments(PARSE_ARGV 0 ARG ""
-    "NAME;SOURCE;OUTPUT_ROOT;OUTPUT_MODULE;CONFIGURE_TOPOLOGY_MANIFEST;EXPECTED_TOPOLOGY_DIGEST;COMPILE_DATABASE;SIGNATURE_SOURCE;PCM_ROOT;OUT_API_PARTITION;OUT_SELECTOR_PARTITION;OUT_IMPLEMENTATION_UNITS;OUT_GENERATION_TARGET;OUT_ARTIFACT_MANIFEST"
+    "NAME;SOURCE;OUTPUT_ROOT;OUTPUT_MODULE;EMISSION_POLICY;CONFIGURE_TOPOLOGY_MANIFEST;EXPECTED_TOPOLOGY_DIGEST;COMPILE_DATABASE;SIGNATURE_SOURCE;PCM_ROOT;OUT_API_PARTITION;OUT_SELECTOR_PARTITION;OUT_IMPLEMENTATION_UNITS;OUT_GENERATION_TARGET;OUT_ARTIFACT_MANIFEST"
     "ENABLED_ORDINALS;PREPARE_DEPENDS")
   foreach(_required IN ITEMS NAME SOURCE OUTPUT_ROOT OUTPUT_MODULE
       CONFIGURE_TOPOLOGY_MANIFEST EXPECTED_TOPOLOGY_DIGEST COMPILE_DATABASE
-      SIGNATURE_SOURCE PCM_ROOT OUT_API_PARTITION OUT_SELECTOR_PARTITION
-      OUT_IMPLEMENTATION_UNITS OUT_GENERATION_TARGET OUT_ARTIFACT_MANIFEST)
+      SIGNATURE_SOURCE PCM_ROOT OUT_IMPLEMENTATION_UNITS
+      OUT_GENERATION_TARGET OUT_ARTIFACT_MANIFEST)
     if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
       _bioseq_template_flatten_fail(
         "bioseq_add_template_flatten_codegen requires ${_required}")
@@ -789,6 +822,20 @@ function(bioseq_add_template_flatten_codegen)
   if(ARG_UNPARSED_ARGUMENTS)
     _bioseq_template_flatten_fail(
       "unknown add arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  _bioseq_template_flatten_resolve_emission_policy(
+    "${ARG_EMISSION_POLICY}" _emission_policy)
+  if(_emission_policy STREQUAL "selector_api")
+    foreach(_required IN ITEMS OUT_API_PARTITION OUT_SELECTOR_PARTITION)
+      if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
+        _bioseq_template_flatten_fail(
+          "selector_api emission requires ${_required}")
+      endif()
+    endforeach()
+  elseif(DEFINED ARG_OUT_API_PARTITION OR
+      DEFINED ARG_OUT_SELECTOR_PARTITION)
+    _bioseq_template_flatten_fail(
+      "implementation_owners emission does not accept API or selector outputs")
   endif()
   string(LENGTH "${ARG_EXPECTED_TOPOLOGY_DIGEST}" _digest_length)
   if(NOT _digest_length EQUAL 64
@@ -855,15 +902,18 @@ function(bioseq_add_template_flatten_codegen)
   string(JSON _schema_revision GET "${_json}" schema_revision)
   string(JSON _generator_identity GET "${_json}" generator_identity)
   string(JSON _policy GET "${_json}" policy)
+  string(JSON _recorded_emission_policy GET
+    "${_json}" emission_policy)
   string(JSON _manifest_name GET "${_json}" name)
   if(NOT _schema_type STREQUAL "NUMBER"
-      OR NOT _schema_revision STREQUAL "1"
+      OR NOT _schema_revision STREQUAL "2"
       OR NOT _generator_identity STREQUAL
         "bioseq-namespace-materialization"
       OR NOT _policy STREQUAL "template_flatten"
+      OR NOT _recorded_emission_policy STREQUAL _emission_policy
       OR NOT _manifest_name STREQUAL ARG_NAME)
     _bioseq_template_flatten_fail(
-      "configure topology schema revision/generator identity/policy/name "
+      "configure topology schema/generator/policy/emission/name "
       "authentication failed")
   endif()
   foreach(_manifest_pair IN ITEMS
@@ -881,20 +931,34 @@ function(bioseq_add_template_flatten_codegen)
         "recorded '${_actual}'")
     endif()
   endforeach()
-  set(_api_partition "${_output_root}/typed_flat_api.cppm")
-  set(_selector_partition "${_output_root}/typed_flat_selector.cppm")
-  foreach(_partition_pair IN ITEMS
-      "api_partition|${_api_partition}"
-      "selector_partition|${_selector_partition}")
-    string(REPLACE "|" ";" _pair "${_partition_pair}")
-    list(GET _pair 0 _field)
-    list(GET _pair 1 _expected)
-    string(JSON _actual GET "${_json}" ${_field})
-    if(NOT _actual STREQUAL _expected)
-      _bioseq_template_flatten_fail(
-        "configure manifest ${_field} is outside/divergent from OUTPUT_ROOT")
-    endif()
-  endforeach()
+  if(_emission_policy STREQUAL "selector_api")
+    set(_api_partition "${_output_root}/typed_flat_api.cppm")
+    set(_selector_partition "${_output_root}/typed_flat_selector.cppm")
+    foreach(_partition_pair IN ITEMS
+        "api_partition|${_api_partition}"
+        "selector_partition|${_selector_partition}")
+      string(REPLACE "|" ";" _pair "${_partition_pair}")
+      list(GET _pair 0 _field)
+      list(GET _pair 1 _expected)
+      string(JSON _actual GET "${_json}" ${_field})
+      if(NOT _actual STREQUAL _expected)
+        _bioseq_template_flatten_fail(
+          "configure manifest ${_field} is outside/divergent from OUTPUT_ROOT")
+      endif()
+    endforeach()
+    set(_interface_sources "${_api_partition}" "${_selector_partition}")
+  else()
+    set(_api_partition "")
+    set(_selector_partition "")
+    foreach(_field IN ITEMS api_partition selector_partition)
+      string(JSON _partition_type TYPE "${_json}" ${_field})
+      if(NOT _partition_type STREQUAL "NULL")
+        _bioseq_template_flatten_fail(
+          "implementation_owners configure manifest ${_field} must be null")
+      endif()
+    endforeach()
+    set(_interface_sources)
+  endif()
 
   set(_manifest_ordinals)
   set(_manifest_sources)
@@ -991,6 +1055,12 @@ function(bioseq_add_template_flatten_codegen)
   set(_artifact_manifest "${_output_root}/artifacts.json")
   set(_generate_depfile "${_output_root}/generate.d")
   set(_generate_stamp "${_output_root}/generate.stamp")
+  set(_generation_outputs
+    ${_interface_sources}
+    ${_manifest_sources}
+    "${_topology_manifest}"
+    "${_artifact_manifest}"
+    "${_generate_stamp}")
   set(_prepare_target "${ARG_NAME}_template_flatten_prepare")
   set(_generation_target "${ARG_NAME}_template_flatten_codegen")
   if(TARGET "${_prepare_target}" OR TARGET "${_generation_target}")
@@ -1065,13 +1135,7 @@ function(bioseq_add_template_flatten_codegen)
   add_dependencies("${_prepare_target}" bioseq_codegen_project)
 
   add_custom_command(
-    OUTPUT
-      "${_api_partition}"
-      "${_selector_partition}"
-      ${_manifest_sources}
-      "${_topology_manifest}"
-      "${_artifact_manifest}"
-      "${_generate_stamp}"
+    OUTPUT ${_generation_outputs}
     BYPRODUCTS "${_generate_depfile}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
       "${_output_root}" "${_pcm_root}"
@@ -1081,6 +1145,7 @@ function(bioseq_add_template_flatten_codegen)
       --source "${_source_path}"
       --repository-root "${_repository_root}"
       --output-module "${ARG_OUTPUT_MODULE}"
+      --emission-policy "${_emission_policy}"
       --profile "${_profile}"
       --configure-topology-manifest "${_configure_manifest}"
       --expected-topology-digest "${ARG_EXPECTED_TOPOLOGY_DIGEST}"
@@ -1125,24 +1190,20 @@ function(bioseq_add_template_flatten_codegen)
     COMMENT "Generating ${ARG_NAME} template-flatten module topology for profile ${_profile}"
     VERBATIM)
   add_custom_target("${_generation_target}"
-    DEPENDS
-      "${_api_partition}"
-      "${_selector_partition}"
-      ${_manifest_sources}
-      "${_topology_manifest}"
-      "${_artifact_manifest}"
-      "${_generate_stamp}")
+    DEPENDS ${_generation_outputs})
   add_dependencies(
     "${_generation_target}" bioseq_codegen_project "${_prepare_target}")
 
-  set(_generated_cppm
-    "${_api_partition}" "${_selector_partition}" ${_manifest_sources})
+  set(_generated_cppm ${_interface_sources} ${_manifest_sources})
   set_source_files_properties(${_generated_cppm} PROPERTIES
     GENERATED TRUE
     CXX_SCAN_FOR_MODULES ON
     COMPILE_OPTIONS "-x;c++")
-  set(${ARG_OUT_API_PARTITION} "${_api_partition}" PARENT_SCOPE)
-  set(${ARG_OUT_SELECTOR_PARTITION} "${_selector_partition}" PARENT_SCOPE)
+  if(_emission_policy STREQUAL "selector_api")
+    set(${ARG_OUT_API_PARTITION} "${_api_partition}" PARENT_SCOPE)
+    set(${ARG_OUT_SELECTOR_PARTITION}
+      "${_selector_partition}" PARENT_SCOPE)
+  endif()
   set(${ARG_OUT_IMPLEMENTATION_UNITS} "${_manifest_sources}" PARENT_SCOPE)
   set(${ARG_OUT_GENERATION_TARGET} "${_generation_target}" PARENT_SCOPE)
   set(${ARG_OUT_ARTIFACT_MANIFEST} "${_artifact_manifest}" PARENT_SCOPE)

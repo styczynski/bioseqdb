@@ -268,19 +268,8 @@ unset(_bioseq_lazy_concrete_pattern)
 # narrower production-owner sweep also rejects the physical-geometry escape
 # hatches named by the specification.
 set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna5.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna5.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna5.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna5.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna5.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna4.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
@@ -892,7 +881,8 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
 # Highway target templates. A marked source is scan-only generator input, never
 # an ordinary module provider, and every registered input must carry the marker.
 set(BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm")
 
 # The annotation and generator registry are one exact ownership boundary. Scan
 # only authored source-tree module units (never current or stale build outputs),
@@ -1154,23 +1144,50 @@ unset(_bioseq_template_flatten_authored_cppm_candidates)
 # The generated scheduler first erases physical storage width to
 # lazy_sequence_view<alphabet>. Own every heavy pipeline closure after that
 # boundary exactly once in PostgreSQL-DSO-private ordinary implementation units
-# of bioseq.pipeline.pipe. All authored owner paths are removed from broad
-# module globs even when dna5 is inactive; only the profile-reachable subset is
-# built, and no Domain-N executable links these scheduler-only definitions.
-set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna4.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna4.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna4.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna4.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna4.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna4.cppm")
-set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna5.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna5.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna5.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna5.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna5.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna5.cppm")
+# of bioseq.pipeline.pipe. The canonical scan-only source describes alphabet x
+# route; only the profile-reachable generated subset is built, and no Domain-N
+# executable links these scheduler-only definitions.
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_TEMPLATE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm")
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/template_flatten/pipe_owners")
+
+# The former directory contained one manually authored owner per coordinate.
+# It is retired: adding a source there would silently create a second owner.
+file(GLOB _bioseq_pipeline_dispatch_owner_authored CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/*.cppm")
+if(_bioseq_pipeline_dispatch_owner_authored)
+  message(FATAL_ERROR
+    "Retired authored pipeline-owner directory must remain empty: "
+    "${_bioseq_pipeline_dispatch_owner_authored}")
+endif()
+unset(_bioseq_pipeline_dispatch_owner_authored)
+
+bioseq_template_flatten_probe(
+  NAME pipeline_pipe_owners
+  SOURCE "${BIOSEQ_PIPELINE_DISPATCH_OWNER_TEMPLATE}"
+  OUTPUT_ROOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}"
+  OUTPUT_MODULE bioseq.pipeline.pipe
+  PROFILE "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
+  EMISSION_POLICY implementation_owners
+  OUT_CONFIGURE_TOPOLOGY_MANIFEST
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_CONFIGURE_TOPOLOGY
+  OUT_TOPOLOGY_DIGEST BIOSEQ_PIPELINE_DISPATCH_OWNER_TOPOLOGY_DIGEST
+  OUT_ENABLED_ORDINALS BIOSEQ_PIPELINE_DISPATCH_OWNER_ENABLED_ORDINALS
+  OUT_ENABLED_SOURCES
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS)
+
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS)
+foreach(_bioseq_pipeline_dispatch_owner_ordinal RANGE 0 5)
+  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
+    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/instance_${_bioseq_pipeline_dispatch_owner_ordinal}.cppm")
+endforeach()
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS)
+foreach(_bioseq_pipeline_dispatch_owner_ordinal RANGE 6 11)
+  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
+    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/instance_${_bioseq_pipeline_dispatch_owner_ordinal}.cppm")
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner_ordinal)
 set(BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS}
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
@@ -1199,26 +1216,16 @@ if(NOT _bioseq_pipeline_dispatch_owner_unique_count EQUAL 12)
 endif()
 foreach(_bioseq_pipeline_dispatch_owner IN LISTS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
-  if(NOT EXISTS "${_bioseq_pipeline_dispatch_owner}")
+  cmake_path(IS_PREFIX BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT
+    "${_bioseq_pipeline_dispatch_owner}" NORMALIZE
+    _bioseq_pipeline_dispatch_owner_in_generated_root)
+  if(NOT _bioseq_pipeline_dispatch_owner_in_generated_root)
     message(FATAL_ERROR
-      "Post-erasure pipeline owner does not exist: "
+      "Pipeline owner escaped its generated root: "
       "${_bioseq_pipeline_dispatch_owner}")
   endif()
 endforeach()
-file(GLOB _bioseq_pipeline_dispatch_owner_authored CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/*.cppm")
-list(REMOVE_ITEM _bioseq_pipeline_dispatch_owner_authored
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/index.cppm")
-list(SORT _bioseq_pipeline_dispatch_owner_authored)
-list(SORT _bioseq_pipeline_dispatch_owner_unique)
-if(NOT "${_bioseq_pipeline_dispatch_owner_authored}" STREQUAL
-    "${_bioseq_pipeline_dispatch_owner_unique}")
-  message(FATAL_ERROR
-    "Post-erasure pipeline owner registry is not an exact set.\n"
-    "Authored: ${_bioseq_pipeline_dispatch_owner_authored}\n"
-    "Registered: ${_bioseq_pipeline_dispatch_owner_unique}")
-endif()
-unset(_bioseq_pipeline_dispatch_owner_authored)
+unset(_bioseq_pipeline_dispatch_owner_in_generated_root)
 unset(_bioseq_pipeline_dispatch_owner_unique_count)
 unset(_bioseq_pipeline_dispatch_owner_unique)
 unset(_bioseq_pipeline_dispatch_owner_all_count)
@@ -1239,6 +1246,9 @@ foreach(_bioseq_pipeline_dispatch_owner_bypass_pattern IN ITEMS
     "minimap_port[ \t\r\n]*<"
     "minimap_port_segmented[ \t\r\n]*<"
     "minimap2_port_with_index[ \t\r\n]*<"
+    "minimap_port_owned[ \t\r\n]*\\("
+    "minimap2_port_with_index_owned[ \t\r\n]*\\("
+    "minimap2_port_with_index_owned[ \t\r\n]*<"
     "dispatch_pipeline[ \t\r\n]*<"
     "minimap_port_with_repr[ \t\r\n]*<")
   if(_bioseq_pipeline_dispatch_owner_bypass_text MATCHES
@@ -1249,9 +1259,12 @@ foreach(_bioseq_pipeline_dispatch_owner_bypass_pattern IN ITEMS
   endif()
 endforeach()
 foreach(_bioseq_pipeline_dispatch_owned_entry IN ITEMS
-    minimap_port_owned
+    minimap_port_raw_owned
     minimap_port_segmented_owned
-    minimap2_port_with_index_owned)
+    minimap_port_fragment_index_vector_owned
+    minimap_port_hash_major_owned
+    minimap_port_grouped_soa_owned
+    minimap_port_fragment_query_owned)
   if(NOT _bioseq_pipeline_dispatch_owner_bypass_text MATCHES
       "${_bioseq_pipeline_dispatch_owned_entry}[ \t\r\n]*\\(")
     message(FATAL_ERROR
@@ -1264,11 +1277,44 @@ unset(_bioseq_pipeline_dispatch_owner_bypass_pattern)
 unset(_bioseq_pipeline_dispatch_owner_bypass_text)
 unset(_bioseq_pipeline_dispatch_owner_bypass_source)
 
-set(BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+set(_bioseq_pipeline_dispatch_owner_expected_implementation_units
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS})
 if(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+  list(APPEND _bioseq_pipeline_dispatch_owner_expected_implementation_units
     ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
+endif()
+if(NOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS}"
+    STREQUAL
+    "${_bioseq_pipeline_dispatch_owner_expected_implementation_units}")
+  message(FATAL_ERROR
+    "Pipeline-owner profile projection diverges from the canonical "
+    "alphabet x route topology")
+endif()
+
+bioseq_add_template_flatten_codegen(
+  NAME pipeline_pipe_owners
+  SOURCE "${BIOSEQ_PIPELINE_DISPATCH_OWNER_TEMPLATE}"
+  OUTPUT_ROOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}"
+  OUTPUT_MODULE bioseq.pipeline.pipe
+  EMISSION_POLICY implementation_owners
+  CONFIGURE_TOPOLOGY_MANIFEST
+    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_CONFIGURE_TOPOLOGY}"
+  EXPECTED_TOPOLOGY_DIGEST
+    "${BIOSEQ_PIPELINE_DISPATCH_OWNER_TOPOLOGY_DIGEST}"
+  ENABLED_ORDINALS ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ENABLED_ORDINALS}
+  COMPILE_DATABASE "${CMAKE_BINARY_DIR}/compile_commands.json"
+  SIGNATURE_SOURCE
+    "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm"
+  PCM_ROOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}/pcm"
+  OUT_IMPLEMENTATION_UNITS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+  OUT_GENERATION_TARGET BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATION_TARGET
+  OUT_ARTIFACT_MANIFEST BIOSEQ_PIPELINE_DISPATCH_OWNER_ARTIFACT_MANIFEST)
+
+if(NOT "${BIOSEQ_PIPELINE_DISPATCH_OWNER_PROBED_IMPLEMENTATION_UNITS}"
+    STREQUAL "${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS}")
+  message(FATAL_ERROR
+    "Pipeline-owner probe and generator disagree on enabled units")
 endif()
 
 list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
@@ -1287,6 +1333,7 @@ if(NOT _bioseq_pipeline_dispatch_owner_count EQUAL
 endif()
 unset(_bioseq_expected_pipeline_dispatch_owner_count)
 unset(_bioseq_pipeline_dispatch_owner_count)
+unset(_bioseq_pipeline_dispatch_owner_expected_implementation_units)
 
 set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
@@ -1315,11 +1362,13 @@ set(BIOSEQ_INSTRUMENTATION_BACKEND_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/unsupported.cppm")
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
+  ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS}
   ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
+  ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS}
   ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
@@ -1643,6 +1692,7 @@ target_sources(bioseq_modules_nopg
 set_source_files_properties(
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS}
   PROPERTIES
+    GENERATED TRUE
     CXX_SCAN_FOR_MODULES ON
     COMPILE_OPTIONS "-x;c++")
 add_library(bioseq_pipeline_dispatch_owners OBJECT)
@@ -1809,13 +1859,35 @@ cmake_path(IS_PREFIX BIOSEQ_HIGHWAY_GENERATED_ROOT
 cmake_path(IS_PREFIX BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
   "${BIOSEQ_HIGHWAY_GENERATED_ROOT}" NORMALIZE
   _bioseq_highway_root_inside_template_flatten_root)
+cmake_path(IS_PREFIX BIOSEQ_HIGHWAY_GENERATED_ROOT
+  "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}" NORMALIZE
+  _bioseq_pipeline_owner_root_inside_highway_root)
+cmake_path(IS_PREFIX BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT
+  "${BIOSEQ_HIGHWAY_GENERATED_ROOT}" NORMALIZE
+  _bioseq_highway_root_inside_pipeline_owner_root)
+cmake_path(IS_PREFIX BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT
+  "${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}" NORMALIZE
+  _bioseq_pipeline_owner_root_inside_scheduler_root)
+cmake_path(IS_PREFIX BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT
+  "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}" NORMALIZE
+  _bioseq_scheduler_root_inside_pipeline_owner_root)
 if(_bioseq_template_flatten_root_inside_highway_root
-    OR _bioseq_highway_root_inside_template_flatten_root)
+    OR _bioseq_highway_root_inside_template_flatten_root
+    OR _bioseq_pipeline_owner_root_inside_highway_root
+    OR _bioseq_highway_root_inside_pipeline_owner_root
+    OR _bioseq_pipeline_owner_root_inside_scheduler_root
+    OR _bioseq_scheduler_root_inside_pipeline_owner_root)
   message(FATAL_ERROR
-    "Highway and template-flatten generated roots must be disjoint; "
+    "Highway, scheduler, and pipeline-owner generated roots must be pairwise "
+    "disjoint; "
     "highway='${BIOSEQ_HIGHWAY_GENERATED_ROOT}', "
-    "template_flatten='${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}'")
+    "scheduler='${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}', "
+    "pipeline_owner='${BIOSEQ_PIPELINE_DISPATCH_OWNER_GENERATED_ROOT}'")
 endif()
+unset(_bioseq_scheduler_root_inside_pipeline_owner_root)
+unset(_bioseq_pipeline_owner_root_inside_scheduler_root)
+unset(_bioseq_highway_root_inside_pipeline_owner_root)
+unset(_bioseq_pipeline_owner_root_inside_highway_root)
 unset(_bioseq_highway_root_inside_template_flatten_root)
 unset(_bioseq_template_flatten_root_inside_highway_root)
 bioseq_template_flatten_probe(
@@ -2495,6 +2567,7 @@ bioseq_add_template_flatten_codegen(
   SOURCE "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_TEMPLATE}"
   OUTPUT_ROOT "${BIOSEQ_DISPATCH_PROCESSOR_TYPED_GENERATED_ROOT}"
   OUTPUT_MODULE bioseq.postgres.scheduler.dispatch_processor
+  EMISSION_POLICY selector_api
   CONFIGURE_TOPOLOGY_MANIFEST "${BIOSEQ_TYPED_CONFIGURE_TOPOLOGY}"
   EXPECTED_TOPOLOGY_DIGEST "${BIOSEQ_TYPED_TOPOLOGY_DIGEST}"
   ENABLED_ORDINALS ${BIOSEQ_TYPED_ENABLED_ORDINALS}

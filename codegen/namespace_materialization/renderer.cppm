@@ -579,7 +579,8 @@ inline void render_selector_switch(
     for (const binding_record& binding : plan.topology.region.bindings) {
         const structural_analysis::source_range& range =
             detail::declaration_range(binding.declaration);
-        if (binding.role == axis_role::identity
+        if (plan.policy == emission_policy::selector_api
+            && binding.role == axis_role::identity
             && binding.declaration.kind
                 == structural_analysis::declaration_kind::alias) {
             edits.push_back(source_edit{
@@ -636,15 +637,23 @@ inline void render_selector_switch(
     output << detail::global_module_fragment(plan)
            << "module " << plan.topology.region.configured_output_module_name
            << ";\n\n";
-    detail::render_imports(output, plan, false, true);
+    detail::render_imports(
+        output,
+        plan,
+        false,
+        plan.policy == emission_policy::selector_api);
     if (plan.topology.region.configured_output_module_name
         == detail::scheduler_output_module) {
         output << "import :cpu_preparation;\n\n";
     }
-    output << "namespace " << coordinate.identity_namespace << " {\n"
+    const std::string_view rendered_namespace =
+        plan.policy == emission_policy::implementation_owners
+        ? std::string_view{plan.topology.region.boundary.qualified_name}
+        : std::string_view{coordinate.identity_namespace};
+    output << "namespace " << rendered_namespace << " {\n"
            << body;
     if (!body.empty() && body.back() != '\n') output << '\n';
-    output << "}  // namespace " << coordinate.identity_namespace << "\n";
+    output << "}  // namespace " << rendered_namespace << "\n";
     return output.str();
 }
 
@@ -652,6 +661,69 @@ inline void render_selector_switch(
     const generation_plan& plan,
     const materialization_coordinate& identity) {
     std::ostringstream output;
+    if (plan.policy == emission_policy::implementation_owners) {
+        output << detail::global_module_fragment(plan)
+               << "module "
+               << plan.topology.region.configured_output_module_name
+               << ";\n\n";
+        detail::render_imports(output, plan, false, false);
+        output << "namespace "
+               << plan.topology.region.boundary.qualified_name << " {\n\n";
+
+        // Bind the identity once for this provisional translation unit. Shard
+        // bindings are harmless TU-local support and let the authored support
+        // island remain an exact source slice.
+        for (const binding_record& binding : plan.topology.region.bindings) {
+            output << detail::render_binding_declaration(
+                plan, binding, identity, false)
+                   << '\n';
+        }
+        if (plan.topology.region.support_island.has_value()) {
+            const structural_analysis::source_range& support_range =
+                plan.topology.region.support_island->declaration_range;
+            output << detail::slice(
+                plan.source_text,
+                support_range,
+                "implementation-owner support island");
+            if (support_range.end.byte_offset > support_range.begin.byte_offset
+                && plan.source_text[support_range.end.byte_offset - 1u]
+                    != '\n') {
+                output << '\n';
+            }
+            output << '\n';
+        }
+
+        const std::string identity_key = detail::identity_key(identity);
+        std::size_t declaration_count = 0u;
+        for (const materialization_coordinate& coordinate
+             : plan.topology.coordinates) {
+            if (detail::identity_key(coordinate) != identity_key) continue;
+            for (const owned_declaration& declaration
+                 : plan.topology.region.controlled_declarations) {
+                if (!declaration.declaration.specifiers.is_definition
+                    || declaration.declaration.linkage
+                        == structural_analysis::entity_linkage::internal
+                    || declaration.declaration.linkage
+                        == structural_analysis::entity_linkage::none
+                    || !coordinate_matches(
+                        coordinate, declaration.clauses)) {
+                    continue;
+                }
+                output << detail::render_entry_head(
+                    plan, declaration, coordinate, true)
+                       << ";\n\n";
+                ++declaration_count;
+            }
+        }
+        if (declaration_count == 0u) {
+            throw std::runtime_error(
+                "implementation-owner identity has no module-safe declaration probe heads");
+        }
+        output << "}  // namespace "
+               << plan.topology.region.boundary.qualified_name << "\n";
+        return output.str();
+    }
+
     const std::string module =
         "bioseq.codegen.probes."
         + detail::module_identifier(plan.name) + ".t"
@@ -764,47 +836,59 @@ inline void render_selector_switch(
 [[nodiscard]] inline generation_result render_generation(
     generation_plan plan,
     const bool render_manifests = true) {
+    if (plan.policy != plan.topology.region.policy) {
+        throw std::runtime_error(
+            "generation-plan emission policy disagrees with authenticated topology");
+    }
     validate_enabled_ordinals(
         plan.topology, plan.profile, plan.enabled_ordinals);
     validate_entry_ownership(plan.topology);
     generation_result result;
-    result.artifacts.push_back(detail::make_artifact(
-        materialization_artifact::kind::api_partition,
-        "typed_flat_api.cppm",
-        plan.topology.region.configured_output_module_name + ":typed_flat_api",
-        plan.topology.identity_representative_ordinals,
-        validation_class::body_free,
-        render_api_partition(plan)));
-    result.artifacts.push_back(detail::make_artifact(
-        materialization_artifact::kind::selector_partition,
-        "typed_flat_selector.cppm",
-        plan.topology.region.configured_output_module_name
-            + ":typed_flat_selector",
-        plan.enabled_ordinals,
-        validation_class::body_bearing,
-        render_selector_partition(plan)));
-    for (const std::uint32_t representative
-         : plan.topology.identity_representative_ordinals) {
-        const materialization_coordinate& identity =
-            detail::coordinate_at(plan.topology, representative);
-        std::vector<std::uint32_t> covered;
-        const std::string key = detail::identity_key(identity);
-        for (const materialization_coordinate& coordinate
-             : plan.topology.coordinates) {
-            if (detail::identity_key(coordinate) == key) {
-                covered.push_back(coordinate.ordinal);
-            }
-        }
+    if (plan.policy == emission_policy::selector_api) {
         result.artifacts.push_back(detail::make_artifact(
-            materialization_artifact::kind::declaration_probe,
-            std::filesystem::path{"pcm/declaration_probes"}
-                / ("identity_" + std::to_string(representative) + ".cppm"),
-            "bioseq.codegen.probes." + detail::module_identifier(plan.name)
-                + ".t" + plan.topology.topology_digest.substr(0u, 12u)
-                + ".identity_" + std::to_string(representative),
-            std::move(covered),
+            materialization_artifact::kind::api_partition,
+            "typed_flat_api.cppm",
+            plan.topology.region.configured_output_module_name
+                + ":typed_flat_api",
+            plan.topology.identity_representative_ordinals,
             validation_class::body_free,
-            render_declaration_probe(plan, identity)));
+            render_api_partition(plan)));
+        result.artifacts.push_back(detail::make_artifact(
+            materialization_artifact::kind::selector_partition,
+            "typed_flat_selector.cppm",
+            plan.topology.region.configured_output_module_name
+                + ":typed_flat_selector",
+            plan.enabled_ordinals,
+            validation_class::body_bearing,
+            render_selector_partition(plan)));
+    }
+    if (plan.policy == emission_policy::selector_api || !render_manifests) {
+        for (const std::uint32_t representative
+             : plan.topology.identity_representative_ordinals) {
+            const materialization_coordinate& identity =
+                detail::coordinate_at(plan.topology, representative);
+            std::vector<std::uint32_t> covered;
+            const std::string key = detail::identity_key(identity);
+            for (const materialization_coordinate& coordinate
+                 : plan.topology.coordinates) {
+                if (detail::identity_key(coordinate) == key) {
+                    covered.push_back(coordinate.ordinal);
+                }
+            }
+            result.artifacts.push_back(detail::make_artifact(
+                materialization_artifact::kind::declaration_probe,
+                std::filesystem::path{"pcm/declaration_probes"}
+                    / ("identity_" + std::to_string(representative) + ".cppm"),
+                plan.policy == emission_policy::implementation_owners
+                    ? plan.topology.region.configured_output_module_name
+                    : "bioseq.codegen.probes."
+                        + detail::module_identifier(plan.name) + ".t"
+                        + plan.topology.topology_digest.substr(0u, 12u)
+                        + ".identity_" + std::to_string(representative),
+                std::move(covered),
+                validation_class::body_free,
+                render_declaration_probe(plan, identity)));
+        }
     }
     for (const std::uint32_t ordinal : plan.enabled_ordinals) {
         const materialization_coordinate& coordinate =

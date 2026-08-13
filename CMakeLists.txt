@@ -812,6 +812,8 @@ if(BIOSEQ_BUILD_CORE)
   # both supported toolchains is the contract.
   add_subdirectory(
     codegen/namespace_materialization/tests/integration/module_canary)
+  add_subdirectory(
+    codegen/namespace_materialization/tests/integration/owner_canary)
 endif()
 
 # Include extensions and their shared code
@@ -882,7 +884,8 @@ if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
   set(_bioseq_highway_validation_dependencies
     bioseq_highway_builder_contracts
-    bioseq_namespace_materialization_module_canary)
+    bioseq_namespace_materialization_module_canary
+    bioseq_namespace_materialization_owner_canary)
   if(TARGET bioseq_highway_clang_imported_binder_canary)
     list(APPEND _bioseq_highway_validation_dependencies
       bioseq_highway_clang_imported_binder_canary)

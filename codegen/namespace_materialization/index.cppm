@@ -163,6 +163,7 @@ parse_options(
         "--compiler-module-inventory-sha256",
         "--configure-topology-manifest",
         "--depfile",
+        "--emission-policy",
         "--enabled-ordinals",
         "--expected-topology-digest",
         "--llvm-config",
@@ -188,6 +189,7 @@ parse_options(
         .source = options.at("--source"),
         .repository_root = options.at("--repository-root"),
         .output_module = options.at("--output-module"),
+        .policy = parse_emission_policy(options.at("--emission-policy")),
         .profile = options.at("--profile"),
         .configure_topology_manifest =
             options.at("--configure-topology-manifest"),
@@ -1073,6 +1075,7 @@ inline void validate_configure_handshake(
         topology, command.expected_topology_digest);
     if (configure.generator_identity != materialization_generator_identity
         || configure.policy != template_flatten_policy
+        || configure.emission != command.policy
         || configure.name != command.name
         || path_identity(configure.source_path) != path_identity(command.source)
         || configure.source_sha256 != source_sha256
@@ -1081,7 +1084,8 @@ inline void validate_configure_handshake(
         || configure.output_module != command.output_module
         || configure.profile != command.profile
         || configure.topology_digest != command.expected_topology_digest
-        || configure.coordinate_count != topology.coordinates.size()) {
+        || configure.coordinate_count != topology.coordinates.size()
+        || topology.region.policy != command.policy) {
         throw std::runtime_error(
             "configure-time and structural template_flatten topology disagree; "
             "configured=" + configure.topology_digest + ", structural="
@@ -1111,7 +1115,7 @@ inline void validate_configure_handshake(
     const structural_analysis::translation_unit sliced =
         structural_analysis::scan_token_slice(command.source, source);
     materialization_region region = extract_materialization_region(
-        sliced, command.output_module, source);
+        sliced, command.output_module, command.policy, source);
     topology_plan topology = build_topology_plan(std::move(region));
     validate_configure_handshake(
         command, configure, source_sha256, topology);
@@ -1165,6 +1169,7 @@ inline void validate_configure_handshake(
         {});
     generation_plan plan{
         .topology = std::move(topology),
+        .policy = command.policy,
         .repository_root = path_identity(command.repository_root),
         .source_path = path_identity(command.source),
         .output_root = path_identity(command.output_root),
@@ -1222,8 +1227,11 @@ inline void validate_configure_handshake(
                 .canonical_semantic_frontend_actions,
     };
     plan.compilation_obligations = cmake_compilation_obligations{
-        .api_partition_units = 1u,
-        .selector_partition_units = 1u,
+        .api_partition_units = command.policy == emission_policy::selector_api
+            ? 1u
+            : 0u,
+        .selector_partition_units =
+            command.policy == emission_policy::selector_api ? 1u : 0u,
         .body_bearing_implementation_units =
             static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
     };

@@ -9243,9 +9243,16 @@ load_compile_database(const std::filesystem::path& path) {
     translation_unit syntax = detail::scan_token_slice_impl(
         probe_identity, body_free_source, true);
     detail::validate_body_free_probe_syntax(syntax);
-    if (!std::ranges::contains(
-            syntax.source_module.imported_modules,
-            signature.source_module.provided_module)) {
+    const bool imports_signature_primary = std::ranges::contains(
+        syntax.source_module.imported_modules,
+        signature.source_module.provided_module);
+    const bool attaches_to_signature_primary =
+        !syntax.source_module.is_interface
+        && !syntax.source_module.is_partition
+        && syntax.source_module.provided_module
+            == signature.source_module.provided_module;
+    if (!imports_signature_primary
+        && !attaches_to_signature_primary) {
         throw std::runtime_error(
             probe_identity.string()
             + ": declaration probe must import its signature-donor module");
