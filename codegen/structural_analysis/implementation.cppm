@@ -9048,11 +9048,14 @@ load_compile_database(const std::filesystem::path& path) {
 
 }  // namespace clang_backend
 
-[[nodiscard]] translation_unit scan_translation_unit_from_code(
+namespace {
+
+[[nodiscard]] translation_unit scan_translation_unit_from_code_with_tool(
     const std::filesystem::path& source_path,
     std::string_view source,
     const std::vector<std::string>& compiler_arguments,
-    std::string_view compiler_profile) {
+    std::string_view compiler_profile,
+    std::string_view compiler_tool) {
     std::vector<translation_unit> units;
     std::vector<std::string> arguments = compiler_arguments;
     if (std::ranges::none_of(
@@ -9069,13 +9072,29 @@ load_compile_database(const std::filesystem::path& path) {
             units, std::string{compiler_profile}),
         llvm::StringRef{source.data(), source.size()},
         arguments,
-        source_path.string());
+        source_path.string(),
+        std::string{compiler_tool});
     if (!success || units.size() != 1) {
         throw std::runtime_error(
             source_path.string()
             + ": Clang structural pass reported errors");
     }
     return std::move(units.front());
+}
+
+}  // namespace
+
+[[nodiscard]] translation_unit scan_translation_unit_from_code(
+    const std::filesystem::path& source_path,
+    std::string_view source,
+    const std::vector<std::string>& compiler_arguments,
+    std::string_view compiler_profile) {
+    return scan_translation_unit_from_code_with_tool(
+        source_path,
+        source,
+        compiler_arguments,
+        compiler_profile,
+        "clang-tool");
 }
 
 [[nodiscard]] translation_unit merge_declaration_probe(
@@ -9441,11 +9460,12 @@ load_compile_database(const std::filesystem::path& path) {
         }
         probe_arguments.push_back(argument);
     }
-    translation_unit semantics = scan_translation_unit_from_code(
+    translation_unit semantics = scan_translation_unit_from_code_with_tool(
         probe_identity,
         body_free_source,
         probe_arguments,
-        effective_profile);
+        effective_profile,
+        adjusted[compiler_index]);
     return merge_declaration_probe(
         std::move(syntax), std::move(semantics));
 }
