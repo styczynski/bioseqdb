@@ -2347,7 +2347,7 @@ inline void verify_authenticated_incremental_publication() {
                                          std::string topology) {
         return render_publication_manifest(publication_manifest_request{
             .output_root = root,
-            .policy = "template_flatten",
+            .policy = "contract",
             .name = "incremental_contract",
             .topology_digest = std::move(topology),
             .prior_manifest_identity = std::move(prior),
@@ -2393,7 +2393,7 @@ inline void verify_authenticated_incremental_publication() {
     const std::string first_manifest_bytes = read_artifact_bytes(manifest);
 
     const previous_publication previous = read_previous_publication(
-        manifest, root, "template_flatten", topology_digest);
+        manifest, root, "contract", topology_digest);
     const rendered_publication_manifest repeat = render(
         previous.manifest_identity, initial_artifacts);
     require(
@@ -2422,7 +2422,7 @@ inline void verify_authenticated_incremental_publication() {
         "publication rejects a byte mutation not covered by its stale self-seal");
     const detail::previous_publication_snapshot authenticated_snapshot =
         detail::read_previous_publication_snapshot(
-            manifest, root, "template_flatten", topology_digest);
+            manifest, root, "contract", topology_digest);
     publish_artifact_if_changed(manifest, repeat.json);
     require_rejected(
         [&] {
@@ -2511,7 +2511,7 @@ inline void verify_authenticated_incremental_publication() {
     const previous_publication transitioned = read_previous_publication(
         manifest,
         root,
-        "template_flatten",
+        "contract",
         replacement_topology_digest);
     require(
         !std::filesystem::exists(stale)
@@ -2527,7 +2527,7 @@ inline void verify_authenticated_incremental_publication() {
             static_cast<void>(render_publication_manifest(
                 publication_manifest_request{
                     .output_root = root,
-                    .policy = "template_flatten",
+                    .policy = "contract",
                     .name = "incremental_contract",
                     .topology_digest = topology_digest,
                     .policy_evidence_json = R"({"schema_revision":1})",
@@ -2579,7 +2579,7 @@ inline void verify_interrupted_publication_recovery() {
                                     std::string_view topology) {
                 return render_publication_manifest(publication_manifest_request{
                     .output_root = root,
-                    .policy = "template_flatten",
+                    .policy = "contract",
                     .name = "interruption_contract",
                     .topology_digest = bioseq::common::sha256_hex(topology),
                     .prior_manifest_identity = std::move(prior),
@@ -2613,7 +2613,7 @@ inline void verify_interrupted_publication_recovery() {
             std::filesystem::last_write_time(root / "keep.cppm", sentinel);
 
             const previous_publication previous = read_previous_publication(
-                manifest, root, "template_flatten", {});
+                manifest, root, "contract", {});
             const std::vector<publication_artifact> transition{
                 make_artifact("keep.cppm", "module interruption.keep;\n"),
                 make_artifact("replace.cppm", "module interruption.new;\n"),
@@ -2633,9 +2633,9 @@ inline void verify_interrupted_publication_recovery() {
             publication_fault_for_testing.reset();
 
             recover_interrupted_publication(
-                root, manifest, stamp, "template_flatten");
+                root, manifest, stamp, "contract");
             const previous_publication recovered = read_previous_publication(
-                manifest, root, "template_flatten", {});
+                manifest, root, "contract", {});
             const std::vector<publication_artifact> final_artifacts =
                 changed_retry
                 ? std::vector<publication_artifact>{
@@ -2705,7 +2705,7 @@ inline void verify_interrupted_publication_recovery() {
                             std::vector<publication_artifact> artifacts) {
         return render_publication_manifest(publication_manifest_request{
             .output_root = root,
-            .policy = "template_flatten",
+            .policy = "contract",
             .name = "interruption_adversarial_contract",
             .topology_digest = bioseq::common::sha256_hex("interruption adversarial topology"),
             .prior_manifest_identity = std::move(prior),
@@ -2726,7 +2726,7 @@ inline void verify_interrupted_publication_recovery() {
     const rendered_publication_manifest first = render({}, initial);
     publish(first, initial);
     const previous_publication previous = read_previous_publication(
-        manifest, root, "template_flatten", {});
+        manifest, root, "contract", {});
     const std::vector<publication_artifact> replacement{
         make_artifact("replace.cppm", "module interruption.new;\n"),
     };
@@ -2745,7 +2745,7 @@ inline void verify_interrupted_publication_recovery() {
     require_rejected(
         [&] {
             recover_interrupted_publication(
-                root, manifest, stamp, "template_flatten");
+                root, manifest, stamp, "contract");
         },
         "READY recovery rejects staged bytes outside the authenticated digest");
     require(
