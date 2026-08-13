@@ -6,7 +6,10 @@ export module bioseq.codegen.inputs.namespace_materialization_owner_canary;
 
 import bioseq.codegen.namespace_materialization.owner_canary;
 
-namespace bioseq::codegen::namespace_materialization::owner_canary {
+namespace bioseq {
+namespace codegen {
+namespace namespace_materialization {
+namespace owner_canary {
 
 static constexpr bool owner_wide
     [[bioseq::template_flatten(
@@ -43,4 +46,7 @@ constexpr int owner_bias = owner_wide ? 100 : 10;
     return value * owner_value{2} + static_cast<owner_value>(owner_bias);
 }
 
-} // namespace bioseq::codegen::namespace_materialization::owner_canary
+} // namespace owner_canary
+} // namespace namespace_materialization
+} // namespace codegen
+} // namespace bioseq
