@@ -21,7 +21,7 @@ import bioseq.indexing.gpu_minimizer_index;
 namespace bioseq::simd {
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&

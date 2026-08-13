@@ -7966,10 +7966,12 @@ template <class p_minimizer,
 // these entries.  Keep the concrete post-erasure pipeline closures in this
 // module's ordinary implementation units instead of implicitly rebuilding
 // them in every generated alphabet x width x shape scheduler leaf.  Exact
-// non-template overloads are a hard frontend boundary under reduced BMIs;
-// ordinary calls prefer them over the compatibility templates above.
+// distinct non-template entries are a hard frontend boundary under reduced
+// BMIs.  Their scheduler-only names keep ordinary Domain-N callers on the
+// compatibility templates above and let the implementation units remain
+// private to the PostgreSQL DSO.
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -7982,7 +7984,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -7995,7 +7997,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8008,7 +8010,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8022,7 +8024,7 @@ minimap2_port_with_index(
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8035,7 +8037,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8048,7 +8050,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -8061,7 +8063,7 @@ minimap2_port_with_index(
     bool allow_gpu_target_index_build = false);
 
 [[nodiscard, gnu::noinline]] match_result_collection
-minimap2_port_with_index(
+minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
@@ -9141,13 +9143,13 @@ match_result_collection minimap_port(
 // definitions live in same-module ordinary implementation units so the
 // force-inline dispatch cascade is instantiated once per alphabet rather than
 // once per generated scheduler leaf.
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
@@ -10655,13 +10657,13 @@ template <sequence_alphabet p_alphabet,
 // The three-argument scheduler route always uses a null fragment-index output.
 // Own that concrete post-erasure specialization out of line while retaining
 // the four-argument template for callers that request index materialization.
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const minimap2_parameters& params = minimap2_parameters{});

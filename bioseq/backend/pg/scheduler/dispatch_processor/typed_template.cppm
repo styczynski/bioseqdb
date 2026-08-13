@@ -1717,7 +1717,7 @@ template <class... p_arguments>
     return run_aligner_pg_checked(
         "minimap_port",
         [&args...]() -> match_result_collection {
-            return minimap_port(std::forward<p_arguments>(args)...);
+            return minimap_port_owned(std::forward<p_arguments>(args)...);
         });
 }
 
@@ -1727,7 +1727,8 @@ template <class... p_arguments>
     return run_aligner_pg_checked(
         "minimap_port_segmented",
         [&args...]() -> match_result_collection {
-            return minimap_port_segmented(std::forward<p_arguments>(args)...);
+            return minimap_port_segmented_owned(
+                std::forward<p_arguments>(args)...);
         });
 }
 
@@ -1737,7 +1738,8 @@ template <class... p_arguments>
     return run_aligner_pg_checked(
         "minimap2_port_with_index",
         [&args...]() -> match_result_collection {
-            return minimap2_port_with_index(std::forward<p_arguments>(args)...);
+            return minimap2_port_with_index_owned(
+                std::forward<p_arguments>(args)...);
 		});
 }
 
@@ -3637,7 +3639,8 @@ template <class p_sequence>
 									const auto query_index = prepared.query_view(0u);
 									const std::uint64_t prepare_host_wall_ns =
 										elapsed_dispatch_host_ns(prepare_started_ns);
-									match_result_collection out = minimap2_port_with_index(
+									match_result_collection out =
+										minimap2_port_with_index_owned(
 										fq_pg_view,
 										ft_pg_view,
 										alignment_query_minimizers,
@@ -7124,7 +7127,7 @@ template <class p_sequence>
                                                 make_lazy_sequence_view(
                                                     query_seq);
                                         native_collections[row] =
-                                            minimap2_port_with_index(
+                                            minimap2_port_with_index_owned(
                                                 lazy_query_view,
                                                 resident_target_view,
                                                 retained_query_sketches[row]

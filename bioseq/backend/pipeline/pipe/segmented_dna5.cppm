@@ -8,6 +8,7 @@ module;
 
 #include <cstddef>
 #include <utility>
+#include <vector>
 
 module bioseq.pipeline.pipe;
 
@@ -17,7 +18,7 @@ import bioseq.storage.lazy_sequence;
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 namespace bioseq::simd {
 
-[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented(
+[[nodiscard, gnu::noinline]] match_result_collection minimap_port_segmented_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const minimap2_parameters& params)
