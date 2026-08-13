@@ -566,9 +566,9 @@ MODES: Dict[str, ModeDefinition] = {
             "audited GCC dyld runtimes. With build_only=true it executes neither "
             "binary and proves only the GCC Highway module/attribute/dispatch "
             "boundary. With build_only=false the local builder additionally "
-            "executes the imported-binder canary and records both selected "
-            "target IDs and names. Neither form proves the full external-api "
-            "build or production DSO."
+            "executes the imported-binder canary in an exact PATH/locale-only "
+            "environment and records both selected target IDs and names. Neither "
+            "form proves the full external-api build or production DSO."
         ),
         is_verb_plular=False,
         targets=["bioseq_highway_gcc_canary"],

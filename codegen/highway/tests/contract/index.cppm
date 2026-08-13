@@ -787,11 +787,25 @@ inline void verify_generated_closure() {
                     artifact.content.contains("#define HWY_TARGET ")
                         && artifact.content.contains(
                             "#include <hwy/aligned_allocator.h>")
+                        && artifact.content.contains(
+                            "#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+                        && artifact.content.contains(
+                            "#if defined(HWY_TARGET_STR) && "
+                            "HWY_HAS_ATTRIBUTE(target)")
+                        && artifact.content.contains(
+                            "#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)")
+                        && artifact.content.contains(
+                            "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR "
+                            "[[gnu::target(HWY_TARGET_STR)]]")
+                        && artifact.content.contains(
+                            "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+                            "#endif")
                         && artifact.content.contains("HWY_ATTR int kernel()")
                         && artifact.content.contains(
                             "import bioseq.fixture.neutral;"),
                     "each target/source partition fixes its target, provides "
-                    "the Highway allocation surface, and rewrites the callable");
+                    "the Highway allocation and lambda-attribute surfaces, "
+                    "and rewrites the callable");
                 break;
             case artifact_kind::kernel_instantiation:
                 ++owner_unit_count;
@@ -938,6 +952,13 @@ inline void verify_generated_closure() {
 }
 
 inline void verify_lambda_attribute_order() {
+    require(
+        detail::valid_lambda_front_attribute_follower("FIXTURE_PARAMS")
+            && detail::valid_lambda_front_attribute_follower("(")
+            && detail::valid_lambda_front_attribute_follower("constexpr")
+            && !detail::valid_lambda_front_attribute_follower(";"),
+        "lambda front-attribute validation accepts proven declarators and "
+        "macroized followers without accepting punctuation");
     extracted_source source{
         .source = source_spec{
             .key = "lambda_fixture",
@@ -945,25 +966,54 @@ inline void verify_lambda_attribute_order() {
         },
         .enclosing_namespace = "bioseq::fixture",
         .body =
-            "auto value = [](int x) constexpr [[gnu::always_inline]] "
+            "auto value = [] [[nodiscard]] (int x) constexpr noexcept(true) "
+            "[[gnu::always_inline]] "
             "-> int { return x; };\n",
     };
     source.callables.push_back(callable_insertion{
-        .body_relative_offset = source.body.find(')') + 1u,
+        .body_relative_offset = source.body.find(']') + 1u,
         .qualified_name = "bioseq::fixture::target::<lambda>",
         .kind = "lambda",
-        .lambda_preceding_token = ")",
-        .lambda_following_token = "constexpr",
-        .lambda_following_relative_offset = source.body.find("constexpr"),
+        .lambda_preceding_token = "]",
+        .lambda_following_token = "[",
+        .lambda_following_relative_offset = source.body.find("[["),
     });
     const std::string rendered = detail::body_with_highway_attributes(source);
     require(
         rendered.contains(
-            "[](int x) HWY_ATTR constexpr [[gnu::always_inline]] -> int")
-            && !rendered.contains("]] HWY_ATTR")
-            && !rendered.contains("-> int HWY_ATTR"),
-        "lambda HWY_ATTR precedes specifiers, standard attributes, and "
-        "trailing return types");
+            "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR [[nodiscard]] (int x) "
+            "constexpr noexcept(true) [[gnu::always_inline]] -> int")
+            && !rendered.contains(") BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+            && !rendered.contains("noexcept(true) BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+            && !rendered.contains("]] BIOSEQ_HIGHWAY_LAMBDA_ATTR"),
+        "lambda target attribute occupies the front attribute slot before "
+        "authored attributes and the lambda declarator");
+
+    extracted_source macroized_source{
+        .source = source_spec{
+            .key = "macroized_lambda_fixture",
+            .path = "macroized_lambda_fixture.cppm",
+        },
+        .enclosing_namespace = "bioseq::fixture",
+        .body =
+            "auto value = [] FIXTURE_PARAMS(int x) { return x; };\n",
+    };
+    macroized_source.callables.push_back(callable_insertion{
+        .body_relative_offset = macroized_source.body.find(']') + 1u,
+        .qualified_name = "bioseq::fixture::target::<macroized-lambda>",
+        .kind = "lambda",
+        .lambda_preceding_token = "]",
+        .lambda_following_token = "FIXTURE_PARAMS",
+        .lambda_following_relative_offset =
+            macroized_source.body.find("FIXTURE_PARAMS"),
+    });
+    const std::string macroized_rendered =
+        detail::body_with_highway_attributes(macroized_source);
+    require(
+        macroized_rendered.contains(
+            "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR FIXTURE_PARAMS(int x)"),
+        "macroized lambda parameters retain the writable front-attribute "
+        "boundary during rendering");
 }
 
 inline void verify_type_only_target_source() {

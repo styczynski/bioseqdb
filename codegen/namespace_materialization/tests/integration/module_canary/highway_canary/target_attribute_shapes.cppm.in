@@ -12,6 +12,16 @@ module;
 #define HWY_TARGET @TARGET_TOKEN@
 #include <hwy/highway.h>
 
+#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR
+#if defined(HWY_TARGET_STR) && HWY_HAS_ATTRIBUTE(target)
+#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)
+#error "selected compiler must support the scoped target attribute"
+#endif
+#define BIOSEQ_HIGHWAY_LAMBDA_ATTR [[gnu::target(HWY_TARGET_STR)]]
+#else
+#define BIOSEQ_HIGHWAY_LAMBDA_ATTR
+#endif
+
 #include <cstdint>
 
 module @TARGET_MODULE@:attribute_shapes;
@@ -21,6 +31,9 @@ module @TARGET_MODULE@:attribute_shapes;
 #endif
 #if !HWY_HAS_ATTRIBUTE(target)
 #error "selected compiler must support the target function attribute"
+#endif
+#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)
+#error "selected compiler must support the scoped target function attribute"
 #endif
 static_assert(sizeof(HWY_TARGET_STR) > 1,
               "compile-only Highway target string must be nonempty");
@@ -93,15 +106,26 @@ HWY_ATTR std::uint32_t attribute_free_function(
 HWY_ATTR std::uint32_t highway_attribute_coverage(
     const std::uint32_t input) noexcept {
   attribute_worker worker{input};
-  const auto local = [](const std::uint32_t value) HWY_ATTR constexpr
+  const auto local = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR (
+      const std::uint32_t value) constexpr noexcept
       [[gnu::always_inline]] -> std::uint32_t {
     return value + std::uint32_t{5};
   };
-  const auto no_parameters = [] HWY_ATTR {
+  const auto no_parameters = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR {
     return std::uint32_t{6};
   };
-  const auto generic = []<class p_value>(const p_value value) HWY_ATTR {
+  const auto generic = []<class p_value> BIOSEQ_HIGHWAY_LAMBDA_ATTR (
+      const p_value value) {
     return value + p_value{7};
+  };
+  const auto constrained_generic = []<class p_value>
+      requires (sizeof(p_value) > 0) BIOSEQ_HIGHWAY_LAMBDA_ATTR (
+          const p_value value) static noexcept {
+    return value + p_value{8};
+  };
+  const auto invented_generic = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR (
+      const auto value) noexcept(noexcept(value + decltype(value){9})) {
+    return value + decltype(value){9};
   };
 
   return attribute_function_template(input)
@@ -111,7 +135,9 @@ HWY_ATTR std::uint32_t highway_attribute_coverage(
       + attribute_free_function(input)
       + local(input)
       + no_parameters()
-      + generic(input);
+      + generic(input)
+      + constrained_generic(input)
+      + invented_generic(input);
 }
 
 }  // namespace bioseq::highway_gcc_canary::HWY_NAMESPACE

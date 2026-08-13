@@ -984,7 +984,9 @@ struct worker {
 };
 
 inline int invoke() {
-    auto local = []() constexpr [[gnu::always_inline]] -> int { return 3; };
+    auto local = [] [[nodiscard]] () constexpr noexcept(true)
+        [[gnu::always_inline]]
+        -> int { return 3; };
     auto implicit = [] { return 4; };
     auto generic_implicit = []<class p_value> { return sizeof(p_value); };
     return local() + implicit()
@@ -1037,7 +1039,7 @@ namespace [[bioseq::similar]] decoy {}
     const translation_unit clang_simd = scan_translation_unit_from_code(
         "simd_marker_ast.cppm",
         simd_marker_source,
-        {"-std=c++20", "-xc++"},
+        {"-std=c++26", "-xc++"},
         "simd_marker_contract");
     require(
         clang_simd.marked_namespaces.size() == 1,
@@ -1092,19 +1094,26 @@ namespace [[bioseq::similar]] decoy {}
                            callable.body_range.begin.byte_offset]
                         == '{';
             }),
-        "Clang structural scan proves function-prefix and lambda-declarator "
-        "HWY_ATTR insertion points");
+        "Clang structural scan proves named-callable prefix and lambda-front "
+        "target-attribute insertion points");
     const auto lambda = std::ranges::find(
         clang_namespace.callables,
         callable_kind::lambda,
         &callable_insertion_record::kind);
+    constexpr std::string_view lambda_attribute_boundary =
+        "] [[nodiscard]]";
+    constexpr std::string_view lambda_introducer_suffix = "]";
     require(
         lambda != clang_namespace.callables.end()
+            && lambda->highway_attribute_insertion.byte_offset
+                >= lambda_introducer_suffix.size()
             && simd_marker_source.substr(
-                lambda->highway_attribute_insertion.byte_offset,
-                std::string_view{" constexpr"}.size()) == " constexpr",
-        "Clang structural scan did not place the lambda HWY_ATTR insertion "
-        "immediately after its explicit parameter list; "
+                lambda->highway_attribute_insertion.byte_offset
+                    - lambda_introducer_suffix.size(),
+                lambda_attribute_boundary.size())
+                == lambda_attribute_boundary,
+        "Clang structural scan did not place the lambda target attribute in "
+        "the front slot after its introducer and before authored attributes; "
             + clang_callable_inventory);
     require(
         std::ranges::any_of(
@@ -1116,7 +1125,7 @@ namespace [[bioseq::similar]] decoy {}
                         std::string_view{" {"}.size()) == " {";
             }),
         "Clang structural scan did not place the parenthesis-free lambda "
-        "HWY_ATTR insertion immediately after its introducer; "
+        "target-attribute insertion immediately after its introducer; "
             + clang_callable_inventory);
     require(
         std::ranges::any_of(
@@ -1132,8 +1141,89 @@ namespace [[bioseq::similar]] decoy {}
                         std::string_view{" {"}.size()) == " {";
             }),
         "Clang structural scan did not place the parenthesis-free generic "
-        "lambda insertion after its complete template head; "
+        "lambda target-attribute insertion after its complete template head; "
             + clang_callable_inventory);
+
+    constexpr std::string_view lambda_geometry_source = R"CPP(
+export module fixture.lambda_geometry;
+export namespace bioseq::fixture {
+namespace [[bioseq::simd]] target {
+inline int exercise_lambda_geometry() {
+    int state = 0;
+    auto explicit_generic = []<class T> [[nodiscard]] (T value) constexpr
+        noexcept(noexcept(T{value})) [[gnu::always_inline]] -> T
+        requires (sizeof(T) > 0) { return value; };
+    auto template_requires = []<class T> requires (sizeof(T) > 0)
+        [[nodiscard]] (T value) static noexcept { return value; };
+    auto mutable_case = [state] [[nodiscard]] (int value) mutable noexcept {
+        return state += value;
+    };
+    auto consteval_case = []() consteval { return 3; };
+    auto static_case = [] static noexcept { return 4; };
+    auto implicit_case = [] [[nodiscard]] constexpr noexcept -> int {
+        return 5;
+    };
+    auto invented_generic = [] [[nodiscard]] (auto value)
+        noexcept(noexcept(value + 1)) { return value; };
+    return explicit_generic(1) + template_requires(1) + mutable_case(1)
+        + consteval_case() + static_case() + implicit_case()
+        + invented_generic(1);
+}
+}
+}
+)CPP";
+    const translation_unit lambda_geometry = scan_translation_unit_from_code(
+        "lambda_geometry.cppm",
+        lambda_geometry_source,
+        {"-std=c++26", "-xc++"},
+        "lambda_geometry_contract");
+    require(
+        lambda_geometry.marked_namespaces.size() == 1,
+        "lambda geometry contract expected one marked namespace");
+    const auto& geometry_callables =
+        lambda_geometry.marked_namespaces.front().callables;
+    const auto require_lambda_anchor =
+        [&](std::string_view declaration_marker,
+            std::string_view anchor,
+            std::string_view following) {
+            const std::size_t declaration =
+                lambda_geometry_source.find(declaration_marker);
+            const std::size_t anchor_begin =
+                lambda_geometry_source.find(anchor, declaration);
+            const std::size_t expected = anchor_begin + anchor.size();
+            const auto found = std::ranges::find_if(
+                geometry_callables,
+                [&](const callable_insertion_record& callable) {
+                    return callable.kind == callable_kind::lambda
+                        && callable.declaration_range.begin.byte_offset
+                            <= expected
+                        && expected <= callable.body_range.begin.byte_offset;
+                });
+            require(
+                declaration != std::string_view::npos
+                    && anchor_begin != std::string_view::npos
+                    && found != geometry_callables.end()
+                    && found->highway_attribute_insertion.byte_offset
+                        == expected
+                    && lambda_geometry_source.substr(
+                           expected, following.size()) == following,
+                "lambda front-attribute anchor mismatch for "
+                    + std::string{declaration_marker});
+        };
+    require_lambda_anchor(
+        "explicit_generic", "[]<class T>", " [[nodiscard]]");
+    require_lambda_anchor(
+        "template_requires",
+        "requires (sizeof(T) > 0)",
+        "\n        [[nodiscard]]");
+    require_lambda_anchor(
+        "mutable_case", "[state]", " [[nodiscard]]");
+    require_lambda_anchor("consteval_case", "[]", "()");
+    require_lambda_anchor("static_case", "[]", " static");
+    require_lambda_anchor(
+        "implicit_case", "[]", " [[nodiscard]]");
+    require_lambda_anchor(
+        "invented_generic", "[]", " [[nodiscard]]");
     for (const auto [kind, description] : {
              std::pair{callable_kind::function, "free function"},
              std::pair{callable_kind::constructor, "constructor"},
@@ -1201,9 +1291,7 @@ namespace [[bioseq::similar]] decoy {}
         "insertion to the writable expansion site; "
             + clang_callable_inventory);
 
-    require_failure(
-        [&] {
-            constexpr std::string_view source = R"CPP(
+    constexpr std::string_view macro_lambda_source = R"CPP(
 export module fixture.macro_lambda;
 export namespace bioseq::fixture {
 namespace [[bioseq::simd]] target {
@@ -1216,14 +1304,32 @@ inline int invoke() {
 }
 }
 )CPP";
-            static_cast<void>(scan_translation_unit_from_code(
-                "macro_lambda.cppm",
-                source,
-                {"-std=c++20", "-xc++"},
-                "macro_lambda_contract"));
-        },
-        "has no confirmed compound-body attribute insertion point",
-        "macroized lambda declarator rejection");
+    const translation_unit macro_lambda = scan_translation_unit_from_code(
+        "macro_lambda.cppm",
+        macro_lambda_source,
+        {"-std=c++26", "-xc++"},
+        "macro_lambda_contract");
+    const std::size_t macro_lambda_declaration =
+        macro_lambda_source.find("auto local");
+    const std::size_t macro_lambda_introducer_end =
+        macro_lambda_source.find(']', macro_lambda_declaration) + 1u;
+    require(
+        macro_lambda_declaration != std::string_view::npos
+            && macro_lambda_introducer_end != 0u
+            && macro_lambda.marked_namespaces.size() == 1
+            && std::ranges::any_of(
+                macro_lambda.marked_namespaces.front().callables,
+                [&](const callable_insertion_record& callable) {
+                    return callable.kind == callable_kind::lambda
+                        && callable.declaration_range.begin.byte_offset
+                            <= macro_lambda_introducer_end
+                        && macro_lambda_introducer_end
+                            <= callable.body_range.begin.byte_offset
+                        && callable.highway_attribute_insertion.byte_offset
+                            == macro_lambda_introducer_end;
+                }),
+        "macroized lambda parameters must not invalidate the direct writable "
+        "front-attribute slot");
 
     const configured_toolchain toolchain;
     assert_toolchain_exists(toolchain);

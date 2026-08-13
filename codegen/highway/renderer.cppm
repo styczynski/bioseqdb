@@ -98,7 +98,18 @@ build_target_coordinates(const target_manifest& inventory) {
            << "#define HWY_TARGET " << target.token << "\n"
            << "#include <cstdint>\n"
            << "#include <hwy/aligned_allocator.h>\n"
-           << "#include <hwy/highway.h>\n\n";
+           << "#include <hwy/highway.h>\n"
+           << "#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+           << "#if defined(HWY_TARGET_STR) && HWY_HAS_ATTRIBUTE(target)\n"
+           << "#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)\n"
+           << "#error \"compiler lacks the scoped target attribute required "
+              "for generated lambdas\"\n"
+           << "#endif\n"
+           << "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR "
+              "[[gnu::target(HWY_TARGET_STR)]]\n"
+           << "#else\n"
+           << "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+           << "#endif\n\n";
     return output.str();
 }
 
@@ -151,7 +162,7 @@ build_target_coordinates(const target_manifest& inventory) {
         if (callable.body_relative_offset >= source.body.size()) {
             throw std::runtime_error(
                 source.source.path.string()
-                + ": stale HWY_ATTR insertion geometry while rendering");
+                + ": stale target-attribute insertion geometry while rendering");
         }
         std::string attribute{"HWY_ATTR "};
         if (lambda) {
@@ -177,7 +188,7 @@ build_target_coordinates(const target_manifest& inventory) {
                     source.source.path.string()
                     + ": stale lambda declarator tokens while rendering");
             }
-            attribute = " HWY_ATTR";
+            attribute = " BIOSEQ_HIGHWAY_LAMBDA_ATTR";
             const unsigned char next = static_cast<unsigned char>(
                 source.body[callable.body_relative_offset]);
             if (!std::isspace(next)) attribute += ' ';
@@ -187,7 +198,10 @@ build_target_coordinates(const target_manifest& inventory) {
             .end_byte = callable.body_relative_offset,
             .replacement = std::move(attribute),
             .source_identity = callable.qualified_name,
-            .purpose = "insert HWY_ATTR on " + callable.qualified_name,
+            .purpose = lambda
+                ? "insert lambda target attribute on "
+                    + callable.qualified_name
+                : "insert HWY_ATTR on " + callable.qualified_name,
         });
     }
     return namespace_materialization::apply_exact_edits(

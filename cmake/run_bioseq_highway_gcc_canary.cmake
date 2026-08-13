@@ -24,7 +24,13 @@ set(_required_inputs
   BIOSEQ_GCC_CANARY_CXX_SHA256
   BIOSEQ_GCC_CANARY_MODULES_SHA256
   BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256
-  BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256)
+  BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256
+  BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR
+  BIOSEQ_GCC_CANARY_APPLE_SDK_PATH
+  BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT
+  BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION
+  BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION
+  BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST)
 foreach(_input IN LISTS _required_inputs)
   if(NOT DEFINED ${_input} OR "${${_input}}" STREQUAL "")
     message(FATAL_ERROR "Highway GCC canary runner requires ${_input}")
@@ -52,6 +58,14 @@ if(NOT "${_observed_driver_closure}" STREQUAL
   message(FATAL_ERROR
     "authenticated GCC driver/frontend/header/runtime closure changed")
 endif()
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
 
 if(NOT IS_ABSOLUTE "${BIOSEQ_GCC_CANARY_BUILD}"
     OR NOT IS_ABSOLUTE "${BIOSEQ_GCC_CANARY_OUTER_BINARY}")
@@ -72,7 +86,7 @@ endif()
 
 set(_identity_material
   "bioseq-highway-gcc-canary\n"
-  "revision=1\n"
+  "revision=2\n"
   "${BIOSEQ_GCC_CANARY_ROOT}\n"
   "${BIOSEQ_GCC_CANARY_VERSION}\n"
   "${BIOSEQ_GCC_CANARY_C_SHA256}\n"
@@ -80,7 +94,13 @@ set(_identity_material
   "${BIOSEQ_GCC_CANARY_MODULES_SHA256}\n"
   "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}\n"
   "${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}\n"
-  "${BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256}\n")
+  "${BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}\n"
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}\n")
 string(SHA256 _identity "${_identity_material}")
 set(_identity_file "${BIOSEQ_GCC_CANARY_BUILD}/.bioseq-toolchain-identity")
 # Recreate the nested closure on every invocation so no same-compiler CMake
@@ -94,7 +114,9 @@ set(_allowlisted_environment
   -i
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
   "LC_ALL=C"
-  "LANG=C")
+  "LANG=C"
+  "DEVELOPER_DIR=${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  "SDKROOT=${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}")
 
 execute_process(
   COMMAND ${_allowlisted_environment}
@@ -104,6 +126,7 @@ execute_process(
     -G Ninja
     "-DCMAKE_MAKE_PROGRAM:FILEPATH=${BIOSEQ_GCC_CANARY_NINJA}"
     "-DCMAKE_CXX_COMPILER:FILEPATH=${BIOSEQ_GCC_CANARY_CXX}"
+    "-DCMAKE_OSX_SYSROOT:PATH=${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
     "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING="
     "-DCMAKE_CXX_FLAGS:STRING="
     "-DCMAKE_EXE_LINKER_FLAGS:STRING="
@@ -135,7 +158,109 @@ execute_process(
     "-DBIOSEQ_GCC_CANARY_MODULES_SHA256:STRING=${BIOSEQ_GCC_CANARY_MODULES_SHA256}"
     "-DBIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256:STRING=${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}"
     "-DBIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256:STRING=${BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR:PATH=${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_SDK_PATH:PATH=${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_SDK_ROOT:PATH=${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_SDK_VERSION:STRING=${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION:STRING=${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+    "-DBIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST:STRING=${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}"
   COMMAND_ERROR_IS_FATAL ANY)
+
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
+
+execute_process(
+  COMMAND ${_allowlisted_environment}
+    "${BIOSEQ_GCC_CANARY_NINJA}"
+    -C "${BIOSEQ_GCC_CANARY_BUILD}"
+    -t commands bioseq_gcc_canary_closure
+  RESULT_VARIABLE _commands_status
+  OUTPUT_VARIABLE _commands
+  ERROR_VARIABLE _commands_stderr)
+if(NOT _commands_status EQUAL 0 OR "${_commands}" STREQUAL "")
+  message(FATAL_ERROR
+    "Highway GCC canary could not audit nested build commands: "
+    "status=${_commands_status}, stderr=${_commands_stderr}")
+endif()
+if("${_commands}" MATCHES ";")
+  message(FATAL_ERROR
+    "Highway GCC canary refuses an unrepresentable semicolon in nested "
+    "build commands")
+endif()
+string(REPLACE "\r\n" "\n" _commands "${_commands}")
+string(REPLACE "\n" ";" _command_lines "${_commands}")
+set(_gcc_command_count 0)
+foreach(_command_line IN LISTS _command_lines)
+  separate_arguments(_command_tokens UNIX_COMMAND "${_command_line}")
+  set(_gcc_token_count 0)
+  foreach(_command_token IN LISTS _command_tokens)
+    if("${_command_token}" STREQUAL "${BIOSEQ_GCC_CANARY_CXX}")
+      math(EXPR _gcc_token_count "${_gcc_token_count} + 1")
+    endif()
+  endforeach()
+  if(_gcc_token_count EQUAL 0)
+    continue()
+  endif()
+  if(NOT _gcc_token_count EQUAL 1)
+    message(FATAL_ERROR
+      "Highway GCC canary nested command references the authenticated compiler "
+      "more than once: ${_command_line}")
+  endif()
+  math(EXPR _gcc_command_count "${_gcc_command_count} + 1")
+  set(_sysroot_flag_count 0)
+  list(LENGTH _command_tokens _command_token_count)
+  set(_command_token_index 0)
+  while(_command_token_index LESS _command_token_count)
+    list(GET _command_tokens ${_command_token_index} _command_token)
+    if(_command_token STREQUAL "-isysroot")
+      math(EXPR _sysroot_flag_count "${_sysroot_flag_count} + 1")
+      math(EXPR _sysroot_value_index "${_command_token_index} + 1")
+      if(_sysroot_value_index GREATER_EQUAL _command_token_count)
+        message(FATAL_ERROR
+          "Highway GCC canary nested GCC command ended at -isysroot: "
+          "${_command_line}")
+      endif()
+      list(GET _command_tokens ${_sysroot_value_index} _sysroot_value)
+      if(NOT "${_sysroot_value}" STREQUAL
+          "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}")
+        message(FATAL_ERROR
+          "Highway GCC canary nested GCC command carries a different Apple "
+          "sysroot: ${_sysroot_value}")
+      endif()
+    elseif(_command_token MATCHES "^-isysroot.+"
+        OR _command_token MATCHES "^--sysroot($|=)")
+      message(FATAL_ERROR
+        "Highway GCC canary nested GCC command carries a forbidden sysroot "
+        "spelling: ${_command_token}")
+    endif()
+    math(EXPR _command_token_index "${_command_token_index} + 1")
+  endwhile()
+  if(NOT _sysroot_flag_count EQUAL 1)
+    message(FATAL_ERROR
+      "Highway GCC canary nested GCC command does not carry exactly one "
+      "sealed Apple sysroot: ${_command_line}")
+  endif()
+endforeach()
+if(_gcc_command_count LESS 2)
+  message(FATAL_ERROR
+    "Highway GCC canary found too few authenticated GCC commands to audit: "
+    "${_gcc_command_count}")
+endif()
+
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
 
 execute_process(
   COMMAND ${_allowlisted_environment}
@@ -144,6 +269,15 @@ execute_process(
     --target bioseq_gcc_canary_closure
     --verbose
   COMMAND_ERROR_IS_FATAL ANY)
+
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
 
 _bioseq_highway_gcc_canary_driver_closure(
   _postlink_driver_closure _gcc_libstdcxx _gcc_libgcc
@@ -202,4 +336,7 @@ message(STATUS
   "bioseq-highway-gcc-canary: linked isolated GCC ${BIOSEQ_GCC_CANARY_VERSION} "
   "Highway and generic module canaries with sealed dyld runtimes; "
   "toolchain identity=${_identity}; "
-  "Highway headers=${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}")
+  "Highway headers=${BIOSEQ_GCC_CANARY_HIGHWAY_HEADER_DIGEST}; "
+  "Apple SDK=${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION} "
+  "(${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}, "
+  "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST})")

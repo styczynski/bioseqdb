@@ -41,6 +41,16 @@ namespace detail {
     });
 }
 
+[[nodiscard]] inline bool valid_lambda_front_attribute_follower(
+    const std::string_view spelling) noexcept {
+    static constexpr std::array<std::string_view, 12> fixed_spellings{
+        "{", "(", "mutable", "constexpr", "consteval", "static",
+        "noexcept", "[", "->", "requires", "__attribute__", "__declspec",
+    };
+    return identifier(spelling)
+        || std::ranges::contains(fixed_spellings, spelling);
+}
+
 [[nodiscard]] inline bool domain_name(std::string_view value) noexcept {
     if (value.empty() || value.front() < 'a' || value.front() > 'z') {
         return false;
@@ -1345,12 +1355,7 @@ inline void validate_inventories(
                     && following_token != unit.tokens.end()
                     && following_token->range.begin.byte_offset
                         <= callable.body_range.begin.byte_offset
-                    && std::ranges::contains(
-                        std::array<std::string_view, 11>{
-                            "{", "mutable", "constexpr", "consteval", "static",
-                            "noexcept", "[", "->", "requires", "__attribute__",
-                            "__declspec",
-                        },
+                    && detail::valid_lambda_front_attribute_follower(
                         following_token->spelling));
             const bool valid_lambda = !lambda
                 || (insertion
@@ -1365,7 +1370,8 @@ inline void validate_inventories(
                 || !insertion_offsets.insert(insertion).second) {
                 throw std::runtime_error(
                     source.path.string()
-                    + ": callable has no unique proven HWY_ATTR insertion point");
+                    + ": callable has no unique proven target-attribute "
+                      "insertion point");
             }
             extracted.callables.push_back(callable_insertion{
                 .body_relative_offset = insertion - body_begin,

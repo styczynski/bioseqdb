@@ -5236,67 +5236,26 @@ class structural_visitor final
         };
         const clang::SourceLocation lambda_begin =
             direct_main_file_location(lambda->getBeginLoc());
-        clang::SourceLocation declarator_end =
+        clang::SourceLocation attribute_anchor =
             direct_main_file_location(lambda->getIntroducerRange().getEnd());
-        if (lambda->hasExplicitParameters() && call_operator != nullptr) {
-            const clang::FunctionTypeLoc function_type =
-                call_operator->getFunctionTypeLoc();
-            if (!function_type.isNull()) {
-                declarator_end = direct_main_file_location(
-                    function_type.getRParenLoc());
+        if (!lambda->getExplicitTemplateParameters().empty()) {
+            const clang::TemplateParameterList* parameters =
+                lambda->getTemplateParameterList();
+            if (parameters == nullptr) {
+                attribute_anchor = {};
             } else {
-                declarator_end = {};
+                clang::SourceLocation template_end =
+                    parameters->getRAngleLoc();
+                if (const clang::Expr* requires_clause =
+                        parameters->getRequiresClause()) {
+                    template_end = requires_clause->getEndLoc();
+                }
+                attribute_anchor = direct_main_file_location(template_end);
             }
-        } else if (const clang::TemplateParameterList* parameters =
-                       lambda->getTemplateParameterList()) {
-            clang::SourceLocation template_end = parameters->getRAngleLoc();
-            if (const clang::Expr* requires_clause =
-                    parameters->getRequiresClause()) {
-                template_end = requires_clause->getEndLoc();
-            }
-            declarator_end = direct_main_file_location(template_end);
         }
-        source_position insertion = declarator_end.isValid()
-            ? token_range_of(declarator_end, sources_, language_).end
+        const source_position insertion = attribute_anchor.isValid()
+            ? token_range_of(attribute_anchor, sources_, language_).end
             : source_position{};
-        bool attribute_geometry_valid = true;
-        if (declarator_end.isValid() && !lambda->hasExplicitParameters()) {
-            const auto& tokens = output_.tokens;
-            std::size_t cursor = static_cast<std::size_t>(std::distance(
-                tokens.begin(),
-                std::ranges::lower_bound(
-                    tokens,
-                    insertion.byte_offset,
-                    {},
-                    [](const lexical_token& token) {
-                        return token.range.begin.byte_offset;
-                    })));
-            while (cursor < tokens.size()
-                   && tokens[cursor].range.begin.byte_offset
-                       < body_range.begin.byte_offset
-                   && detail::attribute_open(tokens, cursor)) {
-                std::size_t close = cursor + 2u;
-                int nested = 0;
-                for (; close + 1u < tokens.size(); ++close) {
-                    if (detail::attribute_open(tokens, close)) {
-                        ++nested;
-                        ++close;
-                    } else if (detail::attribute_close(tokens, close)) {
-                        if (nested == 0) break;
-                        --nested;
-                        ++close;
-                    }
-                }
-                if (close + 1u >= tokens.size()
-                    || tokens[close + 1u].range.end.byte_offset
-                        > body_range.begin.byte_offset) {
-                    attribute_geometry_valid = false;
-                    break;
-                }
-                insertion = tokens[close + 1u].range.end;
-                cursor = close + 2u;
-            }
-        }
         callable_candidates_.push_back(callable_candidate{
             .record = {
                 .kind = callable_kind::lambda,
@@ -5312,8 +5271,7 @@ class structural_visitor final
             },
             .insertion_proven =
                 lambda_begin.isValid()
-                    && declarator_end.isValid()
-                    && attribute_geometry_valid
+                    && attribute_anchor.isValid()
                     && insertion.byte_offset
                         >= source_position_of(lambda_begin, sources_).byte_offset
                     && insertion.byte_offset <= body_range.begin.byte_offset
@@ -5687,10 +5645,10 @@ class structural_visitor final
         if (const auto* method =
                 llvm::dyn_cast<clang::CXXMethodDecl>(function);
             method != nullptr && method->getParent()->isLambda()) {
-            // Lambda call operators need HWY_ATTR immediately after their
-            // explicit parameter list (or introducer when parentheses are
-            // omitted), before specifiers, standard attributes, or a trailing
-            // return type. The LambdaExpr visitor owns that insertion;
+            // Lambda call operators need a standard-spelling target attribute
+            // in the front attribute slot after the introducer or complete
+            // explicit template head. The LambdaExpr visitor owns that
+            // insertion;
             // treating the synthetic call operator as a normal member would
             // record the body twice.
             return;

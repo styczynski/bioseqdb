@@ -186,6 +186,12 @@ LOCAL_LLVM22_CLANG = Path("/usr/lib/llvm-22/bin/clang")
 
 LOCAL_LLVM22_CLANGXX = Path("/usr/lib/llvm-22/bin/clang++")
 
+HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "LANG": "C",
+}
+
 LOCAL_CLANG_RT_CMAKE_KEYS = (
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
@@ -3377,7 +3383,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
                 log_handle.flush()
             run_env = env
-            if mode == "benchmark-e2e" and bench_e2e_config is not None:
+            if mode == "highway-gcc-canary":
+                run_env = HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT.copy()
+                log_handle.write(
+                    "# highway-gcc-canary runtime environment="
+                    "PATH,LC_ALL,LANG\n")
+                log_handle.flush()
+            elif mode == "benchmark-e2e" and bench_e2e_config is not None:
                 run_env = env.copy()
                 run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
                 log_handle.write(
