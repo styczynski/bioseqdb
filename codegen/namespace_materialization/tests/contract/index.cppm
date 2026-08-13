@@ -435,7 +435,8 @@ long root(std::uint8_t abi_code, int value) {
 import fixture.owner;
 import fixture.neutral;
 
-namespace fixture::owner {
+namespace fixture {
+namespace owner {
 
 static constexpr bool OwnerDna5
     [[bioseq::template_flatten(
@@ -461,7 +462,8 @@ int owner_segmented(int value) {
     return value + (OwnerDna5 ? 20 : 1) + static_cast<int>(OwnerRoute);
 }
 
-}  // namespace fixture::owner
+}  // namespace owner
+}  // namespace fixture
 )CPP";
 }
 

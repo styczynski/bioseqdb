@@ -19,7 +19,8 @@ import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.gpu_minimizer_index;
 
-namespace bioseq::simd {
+namespace bioseq {
+namespace simd {
 
 static constexpr bool owner_dna5
     [[bioseq::template_flatten(
@@ -186,4 +187,5 @@ minimap_port_fragment_query_owned(
             gpu_index_identity, allow_gpu_target_index_build);
 }
 
-} // namespace bioseq::simd
+} // namespace simd
+} // namespace bioseq
