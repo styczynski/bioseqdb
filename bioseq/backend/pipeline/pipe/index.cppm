@@ -8176,7 +8176,7 @@ minimap2_port_with_index_owned(
 namespace pipe_entry_detail {
 
 struct dynamic_shape_pipeline_dispatch {
-    template <pipeline_entry_point p_entry_point,
+    template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer, class p_index,
               class p_query_minimizers>
@@ -8190,7 +8190,7 @@ struct dynamic_shape_pipeline_dispatch {
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
         bool allow_gpu_target_index_build,
-        transient_target_index_release_authorization
+        ::bioseq::simd::pipe::transient_target_index_release_authorization
             transient_target_index_owner)
     {
         return ::bioseq::simd::pipe::dispatch_pipeline<
@@ -8205,7 +8205,7 @@ struct dynamic_shape_pipeline_dispatch {
 
 template <std::size_t p_bucket_width, std::size_t p_kmer_size>
 struct pinned_shape_pipeline_dispatch {
-    template <pipeline_entry_point p_entry_point,
+    template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer, class p_index,
               class p_query_minimizers>
@@ -8219,7 +8219,7 @@ struct pinned_shape_pipeline_dispatch {
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
         bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
         bool allow_gpu_target_index_build,
-        transient_target_index_release_authorization
+        ::bioseq::simd::pipe::transient_target_index_release_authorization
             transient_target_index_owner)
     {
         static_assert(std::same_as<
