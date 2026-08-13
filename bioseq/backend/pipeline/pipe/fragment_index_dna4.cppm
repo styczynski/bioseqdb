@@ -6,6 +6,7 @@ module;
 
 #include <bioseq/pg_build_profile.h>
 
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,31 @@ minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
         query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
+        prebuilt_target_index,
+    const minimap2_parameters& params,
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
+    bool allow_gpu_target_index_build)
+{
+    const pipe::minimizer_batch_view<
+        ::bioseq::minimizers::minimap_sketch_data> query_batch{
+        .host = std::span<const ::bioseq::minimizers::minimap_sketch_data>{
+            query_minimizers.data(), query_minimizers.size()},
+        .device = {},
+    };
+    return minimap2_port_with_index_owned(
+        std::move(query_seq), std::move(target_seq), query_batch,
+        prebuilt_target_index, params, gpu_index_cache,
+        gpu_index_identity, allow_gpu_target_index_build);
+}
+
+[[nodiscard, gnu::noinline]] match_result_collection
+minimap2_port_with_index_owned(
+    bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
+    bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
+    const pipe::minimizer_batch_view<
+        ::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
     const ::bioseq::indexing::minimizer_hashmap_fragment_index&
         prebuilt_target_index,
     const minimap2_parameters& params,

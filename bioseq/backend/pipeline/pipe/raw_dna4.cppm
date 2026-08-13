@@ -21,7 +21,7 @@ namespace bioseq::simd {
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params)
 {
-    return minimap_port<::seq::dna4>(
+    return pipe_entry_detail::minimap_port_owned_pinned_shape<::seq::dna4>(
         std::move(query_seq), std::move(target_seq), params);
 }
 

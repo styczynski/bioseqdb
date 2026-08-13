@@ -22,8 +22,9 @@ namespace bioseq::simd {
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const minimap2_parameters& params)
 {
-    return minimap_port_segmented<::seq::dna4, std::nullptr_t>(
-        std::move(query_seq), std::move(target_seq), params, nullptr);
+    return pipe_entry_detail::minimap_port_segmented_owned_dispatch<
+        ::seq::dna4>(
+            std::move(query_seq), std::move(target_seq), params);
 }
 
 } // namespace bioseq::simd

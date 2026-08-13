@@ -7119,6 +7119,26 @@ struct pipeline_run_traits {
         p_entry_point, p_alphabet, p_minimizer, p_index, p_bucket_width, p_kmer_size, p_alignment_algorithm, p_chaining_algorithm, p_minimizer_algorithm>;
 };
 
+// Scheduler-owned raw entries have already selected the representation from
+// the same `(kmer_size, max(query_bp, target_bp))` values consumed by the
+// pipeline cascade.  Preserve those two pinned values while dispatching the
+// remaining algorithm axes, instead of rebuilding every impossible sibling
+// representation below each already-selected outer leaf.
+template <pipeline_entry_point p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          std::size_t p_bucket_width, std::size_t p_kmer_size>
+struct pipeline_run_pinned_shape_traits {
+    template <auto p_alignment_algorithm,
+              auto p_chaining_algorithm,
+              auto p_minimizer_algorithm>
+    using leaf = pipeline_run_leaf<
+        p_entry_point, p_alphabet, p_minimizer, p_index,
+        p_bucket_width, p_kmer_size,
+        p_alignment_algorithm, p_chaining_algorithm,
+        p_minimizer_algorithm>;
+};
+
 /// Common leaf body shared by specialized and fallback parameter branches in
 /// `describe_leaf::call`. Declared before
 /// `describe_leaf` so its unqualified call inside `describe_leaf::call`
@@ -7286,6 +7306,51 @@ match_result_collection dispatch_pipeline(
         detail::ca_step,
         detail::guarded_step<detail::ma_step,
             /*active=*/(p_entry_point != pipeline_entry_point::with_prebuilt_minimizers)>
+    >::template run<>(
+        params, query_seq, target_seq, query_minimizers, target_index,
+        gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
+        transient_target_index_owner);
+}
+
+/**
+ * Scheduler-private counterpart of `dispatch_pipeline` for a raw
+ * representation leaf whose k-mer and sequence-length bucket were fixed by
+ * the outer raw cascade.  The leaf body remains the sole owner of the
+ * full-specialization specialised/fallback branch; only the redundant second
+ * k-mer/bucket cascade is removed.
+ */
+template <std::size_t p_bucket_width,
+          std::size_t p_kmer_size,
+          pipeline_entry_point p_entry_point,
+          sequence_alphabet p_alphabet,
+          class p_minimizer, class p_index,
+          class p_query_minimizers = std::vector<p_minimizer>>
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
+match_result_collection dispatch_pipeline_pinned_shape(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const p_query_minimizers& query_minimizers,
+    const p_index& target_index,
+    const ::bioseq::simd::minimap2_parameters& params,
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false,
+    transient_target_index_release_authorization
+        transient_target_index_owner = {})
+{
+    static_assert(p_kmer_size > 0u);
+    static_assert(p_bucket_width >= p_kmer_size);
+    using traits_type = detail::pipeline_run_pinned_shape_traits<
+        p_entry_point, p_alphabet, p_minimizer, p_index,
+        p_bucket_width, p_kmer_size>;
+    return detail::dispatch_chain<
+        match_result_collection,
+        traits_type::template leaf,
+        detail::baa_step,
+        detail::ca_step,
+        detail::guarded_step<detail::ma_step,
+            /*active=*/(p_entry_point
+                != pipeline_entry_point::with_prebuilt_minimizers)>
     >::template run<>(
         params, query_seq, target_seq, query_minimizers, target_index,
         gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
@@ -7987,6 +8052,19 @@ minimap2_port_with_index_owned(
 minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
+    const ::bioseq::simd::pipe::minimizer_batch_view<
+        ::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
+        prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false);
+
+[[nodiscard, gnu::noinline]] match_result_collection
+minimap2_port_with_index_owned(
+    bioseq::storage::lazy_sequence_view<::seq::dna4> query_seq,
+    bioseq::storage::lazy_sequence_view<::seq::dna4> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
         query_minimizers,
     const ::bioseq::indexing::hash_major_minimizer_selective_reader&
@@ -8040,6 +8118,19 @@ minimap2_port_with_index_owned(
 minimap2_port_with_index_owned(
     bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
     bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
+    const ::bioseq::simd::pipe::minimizer_batch_view<
+        ::bioseq::minimizers::minimap_sketch_data>& query_minimizers,
+    const ::bioseq::indexing::minimizer_hashmap_fragment_index&
+        prebuilt_target_index,
+    const minimap2_parameters& params = minimap2_parameters{},
+    bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr,
+    bioseq::indexing::gpu_index_cache_identity gpu_index_identity = {},
+    bool allow_gpu_target_index_build = false);
+
+[[nodiscard, gnu::noinline]] match_result_collection
+minimap2_port_with_index_owned(
+    bioseq::storage::lazy_sequence_view<::seq::dna5> query_seq,
+    bioseq::storage::lazy_sequence_view<::seq::dna5> target_seq,
     const std::vector<::bioseq::minimizers::minimap_sketch_data>&
         query_minimizers,
     const ::bioseq::indexing::hash_major_minimizer_selective_reader&
@@ -8082,9 +8173,74 @@ minimap2_port_with_index_owned(
  * Builds a target index from `target_minimizers` and delegates to
  * `minimap2_port_with_index`.
  */
-template <class p_minimizer,
+namespace pipe_entry_detail {
+
+struct dynamic_shape_pipeline_dispatch {
+    template <pipeline_entry_point p_entry_point,
+              sequence_alphabet p_alphabet,
+              class p_minimizer, class p_index,
+              class p_query_minimizers>
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
+    static match_result_collection call(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const p_query_minimizers& query_minimizers,
+        const p_index& target_index,
+        const minimap2_parameters& params,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
+        bool allow_gpu_target_index_build,
+        transient_target_index_release_authorization
+            transient_target_index_owner)
+    {
+        return ::bioseq::simd::pipe::dispatch_pipeline<
+            p_entry_point, p_alphabet, p_minimizer, p_index,
+            p_query_minimizers>(
+                query_seq, target_seq, query_minimizers, target_index,
+                params, gpu_index_cache, gpu_index_identity,
+                allow_gpu_target_index_build,
+                transient_target_index_owner);
+    }
+};
+
+template <std::size_t p_bucket_width, std::size_t p_kmer_size>
+struct pinned_shape_pipeline_dispatch {
+    template <pipeline_entry_point p_entry_point,
+              sequence_alphabet p_alphabet,
+              class p_minimizer, class p_index,
+              class p_query_minimizers>
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
+    static match_result_collection call(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const p_query_minimizers& query_minimizers,
+        const p_index& target_index,
+        const minimap2_parameters& params,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity,
+        bool allow_gpu_target_index_build,
+        transient_target_index_release_authorization
+            transient_target_index_owner)
+    {
+        static_assert(std::same_as<
+            std::remove_cvref_t<p_minimizer>,
+            ::bioseq::minimizers::minimizer_representation<
+                p_bucket_width, p_kmer_size>>);
+        return ::bioseq::simd::pipe::dispatch_pipeline_pinned_shape<
+            p_bucket_width, p_kmer_size,
+            p_entry_point, p_alphabet, p_minimizer, p_index,
+            p_query_minimizers>(
+                query_seq, target_seq, query_minimizers, target_index,
+                params, gpu_index_cache, gpu_index_identity,
+                allow_gpu_target_index_build,
+                transient_target_index_owner);
+    }
+};
+
+template <class p_pipeline_dispatch,
+          class p_minimizer,
           sequence_alphabet p_alphabet>
-[[nodiscard]] match_result_collection minimap2_port(
+[[nodiscard]] match_result_collection minimap2_port_impl(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     const std::vector<p_minimizer>& query_minimizers,
@@ -8111,14 +8267,33 @@ template <class p_minimizer,
     static const auto* _with_index_desc =
         bioseq::instrumentation::register_static_region("minimap2_port_with_index");
     auto _with_index_scope = bioseq::instrumentation::region(_with_index_desc);
-    return ::bioseq::simd::pipe::dispatch_pipeline<
+    return p_pipeline_dispatch::template call<
         ::bioseq::simd::pipe::pipeline_entry_point::with_prebuilt_minimizers,
-            p_alphabet, p_minimizer, minimizer_hashmap_fragment_index>(
+        p_alphabet, p_minimizer, minimizer_hashmap_fragment_index,
+        std::vector<p_minimizer>>(
                 query_seq, target_seq, query_minimizers, target_index, params,
                 nullptr, {}, is_gpu_target_index_build,
                 ::bioseq::simd::pipe::
                     transient_target_index_release_authorization{
                         .index = &target_index});
+}
+
+} // namespace pipe_entry_detail
+
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection minimap2_port(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const std::vector<p_minimizer>& query_minimizers,
+    std::vector<p_minimizer> target_minimizers,
+    const minimap2_parameters& params = minimap2_parameters{})
+{
+    return pipe_entry_detail::minimap2_port_impl<
+        pipe_entry_detail::dynamic_shape_pipeline_dispatch,
+        p_minimizer, p_alphabet>(
+            query_seq, target_seq, query_minimizers,
+            std::move(target_minimizers), params);
 }
 
 namespace pipe_entry_detail {
@@ -8128,10 +8303,11 @@ namespace pipe_entry_detail {
 /// exactly, streamed into final mapped buffers, published under an
 /// operation-unique key, and only then released.  No CPU FOA table or CPU
 /// positions vector is constructed on this route.
-template <class p_minimizer,
+template <class p_pipeline_dispatch,
+          class p_minimizer,
           sequence_alphabet p_alphabet>
 [[nodiscard]] match_result_collection
-minimap2_port_with_fixed_vulkan_target_handoff(
+minimap2_port_with_fixed_vulkan_target_handoff_impl(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     const std::vector<p_minimizer>& query_minimizers,
@@ -8366,10 +8542,11 @@ minimap2_port_with_fixed_vulkan_target_handoff(
             bioseq::instrumentation::register_static_region(
                 "minimap2_port_with_index");
         auto _with_index_scope = bioseq::instrumentation::region(_with_index_desc);
-        auto result = ::bioseq::simd::pipe::dispatch_pipeline<
+        auto result = p_pipeline_dispatch::template call<
             ::bioseq::simd::pipe::
                 pipeline_entry_point::with_prebuilt_minimizers,
-                p_alphabet, p_minimizer, minimizer_hashmap_fragment_index>(
+            p_alphabet, p_minimizer, minimizer_hashmap_fragment_index,
+            std::vector<p_minimizer>>(
                     query_seq,
                     target_seq,
                     query_minimizers,
@@ -8561,6 +8738,22 @@ minimap2_port_with_fixed_vulkan_target_handoff(
                 : "operation_exception");
         std::rethrow_exception(pending);
     }
+}
+
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection
+minimap2_port_with_fixed_vulkan_target_handoff(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const std::vector<p_minimizer>& query_minimizers,
+    fixed_vulkan_target_host_owner<p_minimizer> target_host,
+    const minimap2_parameters& params)
+{
+    return minimap2_port_with_fixed_vulkan_target_handoff_impl<
+        dynamic_shape_pipeline_dispatch, p_minimizer, p_alphabet>(
+            query_seq, target_seq, query_minimizers,
+            std::move(target_host), params);
 }
 
 // =============================================================================
@@ -8957,9 +9150,10 @@ minimizer_sketch_execution_stats sketch_into_collector(
  * so the per-query minimizer_stage inside `pipe::dispatch_pipeline` handles
  * query sketching.
  */
-template <class p_minimizer,
+template <class p_pipeline_dispatch,
+          class p_minimizer,
           sequence_alphabet p_alphabet>
-[[nodiscard]] match_result_collection minimap_port_with_repr(
+[[nodiscard]] match_result_collection minimap_port_with_repr_impl(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     const minimap2_parameters& params)
@@ -9051,14 +9245,15 @@ template <class p_minimizer,
     auto owned_target_minimizers = std::move(target_minimizers);
     std::vector<p_minimizer>{}.swap(target_minimizers);
     match_result_collection result = fixed_target_zero_copy_route
-        ? minimap2_port_with_fixed_vulkan_target_handoff<
-              p_minimizer, p_alphabet>(
+        ? minimap2_port_with_fixed_vulkan_target_handoff_impl<
+              p_pipeline_dispatch, p_minimizer, p_alphabet>(
                   query_seq,
                   target_seq,
                   query_minimizers,
                   std::move(fixed_target_sketch->host),
                   params)
-        : minimap2_port<p_minimizer, p_alphabet>(
+        : minimap2_port_impl<
+              p_pipeline_dispatch, p_minimizer, p_alphabet>(
               query_seq,
               target_seq,
               query_minimizers,
@@ -9072,6 +9267,18 @@ template <class p_minimizer,
             result, target_sketch_stats, minimizer_sketch_role::target);
     }
     return result;
+}
+
+template <class p_minimizer,
+          sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection minimap_port_with_repr(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params)
+{
+    return minimap_port_with_repr_impl<
+        dynamic_shape_pipeline_dispatch, p_minimizer, p_alphabet>(
+            query_seq, target_seq, params);
 }
 
 // =============================================================================
@@ -9108,6 +9315,51 @@ struct minimap_port_traits {
     template <auto p_kmer_size, auto p_bucket_width>
     using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
 };
+
+template <sequence_alphabet p_alphabet,
+          std::size_t p_bucket_width, std::size_t p_kmer_size>
+struct minimap_port_owned_repr_leaf {
+    static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>);
+    static_assert(std::is_same_v<decltype(p_kmer_size), std::size_t>);
+
+    BIOSEQ_PIPELINE_INLINE_ATTR
+    static match_result_collection call(
+        const minimap2_parameters& params,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq)
+    {
+        using p_minimizer = ::bioseq::minimizers::minimizer_representation<
+            p_bucket_width, p_kmer_size>;
+        using pipeline_dispatch = pinned_shape_pipeline_dispatch<
+            p_bucket_width, p_kmer_size>;
+        return minimap_port_with_repr_impl<
+            pipeline_dispatch, p_minimizer, p_alphabet>(
+                query_seq, target_seq, params);
+    }
+};
+
+template <sequence_alphabet p_alphabet>
+struct minimap_port_owned_traits {
+    template <auto p_kmer_size, auto p_bucket_width>
+    using leaf = minimap_port_owned_repr_leaf<
+        p_alphabet, p_bucket_width, p_kmer_size>;
+};
+
+template <sequence_alphabet p_alphabet>
+BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
+match_result_collection minimap_port_owned_pinned_shape(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params)
+{
+    using traits_type = minimap_port_owned_traits<p_alphabet>;
+    return ::bioseq::simd::pipe::detail::dispatch_chain<
+        match_result_collection,
+        traits_type::template leaf,
+        ::bioseq::simd::pipe::detail::kmer_size_step,
+        ::bioseq::simd::pipe::detail::seq_len_log2_step_per_k
+    >::template run<>(params, query_seq, target_seq);
+}
 
 } // namespace pipe_entry_detail
 
@@ -9503,9 +9755,52 @@ template <class p_minimizer, sequence_alphabet p_alphabet>
     return result;
 }
 
-template <sequence_alphabet p_alphabet,
+namespace pipe_entry_detail {
+
+struct segmented_dynamic_index_dispatch {
+    template <sequence_alphabet p_alphabet>
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static match_result_collection call(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const pipe::minimizer_batch_view<minimap_sketch_data>&
+            query_minimizers,
+        const minimizer_hashmap_fragment_index& target_index,
+        const minimap2_parameters& params,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity)
+    {
+        return minimap2_port_with_index(
+            query_seq, target_seq, query_minimizers, target_index, params,
+            gpu_index_cache, gpu_index_identity);
+    }
+};
+
+struct segmented_owned_index_dispatch {
+    template <sequence_alphabet p_alphabet>
+    BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
+    static match_result_collection call(
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+        const pipe::minimizer_batch_view<minimap_sketch_data>&
+            query_minimizers,
+        const minimizer_hashmap_fragment_index& target_index,
+        const minimap2_parameters& params,
+        bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache,
+        bioseq::indexing::gpu_index_cache_identity gpu_index_identity)
+    {
+        return minimap2_port_with_index_owned(
+            query_seq, target_seq, query_minimizers, target_index, params,
+            gpu_index_cache, gpu_index_identity);
+    }
+};
+
+} // namespace pipe_entry_detail
+
+template <class p_index_dispatch,
+          sequence_alphabet p_alphabet,
           class p_fragment_index_storage = std::nullptr_t>
-[[nodiscard]] match_result_collection minimap_port_segmented(
+[[nodiscard]] match_result_collection minimap_port_segmented_impl(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
     const minimap2_parameters& params = minimap2_parameters{},
@@ -9888,7 +10183,8 @@ template <sequence_alphabet p_alphabet,
                         filtered_pairs);
                     seg_index.add_position_offset(segment_lo_bp);
 
-                    match_result_collection seg_res = minimap2_port_with_index(
+                    match_result_collection seg_res =
+                        p_index_dispatch::template call<p_alphabet>(
                         query_seq, target_seq, query_minimizers, seg_index, params,
                         segmented_gpu_index_cache_ptr,
                         segment_gpu_identity(segment_index));
@@ -9937,7 +10233,8 @@ template <sequence_alphabet p_alphabet,
                         filtered_pair_collector.pairs.size()},
                     target_len);
 
-                match_result_collection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res =
+                    p_index_dispatch::template call<p_alphabet>(
                     query_seq, target_seq, query_minimizers, seg_index, params,
                     segmented_gpu_index_cache_ptr,
                     gpu_identity);
@@ -9969,7 +10266,8 @@ template <sequence_alphabet p_alphabet,
                     filtered_pairs);
                 seg_index.add_position_offset(segment_lo_bp);
 
-                match_result_collection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res =
+                    p_index_dispatch::template call<p_alphabet>(
                     query_seq, target_seq, query_minimizers, seg_index, params,
                     segmented_gpu_index_cache_ptr,
                     gpu_identity);
@@ -10356,7 +10654,8 @@ template <sequence_alphabet p_alphabet,
 
                 index.build(minimizers, target_len);
                 index.add_position_offset(segment_lo_bp);
-                match_result_collection seg_res = minimap2_port_with_index(
+                match_result_collection seg_res =
+                    p_index_dispatch::template call<p_alphabet>(
                     query_seq, target_seq, query_minimizers, index, params,
                     segmented_gpu_index_cache_ptr,
                     segment_gpu_identity(segment_index));
@@ -10441,7 +10740,8 @@ template <sequence_alphabet p_alphabet,
                                     lpu);
                             index.build(minimizers, target_len);
                             index.add_position_offset(segment_lo_bp);
-                            wave_seg_out[rel] = minimap2_port_with_index(
+                            wave_seg_out[rel] =
+                                p_index_dispatch::template call<p_alphabet>(
                                 query_seq,
                                 target_seq,
                                 query_minimizers,
@@ -10512,7 +10812,8 @@ template <sequence_alphabet p_alphabet,
                 index,
                 filtered_pairs);
         index.add_position_offset(segment_lo_bp);
-        seg_out[segment_index] = minimap2_port_with_index(
+        seg_out[segment_index] =
+            p_index_dispatch::template call<p_alphabet>(
             query_seq, target_seq, query_minimizers, index, params,
             segmented_gpu_index_cache_ptr,
             segment_gpu_identity(segment_index));
@@ -10612,7 +10913,8 @@ template <sequence_alphabet p_alphabet,
                             index,
                             filtered_pairs);
                     index.add_position_offset(segment_lo_bp);
-                    seg_out[segment_index] = minimap2_port_with_index(
+                    seg_out[segment_index] =
+                        p_index_dispatch::template call<p_alphabet>(
                         query_seq, target_seq, query_minimizers, index, params,
                         segmented_gpu_index_cache_ptr,
                         segment_gpu_identity(segment_index));
@@ -10653,6 +10955,35 @@ template <sequence_alphabet p_alphabet,
     }
     return finalize_segmented_stats(std::move(merged_collection));
 }
+
+template <sequence_alphabet p_alphabet,
+          class p_fragment_index_storage = std::nullptr_t>
+[[nodiscard]] match_result_collection minimap_port_segmented(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params = minimap2_parameters{},
+    p_fragment_index_storage* fragment_index_out = nullptr)
+{
+    return minimap_port_segmented_impl<
+        pipe_entry_detail::segmented_dynamic_index_dispatch,
+        p_alphabet, p_fragment_index_storage>(
+            query_seq, target_seq, params, fragment_index_out);
+}
+
+namespace pipe_entry_detail {
+
+template <sequence_alphabet p_alphabet>
+[[nodiscard]] match_result_collection minimap_port_segmented_owned_dispatch(
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
+    bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
+    const minimap2_parameters& params)
+{
+    return minimap_port_segmented_impl<
+        segmented_owned_index_dispatch, p_alphabet, std::nullptr_t>(
+            query_seq, target_seq, params, nullptr);
+}
+
+} // namespace pipe_entry_detail
 
 // The three-argument scheduler route always uses a null fragment-index output.
 // Own that concrete post-erasure specialization out of line while retaining

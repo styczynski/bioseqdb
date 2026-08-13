@@ -1635,6 +1635,159 @@ target_sources(bioseq_modules_nopg
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_OWNED_MODULES})
 
+# Scheduler dispatch owners are ordinary implementation units of the public
+# bioseq.pipeline.pipe module. Keep their CXX dyndep small and DSO-private:
+# this OBJECT target waits only for the Domain-N provider/BMI closure and is
+# linked only by postgresql_bioseq below. In particular, it has no target-wide
+# dependency on typed-dispatch generation, SQL validation, or Highway scans.
+set_source_files_properties(
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS}
+  PROPERTIES
+    CXX_SCAN_FOR_MODULES ON
+    COMPILE_OPTIONS "-x;c++")
+add_library(bioseq_pipeline_dispatch_owners OBJECT)
+set_target_properties(bioseq_pipeline_dispatch_owners PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_sources(bioseq_pipeline_dispatch_owners PRIVATE
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
+target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
+  POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
+if(BIOSEQ_PACKAGE_BUILD)
+  target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
+    BIOSEQ_PACKAGE_O0_PROFILE=1
+    BIOSEQ_PIPELINE_FORCE_INLINE=0)
+endif()
+target_compile_options(bioseq_pipeline_dispatch_owners PRIVATE
+  "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
+  "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
+target_include_directories(bioseq_pipeline_dispatch_owners PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include"
+  "${CMAKE_CURRENT_LIST_DIR}/backend"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/safestringlib/include"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
+  ${Boost_INCLUDE_DIRS}
+  ${HWY_INCLUDE_DIRS})
+# CMake treats an OBJECT library reached through INTERFACE_LINK_LIBRARIES as
+# usage-only. Therefore this PUBLIC edge supplies the pipe BMI to the owner
+# dyndep without reinjecting bioseq_modules_nopg objects when the DSO links
+# both OBJECT targets directly.
+target_link_libraries(bioseq_pipeline_dispatch_owners
+  PUBLIC bioseq_modules_nopg
+  PRIVATE
+    safestring_static
+    fmt
+    ZLIB::ZLIB
+    reflectcpp::reflectcpp
+    libassert::assert
+    foonathan_memory
+    TBB::tbb
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
+    spirv-cross-msl
+    Vulkan::LayerSettings
+    hwy::hwy
+    ${Boost_LIBRARIES})
+if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
+  set_target_properties(bioseq_pipeline_dispatch_owners PROPERTIES
+    JOB_POOL_COMPILE heavy_compile)
+endif()
+
+if(NOT TARGET bioseq_pipeline_dispatch_owners)
+  message(FATAL_ERROR
+    "Post-erasure pipeline owner OBJECT target was not created")
+endif()
+get_target_property(_bioseq_pipeline_dispatch_owner_target_type
+  bioseq_pipeline_dispatch_owners TYPE)
+if(NOT _bioseq_pipeline_dispatch_owner_target_type STREQUAL "OBJECT_LIBRARY")
+  message(FATAL_ERROR
+    "Post-erasure pipeline owners must use a dedicated OBJECT target")
+endif()
+get_target_property(_bioseq_pipeline_dispatch_owner_target_sources
+  bioseq_pipeline_dispatch_owners SOURCES)
+set(_bioseq_pipeline_dispatch_owner_expected_sources
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
+list(SORT _bioseq_pipeline_dispatch_owner_target_sources)
+list(SORT _bioseq_pipeline_dispatch_owner_expected_sources)
+if(NOT "${_bioseq_pipeline_dispatch_owner_target_sources}" STREQUAL
+    "${_bioseq_pipeline_dispatch_owner_expected_sources}")
+  message(FATAL_ERROR
+    "Pipeline owner OBJECT target source attachment is not the active exact "
+    "set.\nAttached: ${_bioseq_pipeline_dispatch_owner_target_sources}\n"
+    "Expected: ${_bioseq_pipeline_dispatch_owner_expected_sources}")
+endif()
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  set(_bioseq_pipeline_dispatch_owner_occurrences 0)
+  foreach(_bioseq_pipeline_dispatch_owner_target_source IN LISTS
+      _bioseq_pipeline_dispatch_owner_target_sources)
+    if(_bioseq_pipeline_dispatch_owner_target_source STREQUAL
+        _bioseq_pipeline_dispatch_owner)
+      math(EXPR _bioseq_pipeline_dispatch_owner_occurrences
+        "${_bioseq_pipeline_dispatch_owner_occurrences} + 1")
+    endif()
+  endforeach()
+  if(_bioseq_pipeline_dispatch_owner IN_LIST
+      BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS)
+    if(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 1)
+      message(FATAL_ERROR
+        "Active pipeline owner must occur exactly once in its OBJECT target: "
+        "${_bioseq_pipeline_dispatch_owner}")
+    endif()
+    get_source_file_property(_bioseq_pipeline_dispatch_owner_scan
+      "${_bioseq_pipeline_dispatch_owner}" CXX_SCAN_FOR_MODULES)
+    if(NOT _bioseq_pipeline_dispatch_owner_scan)
+      message(FATAL_ERROR
+        "Active pipeline owner must participate in its dedicated CXX "
+        "dyndep: ${_bioseq_pipeline_dispatch_owner}")
+    endif()
+  elseif(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 0)
+    message(FATAL_ERROR
+      "Inactive pipeline owner was attached to its OBJECT target: "
+      "${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+get_target_property(_bioseq_pipeline_dispatch_owner_manual_dependencies
+  bioseq_pipeline_dispatch_owners MANUALLY_ADDED_DEPENDENCIES)
+if(_bioseq_pipeline_dispatch_owner_manual_dependencies)
+  message(FATAL_ERROR
+    "Pipeline owner OBJECT target must not have target-wide generated "
+    "dependencies: ${_bioseq_pipeline_dispatch_owner_manual_dependencies}")
+endif()
+get_target_property(_bioseq_pipeline_dispatch_owner_direct_links
+  bioseq_pipeline_dispatch_owners LINK_LIBRARIES)
+set(_bioseq_pipeline_dispatch_owner_nopg_links 0)
+foreach(_bioseq_pipeline_dispatch_owner_direct_link IN LISTS
+    _bioseq_pipeline_dispatch_owner_direct_links)
+  if(_bioseq_pipeline_dispatch_owner_direct_link STREQUAL
+      "bioseq_modules_nopg")
+    math(EXPR _bioseq_pipeline_dispatch_owner_nopg_links
+      "${_bioseq_pipeline_dispatch_owner_nopg_links} + 1")
+  endif()
+endforeach()
+if(NOT _bioseq_pipeline_dispatch_owner_nopg_links EQUAL 1)
+  message(FATAL_ERROR
+    "Pipeline owner OBJECT target must consume bioseq_modules_nopg exactly "
+    "once for the public pipe BMI")
+endif()
+unset(_bioseq_pipeline_dispatch_owner_nopg_links)
+unset(_bioseq_pipeline_dispatch_owner_direct_link)
+unset(_bioseq_pipeline_dispatch_owner_direct_links)
+unset(_bioseq_pipeline_dispatch_owner_manual_dependencies)
+unset(_bioseq_pipeline_dispatch_owner_scan)
+unset(_bioseq_pipeline_dispatch_owner_occurrences)
+unset(_bioseq_pipeline_dispatch_owner_target_source)
+unset(_bioseq_pipeline_dispatch_owner)
+unset(_bioseq_pipeline_dispatch_owner_expected_sources)
+unset(_bioseq_pipeline_dispatch_owner_target_sources)
+unset(_bioseq_pipeline_dispatch_owner_target_type)
+
 # The generation contract validates the complete annotation -> prepared Clang
 # closure -> fixed-target module -> generated binder/registry path, including
 # SneakySnake. Families extend explicit registries while target discovery
@@ -2413,39 +2566,18 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_worker.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/shader_runtime.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/direct_minimizer_materialization.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/external/standard_library_link_support.cppm"
-  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/external/standard_library_link_support.cppm")
 list(APPEND BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/sorted_runs/postgres_error.cppm")
 foreach(_bioseq_pipeline_dispatch_owner IN LISTS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
-  list(FIND BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
-    "${_bioseq_pipeline_dispatch_owner}"
-    _bioseq_pipeline_dispatch_owner_active_index)
-  set(_bioseq_pipeline_dispatch_owner_occurrences 0)
-  foreach(_bioseq_postgres_implementation IN LISTS
+  if(_bioseq_pipeline_dispatch_owner IN_LIST
       BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS)
-    if("${_bioseq_postgres_implementation}" STREQUAL
-        "${_bioseq_pipeline_dispatch_owner}")
-      math(EXPR _bioseq_pipeline_dispatch_owner_occurrences
-        "${_bioseq_pipeline_dispatch_owner_occurrences} + 1")
-    endif()
-  endforeach()
-  if(_bioseq_pipeline_dispatch_owner_active_index EQUAL -1)
-    if(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 0)
-      message(FATAL_ERROR
-        "Inactive pipeline owner was attached to postgresql_bioseq: "
-        "${_bioseq_pipeline_dispatch_owner}")
-    endif()
-  elseif(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 1)
     message(FATAL_ERROR
-      "Active pipeline owner must occur exactly once in the PostgreSQL "
-      "ordinary-unit registry: ${_bioseq_pipeline_dispatch_owner}")
+      "Pipeline owner leaked into the PostgreSQL ordinary-unit registry: "
+      "${_bioseq_pipeline_dispatch_owner}")
   endif()
 endforeach()
-unset(_bioseq_pipeline_dispatch_owner_occurrences)
-unset(_bioseq_pipeline_dispatch_owner_active_index)
-unset(_bioseq_postgres_implementation)
 unset(_bioseq_pipeline_dispatch_owner)
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
@@ -4605,6 +4737,54 @@ bioseq_add_postgresql_extension(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+# These scheduler-owned pipeline entries are intentionally absent from the
+# unit/integration executable variants created by the helper above.  Link the
+# dedicated OBJECT target only into the production PostgreSQL DSO; placing it
+# in SHARED_MODULE_LIBS would propagate its objects to every helper variant
+# and restore the cross-target COMDAT/interposition hazard this boundary
+# removes.
+target_link_libraries(postgresql_bioseq PRIVATE
+  bioseq_pipeline_dispatch_owners)
+get_target_property(_bioseq_postgresql_direct_links
+  postgresql_bioseq LINK_LIBRARIES)
+set(_bioseq_pipeline_dispatch_owner_link_occurrences 0)
+foreach(_bioseq_postgresql_direct_link IN LISTS
+    _bioseq_postgresql_direct_links)
+  if(_bioseq_postgresql_direct_link STREQUAL
+      "bioseq_pipeline_dispatch_owners")
+    math(EXPR _bioseq_pipeline_dispatch_owner_link_occurrences
+      "${_bioseq_pipeline_dispatch_owner_link_occurrences} + 1")
+  endif()
+endforeach()
+if(NOT _bioseq_pipeline_dispatch_owner_link_occurrences EQUAL 1)
+  message(FATAL_ERROR
+    "postgresql_bioseq must link the pipeline owner OBJECT target exactly "
+    "once; found ${_bioseq_pipeline_dispatch_owner_link_occurrences}")
+endif()
+get_target_property(_bioseq_postgresql_attached_sources
+  postgresql_bioseq SOURCES)
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  if(_bioseq_pipeline_dispatch_owner IN_LIST SRC_FILES
+      OR _bioseq_pipeline_dispatch_owner IN_LIST SRC_MOD_FILES
+      OR _bioseq_pipeline_dispatch_owner IN_LIST
+        BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
+      OR _bioseq_pipeline_dispatch_owner IN_LIST BIOSEQ_NOPG_SOURCES
+      OR _bioseq_pipeline_dispatch_owner IN_LIST
+        BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
+      OR _bioseq_pipeline_dispatch_owner IN_LIST BIOSEQ_NOPG_OWNED_MODULES
+      OR _bioseq_pipeline_dispatch_owner IN_LIST
+        _bioseq_postgresql_attached_sources)
+    message(FATAL_ERROR
+      "Pipeline owner escaped its dedicated OBJECT target: "
+      "${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner)
+unset(_bioseq_postgresql_attached_sources)
+unset(_bioseq_pipeline_dispatch_owner_link_occurrences)
+unset(_bioseq_postgresql_direct_link)
+unset(_bioseq_postgresql_direct_links)
 add_dependencies(postgresql_bioseq
   "${BIOSEQ_TYPED_GENERATION_TARGET}")
 
@@ -4666,6 +4846,8 @@ target_compile_options(postgresql_bioseq PRIVATE
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   target_compile_definitions(
     postgresql_bioseq PRIVATE BIOSEQ_EXTERNAL_PG=1)
+  target_compile_definitions(
+    bioseq_pipeline_dispatch_owners PRIVATE BIOSEQ_EXTERNAL_PG=1)
 endif()
 # The Bioseq DSO always owns the provider half of the cache rendezvous ABI and
 # the small PG lifecycle helpers, even when the sibling cache DSO is disabled.
@@ -4750,6 +4932,8 @@ endif()
 # [indexing][per-table] test and the corruption-hook tests run.
 if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(
+    bioseq_pipeline_dispatch_owners PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
   if(TARGET bioseq_integration_tests)
     target_compile_definitions(bioseq_integration_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
@@ -4879,6 +5063,9 @@ else()
     set(_bioseq_sql_runtime_active_profile production)
   endif()
   target_compile_definitions(postgresql_bioseq PRIVATE
+    BIOSEQ_SAFETY_RUNTIME_PROBES=1
+    "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
+  target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
     BIOSEQ_SAFETY_RUNTIME_PROBES=1
     "BIOSEQ_SAFETY_RUNTIME_PROFILE=\"${_bioseq_sql_runtime_active_profile}\"")
   target_compile_definitions(bioseq_pg_support PRIVATE
@@ -5230,3 +5417,46 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       bioseq_external_io)
   endif()
 endif()
+
+# No executable or reusable library in this directory may acquire the
+# scheduler-only owner objects. The single allowed consumer is the PostgreSQL
+# DSO; the owner target itself is excluded from the source-leak check.
+get_property(_bioseq_directory_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_bioseq_directory_target IN LISTS _bioseq_directory_targets)
+  if(_bioseq_directory_target STREQUAL "postgresql_bioseq"
+      OR _bioseq_directory_target STREQUAL
+        "bioseq_pipeline_dispatch_owners")
+    continue()
+  endif()
+  get_target_property(_bioseq_directory_target_links
+    ${_bioseq_directory_target} LINK_LIBRARIES)
+  foreach(_bioseq_directory_target_link IN LISTS
+      _bioseq_directory_target_links)
+    string(FIND "${_bioseq_directory_target_link}"
+      "bioseq_pipeline_dispatch_owners"
+      _bioseq_pipeline_dispatch_owner_link_offset)
+    if(NOT _bioseq_pipeline_dispatch_owner_link_offset EQUAL -1)
+      message(FATAL_ERROR
+        "Scheduler-only pipeline owner target leaked into "
+        "${_bioseq_directory_target}")
+    endif()
+  endforeach()
+  get_target_property(_bioseq_directory_target_sources
+    ${_bioseq_directory_target} SOURCES)
+  foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+      BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+    if(_bioseq_pipeline_dispatch_owner IN_LIST
+        _bioseq_directory_target_sources)
+      message(FATAL_ERROR
+        "Scheduler-only pipeline owner source leaked into "
+        "${_bioseq_directory_target}: ${_bioseq_pipeline_dispatch_owner}")
+    endif()
+  endforeach()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner)
+unset(_bioseq_directory_target_sources)
+unset(_bioseq_pipeline_dispatch_owner_link_offset)
+unset(_bioseq_directory_target_link)
+unset(_bioseq_directory_target_links)
+unset(_bioseq_directory_target)
+unset(_bioseq_directory_targets)
