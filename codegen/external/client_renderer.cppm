@@ -76,7 +76,7 @@ api_key_environment_name(std::string_view client_name) {
 [[nodiscard]] std::string
 integration_scalar_literal(const integration_scalar &value) {
   if (const auto *text = std::get_if<std::string>(&value)) {
-    return "std::string_view{\"" + cpp_escape(*text) + "\"}";
+    return "std::string_view{\"" + escape_cpp_string_literal(*text) + "\"}";
   }
   if (const auto *integer = std::get_if<std::int64_t>(&value)) {
     if (*integer == std::numeric_limits<std::int64_t>::min()) {
@@ -97,7 +97,7 @@ integration_scalar_literal(const integration_scalar &value) {
 /// @param api Validated API model.
 /// @return Generated module source.
 [[nodiscard]] std::string render_module(const generated_api &api) {
-  const std::string namespace_suffix = identifier(api.client_name);
+  const std::string namespace_suffix = make_cpp_identifier(api.client_name);
   std::size_t total_parameter_count = 0;
   for (const auto &operation : api.document.get_operations) {
     total_parameter_count += operation.parameters.size();
@@ -205,7 +205,7 @@ constexpr std::array<parameter_descriptor, )cpp"
   std::size_t parameter_offset = 0;
   for (const auto &operation : api.document.get_operations) {
     for (const auto &parameter : operation.parameters) {
-      out << "    parameter_descriptor{\"" << cpp_escape(parameter.name)
+      out << "    parameter_descriptor{\"" << escape_cpp_string_literal(parameter.name)
           << "\", " << location_literal(parameter.location) << ", "
           << kind_literal(parameter.kind) << ", "
           << (parameter.required ? "true" : "false") << ", "
@@ -215,10 +215,10 @@ constexpr std::array<parameter_descriptor, )cpp"
   out << "}};\n\nconstexpr std::array<operation_descriptor, "
       << api.document.get_operations.size() << "> operations{{\n";
   for (const auto &operation : api.document.get_operations) {
-    out << "    operation_descriptor{\"" << cpp_escape(operation.operation_id)
-        << "\", \"" << cpp_escape(operation.path) << "\", \""
-        << cpp_escape(operation.accept) << "\", \""
-        << cpp_escape(operation.api_key_name) << "\", "
+    out << "    operation_descriptor{\"" << escape_cpp_string_literal(operation.operation_id)
+        << "\", \"" << escape_cpp_string_literal(operation.path) << "\", \""
+        << escape_cpp_string_literal(operation.accept) << "\", \""
+        << escape_cpp_string_literal(operation.api_key_name) << "\", "
         << location_literal(
                operation.api_key_location.value_or(parameter_location::header))
         << ", " << (operation.api_key_location ? "true" : "false") << ", "
@@ -308,7 +308,7 @@ export [[nodiscard]] inline bool response_header_contains(
 export struct )cpp"
       << api.declared_type << R"cpp( {
     constexpr static std::string client_name = ")cpp"
-      << cpp_escape(api.document.provider_name) << R"cpp(";
+      << escape_cpp_string_literal(api.document.provider_name) << R"cpp(";
     constexpr static std::size_t k_default_response_body_limit =
         k_default_maximum_response_body_bytes;
 
@@ -322,7 +322,7 @@ export struct )cpp"
         , pool_(pool)
         , credentials_(std::move(supplied_credentials))
         , transport_(")cpp"
-      << cpp_escape(api.document.host) << "\", " << api.document.port
+      << escape_cpp_string_literal(api.document.host) << "\", " << api.document.port
       << R"cpp() {}
 
     /// @brief Executes one generated GET operation into the result arena.
@@ -398,7 +398,7 @@ private:
             return std::unexpected(client_error{"unknown GET operation: " + std::string(operation_id), 0});
         }
         std::string path = ")cpp"
-      << cpp_escape(api.document.base_path) << R"cpp(";
+      << escape_cpp_string_literal(api.document.base_path) << R"cpp(";
         path += operation->path;
         std::vector<bioseq::external::http_header> headers;
         headers.push_back({"Accept", std::string(
@@ -526,7 +526,7 @@ private:
 /// @param api Validated API model.
 /// @return Generated integration-test source.
 [[nodiscard]] std::string render_test(const generated_api &api) {
-  const std::string namespace_suffix = identifier(api.client_name);
+  const std::string namespace_suffix = make_cpp_identifier(api.client_name);
   std::ostringstream out;
   out << R"cpp(#include <catch2/catch_test_macros.hpp>
 
@@ -611,7 +611,7 @@ TEST_CASE("generated )cpp"
       << api.declared_type << R"cpp( client(
         memory_context, pool, std::move(supplied_credentials));
     REQUIRE(client.client_name == ")cpp"
-      << cpp_escape(api.document.provider_name) << R"cpp(");
+      << escape_cpp_string_literal(api.document.provider_name) << R"cpp(");
     const generated_api::get_request positional_request{
         "__bioseq_compatibility_probe__", {}, 1U};
     REQUIRE(positional_request.maximum_response_body_bytes == 1U);
@@ -627,7 +627,7 @@ TEST_CASE("generated )cpp"
        case_index < api.document.integration_cases.size(); ++case_index) {
     const auto &fixture = api.document.integration_cases[case_index];
     const std::string prefix = "fixture_" + std::to_string(case_index);
-    out << "\n    INFO(\"fixture: " << cpp_escape(fixture.name) << "\");\n";
+    out << "\n    INFO(\"fixture: " << escape_cpp_string_literal(fixture.name) << "\");\n";
     if (fixture.pre_delay_without_credentials_ms != 0) {
       out << "    if (!has_api_key) {\n"
           << "        std::this_thread::sleep_for(std::chrono::milliseconds("
@@ -638,7 +638,7 @@ TEST_CASE("generated )cpp"
       out << "    const std::array " << prefix << "_parameters{\n";
       for (const auto &parameter : fixture.parameters) {
         out << "        generated_api::parameter_value{\""
-            << cpp_escape(parameter.name)
+            << escape_cpp_string_literal(parameter.name)
             << "\", generated_api::" << location_literal(parameter.location)
             << ", " << integration_scalar_literal(parameter.value) << "},\n";
       }
@@ -648,11 +648,11 @@ TEST_CASE("generated )cpp"
     const std::string parameter_expression =
         fixture.parameters.empty() ? std::string{"{}"} : prefix + "_parameters";
     const std::string accept_expression =
-        "std::string_view{\"" + cpp_escape(fixture.accept) + "\"}";
+        "std::string_view{\"" + escape_cpp_string_literal(fixture.accept) + "\"}";
     if (fixture.mode == integration_mode::single) {
       out << "    auto " << prefix << "_response = client."
           << (fixture.accept.empty() ? "get" : "get_with_accept") << "(\""
-          << cpp_escape(fixture.operation_id) << "\", " << parameter_expression;
+          << escape_cpp_string_literal(fixture.operation_id) << "\", " << parameter_expression;
       if (!fixture.accept.empty()) {
         out << ", " << accept_expression;
       }
@@ -665,12 +665,12 @@ TEST_CASE("generated )cpp"
           << "_response->status_code == " << fixture.expected_status << ");\n";
       for (const auto &marker : fixture.body_contains) {
         out << "    REQUIRE(" << prefix << "_response->body_view().find(\""
-            << cpp_escape(marker) << "\") != std::string_view::npos);\n";
+            << escape_cpp_string_literal(marker) << "\") != std::string_view::npos);\n";
       }
       for (const auto &header : fixture.header_contains) {
         out << "    REQUIRE(generated_api::response_header_contains(" << prefix
-            << "_response->headers, \"" << cpp_escape(header.name) << "\", \""
-            << cpp_escape(header.value_contains) << "\"));\n";
+            << "_response->headers, \"" << escape_cpp_string_literal(header.name) << "\", \""
+            << escape_cpp_string_literal(header.value_contains) << "\"));\n";
       }
     } else {
       out << "    const std::array " << prefix << "_requests{\n";
@@ -678,7 +678,7 @@ TEST_CASE("generated )cpp"
            ++request_index) {
         out << "        generated_api::get_request{\n"
             << "            .operation_id = \""
-            << cpp_escape(fixture.operation_id) << "\",\n"
+            << escape_cpp_string_literal(fixture.operation_id) << "\",\n"
             << "            .parameters = " << parameter_expression;
         if (!fixture.accept.empty()) {
           out << ",\n            .accept = " << accept_expression;
@@ -697,13 +697,13 @@ TEST_CASE("generated )cpp"
           << "        REQUIRE(item->status_code == " << fixture.expected_status
           << ");\n";
       for (const auto &marker : fixture.body_contains) {
-        out << "        REQUIRE(item->body_view().find(\"" << cpp_escape(marker)
+        out << "        REQUIRE(item->body_view().find(\"" << escape_cpp_string_literal(marker)
             << "\") != std::string_view::npos);\n";
       }
       for (const auto &header : fixture.header_contains) {
         out << "        REQUIRE(generated_api::response_header_contains("
-            << "item->headers, \"" << cpp_escape(header.name) << "\", \""
-            << cpp_escape(header.value_contains) << "\"));\n";
+            << "item->headers, \"" << escape_cpp_string_literal(header.name) << "\", \""
+            << escape_cpp_string_literal(header.value_contains) << "\"));\n";
       }
       out << "    }\n";
     }
