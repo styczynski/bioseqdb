@@ -268,7 +268,19 @@ unset(_bioseq_lazy_concrete_pattern)
 # narrower production-owner sweep also rejects the physical-geometry escape
 # hatches named by the specification.
 set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna5.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna4.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna5.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
@@ -1139,6 +1151,127 @@ unset(_bioseq_template_flatten_candidate)
 unset(_bioseq_template_flatten_marked_index)
 unset(_bioseq_template_flatten_authored_cppm_candidates)
 
+# The generated scheduler first erases physical storage width to
+# lazy_sequence_view<alphabet>. Own every heavy pipeline closure after that
+# boundary exactly once in ordinary implementation units of
+# bioseq.pipeline.pipe. All authored owner paths are removed from broad module
+# globs even when dna5 is inactive; only the profile-reachable subset is built.
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna4.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna4.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna4.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna4.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna4.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna4.cppm")
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/raw_dna5.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/segmented_dna5.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_index_dna5.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/hash_major_dna5.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/grouped_soa_dna5.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/fragment_query_dna5.cppm")
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
+
+list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS
+  _bioseq_pipeline_dispatch_owner_dna4_count)
+list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS
+  _bioseq_pipeline_dispatch_owner_dna5_count)
+list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS
+  _bioseq_pipeline_dispatch_owner_all_count)
+if(NOT _bioseq_pipeline_dispatch_owner_dna4_count EQUAL 6
+    OR NOT _bioseq_pipeline_dispatch_owner_dna5_count EQUAL 6
+    OR NOT _bioseq_pipeline_dispatch_owner_all_count EQUAL 12)
+  message(FATAL_ERROR
+    "Post-erasure pipeline owner registry must contain exactly six dna4 and "
+    "six dna5 units (12 total)")
+endif()
+set(_bioseq_pipeline_dispatch_owner_unique
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS})
+list(REMOVE_DUPLICATES _bioseq_pipeline_dispatch_owner_unique)
+list(LENGTH _bioseq_pipeline_dispatch_owner_unique
+  _bioseq_pipeline_dispatch_owner_unique_count)
+if(NOT _bioseq_pipeline_dispatch_owner_unique_count EQUAL 12)
+  message(FATAL_ERROR
+    "Post-erasure pipeline owner registry contains duplicate paths")
+endif()
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  if(NOT EXISTS "${_bioseq_pipeline_dispatch_owner}")
+    message(FATAL_ERROR
+      "Post-erasure pipeline owner does not exist: "
+      "${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+file(GLOB _bioseq_pipeline_dispatch_owner_authored CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/*.cppm")
+list(REMOVE_ITEM _bioseq_pipeline_dispatch_owner_authored
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe/index.cppm")
+list(SORT _bioseq_pipeline_dispatch_owner_authored)
+list(SORT _bioseq_pipeline_dispatch_owner_unique)
+if(NOT "${_bioseq_pipeline_dispatch_owner_authored}" STREQUAL
+    "${_bioseq_pipeline_dispatch_owner_unique}")
+  message(FATAL_ERROR
+    "Post-erasure pipeline owner registry is not an exact set.\n"
+    "Authored: ${_bioseq_pipeline_dispatch_owner_authored}\n"
+    "Registered: ${_bioseq_pipeline_dispatch_owner_unique}")
+endif()
+unset(_bioseq_pipeline_dispatch_owner_authored)
+unset(_bioseq_pipeline_dispatch_owner_unique_count)
+unset(_bioseq_pipeline_dispatch_owner_unique)
+unset(_bioseq_pipeline_dispatch_owner_all_count)
+unset(_bioseq_pipeline_dispatch_owner_dna5_count)
+unset(_bioseq_pipeline_dispatch_owner_dna4_count)
+
+# Generated scheduler sources must reach the heavy pipeline only through
+# ordinary overload resolution. An explicit template-id would bypass the
+# concrete owner entries and silently restore one heavy instantiation per leaf.
+set(_bioseq_pipeline_dispatch_owner_bypass_source
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm")
+file(READ "${_bioseq_pipeline_dispatch_owner_bypass_source}"
+  _bioseq_pipeline_dispatch_owner_bypass_text)
+foreach(_bioseq_pipeline_dispatch_owner_bypass_pattern IN ITEMS
+    "minimap_port[ \t\r\n]*<"
+    "minimap_port_segmented[ \t\r\n]*<"
+    "minimap2_port_with_index[ \t\r\n]*<"
+    "dispatch_pipeline[ \t\r\n]*<"
+    "minimap_port_with_repr[ \t\r\n]*<")
+  if(_bioseq_pipeline_dispatch_owner_bypass_text MATCHES
+      "${_bioseq_pipeline_dispatch_owner_bypass_pattern}")
+    message(FATAL_ERROR
+      "Generated scheduler input bypasses the post-erasure pipeline owner "
+      "boundary with pattern '${_bioseq_pipeline_dispatch_owner_bypass_pattern}'")
+  endif()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner_bypass_pattern)
+unset(_bioseq_pipeline_dispatch_owner_bypass_text)
+unset(_bioseq_pipeline_dispatch_owner_bypass_source)
+
+set(BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS})
+if(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+  list(APPEND BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+    ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA5_IMPLEMENTATION_UNITS})
+endif()
+
+list(LENGTH BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+  _bioseq_pipeline_dispatch_owner_count)
+if(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+  set(_bioseq_expected_pipeline_dispatch_owner_count 12)
+else()
+  set(_bioseq_expected_pipeline_dispatch_owner_count 6)
+endif()
+if(NOT _bioseq_pipeline_dispatch_owner_count EQUAL
+    _bioseq_expected_pipeline_dispatch_owner_count)
+  message(FATAL_ERROR
+    "Post-erasure pipeline owner cardinality mismatch: expected "
+    "${_bioseq_expected_pipeline_dispatch_owner_count}, got "
+    "${_bioseq_pipeline_dispatch_owner_count}")
+endif()
+unset(_bioseq_expected_pipeline_dispatch_owner_count)
+unset(_bioseq_pipeline_dispatch_owner_count)
+
 set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_dispatch_contract_impl.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/implementation.cppm"
@@ -1146,7 +1279,37 @@ set(BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/vector_compare/implementation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/instrumentation/summary_writer/implementation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap/implementation.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence/pair_sort.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence/pair_sort.cppm"
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  list(FIND BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS
+    "${_bioseq_pipeline_dispatch_owner}"
+    _bioseq_pipeline_dispatch_owner_active_index)
+  set(_bioseq_pipeline_dispatch_owner_occurrences 0)
+  foreach(_bioseq_nopg_implementation IN LISTS
+      BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS)
+    if("${_bioseq_nopg_implementation}" STREQUAL
+        "${_bioseq_pipeline_dispatch_owner}")
+      math(EXPR _bioseq_pipeline_dispatch_owner_occurrences
+        "${_bioseq_pipeline_dispatch_owner_occurrences} + 1")
+    endif()
+  endforeach()
+  if(_bioseq_pipeline_dispatch_owner_active_index EQUAL -1)
+    if(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 0)
+      message(FATAL_ERROR
+        "Inactive pipeline owner was attached to bioseq_modules_nopg: "
+        "${_bioseq_pipeline_dispatch_owner}")
+    endif()
+  elseif(NOT _bioseq_pipeline_dispatch_owner_occurrences EQUAL 1)
+    message(FATAL_ERROR
+      "Active pipeline owner must occur exactly once in the ordinary-unit "
+      "registry: ${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner_occurrences)
+unset(_bioseq_pipeline_dispatch_owner_active_index)
+unset(_bioseq_nopg_implementation)
 # The public PMU facade defines inline dispatch through each platform backend,
 # so importers require these BMIs as part of the public module closure. Their
 # backend namespaces remain implementation detail; CMake visibility here
@@ -1158,11 +1321,29 @@ set(BIOSEQ_INSTRUMENTATION_BACKEND_MODULES
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS}
   ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
 list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES}
   ${BIOSEQ_NOPG_CPPM_IMPLEMENTATION_UNITS}
+  ${BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS}
   ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES})
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  list(FIND BIOSEQ_NOPG_MODULES "${_bioseq_pipeline_dispatch_owner}"
+    _bioseq_pipeline_dispatch_owner_nopg_module_index)
+  list(FIND SRC_MOD_FILES "${_bioseq_pipeline_dispatch_owner}"
+    _bioseq_pipeline_dispatch_owner_pg_module_index)
+  if(NOT _bioseq_pipeline_dispatch_owner_nopg_module_index EQUAL -1
+      OR NOT _bioseq_pipeline_dispatch_owner_pg_module_index EQUAL -1)
+    message(FATAL_ERROR
+      "Ordinary pipeline owner leaked into a CXX_MODULES interface set: "
+      "${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner_pg_module_index)
+unset(_bioseq_pipeline_dispatch_owner_nopg_module_index)
+unset(_bioseq_pipeline_dispatch_owner)
 
 # The IO reader closure is PostgreSQL-independent and is shared by the
 # extension, external providers, and the IO benchmark. The benchmark launcher
@@ -1193,6 +1374,19 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
 # but not sequence/index/dispatch modules. Keep one canonical provider for this
 # small runtime closure and share it with the full Domain-N library.
 set(BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_NOPG_MODULES})
+foreach(_bioseq_pipeline_dispatch_owner IN LISTS
+    BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
+  list(FIND BIOSEQ_NOPG_OWNED_MODULES
+    "${_bioseq_pipeline_dispatch_owner}"
+    _bioseq_pipeline_dispatch_owner_public_index)
+  if(NOT _bioseq_pipeline_dispatch_owner_public_index EQUAL -1)
+    message(FATAL_ERROR
+      "Ordinary pipeline owner leaked into the public CXX_MODULES file set: "
+      "${_bioseq_pipeline_dispatch_owner}")
+  endif()
+endforeach()
+unset(_bioseq_pipeline_dispatch_owner_public_index)
+unset(_bioseq_pipeline_dispatch_owner)
 list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_RUNTIME_CORE_MODULES})
 
 # Single-owner leaf targets stay in BIOSEQ_NOPG_MODULES so the PostgreSQL glob
@@ -2314,8 +2508,11 @@ message(STATUS
   "typed dispatch processor module implementation units")
 
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  set(BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS
+    ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
+    ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
   if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
-    set_property(SOURCE ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
+    set_property(SOURCE ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
       APPEND PROPERTY COMPILE_DEFINITIONS
         BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
         BIOSEQ_PIPELINE_FORCE_INLINE=0)
@@ -2323,11 +2520,12 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS
       gcc_typed_dispatch_compile=${BIOSEQ_GCC_TYPED_DISPATCH_JOBS})
-    set_source_files_properties(${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
+    set_source_files_properties(
+      ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
       PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
   endif()
   if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
-    set_property(SOURCE ${BIOSEQ_TYPED_IMPLEMENTATION_UNITS}
+    set_property(SOURCE ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
       APPEND PROPERTY COMPILE_OPTIONS
         "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
   endif()
@@ -2338,6 +2536,7 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
     "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
     "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 and "
     "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
+  unset(BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS)
 endif()
 
 # The unit target alone compiles the event listener through its TESTS closure.

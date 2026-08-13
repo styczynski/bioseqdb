@@ -237,7 +237,7 @@ def _ensure_build_worker_timesharing_policy() -> None:
 def _safe_parallel_jobs() -> int:
     """Cap build parallelism by BOTH core count and RAM.
 
-    The heavy C++26 template TUs (pipeline/pipe.cppm, scheduler/dispatch_buffer.cppm,
+    The heavy C++26 template TUs (pipeline/pipe/index.cppm, scheduler/dispatch_buffer.cppm,
     storage/sequence_storage_manager.cppm, minimap_port.cppm, ksw2_batched.cppm)
     each peak around ~3-4 GB RSS at -O3 + thin-LTO. The previous hardcoded
     -j 32 launched dozens of them at once; on a 16 GB box that swap-thrashed
