@@ -39,6 +39,25 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
       "External PostgreSQL acceptance requires PostgreSQL_CONFIG")
   endif()
 
+  file(REAL_PATH "${CMAKE_COMMAND}"
+    _bioseq_external_acceptance_cmake_executable)
+  file(REAL_PATH "${GIT_EXECUTABLE}"
+    _bioseq_external_acceptance_git_executable)
+  file(REAL_PATH "${PostgreSQL_CONFIG}"
+    _bioseq_external_acceptance_pg_config_executable)
+  foreach(_bioseq_external_acceptance_executable IN ITEMS
+      _bioseq_external_acceptance_cmake_executable
+      _bioseq_external_acceptance_git_executable
+      _bioseq_external_acceptance_pg_config_executable)
+    if(NOT EXISTS "${${_bioseq_external_acceptance_executable}}"
+       OR IS_DIRECTORY "${${_bioseq_external_acceptance_executable}}"
+       OR IS_SYMLINK "${${_bioseq_external_acceptance_executable}}")
+      message(FATAL_ERROR
+        "External PostgreSQL acceptance requires a canonical regular "
+        "executable: ${${_bioseq_external_acceptance_executable}}")
+    endif()
+  endforeach()
+
   set(_bioseq_external_acceptance_runner
     "${CMAKE_CURRENT_LIST_DIR}/run_external_postgres_acceptance.py")
   set(_bioseq_external_acceptance_stage
@@ -51,21 +70,21 @@ if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
     "${CMAKE_BINARY_DIR}/bioseq/generated/sql/external-postgres-acceptance")
 
   add_custom_target(bioseq_external_postgres_acceptance
-    COMMAND "${CMAKE_COMMAND}" -E env
+    COMMAND "${_bioseq_external_acceptance_cmake_executable}" -E env
       "PYTHONDONTWRITEBYTECODE=1"
       "${Python3_EXECUTABLE}"
       "${_bioseq_external_acceptance_runner}"
       self-test
-    COMMAND "${CMAKE_COMMAND}" -E env
+    COMMAND "${_bioseq_external_acceptance_cmake_executable}" -E env
       "PYTHONDONTWRITEBYTECODE=1"
       "${Python3_EXECUTABLE}"
       "${_bioseq_external_acceptance_runner}"
       run
       --repository-root "${BIOSEQ_REPOSITORY_ROOT}"
       --output-root "${_bioseq_external_acceptance_output}"
-      --cmake "${CMAKE_COMMAND}"
-      --git "${GIT_EXECUTABLE}"
-      --pg-config "${PostgreSQL_CONFIG}"
+      --cmake "${_bioseq_external_acceptance_cmake_executable}"
+      --git "${_bioseq_external_acceptance_git_executable}"
+      --pg-config "${_bioseq_external_acceptance_pg_config_executable}"
       --stage-script "${_bioseq_external_acceptance_stage}"
       --config-template "${_bioseq_external_acceptance_config}"
       --control-file "${_bioseq_external_acceptance_control}"
