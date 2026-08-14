@@ -345,8 +345,10 @@ target_sources(bioseq_external_io
       "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/index.cppm"
       "${CMAKE_CURRENT_SOURCE_DIR}/io/datasets_stream.cppm")
 target_sources(bioseq_external_io PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/transport/transfer_service_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/openssl_md5.cppm")
 set_source_files_properties(
+  "${CMAKE_CURRENT_SOURCE_DIR}/transport/transfer_service_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/io/archive_source/openssl_md5.cppm"
   PROPERTIES COMPILE_OPTIONS "-x;c++")
 target_link_libraries(bioseq_external_io PUBLIC
