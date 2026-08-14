@@ -205,6 +205,15 @@ EXPECTED_TABLES: dict[str, tuple[tuple[str, str, bool], ...]] = {
     ),
 }
 
+EXPECTED_RELATION_ENTITIES: dict[str, str] = {
+    "taxonomy": "taxonomy",
+    "catalog": "catalog",
+    "record_genes": "record_gene",
+    "record_locations": "record_location",
+    "sequences": "sequence",
+    "sequence_chunks": "sequence_chunk",
+}
+
 EXTERNAL_ACCESS_METHOD_IDENTITY = (
     "sql:access_method:$extension."
     "bioseq::postgres::external::sql_routines.bioseq_external"
@@ -553,7 +562,8 @@ def _verify_enabled_sql(sql: str) -> None:
 
     table_pattern = re.compile(
         r"CREATE TABLE bioseq_external\.([a-z_][a-z0-9_]*)\s*"
-        r"\((.*?)\)\s*USING bioseq_external\s*;",
+        r"\((.*?)\)\s*USING bioseq_external\s*"
+        r"WITH\s*\(\s*entity\s*=\s*'([a-z_][a-z0-9_]*)'\s*\)\s*;",
         re.IGNORECASE | re.DOTALL,
     )
     all_external_tables = re.findall(
@@ -570,6 +580,7 @@ def _verify_enabled_sql(sql: str) -> None:
             "reviewed six tables"
         )
     actual_tables: dict[str, tuple[tuple[str, str, bool], ...]] = {}
+    actual_relation_entities: dict[str, str] = {}
     for match in table_pattern.finditer(sql):
         name = match.group(1)
         if name in actual_tables:
@@ -579,11 +590,17 @@ def _verify_enabled_sql(sql: str) -> None:
         actual_tables[name] = _parse_table_columns(
             match.group(2), name
         )
+        actual_relation_entities[name] = match.group(3)
     if actual_tables != EXPECTED_TABLES:
         raise RuntimeError(
             "generated external table names, column order/types/nullability, "
             "or access-method clauses differ from the reviewed six-table "
             "surface"
+        )
+    if actual_relation_entities != EXPECTED_RELATION_ENTITIES:
+        raise RuntimeError(
+            "generated external table relation entity options differ from "
+            "the reviewed six-table routing surface"
         )
 
     required_acls = (

@@ -214,6 +214,7 @@ struct table_options {
     create_mode create{create_mode::create};
     identifier access_method{"default"};
     bool user_catalog_table{};
+    checked_sql relation_options{};
 };
 
 struct column_options {

@@ -264,6 +264,34 @@ inline void require_failure(
     };
 }
 
+[[nodiscard]] inline collected_program table_relation_options_program(
+    bool include_relation_options,
+    bool include_user_catalog_table) {
+    constexpr std::string_view table_cpp_name{
+        "bioseq::fixture::relation_options_fixture"};
+    collected_program result;
+    result.entities.push_back(fixture_schema("fixture_types"));
+    collected_entity table = fixture_table(
+        "relation_options_fixture", std::string{table_cpp_name});
+    if (include_user_catalog_table) {
+        table.options.push_back(option_value{
+            .name = "user_catalog_table",
+            .expression = "true",
+        });
+    }
+    if (include_relation_options) {
+        table.options.push_back(option_value{
+            .name = "relation_options",
+            .expression =
+                "bioseq::sql::checked_sql{\"fillfactor = 70\"}",
+        });
+    }
+    result.entities.push_back(std::move(table));
+    result.entities.push_back(fixture_type_column(
+        std::string{table_cpp_name}, "fixture_types"));
+    return result;
+}
+
 [[nodiscard]] inline collected_entity fixture_table_check(
     std::string name,
     std::string owner_cpp_name,
@@ -665,6 +693,55 @@ inline void run_generator_contract_self_tests() {
             && graph.fmgr_boundary_module
                 == "bioseq.postgres.support.sql_boundary",
         "default generated-module identities are not canonical");
+
+    const rendered_sql_artifact absent_relation_options_artifact =
+        render_sql_graph(build_sql_graph(
+            contract_test_detail::table_relation_options_program(
+                false, false)));
+    const std::size_t absent_relation_options_statement =
+        contract_test_detail::statement_position(
+            absent_relation_options_artifact,
+            "CREATE TABLE fixture_types.relation_options_fixture");
+    contract_test_detail::require(
+        absent_relation_options_artifact.statements[
+            absent_relation_options_statement].text
+            == "CREATE TABLE fixture_types.relation_options_fixture (\n"
+               "    value integer NOT NULL\n"
+               ");",
+        "absent table relation options changed generated SQL bytes");
+
+    const rendered_sql_artifact authored_relation_options_artifact =
+        render_sql_graph(build_sql_graph(
+            contract_test_detail::table_relation_options_program(
+                true, false)));
+    const std::size_t authored_relation_options_statement =
+        contract_test_detail::statement_position(
+            authored_relation_options_artifact,
+            "CREATE TABLE fixture_types.relation_options_fixture");
+    contract_test_detail::require(
+        authored_relation_options_artifact.statements[
+            authored_relation_options_statement].text
+            == "CREATE TABLE fixture_types.relation_options_fixture (\n"
+               "    value integer NOT NULL\n"
+               ") WITH (fillfactor = 70);",
+        "authored table relation options were not rendered verbatim");
+
+    const rendered_sql_artifact combined_relation_options_artifact =
+        render_sql_graph(build_sql_graph(
+            contract_test_detail::table_relation_options_program(
+                true, true)));
+    const std::size_t combined_relation_options_statement =
+        contract_test_detail::statement_position(
+            combined_relation_options_artifact,
+            "CREATE TABLE fixture_types.relation_options_fixture");
+    contract_test_detail::require(
+        combined_relation_options_artifact.statements[
+            combined_relation_options_statement].text
+            == "CREATE TABLE fixture_types.relation_options_fixture (\n"
+               "    value integer NOT NULL\n"
+               ") WITH (user_catalog_table = true, fillfactor = 70);",
+        "authored table relation options did not compose with the existing "
+        "user-catalog option");
 
     const sql_graph nested_operator_graph = build_sql_graph(
         contract_test_detail::nested_operator_program());

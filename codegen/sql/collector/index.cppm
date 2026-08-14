@@ -459,7 +459,8 @@ inline void validate_options(
             case entity_kind::table:
                 return one_of(name, {
                     "schema", "persistence", "create",
-                    "access_method", "user_catalog_table"});
+                    "access_method", "user_catalog_table",
+                    "relation_options"});
             case entity_kind::column:
                 return one_of(name, {
                     "sql_type", "default_value", "collation"});

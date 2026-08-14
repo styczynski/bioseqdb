@@ -2274,9 +2274,25 @@ natural_type_statements(
                 access_method != "default") {
                 result += " USING " + access_method;
             }
+            std::vector<std::string> relation_options;
             if (option_is(
                     source, "user_catalog_table", "true")) {
-                result += " WITH (user_catalog_table = true)";
+                relation_options.emplace_back(
+                    "user_catalog_table = true");
+            }
+            if (const option_value* authored_options =
+                    find_option(source, "relation_options")) {
+                relation_options.push_back(extract_checked_sql(
+                    authored_options->expression));
+            }
+            if (!relation_options.empty()) {
+                result += " WITH (";
+                for (std::size_t index = 0;
+                     index < relation_options.size(); ++index) {
+                    if (index != 0) result += ", ";
+                    result += relation_options[index];
+                }
+                result += ")";
             }
             result += ";";
             return result;

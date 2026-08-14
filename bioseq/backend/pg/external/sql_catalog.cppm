@@ -29,6 +29,7 @@ inline constexpr bioseq::sql::schema_entity bioseq_external{};
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'taxonomy'"},
 })]] taxonomy final {
     std::string provider;
     std::optional<std::int64_t> taxon_id;
@@ -63,6 +64,7 @@ struct [[bioseq_sql::table({
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'catalog'"},
 })]] catalog final {
     std::string provider;
     std::string domain;
@@ -131,6 +133,7 @@ struct [[bioseq_sql::table({
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'record_gene'"},
 })]] record_genes final {
     std::string provider;
     std::string domain;
@@ -160,6 +163,7 @@ struct [[bioseq_sql::table({
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'record_location'"},
 })]] record_locations final {
     std::string provider;
     std::string domain;
@@ -189,6 +193,7 @@ struct [[bioseq_sql::table({
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'sequence'"},
 })]] sequences final {
     std::string provider;
     std::string domain;
@@ -222,6 +227,7 @@ struct [[bioseq_sql::table({
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
+    .relation_options = bioseq::sql::checked_sql{"entity = 'sequence_chunk'"},
 })]] sequence_chunks final {
     std::string provider;
     std::string domain;
