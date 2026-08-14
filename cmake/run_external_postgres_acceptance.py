@@ -1234,7 +1234,7 @@ def _postgresql_provenance(
         output = _run_checked(
             [str(pg_config), flag],
             timeout=timeout,
-        ).decode("utf-8", errors="strict").strip()
+        ).decode("utf-8", errors="strict").rstrip()
         if not output:
             raise ExternalAcceptanceError(
                 f"pg_config {flag} returned no value"
