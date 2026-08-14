@@ -11,12 +11,9 @@ module;
 // only swaps the free `validate_candidate` call for `ref.validate_fn(...)`,
 // never the byte pump.
 
-#include <concepts>
-#include <cstddef>
-#include <expected>
-#include <stop_token>
-
 export module bioseq.external.transport.transfer_service;
+
+import std;
 
 import bioseq.external.provider.base;     // provider_id, external_execution_key
 import bioseq.external.provider.errors;   // external_error
@@ -115,14 +112,9 @@ make_transfer_service_ref(p_service_type &service) {
 // structure with zero change to the validated_transfer_request it returns.
 class curl_transfer_service {
 public:
-  curl_transfer_service();
-  explicit curl_transfer_service(prov::external_execution_key key);
-  curl_transfer_service(const curl_transfer_service &other) noexcept;
-  curl_transfer_service(curl_transfer_service &&other) noexcept;
-  curl_transfer_service &
-  operator=(const curl_transfer_service &other) noexcept;
-  curl_transfer_service &operator=(curl_transfer_service &&other) noexcept;
-  ~curl_transfer_service() noexcept;
+  curl_transfer_service() = default;
+  explicit curl_transfer_service(prov::external_execution_key key)
+      : key_(key) {}
 
   std::expected<validated_transfer_request, prov::external_error>
   validate(const transfer_service_passkey & /*borrowed*/,
@@ -134,15 +126,17 @@ public:
   [[nodiscard]] prov::external_execution_key execution_key() const noexcept {
     return key_;
   }
-  void request_stop() noexcept;
-  [[nodiscard]] std::stop_token stop_token() const noexcept;
+  void request_stop() noexcept { stop_.request_stop(); }
+  [[nodiscard]] std::stop_token stop_token() const noexcept {
+    return stop_.get_token();
+  }
   [[nodiscard]] transfer_service_ref ref() {
     return make_transfer_service_ref(*this);
   }
 
 private:
   prov::external_execution_key key_{};
-  alignas(std::stop_source) std::byte stop_storage_[sizeof(std::stop_source)];
+  std::stop_source stop_;
 };
 
 static_assert(external_transfer_service_compatible<curl_transfer_service>);
