@@ -3688,6 +3688,7 @@ COPY (
         retained_root=retained_root,
         timeout=timeout,
         sql=f"""
+LOAD '$libdir/bioseq';
 CREATE TABLE {LIFECYCLE_TABLE}
   (provider pg_catalog.text NOT NULL)
 USING bioseq_external
@@ -3809,6 +3810,7 @@ COPY (
             retained_root=retained_root,
             timeout=timeout,
             sql=f"""
+LOAD '$libdir/bioseq';
 \\set ON_ERROR_STOP off
 CREATE TABLE {INVALID_ENTITY_TABLE}
   (provider pg_catalog.text NOT NULL)
@@ -3867,6 +3869,7 @@ COPY (
         retained_root=retained_root,
         timeout=timeout,
         sql=f"""
+LOAD '$libdir/bioseq';
 CREATE TABLE {MISSING_ENTITY_TABLE}
   (provider pg_catalog.text NOT NULL)
 USING bioseq_external;
