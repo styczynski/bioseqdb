@@ -129,7 +129,11 @@ class DocumentActivityContractTests(unittest.TestCase):
             ), mock.patch.object(manager, "_cli", side_effect=cli):
                 manager._ensure_collections()
 
-        self.assertEqual(collections[qmd_manager.COL_CURRENT]["path"], current)
+        canonical_current = current.resolve()
+        self.assertEqual(
+            collections[qmd_manager.COL_CURRENT]["path"],
+            canonical_current,
+        )
         self.assertEqual(
             collections[qmd_manager.COL_CURRENT]["pattern"],
             qmd_manager.COLLECTION_MASK,
@@ -137,7 +141,7 @@ class DocumentActivityContractTests(unittest.TestCase):
         remove_command = (
             "collection", "remove", qmd_manager.COL_CURRENT)
         add_command = (
-            "collection", "add", str(current), "--name",
+            "collection", "add", str(canonical_current), "--name",
             qmd_manager.COL_CURRENT, "--mask", qmd_manager.COLLECTION_MASK,
         )
         self.assertIn(remove_command, commands)
@@ -246,7 +250,7 @@ class DocumentActivityContractTests(unittest.TestCase):
                     "pid": 99999999,
                     "initialized": True,
                     "update_queued": 0,
-                    "update_running": 0,
+                    "update_running": 1,
                     "embed_queued": 0,
                     "embed_running": 0,
                 },
@@ -527,6 +531,7 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
             build_presets.MODES["website"].required_cache_variables,
             {
                 "BIOSEQ_BUILD_WEBSITE": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
             },
@@ -586,6 +591,7 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     _clang_rt_cmake_cache_repairs=mock.DEFAULT,
                     _cmake_preset_cache_contract=mock.DEFAULT,
                     _cmake_preset_cache_repairs=mock.DEFAULT,
+                    _postgresql_discovery_cache_reset_args=mock.DEFAULT,
                     _cmake_configure_stamp_document=mock.DEFAULT,
             ) as patched:
                 patched["_refuse_root_build_identity"].return_value = None
@@ -599,6 +605,9 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 patched["_clang_rt_cmake_cache_repairs"].return_value = ([], [])
                 patched["_cmake_preset_cache_contract"].return_value = {}
                 patched["_cmake_preset_cache_repairs"].return_value = {}
+                patched[
+                    "_postgresql_discovery_cache_reset_args"
+                ].return_value = ()
                 patched["_cmake_configure_stamp_document"].return_value = (
                     configure_stamp)
 
@@ -610,14 +619,18 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
     def test_website_to_external_transition_is_atomic(self):
         commands = self._run_optional_transition(
             "external-api",
-            "shared-opt",
+            build_presets.EXTERNAL_API_BUILD_PRESET,
             {
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
                 "BIOSEQ_BUILD_WEBSITE": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
             },
         )
-        self.assertEqual(commands[0][:3], ["cmake", "--preset", "shared-opt"])
+        self.assertEqual(
+            commands[0][:3],
+            ["cmake", "--preset", build_presets.EXTERNAL_API_BUILD_PRESET],
+        )
         self.assertEqual(
             set(commands[0][3:]),
             {
@@ -631,19 +644,24 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
     def test_external_to_website_transition_is_atomic(self):
         commands = self._run_optional_transition(
             "website",
-            "shared-opt",
+            build_presets.WEBSITE_BUILD_PRESET,
             {
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
                 "BIOSEQ_BUILD_WEBSITE": "OFF",
+                "BIOSEQ_BUILD_CACHE": "OFF",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "OFF",
             },
         )
-        self.assertEqual(commands[0][:3], ["cmake", "--preset", "shared-opt"])
+        self.assertEqual(
+            commands[0][:3],
+            ["cmake", "--preset", build_presets.WEBSITE_BUILD_PRESET],
+        )
         self.assertEqual(
             set(commands[0][3:]),
             {
                 "-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF",
                 "-DBIOSEQ_BUILD_WEBSITE=ON",
+                "-DBIOSEQ_BUILD_CACHE=ON",
                 "-DBIOSEQ_WEBSITE_BROWSER_TESTS=ON",
             },
         )
@@ -698,16 +716,16 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 },
             }
 
-            def fallback_build_dir(mode, debug):
+            def fallback_build_dirs(mode, debug):
                 self.assertEqual((mode, debug), ("external-api", True))
-                return shared_debug_tree
+                return (shared_debug_tree,)
 
             with mock.patch.object(
                     build_worker, "_refresh",
                     side_effect=lambda current, candidate:
                     current.get(candidate)), mock.patch.object(
-                        build_worker, "build_dir_for",
-                        side_effect=fallback_build_dir):
+                        build_worker, "build_dirs_for",
+                        side_effect=fallback_build_dirs):
                 conflict_mode, conflict_entry = build_worker._running_in_same_group(
                     state, "website", True, shared_debug_tree)
 
@@ -1816,15 +1834,27 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             build_dir = Path(temporary).resolve()
             suffix = build_worker._native_shared_library_suffix(
                 build_worker.host_platform.system())
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n",
+                encoding="utf-8",
+            )
             core = build_dir / "bioseq" / f"bioseq{suffix}"
             core.parent.mkdir()
             core.write_bytes(b"website-owned core dso\n")
+            cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/Release"
+                / f"bioseq_cache{suffix}"
+            )
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"website-owned cache dso\n")
 
             evidence = build_worker._receipt_authorized_artifact_evidence(
                 "website", build_dir, debug=False)
 
         relative_paths = {item["relative_path"] for item in evidence}
         self.assertIn(str(core.relative_to(build_dir)), relative_paths)
+        self.assertIn(str(cache.relative_to(build_dir)), relative_paths)
 
     def test_runtime_artifact_must_be_executable(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -24,7 +24,9 @@ def manifest() -> dict[str, object]:
         "c_finfo_symbol_inventory_count": 1,
         "c_wrapper_entity_count": 1,
         "generated_wrapper_symbol_count": 1,
+        "handwritten_fmgr_export_symbol_count": 0,
         "handwritten_fmgr_export_external_symbol_count": 1,
+        "handwritten_fmgr_export_owner_count": 1,
         "c_symbol_sharing_group_count": 0,
         "c_routine_identities": ["fixture.owned_symbol(text)"],
         "c_link_symbols": ["owned_symbol"],
@@ -37,7 +39,15 @@ def manifest() -> dict[str, object]:
             "implementation_declarations": ["fixture::owned_symbol"],
         }],
         "generated_wrapper_symbols": ["owned_symbol"],
+        "handwritten_fmgr_export_symbols": [],
         "handwritten_fmgr_export_external_symbols": ["external_handler"],
+        "handwritten_fmgr_export_owners": [{
+            "symbol": "external_handler",
+            "macro": "PG_FUNCTION_INFO_V1",
+            "source_module": "fixture",
+            "source_path": "fixture.c",
+            "source_line": 3,
+        }],
     }
 
 

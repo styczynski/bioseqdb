@@ -96,8 +96,7 @@ if(BUILD_TESTING)
     PRIVATE
       bioseq_pg_support
       bioseq_postgres_test_support
-      Catch2::Catch2WithMain
-      libassert::assert)
+      Catch2::Catch2WithMain)
   target_include_directories(
     bioseq_postgres_test_support_contract_tests
     PRIVATE "${PROJECT_SOURCE_DIR}/bioseq")

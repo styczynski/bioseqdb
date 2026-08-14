@@ -15,6 +15,7 @@ sys.path.insert(0, str(BUILD_MCP_DIR))
 
 import build_presets  # noqa: E402
 import build_worker  # noqa: E402
+import publication  # noqa: E402
 
 
 class CMakeConfigureFreshnessTest(unittest.TestCase):
@@ -625,9 +626,9 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             }
             with (
                 mock.patch.object(
-                    build_worker,
-                    "_fsync_cmake_configure_stamp_directory",
-                    side_effect=RuntimeError("fsync failed"),
+                    publication,
+                    "fsync_directory",
+                    side_effect=OSError("fsync failed"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "fsync failed"),
             ):

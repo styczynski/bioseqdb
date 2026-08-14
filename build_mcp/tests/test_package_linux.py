@@ -281,14 +281,15 @@ class PackageLinuxServerModeTests(unittest.TestCase):
         run.assert_called_once_with(entry)
 
     def test_remote_run_rejects_before_provisioning(self) -> None:
-        with mock.patch.object(remote, "_start_or_poll_remote") as remote:
+        with mock.patch.object(
+                remote, "_start_or_poll_remote") as remote_start:
             result = remote.tool_remote_run({
                 "operation": "build", "mode": subject.MODE,
                 "branch": "main",
                 "sync": False, "auto_provision": False,
             })
         self.assertIn("local-only", result)
-        remote.assert_not_called()
+        remote_start.assert_not_called()
 
 
 class DockerHealthTests(unittest.TestCase):

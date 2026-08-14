@@ -98,8 +98,8 @@ def publish_private_exclusive(
     descriptor = os.open(destination, flags, mode)
     published = False
     try:
-        write(descriptor)
         os.fchmod(descriptor, mode)
+        write(descriptor)
         os.fsync(descriptor)
         fsync_directory(destination.parent)
         published = True

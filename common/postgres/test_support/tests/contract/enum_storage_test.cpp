@@ -1,5 +1,5 @@
 /** @file Catch contracts for PostgreSQL enum storage registration. */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
 #include <stdexcept>

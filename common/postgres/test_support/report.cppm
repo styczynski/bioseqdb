@@ -544,7 +544,9 @@ collect_artifact_observations(const extension_stage_layout& stage) {
                 stage.manifest_file ? stage.stage_root : std::filesystem::path{},
             .stage_manifest = stage.manifest_file.value_or(std::filesystem::path{}),
             .stage_manifest_sha256 =
-                stage.manifest_digest ? stage.manifest_digest->hex() : std::string{},
+                stage.manifest_digest
+                    ? stage.manifest_digest->render_hex()
+                    : std::string{},
             .control_file = artifact.source_control_file,
             .install_sql = artifact.source_install_sql,
             .dso = artifact.source_dso,
