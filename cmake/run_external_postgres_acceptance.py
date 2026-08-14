@@ -4602,7 +4602,7 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
         "source_sha256": metadata_hash,
         "columns": metadata_column_ids,
-        "constraints": metadata_constraint_ids,
+        "constraints": metadata_constraint_ids[1:],
         "generated_cpp": {
             "facet": "row_codec",
             "owner_key": "storage_metadata",
@@ -4623,7 +4623,10 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
             "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
             "source_sha256": metadata_hash,
-            "dependencies": [EXTERNAL_OPTIONS_TABLE_IDENTITY],
+            "dependencies": [
+                "sql:schema:bioseq_internal",
+                EXTERNAL_OPTIONS_TABLE_IDENTITY,
+            ],
         })
     for identity, kind in (
         (metadata_constraint_ids[0], "primary_key"),
