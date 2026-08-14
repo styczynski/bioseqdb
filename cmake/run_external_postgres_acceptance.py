@@ -3758,7 +3758,7 @@ COPY (
         bindir=bindir,
         retained_root=retained_root,
         timeout=timeout,
-        sql=f"DROP TABLE {LIFECYCLE_TABLE};\n",
+        sql=f"LOAD '$libdir/bioseq';\nDROP TABLE {LIFECYCLE_TABLE};\n",
     )
     dropped_row = _one_csv_record(
         _run_psql(
