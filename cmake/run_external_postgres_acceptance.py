@@ -107,6 +107,18 @@ RUNTIME_CLOSURE_SCHEMA_REVISION = 1
 INSTALL_SCHEMA = "external_acceptance_install"
 DENIED_ROLE = "external_acceptance_denied"
 LIFECYCLE_TABLE = f"{INSTALL_SCHEMA}.external_lifecycle_probe"
+INVALID_ENTITY_TABLE = (
+    f"{INSTALL_SCHEMA}.external_invalid_entity_probe"
+)
+MISSING_ENTITY_TABLE = (
+    f"{INSTALL_SCHEMA}.external_missing_entity_probe"
+)
+INVALID_ENTITY_SQLSTATE = "22023"
+MISSING_ENTITY_SQLSTATE = "22023"
+MISSING_ENTITY_MESSAGE = (
+    'bioseq_external relation "external_missing_entity_probe" is missing '
+    'the required "entity" option'
+)
 EXTERNAL_SOURCE_PATHS = frozenset({
     "bioseq/backend/pg/external/relation.cppm",
     "bioseq/backend/pg/external/sql_catalog.cppm",
@@ -1763,6 +1775,19 @@ def _extract_sqlstate(value: bytes, marker: str) -> str:
     return matches[0]
 
 
+def _extract_error_message(value: bytes, marker: str) -> str:
+    text = value.decode("utf-8", errors="strict")
+    matches = re.findall(
+        rf"(?m)^{re.escape(marker)}=(.+)$",
+        text,
+    )
+    if len(matches) != 1:
+        raise ExternalAcceptanceError(
+            f"expected exactly one {marker} marker, got {matches!r}"
+        )
+    return matches[0]
+
+
 def _evidence_file_inventory(root: Path) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     for path in sorted(root.rglob("*")):
@@ -2226,8 +2251,12 @@ def _validate_receipt_checks(
         },
         "create_drop_using_am": {
             "created_with_access_method": "bioseq_external",
+            "serialized_relation_options": "entity=taxonomy",
             "relation_size": 0,
             "dropped": True,
+            "invalid_entity_sqlstate": INVALID_ENTITY_SQLSTATE,
+            "missing_entity_sqlstate": MISSING_ENTITY_SQLSTATE,
+            "missing_entity_message": MISSING_ENTITY_MESSAGE,
         },
         "drop_extension": {
             "extension_count": 0,
@@ -2325,6 +2354,15 @@ def _validate_evidence_inventory_schema(
                 f"queries/read_only_insert_{table}.sql",
                 f"results/read_only_insert_{table}.stdout",
                 f"results/read_only_insert_{table}.stderr",
+            )
+        ),
+        *(
+            f"{directory}/{label}.{suffix}"
+            for label in ("invalid_entity_option", "missing_entity_option")
+            for directory, suffix in (
+                ("queries", "sql"),
+                ("results", "stdout"),
+                ("results", "stderr"),
             )
         ),
     }
@@ -3196,7 +3234,9 @@ WITH (entity = 'taxonomy');
 COPY (
   SELECT
     am.amname AS access_method,
-    pg_catalog.pg_relation_size(c.oid) AS relation_size
+    pg_catalog.pg_relation_size(c.oid) AS relation_size,
+    pg_catalog.array_to_string(c.reloptions, ',')
+      AS serialized_relation_options
   FROM pg_catalog.pg_class AS c
   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
   JOIN pg_catalog.pg_am AS am ON am.oid = c.relam
@@ -3209,6 +3249,9 @@ COPY (
     )
     lifecycle = {
         "created_with_access_method": lifecycle_row["access_method"],
+        "serialized_relation_options": lifecycle_row[
+            "serialized_relation_options"
+        ],
         "relation_size": _integer(
             lifecycle_row["relation_size"], "lifecycle relation size"
         ),
@@ -3242,12 +3285,81 @@ COPY (
     )
     if lifecycle != {
         "created_with_access_method": "bioseq_external",
+        "serialized_relation_options": "entity=taxonomy",
         "relation_size": 0,
         "dropped": True,
     }:
         raise ExternalAcceptanceError(
             f"create/drop USING AM contract differs: {lifecycle}"
         )
+
+    invalid_marker = "__BIOSEQ_INVALID_ENTITY_SQLSTATE__"
+    invalid_entity_sqlstate = _extract_sqlstate(
+        _run_psql(
+            label="invalid_entity_option",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql=f"""
+\\set ON_ERROR_STOP off
+CREATE TABLE {INVALID_ENTITY_TABLE}
+  (provider pg_catalog.text NOT NULL)
+USING bioseq_external
+WITH (entity = 'unsupported');
+\\echo {invalid_marker}=:SQLSTATE
+\\set ON_ERROR_STOP on
+""",
+        ),
+        invalid_marker,
+    )
+    if invalid_entity_sqlstate != INVALID_ENTITY_SQLSTATE:
+        raise ExternalAcceptanceError(
+            "invalid external entity option returned SQLSTATE "
+            f"{invalid_entity_sqlstate}, expected {INVALID_ENTITY_SQLSTATE}"
+        )
+
+    missing_state_marker = "__BIOSEQ_MISSING_ENTITY_SQLSTATE__"
+    missing_message_marker = "__BIOSEQ_MISSING_ENTITY_MESSAGE__"
+    missing_entity_output = _run_psql(
+        label="missing_entity_option",
+        cluster=cluster,
+        bindir=bindir,
+        retained_root=retained_root,
+        timeout=timeout,
+        sql=f"""
+CREATE TABLE {MISSING_ENTITY_TABLE}
+  (provider pg_catalog.text NOT NULL)
+USING bioseq_external;
+\\set ON_ERROR_STOP off
+SELECT count(*) FROM {MISSING_ENTITY_TABLE};
+\\echo {missing_state_marker}=:SQLSTATE
+\\echo {missing_message_marker}=:LAST_ERROR_MESSAGE
+\\set ON_ERROR_STOP on
+DROP TABLE {MISSING_ENTITY_TABLE};
+""",
+    )
+    missing_entity_sqlstate = _extract_sqlstate(
+        missing_entity_output, missing_state_marker
+    )
+    missing_entity_message = _extract_error_message(
+        missing_entity_output, missing_message_marker
+    )
+    if (
+        missing_entity_sqlstate != MISSING_ENTITY_SQLSTATE
+        or missing_entity_message != MISSING_ENTITY_MESSAGE
+    ):
+        raise ExternalAcceptanceError(
+            "missing external entity option did not fail closed: "
+            f"SQLSTATE={missing_entity_sqlstate!r}, "
+            f"message={missing_entity_message!r}"
+        )
+
+    lifecycle.update({
+        "invalid_entity_sqlstate": invalid_entity_sqlstate,
+        "missing_entity_sqlstate": missing_entity_sqlstate,
+        "missing_entity_message": missing_entity_message,
+    })
 
     _run_psql(
         label="drop_extension",
@@ -3655,6 +3767,38 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             root / "results" / f"read_only_insert_{table}.stderr",
             b"",
         )
+    _write_bytes(
+        root / "queries" / "invalid_entity_option.sql",
+        b"-- synthetic invalid entity probe\n",
+    )
+    _write_bytes(
+        root / "results" / "invalid_entity_option.stdout",
+        (
+            "__BIOSEQ_INVALID_ENTITY_SQLSTATE__="
+            f"{INVALID_ENTITY_SQLSTATE}\n"
+        ).encode("ascii"),
+    )
+    _write_bytes(
+        root / "results" / "invalid_entity_option.stderr",
+        b"",
+    )
+    _write_bytes(
+        root / "queries" / "missing_entity_option.sql",
+        b"-- synthetic missing entity probe\n",
+    )
+    _write_bytes(
+        root / "results" / "missing_entity_option.stdout",
+        (
+            "__BIOSEQ_MISSING_ENTITY_SQLSTATE__="
+            f"{MISSING_ENTITY_SQLSTATE}\n"
+            "__BIOSEQ_MISSING_ENTITY_MESSAGE__="
+            f"{MISSING_ENTITY_MESSAGE}\n"
+        ).encode("utf-8"),
+    )
+    _write_bytes(
+        root / "results" / "missing_entity_option.stderr",
+        b"",
+    )
 
     inputs_root = root / "inputs"
     repository_root = inputs_root / "repository"
@@ -4065,8 +4209,12 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             },
             "create_drop_using_am": {
                 "created_with_access_method": "bioseq_external",
+                "serialized_relation_options": "entity=taxonomy",
                 "relation_size": 0,
                 "dropped": True,
+                "invalid_entity_sqlstate": INVALID_ENTITY_SQLSTATE,
+                "missing_entity_sqlstate": MISSING_ENTITY_SQLSTATE,
+                "missing_entity_message": MISSING_ENTITY_MESSAGE,
             },
             "drop_extension": {
                 "extension_count": 0,
@@ -4428,6 +4576,14 @@ def run_self_tests() -> None:
             ),
             "lifecycle drop": (
                 "checks", "create_drop_using_am", "dropped", False,
+            ),
+            "invalid entity SQLSTATE": (
+                "checks", "create_drop_using_am",
+                "invalid_entity_sqlstate", "00000",
+            ),
+            "missing entity message": (
+                "checks", "create_drop_using_am",
+                "missing_entity_message", "mutated",
             ),
             "cleanup residue": (
                 "checks", "drop_extension", "access_method_count", 1,

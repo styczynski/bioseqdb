@@ -4,9 +4,13 @@ module;
 
 #include <climits>
 #include <cstddef>
+#include <cstring>
 
 extern "C" {
 #include "access/reloptions.h"
+#include "catalog/pg_class.h"
+#include "utils/memutils.h"
+#include "utils/syscache.h"
 }
 
 export module bioseq.postgres.external.relation;
@@ -142,11 +146,83 @@ parse_relation_options(Datum options, bool validate)
 						 lengthof(relation_option_fields)));
 }
 
+namespace {
+
+/**
+ * Parse and cache this AM's private options without replacing PostgreSQL's
+ * StdRdOptions payload in rd_options. PostgreSQL clears rd_amcache when the
+ * relcache entry is invalidated, so a reopened relation is parsed from the
+ * current pg_class.reloptions value.
+ */
+relation_options *
+cached_relation_options(Relation relation)
+{
+	if (relation->rd_amcache != nullptr)
+	{
+		return static_cast<relation_options *>(relation->rd_amcache);
+	}
+
+	HeapTuple relation_tuple = SearchSysCacheCopy1(
+		RELOID, ObjectIdGetDatum(RelationGetRelid(relation)));
+	if (!HeapTupleIsValid(relation_tuple))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("could not find pg_class row for bioseq_external relation %u",
+						RelationGetRelid(relation))));
+	}
+
+	bool is_null = false;
+	Datum raw_options = SysCacheGetAttr(
+		RELOID, relation_tuple, Anum_pg_class_reloptions, &is_null);
+	if (is_null)
+	{
+		heap_freetuple(relation_tuple);
+		return nullptr;
+	}
+
+	ArrayType *raw_options_copy = DatumGetArrayTypePCopy(raw_options);
+	heap_freetuple(relation_tuple);
+
+	bytea *parsed = parse_relation_options(
+		PointerGetDatum(raw_options_copy), true);
+	pfree(raw_options_copy);
+	if (parsed == nullptr ||
+		VARSIZE_ANY(parsed) < static_cast<int>(sizeof(relation_options)))
+	{
+		if (parsed != nullptr)
+		{
+			pfree(parsed);
+		}
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid relation options for bioseq_external relation \"%s\"",
+						RelationGetRelationName(relation))));
+	}
+
+	const Size parsed_size = static_cast<Size>(VARSIZE_ANY(parsed));
+	auto *cached = static_cast<relation_options *>(
+		MemoryContextAlloc(CacheMemoryContext, parsed_size));
+	std::memcpy(cached, parsed, parsed_size);
+	pfree(parsed);
+
+	relation->rd_amcache = cached;
+	return cached;
+}
+
+} // namespace
+
 relation_entity
 entity_from_options(Relation relation)
 {
-	relation_options *options =
-		reinterpret_cast<relation_options *>(relation->rd_options);
+	if (relation == nullptr || !uses_table_access_method(relation))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("relation does not use the bioseq_external access method")));
+	}
+
+	relation_options *options = cached_relation_options(relation);
 
 	if (options == nullptr ||
 		options->entity == static_cast<int>(relation_entity::unspecified))
@@ -159,7 +235,25 @@ entity_from_options(Relation relation)
 						 "record_location, sequence, and sequence_chunk.")));
 	}
 
-	return static_cast<relation_entity>(options->entity);
+	const relation_entity entity = static_cast<relation_entity>(options->entity);
+	switch (entity)
+	{
+		case relation_entity::taxonomy:
+		case relation_entity::catalog:
+		case relation_entity::record_gene:
+		case relation_entity::record_location:
+		case relation_entity::sequence:
+		case relation_entity::sequence_chunk:
+			return entity;
+		case relation_entity::unspecified:
+			break;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("invalid \"entity\" option for bioseq_external relation \"%s\"",
+					RelationGetRelationName(relation))));
+	pg_unreachable();
 }
 
 /* ======================================================================== */
@@ -417,11 +511,12 @@ set_new_file_locator(Relation rel,
 				 errmsg("bioseq_external relations cannot be TEMPORARY")));
 	}
 
-	/* Validate an attached option payload without creating physical storage. */
-	if (rel->rd_options != nullptr)
-	{
-		(void) entity_from_options(rel);
-	}
+	/*
+	 * Supplied values have already passed the PostgreSQL reloptions parser.
+	 * A new relation is not yet visible through pg_class here, so the required
+	 * entity check is intentionally deferred until the reopened relation is
+	 * routed through entity_from_options().
+	 */
 
 	/*
 	 * External relations are non-materialised: no heap/init fork is created.
@@ -657,8 +752,13 @@ initialize_relation_options()
 	}
 
 	relation_option_kind = add_reloption_kind();
+	/* PG17 validates table-AM reloptions through the heap namespace; retain
+	 * the private kind as the parser identity for rd_amcache. */
+	const bits32 accepted_relation_option_kinds =
+		static_cast<bits32>(relation_option_kind) |
+		static_cast<bits32>(RELOPT_KIND_HEAP);
 
-	add_enum_reloption(relation_option_kind, "entity",
+	add_enum_reloption(accepted_relation_option_kinds, "entity",
 					   "Logical entity kind for a bioseq_external relation.",
 					   entity_option_values,
 					   static_cast<int>(relation_entity::unspecified),
@@ -667,16 +767,16 @@ initialize_relation_options()
 					   "and \"sequence_chunk\".",
 					   AccessExclusiveLock);
 
-	add_string_reloption(relation_option_kind, "alphabet",
+	add_string_reloption(accepted_relation_option_kinds, "alphabet",
 						 "Sequence alphabet for sequence/sequence_chunk entities.",
 						 nullptr, accept_alphabet_option,
 						 AccessExclusiveLock);
 
-	add_int_reloption(relation_option_kind, "storage_width",
+	add_int_reloption(accepted_relation_option_kinds, "storage_width",
 					  "Sequence storage unit width for sequence entities.",
 					  0, 0, 64, AccessExclusiveLock);
 
-	add_int_reloption(relation_option_kind, "chunk_bases",
+	add_int_reloption(accepted_relation_option_kinds, "chunk_bases",
 					  "Chunk length in bases for sequence_chunk entities.",
 					  0, 0, INT_MAX, AccessExclusiveLock);
 }
