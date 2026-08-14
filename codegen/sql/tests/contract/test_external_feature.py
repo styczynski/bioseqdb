@@ -945,6 +945,16 @@ def _verify_external_options_manifest(manifest: dict[str, Any]) -> None:
         )
 
 
+def _without_private_external_options_comment(sql: str) -> str:
+    private_comment = re.compile(
+        r"COMMENT ON TABLE "
+        r"bioseq_internal\.external_relation_options\s+IS\s+"
+        r"'(?:''|[^'])*'\s*;",
+        re.IGNORECASE | re.DOTALL,
+    )
+    return private_comment.sub("", sql)
+
+
 def _external_entities(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     entities = manifest.get("entities")
     if not isinstance(entities, list):
@@ -1201,7 +1211,8 @@ def verify(args: argparse.Namespace) -> str:
         _verify_enabled_sql(sql)
         _verify_enabled_manifest(manifest)
     else:
-        if "bioseq_external" in sql:
+        public_sql = _without_private_external_options_comment(sql)
+        if "bioseq_external" in public_sql.lower():
             raise RuntimeError(
                 "disabled SQL profile contains external catalog SQL"
             )
