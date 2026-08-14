@@ -32,8 +32,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'taxonomy'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 taxonomy final {
     std::string provider;
     std::optional<std::int64_t> taxon_id;
@@ -70,8 +69,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'catalog'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 catalog final {
     std::string provider;
     std::string domain;
@@ -142,8 +140,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'record_gene'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 record_genes final {
     std::string provider;
     std::string domain;
@@ -175,8 +172,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'record_location'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 record_locations final {
     std::string provider;
     std::string domain;
@@ -208,8 +204,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'sequence'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 sequences final {
     std::string provider;
     std::string domain;
@@ -245,8 +240,7 @@ struct [[bioseq_sql::table({
     .access_method = "bioseq_external",
     .relation_options = bioseq::sql::checked_sql{"entity = 'sequence_chunk'"},
 }), bioseq_sql::depends(
-    bioseq::sql::type_of<
-        bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
+    bioseq::sql::type_of<bioseq::storage::metadata::catalog_rows::external_relation_options>)]]
 sequence_chunks final {
     std::string provider;
     std::string domain;
