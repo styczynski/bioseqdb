@@ -141,9 +141,6 @@ public:
   }
 
 private:
-  [[nodiscard]] std::stop_source &stop_source_ref() noexcept;
-  [[nodiscard]] const std::stop_source &stop_source_ref() const noexcept;
-
   prov::external_execution_key key_{};
   alignas(std::stop_source) std::byte stop_storage_[sizeof(std::stop_source)];
 };
