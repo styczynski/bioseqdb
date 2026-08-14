@@ -34,6 +34,7 @@ import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.column.table_access;
+import bioseq.postgres.external.relation;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.table.sql_rows;
 import :access_identity;
@@ -48,6 +49,12 @@ static bool extension_teardown_active = false;
  * passed the parent's read-only preflight and must not be mistaken for a new
  * user-authored DROP statement. */
 static bool internal_drop_cleanup_active = false;
+/* The active external CREATE owns this backend-local capture window.  Nested
+ * ProcessUtility calls save and restore both values, so only PostgreSQL's
+ * OAT_POST_CREATE notification for the delegated statement can authorize the
+ * subsequent metadata insert. */
+static bool external_create_capture_active = false;
+static Oid captured_external_create_oid = InvalidOid;
 
 /* PostgreSQL's RemoveRelations() resolves a named partition with
  * RangeVarCallbackForDropRelation so its parent is locked before the child.
@@ -421,6 +428,8 @@ handle_column_table_drop(Oid relid)
 	}
 	const bool is_bioseq_relation =
 		relation_uses_column_table_access_method(drop_target);
+	const bool is_external_relation =
+		bioseq::postgres::external::uses_table_access_method(drop_target);
 	const RelFileLocator relfilelocator = is_bioseq_relation
 		? drop_target->rd_locator
 		: RelFileLocator{};
@@ -431,6 +440,12 @@ handle_column_table_drop(Oid relid)
 	 * The AccessShareLock acquired by try_relation_open remains held to xact end. */
 	relation_close(drop_target, NoLock);
 	drop_target = nullptr;
+
+	if (is_external_relation)
+	{
+		(void) bioseq::postgres::external::delete_relation_options(
+			relation_oid, /* missing_ok = */ true);
+	}
 
 	/* PostgreSQL owns the complete extension dependency-deletion list. During
 	 * an attested DROP EXTENSION, source rows and their catalog disappear with
@@ -549,6 +564,28 @@ handle_column_table_object_access(ObjectAccessType access, Oid class_id, Oid obj
 	if (access == OAT_DROP && class_id == RelationRelationId && !OidIsValid(sub_id))
 	{
 		handle_column_table_drop(object_id);
+	}
+	else if (access == OAT_POST_CREATE
+		&& class_id == RelationRelationId
+		&& sub_id == 0
+		&& external_create_capture_active)
+	{
+		Relation created_relation = relation_open(object_id, NoLock);
+		const bool is_external_relation =
+			bioseq::postgres::external::uses_table_access_method(
+				created_relation);
+		relation_close(created_relation, NoLock);
+		if (is_external_relation)
+		{
+			if (OidIsValid(captured_external_create_oid)
+				&& captured_external_create_oid != object_id)
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("bioseq_external CREATE emitted multiple relation creation events")));
+			}
+			captured_external_create_oid = object_id;
+		}
 	}
 	else if (access == OAT_POST_CREATE && class_id == TriggerRelationId)
 	{
@@ -678,6 +715,26 @@ process_column_table_utility(PlannedStmt *pstmt,
 	}
 
 	Node *parsetree = pstmt->utilityStmt;
+	bioseq::postgres::external::create_relation_options external_options{};
+	CreateStmt *external_create = nullptr;
+	if (IsA(parsetree, CreateStmt)
+		&& bioseq::postgres::external::is_external_create_statement(
+			reinterpret_cast<CreateStmt *>(parsetree)))
+	{
+		/* ProcessUtility trees are normally caller-owned. Copy the one narrow
+		 * statement before removing the four AM-private options; an already
+		 * copied read-only tree can be reused. */
+		if (!read_only_tree)
+		{
+			pstmt = copyObject(pstmt);
+			parsetree = pstmt->utilityStmt;
+		}
+		external_create = reinterpret_cast<CreateStmt *>(parsetree);
+		external_options =
+			bioseq::postgres::external::consume_create_relation_options(
+				external_create);
+	}
+
 	preflight_typmodless_letter_copy(parsetree);
 
 	if (IsA(parsetree, IndexStmt))
@@ -714,6 +771,15 @@ process_column_table_utility(PlannedStmt *pstmt,
 	{
 		extension_teardown_active = true;
 	}
+	const bool saved_external_create_capture =
+		external_create_capture_active;
+	const Oid saved_captured_external_create_oid =
+		captured_external_create_oid;
+	if (external_options.applies)
+	{
+		external_create_capture_active = true;
+		captured_external_create_oid = InvalidOid;
+	}
 	std::exception_ptr cpp_error;
 	PG_TRY();
 	{
@@ -721,19 +787,49 @@ process_column_table_utility(PlannedStmt *pstmt,
 		{
 			previous_process_utility_hook(pstmt, query_string, read_only_tree, context,
 							   params, query_environment, dest, completion_tag);
+			if (external_options.applies)
+			{
+				const Oid created_relation_oid =
+					captured_external_create_oid;
+				external_create_capture_active =
+					saved_external_create_capture;
+				captured_external_create_oid =
+					saved_captured_external_create_oid;
+				if (OidIsValid(created_relation_oid))
+				{
+					bioseq::postgres::external::persist_create_relation_options(
+						created_relation_oid, external_options);
+				}
+				else if (!external_create->if_not_exists)
+				{
+					ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("bioseq_external CREATE completed without a relation creation event")));
+				}
+			}
 		}
 		catch (...)
 		{
+			external_create_capture_active =
+				saved_external_create_capture;
+			captured_external_create_oid =
+				saved_captured_external_create_oid;
 			cpp_error = std::current_exception();
 		}
 	}
 	PG_CATCH();
 	{
 		extension_teardown_active = saved_teardown_context;
+		external_create_capture_active =
+			saved_external_create_capture;
+		captured_external_create_oid =
+			saved_captured_external_create_oid;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	extension_teardown_active = saved_teardown_context;
+	external_create_capture_active = saved_external_create_capture;
+	captured_external_create_oid = saved_captured_external_create_oid;
 	if (cpp_error != nullptr)
 	{
 		std::rethrow_exception(cpp_error);

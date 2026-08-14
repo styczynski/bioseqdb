@@ -214,14 +214,70 @@ EXPECTED_RELATION_ENTITIES: dict[str, str] = {
     "sequence_chunks": "sequence_chunk",
 }
 
+EXTERNAL_OPTIONS_TABLE_IDENTITY = (
+    "sql:table:bioseq_internal.external_relation_options"
+)
+EXTERNAL_OPTIONS_CPP_NAME = (
+    "bioseq::storage::metadata::catalog_rows::external_relation_options"
+)
+EXTERNAL_OPTIONS_SOURCE_MODULE = (
+    "bioseq.postgres.storage.metadata.sql_rows"
+)
+EXTERNAL_OPTIONS_SOURCE_PATH = (
+    "bioseq/backend/pg/column/metadata/sql_rows.cppm"
+)
+EXTERNAL_OPTIONS_ROW_CODEC_MODULE = (
+    "bioseq.postgres.storage.metadata.sql_row_codecs"
+)
+EXTERNAL_OPTIONS_ROW_CODEC_FIELDS = (
+    (0, "regclass", "regclass", "Oid", False, "row_codec.oid.required"),
+    (
+        1,
+        "entity",
+        "text",
+        "std::optional<text*>",
+        True,
+        "row_codec.text_pointer.nullable",
+    ),
+    (
+        2,
+        "alphabet",
+        "text",
+        "std::optional<text*>",
+        True,
+        "row_codec.text_pointer.nullable",
+    ),
+    (
+        3,
+        "storage_width",
+        "integer",
+        "std::int32_t",
+        False,
+        "row_codec.std::int32_t.required",
+    ),
+    (
+        4,
+        "chunk_bases",
+        "integer",
+        "std::int32_t",
+        False,
+        "row_codec.std::int32_t.required",
+    ),
+)
+
 EXTERNAL_ACCESS_METHOD_IDENTITY = (
     "sql:access_method:$extension."
     "bioseq::postgres::external::sql_routines.bioseq_external"
+)
+EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY = (
+    "sql:catalog_dependencies:$extension."
+    "bioseq::postgres::external::sql_routines.bioseq_external_handler"
 )
 
 EXPECTED_TOP_LEVEL_IDENTITIES = {
     "sql:function:bioseq.bioseq_external_handler(internal)",
     EXTERNAL_ACCESS_METHOD_IDENTITY,
+    EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY,
     "sql:schema:bioseq_external",
     *(
         f"sql:table:bioseq_external.{name}"
@@ -519,6 +575,70 @@ def _parse_table_columns(body: str, table: str) -> tuple[tuple[str, str, bool], 
     return tuple(result)
 
 
+def _compact_cpp_type(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(value.split())
+
+
+def _verify_external_options_sql(
+    sql: str,
+    *,
+    expect_public_tables: bool,
+) -> None:
+    table_pattern = re.compile(
+        r"CREATE TABLE bioseq_internal\.external_relation_options\s*"
+        r"\((.*?)\)\s*USING heap\s*"
+        r"WITH\s*\(\s*user_catalog_table\s*=\s*true\s*\)\s*;",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(table_pattern.finditer(sql))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "generated package must create exactly one typed private "
+            "external-relation option catalog"
+        )
+    actual_body = " ".join(matches[0].group(1).split())
+    expected_body = (
+        "regclass regclass NOT NULL, "
+        "entity text, "
+        "alphabet text, "
+        "storage_width integer NOT NULL DEFAULT 0, "
+        "chunk_bases integer NOT NULL DEFAULT 0, "
+        "PRIMARY KEY (regclass), "
+        "CHECK (entity IS NULL OR entity IN ( "
+        "'taxonomy', 'catalog', 'record_gene', 'record_location', "
+        "'sequence', 'sequence_chunk')), "
+        "CHECK (storage_width BETWEEN 0 AND 64), "
+        "CHECK (chunk_bases >= 0)"
+    )
+    if actual_body != expected_body:
+        raise RuntimeError(
+            "private external-relation option catalog columns, typed "
+            "defaults, primary key, or checks differ from the exact contract"
+        )
+    config_dump = (
+        "SELECT pg_catalog.pg_extension_config_dump("
+        "'bioseq_internal.external_relation_options', 'WHERE FALSE');"
+    )
+    if sql.count(config_dump) != 1:
+        raise RuntimeError(
+            "private external-relation option catalog must have exactly one "
+            "schema-only extension config-dump registration"
+        )
+    if expect_public_tables:
+        metadata_position = matches[0].start()
+        for table_name in EXPECTED_TABLES:
+            public_position = sql.find(
+                f"CREATE TABLE bioseq_external.{table_name}"
+            )
+            if public_position < 0 or metadata_position >= public_position:
+                raise RuntimeError(
+                    "private external-relation option metadata must render "
+                    f"before bioseq_external.{table_name}"
+                )
+
+
 def _verify_enabled_sql(sql: str) -> None:
     function = re.compile(
         r"CREATE FUNCTION bioseq\.bioseq_external_handler"
@@ -625,6 +745,199 @@ def _verify_enabled_sql(sql: str) -> None:
         )
 
 
+def _verify_external_options_manifest(manifest: dict[str, Any]) -> None:
+    raw_entities = manifest.get("entities")
+    if not isinstance(raw_entities, list):
+        raise RuntimeError("generated SQL manifest has no entity array")
+    entities = [
+        entity
+        for entity in raw_entities
+        if (
+            isinstance(entity, dict)
+            and entity.get("source_path") == EXTERNAL_OPTIONS_SOURCE_PATH
+            and (
+                entity.get("stable_identity")
+                == EXTERNAL_OPTIONS_TABLE_IDENTITY
+                or entity.get("cpp_declaration")
+                == EXTERNAL_OPTIONS_CPP_NAME
+                or str(entity.get("cpp_declaration", "")).startswith(
+                    EXTERNAL_OPTIONS_CPP_NAME + "::"
+                )
+            )
+        )
+    ]
+    kind_counts = {
+        kind: sum(entity.get("kind") == kind for entity in entities)
+        for kind in ("table", "column", "primary_key", "check", "config_dump")
+    }
+    if kind_counts != {
+        "table": 1,
+        "column": 5,
+        "primary_key": 1,
+        "check": 3,
+        "config_dump": 1,
+    } or len(entities) != 11:
+        raise RuntimeError(
+            "private external-relation option catalog does not have exactly "
+            "one table, five columns, one PK, three checks, and one config dump"
+        )
+    if any(
+        entity.get("source_module") != EXTERNAL_OPTIONS_SOURCE_MODULE
+        or entity.get("source_path") != EXTERNAL_OPTIONS_SOURCE_PATH
+        for entity in entities
+    ):
+        raise RuntimeError(
+            "private external-relation option catalog lost its existing "
+            "storage-metadata source authority"
+        )
+    by_kind = {
+        kind: [entity for entity in entities if entity.get("kind") == kind]
+        for kind in kind_counts
+    }
+    table = by_kind["table"][0]
+    if (
+        table.get("stable_identity") != EXTERNAL_OPTIONS_TABLE_IDENTITY
+        or table.get("installed_identity") != EXTERNAL_OPTIONS_TABLE_IDENTITY
+        or table.get("schema") != "bioseq_internal"
+        or table.get("schema_mode") != "fixed"
+        or table.get("name") != "external_relation_options"
+        or table.get("cpp_declaration") != EXTERNAL_OPTIONS_CPP_NAME
+    ):
+        raise RuntimeError(
+            "private external-relation option catalog identity/schema contract "
+            "is not exact"
+        )
+    columns = {
+        str(entity.get("stable_identity"))
+        for entity in by_kind["column"]
+    }
+    constraints = {
+        str(entity.get("stable_identity"))
+        for kind in ("primary_key", "check")
+        for entity in by_kind[kind]
+    }
+    if (
+        set(table.get("columns", [])) != columns
+        or set(table.get("constraints", [])) != constraints
+        or len(table.get("columns", [])) != 5
+        or len(table.get("constraints", [])) != 4
+    ):
+        raise RuntimeError(
+            "private external-relation option table child closure is stale"
+        )
+    for companion in (
+        *by_kind["column"],
+        *by_kind["primary_key"],
+        *by_kind["check"],
+        *by_kind["config_dump"],
+    ):
+        if set(companion.get("dependencies", [])) != {
+            EXTERNAL_OPTIONS_TABLE_IDENTITY
+        }:
+            raise RuntimeError(
+                "private external-relation option companion lost its exact "
+                "table dependency"
+            )
+
+    generated_cpp = table.get("generated_cpp")
+    if (
+        not isinstance(generated_cpp, dict)
+        or generated_cpp.get("facet") != "row_codec"
+        or generated_cpp.get("owner_key") != "storage_metadata"
+        or generated_cpp.get("source_module")
+        != EXTERNAL_OPTIONS_SOURCE_MODULE
+        or generated_cpp.get("module_name")
+        != EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        or generated_cpp.get("row_cpp_name") != EXTERNAL_OPTIONS_CPP_NAME
+        or generated_cpp.get("profile_invariant") is not True
+    ):
+        raise RuntimeError(
+            "private external-relation option table lost its generated typed "
+            "row-codec owner"
+        )
+    modules = manifest.get("row_codec_modules")
+    if not isinstance(modules, list):
+        raise RuntimeError("generated SQL manifest has no row-codec modules")
+    matching_modules = [
+        module
+        for module in modules
+        if (
+            isinstance(module, dict)
+            and module.get("module_name") == EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        )
+    ]
+    if len(matching_modules) != 1:
+        raise RuntimeError(
+            "generated SQL manifest does not have exactly one storage-metadata "
+            "row-codec module"
+        )
+    module = matching_modules[0]
+    row_names = module.get("row_cpp_names")
+    row_identities = module.get("row_entity_identities")
+    if (
+        module.get("owner_key") != "storage_metadata"
+        or module.get("source_module") != EXTERNAL_OPTIONS_SOURCE_MODULE
+        or module.get("profile_invariant") is not True
+        or not isinstance(row_names, list)
+        or not isinstance(row_identities, list)
+        or len(row_names) != len(row_identities)
+        or [
+            identity
+            for name, identity in zip(row_names, row_identities, strict=True)
+            if name == EXTERNAL_OPTIONS_CPP_NAME
+        ] != [EXTERNAL_OPTIONS_TABLE_IDENTITY]
+    ):
+        raise RuntimeError(
+            "storage-metadata row-codec module does not bind the private "
+            "external option row exactly"
+        )
+    contracts = manifest.get("row_codec_contracts")
+    if not isinstance(contracts, list):
+        raise RuntimeError("generated SQL manifest has no row-codec contracts")
+    matching_contracts = [
+        contract
+        for contract in contracts
+        if (
+            isinstance(contract, dict)
+            and contract.get("row_identity") == EXTERNAL_OPTIONS_TABLE_IDENTITY
+        )
+    ]
+    if len(matching_contracts) != 1:
+        raise RuntimeError(
+            "private external-relation option row has no unique typed codec "
+            "contract"
+        )
+    contract = matching_contracts[0]
+    fields = contract.get("fields")
+    if (
+        contract.get("row_cpp_name") != EXTERNAL_OPTIONS_CPP_NAME
+        or contract.get("module_name") != EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        or not isinstance(fields, list)
+    ):
+        raise RuntimeError(
+            "private external-relation option row-codec identity is stale"
+        )
+    actual_fields = tuple(
+        (
+            field.get("ordinal"),
+            field.get("sql_name"),
+            field.get("sql_type"),
+            _compact_cpp_type(field.get("cpp_type")),
+            field.get("nullable"),
+            field.get("converter_key"),
+        )
+        for field in fields
+        if isinstance(field, dict)
+    )
+    if len(actual_fields) != len(fields) or actual_fields != (
+        EXTERNAL_OPTIONS_ROW_CODEC_FIELDS
+    ):
+        raise RuntimeError(
+            "private external-relation option typed row-codec fields differ "
+            "in name/order/type/nullability/converter"
+        )
+
+
 def _external_entities(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     entities = manifest.get("entities")
     if not isinstance(entities, list):
@@ -691,6 +1004,9 @@ def _verify_enabled_manifest(
     ]
     access_method_identity = EXTERNAL_ACCESS_METHOD_IDENTITY
     access_method = by_identity[access_method_identity]
+    catalog_dependencies = by_identity[
+        EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY
+    ]
     properties = handler.get("routine_properties")
     binding = handler.get("c_binding")
     if (
@@ -709,11 +1025,23 @@ def _verify_enabled_manifest(
         raise RuntimeError(
             "external access method does not depend exactly on its handler"
         )
+    if (
+        catalog_dependencies.get("kind") != "catalog_dependencies"
+        or set(catalog_dependencies.get("dependencies", [])) != {
+            "sql:function:bioseq.bioseq_external_handler(internal)",
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        }
+    ):
+        raise RuntimeError(
+            "external access-method catalog dependency does not root exactly "
+            "the handler and typed option catalog"
+        )
     for table_name in EXPECTED_TABLES:
         identity = f"sql:table:bioseq_external.{table_name}"
         expected_dependencies = {
             "sql:schema:bioseq_external",
             access_method_identity,
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
         }
         if table_name in {"sequences", "sequence_chunks"}:
             expected_dependencies.add("sql:type:bioseq.seq")
@@ -765,6 +1093,22 @@ def _verify_enabled_manifest(
         for index, statement in enumerate(statements)
         if isinstance(statement, dict)
     }
+    metadata_position = statement_positions.get(
+        EXTERNAL_OPTIONS_TABLE_IDENTITY
+    )
+    for table_name in EXPECTED_TABLES:
+        table_position = statement_positions.get(
+            f"sql:table:bioseq_external.{table_name}"
+        )
+        if (
+            not isinstance(metadata_position, int)
+            or not isinstance(table_position, int)
+            or metadata_position >= table_position
+        ):
+            raise RuntimeError(
+                "typed external option metadata was rendered after public "
+                f"table {table_name}"
+            )
     seq_position = statement_positions.get("sql:type:bioseq.seq")
     for table_name in ("sequences", "sequence_chunks"):
         table_position = statement_positions.get(
@@ -792,6 +1136,11 @@ def verify(args: argparse.Namespace) -> str:
         )
     base_sql_bytes = _normalize_profile_sql(sql_bytes, manifest)
     sql = base_sql_bytes.decode("utf-8")
+    _verify_external_options_sql(
+        sql,
+        expect_public_tables=args.expect == "enabled",
+    )
+    _verify_external_options_manifest(manifest)
     handwritten_owners = manifest.get("handwritten_fmgr_export_owners")
     if (
         manifest.get("handwritten_fmgr_export_symbols") != []

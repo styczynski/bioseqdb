@@ -93,6 +93,52 @@ struct [[bioseq_sql::table({
 };
 
 /**
+ * @brief Validated custom options for one bioseq_external relation.
+ *
+ * The PostgreSQL table-AM reloptions ABI has no PG17 callback for a custom
+ * table AM. Persist the authenticated domain in the existing typed metadata
+ * catalog instead of encoding private values into core heap reloptions.
+ */
+struct [[bioseq_sql::table({
+            .schema =
+                bioseq::sql::fixed_schema<"bioseq_internal">,
+            .access_method = "heap",
+            .user_catalog_table = true,
+        }),
+        bioseq_sql::primary_key({
+            .placement =
+                bioseq::sql::constraint_placement::column_inline,
+            .columns = {"regclass"},
+        }),
+        bioseq_sql::config_dump]] external_relation_options {
+    [[bioseq_sql::column({
+        .sql_type = bioseq::sql::pg::regclass,
+    })]]
+    Oid regclass;
+
+    [[bioseq_sql::check({
+        .expression = bioseq::sql::checked_sql{
+            R"SQL(entity IS NULL OR entity IN (
+  'taxonomy', 'catalog', 'record_gene', 'record_location',
+  'sequence', 'sequence_chunk'))SQL"},
+    })]]
+    std::optional<text*> entity;
+
+    std::optional<text*> alphabet;
+
+    [[bioseq_sql::check({
+        .expression = bioseq::sql::checked_sql{
+            "storage_width BETWEEN 0 AND 64"},
+    })]]
+    std::int32_t storage_width = 0;
+
+    [[bioseq_sql::check({
+        .expression = bioseq::sql::checked_sql{"chunk_bases >= 0"},
+    })]]
+    std::int32_t chunk_bases = 0;
+};
+
+/**
  * @brief Per-stripe storage metadata.
  */
 struct [[bioseq_sql::table({
@@ -248,11 +294,13 @@ column_attno, bucket_idx)SQL"},
 
 static_assert(std::is_aggregate_v<row_mask>);
 static_assert(std::is_aggregate_v<options>);
+static_assert(std::is_aggregate_v<external_relation_options>);
 static_assert(std::is_aggregate_v<stripe>);
 static_assert(std::is_aggregate_v<chunk_group>);
 static_assert(std::is_aggregate_v<chunk>);
 static_assert(std::is_aggregate_v<seq_sub_table>);
 static_assert(std::is_standard_layout_v<options>);
+static_assert(std::is_standard_layout_v<external_relation_options>);
 static_assert(std::is_standard_layout_v<stripe>);
 static_assert(std::is_standard_layout_v<chunk_group>);
 static_assert(std::is_standard_layout_v<seq_sub_table>);
