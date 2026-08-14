@@ -114,9 +114,10 @@ make_transfer_service_ref(p_service_type &service) {
 // structure with zero change to the validated_transfer_request it returns.
 class curl_transfer_service {
 public:
-  curl_transfer_service() = default;
+  curl_transfer_service()
+      : curl_transfer_service(prov::external_execution_key{}) {}
   explicit curl_transfer_service(prov::external_execution_key key)
-      : key_(key) {}
+      : key_(key), stop_{} {}
 
   std::expected<validated_transfer_request, prov::external_error>
   validate(const transfer_service_passkey & /*borrowed*/,
