@@ -52,9 +52,9 @@ TEST_CASE("transfer_service_ref dispatches only through the erasure",
     spy_service spy;
     tx::transfer_service_ref ref = tx::make_transfer_service_ref(spy);
     REQUIRE(ref.object == &spy);
-    REQUIRE(ref.validate_fn != nullptr);
-    REQUIRE(ref.execution_key_fn != nullptr);
-    REQUIRE(ref.request_stop_fn != nullptr);
+    REQUIRE(static_cast<bool>(ref.validate_fn));
+    REQUIRE(static_cast<bool>(ref.execution_key_fn));
+    REQUIRE(static_cast<bool>(ref.request_stop_fn));
 
     prov::candidate_transfer_request_view candidate{};
     candidate.method = prov::transfer_method::get;
@@ -78,7 +78,7 @@ TEST_CASE("a hand-rolled transfer_service_ref has null thunks",
           "[component:external_api][layer:contract][feature:external_source]") {
     tx::transfer_service_ref ref{};
     REQUIRE(ref.object == nullptr);
-    REQUIRE(ref.validate_fn == nullptr);
-    REQUIRE(ref.execution_key_fn == nullptr);
-    REQUIRE(ref.request_stop_fn == nullptr);
+    REQUIRE_FALSE(static_cast<bool>(ref.validate_fn));
+    REQUIRE_FALSE(static_cast<bool>(ref.execution_key_fn));
+    REQUIRE_FALSE(static_cast<bool>(ref.request_stop_fn));
 }
