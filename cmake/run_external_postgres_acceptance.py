@@ -836,14 +836,13 @@ def _validate_external_options_manifest(
     }
     constraints = {
         str(entity.get("stable_identity"))
-        for kind in ("primary_key", "check")
-        for entity in by_kind[kind]
+        for entity in by_kind["check"]
     }
     if (
         set(table.get("columns", [])) != columns
         or set(table.get("constraints", [])) != constraints
         or len(table.get("columns", [])) != 5
-        or len(table.get("constraints", [])) != 4
+        or len(table.get("constraints", [])) != 3
     ):
         raise ExternalAcceptanceError(
             "private external option table child closure is incomplete"
