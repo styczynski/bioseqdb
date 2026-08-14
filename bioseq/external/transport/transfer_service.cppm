@@ -23,6 +23,21 @@ import bioseq.external.provider.messages; // candidate_transfer_request_view
 import bioseq.external.provider.locator;  // locator_policy_profile_view
 import bioseq.external.transport.locator; // validated_transfer_request, validate_candidate
 
+namespace bioseq::external::transport::detail {
+
+class transfer_stop_state {
+public:
+  void request_stop() noexcept { source_.request_stop(); }
+  [[nodiscard]] std::stop_token stop_token() const noexcept {
+    return source_.get_token();
+  }
+
+private:
+  std::stop_source source_;
+};
+
+} // namespace bioseq::external::transport::detail
+
 export namespace bioseq::external::transport {
 
 namespace prov = bioseq::external::provider;
@@ -130,7 +145,7 @@ public:
   }
   void request_stop() noexcept { stop_.request_stop(); }
   [[nodiscard]] std::stop_token stop_token() const noexcept {
-    return stop_.get_token();
+    return stop_.stop_token();
   }
   [[nodiscard]] transfer_service_ref ref() {
     return make_transfer_service_ref(*this);
@@ -138,7 +153,7 @@ public:
 
 private:
   prov::external_execution_key key_{};
-  std::stop_source stop_;
+  detail::transfer_stop_state stop_;
 };
 
 static_assert(external_transfer_service_compatible<curl_transfer_service>);
