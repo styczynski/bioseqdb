@@ -824,8 +824,16 @@ def _verify_external_options_manifest(manifest: dict[str, Any]) -> None:
         raise RuntimeError(
             "private external-relation option table child closure is stale"
         )
+    for companion in by_kind["column"]:
+        if set(companion.get("dependencies", [])) != {
+            "sql:schema:bioseq_internal",
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        }:
+            raise RuntimeError(
+                "private external-relation option column lost its exact "
+                "schema/table dependencies"
+            )
     for companion in (
-        *by_kind["column"],
         *by_kind["primary_key"],
         *by_kind["check"],
         *by_kind["config_dump"],
