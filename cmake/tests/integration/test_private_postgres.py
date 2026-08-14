@@ -119,6 +119,8 @@ def test_environment_allowlist(bindir: Path, scratch: Path) -> None:
 def test_unique_allocation(bindir: Path, scratch: Path) -> None:
     first = UniquePrivateCluster(_inputs(bindir, scratch, "uniq_a"))
     second = UniquePrivateCluster(_inputs(bindir, scratch, "uniq_b"))
+    assert first.socket_dir == first.socket_dir.resolve(strict=True)
+    assert second.socket_dir == second.socket_dir.resolve(strict=True)
     assert first.socket_dir != second.socket_dir
     assert first.port != second.port
     assert first.run_dir != second.run_dir
