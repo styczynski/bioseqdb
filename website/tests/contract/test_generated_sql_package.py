@@ -243,6 +243,12 @@ def _require_current_manifest(
         )
 
 
+def _resolved_manifest_extension_name(manifest: dict[str, Any]) -> Any:
+    if "extension_name" not in manifest:
+        return "bioseq"
+    return manifest["extension_name"]
+
+
 def _string_list(value: Any, field: str, source: Path) -> list[str]:
     if (
         not isinstance(value, list)
@@ -357,6 +363,42 @@ def _all_identity_projection(
     if len(installed) != len(set(installed)):
         raise RuntimeError(f"{source}: installed identities are not unique")
     return sorted(stable), sorted(installed)
+
+
+def _verify_acl_companion_visibility(
+    manifest: dict[str, Any], source: Path
+) -> None:
+    entities = manifest["entities"]
+    acl_identities = {
+        entity["stable_identity"]
+        for entity in entities
+        if entity["kind"] in {"grant", "revoke"}
+    }
+    public_acl_identities = {
+        entity["stable_identity"]
+        for entity in entities
+        if entity["kind"] in {"grant", "revoke"}
+        and entity["public_documentation"]
+    }
+    acl_summary_identities: set[str] = set()
+    for index, entity in enumerate(entities):
+        acl_summary = entity.get("acl_summary")
+        if not isinstance(acl_summary, list) or any(
+            not isinstance(identity, str) or not identity
+            for identity in acl_summary
+        ):
+            raise RuntimeError(
+                f"{source}: entities[{index}].acl_summary is malformed"
+            )
+        acl_summary_identities.update(acl_summary)
+    if public_acl_identities:
+        raise RuntimeError(
+            f"{source}: grant/revoke companions must not be website-public"
+        )
+    if acl_summary_identities != acl_identities:
+        raise RuntimeError(
+            f"{source}: ACL companion entities and acl_summary ownership differ"
+        )
 
 
 def _verify_c_symbol_naming(manifest: dict[str, Any], source: Path) -> None:
@@ -588,7 +630,7 @@ def _verify_artifact(artifact: ArtifactInput) -> ArtifactReceipt:
         raise RuntimeError(
             f"{manifest_path}: website requires the production SQL manifest"
         )
-    manifest_extension_name = manifest.get("extension_name")
+    manifest_extension_name = _resolved_manifest_extension_name(manifest)
     if manifest_extension_name != artifact.name:
         raise RuntimeError(
             f"{manifest_path}: extension_name {manifest_extension_name!r} "
@@ -620,6 +662,7 @@ def _verify_artifact(artifact: ArtifactInput) -> ArtifactReceipt:
     )
     _verify_c_symbol_naming(manifest, manifest_path)
     all_stable, _ = _all_identity_projection(manifest, manifest_path)
+    _verify_acl_companion_visibility(manifest, manifest_path)
     derived_stable, derived_installed = _public_projection(
         manifest, manifest_path
     )

@@ -26,7 +26,7 @@ coordinates and the alignment's CIGAR string. Those projections come from
 [[sql:bioseq.target_start]], [[sql:bioseq.target_end]], and
 [[sql:bioseq.cigar]].
 
-```sql runnable id=canonical_mmsearch timeout=15s entity="sql:function:public.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.query_start(anyelement)" entity="sql:function:bioseq.query_end(anyelement)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
+```sql runnable id=canonical_mmsearch timeout=15s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.query_start(anyelement)" entity="sql:function:bioseq.query_end(anyelement)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
 -- bioseq:setup
 SET bioseq.index.insert_maintenance.enabled = on;
 SET bioseq.vectorization.enabled = on;
@@ -74,5 +74,5 @@ DROP TABLE tutorial_mmsearch;
 ```
 
 The setup data is copied from `hoe_seed_rows()` and the probe is the exact
-`kHoeProbeSequence` used by the integration suite. The published rows and
+`k_hoe_probe_sequence` used by the integration suite. The published rows and
 coordinates remain whatever the installed extension actually returns.

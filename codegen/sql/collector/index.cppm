@@ -1687,9 +1687,12 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                     .options = std::move(options),
                     .dependencies = declaration_dependencies,
                     .documentation = declaration.documentation,
-                    .public_documentation = std::ranges::contains(
-                        declaration.documentation.groups,
-                        std::string{"bioseq_sql_public_api"}),
+                    .public_documentation =
+                        *kind != entity_kind::grant
+                        && *kind != entity_kind::revoke
+                        && std::ranges::contains(
+                            declaration.documentation.groups,
+                            std::string{"bioseq_sql_public_api"}),
                     .companion = detail::companion_kind(*kind)
                         || attribute.name == "am_catalog_dependencies",
                 };

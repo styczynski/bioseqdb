@@ -9,9 +9,9 @@ draft: false
 
 The `bioseq_cache` extension is preloaded before `bioseq` and registers the
 production cache provider used by Bioseq plans. Start with
-[[sql:bioseq_cache.version()|`bioseq_cache.version()`]], then use
-[[sql:bioseq_cache.stats()|`stats()`]] and
-[[sql:bioseq_cache.entries()|`entries()`]] to observe decisions. These
+[[sql:bioseq_cache.version|`bioseq_cache.version()`]], then use
+[[sql:bioseq_cache.stats|`stats()`]] and
+[[sql:bioseq_cache.entries|`entries()`]] to observe decisions. These
 diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
 
 ## Exact-query hits
@@ -95,10 +95,10 @@ for one-off scans whose materialized result would dominate the saved work.
 
 Table writes retire dependent generations automatically. A superuser can also
 invalidate one relation with
-[[sql:bioseq_cache.invalidate_relation(regclass)|`invalidate_relation()`]] or
+[[sql:bioseq_cache.invalidate_relation|`invalidate_relation()`]] or
 all generations with
-[[sql:bioseq_cache.invalidate_all()|`invalidate_all()`]], and can clear counters
-with [[sql:bioseq_cache.reset_stats()|`reset_stats()`]]:
+[[sql:bioseq_cache.invalidate_all|`invalidate_all()`]], and can clear counters
+with [[sql:bioseq_cache.reset_stats|`reset_stats()`]]:
 
 ```sql
 SELECT bioseq_cache.invalidate_relation('reads'::regclass);

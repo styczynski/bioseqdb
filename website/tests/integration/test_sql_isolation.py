@@ -127,7 +127,7 @@ def check_m4_isolated(generator: str) -> None:
 
 
 def check_preflight_failure_skips_teardown(generator: str) -> None:
-    """A failed extension preflight never executes author teardown SQL."""
+    """A missing-manifest preflight never executes author teardown SQL."""
     started = time.monotonic()
     result = subprocess.run(
         [generator, "website", "execute-sql",
@@ -138,9 +138,10 @@ def check_preflight_failure_skips_teardown(generator: str) -> None:
         capture_output=True, text=True, timeout=30)
     elapsed = time.monotonic() - started
     ok = (result.returncode == 3
-          and "least-privilege extension ACL" in result.stderr
+          and "extension-backed website isolation requires --sql-manifest "
+              "for ACL target discovery" in result.stderr
           and elapsed < 5.0)
-    _report("M3 preflight failure: author teardown is skipped", ok,
+    _report("M3 manifest preflight failure: author teardown is skipped", ok,
             f"rc={result.returncode} elapsed={elapsed:.2f}s\n"
             f"stderr:\n{result.stderr.strip()}")
 
@@ -296,18 +297,6 @@ def main() -> int:
     created = _psql(pg_bin, "postgres", f"CREATE DATABASE {TEMPLATE}")
     if created.returncode != 0 and "already exists" not in created.stderr:
         print(f"failed to create template database: {created.stderr}", file=sys.stderr)
-        return 2
-
-    # Minimal objects let the production-only per-clone GRANT step succeed while
-    # deliberately omitting pg_extension.bioseq, so the required-extension
-    # preflight fails after provisioning and exercises the teardown gate.
-    fixture = _psql(
-        pg_bin, TEMPLATE,
-        "CREATE SCHEMA IF NOT EXISTS bioseq_internal; "
-        "CREATE TABLE IF NOT EXISTS bioseq_internal.index_policy(id integer); "
-        "CREATE TABLE IF NOT EXISTS bioseq_internal.metadata_age_log(id integer)")
-    if fixture.returncode != 0:
-        print(f"failed to create preflight fixture: {fixture.stderr}", file=sys.stderr)
         return 2
 
     check_m4_direct(args.generator)

@@ -26,11 +26,17 @@ module;
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
+#elif defined(__APPLE__)
+#include <sys/stdio.h>
+#endif
 #include <unistd.h>
 
+#if defined(__linux__)
 #ifndef RENAME_EXCHANGE
 #define RENAME_EXCHANGE (1 << 1)
+#endif
 #endif
 
 module bioseq.codegen.website:build_pipeline;
@@ -49,6 +55,7 @@ import :release_assembly;
 import bioseq.codegen.website.postgres;
 import bioseq.codegen.website.model;
 import bioseq.codegen.support;
+import bioseq.codegen.sql.signature;
 import bioseq.common.hashing;
 
 // Website build orchestration. Owns the closed command dispatch, deterministic
@@ -58,6 +65,38 @@ import bioseq.common.hashing;
 namespace bioseq::codegen::website {
 
 namespace {
+
+[[nodiscard]] std::string hex64(std::uint64_t value);
+
+[[nodiscard]] std::string canonical_result_type_key(
+    std::string_view value) {
+    const auto canonical_scalar = [](std::string_view scalar) {
+        std::string canonical =
+            bioseq::codegen::sql::canonical_routine_sql_type(scalar);
+        if (canonical == "timestamptz") return std::string{"timestampwithtimezone"};
+        if (canonical == "varchar") return std::string{"charactervarying"};
+        if (canonical == "bpchar") return std::string{"character"};
+        return canonical;
+    };
+    const std::vector<bioseq::codegen::sql::parsed_routine_argument> columns =
+        bioseq::codegen::sql::parse_table_result_columns(value);
+    const std::string scalar = canonical_scalar(value);
+    if (columns.empty() && !scalar.starts_with("table(")) {
+        return "scalar:" + scalar;
+    }
+
+    std::string result = "table:" + std::to_string(columns.size()) + ':';
+    const auto append_component = [&result](std::string_view component) {
+        result += std::to_string(component.size());
+        result.push_back(':');
+        result.append(component);
+    };
+    for (const auto& column : columns) {
+        append_component(column.name);
+        append_component(canonical_scalar(column.sql_type));
+    }
+    return result;
+}
 
 [[nodiscard]] std::size_t count_kind(
     const content_node& node,
@@ -359,7 +398,6 @@ void verify_website_pipeline() {
             R"json({
               "schema_revision": 1,
               "authority_mode": "annotated_cpp",
-              "extension_name": "bioseq",
               "extension_schema": "public",
               "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "entities": [
@@ -385,11 +423,18 @@ void verify_website_pipeline() {
                   "installed_identity": "sql:sequence:bioseq_internal.sequence_source_epoch_seq",
                   "kind": "sequence",
                   "public_documentation": false
+                },
+                {
+                  "identity": "sql:guc-value:bioseq.external.enabled",
+                  "installed_identity": "sql:guc-value:bioseq.external.enabled",
+                  "kind": "guc_value",
+                  "public_documentation": false
                 }
               ]
             })json",
             "sql-manifest.json");
-    expect(sql_manifest.entities.size() == 1
+    expect(sql_manifest.extension_name == "bioseq"
+               && sql_manifest.entities.size() == 1
                && sql_manifest.entities.front().stable_identity
                     == "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)"
                && sql_manifest.entities.front().installed_identity
@@ -398,7 +443,11 @@ void verify_website_pipeline() {
                     == std::vector<std::string>{"public"}
                && sql_manifest.restricted_sequence_names
                     == std::vector<std::string>{
-                        "bioseq_internal.sequence_source_epoch_seq"},
+                        "bioseq_internal.sequence_source_epoch_seq"}
+               && std::ranges::find(
+                    sql_manifest.stable_identities,
+                    "sql:guc-value:bioseq.external.enabled")
+                    != sql_manifest.stable_identities.end(),
            "SQL manifest derives public catalog and internal ACL identities");
     const auto sql_manifest_rejects = [](std::string_view json) {
         try {
@@ -409,6 +458,73 @@ void verify_website_pipeline() {
             return true;
         }
     };
+    const auto manifest_with_hidden_guc =
+        [](std::string_view identity_kind) {
+            const std::string identity =
+                "sql:" + std::string(identity_kind) + ":bioseq.test_guc";
+            return std::string{R"json({
+              "schema_revision": 1,
+              "authority_mode": "annotated_cpp",
+              "extension_schema": "public",
+              "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "entities": [{
+                "identity": ")json"}
+                + identity
+                + R"json(",
+                "installed_identity": ")json"
+                + identity
+                + R"json(",
+                "kind": "guc_value",
+                "public_documentation": false
+              }, {
+                "identity": "sql:type:$extension.test_type",
+                "installed_identity": "sql:type:public.test_type",
+                "kind": "type",
+                "name": "test_type",
+                "source_module": "bioseq.test",
+                "source_path": "bioseq/test.cppm",
+                "source_line": 1,
+                "public_documentation": true,
+                "brief": "Test type.",
+                "details": "",
+                "parameters": [],
+                "result_sql_type": "public.test_type"
+              }]
+            })json";
+        };
+    expect(sql_manifest_rejects(
+               manifest_with_hidden_guc("guc_value"))
+               && sql_manifest_rejects(
+                   manifest_with_hidden_guc("function")),
+           "SQL manifest rejects incorrect guc_value identity prefixes");
+    expect(sql_manifest_rejects(
+               R"json({
+                 "schema_revision": 1,
+                 "authority_mode": "annotated_cpp",
+                 "extension_name": null,
+                 "extension_schema": "public",
+                 "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "entities": []
+               })json")
+               && sql_manifest_rejects(
+               R"json({
+                 "schema_revision": 1,
+                 "authority_mode": "annotated_cpp",
+                 "extension_name": "",
+                 "extension_schema": "public",
+                 "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "entities": []
+               })json")
+               && sql_manifest_rejects(
+               R"json({
+                 "schema_revision": 1,
+                 "authority_mode": "annotated_cpp",
+                 "extension_name": 7,
+                 "extension_schema": "public",
+                 "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "entities": []
+               })json"),
+           "SQL manifest rejects present invalid extension names");
     expect(sql_manifest_rejects(
                R"json({
                  "schema_revision": 2,
@@ -642,6 +758,37 @@ void verify_website_pipeline() {
     expect(bioseq::common::sha256_hex("")
            == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
            "sha256 empty vector");
+
+    // Manifest/catalog result parity uses the authoritative SQL signature
+    // grammar. TABLE results remain structural while exact PostgreSQL aliases
+    // canonicalize only their type components.
+    const std::string canonical_table_result = canonical_result_type_key(
+        "table (created_at timestamptz, n int8)");
+    expect(canonical_table_result == canonical_result_type_key(
+               "TABLE(created_at timestamp with time zone, n bigint)")
+               && canonical_table_result != canonical_result_type_key(
+                   "TABLE(created_on timestamp with time zone, n bigint)")
+               && canonical_table_result != canonical_result_type_key(
+                   "TABLE(n bigint, created_at timestamp with time zone)")
+               && canonical_table_result != canonical_result_type_key(
+                   "TABLE(created_at timestamp with time zone)")
+               && canonical_table_result != canonical_result_type_key(
+                   "TABLE(created_at timestamp without time zone, n bigint)"),
+           "SQL TABLE result parity preserves names, order, count, and types");
+    expect(canonical_result_type_key("float8")
+                   == canonical_result_type_key("double precision")
+               && canonical_result_type_key("int")
+                   == canonical_result_type_key("integer")
+               && canonical_result_type_key("bool")
+                   == canonical_result_type_key("boolean")
+               && canonical_result_type_key("varchar")
+                   == canonical_result_type_key("character varying")
+               && canonical_result_type_key("bpchar")
+                   == canonical_result_type_key("character")
+               && canonical_result_type_key("timestamptz")
+                   == canonical_result_type_key(
+                       "timestamp with time zone"),
+           "SQL scalar result parity retains exact PostgreSQL aliases");
 
     // Jinja2Cpp (through the C++20 shim).
     const std::string rendered = render_inline_template(
@@ -2116,7 +2263,7 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
     std::vector<reference_entity> kept;
     std::vector<reference_entity> omitted;
     std::set<std::string, std::less<>> matched;
-    const auto canonical_result_type = [](std::string value) {
+    const auto display_result_type = [](std::string value) {
         if (value == "float8") return std::string{"double precision"};
         if (value == "int8") return std::string{"bigint"};
         if (value == "int4") return std::string{"integer"};
@@ -2176,8 +2323,8 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
         }
         if (!manifest_entity.result_sql_type.empty()
             && entity.return_type
-            && canonical_result_type(*entity.return_type)
-                   != canonical_result_type(
+            && canonical_result_type_key(*entity.return_type)
+                   != canonical_result_type_key(
                        manifest_entity.result_sql_type)) {
             throw std::runtime_error(
                 "SQL manifest/catalog result-type mismatch for '"
@@ -2209,7 +2356,7 @@ void collect_referenced_entity_ids(const std::vector<content_node>& nodes,
         entity.parameters = manifest_entity.parameters;
         if (!manifest_entity.result_sql_type.empty()) {
             entity.return_type =
-                canonical_result_type(manifest_entity.result_sql_type);
+                display_result_type(manifest_entity.result_sql_type);
         }
         entity.module_name = manifest_entity.source_module;
         if (!manifest_entity.source_path.empty()
@@ -2967,10 +3114,10 @@ namespace {
 
 /// @brief Runs `website catalog`: captures live SQL entities to an artifact.
 ///
-/// Connects to the private cluster, derives the schema set from the generated
-/// manifest, and captures type/function identities, properties, and catalog
-/// comments for parity validation. Page visibility and documentation
-/// remain manifest-owned.
+/// Connects to the private cluster, derives each exact extension/schema scope
+/// from the generated manifests, and captures type/function identities,
+/// properties, and catalog comments for parity validation. Page visibility
+/// and documentation remain manifest-owned.
 /// @param args Options after the `catalog` token.
 /// @return Zero on success; two on usage errors; three on capture failure.
 [[nodiscard]] int execute_catalog_command(std::span<std::string_view const> args) try {
@@ -2982,28 +3129,31 @@ namespace {
         args, value_keys, {}, repeatable_value_keys);
     const std::string conninfo = require_option(options, "conninfo");
     const fs::path output = require_option(options, "output");
-    std::set<std::string, std::less<>> catalog_schema_set;
-    for (const loaded_sql_manifest_projection& manifest :
-         load_sql_manifest_projections(options)) {
-        catalog_schema_set.insert(
-            manifest.projection.catalog_schemas.begin(),
-            manifest.projection.catalog_schemas.end());
-    }
-    if (catalog_schema_set.empty()) {
+    const std::vector<loaded_sql_manifest_projection> manifests =
+        load_sql_manifest_projections(options);
+    if (std::ranges::none_of(
+            manifests,
+            [](const loaded_sql_manifest_projection& manifest) {
+                return !manifest.projection.catalog_schemas.empty();
+            })) {
         throw std::runtime_error(
             "SQL manifest public projections have no installed catalog schemas");
     }
-    const std::vector<std::string> catalog_schemas(
-        catalog_schema_set.begin(), catalog_schema_set.end());
 
     std::vector<reference_entity> entities;
-    for (reference_entity& entity :
-         load_extension_type_entities(conninfo, catalog_schemas)) {
-        entities.push_back(std::move(entity));
-    }
-    for (reference_entity& entity :
-         load_extension_function_entities(conninfo, catalog_schemas)) {
-        entities.push_back(std::move(entity));
+    for (const loaded_sql_manifest_projection& manifest : manifests) {
+        const sql_manifest_public_projection& projection =
+            manifest.projection;
+        for (reference_entity& entity : load_extension_type_entities(
+                 conninfo, projection.extension_name,
+                 projection.catalog_schemas)) {
+            entities.push_back(std::move(entity));
+        }
+        for (reference_entity& entity : load_extension_function_entities(
+                 conninfo, projection.extension_name,
+                 projection.catalog_schemas)) {
+            entities.push_back(std::move(entity));
+        }
     }
     std::ranges::sort(entities, [](const reference_entity& lhs,
                                    const reference_entity& rhs) {
@@ -3134,8 +3284,8 @@ void fsync_directory(const fs::path& path) {
 
 // Atomically replaces output with staging. When output is absent the
 // staging directory is renamed into place; when it exists the two sibling
-// directories are exchanged with renameat2(RENAME_EXCHANGE) and the now-old tree
-// is removed, so a reader never observes a partially written site.
+// directories are exchanged with the platform's atomic swap primitive and the
+// now-old tree is removed, so a reader never observes a partially written site.
 void atomic_publish(const fs::path& staging, const fs::path& output) {
     std::error_code error;
     if (!fs::exists(output, error)) {
@@ -3145,6 +3295,7 @@ void atomic_publish(const fs::path& staging, const fs::path& output) {
         }
         return;
     }
+#if defined(__linux__)
     const long result = ::syscall(SYS_renameat2, AT_FDCWD, staging.c_str(),
                                   AT_FDCWD, output.c_str(),
                                   static_cast<unsigned int>(RENAME_EXCHANGE));
@@ -3152,6 +3303,17 @@ void atomic_publish(const fs::path& staging, const fs::path& output) {
         throw std::runtime_error(std::string("renameat2 exchange failed: ")
                                  + std::strerror(errno));
     }
+#elif defined(__APPLE__)
+    const int result = ::renamex_np(
+        staging.c_str(), output.c_str(), static_cast<unsigned int>(RENAME_SWAP));
+    if (result != 0) {
+        throw std::runtime_error(std::string("renamex_np swap failed: ")
+                                 + std::strerror(errno));
+    }
+#else
+    throw std::runtime_error(
+        "atomic directory exchange is unsupported on this platform");
+#endif
     fs::remove_all(staging, error);
 }
 
@@ -3838,7 +4000,9 @@ void decorate_code_entity_ranges(
                    + ",\"doc_nav\":" + doc_nav + "}",
                "entities", serialize_reference_entity_array(entities));
         for (const reference_entity& entity : entities) {
-            const std::string rel = entity_rel(entity) + "index.html";
+            const std::string entity_relative_route =
+                reference_entity_relative_route(version, entity);
+            const std::string rel = entity_relative_route + "index.html";
             std::string page = "{\"title\":" + json_text(entity.qualified_name)
                 + ",\"description\":"
                 + json_text(entity.summary_text.empty()
@@ -3851,7 +4015,7 @@ void decorate_code_entity_ranges(
                       {"Reference", url(version + "/reference/")},
                       {std::string(label),
                        url(version + "/reference/" + std::string(domain) + "/")},
-                      {entity.qualified_name, url(entity_rel(entity))}});
+                      {entity.qualified_name, url(entity_relative_route)}});
             page += ",\"doc_nav\":" + doc_nav;
             // Section table of contents: fixed entity sections that are
             // present, matched to the h2 anchors in entity.html.j2.

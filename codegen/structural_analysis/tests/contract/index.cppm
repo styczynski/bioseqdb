@@ -461,6 +461,114 @@ inline void publish_prepared(
         pcm_root, ".p1689.json");
 }
 
+inline void assert_compile_database_scan_authority_contract(
+    const configured_toolchain& toolchain,
+    const std::filesystem::path& root) {
+    const std::filesystem::path source =
+        root / "codegen/raw_compile_database_mode.cppm";
+    const std::filesystem::path raw_database =
+        root / "raw-scan-compile-commands.json";
+    const std::filesystem::path pcm_root =
+        root / "pcm/raw-scan-owned-authority";
+    write_file(
+        source,
+        "module;\n"
+        "#include <stdarg.h>\n"
+        "export module fixture.raw_compile_database_mode;\n"
+        "export int raw_compile_database_mode_value();\n");
+    write_file(
+        raw_database,
+        render_compile_database({
+            make_command(toolchain, root, source),
+        }));
+
+    const structural_index raw_structural =
+        scan_translation_units_from_database(
+            {source}, raw_database);
+    require(
+        raw_structural.translation_units.size() == 1u
+            && raw_structural.translation_units.front().module_name
+                == "fixture.raw_compile_database_mode"
+            && raw_structural.translation_units.front()
+                .compiler_profile.empty(),
+        "default compile-database structural scan did not retain raw "
+        "CMake database semantics");
+    const module_graph raw_graph =
+        scan_module_graph_from_database(
+            {source}, raw_database);
+    require(
+        raw_graph.units.size() == 1u
+            && raw_graph.units.front().provided_module
+                == "fixture.raw_compile_database_mode",
+        "default compile-database module-graph scan did not retain raw "
+        "CMake database semantics");
+
+    const auto require_incomplete_authority =
+        [&](const auto& operation, std::string_view case_name) {
+            require_failure(
+                operation,
+                "incomplete owned authority",
+                case_name);
+        };
+    require_incomplete_authority(
+        [&] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source}, raw_database, "production"));
+        },
+        "structural scan profile without PCM root");
+    require_incomplete_authority(
+        [&] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source},
+                    raw_database,
+                    std::string_view{},
+                    pcm_root));
+        },
+        "structural scan PCM root without profile");
+    require_incomplete_authority(
+        [&] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source}, raw_database, "production"));
+        },
+        "module-graph scan profile without PCM root");
+    require_incomplete_authority(
+        [&] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source},
+                    raw_database,
+                    std::string_view{},
+                    pcm_root));
+        },
+        "module-graph scan PCM root without profile");
+
+    require_failure(
+        [&] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source},
+                    raw_database,
+                    "production",
+                    pcm_root));
+        },
+        "has no content-keyed PCM output",
+        "explicit structural scan owned authority");
+    require_failure(
+        [&] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source},
+                    raw_database,
+                    "production",
+                    pcm_root));
+        },
+        "has no content-keyed PCM output",
+        "explicit module-graph scan owned authority");
+}
+
 inline void assert_toolchain_exists(
     const configured_toolchain& toolchain) {
     require(
@@ -1335,6 +1443,8 @@ inline int invoke() {
     assert_toolchain_exists(toolchain);
     temporary_tree temporary;
     const std::filesystem::path root = temporary.root();
+    assert_compile_database_scan_authority_contract(
+        toolchain, root);
 
     const std::filesystem::path identical_dependency_source =
         root / "dependency-only-identical.cppm";

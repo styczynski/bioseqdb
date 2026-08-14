@@ -27,6 +27,7 @@ module;
 #include <clang/Lex/Lexer.h>
 #include <clang/Lex/PPCallbacks.h>
 #include <clang/Lex/Preprocessor.h>
+#include <clang/Options/OptionUtils.h>
 #include <clang/Tooling/ArgumentsAdjusters.h>
 #include <clang/Tooling/CompilationDatabase.h>
 #include <clang/Tooling/DependencyScanningTool.h>
@@ -6362,7 +6363,7 @@ structural_arguments_adjuster() {
             append_expanded_argument(argument, expanded);
         }
         clang::tooling::CommandLineArguments result;
-        result.reserve(expanded.size() + 3);
+        result.reserve(expanded.size() + 5);
         for (std::size_t index = 0;
              index < expanded.size();
              ++index) {
@@ -6382,6 +6383,34 @@ structural_arguments_adjuster() {
                 continue;
             }
             result.push_back(argument);
+        }
+        const bool has_resource_directory = std::ranges::any_of(
+            result,
+            [](std::string_view argument) {
+                return argument == "-resource-dir"
+                    || argument.starts_with("-resource-dir=");
+            });
+        if (!has_resource_directory) {
+            // Raw CMake commands rely on compiler-driver discovery, while
+            // the in-process ToolInvocation does not reproduce it.
+            static const std::string linked_resource_directory = [] {
+                const std::filesystem::path linked_clang_driver =
+                    std::filesystem::path{BIOSEQ_LINKED_LLVM_PREFIX}
+                    / "bin/clang++";
+                const std::string resource_directory =
+                    clang::GetResourcesPath(
+                        linked_clang_driver.string());
+                if (resource_directory.empty()
+                    || !std::filesystem::is_directory(
+                        resource_directory)) {
+                    throw std::runtime_error(
+                        "linked Clang driver has no discoverable resource "
+                        "directory");
+                }
+                return resource_directory;
+            }();
+            result.emplace_back("-resource-dir");
+            result.push_back(linked_resource_directory);
         }
         result.emplace_back("-fsyntax-only");
         result.emplace_back("-Wno-unknown-attributes");
@@ -9485,11 +9514,20 @@ namespace {
     };
     std::unique_ptr<clang::tooling::CompilationDatabase> database =
         clang_backend::load_compile_database(compile_database);
-    clang_backend::validate_owned_compile_database(
-        *database,
-        source_paths,
-        compiler_profile,
-        pcm_root);
+    const bool has_compiler_profile = !compiler_profile.empty();
+    const bool has_pcm_root = !pcm_root.empty();
+    if (has_compiler_profile != has_pcm_root) {
+        throw std::runtime_error(
+            "compile-database scan received incomplete owned authority: "
+            "compiler_profile and pcm_root must be provided together");
+    }
+    if (has_compiler_profile) {
+        clang_backend::validate_owned_compile_database(
+            *database,
+            source_paths,
+            compiler_profile,
+            pcm_root);
+    }
     const clang_backend::scoped_compile_database_cwd cwd{
         compile_database};
     const std::vector<std::string> units =
@@ -9524,11 +9562,20 @@ namespace {
     };
     std::unique_ptr<clang::tooling::CompilationDatabase> database =
         clang_backend::load_compile_database(compile_database);
-    clang_backend::validate_owned_compile_database(
-        *database,
-        source_paths,
-        compiler_profile,
-        pcm_root);
+    const bool has_compiler_profile = !compiler_profile.empty();
+    const bool has_pcm_root = !pcm_root.empty();
+    if (has_compiler_profile != has_pcm_root) {
+        throw std::runtime_error(
+            "compile-database scan received incomplete owned authority: "
+            "compiler_profile and pcm_root must be provided together");
+    }
+    if (has_compiler_profile) {
+        clang_backend::validate_owned_compile_database(
+            *database,
+            source_paths,
+            compiler_profile,
+            pcm_root);
+    }
     const clang_backend::scoped_compile_database_cwd cwd{
         compile_database};
     const std::vector<std::string> units =

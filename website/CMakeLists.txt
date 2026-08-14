@@ -769,6 +769,22 @@ add_custom_command(
   COMMENT "website: stage relocatable PostgreSQL + both production extensions"
   VERBATIM)
 
+# Linux can enforce the optional 4 GiB RLIMIT_AS boundary before exec. Darwin
+# accounts mandatory process mappings against RLIMIT_AS, so that same boundary
+# is already below the launcher's address space and setrlimit rejects it before
+# PostgreSQL starts. Keep the unsupported coordinate explicit in the generic
+# runner and omit only this optional cap for the Darwin website build; lifecycle
+# commands remain isolated in process groups and bounded by their deadlines.
+set(_website_private_postgres_limit_args)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(_website_private_postgres_limit_args
+    --address-space-limit-mib 4096)
+elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  message(FATAL_ERROR
+    "website: private PostgreSQL resource policy is unsupported on "
+    "${CMAKE_SYSTEM_NAME}")
+endif()
+
 # Exercise the generator's database-per-example security and result projection
 # against a second disposable cluster. This transcript intentionally needs no
 # extension bootstrap: it proves restricted clone ACLs, same-clone type-name
@@ -783,7 +799,7 @@ add_custom_command(
           --socket-dir-parent /tmp
           --log-dir "${_output_root}/isolation-tests/log"
           --database wtmpl
-          --address-space-limit-mib 4096
+          ${_website_private_postgres_limit_args}
           -- "${Python3_EXECUTABLE}"
              "${CMAKE_SOURCE_DIR}/website/tests/integration/test_sql_isolation.py"
              --generator "${_gen}"
@@ -800,7 +816,7 @@ add_custom_target(bioseq_website_isolation_tests
   DEPENDS "${_isolation_tests_stamp}")
 
 # --- catalog + execute on the staged cluster (§17.3 step 7) -------------------
-# One owner process starts the copied server under RLIMIT_AS containment,
+# One owner process starts the copied server under the host resource policy,
 # installs bioseq_cache before bioseq, then launches one generator child. Both
 # authoritative manifests are supplied in that same provider-before-consumer
 # order for catalog capture and isolated tutorial execution. Nothing after this
@@ -877,7 +893,7 @@ add_custom_command(
           --socket-dir-parent /tmp
           --log-dir "${_output_root}/cluster-log"
           --database bioseq_site
-          --address-space-limit-mib 4096
+          ${_website_private_postgres_limit_args}
           --preload-library bioseq_cache
           --preload-library bioseq
           --disable-prepared-transactions

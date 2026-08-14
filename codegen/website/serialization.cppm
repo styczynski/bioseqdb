@@ -399,10 +399,17 @@ parse_sql_manifest_public_projection(
     if (authority_mode != "annotated_cpp") {
         fail("authority_mode must be 'annotated_cpp'");
     }
-    const std::string extension_name =
-        require_string(root, "extension_name");
-    if (extension_name.empty()) {
-        fail("extension_name must not be empty");
+    std::string extension_name = "bioseq";
+    if (const boost::json::value* value =
+            root.if_contains("extension_name"); value != nullptr) {
+        if (!value->is_string()) {
+            fail("field 'extension_name' must be a string");
+        }
+        const boost::json::string& raw = value->as_string();
+        extension_name.assign(raw.data(), raw.size());
+        if (extension_name.empty()) {
+            fail("extension_name must not be empty");
+        }
     }
     const std::string extension_schema =
         require_string(root, "extension_schema");
@@ -460,6 +467,12 @@ parse_sql_manifest_public_projection(
             }
             return identity.substr(prefix.size());
         };
+    const auto identity_kind_for_manifest_kind =
+        [](std::string_view kind) noexcept -> std::string_view {
+            // The stable-identity grammar has exactly one spelling exception;
+            // every other manifest kind remains byte-for-byte unchanged.
+            return kind == "guc_value" ? "guc-value" : kind;
+        };
     const auto qualified_name =
         [](std::string_view body) -> std::string_view {
             const std::size_t signature = body.find('(');
@@ -502,7 +515,9 @@ parse_sql_manifest_public_projection(
             require_bool(entity, "public_documentation");
         const std::string kind = require_string(entity, "kind");
         const std::string_view installed_body =
-            identity_body(installed_identity, kind);
+            identity_body(
+                installed_identity,
+                identity_kind_for_manifest_kind(kind));
         const std::string_view installed_name =
             qualified_name(installed_body);
         if (kind == "sequence"

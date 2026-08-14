@@ -24,9 +24,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CANONICAL = ROOT / "website_design"
 WEBSITE = ROOT / "website"
 DESIGN_SOURCE = WEBSITE / "design_source"
+CANONICAL = DESIGN_SOURCE
 
 SOURCE_FILES = (
     "index.html",

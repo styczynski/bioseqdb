@@ -257,6 +257,11 @@ def _address_space_preexec(limit_mib: int | None):
     """Return a preexec hook that caps RLIMIT_AS, or None when unbounded."""
     if limit_mib is None:
         return None
+    if sys.platform == "darwin":
+        raise ClusterCommandError(
+            "address-space-limit-mib is unsupported on Darwin: RLIMIT_AS "
+            "includes mandatory process mappings that already exceed the "
+            "requested website limit; omit the option or run on Linux")
     import resource
 
     limit_bytes = int(limit_mib) * 1024 * 1024

@@ -120,6 +120,12 @@ def _run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[st
     )
 
 
+def _assert_diagnostic_contains(diagnostic: str, expected: str) -> None:
+    normalized_diagnostic = " ".join(diagnostic.split())
+    normalized_expected = " ".join(expected.split())
+    assert normalized_expected in normalized_diagnostic, diagnostic
+
+
 def _write(path: Path, text: str, *, executable: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -1228,7 +1234,7 @@ def _run_layout_case(
                 / loader_match_library.name
             )
             collision_library.parent.mkdir(parents=True)
-            shutil.copy2(loader_match_library, collision_library)
+            shutil.copy2(runtime_dir / leaf_name, collision_library)
             collision_artifacts = [dict(artifact) for artifact in artifacts]
             collision_artifacts[2]["library"] = collision_library
             _write_artifact_spec(artifact_spec, collision_artifacts)
@@ -1241,8 +1247,9 @@ def _run_layout_case(
                 timeout=60,
             )
             assert collision_result.returncode != 0
-            assert "loader/overlay coordinate collision" in (
-                collision_result.stdout + collision_result.stderr
+            _assert_diagnostic_contains(
+                collision_result.stdout + collision_result.stderr,
+                "loader/overlay coordinate collision",
             )
             assert not manifest.exists() and not hash_path.exists()
             _write_artifact_spec(artifact_spec, artifacts)
@@ -1350,7 +1357,7 @@ def _run_artifact_spec_contract_cases(
         )
         diagnostic = result.stdout + result.stderr
         assert result.returncode != 0, f"{label} must be rejected"
-        assert expected_diagnostic in diagnostic, diagnostic
+        _assert_diagnostic_contains(diagnostic, expected_diagnostic)
         assert not manifest.exists()
         assert not artifact_hash.exists()
 
@@ -1678,7 +1685,7 @@ def _run_runtime_fault_case(
     )
     assert result.returncode != 0, f"{fault} runtime fault must be rejected"
     diagnostic = result.stdout + result.stderr
-    assert expected_diagnostic in diagnostic, diagnostic
+    _assert_diagnostic_contains(diagnostic, expected_diagnostic)
     assert not manifest_path.exists()
     assert not hash_path.exists()
 

@@ -371,8 +371,9 @@ def _assert_authored_content_contract(version: str) -> None:
     _check(len(fixture_pairs) == 5,
            f"canonical hoe_seed_rows source has {len(fixture_pairs)} rows, expected 5")
     probe_match = re.search(
-        r'kHoeProbeSequence\s*=\s*\n?\s*"([ACGT]+)"', common)
-    _check(probe_match is not None, "cannot resolve canonical kHoeProbeSequence source")
+        r'k_hoe_probe_sequence\s*=\s*\n?\s*"([ACGT]+)"', common)
+    _check(probe_match is not None,
+           "cannot resolve canonical k_hoe_probe_sequence source")
 
     tutorial = tutorial_path.read_text(encoding="utf-8")
     for target, _secondary_probe in fixture_pairs:
@@ -380,7 +381,7 @@ def _assert_authored_content_contract(version: str) -> None:
                "similarity tutorial does not copy each canonical hoe target exactly once")
     probe = probe_match.group(1)
     _check(tutorial.count(f"'{probe}'") == 2,
-           "similarity tutorial must use exact kHoeProbeSequence in EXPLAIN and visible SQL")
+           "similarity tutorial must use exact k_hoe_probe_sequence in EXPLAIN and visible SQL")
     for assertion in (
         "EXPLAIN (FORMAT JSON)", "'{0,Plan,\"Node Type\"}'",
         "'{0,Plan,\"Custom Plan Provider\"}'", "'Custom Scan'", "'BioseqScan'",
