@@ -316,10 +316,10 @@ EXPECTED_INPUT_FILE_KEYS = frozenset({
 READ_ONLY_INSERT_SQL = {
     "catalog": """
 INSERT INTO bioseq_external.catalog
-  (provider, domain, original_identifier, accession, retrievable,
-   provenance, retrieved_at)
+  (provider, domain, entity_kind, original_identifier, accession,
+   retrievable, provenance, retrieved_at)
 VALUES
-  ('acceptance', 'sequence', 'probe', 'probe', true,
+  ('acceptance', 'sequence', 'nucleotide', 'probe', 'probe', true,
    '{}'::pg_catalog.jsonb, pg_catalog.now());
 """,
     "record_genes": """
