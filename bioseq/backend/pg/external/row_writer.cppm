@@ -549,7 +549,7 @@ fill_catalog(const provider::owning_catalog_row& row, TupleTableSlot* slot)
 	set_bool_opt(slot, 27, row.is_reviewed);                        /* is_reviewed */
 	set_bool_opt(slot, 28, row.is_annotated);                       /* is_annotated */
 	set_bool_opt(slot, 29, row.is_fragment);                        /* is_fragment */
-	set_bool(slot, 30, row.retrievable);                            /* retrievable NOT NULL */
+	set_bool(slot, 30, row.is_retrievable);                         /* retrievable NOT NULL */
 	set_provider_attributes(slot, 31, row.provider_attributes_json);/* provider_attributes */
 	set_audit_columns(slot, row, 32, 33, 34);
 }

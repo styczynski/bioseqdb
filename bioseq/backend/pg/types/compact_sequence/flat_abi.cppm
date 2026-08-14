@@ -143,6 +143,11 @@ export enum class pg_sequence_flat_kind : std::uint8_t {
     invalid,
 };
 
+export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
+    char const* input,
+    std::size_t length,
+    bool require_already_canonical = false);
+
 export [[nodiscard]] inline pg_sequence_flat_kind
 classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
 {

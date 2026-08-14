@@ -378,7 +378,7 @@ void view_to_ascii(
 export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     char const* input,
     std::size_t length,
-    bool require_already_canonical = false)
+    bool require_already_canonical)
 {
     return PointerGetDatum(allocate_unbound_ascii(
         input, length, require_already_canonical));
