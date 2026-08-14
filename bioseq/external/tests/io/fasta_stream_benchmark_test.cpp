@@ -7,7 +7,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <expected>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -26,7 +28,11 @@ namespace exio = bioseq::external::io;
 namespace {
 
 std::string write_fixture(std::uint64_t bp) {
-    std::string path = "/tmp/bioseq_external_api/fasta_stream_fixture.fa";
+    const std::filesystem::path directory = "/tmp/bioseq_external_api";
+    std::error_code directory_error;
+    std::filesystem::create_directories(directory, directory_error);
+    REQUIRE_FALSE(directory_error);
+    const std::string path = (directory / "fasta_stream_fixture.fa").string();
     std::FILE* file = std::fopen(path.c_str(), "wb");
     REQUIRE(file != nullptr);
     std::fputs(">bench_synthetic_chromosome\n", file);
