@@ -532,6 +532,7 @@ private:
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -690,7 +691,10 @@ TEST_CASE("generated )cpp"
           << "_requests);\n"
           << "    REQUIRE(" << prefix
           << "_responses.size() == " << fixture.count << ");\n"
-          << "    for (const auto& item : " << prefix << "_responses) {\n"
+          << "    for (std::size_t response_index = 0; response_index < "
+          << prefix << "_responses.size(); ++response_index) {\n"
+          << "        const auto& item = " << prefix
+          << "_responses[response_index];\n"
           << "        INFO((item ? std::string(item->body_view()) : "
              "item.error().message));\n"
           << "        REQUIRE(item.has_value());\n"
