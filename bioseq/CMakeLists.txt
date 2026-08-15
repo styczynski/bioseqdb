@@ -2946,14 +2946,20 @@ option(BIOSEQ_TEST_INDEXES
   OFF)
 set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support.cppm")
+set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULES
+  "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support_parts/contract_core.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support_parts/catalog_lifecycle.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support_parts/toast_faults.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support_parts/codec_fixtures.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
-  "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+  ${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULES})
 # The test-indexes extension imports and owns this provider. Production keeps
 # it out of the DSO; a dedicated excluded target declared after the generated
 # SQL provider closure supplies its raw compile command to dual-profile PREPARE.
 if(BIOSEQ_TEST_INDEXES)
   list(APPEND SRC_MOD_FILES
-    "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+    ${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULES})
 endif()
 set(BIOSEQ_SQL_CODEGEN_DIR
   "${CMAKE_CURRENT_BINARY_DIR}/generated/sql")
@@ -4413,7 +4419,7 @@ if(NOT BIOSEQ_TEST_INDEXES)
       FILE_SET bioseq_sql_row_codec_runtime_test_support_compile_donor_modules
       TYPE CXX_MODULES
       BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
-      FILES "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
+      FILES ${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULES})
   target_link_libraries(
     bioseq_sql_row_codec_runtime_test_support_compile_donor
     PRIVATE bioseq_sql_compile_contract_providers)
