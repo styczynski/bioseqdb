@@ -2397,6 +2397,7 @@ target_sources(bioseq_testing_support
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm")
 target_link_libraries(bioseq_testing_support
@@ -2439,6 +2440,8 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/read_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/write_planning_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/index_chunk_io_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/merge_runs_multicursor_test.cpp"
