@@ -202,6 +202,7 @@ set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer/replay_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
@@ -2411,6 +2412,11 @@ target_sources(bioseq_testing_support
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/grouped_soa/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/support.cppm")
 target_link_libraries(bioseq_testing_support
@@ -2461,18 +2467,26 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/chaining/vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/common/logging_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache/sealed_seed_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache/archive_cache_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/gpu/vulkan_shader_cache/runtime_receipts_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/read_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/write_planning_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index/resident_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/gpu_minimizer_index/source_direct_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/index_chunk_io_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/merge_runs_multicursor_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_fragment_compact_hash32_adapter_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/hash_major_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/generation_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer/replay_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/grouped_soa_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/grouped_soa/reader_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/01_contracts_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/02_grouped_reader_test.cpp"
@@ -2486,6 +2500,8 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/10_payload_corruption_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image/layout_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image/validation_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/storage_concept_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/io/file_kind_test.cpp"
