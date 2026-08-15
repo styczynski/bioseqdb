@@ -2,14 +2,8 @@
  * @file instrumentation/clock.cppm
  * @brief Portable wall-clock and cycle clock.
  *
- * Two functions: now_ns() returns a monotonic nanosecond timestamp,
- * now_cycles() returns a cycle counter (or 0 when unavailable).
- *
- * Implementations:
- *   - macOS arm64: mach_absolute_time + cached timebase ratio.
- *     mach_absolute_time on Apple Silicon is the cntvct_el0 read.
- *   - Linux: clock_gettime(CLOCK_MONOTONIC_RAW) (vDSO-accelerated).
- *   - Cycle counter: rdtscp on x86, mrs cntvct_el0 on arm64.
+ * `now_ns()` returns monotonic nanoseconds. `now_cycles()` returns the native
+ * cycle counter, or zero when the architecture has no supported counter.
  */
 module;
 

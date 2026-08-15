@@ -2,23 +2,8 @@
  * @file instrumentation/pmu/linux.cppm
  * @brief Linux perf_event_open backend.
  *
- * Reads cycles / instructions / branches / branch_misses via the perf
- * subsystem. The four events are opened as a *group* on the calling
- * thread so a single read() syscall returns all four counter values
- * atomically — important when we want IPC and branch-miss-rate to be
- * derived from the same time window.
- *
- * Per-thread file descriptors live in thread-local storage. The kernel
- * automatically frees them when the thread exits or when the program
- * exits. read() returns the counters as raw monotonically-increasing
- * values. The caller subtracts a baseline taken at scope-begin to
- * obtain the delta.
- *
- * No special permissions are required for the default (user-mode-only)
- * configuration as long as `perf_event_paranoid <= 2` (this is the
- * default on most distros). When opening fails we cache the failure
- * thread-locally and the public read() returns zeros so the rest of
- * the pipeline continues to work.
+ * A thread-local perf group returns four coherent raw counters in one read.
+ * Failed setup is cached and reported as an unavailable zero sample.
  */
 module;
 
@@ -126,14 +111,14 @@ static_assert(sizeof(group_read_without_ids) == 7 * sizeof(std::uint64_t));
     attributes.disabled = group_file_descriptor == -1 ? 1 : 0;
     attributes.exclude_kernel = 1;
     attributes.exclude_hv = 1;
-    // Only the leader needs the read-format set; sibling events inherit
+    // Only the leader needs the read format. Sibling events inherit
     // the group's read interpretation when read() is issued on the
     // leader. We set it on the leader only.
     if (group_file_descriptor == -1) {
         attributes.read_format =
             PERF_FORMAT_GROUP | PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
     }
-    // pid=0 -> calling thread; cpu=-1 -> any CPU the thread runs on.
+    // A zero pid selects the calling thread, and cpu -1 allows any CPU.
     return static_cast<int>(perf_event_open_syscall(&attributes, 0, -1, group_file_descriptor, 0));
 }
 

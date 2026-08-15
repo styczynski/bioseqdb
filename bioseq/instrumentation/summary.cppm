@@ -2,8 +2,8 @@
  * @file instrumentation/summary.cppm
  * @brief Percentile estimation, metric summaries, and reset operations.
  *
- * The summary writer takes a profiler_state<p_configuration_type>& as input. The non-templated
- * convenience overload routes to the persistent production profiler state.
+ * Templated operations consume explicit profiler state. Convenience entry
+ * points use the persistent production state.
  */
 module;
 

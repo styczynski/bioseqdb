@@ -2,20 +2,8 @@
  * @file instrumentation/runtime.cppm
  * @brief Process-wide instrumentation state and runtime gate.
  *
- * Owns the persistent (across-batch) profiler_state<p_configuration_type> for each
- * canonical configuration type. Pipeline dispatch installs this state via
- * installed_profiler_scope so aggregates accumulate across multiple
- * batches in the same scan. The summary writer runs at scan end
- * the summary writer and resets it before the next scan.
- *
- * The block is heap-constructed once per p_configuration_type via Meyer's-singleton
- * pattern (the static-local lazy init). Destruction at process exit is
- * fine because the destructor only frees aggregate blocks, no cross-
- * thread state.
- *
- * Also provides a process-wide runtime enable flag
- * (`set_runtime_enabled`) used to pause profiling without recompiling —
- * checked on every region begin in the profiling-enabled instantiation.
+ * Each configuration owns persistent scan-wide state. A relaxed atomic gate
+ * pauses profiling without changing the compiled feature set.
  */
 module;
 
@@ -47,10 +35,7 @@ inline void set_runtime_enabled(bool enabled) noexcept {
     detail::runtime_enabled_flag.store(enabled, std::memory_order_relaxed);
 }
 
-/// Persistent process-wide profiler_state for the given p_configuration_type. Accumulates
-/// across all batches in a scan. ColumnarScan_EndCustomScan reads from
-/// it once at scan end, prints the summary, then calls reset_metrics to
-/// clear before the next scan.
+/** @brief Return persistent process-wide state for one configuration. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard]] inline profiler_state<p_configuration_type>& persistent_profiler_state() noexcept {
     static profiler_state<p_configuration_type> state;

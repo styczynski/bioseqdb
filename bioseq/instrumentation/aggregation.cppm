@@ -1,10 +1,9 @@
 /**
- * @file instrumentation/aggregate.cppm
+ * @file instrumentation/aggregation.cppm
  * @brief Per-thread storage for region and loop measurements.
  *
- * region_aggregate accumulates one row per (region_id, thread). The
- * Each table has one owning producer thread. Summary reads occur after the
- * measured work is quiescent, so aggregate fields remain non-atomic.
+ * Each table has one producer thread. Summary reads occur after measured work
+ * is quiescent, so aggregate fields remain non-atomic.
  */
 module;
 

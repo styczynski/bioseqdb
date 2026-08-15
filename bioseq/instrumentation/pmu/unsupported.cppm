@@ -2,10 +2,8 @@
  * @file instrumentation/pmu/unsupported.cppm
  * @brief Explicit behavior when thread PMU counters are unavailable.
  *
- * Used on Windows and any platform without a working PMU backend.
- * Returns the four-event canon as zeros. The user-facing module
- * The initialization and shutdown results retain the established portable
- * fallback behavior, and reads always return a zero sample.
+ * Initialization remains a no-op, availability stays false, and reads return
+ * the four-event zero sample.
  */
 module;
 

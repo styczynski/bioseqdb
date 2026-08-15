@@ -31,7 +31,7 @@ struct alignas(64) sample_record {
     std::uint16_t active_region_id = 0;
     std::uint32_t reserved = 0;
 };
-// Two cache lines on 64-bit platforms; the second line stays cold during
+// Two cache lines on 64-bit platforms. The second line stays cold during
 // region-only profiling and is touched only when the sampler service is
 // activated. Keeping it 128 B (instead of squeezing to 64) avoids losing
 // signal-side fields and prevents alignment surprises.

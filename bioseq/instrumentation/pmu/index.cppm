@@ -2,18 +2,8 @@
  * @file instrumentation/pmu/index.cppm
  * @brief Portable per-thread performance-monitoring counters.
  *
- * The same four-event sample is exposed on each supported platform. An
- * unavailable platform or permission failure produces a zero sample.
- *
- * Hot-path read overhead:
- *   - macOS: one sysctl (kpc_get_thread_counters), ~300 ns on M-series.
- *   - Linux: one read() on a perf-event group fd, ~200-400 ns depending
- *     on kernel version.
- *
- * The cost is paid only when the selected profiling configuration enables
- * counters and the region is taken (skipped == false). The enable_counters bool sits
- * directly on production_profiling_configuration so the compiler eliminates
- * every PMU read in instantiations that don't ask for them.
+ * Supported backends expose the same four-event sample. Unavailable counters
+ * produce zero values, and disabled configurations eliminate reads at compile time.
  */
 module;
 

@@ -2,16 +2,8 @@
  * @file instrumentation/pmu/macos.cppm
  * @brief Apple Silicon kperf backend.
  *
- * Reads cycles / instructions / branches / branch_misses from Apple's
- * private kperf.framework + kperfdata.framework via dlopen. The
- * underlying kpc_get_thread_counters is a sysctl, so per-call overhead
- * is on the order of a few hundred nanoseconds. PMU access on macOS
- * normally requires root (kpc_force_all_ctrs_set returns EPERM
- * otherwise). The public read_thread_counters() falls back to zeros
- * when init fails so the rest of the pipeline keeps running.
- *
- * Only the dynamically resolved kperf/kperfdata boundary used here is
- * represented. No private framework declarations are linked at build time.
+ * Dynamically resolved kperf and kperfdata symbols provide four thread-local
+ * counters. Initialization failure leaves the portable API unavailable.
  */
 module;
 
@@ -29,9 +21,7 @@ export module bioseq.instrumentation.pmu.macos;
 
 export namespace bioseq::instrumentation::pmu::macos {
 
-/// Canonical 4-event sample. Mirrors the public counter_sample in pmu.cppm
-/// so the dispatch in pmu.cppm can copy field-for-field without having
-/// to know about platform structs.
+/** @brief Four-event sample matching the public PMU counter order. */
 struct counter_sample {
     std::uint64_t cycles        = 0;
     std::uint64_t instructions  = 0;
@@ -430,7 +420,7 @@ inline void shutdown_thread() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return;
     // Best-effort disable of per-thread counting. On macOS this is
-    // process-wide for the calling thread; we do not unwind the
+    // process-wide for the calling thread. We do not unwind the
     // process-wide state because other threads might still be using it.
     if (state.kpc_set_thread_counting != nullptr) {
         state.kpc_set_thread_counting(0);

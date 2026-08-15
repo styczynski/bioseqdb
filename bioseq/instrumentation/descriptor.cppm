@@ -2,14 +2,8 @@
  * @file instrumentation/descriptor.cppm
  * @brief Stable metadata for named instrumentation sites.
  *
- * A descriptor is registered once per (name, file, line) tuple via the
- * static-local idiom at the call site:
- *   static const auto* descriptor = register_static_region("ksw2.extend");
- *
- * Registration is cold-path: the first call acquires a mutex, deduplicates
- * against the global hash table, allocates a fresh descriptor block from
- * the global pool when needed, returns a stable pointer. Subsequent calls
- * return the cached pointer (one load + branch).
+ * Cold-path registration deduplicates source identities and returns stable
+ * pointers from process-lifetime storage.
  */
 module;
 
@@ -34,22 +28,20 @@ export namespace bioseq::instrumentation {
 /** @brief Category encoded in a metric descriptor. */
 enum class metric_kind : std::uint8_t { region, loop, counter, gauge, sample };
 
-/// A descriptor is the immutable metadata for one named profiling site.
-/// 64 bytes and cache-line aligned. The fields are laid out so that the
-/// hottest reads (id, name, kind, flags) are in the first 32 bytes.
+/** @brief Cache-line-aligned immutable metadata for one profiling site. */
 struct alignas(64) region_descriptor {
-    std::uint32_t  id;              // assigned at registration; 0 = invalid
-    std::uint32_t  name_hash;       // FNV-1a (fast equality during dedup)
-    const char*    name;            // points into .rodata or descriptor pool
+    std::uint32_t  id;              ///< Registration id, with zero reserved as invalid.
+    std::uint32_t  name_hash;       ///< FNV-1a hash used during deduplication.
+    const char*    name;            ///< Stable name owned by static data or the registry.
     const char*    file;
     std::uint32_t  line;
-    std::uint16_t  color;           // reserved for visualisation
+    std::uint16_t  color;           ///< Reserved visualization color.
     metric_kind    kind;
     std::uint8_t   flags;
-    std::uint16_t  highway_lanes;   // 0 if not a SIMD region
+    std::uint16_t  highway_lanes;   ///< SIMD lane count, or zero for scalar sites.
     std::uint8_t   reserved_after_lanes[6];
-    const char*    highway_target;  // nullptr if not a SIMD region
-    const char*    arena_name;      // nullptr if not arena-attributed
+    const char*    highway_target;  ///< SIMD target name, or null for scalar sites.
+    const char*    arena_name;      ///< Arena name, or null without attribution.
     std::uint8_t   reserved_tail[8];
 };
 static_assert(sizeof(region_descriptor) == 64);

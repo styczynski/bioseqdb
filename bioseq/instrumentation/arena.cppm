@@ -2,11 +2,8 @@
  * @file instrumentation/arena.cppm
  * @brief Scoped allocation attribution and allocator tracker hook.
  *
- * The arena_scope<p_configuration_type> RAII type stamps a kind into the per-thread
- * profiler block. Allocations through the matching foonathan/memory
- * tracker increment the per-arena counter. When p_configuration_type::enable_arena_tracking
- * is false the entire mechanism collapses (every if constexpr branch is
- * empty in the discarded instantiation).
+ * `arena_scope` records a category in the active thread profiler. Disabled
+ * configurations discard the tracking path at compile time.
  */
 module;
 
