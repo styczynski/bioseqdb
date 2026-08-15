@@ -27,13 +27,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 // and assert per-slot byte-equality.
 // =============================================================================
 
-template <class p_descriptor, std::size_t p_stream_width,
-          typename p_lifted, typename p_highway_operation>
-void check_binary_vec_op(
-        p_descriptor d,
-        p_lifted lifted,
-        p_highway_operation hn_op,
-        const char* name) {
+template <class p_descriptor,
+          std::size_t p_stream_width,
+          typename p_lifted,
+          typename p_highway_operation>
+auto check_binary_vec_op(p_descriptor d,
+                         p_lifted lifted,
+                         p_highway_operation hn_op,
+                         const char* name) -> void {
     using lane_type = hn::TFromD<p_descriptor>;
     const auto va = hn::Set(d, static_cast<lane_type>(0xAA));
     const auto vb = hn::Set(d, static_cast<lane_type>(0x55));
@@ -75,13 +76,14 @@ void check_binary_vec_op(
 }
 
 // Comparison ops: result is a mask_stream. Compare via VecFromMask round-trip.
-template <class p_descriptor, std::size_t p_stream_width,
-          typename p_lifted, typename p_highway_operation>
-void check_binary_cmp_op(
-        p_descriptor d,
-        p_lifted lifted,
-        p_highway_operation hn_op,
-        const char* name) {
+template <class p_descriptor,
+          std::size_t p_stream_width,
+          typename p_lifted,
+          typename p_highway_operation>
+auto check_binary_cmp_op(p_descriptor d,
+                         p_lifted lifted,
+                         p_highway_operation hn_op,
+                         const char* name) -> void {
     using lane_type = hn::TFromD<p_descriptor>;
     const auto va = hn::Set(d, static_cast<lane_type>(5));
     const auto vb = hn::Set(d, static_cast<lane_type>(10));

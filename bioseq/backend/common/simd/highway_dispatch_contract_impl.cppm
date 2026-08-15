@@ -14,9 +14,8 @@ module bioseq.highway.dispatch_contract;
 
 namespace bioseq::simd_dispatch {
 
-highway_dispatch_plan make_highway_dispatch_plan(
-    const std::int64_t compiled_targets) noexcept
-{
+auto make_highway_dispatch_plan(const std::int64_t compiled_targets) noexcept
+    -> highway_dispatch_plan {
     const std::int64_t cpu_supported_targets = hwy::SupportedTargets();
     const std::int64_t runnable_targets =
         compiled_targets & cpu_supported_targets;
@@ -35,7 +34,7 @@ highway_dispatch_plan make_highway_dispatch_plan(
     };
 }
 
-std::vector<std::string_view> highway_target_names(const std::int64_t mask) {
+auto highway_target_names(const std::int64_t mask) -> std::vector<std::string_view> {
     std::vector<std::string_view> names;
     std::uint64_t remaining = static_cast<std::uint64_t>(mask);
 

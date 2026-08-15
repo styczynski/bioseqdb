@@ -7,7 +7,7 @@ import bioseq.highway.test_support;
 
 namespace {
 
-[[nodiscard]] std::int64_t fixed_target() {
+[[nodiscard]] auto fixed_target() -> std::int64_t {
     return bioseq::simd_dispatch::highway_test_target_binding().target;
 }
 

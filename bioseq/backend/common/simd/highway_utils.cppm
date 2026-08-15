@@ -33,7 +33,7 @@ struct simd_array_allocator {
      * @param[in] length Number of elements to allocate.
      * @return Owning Highway-aligned buffer.
      */
-    [[nodiscard]] static p_buffer_type allocate(std::size_t length) {
+    [[nodiscard]] static auto allocate(std::size_t length) -> p_buffer_type {
         return hwy::AllocateAligned<p_value_type>(length);
     }
 };
@@ -49,13 +49,10 @@ struct simd_array_allocator {
  * @return Selected scalar lane.
  * @pre `p_tail_offset < hn::Lanes(simd_tag)`.
  */
-template <
-    class p_simd_tag,
-    std::size_t p_tail_offset = 0u,
-    class p_value_type = hn::TFromD<p_simd_tag>>
-HWY_INLINE p_value_type extract_last_lane(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector) {
+template <class p_simd_tag,
+          std::size_t p_tail_offset = 0u,
+          class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE auto extract_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector) -> p_value_type {
     return hn::ExtractLane(
         vector,
         hn::Lanes(simd_tag) - 1u - p_tail_offset);
@@ -71,9 +68,8 @@ HWY_INLINE p_value_type extract_last_lane(
  * @return Vector whose lanes contain the selected scalar value.
  */
 template <class p_simd_tag, std::size_t p_tail_offset = 0u>
-HWY_INLINE hn::Vec<p_simd_tag> broadcast_last_lane(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector) {
+HWY_INLINE auto broadcast_last_lane(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector)
+    -> hn::Vec<p_simd_tag> {
     constexpr std::size_t k_lane_index =
         hn::MaxLanes(p_simd_tag{}) - 1u - p_tail_offset;
     if constexpr (hn::MaxLanes(p_simd_tag{}) <= 64u) {
@@ -96,14 +92,12 @@ HWY_INLINE hn::Vec<p_simd_tag> broadcast_last_lane(
  * @param[in] first_value Replacement value.
  * @return Vector with the requested leading lanes replaced.
  */
-template <
-    class p_simd_tag,
-    std::size_t p_first_lane_count = 1u,
-    class p_value_type = hn::TFromD<p_simd_tag>>
-HWY_INLINE hn::Vec<p_simd_tag> replace_first_lanes(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector,
-    p_value_type first_value) {
+template <class p_simd_tag,
+          std::size_t p_first_lane_count = 1u,
+          class p_value_type = hn::TFromD<p_simd_tag>>
+HWY_INLINE auto replace_first_lanes(p_simd_tag simd_tag,
+                                    hn::Vec<p_simd_tag> vector,
+                                    p_value_type first_value) -> hn::Vec<p_simd_tag> {
     return hn::IfThenElse(
         hn::FirstN(simd_tag, p_first_lane_count),
         hn::Set(simd_tag, first_value),
@@ -122,10 +116,9 @@ HWY_INLINE hn::Vec<p_simd_tag> replace_first_lanes(
  * @pre `lane_index < hn::Lanes(simd_tag)`.
  */
 template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
-HWY_INLINE p_value_type extract_lane(
-    [[maybe_unused]] p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector,
-    std::size_t lane_index) {
+HWY_INLINE auto extract_lane([[maybe_unused]] p_simd_tag simd_tag,
+                             hn::Vec<p_simd_tag> vector,
+                             std::size_t lane_index) -> p_value_type {
     return hn::ExtractLane(vector, lane_index);
 }
 
@@ -141,10 +134,9 @@ HWY_INLINE p_value_type extract_lane(
  * @pre At least one active lane equals `maximum`; violation terminates the process.
  */
 template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
-HWY_INLINE std::size_t find_first_maximum_lane(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector,
-    p_value_type maximum) {
+HWY_INLINE auto find_first_maximum_lane(p_simd_tag simd_tag,
+                                        hn::Vec<p_simd_tag> vector,
+                                        p_value_type maximum) -> std::size_t {
     const auto lane_index = hn::FindFirstTrue(
         simd_tag,
         hn::Eq(vector, hn::Set(simd_tag, maximum)));
@@ -167,9 +159,8 @@ HWY_INLINE std::size_t find_first_maximum_lane(
  * not be replaced with a whole-vector slide.
  */
 template <std::size_t p_lane_count, class p_simd_tag>
-HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_zero(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> vector) {
+HWY_INLINE auto shift_lanes_left_zero(p_simd_tag simd_tag, hn::Vec<p_simd_tag> vector)
+    -> hn::Vec<p_simd_tag> {
     return hn::ShiftLeftBytes<
         p_lane_count * sizeof(hn::TFromD<p_simd_tag>)>(simd_tag, vector);
 }
@@ -184,10 +175,10 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_zero(
  * @return Shifted vector with the predecessor's last active lane inserted first.
  */
 template <class p_simd_tag>
-HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_with_predecessor(
-    p_simd_tag simd_tag,
-    hn::Vec<p_simd_tag> current,
-    hn::Vec<p_simd_tag> predecessor) {
+HWY_INLINE auto shift_lanes_left_with_predecessor(p_simd_tag simd_tag,
+                                                  hn::Vec<p_simd_tag> current,
+                                                  hn::Vec<p_simd_tag> predecessor)
+    -> hn::Vec<p_simd_tag> {
     constexpr std::size_t k_vector_byte_count =
         hn::MaxLanes(p_simd_tag{}) * sizeof(hn::TFromD<p_simd_tag>);
     if constexpr (k_vector_byte_count <= 16u) {
@@ -217,10 +208,10 @@ HWY_INLINE hn::Vec<p_simd_tag> shift_lanes_left_with_predecessor(
  * @return Polynomial log2 approximation for every input lane.
  */
 template <class p_integer_simd_tag, class p_float_simd_tag>
-HWY_INLINE hn::Vec<p_float_simd_tag> approximate_log2(
-    p_integer_simd_tag integer_simd_tag,
-    p_float_simd_tag float_simd_tag,
-    hn::Vec<p_integer_simd_tag> integer_values) {
+HWY_INLINE auto approximate_log2(p_integer_simd_tag integer_simd_tag,
+                                 p_float_simd_tag float_simd_tag,
+                                 hn::Vec<p_integer_simd_tag> integer_values)
+    -> hn::Vec<p_float_simd_tag> {
     const auto float_values = hn::ConvertTo(float_simd_tag, integer_values);
     const auto integer_bit_values = hn::BitCast(integer_simd_tag, float_values);
     const auto raw_exponents = hn::And(
@@ -300,9 +291,9 @@ private:
      * @param[in] simd_tag Active Highway descriptor.
      * @param[in,out] matrix_storage Borrowed matrix storage.
      */
-    static constexpr void transpose_one_lane(
-        [[maybe_unused]] p_simd_tag& simd_tag,
-        [[maybe_unused]] p_matrix_storage& matrix_storage) {}
+    static constexpr auto transpose_one_lane([[maybe_unused]] p_simd_tag& simd_tag,
+                                             [[maybe_unused]] p_matrix_storage& matrix_storage)
+        -> void {}
 
     /**
      * @brief Transposes a two-lane square matrix in place.
@@ -310,9 +301,8 @@ private:
      * @param[in] simd_tag Active Highway descriptor.
      * @param[in,out] matrix_storage Borrowed matrix storage.
      */
-    static constexpr void transpose_two_lanes(
-        p_simd_tag& simd_tag,
-        p_matrix_storage& matrix_storage) {
+    static constexpr auto transpose_two_lanes(p_simd_tag& simd_tag,
+                                              p_matrix_storage& matrix_storage) -> void {
         const p_simd_vector first_row = matrix_storage[0];
         const p_simd_vector second_row = matrix_storage[1];
         const p_simd_vector first_column =
@@ -330,9 +320,8 @@ private:
      * @param[in,out] matrix_storage Borrowed matrix storage.
      * @warning Terminates when the lane type cannot be widened once.
      */
-    static constexpr void transpose_four_lanes(
-        p_simd_tag& simd_tag,
-        p_matrix_storage& matrix_storage) {
+    static constexpr auto transpose_four_lanes(p_simd_tag& simd_tag,
+                                               p_matrix_storage& matrix_storage) -> void {
         if constexpr (!simd_lane_widenable_once<p_simd_tag>) {
             std::abort();
         } else {
@@ -386,9 +375,8 @@ private:
      * @param[in,out] matrix_storage Borrowed matrix storage.
      * @warning Terminates when the lane type cannot be widened twice.
      */
-    static constexpr void transpose_eight_lanes(
-        p_simd_tag& simd_tag,
-        p_matrix_storage& matrix_storage) {
+    static constexpr auto transpose_eight_lanes(p_simd_tag& simd_tag,
+                                                p_matrix_storage& matrix_storage) -> void {
         if constexpr (!simd_lane_widenable_twice<p_simd_tag>) {
             std::abort();
         } else {
@@ -534,11 +522,11 @@ private:
      * @return One interleaved column of the sixteen-row matrix.
      */
     template <bool p_select_upper, class p_triple_wide_simd_tag>
-    static constexpr p_simd_vector interleave_matrix_halves(
-        p_simd_tag& simd_tag,
-        const p_triple_wide_simd_tag& triple_wide_simd_tag,
-        p_simd_vector upper_column,
-        p_simd_vector lower_column) {
+    static constexpr auto
+    interleave_matrix_halves(p_simd_tag& simd_tag,
+                             const p_triple_wide_simd_tag& triple_wide_simd_tag,
+                             p_simd_vector upper_column,
+                             p_simd_vector lower_column) -> p_simd_vector {
         const auto upper_wide =
             hn::BitCast(triple_wide_simd_tag, upper_column);
         const auto lower_wide =
@@ -567,9 +555,8 @@ private:
      * @param[in,out] matrix_storage Borrowed matrix storage.
      * @warning Terminates when the lane type cannot be widened three times.
      */
-    static constexpr void transpose_sixteen_lanes(
-        p_simd_tag& simd_tag,
-        p_matrix_storage& matrix_storage) {
+    static constexpr auto transpose_sixteen_lanes(p_simd_tag& simd_tag,
+                                                  p_matrix_storage& matrix_storage) -> void {
         if constexpr (!simd_lane_widenable_three_times<p_simd_tag>) {
             std::abort();
         } else {
@@ -700,10 +687,9 @@ public:
      * @pre `p_offset_count >= hn::Lanes(simd_tag)` and every row is fully readable.
      */
     template <typename p_value_type, std::size_t p_offset_count>
-    constexpr std::size_t load_rows_at_offsets(
-        p_simd_tag& simd_tag,
-        const std::array<std::size_t, p_offset_count> offsets,
-        const p_value_type* source) {
+    constexpr auto load_rows_at_offsets(p_simd_tag& simd_tag,
+                                        const std::array<std::size_t, p_offset_count> offsets,
+                                        const p_value_type* source) -> std::size_t {
         const std::size_t lane_count = hn::Lanes(simd_tag);
         for (std::size_t row_index = 0; row_index < lane_count; ++row_index) {
             matrix_storage_[row_index] =
@@ -725,11 +711,12 @@ public:
      * @pre `p_offset_count == hn::Lanes(simd_tag)`.
      */
     template <typename p_value_type, std::size_t p_offset_count>
-    constexpr std::pair<std::size_t, std::size_t> load_bounded_rows_at_offsets(
-        p_simd_tag& simd_tag,
-        std::size_t available_value_count,
-        const std::array<std::size_t, p_offset_count> offsets,
-        const p_value_type* source) {
+    constexpr auto
+    load_bounded_rows_at_offsets(p_simd_tag& simd_tag,
+                                 std::size_t available_value_count,
+                                 const std::array<std::size_t, p_offset_count> offsets,
+                                 const p_value_type* source)
+        -> std::pair<std::size_t, std::size_t> {
         const std::size_t lane_count = hn::Lanes(simd_tag);
         if (p_offset_count < lane_count) [[unlikely]] {
             std::abort();
@@ -770,7 +757,7 @@ public:
      * @param[in] simd_tag Highway descriptor defining matrix dimensions.
      * @warning Terminates for unsupported lane counts or element widths.
      */
-    constexpr void transpose_in_place(p_simd_tag& simd_tag) {
+    constexpr auto transpose_in_place(p_simd_tag& simd_tag) -> void {
         const std::size_t lane_count = hn::Lanes(simd_tag);
         if (lane_count == 1u) {
             transpose_one_lane(simd_tag, matrix_storage_);

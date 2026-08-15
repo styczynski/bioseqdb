@@ -17,30 +17,31 @@ extern "C" void bioseq_sort_pair_run_u128_keys(
 
 namespace {
 
-[[nodiscard]] hwy::uint128_t make_u128(std::uint64_t hi, std::uint64_t lo) {
-    return hwy::uint128_t{.lo = lo, .hi = hi};
+[[nodiscard]] auto make_u128(std::uint64_t high, std::uint64_t low) -> hwy::uint128_t {
+    return hwy::uint128_t{.lo = low, .hi = high};
 }
 
-[[nodiscard]] bool u128_less(const hwy::uint128_t& a, const hwy::uint128_t& b) {
-    return (a.hi == b.hi) ? (a.lo < b.lo) : (a.hi < b.hi);
+[[nodiscard]] auto u128_less(const hwy::uint128_t& left, const hwy::uint128_t& right) -> bool {
+    return (left.hi == right.hi) ? (left.lo < right.lo) : (left.hi < right.hi);
 }
 
-[[nodiscard]] std::vector<hwy::uint128_t> random_u128_case(std::size_t n) {
-    std::mt19937_64 rng(0x5EED12345678ULL + n);
-    std::vector<hwy::uint128_t> out;
-    out.reserve(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        const std::uint64_t hi = (i % 3 == 0) ? (rng() % 17) : rng();
-        const std::uint64_t lo = (i % 5 == 0) ? (rng() % 23) : rng();
-        out.push_back(make_u128(hi, lo));
+[[nodiscard]] auto random_u128_case(std::size_t key_count) -> std::vector<hwy::uint128_t> {
+    std::mt19937_64 random_engine(0x5EED12345678ULL + key_count);
+    std::vector<hwy::uint128_t> keys;
+    keys.reserve(key_count);
+    for (std::size_t index = 0; index < key_count; ++index) {
+        const std::uint64_t high = (index % 3 == 0) ? (random_engine() % 17) : random_engine();
+        const std::uint64_t low = (index % 5 == 0) ? (random_engine() % 23) : random_engine();
+        keys.push_back(make_u128(high, low));
     }
-    return out;
+    return keys;
 }
 
-[[nodiscard]] std::vector<std::vector<hwy::uint128_t>> u128_sort_cases() {
+[[nodiscard]] auto u128_sort_cases() -> std::vector<std::vector<hwy::uint128_t>> {
     std::vector<std::vector<hwy::uint128_t>> cases;
-    for (std::size_t n : {0u, 1u, 2u, 3u, 4u, 7u, 8u, 9u, 15u, 31u, 64u, 127u, 257u}) {
-        cases.push_back(random_u128_case(n));
+    for (const std::size_t key_count :
+         {0u, 1u, 2u, 3u, 4u, 7u, 8u, 9u, 15u, 31u, 64u, 127u, 257u}) {
+        cases.push_back(random_u128_case(key_count));
     }
 
     std::vector<hwy::uint128_t> all_same_kmer;
@@ -70,8 +71,7 @@ namespace {
     return cases;
 }
 
-template <std::size_t p_stream_width>
-void check_u128_vector_stream_width() {
+template <std::size_t p_stream_width> auto check_u128_vector_stream_width() -> void {
     for (const auto& input : u128_sort_cases()) {
         auto expected_asc = input;
         std::sort(expected_asc.begin(), expected_asc.end(), u128_less);
@@ -82,10 +82,11 @@ void check_u128_vector_stream_width() {
         ASSERT(got_asc == expected_asc);
 
         auto expected_desc = input;
-        std::sort(expected_desc.begin(), expected_desc.end(),
-            [](const hwy::uint128_t& a, const hwy::uint128_t& b) {
-                return u128_less(b, a);
-            });
+        std::sort(expected_desc.begin(),
+                  expected_desc.end(),
+                  [](const hwy::uint128_t& left, const hwy::uint128_t& right) {
+                      return u128_less(right, left);
+                  });
 
         auto got_desc = input;
         bioseq::simd::sorting::sort_unsigned_128_descending_vector_stream<p_stream_width>(

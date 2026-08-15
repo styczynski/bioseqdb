@@ -4,9 +4,9 @@
  */
 module;
 
+#include <array>
 #include <hwy/aligned_allocator.h>
 #include <hwy/highway.h>
-
 #include <vector>
 
 export module bioseq.simd.utils;
@@ -33,14 +33,14 @@ using ::bioseq::common::templating::for_each_index;
  * @return Scalar values in increasing lane order.
  */
 template <typename p_value_type, typename p_simd_tag>
-HWY_INLINE std::vector<p_value_type> extract_lanes(
-    const p_simd_tag& simd_tag,
-    const hn::Vec<p_simd_tag>& vector) {
+HWY_INLINE auto extract_lanes(const p_simd_tag& simd_tag, const hn::Vec<p_simd_tag>& vector)
+    -> std::vector<p_value_type> {
 #if HWY_TARGET == HWY_RVV
     auto storage = hwy::AllocateAligned<p_value_type>(hn::Lanes(simd_tag));
     p_value_type* HWY_RESTRICT storage_buffer = storage.get();
 #else
-    HWY_ALIGN p_value_type storage_buffer[hn::MaxLanes(simd_tag)];
+    HWY_ALIGN std::array<p_value_type, hn::MaxLanes(p_simd_tag{})> storage;
+    p_value_type* storage_buffer = storage.data();
 #endif
     hn::StoreU(vector, simd_tag, storage_buffer);
     return std::vector<p_value_type>(
@@ -58,9 +58,8 @@ HWY_INLINE std::vector<p_value_type> extract_lanes(
  * @return Mask lanes in Highway's vector-mask scalar representation.
  */
 template <typename p_value_type, typename p_simd_tag>
-HWY_INLINE std::vector<p_value_type> extract_lanes(
-    const p_simd_tag& simd_tag,
-    const hn::Mask<p_simd_tag>& mask) {
+HWY_INLINE auto extract_lanes(const p_simd_tag& simd_tag, const hn::Mask<p_simd_tag>& mask)
+    -> std::vector<p_value_type> {
     return extract_lanes<p_value_type>(
         simd_tag,
         hn::VecFromMask(simd_tag, mask));
