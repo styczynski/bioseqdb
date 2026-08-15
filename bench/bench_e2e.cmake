@@ -3,10 +3,13 @@
 # Resolve every owned source-tree component from the repository-level CMake
 # source root. This file is included from bioseq/CMakeLists.txt, but the source
 # layout is rooted above that component.
+include("${PROJECT_SOURCE_DIR}/cmake/bioseq_source_inventory.cmake")
+
 set(BIOSEQ_REPOSITORY_ROOT "${PROJECT_SOURCE_DIR}")
 set(BIOSEQ_DIR "${BIOSEQ_REPOSITORY_ROOT}/bioseq")
-set(BENCH_FRAMEWORK_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
-set(BENCH_E2E_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench")
+set(BIOSEQ_E2E_BENCHMARK_FRAMEWORK_DIR
+  "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
+set(BIOSEQ_E2E_BENCHMARK_ROOT "${BIOSEQ_REPOSITORY_ROOT}/bench")
 
 # minimap2 CLI binary the bench shells out to. -D cache override wins; otherwise
 # default to PATH `minimap2`. The bench aborts at run time if the
@@ -21,15 +24,26 @@ endif()
 # NO_POSTGRES modules (IO reader, generator, sequences, instrumentation) arrive
 # via SHARED_MODULE_LIBS below. The integration support target owns the SQL
 # client module and is linked below.
-set(BENCH_E2E_MOD_FILES
-  "${BENCH_E2E_DIR}/e2e/index.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_E2E_BENCHMARK_MODULES
+  BASE_DIRECTORY "${BIOSEQ_E2E_BENCHMARK_ROOT}/e2e"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS
+    "main.cppm"
+    "tests/support/index.cppm"
+  EXPECTED_COUNT 1)
 
 # The test-support interface is a distinct provider compiled only for the
 # contract test executable. Its primary-module bridge is enabled by the target-local
 # BIOSEQ_E2E_TESTING_API definition below.
-set(BENCH_E2E_TEST_MOD_FILES
-  ${BENCH_E2E_MOD_FILES}
-  "${BENCH_E2E_DIR}/e2e/tests/support/index.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_E2E_BENCHMARK_TEST_MODULES
+  BASE_DIRECTORY "${BIOSEQ_E2E_BENCHMARK_ROOT}/e2e"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS "main.cppm"
+  EXPECTED_COUNT 2)
 
 bioseq_add_postgresql_extension(
   bioseq_benchmark_e2e
@@ -59,16 +73,24 @@ bioseq_add_postgresql_extension(
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
-    "${BENCH_E2E_DIR}/e2e/main.cppm"
+    "${BIOSEQ_E2E_BENCHMARK_ROOT}/e2e/main.cppm"
   SUPPORT_CXX_MODULES
-  CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
+  CXX_MOD_BASE_DIRS
+    "${BIOSEQ_DIR}"
+    "${BIOSEQ_E2E_BENCHMARK_ROOT}"
+    "${BIOSEQ_E2E_BENCHMARK_FRAMEWORK_DIR}"
   CXX_MOD_FILES
-    ${BENCH_E2E_MOD_FILES}
+    ${BIOSEQ_E2E_BENCHMARK_MODULES}
   HWY 1.3.0)
 
 # Compile the production serializer itself into a dedicated Catch2 executable.
 # This is deliberately a separate target instead of bioseq_add_postgresql_extension(TESTS):
 # the latter changes the production executable's Catch2 main/definitions too.
+bioseq_collect_authored_sources(
+  BIOSEQ_E2E_BENCHMARK_CONTRACT_TEST_SOURCES
+  BASE_DIRECTORY "${BIOSEQ_E2E_BENCHMARK_ROOT}/tests/contract"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 1)
 bioseq_add_postgresql_extension(
   bioseq_benchmark_e2e_contract_tests
   TYPE EXEC CXX 26
@@ -97,11 +119,14 @@ bioseq_add_postgresql_extension(
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
-    "${BENCH_E2E_DIR}/tests/contract/evidence_test.cpp"
+    ${BIOSEQ_E2E_BENCHMARK_CONTRACT_TEST_SOURCES}
   SUPPORT_CXX_MODULES
-  CXX_MOD_BASE_DIRS "${BIOSEQ_DIR}" "${BENCH_E2E_DIR}" "${BENCH_FRAMEWORK_DIR}"
+  CXX_MOD_BASE_DIRS
+    "${BIOSEQ_DIR}"
+    "${BIOSEQ_E2E_BENCHMARK_ROOT}"
+    "${BIOSEQ_E2E_BENCHMARK_FRAMEWORK_DIR}"
   CXX_MOD_FILES
-    ${BENCH_E2E_TEST_MOD_FILES}
+    ${BIOSEQ_E2E_BENCHMARK_TEST_MODULES}
   HWY 1.3.0)
 
 # Match the project's generated Catch2 targets: ThinLTO can drop TLS init
@@ -122,16 +147,16 @@ endif()
 
 target_compile_definitions(bioseq_benchmark_e2e PRIVATE
   "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_benchmark_e2e\""
-  "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
-  "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
+  "BIOSEQ_E2E_DATA_DIR=\"${BIOSEQ_E2E_BENCHMARK_ROOT}\""
+  "BIOSEQ_E2E_CONFIG_PATH=\"${BIOSEQ_E2E_BENCHMARK_ROOT}/bench_e2e_configuration.json\""
   "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
 
 if(TARGET bioseq_benchmark_e2e_contract_tests)
   target_compile_definitions(bioseq_benchmark_e2e_contract_tests PRIVATE
     BIOSEQ_E2E_TESTING_API=1
     "BIOSEQ_E2E_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bioseq_benchmark_e2e\""
-    "BIOSEQ_E2E_DATA_DIR=\"${BENCH_E2E_DIR}\""
-    "BIOSEQ_E2E_CONFIG_PATH=\"${BENCH_E2E_DIR}/bench_e2e_configuration.json\""
+    "BIOSEQ_E2E_DATA_DIR=\"${BIOSEQ_E2E_BENCHMARK_ROOT}\""
+    "BIOSEQ_E2E_CONFIG_PATH=\"${BIOSEQ_E2E_BENCHMARK_ROOT}/bench_e2e_configuration.json\""
     "BIOSEQ_E2E_MINIMAP2_BIN=\"${BIOSEQ_MINIMAP2_BIN}\"")
 endif()
 

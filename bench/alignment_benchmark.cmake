@@ -3,24 +3,35 @@
 # Included from `bioseq/CMakeLists.txt` after the framework's
 # `find_package(...)` calls have been resolved.
 
+include("${PROJECT_SOURCE_DIR}/cmake/bioseq_source_inventory.cmake")
+
 set(BIOSEQ_REPOSITORY_ROOT "${PROJECT_SOURCE_DIR}")
 set(BIOSEQ_DIR "${BIOSEQ_REPOSITORY_ROOT}/bioseq")
-set(BENCH_FRAMEWORK_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
+set(BIOSEQ_ALIGNMENT_BENCHMARK_FRAMEWORK_DIR
+  "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
 set(BIOSEQ_ALIGNMENT_BENCHMARK_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench")
 
 # Module set: only the benchmark-private modules. The whole Domain N core
 # (alignment_hwy, common-minus-testing, sequences, pipeline, instrumentation)
 # is delivered via `bioseq_modules_nopg`.
-set(BIOSEQ_ALIGNMENT_BENCHMARK_MODULES
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/alignment/index.cppm"
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/prefilters/index.cppm"
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/tool_minimap2.cppm"
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/instr_shim.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_ALIGNMENT_BENCHMARK_MODULES
+  BASE_DIRECTORY "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}"
+  INCLUDE_PATTERNS
+    "alignment/*.cppm"
+    "prefilters/*.cppm"
+    "tool_minimap2/*.cppm"
+  EXCLUDE_PATHS "alignment/main.cppm"
+  EXPECTED_COUNT 4)
 
 # minimap2 C reference sources are linked alongside the bench TU.
-file(GLOB_RECURSE BIOSEQ_ALIGNMENT_BENCHMARK_MINIMAP2_SOURCES
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/minimap2/*.c"
-  "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/minimap2/*.cpp")
+bioseq_collect_authored_sources(
+  BIOSEQ_ALIGNMENT_BENCHMARK_MINIMAP2_SOURCES
+  BASE_DIRECTORY
+    "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/tool_minimap2/minimap2"
+  RECURSE
+  INCLUDE_PATTERNS "*.c" "*.cpp"
+  EXPECTED_COUNT 17)
 
 bioseq_add_postgresql_extension(
   bioseq_benchmark
@@ -76,7 +87,7 @@ bioseq_add_postgresql_extension(
   CXX_MOD_BASE_DIRS
     "${BIOSEQ_DIR}"
     "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}"
-    "${BENCH_FRAMEWORK_DIR}"
+    "${BIOSEQ_ALIGNMENT_BENCHMARK_FRAMEWORK_DIR}"
   CXX_MOD_FILES
     ${BIOSEQ_ALIGNMENT_BENCHMARK_MODULES}
   HWY 1.3.0)
