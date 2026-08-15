@@ -121,11 +121,31 @@ def _external_api_build_preset(
 EXTERNAL_API_BUILD_PRESET = _external_api_build_preset(
     os.environ, sys.platform, DEFAULT_BUILD_PRESET)
 
-WEBSITE_BUILD_PRESET = os.environ.get(
-    "BIOSEQ_WEBSITE_BUILD_PRESET", "website-aws-x64-linux")
 
-WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
-    "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET", "website-aws-x64-linux-debug")
+def _website_build_preset(
+        environment: Mapping[str, str], platform: str,
+        default_build_preset: str, *, debug: bool = False) -> str:
+    """Select the website preset for the execution host and override."""
+    override_name = (
+        "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET"
+        if debug else "BIOSEQ_WEBSITE_BUILD_PRESET"
+    )
+    linux_default = (
+        "website-aws-x64-linux-debug"
+        if debug else "website-aws-x64-linux"
+    )
+    host_default = (
+        linux_default if platform.startswith("linux")
+        else default_build_preset
+    )
+    return environment.get(override_name, host_default)
+
+
+WEBSITE_BUILD_PRESET = _website_build_preset(
+    os.environ, sys.platform, DEFAULT_BUILD_PRESET)
+
+WEBSITE_DEBUG_BUILD_PRESET = _website_build_preset(
+    os.environ, sys.platform, DEBUG_BUILD_PRESET, debug=True)
 
 POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
 

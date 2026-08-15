@@ -129,6 +129,47 @@ class CachePresetContractTest(unittest.TestCase):
 
 
 class CacheModeResolutionTest(unittest.TestCase):
+    def test_website_presets_are_host_native_and_overrideable(self) -> None:
+        cases = (
+            ("darwin", False, "bench-opt", "bench-opt"),
+            ("darwin", True, "bench-opt-debug", "bench-opt-debug"),
+            ("linux", False, "bench-opt", "website-aws-x64-linux"),
+            (
+                "linux",
+                True,
+                "bench-opt-debug",
+                "website-aws-x64-linux-debug",
+            ),
+        )
+        for platform, debug, default, expected in cases:
+            with self.subTest(platform=platform, debug=debug):
+                self.assertEqual(
+                    build_presets._website_build_preset(
+                        {}, platform, default, debug=debug),
+                    expected,
+                )
+
+        self.assertEqual(
+            build_presets._website_build_preset(
+                {"BIOSEQ_WEBSITE_BUILD_PRESET": "custom-website"},
+                "darwin",
+                "bench-opt",
+            ),
+            "custom-website",
+        )
+        self.assertEqual(
+            build_presets._website_build_preset(
+                {
+                    "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET":
+                        "custom-website-debug",
+                },
+                "linux",
+                "bench-opt-debug",
+                debug=True,
+            ),
+            "custom-website-debug",
+        )
+
     def test_benchmark_filter_rejects_unknown_axes(self) -> None:
         arguments, error = build_presets._filter_to_cli_args({
             "unknown_axis": ["silently-dropping-this-is-unsafe"],
