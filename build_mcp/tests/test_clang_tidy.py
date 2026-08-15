@@ -304,6 +304,9 @@ class ClangTidyPolicyTests(unittest.TestCase):
             "bioseq/generated/highway/neon/binder.cppm", generated=True
         )
         hot = self._command("bioseq/backend/sequences/indexing/index.cppm")
+        packed_partition = self._command(
+            "bioseq/backend/sequences/packed_sequence_parts/packing.cppm"
+        )
         alignment_hwy = self._command("bioseq/backend/alignment_hwy/ksw.cppm")
         vector_compare = self._command("bioseq/backend/vector_compare/index.cppm")
         fmtlog = self._command(
@@ -343,6 +346,10 @@ class ClangTidyPolicyTests(unittest.TestCase):
         )
         self.assertIn("modernize-make-unique", clang_tidy._disabled_checks(highway))
         self.assertIn("modernize-use-ranges", clang_tidy._disabled_checks(hot))
+        self.assertIn(
+            "modernize-use-ranges",
+            clang_tidy._disabled_checks(packed_partition),
+        )
         zero_cost_rewrite_checks = {
             "cppcoreguidelines-avoid-c-arrays",
             "cppcoreguidelines-avoid-magic-numbers",

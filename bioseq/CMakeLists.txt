@@ -204,7 +204,9 @@ set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_checked_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_minimizers_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_aligner_parity_test.cpp
@@ -290,6 +292,15 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/contract.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/upload.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/memory.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/sketch_dispatch.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/index_materialization.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/batch.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/index_routes.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/segmented.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/entry_points.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/batch_sort.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/cpu_preparation.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm)
@@ -335,7 +346,7 @@ function(bioseq_private_packed_access_scope_names
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
       run_fragmented_impl)
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/upload.cppm")
     set(_bioseq_scopes
       byte_upload_range_address_adapter
       vulkan_sketchable_sequence
@@ -345,8 +356,14 @@ function(bioseq_private_packed_access_scope_names
       admitted_sketch_collection_limit_bp
       sketch_segment_windows
       make_upload_view_from_window
-      make_sequence_upload_view
-      build_gpu_segment_index_on_device_resident_impl
+      make_sequence_upload_view)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/index_routes.cppm")
+    set(_bioseq_scopes
+      build_gpu_segment_index_on_device_resident_impl)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/segmented.cppm")
+    set(_bioseq_scopes
       collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
       collect_minimizers_vulkan_segment_resident_impl_or_throw)
   endif()
@@ -460,7 +477,11 @@ function(bioseq_private_packed_access_line_allowed
       set(_bioseq_allowed TRUE)
     endif()
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/upload.cppm"
+      OR "${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/index_routes.cppm"
+      OR "${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers_parts/segmented.cppm")
     if("${_bioseq_scope}" STREQUAL "byte_upload_range_address_adapter"
         AND "${_bioseq_line}" STREQUAL
           "[[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {")
@@ -2331,10 +2352,12 @@ target_sources(bioseq_testing_support
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
-      "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm")
 target_link_libraries(bioseq_testing_support
   PUBLIC
     bioseq_modules_nopg
+    bioseq_highway_test_support
     libassert::assert
   PRIVATE
     Catch2::Catch2)
@@ -2392,7 +2415,12 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_continuation_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_output_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_minimizers_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_memory_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_batch_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_parity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_index_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/parallelism/pool_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/gatekeeper_test.cpp"
@@ -5004,6 +5032,7 @@ if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(
     bioseq_pipeline_dispatch_owners PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(bioseq_testing_support PRIVATE BIOSEQ_TEST_INDEXES=1)
   if(TARGET bioseq_integration_tests)
     target_compile_definitions(bioseq_integration_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()

@@ -562,6 +562,7 @@ def _disabled_checks(command: CompileCommand) -> tuple[str, ...]:
             "/backend/sequences/indexing/",
             "/backend/sequences/kmers/",
             "/backend/sequences/packed_sequence.cppm",
+            "/backend/sequences/packed_sequence_parts/",
             "/backend/sequences/prefilter/",
             "/backend/sequences/rank_pack",
             "/backend/sequences/simd",
