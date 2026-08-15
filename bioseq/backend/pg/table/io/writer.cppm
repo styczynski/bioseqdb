@@ -24,23 +24,31 @@ import bioseq.postgres.support.datums;
 import bioseq.postgres.types.compact_sequence;
 import :buffers;
 
+/** @brief Flush any buffered rows for a column-table writer. */
 export void flush_pending_column_writes(column_write_state *state);
 
 
+/** @brief Allocate buffers for a stripe's configured row and chunk limits. */
 static stripe_buffers * allocate_stripe_buffers(uint32_t stripe_max_row_count,
 												uint32_t chunk_group_row_limit,
 												uint32_t column_count);
+/** @brief Allocate skip metadata for a stripe's configured chunk capacity. */
 static stripe_skip_list * allocate_stripe_skip_list(uint32_t stripe_max_row_count,
 												  uint32_t chunk_group_row_limit,
 												  uint32_t column_count);
+/** @brief Persist the writer's current stripe and its metadata. */
 static void flush_stripe(column_write_state *write_state);
+/** @brief Pack Boolean values into a serialized bitmap. */
 static StringInfo serialize_boolean_array(bool *boolean_values, uint32_t boolean_count);
+/** @brief Serialize one completed chunk group's presence and value streams. */
 static void serialize_chunk_data(column_write_state *write_state, uint32_t chunk_index,
 							   uint32_t row_count);
+/** @brief Update one chunk's extrema from a non-null column value. */
 static void update_chunk_min_max(chunk_skip_node *chunk_skip_node,
 									  Datum column_value, bool column_type_by_value,
 									  int column_type_length, Oid column_collation,
 									  FmgrInfo *comparison_function);
+/** @brief Make a deep copy of a serialized StringInfo buffer. */
 static StringInfo copy_string_info(StringInfo source_buffer);
 
 /*
@@ -48,6 +56,7 @@ static StringInfo copy_string_info(StringInfo source_buffer);
  * handle. This handle should be used for adding the row values and finishing the
  * data load operation.
  */
+/** @brief Create buffered write state for a column-table relation. */
 export column_write_state *
 begin_column_write(RelFileLocator relation_file_locator,
 				   column_options options,
@@ -119,6 +128,7 @@ begin_column_write(RelFileLocator relation_file_locator,
  *
  * Returns the "row number" assigned to written row.
  */
+/** @brief Append one row while the writer's stripe context is active. */
 static uint64_t
 write_column_row_pg_leaf(
 	column_write_state *write_state,
@@ -290,6 +300,7 @@ write_column_row_pg_leaf(
 }
 
 
+/** @brief Append a row and return its assigned relation row number. */
 export uint64_t
 write_column_row(
 	column_write_state *write_state,
@@ -311,6 +322,7 @@ write_column_row(
  * end_column_write finishes a columnar data load operation. If we have an unflushed
  * stripe, we flush it.
  */
+/** @brief Flush and release a column-table writer. */
 export void
 end_column_write(column_write_state *write_state)
 {
@@ -340,6 +352,7 @@ end_column_write(column_write_state *write_state)
 }
 
 
+/** @brief Flush buffered rows from within PostgreSQL's protected boundary. */
 static void
 flush_pending_column_writes_pg_leaf(column_write_state *write_state)
 {
@@ -356,6 +369,7 @@ flush_pending_column_writes_pg_leaf(column_write_state *write_state)
 }
 
 
+/** @brief Flush buffered rows while preserving the caller's memory context. */
 void
 flush_pending_column_writes(column_write_state *write_state)
 {
@@ -373,6 +387,7 @@ flush_pending_column_writes(column_write_state *write_state)
  *
  * Return per-tuple context for columnar write operation.
  */
+/** @brief Return the writer's per-tuple scratch memory context. */
 export MemoryContext
 get_column_write_per_tuple_context(column_write_state *state)
 {
@@ -778,6 +793,7 @@ copy_string_info(StringInfo source_buffer)
 }
 
 
+/** @brief Report whether the writer contains rows not yet persisted. */
 export bool
 has_pending_column_writes(column_write_state *state)
 {

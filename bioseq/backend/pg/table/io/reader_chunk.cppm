@@ -22,6 +22,7 @@ import :pruning;
 
 using namespace bioseq::postgres::support;
 
+/** @brief Decode packed presence bits into a Boolean array. */
 static void
 deserialize_boolean_array(StringInfo bool_array_buffer, bool *bool_array,
 					 uint32_t bool_array_length)
@@ -52,6 +53,7 @@ deserialize_boolean_array(StringInfo bool_array_buffer, bool *bool_array,
 	}
 }
 
+/** @brief Decode serialized non-null datums into their row positions. */
 static void
 deserialize_datum_array(StringInfo datum_buffer, bool *present_values, uint32_t datum_count,
 					  bool datum_type_by_value, int datum_type_length,
@@ -85,6 +87,7 @@ deserialize_datum_array(StringInfo datum_buffer, bool *present_values, uint32_t 
 	}
 }
 
+/** @brief Evaluate a column's immutable default expression. */
 static Datum
 get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attribute_form)
 {
@@ -118,6 +121,7 @@ get_column_default_value(TupleConstr *tuple_constraints, Form_pg_attribute attri
 	}
 }
 
+/** @brief Read the selected chunks for one physical column. */
 static column_buffers *
 load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 				  uint32_t chunk_count, uint64_t stripe_offset,
@@ -176,6 +180,7 @@ load_column_buffers(Relation relation, chunk_skip_node *chunk_skip_nodes,
 	return loaded_column_buffers;
 }
 
+/** @brief Load projected, predicate-selected buffers for one stripe. */
 export stripe_buffers *
 load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata,
 						  TupleDesc tuple_descriptor, List *projected_columns,
@@ -239,6 +244,7 @@ load_filtered_stripe_buffers(Relation relation, stripe_metadata *stripe_metadata
 	return buffers;
 }
 
+/** @brief Decompress and materialize one selected chunk group. */
 static chunk_data *
 deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 					 uint32_t row_count, TupleDesc tuple_descriptor,
@@ -358,6 +364,7 @@ deserialize_chunk_data(stripe_buffers *buffers, uint64_t chunk_index,
 	return pending_chunk;
 }
 
+/** @brief Initialize row-reading state for a selected chunk group. */
 export chunk_group_read_state *
 begin_chunk_group_read(stripe_buffers *buffers, int chunk_index, TupleDesc tuple_desc,
 					List *projected_columns, MemoryContext cxt, stripe_read_state *state,
@@ -394,6 +401,7 @@ begin_chunk_group_read(stripe_buffers *buffers, int chunk_index, TupleDesc tuple
 	return chunk_group_state;
 }
 
+/** @brief Release a chunk group's decoded values and read state. */
 export void
 end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 {
@@ -405,6 +413,7 @@ end_chunk_group_read(chunk_group_read_state *chunk_group_state)
 	pfree(chunk_group_state);
 }
 
+/** @brief Materialize the next visible row from a chunk group. */
 export bool
 read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *column_values,
 					  bool *column_nulls, int32_t *deleted_columns_number)
@@ -452,6 +461,7 @@ read_next_chunk_group_row(chunk_group_read_state *chunk_group_state, Datum *colu
 	return false;
 }
 
+/** @brief Append visible chunk-group rows to vectorized output columns. */
 export bool
 read_next_chunk_group_vector(chunk_group_read_state *chunk_group_state, Datum *column_values,
 						 bool *column_nulls, TupleDesc tuple_desc,
