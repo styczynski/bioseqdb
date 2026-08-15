@@ -1,6 +1,11 @@
 /**
  * @file gatekeeper_test.cpp
- * @brief Focused semantic tests for the clean-room scalar GateKeeper oracle.
+ * @brief Verifies scalar GateKeeper soundness, diagnostics, adapters, and Vulkan parity.
+ *
+ * Independent dynamic-programming and run-based mask oracles cover exhaustive binary inputs,
+ * arbitrary byte ranks, packed dna4/dna5/aa27 ranges, boundary lengths, conservative slice
+ * handling, and hardware command replay. The Vulkan cases compare every result ABI field with the
+ * scalar oracle while retaining the production dispatch keys.
  */
 #include <tests/support/common.hpp>
 
@@ -27,9 +32,15 @@ using namespace bioseq::prefilter;
 
 namespace {
 
+/** Logical mismatch vector used by the independent run-scanning oracle. */
 using bit_vector = std::vector<std::uint8_t>;
 
-/** Compute independent full-matrix global Levenshtein distance. */
+/**
+ * @brief Computes an independent full-matrix global Levenshtein distance.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @return Exact insertion, deletion, and substitution distance.
+ */
 [[nodiscard]] inline std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target)
@@ -55,7 +66,11 @@ using bit_vector = std::vector<std::uint8_t>;
     return previous.back();
 }
 
-/** Enumerate every binary string of one fixed length. */
+/**
+ * @brief Enumerates every binary rank string of one fixed length.
+ * @param[in] length Number of ranks in every generated string.
+ * @return All `2^length` strings in increasing source-bit order.
+ */
 [[nodiscard]] inline std::vector<std::vector<std::uint8_t>>
 binary_sequences(std::uint32_t length)
 {
@@ -73,7 +88,11 @@ binary_sequences(std::uint32_t length)
     return sequences;
 }
 
-/** Amend bounded zero runs by scanning runs, independently of word shifts. */
+/**
+ * @brief Amends bounded zero runs by scanning them independently of bitset shifts.
+ * @param[in] mismatches Logical mismatch bits for one diagonal.
+ * @return A copy with bounded internal runs of at most two zero bits set.
+ */
 [[nodiscard]] inline bit_vector amend_run_oracle(
     const bit_vector& mismatches)
 {
@@ -102,7 +121,14 @@ binary_sequences(std::uint32_t length)
     return amended;
 }
 
-/** Build one shifted mismatch row with vacant positions represented by zero. */
+/**
+ * @brief Builds one shifted mismatch row with vacant positions represented by zero.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @param[in] distance Diagonal displacement in ranks.
+ * @param[in] shift_query_right Selects the query-right diagonal when `true`.
+ * @return Logical mismatch bits for the selected diagonal.
+ */
 [[nodiscard]] inline bit_vector shifted_mismatch_oracle(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -124,7 +150,11 @@ binary_sequences(std::uint32_t length)
     return mismatches;
 }
 
-/** Derive the specified nibble cost by comparisons rather than a table. */
+/**
+ * @brief Derives the GateKeeper nibble cost with comparisons rather than a table.
+ * @param[in] nibble Four-bit mismatch group.
+ * @return The specified zero-, one-, or two-edit group cost.
+ */
 [[nodiscard]] constexpr inline std::uint32_t nibble_cost_oracle(
     std::uint8_t nibble) noexcept
 {
@@ -142,9 +172,14 @@ binary_sequences(std::uint32_t length)
 }
 
 /**
- * Compute only the packed low diagnostic through a simple run-based mask
- * oracle. This intentionally does not share the implementation's bitset
- * amendment or multiword shifts.
+ * @brief Computes the packed low diagnostic through a run-based mask oracle.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @param[in] max_edits Threshold used to cap the estimate.
+ * @return The expected GateKeeper diagnostic estimate, capped at `max_edits + 1`.
+ *
+ * This oracle intentionally shares neither the implementation's bitset amendment nor its
+ * multiword shifts.
  */
 [[nodiscard]] inline std::uint32_t diagnostic_estimate_oracle(
     std::span<const std::uint8_t> query,
@@ -202,7 +237,12 @@ binary_sequences(std::uint32_t length)
     return estimate;
 }
 
-/** Compare every result ABI field. */
+/**
+ * @brief Compares every field in the prefilter result ABI.
+ * @param[in] lhs First result.
+ * @param[in] rhs Second result.
+ * @return `true` only when all four result fields are equal.
+ */
 [[nodiscard]] constexpr inline bool same_result(
     const prefilter_result& lhs,
     const prefilter_result& rhs) noexcept
@@ -213,7 +253,11 @@ binary_sequences(std::uint32_t length)
         && lhs.diagnostics == rhs.diagnostics;
 }
 
-/** Check the diagnostic implications shared by all supported equal jobs. */
+/**
+ * @brief Checks diagnostic implications shared by all supported equal-length jobs.
+ * @param[in] result Evaluated GateKeeper result.
+ * @param[in] max_edits Threshold used for the evaluation.
+ */
 inline void check_supported_diagnostics(
     const prefilter_result& result,
     std::uint32_t max_edits)
@@ -235,13 +279,26 @@ inline void check_supported_diagnostics(
     }
 }
 
+/**
+ * @brief Owns deterministic xorshift state for reproducible rank fixtures.
+ *
+ * Instances are test-local, single-threaded, and have no external lifetime or ownership.
+ */
 class deterministic_gatekeeper_ranks {
 public:
+    /**
+     * @brief Initializes the deterministic state.
+     * @param[in] seed Non-random initial state used by the fixture.
+     */
     explicit constexpr deterministic_gatekeeper_ranks(
         std::uint32_t seed) noexcept
         : state_(seed)
     {}
 
+    /**
+     * @brief Advances the deterministic state.
+     * @return The next deterministic 32-bit value.
+     */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ ^= state_ << 13u;
@@ -250,6 +307,12 @@ public:
         return state_;
     }
 
+    /**
+     * @brief Draws one rank from a nonempty rank domain.
+     * @param[in] rank_count Exclusive upper bound for the returned rank.
+     * @return A rank in `[0, rank_count)`.
+     * @pre `rank_count` is nonzero.
+     */
     [[nodiscard]] std::uint8_t rank(std::uint32_t rank_count) noexcept
     {
         return static_cast<std::uint8_t>(next() % rank_count);
@@ -259,6 +322,14 @@ private:
     std::uint32_t state_;
 };
 
+/**
+ * @brief Generates a deterministic rank sequence.
+ * @param[in] length Number of ranks to generate.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in,out] ranks Deterministic state advanced by each generated rank.
+ * @return A sequence containing `length` generated ranks.
+ * @pre `rank_count` is nonzero.
+ */
 [[nodiscard]] std::vector<std::uint8_t> randomized_rank_sequence(
     std::size_t length,
     std::uint32_t rank_count,
@@ -271,6 +342,14 @@ private:
     return sequence;
 }
 
+/**
+ * @brief Applies distinct-rank substitutions at deterministic consecutive positions.
+ * @param[in,out] target Sequence to mutate.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in] substitution_count Maximum number of substitutions to apply.
+ * @param[in,out] ranks Deterministic state used for the start and replacement ranks.
+ * @pre `rank_count` is greater than one whenever `target` is nonempty.
+ */
 void apply_randomized_substitutions(
     std::vector<std::uint8_t>& target,
     std::uint32_t rank_count,
@@ -290,6 +369,16 @@ void apply_randomized_substitutions(
     }
 }
 
+/**
+ * @brief Builds one deterministic target variant for randomized soundness checks.
+ * @param[in] query Source query ranks.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in] max_edits Threshold controlling substitution variants.
+ * @param[in] variant Selects identity, bounded substitutions, rotation, or random ranks.
+ * @param[in,out] ranks Deterministic state consumed by the selected variant.
+ * @return A target with the same length as `query`.
+ * @pre `rank_count` is greater than one.
+ */
 [[nodiscard]] std::vector<std::uint8_t> randomized_target_sequence(
     std::span<const std::uint8_t> query,
     std::uint32_t rank_count,
@@ -329,6 +418,13 @@ void apply_randomized_substitutions(
     return target;
 }
 
+/**
+ * @brief Converts numeric ranks into values of one SeqAn alphabet.
+ * @tparam p_alphabet Alphabet type accepting every supplied rank.
+ * @param[in] ranks Numeric ranks to convert in order.
+ * @return Alphabet values with the same ranks and order.
+ * @pre Every input rank belongs to `p_alphabet`.
+ */
 template <typename p_alphabet>
 [[nodiscard]] std::vector<p_alphabet> alphabet_sequence_from_ranks(
     std::span<const std::uint8_t> ranks)
@@ -344,6 +440,13 @@ template <typename p_alphabet>
     return sequence;
 }
 
+/**
+ * @brief Checks a randomized result against independent exact and mask oracles.
+ * @param[in] query Query ranks evaluated by GateKeeper.
+ * @param[in] target Target ranks evaluated by GateKeeper.
+ * @param[in] max_edits Threshold supplied to GateKeeper.
+ * @param[in] result Result whose bounds, acceptance, and diagnostics are checked.
+ */
 inline void check_randomized_gatekeeper_result(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
