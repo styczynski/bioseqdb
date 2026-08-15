@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Prepares a side-effect-free claim plan after validating receipt and live identities.
 runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
 runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     const persisted_grouped_soa_coordinate_operation_receipt& receipt,
@@ -113,6 +114,7 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     return result;
 }
 
+/// @brief Exercises finalizer rejection paths without consuming cache metric claims.
 bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -405,6 +407,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     return claims_unchanged();
 }
 
+/// @brief Exercises partial cache-metric deltas and their one-shot claim behavior.
 bool runtime::self_test_gpu_cache_partial_delta_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -535,6 +538,7 @@ bool runtime::self_test_gpu_cache_partial_delta_contract(
     return !zero_delta.is_valid() && zero_delta.audit() == runtime_gpu_cache_metrics_audit{};
 }
 
+/// @brief Validates and commits one persisted grouped-SoA coordinate receipt.
 persisted_grouped_soa_coordinate_accepted_operation
 runtime::finalize_persisted_grouped_soa_coordinate_operation(
     persisted_grouped_soa_coordinate_operation_receipt&& receipt,
@@ -565,6 +569,7 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
     return accepted;
 }
 
+/// @brief Runs a coordinate batch and returns only its host-visible result wires.
 std::vector<gpu_coordinate_result_wire> runtime::run_seed_to_coordinate_results_roundtrip(
     const gpu_seed_query_inputs& query_inputs,
     std::span<const gpu_seed_coordinate_job> jobs,

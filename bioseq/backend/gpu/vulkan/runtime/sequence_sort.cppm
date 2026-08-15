@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Sorts a contiguous packed-sequence image through the chunk-based overload.
 std::vector<std::uint32_t>
 runtime::run_sequence_sort_roundtrip(std::span<const std::byte> packed_units,
                                      std::span<const sequence_descriptor_wire> descs,
@@ -33,6 +34,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const std::byte> packed_units,
         std::span<const sequence_sort_upload_chunk>(&chunk, 1u), descs, params);
 }
 
+/// @brief Sorts borrowed packed chunks by shader keys and exact lexical tie breaks.
 std::vector<std::uint32_t>
 runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk> chunks,
                                      std::span<const sequence_descriptor_wire> descs,

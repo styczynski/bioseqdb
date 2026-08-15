@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Runs one count, scan, and emit sketch roundtrip with host materialization.
 runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                     const vulkan_rank_lut& rank_lut,
                                                     const vulkan_sketch_params& params,
@@ -279,6 +280,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     return result;
 }
 
+/// @brief Runs a tiled sketch batch while preserving device-only authorization when requested.
 runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::span<const std::byte> packed_sequence,
     const vulkan_rank_lut& rank_lut,

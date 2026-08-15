@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Prepares every pipeline used by the complete target-index route while locked.
 void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& params) {
     // Keep this list identical to the complete target-index route. Pipeline
     // owners and their exact metadata permits remain process-lived in runtime;
@@ -39,6 +40,7 @@ void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& 
     (void)get_compute_pipeline_locked(shader_kind::target_index_emit_buckets, 128u, 1u);
 }
 
+/// @brief Validates the sketch shape and prepares target-index pipelines under queue ownership.
 void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -50,6 +52,8 @@ void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params)
     prepare_target_index_pipelines_locked(params);
 }
 
+/// @brief Builds and validates a resident target index without materializing it on the host.
+/// @return Move-owned index buffers, admission statistics, and a precise failure reason.
 gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_sequence,
                                             std::uint64_t padded_sequence_bytes,
                                             std::uint64_t owned_sequence_staging_bytes,
@@ -1067,6 +1071,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     return out;
 }
 
+/// @brief Sketches a target and returns stable value-then-key sorted minimizer pairs.
+/// @return Resident sorted pairs and the exact host download used for persistence.
 gpu_sorted_pair_result
 runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_sequence,
                                          const vulkan_rank_lut& rank_lut,

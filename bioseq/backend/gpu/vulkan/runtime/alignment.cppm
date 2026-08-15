@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Executes bounded alignment-extension jobs and downloads their result wires.
 std::vector<gpu_alignment_extension_result_wire>
 runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_symbols,
                                            std::span<const std::uint32_t> target_symbols,
@@ -110,6 +111,7 @@ runtime::run_alignment_extension_roundtrip(std::span<const std::uint32_t> query_
     return results;
 }
 
+/// @brief Executes bounded alignment and reconstructs packed CIGAR output on the GPU.
 alignment_cigar_batch_result
 runtime::run_alignment_simple_cigar_roundtrip(std::span<const std::uint32_t> query_symbols,
                                               std::span<const std::uint32_t> target_symbols,

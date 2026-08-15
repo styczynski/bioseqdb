@@ -1,6 +1,6 @@
 /**
- * @file metal_archive.cppm
- * @brief Owns immutable Metal archive admission, snapshots, and MoltenVK interposition.
+ * @file interpose.cppm
+ * @brief Owns the single Apple Objective-C and MoltenVK archive interposition boundary.
  */
 module;
 
@@ -19,218 +19,20 @@ module;
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 
-module bioseq.gpu.vulkan.runtime:metal_archive;
+export module bioseq.gpu.vulkan.runtime:metal_archive.interpose;
 
 import :receipts;
+import :metal_archive.configuration;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 import bioseq.instrumentation;
 import std;
 
-namespace bioseq::gpu::vulkan {
-
-struct runtime_metal_archive_configuration_slot {
-    std::mutex mu;
-    std::shared_ptr<const runtime_metal_archive_configuration_image> configuration;
-    bool sealed = false;
-    std::atomic<bool> installed_accepted{false};
-    std::atomic<std::uint64_t> install_validation_count{0u};
-    std::atomic<std::uint64_t> live_gate_calls{0u};
-    std::atomic<std::uint64_t> live_configuration_scan_count{0u};
-};
-
-runtime_metal_archive_configuration_slot&
-runtime_metal_archive_configuration_slot_instance() noexcept {
-    static runtime_metal_archive_configuration_slot slot;
-    return slot;
-}
-
-[[nodiscard]] std::shared_ptr<const runtime_metal_archive_configuration_image>
-runtime_metal_archive_configuration_snapshot() {
-    auto& slot = runtime_metal_archive_configuration_slot_instance();
-    std::lock_guard<std::mutex> guard(slot.mu);
-    return slot.configuration;
-}
-
-std::expected<std::shared_ptr<const runtime_metal_archive_configuration_image>, std::string>
-make_runtime_metal_archive_configuration_image(
-    std::shared_ptr<const sealed_shader_cache_seed_image> seed_image,
-    std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid,
-    std::uint64_t metal_device_registry_id) {
-    if (!seed_image || !seed_image->is_accepted()) {
-        return std::unexpected("runtime Metal archive configuration has no accepted seed image");
-    }
-    std::uint64_t archive_count = 0u;
-    for (const sealed_shader_cache_artifact_image& artifact : seed_image->artifacts()) {
-        archive_count +=
-            artifact.descriptor.kind == sealed_shader_cache_artifact_kind::metal_binary_archive
-                ? 1u
-                : 0u;
-    }
-    if (archive_count == 0u ||
-        archive_count > sealed_shader_cache_detail::k_maximum_seed_image_artifacts) {
-        return std::unexpected("runtime Metal archive configuration archive count is invalid");
-    }
-    using bioseq::common::saturating_add;
-    using bioseq::common::saturating_mul;
-    std::uint64_t retained = sizeof(runtime_metal_archive_configuration_image);
-    retained = saturating_add(
-        saturating_add(
-            retained,
-            saturating_mul(
-                archive_count,
-                sizeof(runtime_metal_archive_spec) +
-                    2u * (sealed_shader_cache_detail::k_maximum_manifest_filename_bytes + 1024u))),
-        2u * 1024u);
-    const std::uint64_t peak =
-        saturating_mul(retained, bioseq::parallelism::k_vector_preallocation_headroom_factor);
-    if (retained == (std::numeric_limits<std::uint64_t>::max)() ||
-        peak == (std::numeric_limits<std::uint64_t>::max)()) {
-        return std::unexpected("runtime Metal archive configuration admission saturated");
-    }
-    bioseq::parallelism::memory_admission_failure admission_failure{};
-    auto permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
-        peak, &admission_failure);
-    if (!permit) {
-        return std::unexpected(shader_cache_message(
-            "runtime Metal archive configuration admission denied before allocation: reason=",
-            bioseq::parallelism::memory_admission_failure_reason_name(admission_failure.reason),
-            " requested=",
-            admission_failure.requested_bytes));
-    }
-    try {
-        runtime_metal_archive_configuration configuration{};
-        configuration.seed_image = std::move(seed_image);
-        configuration.vulkan_device_uuid = vulkan_device_uuid;
-        configuration.metal_device_registry_id = metal_device_registry_id;
-        configuration.archives.reserve(static_cast<std::size_t>(archive_count));
-        std::optional<metal_archive_negative_error_fingerprint> common_error;
-        for (std::size_t ordinal = 0u; ordinal < configuration.seed_image->artifacts().size();
-             ++ordinal) {
-            const sealed_shader_cache_artifact_image& artifact =
-                configuration.seed_image->artifacts()[ordinal];
-            if (artifact.descriptor.kind !=
-                sealed_shader_cache_artifact_kind::metal_binary_archive) {
-                continue;
-            }
-            const std::string qualification_filename =
-                artifact.descriptor.filename + ".qualification";
-            const auto* qualification_image = sealed_shader_cache_detail::find_artifact_image(
-                configuration.seed_image->artifacts(),
-                sealed_shader_cache_artifact_kind::metal_binary_archive_qualification,
-                artifact.descriptor.key_index,
-                qualification_filename);
-            if (qualification_image == nullptr) {
-                return std::unexpected(
-                    shader_cache_message("runtime Metal archive qualification missing for ",
-                                         artifact.descriptor.filename));
-            }
-            auto qualification =
-                sealed_shader_cache_detail::parse_metal_archive_qualification_receipt(
-                    qualification_image->bytes);
-            if (!qualification || !qualification->is_production_accepted() ||
-                qualification->archive_size != artifact.descriptor.size ||
-                qualification->archive_sha256 != artifact.descriptor.sha256) {
-                return std::unexpected(
-                    shader_cache_message("runtime Metal archive qualification mismatch for ",
-                                         artifact.descriptor.filename));
-            }
-            if (common_error && *common_error != qualification->negative_error) {
-                return std::unexpected(
-                    "runtime Metal archive qualifications disagree on NSError fingerprint");
-            }
-            common_error = qualification->negative_error;
-            if (configuration.qualification_receipt_count == 0u) {
-                configuration.qualification_wire_revision = qualification->wire_revision;
-                configuration.helper_wire_revision = qualification->helper_wire_revision;
-                configuration.helper_build_identity = qualification->helper_build_identity;
-                configuration.helper_source = qualification->helper_source;
-                configuration.helper_executable_size = qualification->helper_executable_size;
-                configuration.helper_executable_sha256 = qualification->helper_executable_sha256;
-                configuration.helper_metal_registry_id = qualification->helper_metal_registry_id;
-            } else if (configuration.qualification_wire_revision != qualification->wire_revision ||
-                       configuration.helper_wire_revision != qualification->helper_wire_revision ||
-                       configuration.helper_build_identity !=
-                           qualification->helper_build_identity ||
-                       configuration.helper_source != qualification->helper_source ||
-                       configuration.helper_executable_size !=
-                           qualification->helper_executable_size ||
-                       configuration.helper_executable_sha256 !=
-                           qualification->helper_executable_sha256 ||
-                       configuration.helper_metal_registry_id !=
-                           qualification->helper_metal_registry_id) {
-                return std::unexpected(
-                    "runtime Metal archive qualifications disagree on helper provenance");
-            }
-            ++configuration.qualification_receipt_count;
-            configuration.archives.push_back(runtime_metal_archive_spec{
-                .artifact_ordinal = static_cast<std::uint32_t>(ordinal),
-                .artifact_filename = artifact.descriptor.filename,
-                .size = artifact.descriptor.size,
-                .sha256 = artifact.descriptor.sha256,
-                .negative_error_domain = std::move(qualification->negative_error.domain),
-                .negative_error_code = qualification->negative_error.code,
-            });
-        }
-        if (!configuration.is_valid()) {
-            return std::unexpected(
-                "runtime Metal archive configuration factory produced invalid evidence");
-        }
-        auto installed = std::shared_ptr<runtime_metal_archive_configuration_image>(
-            new runtime_metal_archive_configuration_image(
-                std::move(configuration), peak, std::move(*permit)));
-        if (!installed->reconcile() || !installed->is_valid()) {
-            return std::unexpected(
-                "runtime Metal archive configuration admission reconciliation failed");
-        }
-        return installed;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected("runtime Metal archive configuration allocation failed");
-    }
-}
-
-std::expected<void, std::string> install_runtime_metal_archive_configuration(
-    std::shared_ptr<const runtime_metal_archive_configuration_image> configuration) {
-    if (!configuration || !configuration->is_valid()) {
-        return std::unexpected(
-            "runtime Metal archive configuration is incomplete or non-canonical");
-    }
-    auto& slot = runtime_metal_archive_configuration_slot_instance();
-    slot.install_validation_count.fetch_add(1u, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> guard(slot.mu);
-    if (slot.sealed) {
-        if (slot.configuration &&
-            slot.configuration->configuration() == configuration->configuration()) {
-            return {};
-        }
-        return std::unexpected(
-            "runtime Metal archive configuration is already sealed to different evidence");
-    }
-    slot.configuration = std::move(configuration);
-    slot.sealed = true;
-    slot.installed_accepted.store(true, std::memory_order_release);
-    return {};
-}
-
-bool is_runtime_metal_archive_configuration_installed() noexcept {
-    auto& slot = runtime_metal_archive_configuration_slot_instance();
-    return slot.installed_accepted.load(std::memory_order_acquire);
-}
-
-[[nodiscard]] runtime_metal_archive_live_gate_result
-capture_runtime_metal_archive_live_gate_result() noexcept {
-    auto& slot = runtime_metal_archive_configuration_slot_instance();
-    return runtime_metal_archive_live_gate_result{
-        .install_validation_count = slot.install_validation_count.load(std::memory_order_relaxed),
-        .live_gate_calls = slot.live_gate_calls.load(std::memory_order_relaxed),
-        .live_configuration_scan_count =
-            slot.live_configuration_scan_count.load(std::memory_order_relaxed),
-        .installed_accepted = slot.installed_accepted.load(std::memory_order_acquire),
-    };
-}
+export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
+/// @brief Dynamically resolved Objective-C runtime calls used by both interposes.
 struct objc_runtime_functions {
     void* msg_send = nullptr;
     void* (*get_class)(const char*) = nullptr;
@@ -242,6 +44,7 @@ struct objc_runtime_functions {
     void* (*method_set_implementation)(void*, void*) = nullptr;
 };
 
+/// @brief Process state for replacing MoltenVK command-library source compilation.
 struct moltenvk_command_library_interpose {
     objc_runtime_functions objc{};
     std::vector<std::byte> metallib;
@@ -262,16 +65,19 @@ struct moltenvk_command_library_interpose {
     std::atomic<std::uint64_t> source_fallback_calls{0u};
 };
 
+/// @brief Returns the process-owned command-library interpose state.
 moltenvk_command_library_interpose& moltenvk_command_interpose_state() noexcept {
     static moltenvk_command_library_interpose state;
     return state;
 }
 
+/// @brief Casts the dynamically resolved Objective-C message entry point.
 template <class p_function_type>
 [[nodiscard]] p_function_type objc_msg_cast(void* function) noexcept {
     return reinterpret_cast<p_function_type>(function);
 }
 
+/// @brief Releases one retained Objective-C object unless ownership is transferred.
 class scoped_objc_release {
   public:
     scoped_objc_release() = default;
@@ -372,6 +178,7 @@ extern "C" void* bioseq_moltenvk_new_library_with_source(
         self, cmd, source, options, error);
 }
 
+/// @brief ABI-compatible Objective-C block literal used by asynchronous wrappers.
 struct objc_block_literal {
     void* isa = nullptr;
     int flags = 0;
@@ -380,6 +187,7 @@ struct objc_block_literal {
     void* descriptor = nullptr;
 };
 
+/// @brief Completes a wrapped Metal library callback through the original block.
 void invoke_metal_library_completion(void* completion, void* library, void* error) noexcept {
     if (completion == nullptr) {
         return;
@@ -392,6 +200,7 @@ void invoke_metal_library_completion(void* completion, void* library, void* erro
     objc_msg_cast<invoke_function>(block->invoke)(completion, library, error);
 }
 
+/// @brief Completes a wrapped Metal pipeline callback through the original block.
 void invoke_metal_pipeline_completion(void* completion,
                                       void* pipeline,
                                       void* reflection,
@@ -474,6 +283,7 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
         self, cmd, source, options, completion);
 }
 
+/// @brief Reads one metallib candidate into an owned byte vector.
 [[nodiscard]] bool read_file_bytes(const char* path, std::vector<std::byte>* out) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -490,6 +300,7 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
     return static_cast<bool>(input);
 }
 
+/// @brief Installs fail-closed command-library wrappers before MoltenVK device setup.
 void install_moltenvk_command_library_interpose() noexcept {
     auto& state = moltenvk_command_interpose_state();
     void* installed_method = nullptr;
@@ -774,6 +585,7 @@ capture_command_interpose_device_binding(void* device) noexcept {
 
 struct active_metal_archive_pipeline_scope;
 
+/// @brief Process state for immutable Metal archives and pipeline interception.
 struct metal_pipeline_archive_interpose {
     objc_runtime_functions objc{};
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration_image;
@@ -834,11 +646,13 @@ struct metal_pipeline_archive_interpose {
     }
 };
 
+/// @brief Returns the process-owned pipeline interpose state.
 metal_pipeline_archive_interpose& metal_pipeline_archive_interpose_state() noexcept {
     static metal_pipeline_archive_interpose state;
     return state;
 }
 
+/// @brief Releases resident archives while retaining sticky failure state.
 void rollback_metal_archive_loaded_state(metal_pipeline_archive_interpose& state) noexcept {
     if (state.archive_array != nullptr && state.sel_release != nullptr &&
         state.objc.msg_send != nullptr) {
@@ -855,6 +669,7 @@ void rollback_metal_archive_loaded_state(metal_pipeline_archive_interpose& state
     state.process_qualification = {};
 }
 
+/// @brief Restores original Objective-C methods and clears a partial installation.
 void rollback_metal_pipeline_archive_interpose_install(
     metal_pipeline_archive_interpose& state) noexcept {
     if (state.objc.method_set_implementation != nullptr) {
@@ -904,6 +719,7 @@ void rollback_metal_pipeline_archive_interpose_install(
     state.objc = {};
 }
 
+/// @brief Copies a borrowed NSString into process-owned UTF-8 storage.
 [[nodiscard]] std::string
 bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_utf8_string) {
     if (ns_string == nullptr || sel_utf8_string == nullptr) {
@@ -914,6 +730,7 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
     return text == nullptr ? std::string{} : std::string(text);
 }
 
+/// @brief Creates an autoreleased NSString from one owned UTF-8 view.
 [[nodiscard]] void* bioseq_make_ns_string(objc_runtime_functions& objc, std::string_view value) {
     void* ns_string_cls = objc.get_class("NSString");
     if (ns_string_cls == nullptr) {
@@ -925,6 +742,7 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
         ns_string_cls, objc.sel_register_name("stringWithUTF8String:"), owned.c_str());
 }
 
+/// @brief Creates a file URL for one canonical private archive path.
 [[nodiscard]] void* bioseq_make_file_url(objc_runtime_functions& objc,
                                          const std::filesystem::path& path) {
     void* url_cls = objc.get_class("NSURL");
@@ -937,6 +755,7 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
         url_cls, objc.sel_register_name("fileURLWithPath:"), ns_path);
 }
 
+/// @brief Copies a Metal error description without retaining the error object.
 [[nodiscard]] std::string bioseq_ns_error_description(objc_runtime_functions& objc, void* error) {
     if (error == nullptr) {
         return {};
@@ -947,6 +766,7 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
     return bioseq_ns_string_utf8(objc, desc, objc.sel_register_name("UTF8String"));
 }
 
+/// @brief Records the first owned diagnostic and permanently closes archive use.
 void mark_metal_archive_sticky_failure(metal_pipeline_archive_interpose& state,
                                        std::string reason) noexcept {
     state.sticky_failure.store(true, std::memory_order_release);
@@ -960,6 +780,7 @@ void mark_metal_archive_sticky_failure(metal_pipeline_archive_interpose& state,
     }
 }
 
+/// @brief Records a literal diagnostic without allowing allocation failure to escape.
 void mark_metal_archive_sticky_failure_literal(metal_pipeline_archive_interpose& state,
                                                const char* reason) noexcept {
     state.sticky_failure.store(true, std::memory_order_release);
@@ -971,12 +792,14 @@ void mark_metal_archive_sticky_failure_literal(metal_pipeline_archive_interpose&
     }
 }
 
+/// @brief Captures the first sticky failure diagnostic under its mutex.
 [[nodiscard]] std::string metal_archive_failure_reason(metal_pipeline_archive_interpose& state) {
     std::lock_guard<std::mutex> guard(state.failure_mu);
     return state.failure_reason.empty() ? std::string{"immutable Metal archive receipt failed"}
                                         : state.failure_reason;
 }
 
+/// @brief Stable file identity and streamed-byte audit for one private archive.
 struct metal_archive_file_snapshot {
     runtime_metal_archive_spec actual{};
     std::uint64_t device = 0u;
@@ -992,6 +815,7 @@ struct metal_archive_file_snapshot {
     [[nodiscard]] bool operator==(const metal_archive_file_snapshot&) const noexcept = default;
 };
 
+/// @brief Validates one archive path and streams its exact retained bytes.
 [[nodiscard]] std::expected<metal_archive_file_snapshot, std::string>
 capture_metal_archive_file_snapshot(const std::filesystem::path& physical_path,
                                     const runtime_metal_archive_spec& expected,
@@ -1099,6 +923,7 @@ capture_metal_archive_file_snapshot(const std::filesystem::path& physical_path,
     };
 }
 
+/// @brief Owns and unlinks one private archive snapshot path.
 class private_metal_archive_snapshot {
   public:
     private_metal_archive_snapshot() = default;
@@ -1138,6 +963,7 @@ class private_metal_archive_snapshot {
 };
 static_assert(std::is_nothrow_move_constructible_v<private_metal_archive_snapshot>);
 
+/// @brief Owns one private snapshot descriptor until transfer or close.
 class private_snapshot_file_descriptor {
   public:
     explicit private_snapshot_file_descriptor(int fd) noexcept : fd_(fd) {}
@@ -1167,6 +993,7 @@ class private_snapshot_file_descriptor {
     int fd_ = -1;
 };
 
+/// @brief Removes an incomplete snapshot path unless ownership is released.
 class private_snapshot_unlink_guard {
   public:
     explicit private_snapshot_unlink_guard(const char* path) noexcept : path_(path) {}
@@ -1185,6 +1012,7 @@ class private_snapshot_unlink_guard {
     const char* path_ = nullptr;
 };
 
+/// @brief Writes one exact seed artifact into a private snapshot.
 [[nodiscard]] std::expected<private_metal_archive_snapshot, std::string>
 write_private_metal_archive_snapshot(std::string_view artifact_filename,
                                      std::span<const std::byte> bytes,
@@ -1259,6 +1087,7 @@ write_private_metal_archive_snapshot(std::string_view artifact_filename,
                                                                       std::move(result)};
 }
 
+/// @brief Owns the mode-restricted process directory for open archive files.
 class private_metal_archive_process_directory {
   public:
     private_metal_archive_process_directory() = default;
@@ -1293,6 +1122,7 @@ class private_metal_archive_process_directory {
     std::filesystem::path path_;
 };
 
+/// @brief Creates the private process directory used during qualification.
 [[nodiscard]] std::expected<private_metal_archive_process_directory, std::string>
 make_private_metal_archive_process_directory() {
     std::error_code temp_error;
@@ -1326,6 +1156,7 @@ make_private_metal_archive_process_directory() {
     return owner;
 }
 
+/// @brief Owns one still-open archive file and its immutable file identity.
 class open_private_metal_archive {
   public:
     open_private_metal_archive() = default;
@@ -1407,6 +1238,7 @@ class open_private_metal_archive {
     bool linked_ = true;
 };
 
+/// @brief Writes and fsyncs one exact archive image without following links.
 [[nodiscard]] std::expected<open_private_metal_archive, std::string>
 write_open_private_metal_archive(const std::filesystem::path& directory,
                                  std::size_t ordinal,
@@ -1450,6 +1282,7 @@ write_open_private_metal_archive(const std::filesystem::path& directory,
     return result;
 }
 
+/// @brief Hashes an open private archive once and compares retained seed bytes.
 [[nodiscard]] std::expected<std::uint64_t, std::string>
 hash_open_private_metal_archive_once(open_private_metal_archive& image,
                                      const runtime_metal_archive_spec& expected,
@@ -1487,6 +1320,7 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
     return streamed;
 }
 
+/// @brief Loads one private Metal binary archive object from its open-file URL.
 [[nodiscard]] void* load_metal_binary_archive(metal_pipeline_archive_interpose& state,
                                               void* loader_device,
                                               const std::filesystem::path& path) {
@@ -1521,6 +1355,7 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
     return archive;
 }
 
+/// @brief Loads the ordered archive set and seals process qualification.
 [[nodiscard]] bool load_exact_metal_binary_archives(metal_pipeline_archive_interpose& state,
                                                     void* loader_device) {
     state.loaded_pre_post_identity_checks = 0u;
@@ -1751,6 +1586,7 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
     return true;
 }
 
+/// @brief Verifies in-memory qualification without reopening archive paths.
 [[nodiscard]] std::expected<std::uint64_t, std::string>
 verify_resident_metal_archive_snapshots(metal_pipeline_archive_interpose& state,
                                         std::string_view operation_label) {
@@ -1769,6 +1605,7 @@ verify_resident_metal_archive_snapshots(metal_pipeline_archive_interpose& state,
     return 0u;
 }
 
+/// @brief Reads the exact Metal function name bound by one pipeline descriptor.
 [[nodiscard]] std::string descriptor_function_name(metal_pipeline_archive_interpose& state,
                                                    void* desc) {
     if (desc == nullptr || state.sel_compute_function == nullptr || state.sel_name == nullptr) {
@@ -1784,11 +1621,13 @@ verify_resident_metal_archive_snapshots(metal_pipeline_archive_interpose& state,
     return bioseq_ns_string_utf8(state.objc, name, state.sel_utf8_string);
 }
 
+/// @brief Exact domain and code returned by a negative-control Metal call.
 struct metal_error_identity {
     std::string domain;
     std::int64_t code = 0;
 };
 
+/// @brief Captures a borrowed NSError domain and code into owned storage.
 [[nodiscard]] metal_error_identity
 metal_error_identity_from_error(metal_pipeline_archive_interpose& state, void* error) {
     if (error == nullptr || state.sel_error_domain == nullptr || state.sel_error_code == nullptr) {
@@ -1807,6 +1646,7 @@ metal_error_identity_from_error(metal_pipeline_archive_interpose& state, void* e
 
 constexpr unsigned long k_metal_pipeline_fail_on_binary_archive_miss = 1ul << 2u;
 
+/// @brief Mutable state for one explicitly scoped Vulkan pipeline creation.
 struct active_metal_archive_pipeline_scope {
     std::mutex mu;
     runtime_metal_archive_pipeline_audit audit{};
@@ -1817,6 +1657,7 @@ struct active_metal_archive_pipeline_scope {
     std::uint64_t outside_scope_interceptions_at_begin = 0u;
 };
 
+/// @brief Produces a nonzero monotonically increasing receipt identity.
 [[nodiscard]] std::uint64_t next_nonzero_identity(std::atomic<std::uint64_t>& counter) noexcept {
     constexpr std::uint64_t exhausted = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t value = counter.load(std::memory_order_relaxed);
@@ -1829,6 +1670,7 @@ struct active_metal_archive_pipeline_scope {
     return 0u;
 }
 
+/// @brief Reads the registry identity from one intercepted Metal device.
 [[nodiscard]] std::uint64_t metal_device_registry_id(metal_pipeline_archive_interpose& state,
                                                      void* device) noexcept {
     if (device == nullptr || state.sel_registry_id == nullptr)
@@ -1838,6 +1680,7 @@ struct active_metal_archive_pipeline_scope {
         objc_msg_cast<registry_function>(state.objc.msg_send)(device, state.sel_registry_id));
 }
 
+/// @brief Releases one Objective-C object through the cached selector.
 void release_objc_object(metal_pipeline_archive_interpose& state, void* object) noexcept {
     if (object == nullptr || state.sel_release == nullptr)
         return;
@@ -1845,6 +1688,7 @@ void release_objc_object(metal_pipeline_archive_interpose& state, void* object) 
     objc_msg_cast<release_function>(state.objc.msg_send)(object, state.sel_release);
 }
 
+/// @brief Creates an empty binary-archive array for the negative control.
 [[nodiscard]] void* make_empty_metal_archive_array(metal_pipeline_archive_interpose& state,
                                                    void* device) noexcept {
     void* desc_cls = state.objc.get_class("MTLBinaryArchiveDescriptor");
@@ -1885,6 +1729,7 @@ void release_objc_object(metal_pipeline_archive_interpose& state, void* object) 
     return array;
 }
 
+/// @brief Marks both the active scope and process interpose as failed.
 void fail_active_metal_archive_scope(metal_pipeline_archive_interpose& state,
                                      active_metal_archive_pipeline_scope& scope,
                                      std::string reason) noexcept {
@@ -1903,6 +1748,7 @@ enum class metal_pipeline_intercept_verdict : std::uint8_t {
     rejected,
 };
 
+/// @brief Replaces archive descriptors and runs the required negative control.
 [[nodiscard]] metal_pipeline_intercept_verdict prepare_scoped_metal_pipeline_call(
     void* self, void* desc, unsigned long options, bool asynchronous) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -2147,6 +1993,7 @@ extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
         self, cmd, desc, options | k_metal_pipeline_fail_on_binary_archive_miss, reflection, error);
 }
 
+/// @brief Installs pipeline wrappers for the selected Vulkan device.
 void install_metal_pipeline_archive_interpose(
     runtime_vulkan_device_identity selected_vulkan_device) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -2363,6 +2210,7 @@ void install_metal_pipeline_archive_interpose(
     }
 }
 
+/// @brief Binds one Vulkan pipeline creation to an immutable Metal audit.
 class metal_archive_pipeline_create_scope {
   public:
     metal_archive_pipeline_create_scope(bool required,
@@ -2592,9 +2440,12 @@ class metal_archive_pipeline_create_scope {
     std::shared_ptr<active_metal_archive_pipeline_scope> active_{};
 };
 #else
+/// @brief Leaves command-library interposition inactive on non-Apple runtimes.
 void install_moltenvk_command_library_interpose() noexcept {}
+/// @brief Leaves pipeline interposition inactive on non-Apple runtimes.
 void install_metal_pipeline_archive_interpose(runtime_vulkan_device_identity) noexcept {}
 
+/// @brief Rejects immutable archive requirements on non-Apple runtimes.
 class metal_archive_pipeline_create_scope {
   public:
     metal_archive_pipeline_create_scope(bool required,
@@ -2620,107 +2471,5 @@ class metal_archive_pipeline_create_scope {
     bool required_ = false;
 };
 #endif
-
-void require_immutable_metal_policy_live(std::string_view operation_label) {
-    runtime_metal_archive_configuration_slot_instance().live_gate_calls.fetch_add(
-        1u, std::memory_order_relaxed);
-#if defined(__APPLE__)
-    if (!is_runtime_metal_archive_configuration_installed())
-        return;
-    auto& archive_state = metal_pipeline_archive_interpose_state();
-    auto& command_state = moltenvk_command_interpose_state();
-    const bool clean =
-        archive_state.configuration_validated && archive_state.configured_identity.is_valid() &&
-        archive_state.configured_identity == archive_state.loaded_identity &&
-        archive_state.installed && archive_state.archive_array != nullptr &&
-        archive_state.process_qualification.is_internally_consistent() &&
-        archive_state.process_qualification.archive_set == archive_state.loaded_identity &&
-        !archive_state.sticky_failure.load(std::memory_order_acquire) &&
-        archive_state.outside_scope_interceptions.load(std::memory_order_relaxed) == 0u &&
-        command_state.installed && command_state.immutable_fail_closed &&
-        command_state.cached_binding_validated &&
-        !command_state.sticky_failure.load(std::memory_order_acquire) &&
-        command_state.recognized_source_requests.load(std::memory_order_relaxed) == 0u &&
-        command_state.source_fallback_calls.load(std::memory_order_relaxed) == 0u &&
-        archive_state.loader_registry_id == archive_state.runtime_metal_registry_id &&
-        archive_state.loader_registry_id ==
-            archive_state.process_qualification.helper_metal_registry_id &&
-        archive_state.runtime_vulkan_device_identity.device_uuid ==
-            archive_state.process_qualification.vulkan_device_uuid &&
-        archive_state.runtime_vulkan_device_identity.api_version ==
-            archive_state.process_qualification.api_version &&
-        archive_state.runtime_vulkan_device_identity.driver_version ==
-            archive_state.process_qualification.driver_version &&
-        archive_state.runtime_vulkan_device_identity.vendor_id ==
-            archive_state.process_qualification.vendor_id &&
-        archive_state.runtime_vulkan_device_identity.device_id ==
-            archive_state.process_qualification.device_id &&
-        archive_state.runtime_vulkan_device_identity.pipeline_cache_uuid ==
-            archive_state.process_qualification.pipeline_cache_uuid &&
-        command_state.loader_registry_id == archive_state.loader_registry_id &&
-        command_state.cached_methods_present == 2u &&
-        command_state.cached_wrapper_methods == command_state.cached_methods_present;
-    if (!clean) {
-        throw vulkan_runtime_error(fmt::format(
-            "{} observed stale or poisoned immutable Metal policy state", operation_label));
-    }
-#else
-    (void)operation_label;
-#endif
-}
-
-void probe_immutable_metal_policy_live_for_test() {
-    require_immutable_metal_policy_live("unit-test live gate");
-}
-
-[[nodiscard]] std::expected<runtime_private_archive_snapshot_test_result, std::string>
-verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filename,
-                                                 std::span<const std::byte> bytes,
-                                                 const std::filesystem::path& temp_parent) {
-#if defined(__APPLE__)
-    if (artifact_filename.empty() || bytes.empty()) {
-        return std::unexpected("private archive snapshot test input is empty");
-    }
-    runtime_metal_archive_spec expected{
-        .artifact_ordinal = 0u,
-        .artifact_filename = std::string(artifact_filename),
-        .size = static_cast<std::uint64_t>(bytes.size()),
-        .sha256 = sealed_shader_cache_detail::sha256(bytes),
-        .negative_error_domain = "MTLLibraryErrorDomain",
-        .negative_error_code = 6,
-    };
-    auto private_image =
-        write_private_metal_archive_snapshot(artifact_filename, bytes, temp_parent);
-    if (!private_image)
-        return std::unexpected(private_image.error());
-    auto snapshot = capture_metal_archive_file_snapshot(private_image->path(), expected, bytes);
-    if (!snapshot)
-        return std::unexpected(snapshot.error());
-    const int fd = ::open(private_image->path().c_str(), O_WRONLY);
-    if (fd < 0) {
-        return std::unexpected("cannot open private snapshot for tamper test");
-    }
-    const std::byte changed = bytes.front() ^ std::byte{0x01};
-    const bool wrote = ::pwrite(fd, &changed, sizeof(changed), 0) == 1 && ::fsync(fd) == 0;
-    (void)::close(fd);
-    if (!wrote) {
-        return std::unexpected("cannot mutate private snapshot for tamper test");
-    }
-    const auto rejected =
-        capture_metal_archive_file_snapshot(private_image->path(), expected, bytes);
-    return runtime_private_archive_snapshot_test_result{
-        .snapshot_path = private_image->path(),
-        .streamed_bytes = snapshot->streamed_bytes,
-        .scratch_capacity_bytes = snapshot->scratch_capacity_bytes,
-        .exact_seed_compared = snapshot->exact_seed_compared,
-        .tamper_rejected = !rejected,
-    };
-#else
-    (void)artifact_filename;
-    (void)bytes;
-    (void)temp_parent;
-    return std::unexpected("private Metal archive snapshots are Apple-only");
-#endif
-}
 
 } // namespace bioseq::gpu::vulkan

@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Computes count-submit and pessimistic output admission for a sketch batch.
 gpu_sketch_batch_allocation_requirements
 runtime::sketch_batch_allocation_requirements(std::uint64_t packed_sequence_bytes,
                                               std::uint64_t tile_count,
@@ -58,6 +59,7 @@ runtime::sketch_batch_allocation_requirements(std::uint64_t packed_sequence_byte
     };
 }
 
+/// @brief Generates packed sequence units through the dedicated Vulkan kernel.
 buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
                                              std::span<const std::uint32_t> cdf,
                                              generate_units_push push,
@@ -130,6 +132,7 @@ buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
     return out;
 }
 
+/// @brief Copies one validated allocation slice into caller-owned host storage.
 void runtime::download_slice(const buffer& src,
                              std::uint64_t src_byte_offset,
                              std::span<std::byte> dst) {
@@ -151,6 +154,7 @@ void runtime::download_slice(const buffer& src,
 
 // --- Arena -----------------------------------------------------------------
 
+/// @brief Returns the lazily constructed arena owned by this runtime.
 gpu_arena& runtime::reusable_gpu_arena() {
     if (!gpu_arena_) {
         gpu_arena_.emplace(*this);
@@ -158,6 +162,7 @@ gpu_arena& runtime::reusable_gpu_arena() {
     return *gpu_arena_;
 }
 
+/// @brief Grows all arena classes before a paired submission begins.
 bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
                                 std::uint64_t upload_bytes,
                                 std::uint64_t download_bytes) {
@@ -202,6 +207,7 @@ bool gpu_arena::ensure_capacity(std::uint64_t device_bytes,
     return true;
 }
 
+/// @brief Releases every backing buffer after all live slices have rewound.
 bool gpu_arena::release_idle_capacity() noexcept {
     if (device_cursor_ != 0u || upload_cursor_ != 0u || download_cursor_ != 0u) {
         return false;
@@ -215,6 +221,7 @@ bool gpu_arena::release_idle_capacity() noexcept {
     return true;
 }
 
+/// @brief Bump-allocates one aligned device slice.
 gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t a = std::max<std::uint64_t>(alignment, k_gpu_buffer_offset_alignment);
     const std::uint64_t offset = align_up(device_cursor_, a);
@@ -225,6 +232,7 @@ gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t al
     return gpu_arena_slice{&device_, offset, bytes};
 }
 
+/// @brief Bump-allocates one aligned upload slice.
 gpu_arena_slice gpu_arena::allocate_upload(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t offset = align_up(upload_cursor_, std::max<std::uint64_t>(alignment, 16u));
     if (offset + bytes > upload_capacity_)
@@ -233,6 +241,7 @@ gpu_arena_slice gpu_arena::allocate_upload(std::uint64_t bytes, std::uint64_t al
     return gpu_arena_slice{&upload_, offset, bytes};
 }
 
+/// @brief Bump-allocates one aligned download slice.
 gpu_arena_slice gpu_arena::allocate_download(std::uint64_t bytes, std::uint64_t alignment) {
     const std::uint64_t offset =
         align_up(download_cursor_, std::max<std::uint64_t>(alignment, 16u));
@@ -242,6 +251,7 @@ gpu_arena_slice gpu_arena::allocate_download(std::uint64_t bytes, std::uint64_t 
     return gpu_arena_slice{&download_, offset, bytes};
 }
 
+/// @brief Binds exactly one arena slice without widening its descriptor range.
 void gpu_arena::bind_storage_slice(VkWriteDescriptorSet& write,
                                    VkDescriptorBufferInfo& info,
                                    std::uint32_t binding,
@@ -259,6 +269,7 @@ void gpu_arena::bind_storage_slice(VkWriteDescriptorSet& write,
 
 // --- GPU frontend descriptor pool + dispatch recorder ---------------------------
 
+/// @brief Creates the fresh-set descriptor pool on first use.
 void runtime::ensure_dispatch_descriptor_pool_locked() {
     if (dispatch_descriptor_pool_ != VK_NULL_HANDLE)
         return;
@@ -274,12 +285,14 @@ void runtime::ensure_dispatch_descriptor_pool_locked() {
              "vkCreateDescriptorPool(gpu)");
 }
 
+/// @brief Resets the fresh-set pool between complete frontend operations.
 void runtime::reset_dispatch_descriptor_pool_locked() {
     ensure_dispatch_descriptor_pool_locked();
     check_vk(vkResetDescriptorPool(device_, dispatch_descriptor_pool_, 0),
              "vkResetDescriptorPool(gpu)");
 }
 
+/// @brief Allocates one descriptor set whose bindings remain immutable through submission.
 VkDescriptorSet runtime::allocate_dispatch_descriptor_set_locked(VkDescriptorSetLayout layout) {
     VkDescriptorSetAllocateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -291,6 +304,7 @@ VkDescriptorSet runtime::allocate_dispatch_descriptor_set_locked(VkDescriptorSet
     return set;
 }
 
+/// @brief Updates a reusable descriptor set from explicit buffer-offset-range triples.
 void runtime::bind_descriptors_offsets_locked(const compute_pipeline& entry,
                                               std::span<const VkDescriptorBufferInfo> infos) {
     std::vector<VkWriteDescriptorSet> writes(infos.size());
@@ -307,6 +321,7 @@ void runtime::bind_descriptors_offsets_locked(const compute_pipeline& entry,
         device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
+/// @brief Records one compute dispatch and its causal receipt use.
 void runtime::record_compute_dispatch_locked(VkCommandBuffer cmd,
                                              const compute_pipeline& pipe,
                                              std::span<const VkDescriptorBufferInfo> infos,
@@ -347,6 +362,7 @@ void runtime::record_compute_dispatch_locked(VkCommandBuffer cmd,
     vkCmdDispatch(cmd, group_count, 1, 1);
 }
 
+/// @brief Records every histogram, scan, and scatter pass for one stable radix sort.
 void runtime::record_radix_sort_locked(VkCommandBuffer cmd,
                                        const gpu_arena_slice& keys,
                                        const gpu_arena_slice& values,
@@ -422,6 +438,7 @@ void runtime::record_radix_sort_locked(VkCommandBuffer cmd,
     result_in_scratch = in_scratch;
 }
 
+/// @brief Records stable value-first then key sorting over parallel pair buffers.
 void runtime::record_stable_pair_sort_by_value_then_key_locked(VkCommandBuffer command_buffer,
                                                                sorted_pair_device_views& views,
                                                                gpu_arena_slice hist,

@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Validates and executes the SneakySnake recorded-command route.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_batch_roundtrip(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
@@ -56,6 +57,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_sneaky_snake_rank_
     return results;
 }
 
+/// @brief Selects and executes the GateKeeper route for one homogeneous batch.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_batch_roundtrip(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
@@ -71,6 +73,7 @@ std::vector<bioseq::prefilter::prefilter_result> runtime::run_gatekeeper_rank_ba
     return results;
 }
 
+/// @brief Reuses or records one rank-prefilter command and validates downloaded results.
 std::vector<bioseq::prefilter::prefilter_result> runtime::run_rank_prefilter_batch_roundtrip_locked(
     shader_kind kind,
     std::uint32_t push_mode,

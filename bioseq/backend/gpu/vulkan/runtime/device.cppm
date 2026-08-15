@@ -25,6 +25,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Releases one buffer through its owning runtime and clears borrowed state.
 void buffer::reset() noexcept {
     if (owner != nullptr && buffer_handle != VK_NULL_HANDLE) {
         owner->destroy_buffer(*this);
@@ -43,6 +44,7 @@ void buffer::reset() noexcept {
 // runtime lifecycle
 // ---------------------------------------------------------------------------
 
+/// @brief Initializes the process runtime once and retains any diagnostic on failure.
 runtime::runtime() {
     try {
         init();
@@ -59,15 +61,18 @@ runtime::runtime() {
     }
 }
 
+/// @brief Releases runtime-owned Vulkan state in dependency-safe order.
 runtime::~runtime() {
     shutdown();
 }
 
+/// @brief Returns the lazily initialized process-wide runtime owner.
 runtime& runtime::instance() {
     static runtime runtime;
     return runtime;
 }
 
+/// @brief Resolves the optional MoltenVK private workgroup-size entry point.
 void runtime::resolve_moltenvk_private_api() noexcept {
     set_workgroup_size_mvk_ = nullptr;
 #if defined(__APPLE__)
@@ -82,7 +87,7 @@ void runtime::resolve_moltenvk_private_api() noexcept {
         set_workgroup_size_mvk_ = fn;
         return;
     }
-    constexpr const char* candidates[] = {
+    constexpr std::array candidates = {
         "/opt/homebrew/lib/libMoltenVK.dylib",
         "/usr/local/lib/libMoltenVK.dylib",
     };
@@ -96,11 +101,13 @@ void runtime::resolve_moltenvk_private_api() noexcept {
 #endif
 }
 
+/// @brief Checks whether the installed provider must supply shader modules.
 bool runtime::should_use_shader_provider_locked() const noexcept {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     return provider != nullptr && provider->load_module != nullptr;
 }
 
+/// @brief Lets the installed provider prepare shader state before runtime creation.
 void prepare_shader_provider_runtime() {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     if (provider == nullptr || provider->prepare_runtime == nullptr) {
@@ -113,6 +120,7 @@ void prepare_shader_provider_runtime() {
     }
 }
 
+/// @brief Selects a physical device and creates the synchronous Vulkan runtime.
 void runtime::init() {
     // --- Instance ---
     ensure_vulkan_loader_loaded_for_runtime();
@@ -545,6 +553,7 @@ void runtime::init() {
         features_.software_device);
 }
 
+/// @brief Destroys buffers, pipelines, synchronization objects, and device handles.
 void runtime::shutdown() noexcept {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
@@ -596,6 +605,7 @@ void runtime::shutdown() noexcept {
 #endif
 }
 
+/// @brief Selects a memory type satisfying the requested property mask.
 std::uint32_t runtime::find_memory_type(std::uint32_t type_bits,
                                         VkMemoryPropertyFlags flags) const {
     VkPhysicalDeviceMemoryProperties mem_props{};
@@ -614,6 +624,7 @@ std::uint32_t runtime::find_memory_type(std::uint32_t type_bits,
 // buffer allocation
 // ---------------------------------------------------------------------------
 
+/// @brief Creates one persistently mapped host-visible buffer.
 buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
     if (!features_.available) {
         throw vulkan_runtime_error("create_host_buffer on unavailable device");
@@ -678,6 +689,7 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
                   mapped};
 }
 
+/// @brief Queries physical allocation bytes for a logical buffer shape.
 std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
                                                         VkBufferUsageFlags usage) const {
     if (bytes == 0u)
@@ -695,6 +707,7 @@ std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
     return requirements.size;
 }
 
+/// @brief Totals physical bytes retained by the shared prefilter workspace.
 std::uint64_t runtime::prefilter_workspace_allocation_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
     return saturating_add(
@@ -704,6 +717,7 @@ std::uint64_t runtime::prefilter_workspace_allocation_bytes_locked() const noexc
                                       prefilter_results_buffer_.allocation_bytes)));
 }
 
+/// @brief Releases every shared prefilter buffer and its admission permit.
 void runtime::release_prefilter_workspace_locked() noexcept {
     prefilter_results_buffer_.reset();
     prefilter_jobs_buffer_.reset();
@@ -713,6 +727,7 @@ void runtime::release_prefilter_workspace_locked() noexcept {
     prefilter_workspace_permit_.release();
 }
 
+/// @brief Grows one prefilter allocation without shrinking a sufficient buffer.
 void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
                                                        std::uint64_t bytes,
                                                        VkBufferUsageFlags usage) {
@@ -773,6 +788,7 @@ void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
     prefilter_workspace_permit_.shrink_to(retained);
 }
 
+/// @brief Computes physical arena bytes including retained high-water capacity.
 std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_bytes) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -790,6 +806,7 @@ std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_
     return std::max(requested_requirement, current_requirement);
 }
 
+/// @brief Computes physical allocation bytes for one buffer usage contract.
 std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_bytes,
                                                      VkBufferUsageFlags usage) {
     std::lock_guard<std::mutex> guard(mu_);
@@ -799,6 +816,7 @@ std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_byt
     return buffer_memory_requirement_locked(requested_bytes, usage);
 }
 
+/// @brief Creates one device buffer admitted against its physical allocation.
 buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
     if (!features_.available) {
         throw vulkan_runtime_error("create_device_buffer on unavailable device");
@@ -885,6 +903,7 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
                   mapped};
 }
 
+/// @brief Releases one allocation and its admission permit exactly once.
 void runtime::destroy_buffer(buffer& allocation) noexcept {
     if (device_ == VK_NULL_HANDLE)
         return;

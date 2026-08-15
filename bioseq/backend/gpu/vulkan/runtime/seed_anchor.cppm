@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Counts and emits seed hits against an already resident target index.
 seed_lookup_result
 runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                    std::span<const std::uint32_t> prefix_counts,
@@ -353,6 +354,7 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
 // GPU frontend — arena + frontend implementation
 // ===========================================================================
 
+/// @brief Runs seed lookup and canonical anchor sorting for one query.
 seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                       std::uint64_t query_len,
                                                       std::uint32_t kmer_size,

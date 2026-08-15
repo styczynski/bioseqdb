@@ -42,11 +42,14 @@ struct vulkan_submission_test_state {
 
 vulkan_submission_test_state g_vulkan_submission_test_state{};
 
+/// @brief Reads the fault selected for the test-only submission seam.
+/// @return Fault visible to the next upload and submission.
 [[nodiscard]] vulkan_submission_test_fault active_vulkan_submission_test_fault() noexcept {
     return static_cast<vulkan_submission_test_fault>(
         g_vulkan_submission_test_state.fault.load(std::memory_order_acquire));
 }
 
+/// @brief Records whether an armed upload-failure fault reached the upload boundary.
 void note_vulkan_submission_test_upload() noexcept {
     const auto fault = active_vulkan_submission_test_fault();
     if (fault == vulkan_submission_test_fault::none) {
@@ -58,6 +61,8 @@ void note_vulkan_submission_test_upload() noexcept {
     }
 }
 
+/// @brief Holds an armed submission after queue submission and before fence drain.
+/// @return Fault that must be delivered after the shared fence is restored.
 [[nodiscard]] vulkan_submission_test_fault delay_vulkan_submission_test_after_submit() noexcept {
     const auto fault = active_vulkan_submission_test_fault();
     if (fault == vulkan_submission_test_fault::none) {
@@ -75,6 +80,7 @@ void note_vulkan_submission_test_upload() noexcept {
     return fault;
 }
 
+/// @brief Holds delivery of an armed fault after the fence has been drained.
 void delay_vulkan_submission_test_after_drain(vulkan_submission_test_fault fault) noexcept {
     if (fault == vulkan_submission_test_fault::none) {
         return;
@@ -90,6 +96,7 @@ void delay_vulkan_submission_test_after_drain(vulkan_submission_test_fault fault
     state.waiting_after_drain.store(0u, std::memory_order_release);
 }
 
+/// @brief Delivers an armed fault only after queue and fence cleanup has completed.
 void deliver_vulkan_submission_test_fault_after_drain(vulkan_submission_test_fault fault) {
     if (fault == vulkan_submission_test_fault::none) {
         return;
@@ -192,6 +199,8 @@ constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
     return false;
 }
 
+/// @brief Enumerates loader-visible instance extensions without changing loader state.
+/// @return Available instance extensions or an empty list when enumeration fails.
 [[nodiscard]] std::vector<VkExtensionProperties> instance_extensions() {
     std::uint32_t count = 0;
     if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) != VK_SUCCESS) {
@@ -204,6 +213,8 @@ constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
     return props;
 }
 
+/// @brief Enumerates extensions for one physical device.
+/// @return Available device extensions or an empty list when enumeration fails.
 [[nodiscard]] std::vector<VkExtensionProperties> device_extensions(VkPhysicalDevice device) {
     std::uint32_t count = 0;
     if (vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr) != VK_SUCCESS) {
@@ -226,7 +237,7 @@ void ensure_homebrew_moltenvk_icd_visible() {
     if (std::getenv("VK_ICD_FILENAMES") != nullptr) {
         return;
     }
-    constexpr const char* candidates[] = {
+    constexpr std::array candidates = {
         "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
         "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
     };
@@ -311,6 +322,7 @@ void reset_vulkan_submission_test_seam() noexcept {
 }
 #endif
 
+/// @brief Resolves every Vulkan entry point required by the synchronous runtime.
 void load_vulkan_runtime_functions() {
     std::string missing;
 #define BIOSEQ_LOAD_VULKAN_FUNCTION(name)                                                          \
@@ -332,10 +344,11 @@ void load_vulkan_runtime_functions() {
     }
 }
 
+/// @brief Loads a process-visible Vulkan loader when needed, then resolves its entry points.
 void ensure_vulkan_loader_loaded_for_runtime() {
     if (::dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
 #if defined(__APPLE__)
-        constexpr const char* candidates[] = {
+        constexpr std::array candidates = {
             "@rpath/libvulkan.1.4.341.dylib",
             "@rpath/libvulkan.1.dylib",
             "@rpath/libvulkan.dylib",
@@ -343,7 +356,7 @@ void ensure_vulkan_loader_loaded_for_runtime() {
             "/usr/local/lib/libvulkan.dylib",
         };
 #else
-        constexpr const char* candidates[] = {
+        constexpr std::array candidates = {
             "libvulkan.so.1",
             "libvulkan.so",
         };
@@ -374,6 +387,8 @@ void ensure_vulkan_loader_loaded_for_runtime() {
     load_vulkan_runtime_functions();
 }
 
+/// @brief Resolves the image that owns a loaded symbol on platforms that expose it.
+/// @return Owning image path or an empty string when unavailable.
 [[nodiscard]] std::string symbol_image(const void* symbol) {
 #if defined(__APPLE__)
     Dl_info info{};
@@ -386,6 +401,7 @@ void ensure_vulkan_loader_loaded_for_runtime() {
     return {};
 }
 
+/// @brief Copies host bytes into a mapped device allocation before shader access.
 void runtime::upload_locked(buffer& transfer_scratch,
                             buffer& dst,
                             std::span<const std::byte> bytes,
@@ -410,6 +426,7 @@ void runtime::upload_locked(buffer& transfer_scratch,
     }
 }
 
+/// @brief Copies a mapped device allocation into caller-owned host bytes.
 void runtime::download_locked(buffer& transfer_scratch,
                               const buffer& src,
                               std::span<std::byte> bytes) {
@@ -485,6 +502,8 @@ struct alignment_cigar_push_constants {
 static_assert(sizeof(alignment_cigar_push_constants) == 60);
 static_assert(std::is_standard_layout_v<alignment_cigar_push_constants>);
 
+/// @brief Encodes alignment-extension parameters into the shader push layout.
+/// @return ABI-pinned push constants for one dispatch.
 [[nodiscard]] alignment_extension_push_constants
 alignment_extension_push(std::uint32_t job_count,
                          const gpu_alignment_extension_params& params) noexcept {
@@ -501,6 +520,8 @@ alignment_extension_push(std::uint32_t job_count,
                                               params.reserved0};
 }
 
+/// @brief Encodes bounded-CIGAR parameters into the shader push layout.
+/// @return ABI-pinned push constants for one dispatch.
 [[nodiscard]] alignment_cigar_push_constants
 alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& params) noexcept {
     return alignment_cigar_push_constants{job_count,
@@ -520,6 +541,7 @@ alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& 
                                           params.reserved};
 }
 
+/// @brief Rejects an alignment-extension score outside the shader domain.
 void validate_alignment_extension_score(const char* name, std::int32_t value) {
     constexpr std::int32_t k_max_absolute_score = 1'000'000;
     if (value < 0 || value > k_max_absolute_score) {
@@ -528,6 +550,7 @@ void validate_alignment_extension_score(const char* name, std::int32_t value) {
     }
 }
 
+/// @brief Checks one symbol range against stream bounds and alphabet width.
 void validate_alignment_extension_symbols(std::span<const std::uint32_t> symbols,
                                           std::uint32_t offset,
                                           std::uint32_t length,
@@ -559,6 +582,7 @@ void validate_alignment_extension_symbols(std::span<const std::uint32_t> symbols
     }
 }
 
+/// @brief Validates all alignment-extension spans and ABI fields before submission.
 void validate_alignment_extension_inputs(std::span<const std::uint32_t> query_symbols,
                                          std::span<const std::uint32_t> target_symbols,
                                          std::span<const gpu_alignment_extension_job_wire> jobs,
@@ -640,6 +664,7 @@ void validate_alignment_extension_inputs(std::span<const std::uint32_t> query_sy
     }
 }
 
+/// @brief Checks shared prefilter stream bounds before replaying a recorded command.
 void validate_prefilter_inputs(const char* algorithm,
                                std::span<const std::uint8_t> query_ranks,
                                std::span<const std::uint8_t> target_ranks,
@@ -657,6 +682,7 @@ void validate_prefilter_inputs(const char* algorithm,
     }
 }
 
+/// @brief Verifies SneakySnake result status and rejection diagnostics per job.
 void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_job> jobs,
                                    std::span<const bioseq::prefilter::prefilter_result> results,
                                    std::size_t query_rank_count,
@@ -720,6 +746,7 @@ void validate_sneaky_snake_results(std::span<const bioseq::prefilter::prefilter_
     }
 }
 
+/// @brief Verifies GateKeeper result status and exact-guard diagnostics per job.
 void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_job> jobs,
                                  std::span<const bioseq::prefilter::prefilter_result> results,
                                  std::size_t query_rank_count,
@@ -824,6 +851,7 @@ void validate_gatekeeper_results(std::span<const bioseq::prefilter::prefilter_jo
     }
 }
 
+/// @brief Rejects a bounded-CIGAR score outside the shader domain.
 void validate_alignment_cigar_score(const char* name, std::int32_t value) {
     constexpr std::int32_t k_max_absolute_score = 1'000'000;
     if (value < 0 || value > k_max_absolute_score) {
@@ -835,6 +863,7 @@ void validate_alignment_cigar_score(const char* name, std::int32_t value) {
     }
 }
 
+/// @brief Validates bounded-CIGAR streams, traceback spans, and output capacity.
 void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbols,
                                      std::span<const std::uint32_t> target_symbols,
                                      std::span<const gpu_alignment_cigar_job_wire> jobs,
@@ -1070,6 +1099,8 @@ struct gpu_anchor_sort_key_plan {
     std::uint32_t pass_count = 8u;
 };
 
+/// @brief Derives the exact radix width for encoded target coordinates.
+/// @return Conservative default when the coordinate span is not representable.
 [[nodiscard]] gpu_anchor_sort_key_plan
 make_anchor_sort_key_plan(std::uint64_t target_len, std::uint64_t target_position_offset) noexcept {
     const auto pass_count =
@@ -1120,6 +1151,7 @@ void record_compute_barrier(VkCommandBuffer cmd) {
                          nullptr);
 }
 
+/// @brief Records host-write visibility before a shader consumes mapped bytes.
 void record_host_to_shader(VkCommandBuffer cmd) {
     VkMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -1137,6 +1169,7 @@ void record_host_to_shader(VkCommandBuffer cmd) {
                          nullptr);
 }
 
+/// @brief Records shader-write visibility before the host reads mapped bytes.
 void record_shader_to_host(VkCommandBuffer cmd) {
     VkMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

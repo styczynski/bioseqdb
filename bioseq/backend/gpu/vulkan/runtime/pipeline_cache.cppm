@@ -24,6 +24,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Destroys one pipeline handle set in reverse ownership order.
 void runtime::owned_pipeline_handles::reset() noexcept {
     if (device != VK_NULL_HANDLE) {
         if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
@@ -50,6 +51,7 @@ void runtime::owned_pipeline_handles::reset() noexcept {
     pipeline = VK_NULL_HANDLE;
 }
 
+/// @brief Totals retained host metadata for both runtime pipeline caches.
 std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     using bioseq::common::saturating_add;
     using bioseq::common::saturating_mul;
@@ -73,6 +75,7 @@ std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
     return owned;
 }
 
+/// @brief Admits a prospective cache capacity before either vector grows.
 void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
                                                  std::size_t compute_pipeline_capacity) {
     using bioseq::common::saturating_add;
@@ -129,6 +132,7 @@ void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
     }
 }
 
+/// @brief Shrinks the metadata permit to the cache capacities actually retained.
 void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
     if (!pipeline_cache_metadata_permit_)
         return;
@@ -149,6 +153,7 @@ void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
         pipeline_cache_metadata_permit_.release();
 }
 
+/// @brief Creates one chaining pipeline and binds its immutable Metal archive receipt.
 runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeline_key& key) {
     const bool provider_used = should_use_shader_provider_locked();
     const bool archive_receipt_required =
@@ -321,6 +326,7 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
 // Upload / download helpers (called under mu_, command buffer already open)
 // ---------------------------------------------------------------------------
 
+/// @brief Returns a cached compute pipeline or creates its exact shader variant.
 runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                                                                std::uint32_t local_size,
                                                                std::uint32_t max_span) {
@@ -576,6 +582,7 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     return compute_pipelines_.back().view();
 }
 
+/// @brief Updates one reusable descriptor set with whole-buffer storage bindings.
 void runtime::bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                        std::span<const VkBuffer> buffers) {
     DEBUG_ASSERT(buffers.size() == entry.binding_count,

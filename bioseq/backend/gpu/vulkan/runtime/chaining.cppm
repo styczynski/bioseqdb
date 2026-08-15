@@ -22,6 +22,7 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
+/// @brief Runs tiled dynamic-programming chaining over caller-owned buffers.
 void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
                                               buffer& transfer_scratch,
                                               buffer& anchors,
@@ -164,6 +165,7 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
+/// @brief Runs coordinate chaining and downloads the selected predecessor trace.
 gpu_coordinate_chain_trace_result
 runtime::run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& key,
                                                  buffer& transfer_scratch,
