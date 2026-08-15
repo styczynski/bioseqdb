@@ -12,10 +12,9 @@ export module bioseq.gpu.metal_archive;
 
 export namespace bioseq::gpu::metal_archive {
 
-/** @brief Wire revision emitted by the exec-clean archive builder process. */
+/** @brief Protocol revision printed in the archive-builder qualification transcript. */
 inline constexpr std::uint32_t k_archive_helper_wire_revision = 2u;
-/** @brief Build identity emitted alongside the archive-builder wire revision.
- */
+/** @brief Helper identity printed beside the protocol revision. */
 inline constexpr std::string_view k_archive_helper_build_identity = "bioseq_gpu_archive_builder";
 
 /**
@@ -38,11 +37,11 @@ inline constexpr std::string_view k_archive_helper_build_identity = "bioseq_gpu_
  * @return A line-oriented qualification transcript.
  * @warning Call only from an exec-clean process.
  */
-[[nodiscard]] std::string
-build_binary_archive(std::string_view metallib_path,
-                     std::string_view archive_path,
-                     std::string_view entry_name,
-                     std::uint64_t maximum_total_threads_per_threadgroup,
-                     bool is_threadgroup_size_multiple_of_thread_execution_width);
+[[nodiscard]] auto build_binary_archive(std::string_view metallib_path,
+                                        std::string_view archive_path,
+                                        std::string_view entry_name,
+                                        std::uint64_t maximum_total_threads_per_threadgroup,
+                                        bool is_threadgroup_size_multiple_of_thread_execution_width)
+    -> std::string;
 
 } // namespace bioseq::gpu::metal_archive

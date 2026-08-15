@@ -1,6 +1,9 @@
 /**
- * @file
- * @brief Exposes the complete dependency-light Vulkan ABI surface.
+ * @file vulkan/abi/index.cppm
+ * @brief Re-exports the complete dependency-light Vulkan ABI surface.
+ *
+ * Consumers import this primary interface while each partition owns one host/shader
+ * contract family.
  */
 export module bioseq.gpu.vulkan.abi;
 
