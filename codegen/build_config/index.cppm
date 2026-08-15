@@ -64,14 +64,17 @@ namespace detail {
                                      "' must occur once");
         }
     }
-    constexpr std::string_view required[]{
-        "--compile-contract", "--manifest", "--output", "--source", "--stamp"};
-    for (const std::string_view option : required) {
+    const auto require_option = [&singleton](const std::string_view option) {
         if (!singleton.contains(option)) {
             throw std::runtime_error("missing required build-config generator option '" +
                                      std::string{option} + "'");
         }
-    }
+    };
+    require_option("--compile-contract");
+    require_option("--manifest");
+    require_option("--output");
+    require_option("--source");
+    require_option("--stamp");
     command_line result{
         .source = singleton.at(std::string{"--source"}),
         .output = singleton.at(std::string{"--output"}),

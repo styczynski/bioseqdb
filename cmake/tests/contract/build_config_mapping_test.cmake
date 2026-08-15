@@ -70,12 +70,39 @@ function(_verify_cache_testing build_cache cache_testing expected)
     "cache-testing mapping for build-cache=${build_cache}, testing=${cache_testing}")
 endfunction()
 
+function(_verify_profile_enabled ordinal alphabet width expected)
+  _bioseq_template_flatten_profile_enabled(
+    "${ordinal}" "${alphabet}" "${width}" actual)
+  _require_equal("${actual}" "${expected}"
+    "template profile ${ordinal}, alphabet=${alphabet}, width=${width}")
+endfunction()
+
+_bioseq_build_config_profiles(_profiles)
+set(_expected_profiles
+  dna4_uint64
+  all_alphabets_uint64
+  all_coordinates
+  all_coordinates_adaptive_lengths
+  extended_kmer_coordinates
+  full_specialization)
+_require_equal("${_profiles}" "${_expected_profiles}"
+  "canonical template-profile order")
+
 _verify_profile(dna4_uint64 0 0 0 0 0 0 7)
 _verify_profile(all_alphabets_uint64 1 1 0 0 0 0 14)
 _verify_profile(all_coordinates 2 1 1 0 0 0 56)
 _verify_profile(all_coordinates_adaptive_lengths 3 1 1 1 0 0 56)
 _verify_profile(extended_kmer_coordinates 4 1 1 1 1 0 56)
 _verify_profile(full_specialization 5 1 1 1 1 1 56)
+
+_verify_profile_enabled(0 dna4 w8 TRUE)
+_verify_profile_enabled(0 dna5 w8 FALSE)
+_verify_profile_enabled(0 dna4 w4 FALSE)
+_verify_profile_enabled(1 dna5 w8 TRUE)
+_verify_profile_enabled(1 aminoacid w8 FALSE)
+_verify_profile_enabled(1 dna4 w4 FALSE)
+_verify_profile_enabled(2 aminoacid w4 TRUE)
+_verify_profile_enabled(5 aminoacid w4 TRUE)
 
 foreach(_true_value IN ITEMS 1 ON TRUE YES Y 2 -1)
   _verify_boolean("${_true_value}" 1)
@@ -141,6 +168,17 @@ _require_contains("${_authored_config_source}"
   "canonical cache-testing override macro")
 
 file(READ "${_repository_root}/bioseq/CMakeLists.txt" _bioseq_cmake_source)
+_require_contains("${_bioseq_cmake_source}"
+  "_bioseq_build_config_profiles(BIOSEQ_TEMPLATE_FLATTEN_PROFILES)"
+  "canonical template-profile catalog")
+_require_contains("${_bioseq_cmake_source}"
+  "_bioseq_build_config_profile("
+  "canonical template-profile mapping")
+if("${_bioseq_cmake_source}" MATCHES
+    "BIOSEQ_TEMPLATE_FLATTEN_PROFILE[ \t\r\n]+STREQUAL")
+  message(FATAL_ERROR
+    "bioseq/CMakeLists.txt duplicates the canonical template-profile map")
+endif()
 _require_contains("${_bioseq_cmake_source}"
   "option(BIOSEQ_TEST_INDEXES
   \"Compile the test-only indexing descriptors into the extension + test execs\"

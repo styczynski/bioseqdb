@@ -223,6 +223,18 @@ inline void verify_profile_contracts() {
 inline void verify_fail_closed_declarations() {
     require_rejected(
         [] {
+            static_cast<void>(collect_config_model(
+                "missing_bioseq_prefix.cppm",
+                fixture(documented_variable("bool",
+                                            "fixture_enabled",
+                                            "BIOSEQ_BUILD_CONFIG_FIXTURE_ENABLED",
+                                            "boolean",
+                                            "false|true",
+                                            "false"))));
+        },
+        "public constants without the bioseq_ prefix are rejected");
+    require_rejected(
+        [] {
             static_cast<void>(
                 collect_config_model("wrong_macro.cppm",
                                      fixture(documented_variable("bool",

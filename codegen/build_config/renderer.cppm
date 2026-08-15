@@ -70,7 +70,7 @@ struct source_edit final {
 [[nodiscard]] inline std::string json_escape(const std::string_view value) {
     std::string result;
     result.reserve(value.size());
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr std::string_view digits = "0123456789abcdef";
     for (const unsigned char character : value) {
         switch (character) {
         case '"':

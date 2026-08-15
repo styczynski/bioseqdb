@@ -202,15 +202,15 @@ function(_bioseq_template_flatten_find_attribute_end
 endfunction()
 
 function(_bioseq_template_flatten_profile_enabled
-    profile alphabet_label width_label output_variable)
+    profile_ordinal alphabet_label width_label output_variable)
   set(_enabled TRUE)
-  if(profile STREQUAL "dna4_uint64")
+  if(profile_ordinal EQUAL 0)
     if((NOT alphabet_label STREQUAL "" AND
         NOT alphabet_label STREQUAL "dna4") OR
        (NOT width_label STREQUAL "" AND NOT width_label STREQUAL "w8"))
       set(_enabled FALSE)
     endif()
-  elseif(profile STREQUAL "all_alphabets_uint64")
+  elseif(profile_ordinal EQUAL 1)
     if((NOT alphabet_label STREQUAL "" AND
         NOT (alphabet_label STREQUAL "dna4" OR
              alphabet_label STREQUAL "dna5")) OR
@@ -498,7 +498,8 @@ function(bioseq_template_flatten_probe)
     endforeach()
     string(APPEND _canonical "\n")
     _bioseq_template_flatten_profile_enabled(
-      ${ARG_PROFILE} "${_alphabet}" "${_width}" _enabled)
+      "${_bioseq_template_flatten_profile_index}"
+      "${_alphabet}" "${_width}" _enabled)
     set(_relative_path "instance_${_ordinal}.cppm")
     string(REPLACE ";" "," _assignments_encoded "${_assignments}")
     list(APPEND _coordinate_records

@@ -23,17 +23,22 @@ function(_bioseq_build_config_cache_testing build_cache_value
   endif()
 endfunction()
 
-function(_bioseq_build_config_profile profile ordinal_output
-    all_alphabets_output all_coordinates_output adaptive_lengths_output
-    extended_coordinates_output full_specialization_output
-    scheduler_unit_count_output)
-  set(_profiles
+function(_bioseq_build_config_profiles output_variable)
+  set(${output_variable}
     dna4_uint64
     all_alphabets_uint64
     all_coordinates
     all_coordinates_adaptive_lengths
     extended_kmer_coordinates
-    full_specialization)
+    full_specialization
+    PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_build_config_profile profile ordinal_output
+    all_alphabets_output all_coordinates_output adaptive_lengths_output
+    extended_coordinates_output full_specialization_output
+    scheduler_unit_count_output)
+  _bioseq_build_config_profiles(_profiles)
   list(FIND _profiles "${profile}" _profile_ordinal)
   if(_profile_ordinal EQUAL -1)
     _bioseq_build_config_fail(
