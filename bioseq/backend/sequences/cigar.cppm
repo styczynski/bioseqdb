@@ -73,7 +73,7 @@ inline void push_packed_cigar(
 
 /**
  * @brief Decode and append packed CIGAR words to an operation vector.
- * @param destination Run-length destination; equal adjacent opcodes merge.
+ * @param destination Run-length destination. Equal adjacent opcodes merge.
  * @param source KSW2 words encoded as `(length << 4) | opcode`.
  */
 inline void append_cigar(
@@ -103,8 +103,8 @@ inline void append_cigar(
  * @tparam p_strand_reversed Whether query ranks are decoded in reverse-complement
  * order.
  * @tparam p_alphabet Logical alphabet shared by both sequence views.
- * @param query_seq Lazy query view; it is decoded only for the selected window.
- * @param target_seq Lazy target view; it is decoded only for the selected window.
+ * @param query_seq Lazy query view decoded only for the selected window.
+ * @param target_seq Lazy target view decoded only for the selected window.
  * @param query_start Inclusive query offset.
  * @param query_end Exclusive query offset.
  * @param target_start Inclusive target offset.
@@ -299,7 +299,7 @@ exact_edit_distance_for_implicit_seed(
 /**
  * @brief Format operations as a human-readable CIGAR string.
  * @param cigar Run-length operations to render.
- * @return Text such as `58M1I33M`; unknown opcodes render as `?`.
+ * @return Text such as `58M1I33M`. Unknown opcodes render as `?`.
  */
 [[nodiscard]] inline std::string format_cigar(
     const std::vector<cigar_operation>& cigar)

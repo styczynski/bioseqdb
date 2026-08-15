@@ -4,7 +4,7 @@
  *
  * The module owns the shared contracts used by scalar, SIMD, RMQ, and Vulkan
  * chaining. Coordinates remain 64-bit through sorting and exact score
- * calculations; packed accessors exist only for canonical ordering.
+ * calculations. Packed accessors exist only for canonical ordering.
  */
 module;
 
@@ -308,7 +308,7 @@ struct chain {
 ///
 /// Allocates via `context::current().alloc_chain_array<element_type>(...)` so the
 /// underlying storage is reclaimed at the surrounding `arena::chain` scope
-/// unwind.  `push_back` grows geometrically; orphaned slabs land in the
+/// unwind. `push_back` grows geometrically. Orphaned slabs land in the
 /// arena and are freed in O(1) at scope exit.
 ///
 /// Two patterns are supported:
@@ -316,7 +316,7 @@ struct chain {
 ///   1. Trivially-copyable `element_type` (e.g. `anchor`, `chain`, `minimizer_record`):
 ///      callers use `reserve(N)` + `push_back` or `reserve(N)` + write
 ///      through `data()` + `resize(actual_n)`.  The arena scope reclaims
-///      the slab without per-element work; element destructors are no-op.
+///      the slab without per-element work. Element destructors are no-op.
 ///
 ///   2. Non-trivially-destructible `element_type` (e.g. `alignment_region` with its
 ///      `std::vector<cigar_operation>` member): callers MUST use
@@ -418,7 +418,7 @@ struct arena_slab {
     /// Allocate exactly @p capacity uninitialised slots in the arena.
     ///
     /// Use this once (not in a growth loop) for non-trivially-destructible
-    /// `element_type`.  Callers then `construct_at_back(args...)` per element; the
+    /// `element_type`. Callers then `construct_at_back(args...)` per element. The
     /// slab's destructor walks the live prefix and calls `~element_type()` on each.
     void reserve_for_placement_new(std::size_t capacity) {
         DEBUG_ASSERT(capacity_ == 0, "reserve_for_placement_new must be called on a fresh slab");
@@ -444,7 +444,7 @@ struct arena_slab {
 
     /// `push_back` overload restricted to trivially-copyable types.
     ///
-    /// Geometric growth via `memcpy` of the live prefix; non-trivial types
+    /// Geometric growth via `memcpy` of the live prefix. Non-trivial types
     /// must use the `reserve_for_placement_new` + `construct_at_back`
     /// pattern instead so destructors are called.
     void push_back(element_type value) {
@@ -592,7 +592,7 @@ struct chaining_parameters {
         bioseq::chaining::chaining_mode::simd_dp;
 
     /// Named SIMD forward-search policy. Exact is the permanent default and
-    /// oracle; accelerated execution must always be requested explicitly.
+    /// oracle. Accelerated execution must always be requested explicitly.
     simd_chaining_policy simd_policy = simd_chaining_policy::exact_visited;
 
     /// Enable Vulkan execution for the vulkan_tiled_dp chaining backend. When
@@ -602,7 +602,7 @@ struct chaining_parameters {
 
     /// True when downstream stages only need a mapped coordinate/strand result,
     /// not the full secondary list or base-alignment metadata. The scalar/SIMD
-    /// chaining backends ignore this hint; the Vulkan backend uses it to keep the
+    /// chaining backends ignore this hint. The Vulkan backend uses it to keep the
     /// selected GPU coordinate path from spending CPU time backtracking every
     /// chain when SQL did not request CIGAR, divergence, or MAPQ.
     bool    coordinate_only    = false;
@@ -760,14 +760,13 @@ struct chaining_parameters {
 
 /// Extract chains from DP arrays via backtracking.
 ///
-/// Equivalent to mg_chain_backtrack() + compact_a() in lchain.c.
 /// Processes anchors from highest to lowest score, tracing predecessor
 /// chains and filtering by min_score and min_seed_count.
 ///
-/// Rejected traces remain visited. This matches the source algorithm and
-/// prevents repeated traversal through already-explored anchors.
+/// Rejected traces remain visited to prevent repeated traversal through
+/// already-explored anchors.
 ///
-/// @param anchors                  Original (AoS) anchor array
+/// @param anchors                  Input anchor array in array-of-structs form.
 /// @param best_scores              f[i] -- best chain score ending at anchor i
 /// @param predecessors             p[i] -- predecessor index (-1 if chain start)
 /// @param peak_scores              v[i] -- peak score along the chain through i
@@ -775,7 +774,7 @@ struct chaining_parameters {
 /// @param min_seed_count           Minimum number of anchors per chain
 /// @param chains_out               Output slab — surviving chains are appended.
 /// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                 appended in chain order; `chain::anchor_start`
+///                                 appended in chain order. `chain::anchor_start`
 ///                                 indexes into this slab.
 ///
 /// The two output slabs are written directly in the per-query chain arena.
@@ -841,8 +840,8 @@ inline void backtrack_chains(
     for (int64_t rank_idx = static_cast<int64_t>(scored_count) - 1;
          rank_idx >= 0; --rank_idx)
     {
-        // NOTE: Do NOT skip candidates where visited[candidate] != 0.
-        // The trace naturally stops at visited nodes. (lchain.c:35-56)
+        // Do not skip previously visited candidates here. The trace naturally
+        // stops at the first visited predecessor.
         std::size_t chain_len = 0;
         int64_t trace_idx;
         for (trace_idx = scored[rank_idx].anchor_index;
@@ -878,9 +877,8 @@ inline void backtrack_chains(
                 reordered_anchors_out.push_back(anchors[chain_idx[i]]);
             }
         }
-        // CRITICAL: Do NOT unmark visited[] for rejected chains.
-        // This prevents re-tracing through already-explored anchors.
-        // (lchain.c:43,55 deliberately leaves t[i]=1)
+        // Keep visited marks for rejected chains so later candidates do not
+        // retrace already-explored anchors.
     }
 
     bioseq_log<logging_level::debug>("[chaining] Backtracking: {} chains from {} anchors",

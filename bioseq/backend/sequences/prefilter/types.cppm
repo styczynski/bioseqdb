@@ -17,7 +17,7 @@ export namespace bioseq::prefilter {
  * @brief Outcome class for a conservative edit-distance prefilter.
  *
  * Unsupported inputs remain accepted so a caller can continue with the exact
- * aligner; prefilters never turn an unsupported geometry into a rejection.
+ * aligner. Prefilters never turn an unsupported geometry into a rejection.
  */
 enum class prefilter_status : std::uint32_t {
     success = 0u,                  ///< The selected prefilter evaluated the job.

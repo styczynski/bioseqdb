@@ -3,7 +3,7 @@
  * @brief Banded exact global edit-distance threshold predicate.
  *
  * The implementation stores only the active diagonal band. Small thresholds
- * use fixed stack arrays; larger thresholds allocate two `O(max_edits)` rows.
+ * use fixed stack arrays. Larger thresholds allocate two `O(max_edits)` rows.
  */
 module;
 

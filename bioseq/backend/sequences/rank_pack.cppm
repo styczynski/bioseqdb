@@ -87,7 +87,7 @@ public:
     /**
      * @brief Append one completed unit.
      * @param value Packed unit to append.
-     * @return Always `true`; allocation failure propagates as an exception.
+     * @return Always `true`. Allocation failure propagates as an exception.
      */
     [[nodiscard]] bool try_write(p_unit_type value) {
         output_->push_back(value);
@@ -229,7 +229,7 @@ public:
      * @brief Flush the partial word and validate optional expected counts.
      * @param expected_symbols Optional exact emitted-rank count.
      * @param expected_units Optional exact written-unit count.
-     * @return Stable terminal result; repeated calls return the same value.
+     * @return Stable terminal result. Repeated calls return the same value.
      */
     [[nodiscard]] rank_pack_result finish(
             std::optional<std::uint64_t> expected_symbols = std::nullopt,

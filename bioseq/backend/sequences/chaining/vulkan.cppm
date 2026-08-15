@@ -1,12 +1,12 @@
 /**
- * @file chaining_vulkan.cppm
+ * @file vulkan.cppm
  * @brief Vulkan G3SA tiled-DP anchor-chaining backend.
  *
  * Consumes the anchors `collect_seed_hits` already produced and sorted, runs
  * the G3SA-style tiled dynamic-programming score generation on Vulkan, then
  * reuses bioseq's `backtrack_chains` to emit the same `(chain, reordered
  * anchor)` ABI the downstream stages already consume. The shader returns the DP
- * arrays (`best_scores`, absolute `predecessors`); this module never ports
+ * arrays (`best_scores`, absolute `predecessors`). This module does not run
  * G3SA's CUDA backtracking stack.
  *
  * Alphabet-neutral by construction: chaining reads anchor coordinates and
@@ -75,8 +75,8 @@ inline void require_vulkan_chaining_supported() {
 
 /// Pick the tile/local workgroup dimensions for the chaining pipeline from the
 /// device limits. 384 is the portable floor (~12 KiB shared stays under the
-/// 16 KiB Vulkan guaranteed minimum); 1024 is only chosen on devices that can
-/// host G3SA's original tile footprint comfortably.
+/// 16 KiB Vulkan guaranteed minimum). 1024 is only chosen on devices that can
+/// host the largest tile footprint comfortably.
 [[nodiscard]] inline bioseq::gpu::vulkan::chaining_pipeline_key
 choose_vulkan_chaining_pipeline(
     const bioseq::gpu::vulkan::vulkan_feature_set& features) noexcept
@@ -402,7 +402,7 @@ struct vulkan_chaining_shape_plan {
 /// Very long hard ranges are usually near-colinear dense minimizer runs where
 /// chaining every anchor adds DP cost without improving the downstream extension
 /// seed. Keep sorted order and both range endpoints, but adaptively thin the
-/// interior so the GPU DP critical path is bounded.
+/// interior so the GPU DP inner path is bounded.
 [[nodiscard]] inline bool compact_long_gpu_chain_ranges(
     std::span<const anchor> anchors,
     std::span<const bioseq::gpu::vulkan::gpu_chain_range> ranges,
@@ -533,7 +533,7 @@ struct vulkan_chaining_shape_plan {
 }
 
 /// Run the Vulkan tiled-DP chaining path. Throws `vulkan_runtime_error` on any
-/// selected-GPU decline; algorithm fallback must be chosen by the caller before
+/// selected-GPU decline. Algorithm fallback must be chosen by the caller before
 /// entering the pipeline.
 [[nodiscard]] inline bool execute_vulkan_chaining(
     std::span<const anchor> anchors,

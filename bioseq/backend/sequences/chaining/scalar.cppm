@@ -1,16 +1,10 @@
 /**
- * @file chaining_scalar.cppm
- * @brief Scalar DP chaining algorithm, extracted from minimap_port.cppm.
+ * @file scalar.cppm
+ * @brief Scalar dynamic-programming anchor chaining.
  *
- * This is the original chain_anchors_dp() algorithm with no algorithmic changes.
- * Equivalent to mg_lchain_dp() in lchain.c:150-219.
- *
- * Complexity: O(n * max_iter) per anchor.
- *
- * Changes from the original minimap_port.cppm extraction:
- *   - Accepts chaining_parameters instead of minimap2_parameters
- *   - Uses precomputed gap_penalty/skip_penalty from chaining_parameters
- *   - Delegates backtracking to shared backtrack_chains() from chaining_utils
+ * Scores coordinate-sorted anchors with prepared gap and skip penalties, then
+ * writes retained chains through the shared arena-backed backtracking contract.
+ * Complexity is O(n * max_chain_iter) per query.
  */
 module;
 
@@ -31,22 +25,18 @@ import bioseq.instrumentation;
 export {
 namespace bioseq::chaining {
 
-/// Scalar DP chaining.
+/// Chain coordinate-sorted anchors with scalar dynamic programming.
 ///
-/// This is the original chain_anchors_dp() from minimap_port.cppm, extracted verbatim.
-/// Equivalent to mg_lchain_dp() in lchain.c:150-219.
+/// For each coordinate-sorted anchor, the kernel:
+///   1. Searches prior anchors in `[window_start, current - 1]`.
+///   2. Adds the pair score to the candidate's best score.
+///   3. Tracks the best predecessor and score.
+///   4. Applies the configured maximum-skip termination.
+///   5. Tries the globally best anchor as a fallback candidate.
 ///
-/// Algorithm:
-///   For each anchor (sorted by ref position):
-///     1. Search backwards through prior anchors in [window_start, current-1]
-///     2. Compute chaining score: pair_score(current, candidate) + best_scores[candidate]
-///     3. Track best predecessor and score
-///     4. Apply max_skip early termination
-///     5. Try the globally best anchor (global_best_idx) as fallback
+/// It then backtracks from highest-scoring anchors to extract chains.
 ///
-///   Backtrack from highest-scoring anchors to extract chains.
-///
-/// @param anchors                  Sorted anchor array (read-only span; the
+/// @param anchors                  Sorted anchor array (read-only span. The
 ///                                  kernel does not mutate the input — it only
 ///                                  reads positions to score and emit a
 ///                                  freshly-reordered anchor span alongside
@@ -56,11 +46,11 @@ namespace bioseq::chaining {
 /// @param chains_out               Output slab — surviving chains are appended
 ///                                  here in score-descending order.
 /// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                  appended in chain order; `chain::anchor_start`
+///                                  appended in chain order. `chain::anchor_start`
 ///                                  indexes into this slab.
 ///
 /// Both output slabs must be live arena_slab values rooted in the caller's
-/// per-query `arena::chain` scope.  The kernel writes directly into them via
+/// per-query `arena::chain` scope. The kernel writes directly into them via
 /// `backtrack_chains`, avoiding an intermediate output container and copy.
 void chain_anchors_scalar(
     std::span<const anchor> anchors,

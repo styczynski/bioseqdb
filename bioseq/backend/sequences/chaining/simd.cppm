@@ -1,5 +1,5 @@
 /**
- * @file chaining_simd.cppm
+ * @file simd.cppm
  * @brief Target-neutral contracts and facade for SIMD DP chaining.
  *
  * The complete Highway implementation is generated per target from
@@ -203,10 +203,10 @@ struct simd_chaining_policy_stats {
 };
 
 /**
- * @brief Execution counters proving that SIMD scoring and backtracking ran.
+ * @brief Execution counters for SIMD scoring and backtracking work.
  *
- * Match, pipeline, and benchmark aggregation carries this object end to end;
- * forbidden scalar-route counters must remain zero for accepted execution.
+ * Match, pipeline, and benchmark aggregation carries this object end to end.
+ * Forbidden scalar-route counters must remain zero for accepted execution.
  */
 struct simd_chaining_execution_stats {
     std::uint64_t anchors_consumed = 0;

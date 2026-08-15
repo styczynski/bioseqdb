@@ -293,6 +293,11 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/state.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/vulkan_minimizers.cppm
@@ -339,14 +344,23 @@ function(bioseq_private_packed_access_scope_names
       run_packed_kernel
       collect_minimizers_bounded_nthash_simd_checked)
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm")
     set(_bioseq_scopes
-      two_stack_simd_iteration_resident_kernel
+      two_stack_simd_iteration_resident_kernel)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm")
+    set(_bioseq_scopes
       decode_packed_dna4_rank_vector
-      decode_packed_nt4_rank_vector
+      decode_packed_nt4_rank_vector)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm")
+    set(_bioseq_scopes
       reset_two_stack_nthash
       consume_two_stack_nthash_packed_fragment
-      consume_two_stack_nthash_fragment
+      consume_two_stack_nthash_fragment)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm")
+    set(_bioseq_scopes
       collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
       run_fragmented_impl)
   elseif("${_bioseq_source}" STREQUAL
@@ -436,7 +450,13 @@ function(bioseq_private_packed_access_line_allowed
       set(_bioseq_allowed TRUE)
     endif()
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm"
+      OR "${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm"
+      OR "${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm"
+      OR "${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm")
     if("${_bioseq_scope}" STREQUAL
         "two_stack_simd_iteration_resident_kernel"
         AND "${_bioseq_line}" STREQUAL
@@ -905,6 +925,11 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimap2_reference_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/state.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm"
@@ -2110,7 +2135,12 @@ bioseq_add_highway_codegen(
     "hasher_lexic|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm|bioseq.highway.sources.hasher_lexic|hasher_lexic|hasher_lexic|hasher_base,simd_utils"
     "hasher_minimap_int|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_minimap_int_kernel.cppm|bioseq.highway.sources.hasher_minimap_int|hasher_minimap_int|hasher_minimap_int|hasher_base,hasher_lexic,simd_utils"
     "minimizer_minimap2_reference|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimap2_reference_kernel.cppm|bioseq.highway.sources.minimizer_minimap2_reference|minimizer_minimap2_reference|minimizers|sequence_ops,hasher_base,hasher_minimap_int,simd_utils,vector_stream"
-    "minimizer_two_stack_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack_nthash|minimizer_two_stack_nthash|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_two_stack_nthash_state|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/state.cppm|bioseq.highway.sources.minimizer_two_stack_nthash_state|minimizer_two_stack_nthash_state|minimizers|"
+    "minimizer_two_stack_nthash_resident_stream|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm|bioseq.highway.sources.minimizer_two_stack_nthash_resident_stream|minimizer_two_stack_nthash_resident_stream|minimizers|minimizer_two_stack_nthash_state,sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
+    "minimizer_two_stack_nthash_exact_vectors|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm|bioseq.highway.sources.minimizer_two_stack_nthash_exact_vectors|minimizer_two_stack_nthash_exact_vectors|minimizers|minimizer_two_stack_nthash_state,hasher_minimap_int"
+    "minimizer_two_stack_nthash_continuation|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm|bioseq.highway.sources.minimizer_two_stack_nthash_continuation|minimizer_two_stack_nthash_continuation|minimizers|minimizer_two_stack_nthash_state,minimizer_two_stack_nthash_exact_vectors"
+    "minimizer_two_stack_nthash_drivers|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm|bioseq.highway.sources.minimizer_two_stack_nthash_drivers|minimizer_two_stack_nthash_drivers|minimizers|minimizer_two_stack_nthash_state,minimizer_two_stack_nthash_resident_stream,minimizer_two_stack_nthash_exact_vectors,minimizer_two_stack_nthash_continuation"
+    "minimizer_two_stack_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack_nthash|minimizer_two_stack_nthash|minimizers|minimizer_two_stack_nthash_state,minimizer_two_stack_nthash_drivers"
     "minimizer_bounded_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm|bioseq.highway.sources.minimizer_bounded_nthash|minimizer_bounded_nthash|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
     "alignment_utils|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm|bioseq.highway.sources.alignment_utils|alignment_utils|alignment|"
     "ksw2_primitives|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_primitives.cppm|bioseq.highway.sources.ksw2_primitives|ksw2_primitives|alignment|"
