@@ -72,12 +72,31 @@ endfunction()
 # callers must invoke this function once for production and once for
 # test_indexes.
 function(bioseq_add_postgres_error_safety_runtime_profile)
+    set(_one_value_arguments
+        TARGET
+        PROFILE
+        LEDGER
+        RUNTIME_INVENTORY
+        RUNTIME_INVENTORY_PRODUCER_EXECUTABLE
+        SQL_MANIFEST
+        SQL_FILE
+        CONTROL_FILE
+        CONTROL_DSO_TARGET
+        RUNTIME_POLICY
+        CASE_TEMPLATE
+        OUTPUT_DIRECTORY)
+    set(_multi_value_arguments
+        HARNESS_MODULES
+        HARNESS_SOURCES
+        INCLUDE_DIRS
+        LINKS
+        DEPENDS)
     cmake_parse_arguments(
         PARSE_ARGV 0
         ARG
         ""
-        "TARGET;PROFILE;LEDGER;RUNTIME_INVENTORY;RUNTIME_INVENTORY_PRODUCER_EXECUTABLE;SQL_MANIFEST;SQL_FILE;CONTROL_FILE;CONTROL_DSO_TARGET;RUNTIME_POLICY;CASE_TEMPLATE;HARNESS_SOURCE;OUTPUT_DIRECTORY"
-        "INCLUDE_DIRS;LINKS;DEPENDS"
+        "${_one_value_arguments}"
+        "${_multi_value_arguments}"
     )
     foreach(required
             TARGET
@@ -91,8 +110,14 @@ function(bioseq_add_postgres_error_safety_runtime_profile)
             CONTROL_DSO_TARGET
             RUNTIME_POLICY
             CASE_TEMPLATE
-            HARNESS_SOURCE
             OUTPUT_DIRECTORY)
+        if(NOT ARG_${required})
+            message(FATAL_ERROR
+                "bioseq_add_postgres_error_safety_runtime_profile "
+                "requires ${required}")
+        endif()
+    endforeach()
+    foreach(required HARNESS_MODULES HARNESS_SOURCES)
         if(NOT ARG_${required})
             message(FATAL_ERROR
                 "bioseq_add_postgres_error_safety_runtime_profile "
@@ -117,12 +142,18 @@ function(bioseq_add_postgres_error_safety_runtime_profile)
     endif()
     foreach(source_input
             RUNTIME_POLICY
-            CASE_TEMPLATE
-            HARNESS_SOURCE)
+            CASE_TEMPLATE)
         if(NOT EXISTS "${ARG_${source_input}}")
             message(FATAL_ERROR
                 "PostgreSQL runtime safety ${source_input} is missing: "
                 "${ARG_${source_input}}")
+        endif()
+    endforeach()
+    foreach(harness_source IN LISTS ARG_HARNESS_MODULES ARG_HARNESS_SOURCES)
+        if(NOT EXISTS "${harness_source}")
+            message(FATAL_ERROR
+                "PostgreSQL runtime safety harness source is missing: "
+                "${harness_source}")
         endif()
     endforeach()
     if(NOT Python3_EXECUTABLE)
@@ -193,11 +224,21 @@ function(bioseq_add_postgres_error_safety_runtime_profile)
         "${ARG_TARGET}_plan"
         DEPENDS "${_plan}" "${_header}" "${_plan_stamp}")
 
-    add_executable(
-        "${ARG_TARGET}" EXCLUDE_FROM_ALL
-        "${ARG_HARNESS_SOURCE}")
+    add_executable("${ARG_TARGET}" EXCLUDE_FROM_ALL)
+    target_sources(
+        "${ARG_TARGET}"
+        PRIVATE
+            ${ARG_HARNESS_SOURCES}
+        PRIVATE FILE_SET CXX_MODULES
+        BASE_DIRS "${CMAKE_SOURCE_DIR}"
+        FILES
+            ${ARG_HARNESS_MODULES})
     set_source_files_properties(
         "${_header}" PROPERTIES GENERATED TRUE)
+    set_source_files_properties(
+        ${ARG_HARNESS_MODULES}
+        ${ARG_HARNESS_SOURCES}
+        PROPERTIES OBJECT_DEPENDS "${_header}")
     target_sources("${ARG_TARGET}" PRIVATE "${_header}")
     set_target_properties("${ARG_TARGET}" PROPERTIES
         CXX_STANDARD 26

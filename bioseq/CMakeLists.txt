@@ -2435,7 +2435,8 @@ target_sources(bioseq_integration_test_support
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/join_test_support.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/explain_test_support.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/explain_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/mmsearch_test_support.cppm")
 target_link_libraries(bioseq_integration_test_support PUBLIC
   fmt
   libassert::assert
@@ -2548,7 +2549,10 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/load_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/minimizers_per_sequence_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_base_statistics_planner_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_persisted_index_routes_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_slice_transformed_ownership_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/mmsearch_edit_options_policy_vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/reindex_scanner_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/row_mask_write_state_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sample_table_test.cpp"
@@ -5231,8 +5235,18 @@ else()
       CONTROL_DSO_TARGET "${_bioseq_sql_runtime_control_target}"
       RUNTIME_POLICY "${BIOSEQ_SQL_SAFETY_RUNTIME_POLICY}"
       CASE_TEMPLATE "${_bioseq_sql_runtime_case_template}"
-      HARNESS_SOURCE
+      HARNESS_MODULES
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_support.cppm"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_core_support.cppm"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_case_support.cppm"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_manifest_support.cppm"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_scenario_support.cppm"
+      HARNESS_SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_main.cc"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_activation.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_describe.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_run_case.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/safety_runtime_harness_self_test.cpp"
       OUTPUT_DIRECTORY
         "${_bioseq_sql_runtime_root}/${_bioseq_sql_runtime_profile}"
       LINKS
