@@ -2436,11 +2436,18 @@ target_sources(bioseq_integration_test_support
       "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/join_test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/explain_test_support.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/mmsearch_test_support.cppm")
-target_link_libraries(bioseq_integration_test_support PUBLIC
-  fmt
-  libassert::assert
-  PostgreSQL::PostgreSQL)
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/mmsearch_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index_admin_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/sql_boundary_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/lazy_sequence_slicing_acceptance_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/source_domain_lifetime_test_support.cppm")
+target_link_libraries(bioseq_integration_test_support
+  PUBLIC
+    fmt
+    libassert::assert
+    PostgreSQL::PostgreSQL
+  PRIVATE
+    Catch2::Catch2)
 
 # Catch source ownership is explicit. The repository-level ownership audit
 # discovers *_test.cpp only to reject omissions or duplicate owners; discovery
@@ -2535,6 +2542,9 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_runtime_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/gpu_mmsearch_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_generation_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_hash_major_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_update_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_invariance_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_mixed_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_table_test.cpp"
@@ -2546,6 +2556,10 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/large_table_alignment_smoke_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_expression_property_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_acceptance_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_concat_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_comparison_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_storage_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_lifetime_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/load_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/minimizers_per_sequence_test.cpp"
@@ -2561,13 +2575,25 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sequence_fragment_storage_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sequence_typmod_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_lifetime_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_transaction_lifetime_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_parallel_policy_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_boundary_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_boundary_maintenance_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_boundary_bpchar_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_boundary_generated_registry_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/sql_row_codec_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/storage_buckets_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/substring_property_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/symbol_count_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/typmod_coalesce_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/wire_test.cpp")
+
+if(NOT BIOSEQ_TEST_INDEXES)
+  set_source_files_properties(
+    "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_transaction_lifetime_test.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tests/integration/source_domain_parallel_policy_test.cpp"
+    PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
 
 list(REMOVE_ITEM SRC_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_UNIT_TEST_SOURCES})
