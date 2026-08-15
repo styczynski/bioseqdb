@@ -15,7 +15,6 @@ from build_worker import (
     _run_build_inline,
     _run_build_worker,
     _run_papers_build_worker,
-    _run_subagent_worker,
     tool_inspect,
 )
 from process_state import _log
@@ -139,18 +138,7 @@ def main() -> int:
             "Forwarded only to the local benchmark-e2e executable environment."
         ),
     )
-    parser.add_argument(
-        "--run-subagent",
-        action="store_true",
-        default=False,
-        help=(
-            "(internal) run as a detached subagent worker; reads prompt and "
-            "config from SUBAGENT_STATE_FILE and invokes codex exec"
-        ),
-    )
     args = parser.parse_args()
-    if args.run_subagent:
-        return _run_subagent_worker()
     if args.run_papers_build:
         return _run_papers_build_worker()
     if args.run_remote is not None:

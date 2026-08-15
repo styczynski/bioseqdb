@@ -98,7 +98,6 @@ from process_state import (
     LOG_DIR,
     REMOTE_STATE_FILE,
     STATE_FILE,
-    SUBAGENT_STATE_FILE,
     _ProcessIdentity,
     _await_guarded_worker_arm,
     _build_worker_descendant_environment,
@@ -107,26 +106,22 @@ from process_state import (
     _global_lock,
     _guarded_process_snapshot,
     _load_state,
-    _load_subagent_state,
     _log,
     _read_activity_registry,
     _refresh,
-    _refresh_subagent,
     _require_trusted_root_owned_path,
     _same_process,
     _save_state,
-    _save_subagent_state,
     _store_build_receipt,
     _stream_subprocess,
-    _subagent_global_lock,
     _tail_path,
     _terminate_unarmed_popen_group,
     _transient_activity,
     _trusted_root_owned_executable,
     _update_entry,
-    _update_subagent_entry,
     _valid_detached_worker_identity,
 )
+from subagent import subagent_activity_snapshot
 from publication import durable_replace_bytes, fsync_directory
 
 import bootstrap
@@ -751,62 +746,6 @@ def _ensure_cmake_preset_tree_fresh(
         raise RuntimeError(
             f"preset {preset!r} did not produce {build_ninja}")
     return True
-
-_SUBAGENT_PROMPT_TEMPLATE = (
-    "# Context\n"
-    "You are subagent spawned from main AI agent. Your task will be stated in prompt "
-    "(from parent AI agent) below.\n\n"
-    "CRITICAL RULES — you must follow these unconditionally:\n"
-    "- This is a NON-INTERACTIVE session. You must NEVER ask questions or request clarification.\n"
-    "- You must complete ALL work described in the prompt in a single run. No deferring, no "
-    "'I will do this later', no partial work. Leaving any part of the task unfinished is a "
-    "CRITICAL FAILURE.\n"
-    "- If anything is ambiguous, make a reasonable decision and proceed. Document your decision "
-    "in task_status.\n\n"
-    "Always follow this workflow no matter what the prompt underneath says:\n"
-    "1. Read DOCS/CURRENT/GUIDELINES/0321_BIOSEQ_CODE_AND_WORKFLOW_GUIDELINES.md in full\n"
-    "2. Read prompt content and do ALL tasks specified there in full. Before finishing, spawn a "
-    "subagent that will review your response (this is to ensure the parent AI agent gets the "
-    "highest quality answer possible). Iterate this review subagent until saturation (no further "
-    "feedback). The review subagent must also follow the non-interactive, no-deferral rules.\n"
-    "3. Return response to the parent AI agent in the JSON format. The response format should "
-    "follow this pattern:\n"
-    "{\n"
-    '    "task_status": "Detailed information about completion of this task",\n'
-    '    "bugs": "Any bugs you found that needs to be flagged",\n'
-    '    "risks": "Any risks you found that needs to be flagged",\n'
-    '    "changed_files": [],\n'
-    '    "review_tldr": [],\n'
-    '    "output": []\n'
-    "}\n"
-    "The `output` array must contain one string entry per requested output (see below), "
-    "in the same order they were listed. Each entry is a free-form string — prose, code, "
-    "bullet points, whatever best answers that specific request.\n"
-    "{requested_outputs_section}\n"
-    "# Prompt\n"
-    "PROMPT FROM PARENT AI AGENT PASTED AS-IS BELOW:\n"
-    "{parent_prompt}"
-)
-
-def _build_requested_outputs_section(requested_outputs: list[str]) -> str:
-    """Render the requested_outputs list into the prompt section that tells the
-    subagent exactly what to put in each slot of the `output` array."""
-    if not requested_outputs:
-        return (
-            "No specific outputs were requested by the parent agent. "
-            "Leave the `output` array empty ([]).\n\n"
-        )
-    lines = [
-        "\n# Requested Outputs\n"
-        "The parent agent wants the following items in the `output` array, "
-        "one element per item, in this exact order:\n"
-    ]
-    for i, item in enumerate(requested_outputs, 1):
-        lines.append(f"{i}. {item}")
-    lines.append("\n")
-    return "\n".join(lines)
-
-SUBAGENT_HARD_TIMEOUT_SEC = 90 * 60.0
 
 @dataclass(frozen=True)
 class InspectTargetDefinition:
@@ -4574,13 +4513,7 @@ def _local_activity() -> dict:
              if key not in known_keys]
         )
 
-    subagent_state, subagent_present = _read_activity_registry(
-        SUBAGENT_STATE_FILE)
-    subagent_activity = _transient_activity(
-        [subagent_state] if subagent_state else (
-            [None] if subagent_state is None else []),
-        registry_present=subagent_present,
-    )
+    subagent_activity = subagent_activity_snapshot()
     remote_state, remote_present = _read_activity_registry(REMOTE_STATE_FILE)
     remote_activity = _transient_activity(
         [remote_state] if remote_state else (
@@ -5504,223 +5437,3 @@ def tool_papers_inspect(arguments: dict) -> dict:
         "content": content,
         "isError": bool(render_errors),
     }
-
-def _run_subagent_worker() -> int:
-    """Detached worker entry point — invoked via --run-subagent.
-
-    Reads the full prompt and config from SUBAGENT_STATE_FILE (written by
-    tool_subagent before spawning this process), runs codex exec, streams
-    its JSONL output to the log file, and captures the final message via
-    --output-last-message.  Updates state on every significant transition so
-    subagent_status always reflects reality.
-    """
-    state = _load_subagent_state()
-    if not state:
-        _log("subagent worker: no state entry, exiting")
-        return 1
-
-    started_at = float(state["started_at"])
-    log_path    = Path(state["log_file"])
-    result_path = Path(state["result_file"])
-    timeout_sec = float(state.get("timeout_sec", 3600))
-    deadline    = started_at + min(timeout_sec, SUBAGENT_HARD_TIMEOUT_SEC)
-
-    prompt            = state.get("prompt", "")
-    requested_outputs = state.get("requested_outputs") or []
-
-    outputs_section = _build_requested_outputs_section(requested_outputs)
-    full_prompt = (
-        _SUBAGENT_PROMPT_TEMPLATE
-        .replace("{requested_outputs_section}", outputs_section)
-        .replace("{parent_prompt}", prompt)
-    )
-
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = log_path.open("w", buffering=1)
-    log_handle.write(
-        f"# bioseq subagent worker — pid={os.getpid()} "
-        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
-        f"# repository_root={REPOSITORY_ROOT}\n"
-        f"# timeout_sec={timeout_sec} (hard ceiling {SUBAGENT_HARD_TIMEOUT_SEC/60:.0f} min)\n"
-        f"# result_file={result_path}\n"
-    )
-    log_handle.flush()
-
-    env = os.environ.copy()
-
-    try:
-        _update_subagent_entry(step="running")
-
-        cmd = [
-            "codex", "exec",
-            "--json",
-            "--output-last-message", str(result_path),
-            "-C", str(REPOSITORY_ROOT),
-            full_prompt,
-        ]
-        rc = _stream_subprocess(cmd, log_handle, deadline,
-                                cwd=REPOSITORY_ROOT, env=env)
-
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="completed" if rc == 0 else "failed",
-            step="completed"  if rc == 0 else "failed",
-            completed_at=completed_at,
-            exit_code=rc,
-            notes=None if rc == 0 else f"codex exited with code {rc}",
-        )
-        log_handle.write(
-            f"\n# worker exiting (rc={rc}) at "
-            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
-        )
-        return 0 if rc == 0 else 1
-
-    except TimeoutError as e:
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="killed_timeout",
-            step="killed_timeout",
-            completed_at=completed_at,
-            exit_code=None,
-            notes=str(e),
-        )
-        log_handle.write(f"\n# killed by hard timeout: {e}\n")
-        return 124
-
-    except Exception as e:
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="failed",
-            step="failed",
-            completed_at=completed_at,
-            exit_code=None,
-            notes=str(e),
-        )
-        log_handle.write(f"\n# worker failed: {e}\n")
-        return 1
-
-    finally:
-        log_handle.close()
-
-def tool_subagent(prompt: str, timeout_sec: int = 3600,
-                  requested_outputs: Optional[List[str]] = None) -> str:
-    """Schedule a Codex cross-model subagent (non-blocking).
-
-    Spawns a detached worker process (identical pattern to start_build) and
-    returns immediately.  Use subagent_status to poll for completion and read
-    the result.  At most one subagent runs at a time; a second call while one
-    is running returns the current status instead of starting a duplicate.
-    """
-
-    # DO NOT EDIT THIS!
-    return "Error: subagent is disabled for now. Use native subagents!"
-
-    if not prompt or not prompt.strip():
-        return "Error: prompt must be a non-empty string."
-
-    with _subagent_global_lock():
-        state = _refresh_subagent(_load_subagent_state())
-        if state.get("status") == "running":
-            elapsed_min = (time.time() - float(state["started_at"])) / 60.0
-            return (
-                f"A subagent is already running (pid={state.get('pid')}, "
-                f"elapsed={elapsed_min:.1f} min). "
-                f"Use subagent_status to check progress. "
-                f"Log: {state.get('log_file')}"
-            )
-
-        started_at = time.time()
-        timestamp  = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
-        log_path    = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.log"
-        result_path = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.result.json"
-
-        server_path = Path(__file__).with_name("server.py").resolve()
-        proc = subprocess.Popen(
-            [sys.executable, str(server_path), "--run-subagent"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-
-        _save_subagent_state({
-            "status":            "running",
-            "step":              "spawning",
-            "started_at":        started_at,
-            "completed_at":      None,
-            "pid":               proc.pid,
-            "log_file":          str(log_path),
-            "result_file":       str(result_path),
-            "exit_code":         None,
-            "notes":             None,
-            "timeout_sec":       timeout_sec,
-            "prompt":            prompt,
-            "requested_outputs": requested_outputs or [],
-            "prompt_preview":    prompt[:200],
-        })
-        _log(f"started subagent worker pid={proc.pid} log={log_path}")
-
-    return (
-        f"Subagent scheduled (pid={proc.pid}). "
-        f"Use subagent_status to check progress and retrieve the result. "
-        f"Log: {log_path}. Result will be written to: {result_path}"
-    )
-
-def tool_subagent_status() -> str:
-    """Return the current status of the most recently scheduled subagent."""
-    state = _load_subagent_state()
-    if not state:
-        return "No subagent has been scheduled yet. Use the subagent tool to spawn one."
-
-    state = _refresh_subagent(state)
-    status   = state.get("status", "unknown")
-    log_path = state.get("log_file", "(no log)")
-    result_path = state.get("result_file", "(no result file)")
-    preview  = state.get("prompt_preview", "")
-
-    if status == "running":
-        elapsed_min = (time.time() - float(state["started_at"])) / 60.0
-        eta_min     = max(0.0, float(state.get("timeout_sec", 3600)) / 60.0 - elapsed_min)
-        step        = state.get("step", "running")
-        return (
-            f"Subagent is running (pid={state.get('pid')}, "
-            f"elapsed={elapsed_min:.1f} min, ETA ≤{eta_min:.0f} min). "
-            f"Step: {step}. Prompt preview: {preview!r}. "
-            f"Log: {log_path}"
-        )
-
-    started_at   = float(state.get("started_at", time.time()))
-    completed_at = float(state.get("completed_at") or time.time())
-    duration_min = (completed_at - started_at) / 60.0
-
-    if status == "completed":
-        msg = (
-            f"Subagent completed in {duration_min:.1f} min. "
-            f"Result: {result_path}. Log: {log_path}"
-        )
-        try:
-            result_text = Path(result_path).read_text(encoding="utf-8", errors="replace")
-            if len(result_text) <= 8000:
-                msg += f"\n\nResult content:\n{result_text}"
-            else:
-                msg += (f"\n\nResult file is large ({len(result_text)} chars); "
-                        f"read {result_path} directly.")
-        except OSError:
-            msg += "\n\n(result file not found or unreadable)"
-        return msg
-
-    if status == "killed_timeout":
-        return (
-            f"Subagent was killed by the hard timeout after {duration_min:.1f} min. "
-            f"Log: {log_path}"
-        )
-
-    if status in ("failed", "aborted"):
-        notes = state.get("notes") or "(no notes)"
-        return (
-            f"Subagent {status} after {duration_min:.1f} min: {notes}. "
-            f"Log: {log_path}"
-        )
-
-    return f"Subagent status: {status}. Log: {log_path}"

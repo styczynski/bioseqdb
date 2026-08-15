@@ -996,12 +996,14 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         registries = (
             ({"benchmark": {"status": "completed"}}, True),
             ({}, False),
-            ({}, False),
         )
         with mock.patch.object(
             build_worker, "_read_activity_registry", side_effect=registries,
         ), mock.patch.object(
             build_worker, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            build_worker, "subagent_activity_snapshot",
+            return_value={"queued": 0, "running": 0, "state": "idle"},
         ), mock.patch.object(
             build_worker.shutil, "disk_usage",
             return_value=SimpleNamespace(free=12345),
@@ -1038,9 +1040,12 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         with mock.patch.object(
             build_worker,
             "_read_activity_registry",
-            side_effect=((None, True), ({}, False), ({}, False)),
+            side_effect=((None, True), ({}, False)),
         ), mock.patch.object(
             build_worker, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            build_worker, "subagent_activity_snapshot",
+            return_value={"queued": 0, "running": 0, "state": "absent"},
         ), mock.patch.object(
             build_worker.shutil, "disk_usage",
             return_value=SimpleNamespace(free=1),
