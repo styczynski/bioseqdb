@@ -1,3 +1,7 @@
+/**
+ * @file index.cppm
+ * @brief Provides libpq sessions, SQL assertions, and fixtures for integration tests.
+ */
 module;
 #include <cctype>
 #include <cstdint>
@@ -21,11 +25,14 @@ export module bioseq.tests.integration.support;
 
 namespace bioseq_int_tests {
 
+/** @brief Text cells returned for one libpq result row. */
 export using row_t = std::vector<std::optional<std::string>>;
+/** @brief Ordered rows returned by one libpq query. */
 export using rowset_t = std::vector<row_t>;
 
 namespace detail {
 
+/** @brief Owns one libpq result until the current helper scope ends. */
 struct pg_result {
     PGresult* ptr = nullptr;
 
@@ -49,6 +56,7 @@ struct pg_result {
     }
 };
 
+/** @brief Stores connection parameters resolved for an integration session. */
 struct pg_credentials {
     std::string user;
     std::string password;
@@ -57,25 +65,30 @@ struct pg_credentials {
     std::string port;
 };
 
+/** @return True when libpq reports a successful command or tuple result. */
 inline bool command_success(ExecStatusType status) noexcept {
     return status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK ||
            status == PGRES_SINGLE_TUPLE;
 }
 
+/** @return An owned libpq result for one SQL statement. */
 inline pg_result exec(PGconn* conn, std::string_view sql) {
     return pg_result(PQexec(conn, std::string(sql).c_str()));
 }
 
+/** @return The current connection diagnostic or an empty string. */
 inline std::string connection_error(PGconn* conn) {
     const char* message = conn == nullptr ? nullptr : PQerrorMessage(conn);
     return message == nullptr ? std::string{} : std::string(message);
 }
 
+/** @return A nonempty environment value or the supplied fallback. */
 inline std::string env_or(const char* name, std::string_view fallback) {
     const char* value = std::getenv(name);
     return value && *value ? std::string(value) : std::string(fallback);
 }
 
+/** @return Integration credentials resolved from the test environment. */
 inline pg_credentials make_default_credentials() {
     const auto user_str = env_or("BIOSEQ_TEST_PGUSER", "postgres");
     const auto pass_str = env_or("BIOSEQ_TEST_PGPASSWORD", "postgres");
@@ -91,6 +104,7 @@ inline pg_credentials make_default_credentials() {
     };
 }
 
+/** @return A connected libpq session or throws with the connection diagnostic. */
 inline PGconn* connect_raw(const pg_credentials& credentials) {
     const char* keywords[] = {
         "user", "password", "host", "dbname", "port", nullptr,
@@ -124,6 +138,7 @@ inline PGconn* connect_raw(const pg_credentials& credentials) {
 // Wraps a single libpq PGconn for raw SQL against the bioseq Postgres extension.
 // Tests build their state from raw SQL because typed SQL wrappers cannot
 // describe `bioseq.seq('dna4', 32)` typmods.
+/** @brief Owns one libpq session and captures its asynchronous notices. */
 export class connection_test_context {
 private:
     PGconn* _raw_conn = nullptr;
@@ -213,6 +228,7 @@ public:
 
 // Issues a SQL statement that does not return rows. Aborts the test on failure
 // so each call site can stay free of error-handling boilerplate.
+/** @brief Executes a statement and fails the current test on server error. */
 export inline void exec_sql(const connection_test_context& ctx,
                             std::string_view sql) {
     auto result = detail::exec(ctx.raw(), sql);
@@ -231,6 +247,7 @@ export inline void exec_sql(const connection_test_context& ctx,
 // tests that expect Postgres to raise on invalid typmods, mismatched casts
 // etc. Does not propagate any error message — callers usually only care that
 // the statement raised at all.
+/** @return True when the server rejects the supplied statement. */
 export [[nodiscard]] inline bool sql_fails(
     const connection_test_context& ctx, std::string_view sql) {
     auto result = detail::exec(ctx.raw(), sql);
@@ -242,6 +259,7 @@ export [[nodiscard]] inline bool sql_fails(
 // `sql_fails` (bool only), this returns the SQLSTATE and server
 // diagnostic and ASSERTS if the statement unexpectedly SUCCEEDED — so a
 // silently-accepted bad statement can never pass as "errored as expected".
+/** @brief Captures SQLSTATE and server diagnostics for one expected failure. */
 export struct sql_error_info {
     std::string sqlstate;
     std::string message;
@@ -250,6 +268,7 @@ export struct sql_error_info {
     }
 };
 
+/** @return The SQLSTATE and diagnostics from a statement that must fail. */
 export [[nodiscard]] inline sql_error_info sql_error(
     const connection_test_context& ctx, std::string_view sql) {
     const std::string sql_owned(sql);
@@ -301,6 +320,7 @@ export [[nodiscard]] inline sql_error_info sql_error(
 
 // Same as `exec_sql`, but accepts a printf-style format string so callers can
 // inline parameters without manual `fmt::format` plumbing.
+/** @brief Formats and executes a statement that must succeed. */
 export template <typename... p_args>
 inline void exec_sqlf(const connection_test_context& ctx,
                       fmt::format_string<p_args...> fmtstr, p_args&&... args) {
@@ -310,6 +330,7 @@ inline void exec_sqlf(const connection_test_context& ctx,
 // Runs a SELECT and returns the entire row set in textual form. Each NULL value
 // becomes std::nullopt; everything else is the libpq text representation. Tests
 // can then post-process via `parse_int_cell` etc.
+/** @return Every query row as optional libpq text cells. */
 export [[nodiscard]] inline rowset_t query_rows(
     const connection_test_context& ctx, std::string_view sql) {
     auto pgres = detail::exec(ctx.raw(), sql);
@@ -342,6 +363,7 @@ export [[nodiscard]] inline rowset_t query_rows(
 }
 
 // Convenience: returns the single row of a one-row query. Asserts otherwise.
+/** @return The only row from a query that must return exactly one row. */
 export [[nodiscard]] inline row_t query_one(
     const connection_test_context& ctx, std::string_view sql) {
     auto rows = query_rows(ctx, sql);
@@ -355,6 +377,7 @@ export [[nodiscard]] inline row_t query_one(
 // Returns the single row of a one-row query, or nullopt for an empty result
 // set. Useful when callers want to express "if any row, then ..." without
 // hand-writing the Catch2 matchers.
+/** @return The only query row or null when the result is empty. */
 export [[nodiscard]] inline std::optional<row_t> query_one_or_none(
     const connection_test_context& ctx, std::string_view sql) {
     auto rows = query_rows(ctx, sql);
@@ -371,6 +394,7 @@ export [[nodiscard]] inline std::optional<row_t> query_one_or_none(
 
 // Convenience: returns the single (row, column) cell of a one-row, one-column
 // query as a string. Asserts otherwise (NULLs included).
+/** @return The non-null text value from a one-row one-column query. */
 export [[nodiscard]] inline std::string query_scalar(
     const connection_test_context& ctx, std::string_view sql) {
     auto row = query_one(ctx, sql);
@@ -387,12 +411,14 @@ export [[nodiscard]] inline std::string query_scalar(
 
 // Same as `query_scalar`, but parses the cell as a long long. Useful for COUNT,
 // symbol_count, len, etc.
+/** @return The signed integer value from a scalar query. */
 export [[nodiscard]] inline long long query_scalar_int(
     const connection_test_context& ctx, std::string_view sql) {
     return std::stoll(query_scalar(ctx, sql));
 }
 
 // Convenience: collects a single text column out of a multi-row SELECT.
+/** @return One optional text cell for every query row. */
 export [[nodiscard]] inline std::vector<std::optional<std::string>>
 query_single_column(const connection_test_context& ctx,
                     std::string_view sql) {
@@ -414,6 +440,7 @@ query_single_column(const connection_test_context& ctx,
 // of the textual plan. `p_analyze` is a template parameter so the SQL string
 // itself is a compile-time choice (matches CODE_GUIDELINES §1 "templates over
 // runtime conditionals").
+/** @return Text lines from an instrumented or plan-only EXPLAIN. */
 export template <bool p_analyze = true>
 [[nodiscard]] inline std::vector<std::string> explain_text(
     const connection_test_context& ctx, std::string_view sql) {
@@ -442,6 +469,7 @@ export template <bool p_analyze = true>
 // "  Foo Bar: <value>" out of a textual plan. `key` is the literal text to
 // the left of the colon; the returned string is the trimmed remainder. Used
 // instead of plain substring grep to avoid false positives.
+/** @return A trimmed EXPLAIN property value when the key is present. */
 export [[nodiscard]] inline std::optional<std::string> find_explain_property(
     std::span<const std::string> lines, std::string_view key) {
     const std::string needle = std::string(key) + ":";
@@ -470,6 +498,7 @@ export [[nodiscard]] inline std::optional<std::string> find_explain_property(
 // Runs `EXPLAIN (FORMAT JSON, ANALYZE, VERBOSE, COSTS, BUFFERS) <sql>` and
 // returns the JSON string verbatim. Postgres returns the JSON in a single text
 // row which we concatenate so callers can pattern-match easily.
+/** @return The JSON EXPLAIN document for an instrumented query. */
 export [[nodiscard]] inline std::string explain_json(
     const connection_test_context& ctx, std::string_view sql) {
     const std::string explain_sql = fmt::format(
@@ -487,6 +516,7 @@ export [[nodiscard]] inline std::string explain_json(
 
 // True when ANY of the textual EXPLAIN lines contains `needle`. Used for
 // brittle-but-readable plan assertions.
+/** @return True when any textual EXPLAIN line contains the requested text. */
 export [[nodiscard]] inline bool plan_contains(
     std::span<const std::string> lines, std::string_view needle) {
     for (const auto& line : lines) {
@@ -499,6 +529,7 @@ export [[nodiscard]] inline bool plan_contains(
 
 // RAII GUC scope: SET on construction, RESET on destruction. Lets each test
 // flip a single setting without polluting the connection's session state.
+/** @brief Sets one session GUC and resets it when the scope ends. */
 export class guc_scope {
 private:
     const connection_test_context* _ctx;
@@ -541,6 +572,7 @@ public:
 // pg_proc rows). The schemas it owns — bioseq, bioseq_internal — are
 // rebuilt by the install script and contain only fixture state at the
 // boundary of each test, so the cascade is safe.
+/** @brief Recreates the extension and removes the supplied fixture tables. */
 export inline void reset_extension(const connection_test_context& ctx,
                                    std::span<const std::string_view> tables) {
     for (const auto& table : tables) {
@@ -582,6 +614,7 @@ export inline void reset_extension(const connection_test_context& ctx,
 
 // Same as the span overload, but accepts an initializer list so callers can
 // write `reset_extension(ctx, {"hoe", "x"});` directly.
+/** @brief Recreates the extension using an initializer-list table set. */
 export inline void reset_extension(
     const connection_test_context& ctx,
     std::initializer_list<std::string_view> tables) {
@@ -590,6 +623,7 @@ export inline void reset_extension(
 
 // Builds + connects + cleans state in one call. Returns a fresh fixture
 // owned by the caller. Promoted from per-file `fresh_context()` helpers.
+/** @return A connected integration session with freshly recreated extension state. */
 export [[nodiscard]] inline connection_test_context fresh_context(
     std::initializer_list<std::string_view> tables = {}) {
     connection_test_context ctx;
@@ -601,6 +635,7 @@ export [[nodiscard]] inline connection_test_context fresh_context(
 // row and sub-key counts without depending on implementation tables.
 
 // Total chunk rows of one index across its derived seqidx_* shards.
+/** @return The total stored row count for one logical sequence index. */
 export [[nodiscard]] inline long long index_table_row_count(
     const connection_test_context& ctx, std::string_view index_name,
     std::string_view user_table) {
@@ -611,6 +646,7 @@ export [[nodiscard]] inline long long index_table_row_count(
 
 // Distinct sub_key count for ONE query_key across an index's shards (the
 // per-sequence "is this row fully indexed" check).
+/** @return The number of distinct stored subkeys for one indexed sequence row. */
 export [[nodiscard]] inline long long index_distinct_sub_keys(
     const connection_test_context& ctx, std::string_view index_name,
     std::string_view user_table, long long query_key) {
@@ -620,6 +656,7 @@ export [[nodiscard]] inline long long index_distinct_sub_keys(
 }
 
 // Resolve a row's BIOSEQ_COLUMN rowno (== index query_key) from its ctid.
+/** @return The Bioseq column row number resolved from a heap tuple identifier. */
 export [[nodiscard]] inline long long column_row_number_for_ctid(
     const connection_test_context& ctx, std::string_view user_table,
     std::string_view ctid_literal) {
@@ -629,12 +666,14 @@ export [[nodiscard]] inline long long column_row_number_for_ctid(
 }
 
 // Backend-local spilled-run count of the most recent minimizers_per_sequence build.
+/** @return The spilled-run count from the latest minimizer-sequence build. */
 export [[nodiscard]] inline long long last_index_merge_run_count(
     const connection_test_context& ctx) {
     return query_scalar_int(ctx, "SELECT bioseq.last_index_merge_run_count()");
 }
 
 // Encodes the supported (alphabet, width) typmod values.
+/** @brief Describes one supported sequence alphabet and storage width. */
 export struct seq_typmod {
     std::string_view alphabet;  // "dna4" or "dna5"
     int width;                  // 8 / 16 / 32 / 64
@@ -654,16 +693,19 @@ export struct seq_typmod {
 // production pack so any drift fails at build time, preserving the
 // "pack is the single source of truth" promise indirectly (drift
 // detection lives in the production TU).
+/** @brief Tag types distinguishing supported fixture alphabets. */
 export namespace seq_entry_tag {
     struct dna4 {};
     struct dna5 {};
 }
 
+/** @brief Fixture entry describing the DNA4 alphabet. */
 export struct dna4_entry {
     using alphabet_type = seq_entry_tag::dna4;
     static constexpr std::string_view alphabet_name_sv = "dna4";
 };
 
+/** @brief Fixture entry describing the DNA5 alphabet. */
 export struct dna5_entry {
     using alphabet_type = seq_entry_tag::dna5;
     static constexpr std::string_view alphabet_name_sv = "dna5";
@@ -672,6 +714,7 @@ export struct dna5_entry {
 // Build a seq_typmod from a templated alphabet entry so the test fixture pulls
 // the name string from the entry, never from a
 // parallel literal in the test file.
+/** @return A sequence typmod built from an alphabet entry and storage width. */
 export template <class p_entry>
 [[nodiscard]] inline constexpr seq_typmod make_seq_typmod(int width) noexcept {
     return seq_typmod{
@@ -683,6 +726,7 @@ export template <class p_entry>
 // Builds the SQL literal `'<payload>'::bioseq.seq('<alphabet>', <width>)`
 // so test sites stop reaching for ad-hoc fmt::format with the typmod text
 // embedded inline.
+/** @return A typed SQL sequence literal for the supplied payload. */
 export [[nodiscard]] inline std::string format_literal(
     std::string_view payload, const seq_typmod& typmod) {
     return fmt::format("'{}'::{}", payload, typmod.sql());
@@ -692,6 +736,7 @@ export [[nodiscard]] inline std::string format_literal(
 // from MIDNSHP=X. Anything else is malformed. The bioseq custom scan
 // returns an empty string when no alignment was attempted; callers can
 // branch on `value.empty()` separately.
+/** @return True when a nonempty value is a syntactically valid CIGAR string. */
 export [[nodiscard]] inline bool is_valid_cigar(std::string_view value) {
     if (value.empty()) {
         return false;
@@ -727,6 +772,7 @@ export [[nodiscard]] inline bool is_valid_cigar(std::string_view value) {
 // the substring-property tests to check that the aligner returned
 // the property "match length == query length" — see §9 of
 // REPORT_POSTGRES_QUERY_BUGFIXING_1.md for the rationale.
+/** @return True when the CIGAR is one exact match of the expected length. */
 export [[nodiscard]] inline bool is_exact_match_cigar(std::string_view value,
                                                       long long expected_len) {
     if (value.empty() || expected_len <= 0) {
@@ -762,6 +808,7 @@ export [[nodiscard]] inline bool is_exact_match_cigar(std::string_view value,
 // sequence column. Callers stay free of the column-naming detail because the
 // helper synthesises column names `seq0`, `seq1`, ... around the primary key
 // (`pk INT PRIMARY KEY`).
+/** @brief Describes one sequence fixture table. */
 export struct seq_table_spec {
     std::string name;
     seq_typmod typmod;
@@ -769,6 +816,7 @@ export struct seq_table_spec {
     bool using_bioseq = false; // when true, CREATE TABLE ... USING bioseq;
 };
 
+/** @brief Stores one primary key and its sequence fixture values. */
 export struct seq_row {
     int pk;
     std::vector<std::string> sequences;  // one entry per seq column
@@ -777,6 +825,7 @@ export struct seq_row {
 // Drops (CASCADE), creates and populates a bioseq.seq-bearing table according
 // to `spec`. Sequence columns are named seq0, seq1, ... so tests can refer to
 // them by index without pre-declaring schemas.
+/** @brief Recreates and populates a sequence fixture table. */
 export inline void create_seq_table(
     const connection_test_context& ctx, const seq_table_spec& spec,
     std::span<const seq_row> rows = {}) {
@@ -827,6 +876,7 @@ export inline void create_seq_table(
 }
 
 // Initializer-list overload so call sites can write the rows literally.
+/** @brief Recreates a sequence fixture table from literal rows. */
 export inline void create_seq_table(
     const connection_test_context& ctx, const seq_table_spec& spec,
     std::initializer_list<seq_row> rows) {
@@ -838,6 +888,7 @@ export inline void create_seq_table(
 // `seq0` is the long target sequence; `seq1` is a shorter probe used as the
 // mmsearch query argument. Centralised here so multiple test files can pin
 // the same input data.
+/** @return The canonical five-row alignment fixture. */
 export inline std::vector<seq_row> hoe_seed_rows() {
     return {
         seq_row{
@@ -871,6 +922,7 @@ export inline std::vector<seq_row> hoe_seed_rows() {
 // Drops + creates the named hoe fixture, populates with `hoe_seed_rows()`,
 // engages the columnar AM. Returns the typmod so call sites can build their
 // query literals via `format_literal`.
+/** @return The typmod used after recreating the canonical alignment fixture. */
 export inline seq_typmod seed_hoe_fixture(
     const connection_test_context& ctx, std::string_view name) {
     constexpr seq_typmod typmod{.alphabet = "dna4", .width = 32};
@@ -890,11 +942,13 @@ export inline seq_typmod seed_hoe_fixture(
 
 // The probe sequence used throughout the suite as the mmsearch query
 // argument and the current minimizer-index fixture contract.
+/** @brief Canonical query sequence used by the alignment fixture. */
 export constexpr std::string_view k_hoe_probe_sequence =
     "CTAGTCACTGTAGCCTGATCGTAGCTAGT";
 
 // SQL literal of the canonical probe sequence at the dna4/32 typmod used by
 // the hoe fixture. Saves every mmsearch test from re-typing the typmod.
+/** @return The canonical probe as a DNA4 32-bit SQL literal. */
 export [[nodiscard]] inline std::string hoe_probe_literal() {
     return format_literal(k_hoe_probe_sequence,
                           seq_typmod{.alphabet = "dna4", .width = 32});
@@ -903,6 +957,7 @@ export [[nodiscard]] inline std::string hoe_probe_literal() {
 // Seeds a small dna4/32 columnar table with three deterministic 16-bp rows.
 // Used by tests that need a `USING bioseq` table whose meta_sidecar is
 // guaranteed to be populated but whose mmsearch result set is unconstrained.
+/** @brief Recreates a small deterministic DNA4 columnar fixture. */
 export inline void seed_small_bioseq_column(
     const connection_test_context& ctx, std::string_view name) {
     exec_sqlf(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
@@ -924,6 +979,7 @@ export inline void seed_small_bioseq_column(
 
 // Comparable list of integer values returned by a one-column SELECT. Builds
 // from query_single_column and parses each cell.
+/** @return One parsed integer for every row of a single-column query. */
 export [[nodiscard]] inline std::vector<long long> query_int_column(
     const connection_test_context& ctx, std::string_view sql) {
     auto col = query_single_column(ctx, sql);
@@ -948,6 +1004,7 @@ export [[nodiscard]] inline std::vector<long long> query_int_column(
 //
 // The default flips the full vectorization+column_cache matrix, since these
 // are the two GUCs whose code paths are most likely to diverge.
+/** @return Canonical rows after checking every supplied GUC combination. */
 export [[nodiscard]] inline rowset_t expect_query_invariant_under_options(
     const connection_test_context& ctx, std::string_view sql,
     std::span<const std::pair<std::string_view, std::vector<std::string_view>>>
@@ -955,7 +1012,7 @@ export [[nodiscard]] inline rowset_t expect_query_invariant_under_options(
     // Build the cartesian product of all (guc, value) pairs.
     std::vector<size_t> idx(guc_matrix.size(), 0);
 
-    auto describe_combination = [&]() {
+    auto describe_combination = [&guc_matrix, &idx]() {
         std::string description;
         for (size_t i = 0; i < guc_matrix.size(); ++i) {
             if (i > 0) description += ", ";
@@ -1010,6 +1067,7 @@ export [[nodiscard]] inline rowset_t expect_query_invariant_under_options(
 }
 
 // Convenience wrapper around the span overload accepting initializer lists.
+/** @return Canonical rows after checking literal GUC combinations. */
 export inline rowset_t expect_query_invariant_under_options(
     const connection_test_context& ctx, std::string_view sql,
     std::initializer_list<
@@ -1025,6 +1083,7 @@ export inline rowset_t expect_query_invariant_under_options(
 
 // Common-case shorthand: assert that the query returns the same rows whether
 // the named GUC is "on" or "off". Returns the canonical row set.
+/** @return Canonical rows after checking both values of one Boolean GUC. */
 export inline rowset_t expect_invariant_under_guc_toggle(
     const connection_test_context& ctx, std::string_view sql,
     std::string_view guc) {

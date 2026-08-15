@@ -1,3 +1,7 @@
+/**
+ * @file catalog_entity_handle_consumer_test.cpp
+ * @brief Verifies generated catalog handles from an ordinary module importer.
+ */
 #include <bioseq/pg_compat.h>
 
 #include <concepts>

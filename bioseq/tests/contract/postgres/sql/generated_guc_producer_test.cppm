@@ -1,3 +1,7 @@
+/**
+ * @file generated_guc_producer_test.cppm
+ * @brief Exports a generated-like enum-GUC registration contract.
+ */
 module;
 
 #include <type_traits>

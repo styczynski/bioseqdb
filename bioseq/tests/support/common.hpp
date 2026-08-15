@@ -1,3 +1,7 @@
+/**
+ * @file common.hpp
+ * @brief Provides shared range and data-generation helpers for unit tests.
+ */
 #pragma once
 
 #include <algorithm>
@@ -30,6 +34,7 @@
 #include <libassert/assert.hpp>
 #include <libassert/assert-catch2.hpp>
 
+/** @return True after asserting that two ranges contain the same value set. */
 template<
     std::ranges::contiguous_range p_range,
     typename p_value =
@@ -76,6 +81,7 @@ bool assert_range_set_equality(
     return true;
 }
 
+/** @return A vector containing an increasing sequence from `start`. */
 template<typename p_value>
 std::vector<p_value> increasing_vector(
     std::size_t length,
@@ -85,6 +91,7 @@ std::vector<p_value> increasing_vector(
     return v;
 }
 
+/** @return A vector of fixed requested length containing increasing values. */
 template<typename p_value, std::size_t p_length>
 std::vector<p_value> increasing_array(p_value start = 0) {
     std::vector<p_value> v(p_length);
@@ -92,6 +99,7 @@ std::vector<p_value> increasing_array(p_value start = 0) {
     return v;
 }
 
+/** @return A two-dimensional matrix filled in row-major increasing order. */
 template<typename p_value>
 std::vector<std::vector<p_value>> vector_increasing_matrix_2d(
     std::size_t dim_rows,
@@ -108,11 +116,13 @@ std::vector<std::vector<p_value>> vector_increasing_matrix_2d(
     return v;
 }
 
+/** @brief Matches input ranges whose elements are themselves ranges. */
 template<typename p_range>
 concept nested_range =
     std::ranges::input_range<p_range> &&
     std::ranges::range<std::ranges::range_reference_t<p_range>>;
 
+/** @brief Recursively flattens nested ranges into a joined range view. */
 struct flatten_t {
     template<nested_range p_range>
     auto operator()(p_range&& range) const
@@ -129,9 +139,11 @@ struct flatten_t {
     }
 };
 
+/** @return The recursively flattened representation of `value`. */
 template<typename p_value>
 auto operator |(p_value&& value, flatten_t flatten_fn) {
     return flatten_fn(std::forward<p_value>(value));
 };
 
+/** @brief Pipeable recursive range flattener used by tests. */
 constexpr flatten_t flatten;

@@ -1,3 +1,8 @@
+/**
+ * @file admin_test.cpp
+ * @brief Exercises Bioseq administration views and native table options.
+ */
+
 // Integration coverage for the Bioseq administration views and the native
 // table-option functions.
 
@@ -364,7 +369,7 @@ TEST_CASE("native alter functions require Bioseq table ownership",
 
   const row_t initial = table_options(ctx, k_ownership_table);
 
-  const auto require_nonowner_failure = [&](std::string_view invocation) {
+  const auto require_nonowner_failure = [&ctx, &initial](std::string_view invocation) {
     exec_sql(ctx, "BEGIN;");
     exec_sqlf(ctx, "CREATE ROLE {} NOLOGIN;", k_non_owner_role);
     exec_sqlf(ctx, "SET LOCAL ROLE {};", k_non_owner_role);

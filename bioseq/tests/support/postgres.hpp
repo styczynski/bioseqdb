@@ -8,4 +8,21 @@
 #include <sqlgen/write.hpp>
 #include <sqlgen/read.hpp>
 
-#define ASSERT_SQLGEN(RESULT) if (!(RESULT)) { ASSERT(false, fmt::format("Connection error: {}", result.error().what()), (RESULT)); }
+/**
+ * @brief Asserts a sqlgen result while preserving the test call-site location.
+ *
+ * The scoped binding evaluates the expression once and ensures the diagnostic
+ * reads the same result that the caller supplied.
+ */
+#define ASSERT_SQLGEN(RESULT)                                                     \
+    do {                                                                          \
+        const auto& bioseq_sqlgen_result = (RESULT);                               \
+        if (!bioseq_sqlgen_result) {                                               \
+            ASSERT(                                                               \
+                false,                                                            \
+                fmt::format(                                                      \
+                    "Connection error: {}",                                      \
+                    bioseq_sqlgen_result.error().what()),                          \
+                #RESULT);                                                         \
+        }                                                                         \
+    } while (false)
