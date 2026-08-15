@@ -5,10 +5,8 @@
  * The blockfinder (`block_finder.cppm`) probes candidate dynamic-Huffman
  * block starts. The precode validator rejects candidates whose
  * code-length-of-code-lengths table does not form a complete prefix
- * code. The 16K-entry LUT trick (port of upstream
- * `CountAllocatedLeaves.hpp:64-95`) lets us validate the count constraint
- * via two LUT lookups and a single comparison, vastly cheaper than
- * actually building the precode Huffman table.
+ * code. A 16K-entry lookup table reduces groups of packed code lengths
+ * to virtual-leaf counts before the final budget comparison.
  *
  * The validator operates on the 19 × 3-bit encoded code lengths read
  * from the candidate block header. Two halves of the bitset (low 24

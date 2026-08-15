@@ -44,7 +44,9 @@ struct aligned_buffer {
     static constexpr bool use_posix_memalign =
         (p_alignment > alignof(std::max_align_t));
 
+    /// Releases storage returned by `posix_memalign`.
     struct posix_deleter {
+        /// Return an aligned allocation to the C allocator.
         void operator()(p_value_type* ptr) const noexcept { std::free(ptr); }
     };
     using owning_ptr_t = std::conditional_t<
@@ -56,6 +58,7 @@ struct aligned_buffer {
     std::size_t  size     = 0;
     std::size_t  capacity = 0;
 
+    /// Ensure capacity for `units` elements while preserving the live prefix.
     [[nodiscard]] std::expected<void, std::string>
     reserve(std::size_t units) noexcept {
         if (units <= capacity) return {};
@@ -81,6 +84,7 @@ struct aligned_buffer {
         return {};
     }
 
+    /// Append `units` uninitialized elements and return their writable span.
     [[nodiscard]] std::expected<std::span<p_value_type>, std::string>
     extend(std::size_t units) noexcept {
         if (size + units > capacity) {
@@ -96,10 +100,14 @@ struct aligned_buffer {
         return out;
     }
 
+    /// Discard the live prefix without releasing the allocation.
     void clear() noexcept { size = 0; }
 
+    /// Return whether the live prefix contains no elements.
     [[nodiscard]] bool                empty() const noexcept { return size == 0; }
+    /// Return the writable live prefix.
     [[nodiscard]] std::span<p_value_type>        view()        noexcept { return {data.get(), size}; }
+    /// Return the readable live prefix.
     [[nodiscard]] std::span<const p_value_type>  view()  const noexcept { return {data.get(), size}; }
 };
 

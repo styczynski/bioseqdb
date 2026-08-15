@@ -27,7 +27,7 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::io::identifier_parser {
 
 // =====================================================================
-// §4.1 — enums
+// Header format types
 // =====================================================================
 
 /// The header dialect. AUTO is detected once per file from sampled headers.
@@ -53,14 +53,13 @@ enum class metadata_style : std::uint8_t { none, equals, bracket, both };
 inline constexpr std::uint16_t no_position = 0xFFFF;
 
 // =====================================================================
-// §4.2 — name normalisation (D6): lower-case and drop '_' / '-'
+// Name normalization
 // =====================================================================
 
 /// Lower-case and drop '_' and '-'. Headers/column names are short; scalar.
 /// `out` must hold at least `in.size()` bytes; returns the written view into it.
-/// Reuses the single ASCII-fold rule in file_utils (`lowercase_ascii_character`) so the
-/// runtime column-name match and the consteval `normalised_key` table guards normalise
-/// through identical logic — no drift (mirrors pg_compact_sequence.cppm guards).
+/// Reuses `lowercase_ascii_character` so runtime matching and compile-time
+/// table validation apply the same ASCII rule.
 [[nodiscard]] inline std::string_view normalise_name(
         std::string_view in, std::span<char> out) noexcept {
     std::size_t n = 0;
@@ -88,7 +87,7 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
 }
 
 // =====================================================================
-// §4.1 — field / format table types
+// Field and format definitions
 // =====================================================================
 
 /// One known field of a format. `normalised_key` is the *normalised canonical* key the
@@ -112,11 +111,11 @@ struct header_format_definition {
     char                              primary_delimiter;  // '|', '/', or '\0'
     metadata_style                    metadata;
     std::span<const header_field_definition> fields;
-    std::uint16_t                     identifier_block_field_count = 0;  // ncbi family (§6.2b)
+    std::uint16_t                     identifier_block_field_count = 0;  // ncbi identifier prefix
 };
 
 // =====================================================================
-// §8 — alias arrays (constexpr static; the field spans point at them)
+// Alias tables
 // =====================================================================
 
 inline constexpr std::array<std::string_view, 2> identifier_aliases{{"id", "identifier"}};
@@ -129,10 +128,10 @@ inline constexpr std::array<std::string_view, 2> accession_identifier_aliases{{"
 inline constexpr std::array<std::string_view, 1> name_aliases{{"name"}};
 
 // =====================================================================
-// §4.1 / §8 — per-format field tables
+// Per-format field tables
 // =====================================================================
 
-// --- uniprotkb: db|accession|entry block + EQUALS tags (§4.1) ---
+// UniProtKB: db|accession|entry block plus equals tags.
 inline constexpr std::array<header_field_definition, 11> uniprotkb_fields{{
   {"db",                  "",   "db",                 {},                  field_origin::positional,  0},
   {"accession",           "",   "accession",          identifier_aliases,          field_origin::positional,  1},
@@ -147,7 +146,7 @@ inline constexpr std::array<header_field_definition, 11> uniprotkb_fields{{
   {"sequence_version",    "SV", "sequenceversion",    {},                  field_origin::equals_tag,  no_position},
 }};
 
-// --- uniref: first-token id + cluster + n/Tax/TaxID/RepID (§8) ---
+// UniRef: first-token id plus cluster and keyed metadata.
 inline constexpr std::array<header_field_definition, 6> uniref_fields{{
   {"id",      "",      "id",     identifier_aliases,  field_origin::positional,  0},
   {"cluster", "",      "cluster", {},         field_origin::description, no_position},
@@ -157,7 +156,7 @@ inline constexpr std::array<header_field_definition, 6> uniref_fields{{
   {"rep_id",  "RepID", "repid",   {},         field_origin::equals_tag,  no_position},
 }};
 
-// --- uniparc simple + proteomes (one format, PC= disambiguates) (§8) ---
+// UniParc simple and proteome headers. PC distinguishes the latter.
 inline constexpr std::array<header_field_definition, 9> uniparc_fields{{
   {"id",                  "",       "id",                 identifier_aliases,          field_origin::positional,  0},
   {"protein_name",        "",       "proteinname",        protein_name_aliases, field_origin::description, no_position},
@@ -170,7 +169,7 @@ inline constexpr std::array<header_field_definition, 9> uniparc_fields{{
   {"proteome_component",  "PC",     "proteomecomponent",  {},                  field_origin::equals_tag,  no_position},
 }};
 
-// --- unimes: first-token id + name + OS/SV + arbitrary tags (§8) ---
+// UniMes: first-token id, name, and keyed metadata.
 inline constexpr std::array<header_field_definition, 4> unimes_fields{{
   {"id",               "",   "id",              identifier_aliases,          field_origin::positional,  0},
   {"name",             "",   "name",            description_aliases, field_origin::description, no_position},
@@ -178,7 +177,7 @@ inline constexpr std::array<header_field_definition, 4> unimes_fields{{
   {"sequence_version", "SV", "sequenceversion", {},                  field_origin::equals_tag,  no_position},
 }};
 
-// --- spd: id|gene|description, gene split on '_' -> gene_id/taxon (§8) ---
+// SPD: id|gene|description with gene id and taxon extraction.
 inline constexpr std::array<header_field_definition, 5> spd_fields{{
   {"id",          "", "id",          identifier_aliases, field_origin::positional,  0},
   {"gene",        "", "gene",        {},         field_origin::positional,  1},
@@ -187,7 +186,7 @@ inline constexpr std::array<header_field_definition, 5> spd_fields{{
   {"taxon",       "", "taxon",       {},         field_origin::description, no_position},
 }};
 
-// --- ncbi generic: id + description + trailing [organism] (§8) ---
+// Generic NCBI: id, description, and trailing organism.
 inline constexpr std::array<header_field_definition, 4> ncbi_fields{{
   {"id",          "", "id",          ncbi_identifier_aliases, field_origin::positional,  0},
   {"description", "", "description", {},             field_origin::description, no_position},
@@ -195,7 +194,7 @@ inline constexpr std::array<header_field_definition, 4> ncbi_fields{{
   {"taxon",       "", "taxon",       {},             field_origin::bracket_tag, no_position},
 }};
 
-// --- ncbi gi: gi|gi_number|... + trailing [organism] (§8) ---
+// NCBI GI: positional identifier prefix plus trailing organism.
 inline constexpr std::array<header_field_definition, 5> ncbi_gi_fields{{
   {"gi",          "", "gi",          {},         field_origin::positional,  0},
   {"gi_number",   "", "ginumber",    identifier_aliases, field_origin::positional,  1},
@@ -204,9 +203,9 @@ inline constexpr std::array<header_field_definition, 5> ncbi_gi_fields{{
   {"taxon",       "", "taxon",       {},         field_origin::bracket_tag, no_position},
 }};
 
-// --- ncbi pdb: pdb|pdb_id|chain description + trailing [organism] (§8) ---
+// NCBI PDB: positional identifier prefix, chain, and trailing organism.
 // `chain` is description-origin (key route) because parse_ncbi splits it out of
-// parts[2] (MEDIUM-04); it must not bind the whole parts[2] via a pos route.
+// parts[2]. It must not bind the whole field through a positional route.
 inline constexpr std::array<header_field_definition, 6> ncbi_pdb_fields{{
   {"pdb",         "", "pdb",         {},                 field_origin::positional,  0},
   {"pdb_id",      "", "pdbid",       accession_identifier_aliases, field_origin::positional,  1},
@@ -216,7 +215,7 @@ inline constexpr std::array<header_field_definition, 6> ncbi_pdb_fields{{
   {"taxon",       "", "taxon",       {},                 field_origin::bracket_tag, no_position},
 }};
 
-// --- RefSeq: ref|accession| description [organism] (§8) ---
+// RefSeq: ref|accession| prefix, description, and trailing organism.
 inline constexpr std::array<header_field_definition, 5> refseq_fields{{
   {"ref",         "", "ref",         {},                  field_origin::positional,  0},
   {"accession",   "", "accession",   accession_identifier_aliases, field_origin::positional,  1},
@@ -225,7 +224,7 @@ inline constexpr std::array<header_field_definition, 5> refseq_fields{{
   {"taxon",       "", "taxon",       {},                  field_origin::bracket_tag, no_position},
 }};
 
-// --- GenBank: id + [key=value] bracket tags (§8) ---
+// GenBank: identifier plus bracketed key-value metadata.
 inline constexpr std::array<header_field_definition, 5> genbank_fields{{
   {"id",         "", "id",         genbank_identifier_aliases, field_origin::positional,  0},
   {"organism",   "", "organism",   {},                field_origin::bracket_tag, no_position},
@@ -234,7 +233,7 @@ inline constexpr std::array<header_field_definition, 5> genbank_fields{{
   {"moltype",    "", "moltype",    {},                field_origin::bracket_tag, no_position},
 }};
 
-// --- gisaid: 8 pipe-positional fields (§8) ---
+// GISAID: eight pipe-delimited positional fields.
 inline constexpr std::array<header_field_definition, 8> gisaid_fields{{
   {"strain",          "", "strain",         name_aliases,        field_origin::positional, 0},
   {"type",            "", "type",           {},                  field_origin::positional, 1},
@@ -246,7 +245,7 @@ inline constexpr std::array<header_field_definition, 8> gisaid_fields{{
   {"accession",       "", "accession",      identifier_aliases,          field_origin::positional, 7},
 }};
 
-// --- imgt: 15 pipe-positional fields (§8) ---
+// IMGT: fifteen pipe-delimited positional fields.
 inline constexpr std::array<header_field_definition, 15> imgt_fields{{
   {"ligm_accession",      "", "ligmaccession",     accession_identifier_aliases, field_origin::positional, 0},
   {"imgt_allele_name",    "", "imgtallelename",    {},                  field_origin::positional, 1},
@@ -268,7 +267,7 @@ inline constexpr std::array<header_field_definition, 15> imgt_fields{{
 inline constexpr std::array<header_field_definition, 0> no_fields{};
 
 // =====================================================================
-// §4.1 — format definition table, indexed by enum value
+// Format lookup
 // =====================================================================
 
 inline constexpr std::array<header_format_definition,
@@ -296,11 +295,10 @@ inline constexpr std::array<header_format_definition,
 }
 
 // =====================================================================
-// Compile-time drift guards: every field's normalised_key == norm(canonical),
-// and the format table is dense + ordered by enum value (mirrors the
-// pg_compact_sequence.cppm:82-100 source-of-truth static_asserts).
+// Compile-time table validation
 // =====================================================================
 
+/// Verify that every emitted field key is the normalized canonical name.
 [[nodiscard]] consteval bool all_norm_keys_canonical() {
     for (const auto& def : header_format_definitions)
         for (const auto& fd : def.fields)
@@ -311,6 +309,7 @@ inline constexpr std::array<header_format_definition,
 static_assert(all_norm_keys_canonical(),
               "header field keys must match normalised canonical names");
 
+/// Verify that definitions are dense and ordered by `header_format` value.
 [[nodiscard]] consteval bool format_table_is_dense_and_ordered() {
     for (std::size_t i = 0; i < header_format_definitions.size(); ++i)
         if (static_cast<std::size_t>(header_format_definitions[i].id) != i) return false;
@@ -320,7 +319,7 @@ static_assert(format_table_is_dense_and_ordered(),
               "header_format_definitions must be dense and ordered by header_format value");
 
 // =====================================================================
-// §4.1 — SQL format-name parsing (normalisation-insensitive)
+// Format-name parsing
 // =====================================================================
 
 /// Map a SQL format name ('auto','uni_prot','uni_ref',…) to its enum,

@@ -2,9 +2,8 @@
  * @file writer.cppm
  * @brief Public entry point for the IO writer.
  *
- * Mirror of `reader.cppm` for the inverse direction. Holds the
- * user-visible types (`sequence_writer`, `write_sequences_file`) and
- * the lock-free per-thread chunk pipeline.
+ * Holds the user-visible `sequence_writer` and `write_sequences_file`
+ * interfaces plus the per-thread chunk pipeline.
  *
  * **Threading model.** Each producer thread owns a `producer_state`
  * (chunk buffer + scratch) keyed by thread ID. `write_record` /
@@ -25,7 +24,7 @@
  * `decode_words_to_ascii_scalar` path.
  *
  * **Line wrapping.** FASTA bodies can be wrapped at a configurable
- * width (default 80 to match the bench corpus). The wrap is folded
+ * width. Width zero leaves each body on one line. Wrapping is folded
  * into the decoder via the `_wrapped` variant: the SIMD path decodes
  * to a per-thread scratch then memcpys with newline injection; the
  * scalar path inlines the wrap directly.
@@ -74,15 +73,14 @@ export namespace bioseq::io {
 /// `std::vector<uint8_t>`, a `resize`/`extend` call does NOT
 /// zero-initialise the new bytes — the writer's append paths
 /// immediately overwrite them with decoded ASCII / qualities. With a
-/// 16 MiB chunk this saves 16 MiB of memory traffic per flush cycle
-/// (the `vector` would zero the buffer once on geometric grow then
-/// zero-init each `resize` past the previous size, even within the
-/// pre-reserved capacity).
+/// This avoids the initialization writes that `std::vector::resize`
+/// would perform before the bytes are overwritten.
 struct writer_byte_buffer {
     std::unique_ptr<std::uint8_t[]> data;
     std::size_t size = 0;
     std::size_t capacity = 0;
 
+    /// Ensure capacity for `cap` bytes while preserving the live prefix.
     void reserve(std::size_t cap) {
         if (cap <= capacity) return;
         auto new_data = std::make_unique_for_overwrite<std::uint8_t[]>(cap);
@@ -120,8 +118,10 @@ struct writer_byte_buffer {
         std::memcpy(extend(bytes), src, bytes);
     }
 
+    /// Discard the live bytes without releasing the allocation.
     void clear() noexcept { size = 0; }
 
+    /// Return whether the buffer contains no live bytes.
     [[nodiscard]] bool empty() const noexcept { return size == 0; }
 };
 
@@ -152,8 +152,7 @@ public:
 
     /// Open `path` for writing. When `options.output_capacity_hint`
     /// is zero, uses the pwrite-based sink; otherwise pre-allocates
-    /// the file to the hint and mmap-writes into it (faster on macOS
-    /// because it skips the kernel pwrite memcpy).
+    /// the file to the hint and writes through a shared mapping.
     [[nodiscard]] static std::expected<sequence_writer, std::string>
     open(std::string_view path,
          const writer_options& options = default_writer_options) {
@@ -282,10 +281,8 @@ public:
     /// header once, then SIMD-decodes storage-unit-aligned slices of the view,
     /// carrying FASTA line-wrap state across slices, and flushes the producer
     /// between slices so RSS never exceeds ~one slice + the chunk capacity.
-    /// It flushes mid-record, so — like the multi-thread invariant in
-    /// `write_record` — it must be used single-producer for the record (the
-    /// E2E bench's FASTA emission is single-threaded). Returns false on a
-    /// prior/own flush error.
+    /// It flushes mid-record, so one producer must own the record until the
+    /// call returns. Returns false on a prior or current flush error.
     [[nodiscard]] bool write_record_streamed(
         std::string_view header,
         const sequence_view& seq,
@@ -375,9 +372,7 @@ public:
         return true;
     }
 
-    /// Append a whole batch in one call. Hot path for the bench: keeps
-    /// the per-record metadata accesses tight and the decoder LUT in
-    /// registers across many records.
+    /// Append a whole batch while retaining decoder state across records.
     [[nodiscard]] bool write_batch(const batch_t& batch) {
         if (_failed.load(std::memory_order_relaxed)) return false;
 
@@ -488,11 +483,8 @@ private:
     /// We deliberately do NOT use a thread_local pointer cache: the
     /// writer is templated, so across multiple writer instances of
     /// the same template the thread_local pointer would be shared and
-    /// could outlive its owner (writers are constructed and destroyed
-    /// in tight loops in the bench, often at recurring stack
-    /// addresses). The mutex-guarded find is cheap relative to the
-    /// per-batch decode work, and the lock is uncontended in
-    /// steady-state because each thread reads only its own slot.
+    /// could outlive its owner. The mutex-guarded lookup keeps the
+    /// producer lifetime tied to its writer.
     [[nodiscard]] writer_producer_state& acquire_producer_state() {
         const std::thread::id thread_id = std::this_thread::get_id();
         std::lock_guard guard{*_producers_mutex};

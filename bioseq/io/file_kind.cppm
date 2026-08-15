@@ -1,4 +1,7 @@
-// bioseq/io/file_kind.cppm
+/**
+ * @file file_kind.cppm
+ * @brief Case-insensitive FASTA, FASTQ, and gzip suffix classification.
+ */
 module;
 #include <array>
 #include <cctype>
@@ -49,9 +52,10 @@ namespace detail {
     inline constexpr std::array<std::string_view, 3> gzip_suffixes{
         ".gz", ".bgz", ".bgzf"};
 
-    /// Extension → format table. The first entry whose suffix matches (after a
-    /// gzip suffix is stripped) wins. constexpr so it lowers to a jump table.
+    /// One recognized extension and its sequence format.
     struct file_format_suffix { std::string_view suffix; sequence_file_format format; };
+    /// Extension → format table. The first entry whose suffix matches after a
+    /// gzip suffix is stripped wins.
     inline constexpr std::array<file_format_suffix, 6> format_suffixes{{
         {".fasta", sequence_file_format::fasta},
         {".fa",    sequence_file_format::fasta},

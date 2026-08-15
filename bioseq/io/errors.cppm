@@ -1,3 +1,7 @@
+/**
+ * @file errors.cppm
+ * @brief Failure callback protocol and formatted diagnostic dispatch.
+ */
 module;
 
 
@@ -19,7 +23,7 @@ concept failure_callback = std::invocable<p_failure_function, std::string&&>;
 /// Build a diagnostic via a compile-checked fmt format string and
 /// dispatch to the user's failure callback. Wraps the boilerplate of
 /// `failure_fn(fmt::format(...))` while keeping the format string
-/// compile-time validated. Spec §3.5 / §15.1.
+/// compile-time validated.
 template <typename p_failure_function, typename... p_arguments>
 inline void emit_failure(p_failure_function& failure_fn,
                          fmt::format_string<p_arguments...> fmt_str,

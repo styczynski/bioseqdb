@@ -156,12 +156,8 @@ public:
         return result;
     }
 
-    /// Close the file descriptor. Idempotent. Deliberately does NOT
-    /// `fsync` — the bench measures throughput, not durability, and
-    /// fsync on macOS adds 10-50 ms per close (kernel waits for the
-    /// disk to acknowledge the write). The page cache will write the
-    /// bytes back asynchronously; the data is durable from the
-    /// reader's perspective as soon as `close` returns.
+    /// Close the file descriptor without calling `fsync`. The call is
+    /// idempotent, and callers control any durability barrier separately.
     [[nodiscard]] std::expected<void, std::string> close() noexcept {
         if (_fd < 0) return {};
         const int rc_close = ::close(_fd);
@@ -182,10 +178,12 @@ public:
         return _next_offset.load(std::memory_order_relaxed);
     }
 
+    /// Return the most recent write diagnostic.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }
 
+    /// Return the owned file descriptor, or -1 after close.
     [[nodiscard]] int fd() const noexcept { return _fd; }
 
 private:
@@ -275,9 +273,8 @@ public:
     /// overflow the mmap'd capacity, the offset still advances (so
     /// concurrent reservations remain disjoint) — `write_at` then
     /// catches the overflow and stamps an error. Atomicity:
-    /// `fetch_add` with relaxed memory order suffices because the
-    /// kernel pwrite/page-cache traffic is the synchronisation
-    /// point, not the offset variable.
+    /// Relaxed ordering suffices because the counter only assigns
+    /// disjoint ranges. Byte publication does not depend on it.
     [[nodiscard]] std::uint64_t reserve_offset(std::size_t byte_count) noexcept {
         return _next_offset.fetch_add(
             static_cast<std::uint64_t>(byte_count),
@@ -308,7 +305,7 @@ public:
         return result;
     }
 
-    /// Close the sink: msync, munmap, ftruncate to actual size, close.
+    /// Unmap the sink, truncate it to the written size, and close it.
     [[nodiscard]] std::expected<void, std::string> close() noexcept {
         if (_fd < 0) return {};
         const std::size_t actual_size =
@@ -334,10 +331,12 @@ public:
         return {};
     }
 
+    /// Return the total byte count claimed by producers.
     [[nodiscard]] std::uint64_t reserved_byte_count() const noexcept {
         return _next_offset.load(std::memory_order_relaxed);
     }
 
+    /// Return the most recent mapping or write diagnostic.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }

@@ -64,9 +64,8 @@ enum class fastq_parser_progress : std::uint8_t {
     finished_record,        ///< Ready for emit.
 };
 
-/// Per-record FASTQ parser state. Aligned to a cache line
-/// so a future multi-parser pipeline can store one state per parser
-/// thread without false-sharing the partial-encoding fields.
+/// Per-record FASTQ parser state. Cache-line alignment separates parser
+/// states used by concurrent mmap shards.
 template <typename p_storage_unit,
           std::size_t p_bits_per_char,
           std::size_t p_letters_per_unit>
@@ -94,6 +93,7 @@ struct alignas(64) fastq_parser_state {
     std::vector<char>* header_storage = nullptr;
     std::vector<std::uint8_t>* quality_storage = nullptr;
 
+    /// Reset record-local progress while retaining attached batch storage.
     void reset_for_next_record() noexcept {
         progress = fastq_parser_progress::at_header_sigil;
         body.reset();
@@ -101,6 +101,7 @@ struct alignas(64) fastq_parser_state {
         sequence_letter_count = 0;
     }
 
+    /// Bind the parser state to the active batch's shared storage.
     void attach_to_batch(std::vector<char>& header_buf,
                          std::vector<p_storage_unit>& seq_buf,
                          std::vector<std::uint8_t>& quality_buf) noexcept {
@@ -111,7 +112,7 @@ struct alignas(64) fastq_parser_state {
 };
 
 /// Parse one FASTQ record from the slab. Multi-line bodies and
-/// multi-line quality strings are both supported. Spec §10.
+/// multi-line quality strings are both supported.
 ///
 /// `emit_record` is invoked with
 /// `(header_start, header_size, seq_start, seq_word_count, padding,

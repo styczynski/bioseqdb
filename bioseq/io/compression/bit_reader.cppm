@@ -2,11 +2,9 @@
  * @file bit_reader.cppm
  * @brief Forward-only bit reader for DEFLATE-style streams.
  *
- * Span-input, non-templated. DEFLATE is the only consumer; templating on
- * `<LsbFirst, BufferT>` is YAGNI for this PR. Buffer is hardcoded
- * `std::uint64_t`. `peek<p_bit_count>()` and `read<p_bit_count>()` static_assert on p_bit_count at
- * compile time. The variable-p_bit_count `peek_bits(n)` is the Huffman fast loop's
- * entry point.
+ * The reader uses a fixed `std::uint64_t` buffer because DEFLATE is its only
+ * consumer. `peek<p_bit_count>()` and `read<p_bit_count>()` validate their
+ * widths at compile time. `peek_bits(n)` serves the Huffman fast loop.
  *
  * The bit buffer holds up to 64 bits LSB-first. `refill()` fills the
  * buffer until either 8 bytes have been consumed from `_data` or the
@@ -28,6 +26,7 @@ export module bioseq.io.compression.bit_reader;
 
 export namespace bioseq::io::compression {
 
+/// Forward-only LSB-first reader over borrowed compressed bytes.
 class bit_reader {
 public:
     static constexpr std::size_t buffer_refill_size = 128 * 1024;
@@ -114,6 +113,7 @@ public:
         return _byte_cursor * 8 - _bits_buffered;
     }
 
+    /// Return the number of unread bits currently held in the local buffer.
     [[nodiscard]] std::size_t bits_buffered() const noexcept {
         return _bits_buffered;
     }
@@ -178,10 +178,12 @@ public:
         return result;
     }
 
+    /// Return whether both the source span and local bit buffer are exhausted.
     [[nodiscard]] bool exhausted() const noexcept {
         return _byte_cursor >= _data.size() && _bits_buffered == 0;
     }
 
+    /// Return the size of the borrowed compressed span.
     [[nodiscard]] std::size_t total_bytes() const noexcept {
         return _data.size();
     }

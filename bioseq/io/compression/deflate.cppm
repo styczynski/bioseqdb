@@ -1,6 +1,6 @@
 /**
  * @file deflate.cppm
- * @brief DEFLATE block decoder — port of rapidgzip's marker-mode Block.
+ * @brief DEFLATE block decoder with direct and marker output modes.
  *
  * RFC 1951. Two execution modes share one buffer:
  *
@@ -135,6 +135,7 @@ inline constexpr auto distance_table = build_distance_lut();
 // Public types
 // =====================================================================
 
+/// Compression mode encoded by a DEFLATE block header.
 enum class block_compression : std::uint8_t {
     uncompressed = 0,
     fixed_huffman = 1,
@@ -142,6 +143,7 @@ enum class block_compression : std::uint8_t {
     reserved = 3,
 };
 
+/// Result of decoding a DEFLATE header or body segment.
 enum class decode_status : std::uint8_t {
     ok = 0,
     end_of_block = 1,
@@ -161,6 +163,7 @@ enum class decode_status : std::uint8_t {
     generic_error = 15,
 };
 
+/// Return a stable diagnostic name for a decode status.
 [[nodiscard]] constexpr const char*
 decode_status_name(decode_status status) noexcept {
     switch (status) {
@@ -195,16 +198,20 @@ struct decoded_data_view {
     /// MAX_WINDOW_SIZE]` and demotes the chunk to direct mode.
     std::array<std::span<const std::uint16_t>, 2> data_with_markers{};
 
+    /// Return the total number of resolved and marker lanes.
     [[nodiscard]] std::size_t size() const noexcept {
         return data[0].size() + data[1].size()
              + data_with_markers[0].size() + data_with_markers[1].size();
     }
+    /// Return the number of resolved byte lanes.
     [[nodiscard]] std::size_t data_size() const noexcept {
         return data[0].size() + data[1].size();
     }
+    /// Return the number of unresolved marker lanes.
     [[nodiscard]] std::size_t data_with_markers_size() const noexcept {
         return data_with_markers[0].size() + data_with_markers[1].size();
     }
+    /// Return whether the view contains unresolved marker lanes.
     [[nodiscard]] bool contains_markers() const noexcept {
         return data_with_markers_size() > 0;
     }
@@ -333,14 +340,23 @@ public:
     // State queries
     // ---------------------------------------------------------------
 
+    /// Return whether the current block body has been exhausted.
     [[nodiscard]] bool is_end_of_block() const noexcept { return _at_end_of_block; }
+    /// Return whether the final block body has been exhausted.
     [[nodiscard]] bool is_end_of_stream() const noexcept { return _at_end_of_block && _is_last_block; }
+    /// Return the current block's BFINAL flag.
     [[nodiscard]] bool is_last_block() const noexcept { return _is_last_block; }
+    /// Return whether decoded output still contains prior-window markers.
     [[nodiscard]] bool contains_marker_bytes() const noexcept { return _contains_markers; }
+    /// Return the current block's compression mode.
     [[nodiscard]] block_compression compression_type() const noexcept { return _compression_type; }
+    /// Return the number of bytes decoded since reset.
     [[nodiscard]] std::size_t decoded_bytes() const noexcept { return _decoded_bytes; }
+    /// Return the current write position in the circular window.
     [[nodiscard]] std::size_t window_position() const noexcept { return _window_position; }
+    /// Return the header padding bit count for an uncompressed block.
     [[nodiscard]] std::uint8_t padding() const noexcept { return _padding; }
+    /// Return the declared byte size of an uncompressed block.
     [[nodiscard]] std::size_t uncompressed_size() const noexcept {
         return _compression_type == block_compression::uncompressed ? _uncompressed_size : 0;
     }
@@ -370,9 +386,8 @@ public:
         if (prior_window.empty()) {
             // Restore the identity marker tail. We can skip this
             // memcpy if `_window_position == 0` and the buffer was
-            // freshly constructed, but block reuse is the common path,
-            // so a 64 KiB memcpy beats correctness bugs. ~6 GB/s on
-            // Apple Silicon — invisible vs 50 ms decode time per chunk.
+            // freshly constructed, but reused blocks require the full
+            // identity tail to be restored.
             std::memcpy(_window16.data(),
                         detail::get_initial_marker_buffer().data(),
                         sizeof(_window16));
@@ -536,8 +551,8 @@ public:
             std::span<const std::uint8_t>{precode_cl.data(), precode_cl.size()});
         if (!precode_or.is_valid()) return decode_status::invalid_code_lengths;
 
-        // Concatenate literal and distance code-length streams into one
-        // (rapidgzip layout). Max length = 286 + 30 = 316; +256 safety
+        // Concatenate literal and distance code-length streams into one.
+        // Max length is 286 + 30 = 316. The +256 safety
         // pad lets run-length expansions store past `count` without
         // bounds checks.
         std::array<std::uint8_t, literal_and_distance_code_length_buffer_size> literal_cl{};

@@ -1,3 +1,7 @@
+/**
+ * @file sources.cppm
+ * @brief POSIX, memory-mapped, and zlib-backed byte sources.
+ */
 module;
 
 
@@ -32,7 +36,7 @@ export namespace bioseq::io {
 
 /// Strip the UTF-8 BOM `0xEF 0xBB 0xBF` if it appears at the start of
 /// `dst`. Returns the number of bytes the cursor should advance past
-/// (0 or 3). Used by every source's first `read_into` call. Spec §16.2.
+/// (0 or 3). Used by every source's first `read_into` call.
 [[nodiscard]] inline std::size_t strip_leading_bom(const std::uint8_t* dst,
                                                    std::size_t size) noexcept {
     if (size >= 3 && dst[0] == 0xEF && dst[1] == 0xBB && dst[2] == 0xBF) {
@@ -42,7 +46,7 @@ export namespace bioseq::io {
 }
 
 /// POSIX `read(2)`-backed source. Construct via `try_open` to surface
-/// open-time errors via `std::expected`. Spec Appendix J / §6.2.
+/// open-time errors via `std::expected`.
 class posix_read_source {
 public:
     posix_read_source() = default;
@@ -72,6 +76,7 @@ public:
 
     ~posix_read_source() { close_fd(); }
 
+    /// Open `path` as a sequential read-only byte source.
     [[nodiscard]] static std::expected<posix_read_source, std::string> try_open(
         std::string_view path) {
         const std::string path_str(path);
@@ -88,6 +93,7 @@ public:
         return source;
     }
 
+    /// Read at most `cap` bytes, stripping a leading UTF-8 BOM once.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_fd < 0) {
             _last_error_message = "posix_read_source: file descriptor closed";
@@ -119,8 +125,10 @@ public:
         return source_read_result{scaled, false, false};
     }
 
+    /// Return the most recent read diagnostic.
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
 
+    /// Return the number of source bytes consumed, including any BOM.
     [[nodiscard]] std::size_t global_offset() const noexcept { return _global_offset; }
 
 private:
@@ -140,15 +148,14 @@ private:
 struct mmap_source;
 
 /// Result of `mmap_source::try_open` when extended with magic-byte
-/// sniffing (spec §8.2). Carries the freshly-mapped source plus the
+/// sniffing. Carries the freshly-mapped source plus the
 /// 2-byte magic check + total file size so the dispatcher can route
 /// gzipped files to the parallel decoder without a second `open`.
 struct mmap_source_with_magic;
 
-/// `mmap(2)`-backed source. The file is mapped read-only and `read_into`
-/// performs a `memcpy` into the caller's slab. The zero-copy direct
-/// mode (parser sees mmap'd bytes directly) is a future optimisation —
-/// compressed input is always copied through the decompressor.
+/// `mmap(2)`-backed source. `read_into` copies mapped bytes into a slab.
+/// `direct_view` exposes the mapped bytes to the synchronous direct path.
+/// Compressed input is copied through its decompressor.
 class mmap_source {
 public:
     mmap_source() = default;
@@ -190,7 +197,7 @@ public:
     [[nodiscard]] static std::expected<mmap_source, std::string>
     try_open(std::string_view path, const reader_options& options);
 
-    /// Magic-byte-aware open (spec §8.2). Reads the first 2 bytes via
+    /// Magic-byte-aware open. Reads the first 2 bytes via
     /// `pread(2)` after `fstat` and returns the source bundled with
     /// the gzip-magic flag and the file size. Used by the dispatcher
     /// to route gzipped files to the parallel decoder without a
@@ -198,6 +205,7 @@ public:
     [[nodiscard]] static std::expected<mmap_source_with_magic, std::string>
     try_open_with_magic(std::string_view path, const reader_options& options);
 
+    /// Copy at most `cap` mapped bytes, stripping a leading UTF-8 BOM once.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         const std::size_t available = (_cursor < _size) ? (_size - _cursor) : 0;
         const std::size_t copy_size = std::min(cap, available);
@@ -218,10 +226,11 @@ public:
         return source_read_result{scaled, _cursor >= _size, false};
     }
 
+    /// Return the most recent mapping or read diagnostic.
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
 
-    /// Direct view of the mapped region. Used by the zero-copy fast
-    /// path in `run_sync_pipeline_mmap_direct` (reader.cppm) to
+    /// Direct view of the mapped region. Used by the zero-copy mmap
+    /// batch pipeline to
     /// hand the parser the whole file in one contiguous span without
     /// the slab refill / `make_room` memmove overhead. The leading
     /// UTF-8 BOM is stripped from the returned `(ptr, size)` pair.
@@ -262,7 +271,7 @@ private:
     std::string _last_error_message;
 };
 
-/// Magic-byte sniff result. The dispatcher (`reader.cppm`) uses
+/// Magic-byte sniff result. The reader dispatcher uses
 /// this to route gzipped files to the parallel decoder. Aggregate so
 /// `std::expected` can move-construct it from designated-init.
 struct mmap_source_with_magic {
@@ -343,7 +352,7 @@ mmap_source::try_open_with_magic(
 
 /// `gzread`-backed source. Uses zlib. zlib's `gzopen` transparently
 /// handles plain (non-gzipped) files too, so this source doubles as a
-/// "POSIX with auto-decompression". Spec Appendix K / §6.4.
+/// "POSIX with auto-decompression".
 class gzip_source {
 public:
     gzip_source() = default;
@@ -373,6 +382,7 @@ public:
 
     ~gzip_source() { release(); }
 
+    /// Open `path` through zlib's transparent gzip reader.
     [[nodiscard]] static std::expected<gzip_source, std::string> try_open(
         std::string_view path) {
         const std::string path_str(path);
@@ -387,6 +397,7 @@ public:
         return source;
     }
 
+    /// Read at most `cap` decompressed bytes and report zlib failures.
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_file == nullptr) {
             _last_error_message = "gzip_source: file handle closed";
@@ -429,6 +440,7 @@ public:
         return source_read_result{scaled, false, false};
     }
 
+    /// Return the most recent zlib diagnostic.
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
 
 private:

@@ -1,3 +1,7 @@
+/**
+ * @file buffer.cppm
+ * @brief Aligned refill slab used by sequence readers.
+ */
 module;
 
 #include <hwy/aligned_allocator.h>
@@ -17,7 +21,7 @@ export namespace bioseq::io {
 /// One I/O slab: a HWY-aligned byte buffer plus the parser's bookkeeping
 /// (fill cursor, parse cursor, EOF marker). The producer fills bytes
 /// in `[fill_size, capacity)`; the parser reads from
-/// `[parse_cursor, fill_size)`. Spec §7.1.
+/// `[parse_cursor, fill_size)`.
 struct buffer_slab {
     hwy::AlignedFreeUniquePtr<std::uint8_t[]> data;
     std::size_t capacity = 0;
@@ -27,19 +31,22 @@ struct buffer_slab {
 
     buffer_slab() = default;
 
+    /// Allocate an empty slab with the requested byte capacity.
     explicit buffer_slab(std::size_t initial_capacity)
         : data(hwy::AllocateAligned<std::uint8_t>(initial_capacity)),
           capacity(initial_capacity) {}
 
+    /// Return the writable start of the slab allocation.
     [[nodiscard]] std::uint8_t* raw() noexcept { return data.get(); }
+    /// Return the readable start of the slab allocation.
     [[nodiscard]] const std::uint8_t* raw() const noexcept { return data.get(); }
+    /// Return the number of filled bytes not yet consumed by the parser.
     [[nodiscard]] std::size_t remaining() const noexcept {
         return fill_size - parse_cursor;
     }
 
     /// Slide unconsumed bytes down to offset 0, freeing space at the
     /// tail for the next refill. Returns true if any room was made.
-    /// Spec §7.2.
     bool make_room() noexcept {
         DEBUG_ASSERT(parse_cursor <= fill_size,
                      "buffer_slab::make_room: parse_cursor must be within fill_size");
@@ -56,14 +63,11 @@ struct buffer_slab {
     /// Grow the slab according to the policy: double up to 8 MiB, then
     /// linear 8 MiB increments forever, capped by `max_buffer_size`.
     /// Returns true on success; false if the cap was hit.
-    /// Preserves bytes in `[0, fill_size)`. Spec §7.2.
+    /// Preserves bytes in `[0, fill_size)`.
     bool grow(const reader_options& options) {
         if (capacity >= options.io.max_buffer_size) return false;
-        // Threshold above which we switch from geometric (doubling)
-        // to linear (8 MiB increments) growth — borrowed from
-        // seq_io's `StdPolicy` (deep-dive §3.1). Doubling past 8 MiB
-        // would over-reserve for large FASTA records; linear growth
-        // amortises the realloc cost without burning excess RAM.
+        // Switch to 8 MiB increments once geometric growth would
+        // over-reserve large records.
         constexpr std::size_t geometric_growth_limit_bytes =
             static_cast<std::size_t>(1) << 23;  // 8 MiB
         std::size_t new_capacity = (capacity < geometric_growth_limit_bytes)

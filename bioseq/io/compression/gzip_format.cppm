@@ -35,6 +35,7 @@ inline constexpr std::uint8_t gzip_magic_first_byte = 0x1F;
 inline constexpr std::uint8_t gzip_magic_second_byte = 0x8B;
 inline constexpr std::uint8_t gzip_deflate_method = 0x08;
 
+/// Decoded gzip FLG bits that control optional header fields.
 struct gzip_header_flags {
     bool ftext    = false;
     bool fhcrc    = false;
@@ -43,6 +44,7 @@ struct gzip_header_flags {
     bool fcomment = false;
 };
 
+/// Parsed fixed header fields and the first DEFLATE bit offset.
 struct gzip_header {
     std::size_t end_bit_offset = 0;
     gzip_header_flags  flags;
@@ -51,6 +53,7 @@ struct gzip_header {
     std::uint32_t modification_time = 0;
 };
 
+/// Parsed checksum and modulo-2^32 size from a gzip member footer.
 struct gzip_footer {
     std::uint32_t crc32 = 0;
     std::uint32_t isize_low32 = 0;

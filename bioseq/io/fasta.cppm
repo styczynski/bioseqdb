@@ -70,9 +70,8 @@ struct record_parse_result {
     std::size_t   cursor  = 0;
 };
 
-/// Per-record FASTA parser state. Aligned to a cache line so a future
-/// multi-parser pipeline can store one state per parser
-/// thread without false-sharing the partial-encoding fields.
+/// Per-record FASTA parser state. Cache-line alignment separates parser
+/// states used by concurrent mmap shards.
 template <typename p_storage_unit,
           std::size_t p_bits_per_char,
           std::size_t p_letters_per_unit>
@@ -90,6 +89,7 @@ struct alignas(64) fasta_parser_state {
     /// pushes header bytes into this directly to avoid per-record allocation.
     std::vector<char>* header_storage = nullptr;
 
+    /// Reset record-local progress while retaining attached batch storage.
     void reset_for_next_record() noexcept {
         progress = fasta_parser_progress::at_header_sigil;
         body.reset();
@@ -109,8 +109,8 @@ struct alignas(64) fasta_parser_state {
 
 /// Parse one FASTA record from the slab, given the state. On COMPLETE,
 /// the caller appends the record to its batch and recycles the state.
-/// `slab_data` / `slab_size` are the readable region; the parse cursor
-/// is `*cursor_inout`. Spec §9.2.
+/// `slab_data` / `slab_size` are the readable region. `cursor` is the
+/// current parse offset and the result carries its updated value.
 ///
 /// `is_eof` is the producer's "no more bytes coming" flag for this
 /// slab; lets us emit the trailing record cleanly.

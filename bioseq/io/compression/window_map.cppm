@@ -1,14 +1,6 @@
 /**
  * @file window_map.cppm
- * @brief Fixed-depth ring of `(encoded_end_bit_offset, 32 KiB window)`
- *        entries. Sized at `cache_depth = 16`.
- *
- * Single-writer / single-reader semantics: the chunk_fetcher's per-chunk
- * worker writes the resolved tail-window into slot[chunk.next_slot]
- * after marker resolution; the orchestrator reads it from
- * slot[next_chunk.prior_window_slot]. Relaxed atomics on the slot
- * generation counters keep the overhead at one inc / one load per
- * window swap.
+ * @brief Trailing decompression window keyed by encoded bit offset.
  */
 module;
 
@@ -25,11 +17,10 @@ export namespace bioseq::io::compression {
 
 inline constexpr std::size_t window_size_bytes = 32 * 1024;
 
-/// One entry in the window ring. `bytes` holds the trailing 32 KiB of
+/// One reusable window entry. `bytes` holds the trailing 32 KiB of
 /// the chunk's decoded output; `size` < 32 KiB only at end-of-stream.
 /// `encoded_end_bit_offset` is the bit-offset just past the chunk's
-/// last DEFLATE block. `generation` is bumped on each write so the
-/// reader can spot stale entries.
+/// last DEFLATE block. `generation` distinguishes reused entries.
 struct decompression_window {
     std::array<std::uint8_t, window_size_bytes> bytes{};
     std::size_t   size                       = 0;

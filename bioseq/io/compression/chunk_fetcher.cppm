@@ -45,33 +45,16 @@ import bioseq.parallelism.pool;
 
 export namespace bioseq::io::compression {
 
-/// Capacity of the in-flight chunk arena. With 32 MiB compressed
-/// chunks × 3.16 ratio × 2 (uint16 marker storage) = ~200 MiB peak
-/// per slot. 8 slots × 200 MiB = 1.6 GiB peak — large but acceptable
-/// for the 4× target. Smaller arenas starve the worker pool when
-/// consumer is slow.
+/// Maximum number of decoded chunks retained between workers and consumer.
 inline constexpr std::size_t chunk_arena_capacity = 8;
 
-/// Chunk target size (compressed bytes). The paper's optimum is
-/// 4 MiB on a 128-core x86 system; on Apple Silicon with 6-8 workers
-/// the per-chunk overheads (plan validation, slot lifecycle dance,
-/// trailing-window propagation) eat a larger fraction at small chunk
-/// sizes. 32 MiB cuts chunk count from ~462 to ~59 on the SRR
-/// corpus, amortising those overheads while keeping arena RAM
-/// bounded (8 slots × 100 MiB marker = 800 MiB peak).
+/// Default compressed-byte target used when the caller supplies zero.
 inline constexpr std::size_t default_chunk_target_bytes = 32 * 1024 * 1024;
 
-/// Cap worker count. Past ~core count workers stop helping, and the
-/// drain side becomes the bottleneck. M1 Pro has 8 perf cores, so 8 is
-/// the practical ceiling.
+/// Upper bound on concurrent decoders sharing the fixed-capacity arena.
 inline constexpr std::size_t maximum_worker_count = 12;
 
-/// Hard cap on a chunk's decompressed output size. Real chunks are
-/// ~50 MiB (16 MiB compressed × 3.16 ratio). 256 MiB gives a 5× safety
-/// margin against unusually-compressible cells (long runs of identical
-/// bytes) while bounding the damage from a false-positive block start
-/// that passes header validation but decodes to garbage. Chunks
-/// exceeding this cap return an error rather than ballooning RAM.
+/// Hard cap on one chunk's decoded output. Exceeding it returns an error.
 inline constexpr std::size_t maximum_chunk_decompressed_bytes = 256 * 1024 * 1024;
 
 namespace detail {
@@ -107,7 +90,6 @@ struct gzip_member_descriptor {
 /// reader's current position. Mirrors `deflate_block_decoder::read_header`
 /// but skips the literal/distance Huffman table builds and instead
 /// runs the Kraft completeness check on each table's code lengths.
-/// ~5× faster than `read_header` for false-positive rejection.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(
     bit_reader& reader) noexcept;
 
@@ -120,28 +102,10 @@ struct gzip_member_descriptor {
 ///      block — Kraft completeness check on the literal+distance
 ///      trees.
 ///
-/// Step 2 is what filters compressed-data sequences that randomly look
-/// like a gzip header. The 4-byte magic prefix `1f 8b 08 [00..1f]` has
-/// 30 valid combinations across 2^32 — at ~2 GiB of compressed data,
-/// expect ~4 prefilter hits PER FILE just from random data. With FNAME
-/// / FCOMMENT being NUL-terminated reads on random bytes,
-/// `parse_gzip_header` alone passes nearly all of them: a 1.9 GiB
-/// SRR FASTQ.gz had 19 false-positive members and 1 real one.
-///
-/// Each fake member's chunk-0 starts in DIRECT mode at a non-block bit
-/// position. The decoder reads garbage Huffman codes and eventually
-/// emits a back-reference whose `distance > _decoded_bytes + produced`,
-/// returning EXCEEDED_WINDOW_RANGE. The Kraft check at the candidate's
-/// `header_end_bit` rejects ~5e-7 of the prefilter survivors per the
-/// rapidgzip paper (tab:false_positives), bringing expected fake
-/// members per file to effectively zero.
-///
-/// Unsupported parallel-member layout: this rejects a gzip member
-/// whose first deflate block is fixed-Huffman or uncompressed. Real
-/// gzip encoders (gzip, pigz, igzip, zlib level ≥ 1) emit dynamic
-/// Huffman for any payload past a few hundred bytes, so this is safe
-/// for production data. Fixed-block-first members use the single-worker
-/// producer (`worker_count <= 1`).
+/// The Huffman validation rejects magic-byte sequences embedded in compressed
+/// data before they become member boundaries. Parallel planning accepts only
+/// members whose first DEFLATE block is dynamic-Huffman. Other layouts require
+/// the single-worker producer.
 [[nodiscard]] inline std::expected<std::vector<gzip_member_descriptor>, std::string>
 prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
     std::vector<gzip_member_descriptor> members;
@@ -149,8 +113,7 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
 
     std::size_t cursor = 0;
     while (cursor + 4 <= compressed_view.size()) {
-        // SIMD-scan for the next 0x1f. After the first member, this
-        // saves ~40 GB/s of byte-by-byte scan.
+        // SIMD-scan for the next 0x1f candidate.
         const std::size_t advance = bioseq::io::simd::scan_first_byte(
             std::uint8_t{0x1F},
             compressed_view.data() + cursor,
@@ -221,12 +184,13 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
 // Chunk planning
 // =====================================================================
 
+/// Encoded interval and member position assigned to one chunk worker.
 struct chunk_decode_plan {
     std::uint32_t member_index          = 0;
     /// Bit offset of a valid deflate-block start. Worker seeks here.
     std::size_t   start_bit           = 0;
     /// Worker stops decoding once a block starts at-or-after this bit
-    /// (mirrors librapidarchive's `untilOffset`).
+    /// without decoding a block owned by the next plan.
     std::size_t   stop_at_bit         = 0;
     /// True for the very first chunk of the member (decoder runs in
     /// direct mode; window starts empty).
@@ -296,14 +260,8 @@ struct chunk_decode_plan {
 /// `stop_at_bit` of chunk K is the `start_bit` of chunk K+1 (or, for
 /// the last chunk of a member, the next member's start or end of file).
 ///
-/// CRITICAL: each chunk's `start_bit` MUST be a fully-validated
-/// dynamic Huffman block start. Precode-only validation lets through
-/// ~478M / 1e12 false positives (paper tab:false_positives). At the
-/// 1.876 GiB corpus's bit count that's ~3 candidates that LOOK like
-/// real blocks but produce garbage when decoded — and any one of them
-/// at a chunk boundary corrupts the output stream. `read_header` runs
-/// the full Kraft completeness check on literal+distance trees, which
-/// is the strongest filter we have without actually decoding the body.
+/// Every noninitial `start_bit` passes full literal and distance Kraft
+/// validation. Precode-only candidates are insufficient as chunk boundaries.
 [[nodiscard]] inline std::expected<std::vector<chunk_decode_plan>, std::string>
 plan_chunks(std::span<const std::uint8_t> compressed_view,
             const std::vector<gzip_member_descriptor>& members,
@@ -327,10 +285,8 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
             }
             bit_reader probe{compressed_view};
             probe.seek_to_bit(candidate);
-            // Lightweight Kraft check — skips the literal+distance
-            // table builds that `deflate_block_decoder::read_header` performs. Saves
-            // ~5 µs per candidate × ~5.8M candidates per corpus → ~30 s
-            // sequential, ~5 s parallel.
+            // Validate both code-length sets without constructing the
+            // literal and distance lookup tables.
             if (validate_dynamic_huffman_only(probe)) {
                 return candidate;
             }
@@ -339,11 +295,7 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
         return block_finder_sentinel;
     };
 
-    // Worker count for parallel candidate validation. Plan generation
-    // is dominated by `read_header` rejection at false positives —
-    // ~30 µs each, ~1500 per chunk in real DEFLATE. Parallelising
-    // across the same N threads we'll use for decoding amortises this
-    // back into the overall pipeline.
+    // Bound candidate validation to the same pool used for decoding.
     const unsigned hw_threads =
         bioseq::parallelism::default_concurrency_limit();
     const std::size_t plan_workers =
@@ -376,13 +328,8 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
         plan_start_bits.reserve(n_chunks);
         plan_start_bits.push_back(member_start_bit);
 
-        // Validate chunk start_bits IN PARALLEL across `plan_workers`
-        // threads. Each thread owns a heap-allocated probe decoder and
-        // searches its assigned chunk indices. Per-chunk results are
-        // collected into a vector and merged afterwards. Without
-        // parallelism, validation took ~20 s on the 1.876 GiB corpus
-        // (paper false-positive rate × 30 µs read_header per
-        // candidate). With 6 workers we land ~3-4 s.
+        // Validate chunk start bits in parallel. Results are collected
+        // by chunk index and merged in encoded order.
         std::vector<std::size_t> per_chunk_start(n_chunks,
                                                  block_finder_sentinel);
         per_chunk_start[0] = member_start_bit;
@@ -439,14 +386,9 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
 // Marker resolver
 // =====================================================================
 
-/// Resolve markers in `chunk.marker_storage` against `prev_window`
-/// (the previous chunk's last `prev_window_size` bytes), writing the
-/// resolved bytes into `chunk.byte_storage`. After the call,
-/// `chunk.uses_marker_storage == false` and the byte_storage holds
-/// `chunk.marker_storage.size` bytes.
-/// Inner per-lane resolver. Resolves `count` uint16 lanes from
+/// Resolve `count` marker or literal lanes from
 /// `src` into uint8 bytes at `dst`, using `prev_window` for marker
-/// lookups. Branch-free; compilers auto-vectorise the arithmetic.
+/// lookups.
 inline void resolve_lane_range(
     const std::uint16_t* src,
     std::uint8_t*        dst,
@@ -542,6 +484,7 @@ inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
 // Direct-mode buffer copy helpers
 // =====================================================================
 
+/// Copy resolved spans into contiguous byte storage.
 [[nodiscard]] inline std::size_t copy_direct_view(
     chunk_byte_buffer&       byte_storage,
     const decoded_data_view&  view) noexcept {
@@ -559,6 +502,7 @@ inline void resolve_remaining_markers(decoded_chunk& chunk) noexcept {
     return copied;
 }
 
+/// Copy marker spans into contiguous marker storage.
 [[nodiscard]] inline std::size_t copy_marker_view(
     chunk_marker_buffer&      marker_storage,
     const decoded_data_view&  view) noexcept {
@@ -685,13 +629,8 @@ decode_until(deflate_block_decoder& decoder,
         decoder.set_initial_window(std::span<const std::uint8_t>{});
     } else {
         // Marker mode: fresh decoder, prior window unknown. The
-        // `plan.start_bit` was returned by `seek_dynamic_huffman_candidate`
-        // (precode-only validation). The full literal+distance Kraft
-        // check happens here, parallelised across all workers.
-        // Per the paper tab:false_positives, the Kraft check rejects
-        // ~478M precode-valid candidates per 1e12 bit positions, so
-        // each chunk may need to scan past several false positives
-        // before finding a real block start.
+        // `plan.start_bit` was returned by candidate scanning. Retry
+        // within this plan if full header decoding rejects it.
         //
         // We deliberately avoid `deflate_block_decoder::reset()` between attempts —
         // its 128 KiB marker-buffer memcpy dominates wall clock at
@@ -738,8 +677,7 @@ decode_until(deflate_block_decoder& decoder,
             if (err != decode_status::ok) {
                 return err;
             }
-            // Preemptive stop (librapidarchive `GzipChunk.hpp:550-554`):
-            // stop BEFORE decoding the just-read block when (a) the
+            // Stop before decoding the just-read block when (a) the
             // new block sits at or past `stop_at_bit`, (b) it isn't the
             // member's last block, and (c) it's not a fixed block.
             // Fixed blocks are excluded because the blockfinder doesn't
@@ -852,8 +790,10 @@ decode_until(deflate_block_decoder& decoder,
 // chunk_fetcher
 // =====================================================================
 
+/// Plans, decodes, and exposes gzip chunks in encoded order.
 class chunk_fetcher {
 public:
+    /// Construct over caller-owned compressed bytes.
     chunk_fetcher(std::span<const std::uint8_t> compressed_view,
                   std::size_t                   chunk_decompressed_target_bytes,
                   std::size_t                   worker_count,
@@ -883,6 +823,7 @@ public:
     chunk_fetcher(chunk_fetcher&&) = delete;
     chunk_fetcher& operator=(chunk_fetcher&&) = delete;
 
+    /// Start the background producer once.
     void start_producer() noexcept {
         if (_producer_started) return;
         _producer_started = true;
@@ -897,6 +838,7 @@ public:
         }});
     }
 
+    /// Borrow the next ordered chunk and report whether it carries an error.
     [[nodiscard]] std::pair<const decoded_chunk*, bool>
     get_next_chunk() noexcept {
         start_producer();
@@ -927,6 +869,7 @@ public:
         return {chunk, chunk->state == chunk_state::decode_error};
     }
 
+    /// Release a borrowed chunk slot for producer reuse.
     void release_chunk(const decoded_chunk* chunk) noexcept {
         if (chunk == nullptr) return;
         std::size_t slot = chunk_arena_capacity;
@@ -940,13 +883,16 @@ public:
         _state_cv.notify_all();
     }
 
+    /// Return the first producer or decoder diagnostic.
     [[nodiscard]] std::string last_error_message() const noexcept {
         std::lock_guard<std::mutex> guard(_state_mutex);
         return _last_error_message;
     }
 
+    /// Compatibility hook. Chunks are released explicitly by pointer.
     void release_until(std::size_t /*encoded_bit_offset*/) noexcept {}
 
+    /// Stop the producer and join its task group. Idempotent.
     void shutdown() noexcept {
         if (!_producer_started) return;
         _shutdown.store(true, std::memory_order_release);
@@ -1156,8 +1102,7 @@ private:
                 break;
             }
 
-            // Resolve the trailing 32 KiB in the ordered drain so the window
-            // runs this serially so the trailing window propagates
+            // Resolve the trailing 32 KiB in encoded order so the window
             // propagates forward correctly. The remaining prefix is resolved
             // by the worker after this slot is marked ready.
             if (chunk.uses_marker_storage) {
@@ -1235,8 +1180,7 @@ private:
     /// their tagged arena slots, and signals the ordered drain.
     void worker_loop(const std::vector<detail::chunk_decode_plan>& plans,
                      std::size_t                            total_chunks) noexcept {
-        // Heap-allocate the decoder — its 128 KiB `_window16` is too
-        // big for the worker's stack on macOS.
+        // Keep the decoder's 128 KiB window out of the worker stack.
         auto decoder = std::make_unique<deflate_block_decoder>();
 
         while (true) {
@@ -1323,12 +1267,14 @@ private:
         _state_cv.notify_all();
     }
 
+    /// Mark producer completion and wake every slot waiter.
     void signal_done() noexcept {
         _producer_done.store(true, std::memory_order_release);
         std::lock_guard<std::mutex> guard(_state_mutex);
         _state_cv.notify_all();
     }
 
+    /// Retain the first terminal error and discard later diagnostics.
     void set_error(std::string message) noexcept {
         std::lock_guard<std::mutex> guard(_state_mutex);
         if (_last_error_message.empty()) {

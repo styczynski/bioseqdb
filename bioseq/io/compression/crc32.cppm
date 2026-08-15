@@ -74,6 +74,7 @@ namespace detail {
         detail::to_zlib_size(size)));
 }
 
+/// Combine two completed CRC values as if their byte ranges were contiguous.
 [[nodiscard]] inline std::uint32_t crc32_combine(
     std::uint32_t crc_a, std::uint32_t crc_b, std::size_t length_b) noexcept {
     return detail::from_zlib_ulong(::crc32_combine(
@@ -82,9 +83,8 @@ namespace detail {
         detail::to_zlib_off(length_b)));
 }
 
-/// Highway-acceleration entry point. Implementation lives in
-/// `simd.cppm`. **Not wired** by default: the orchestrator
-/// continues to call `crc32_update` (which routes to zlib's crc32_z).
+/// Highway-accelerated update with zlib-compatible running-state semantics.
+/// The implementation lives in `simd.cppm`.
 [[nodiscard]] std::uint32_t crc32_iso_hdlc_simd(
     std::uint32_t running, const std::uint8_t* bytes, std::size_t size) noexcept;
 

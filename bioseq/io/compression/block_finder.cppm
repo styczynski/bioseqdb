@@ -38,8 +38,8 @@ inline constexpr std::size_t block_finder_sentinel =
 /// Validate a candidate dynamic-Huffman block by attempting to read the
 /// 14-bit header (HLIT, HDIST, HCLEN) then checking that the precode
 /// code-length table forms a complete prefix code. The validator is
-/// cheap (one LUT-lookup-driven sum + comparison) so the blockfinder
-/// can probe candidates aggressively. Takes a copy of the bit reader
+/// uses a bounded LUT reduction before full table construction. Takes a copy
+/// of the bit reader
 /// — the caller's cursor is preserved.
 [[nodiscard]] inline bool
 validate_precode(bit_reader reader_copy) noexcept {

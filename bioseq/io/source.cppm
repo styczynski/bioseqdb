@@ -1,10 +1,11 @@
+/**
+ * @file source.cppm
+ * @brief Lightweight byte-source result and protocol definitions.
+ *
+ * This module has no project imports. `bioseq.io.sources` re-exports it for
+ * consumers that also need concrete source implementations.
+ */
 module;
-
-// Lightweight source protocol. Holds only `source_read_result` and the
-// `io_source` concept so a generated client or external
-// transfer can depend on the byte-source protocol WITHOUT pulling the whole
-// sequences/alphabets graph. Imports nothing project-side (spec §2774);
-// `bioseq.io.sources` re-exports it so existing importers are unaffected.
 
 #include <concepts>
 #include <cstddef>

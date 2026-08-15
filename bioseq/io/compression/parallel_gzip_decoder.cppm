@@ -1,8 +1,6 @@
 /**
  * @file parallel_gzip_decoder.cppm
- * @brief Top-level orchestrator. Owns the chunk_fetcher; walks chunks
- *        linearly; tracks `gzip_member_checksum_state`; verifies CRC + ISIZE on
- *        member end.
+ * @brief Ordered chunk drain with optional gzip member checksum tracking.
  */
 module;
 

@@ -6,11 +6,8 @@
  * 32 KiB window for downstream chunk priming, and an inline error
  * message buffer.
  *
- * The direct decoder runs a single zlib `inflate(2)` pass per chunk.
- * It reads as much input as zlib needs to
- * advance to the chunk's target output size; `decompressed_size_bytes`
- * is the produced byte count. The trailing window is captured by
- * memcpy from the tail of the produced bytes for downstream chunks.
+ * Directly resolved output uses byte storage. Independently decoded blocks
+ * may use marker lanes until the preceding 32 KiB window is available.
  *
  * The marker output buffer is `uint16_t[]`. Each literal lane's high
  * byte is zero, so
@@ -54,14 +51,17 @@ struct inline_error_message {
     std::array<char, capacity>  buffer{};
     std::size_t                  size = 0;
 
+    /// Replace the current message with a truncated, null-terminated copy.
     void assign(std::string_view message) noexcept {
         size = std::min(message.size(), capacity - 1);
         std::memcpy(buffer.data(), message.data(), size);
         buffer[size] = '\0';
     }
+    /// Return the live message bytes without the trailing null byte.
     [[nodiscard]] std::string_view view() const noexcept {
         return {buffer.data(), size};
     }
+    /// Return whether no diagnostic bytes are stored.
     [[nodiscard]] bool empty() const noexcept { return size == 0; }
 };
 
@@ -94,8 +94,7 @@ struct decoded_chunk {
     inline_error_message error_message;
 };
 
-// The chunk producer loop lives in `chunk_fetcher.cppm`. It writes
-// resolved bytes directly into `decoded_chunk::byte_storage` via zlib
-// `inflate(2)`, while independently decoded blocks use marker storage.
+// The chunk producer loop writes resolved output into byte storage and keeps
+// marker storage for blocks that still depend on the preceding window.
 
 }  // namespace bioseq::io::compression

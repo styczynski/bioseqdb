@@ -83,12 +83,13 @@ value_for_column(const identifier_mapping_result& map,
             .is_identity_or_generated = false};
 }
 
-// Resolve + parse in one shot; returns (mapping, writer) so callers assert values.
+/// Holds the resolved mapping and values captured while routing one header.
 struct parse_run {
     identifier_mapping_result map;
     capture_identifier_writer writer;
 };
 
+/// Resolve a mapping, parse one header, and return its captured destination values.
 [[nodiscard]] parse_run run_parse(
         header_format requested, header_format effective,
         std::span<const column_descriptor> columns, std::string_view header,
@@ -311,6 +312,8 @@ TEST_CASE("identifier_parser: detect_header_format majority vote",
 namespace {
 
 /// Write identifier-parser input to a process-unique temporary file.
+/// @param content Bytes to write to the file.
+/// @return Path of the completed temporary file.
 std::string write_tmp_file(const std::string& content) {
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> counter{0};

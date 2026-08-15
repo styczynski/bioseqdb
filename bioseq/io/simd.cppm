@@ -65,9 +65,7 @@ HWY_INLINE hn::Mask<p_descriptor> any_needle_match(
         return hn::Or(hn::Or(hn::Eq(chunk_bytes, hn::Set(d, needles[0])),
                              hn::Eq(chunk_bytes, hn::Set(d, needles[1]))),
                       hn::Eq(chunk_bytes, hn::Set(d, needles[2])));
-    } else {  // 4..8: new branch only; the 1/2/3 arms above stay codegen-identical
-              // so the FASTA/FASTQ record-scan hot path (scan_for_first /
-              // scan_for_each callers) cannot regress (spec §5.1).
+    } else {  // Keep the common one-, two-, and three-needle expressions fixed.
         hn::Mask<p_descriptor> m = hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
         for (std::size_t i = 1; i < p_needle_count; ++i)
             m = hn::Or(m, hn::Eq(chunk_bytes, hn::Set(d, needles[i])));
@@ -78,7 +76,7 @@ HWY_INLINE hn::Mask<p_descriptor> any_needle_match(
 /// Per-target unroll factor for the aligned-body scan loop. AVX-512
 /// lanes already process 64 B per chunk so a 2× unroll already
 /// achieves the 128 B / iter target; AVX2 + NEON benefit from 4×
-/// because each chunk is shorter (32 B / 16 B). See spec §17.2 / §17.3.
+/// because each chunk is shorter (32 B / 16 B).
 template <class p_descriptor>
 constexpr std::size_t scan_unroll_factor() noexcept {
     if constexpr (hn::MaxLanes(p_descriptor{}) >= 64) return 2;
@@ -86,7 +84,7 @@ constexpr std::size_t scan_unroll_factor() noexcept {
 }
 
 /// Find the first byte in `[data, data+size)` matching ANY of `needles`.
-/// Returns `size` if absent. Spec §8.1, §8.2, §17.3.
+/// Returns `size` if absent.
 template <std::size_t p_needle_count, class p_descriptor>
 [[nodiscard]] HWY_INLINE std::size_t scan_for_first(
     p_descriptor d,
@@ -189,7 +187,6 @@ template <std::size_t p_needle_count, class p_descriptor>
 
 /// Iterate every offset in `[data, data+size)` whose byte matches any
 /// needle, calling `visit(offset)` per match in ascending order.
-/// Spec §8.4-§8.5.
 template <std::size_t p_needle_count, class p_descriptor, typename p_visit>
 HWY_INLINE void scan_for_each(
     p_descriptor d,
@@ -249,7 +246,7 @@ HWY_INLINE void scan_for_each(
 
 /// Marker resolution — for each `uint16_t` value `v` in `buffer`, if
 /// `v < 0x8000` keep low byte; else replace low byte with
-/// `window[v - 0x8000]`. Spec §5.1.
+/// `window[v - 0x8000]`.
 template <class p_u16_descriptor>
 HWY_INLINE void replace_markers_inplace_one_chunk(
     p_u16_descriptor               d_u16,
@@ -290,7 +287,6 @@ HWY_INLINE void replace_markers_inplace_one_chunk(
 
 /// `dst[i] = static_cast<uint8_t>(src[i])` — drop the high byte of
 /// each `uint16_t`. 4×-unrolled `DemoteTo` per main-loop iteration.
-/// Spec §5.2.
 ///
 /// `Rebind<u8, p_u16_descriptor>` keeps the same lane count as the u16 tag (so
 /// `DemoteTo` produces a vector with the same lane count, just half
@@ -335,17 +331,18 @@ HWY_INLINE void narrow_lower_bytes_to_dst_inner(
 // ---------------------------------------------------------------------
 // Huffman fast loop — decode `huffman_fast_loop_unroll` literal-only
 // symbols per call from a shared bit buffer. Caller refills first.
-// Spec §5.3.
 // ---------------------------------------------------------------------
 
 inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
+/// Literal symbols and bit consumption produced by the inline fast loop.
 struct huffman_fast_loop_result_inner {
     std::array<std::uint16_t, huffman_fast_loop_unroll> symbols{};
     std::size_t                                       symbols_emitted = 0;
     std::size_t                                       bits_consumed   = 0;
 };
 
+/// Decode consecutive primary-table literals without advancing a bit reader.
 [[nodiscard]] HWY_INLINE huffman_fast_loop_result_inner
 huffman_fast_loop_inner(
     std::uint64_t        bit_buffer,
@@ -369,6 +366,7 @@ huffman_fast_loop_inner(
     return result;
 }
 
+/// Store the literal prefix produced by the inline fast loop.
 HWY_INLINE void huffman_fast_loop_store_inner(
     const huffman_fast_loop_result_inner& result,
     std::uint16_t* HWY_RESTRICT           window_cursor) noexcept {
@@ -382,21 +380,25 @@ HWY_INLINE void huffman_fast_loop_store_inner(
 // polynomial folds to Highway carry-less multiplication operations.
 // ---------------------------------------------------------------------
 
+/// Carry-less multiply of the low polynomial lanes.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_low_low(
     p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulLower(a, b);
 }
+/// Carry-less multiply of the high polynomial lanes.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_high_high(
     p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulUpper(a, b);
 }
+/// Carry-less multiply of the low lane by the high lane.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_low_high(
     p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
     return hn::CLMulLower(a, hn::Shuffle01(b));
 }
+/// Carry-less multiply of the high lane by the low lane.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> cmul_high_low(
     p_descriptor /*d*/, hn::Vec<p_descriptor> a, hn::Vec<p_descriptor> b) noexcept {
@@ -412,7 +414,7 @@ template <class p_descriptor>
     return hn::Load(d, lanes.data());
 }
 
-/// Reflected fold-16. Mirrors `width32_ops.rs:48-69`.
+/// Fold one 16-byte reflected-polynomial state with new input.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE hn::Vec<p_descriptor> crc32_fold_16_reflected(
     p_descriptor d, hn::Vec<p_descriptor> state, hn::Vec<p_descriptor> coeff, hn::Vec<p_descriptor> data_to_xor) noexcept {
@@ -421,6 +423,7 @@ template <class p_descriptor>
     return hn::Xor(hn::Xor(h, l), data_to_xor);
 }
 
+/// Build the coefficient sequence used to collapse eight folded lanes.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE std::array<hn::Vec<p_descriptor>, 7>
 crc32_collapse_coefficients(
@@ -436,6 +439,7 @@ crc32_collapse_coefficients(
     };
 }
 
+/// Reduce a folded 128-bit state to a reflected CRC-32 value.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE std::uint32_t crc32_final_reduction_reflected(
     p_descriptor                                    d,
@@ -464,7 +468,7 @@ template <class p_descriptor>
     return static_cast<std::uint32_t>(out_lanes[1]);
 }
 
-/// 128-byte SIMD-aligned chunk processor. Mirrors `algorithm.rs:200-274`.
+/// Fold one or more contiguous 128-byte chunks into the running state.
 template <class p_descriptor>
 HWY_INLINE void crc32_process_simd_chunks_reflected(
     p_descriptor                                    d,
@@ -506,6 +510,7 @@ HWY_INLINE void crc32_process_simd_chunks_reflected(
         static_cast<z_size_t>(size)));
 }
 
+/// Update a reflected CRC using SIMD blocks and a scalar tail.
 template <class p_descriptor>
 [[nodiscard]] HWY_INLINE std::uint32_t crc32_iso_hdlc_reflected_impl(
     p_descriptor                                    d,
@@ -542,7 +547,7 @@ HWY_AFTER_NAMESPACE();
 // Non-inline wrappers — entry points for non-Highway-aware modules.
 // =====================================================================
 //
-// Modules like `bioseq_io.fasta` / `bioseq_io.fastq` need a "find next
+// Modules like `bioseq.io.fasta` / `bioseq.io.fastq` need a "find next
 // '\n'" primitive but do not include `<hwy/highway.h>` in their GMF
 // (doing so re-emits Highway's per-target inline operator overloads
 // into every importer's BMI and trips clang's "definition with same
@@ -558,13 +563,13 @@ HWY_AFTER_NAMESPACE();
 namespace bioseq::io::simd {
 
 /// Find the first byte in `[data, data+size)` equal to `needle`, or
-/// `size` if absent. Spec §8.2.
+/// `size` if absent.
 [[nodiscard]] std::size_t scan_first_byte(
     std::uint8_t needle,
     const std::uint8_t* data,
     std::size_t size) noexcept;
 
-/// Same as `scan_first_byte` but for two needles. Spec §8.3.
+/// Same as `scan_first_byte` but for two needles.
 [[nodiscard]] std::size_t scan_first_byte_pair(
     std::uint8_t needle_0,
     std::uint8_t needle_1,
@@ -576,7 +581,7 @@ namespace bioseq::io::simd {
 /// 4-needle pack is exposed via this single-arity wrapper for the
 /// FASTA FSM's `\n`-or-`>` body-end scan; it bypasses the per-call
 /// arity dispatch in `scan_first_byte_pair` so the body scan loop
-/// goes through one inline body. Spec §8.3.
+/// goes through one inline body.
 [[nodiscard]] std::size_t scan_first_byte_dispatch3(
     std::uint8_t needle_0,
     std::uint8_t needle_1,
@@ -584,13 +589,9 @@ namespace bioseq::io::simd {
     const std::uint8_t* data,
     std::size_t size) noexcept;
 
-/// p_visit every offset in `[data, data+size)` whose byte equals any of the four
-/// structural header delimiters, in ascending order, via the existing
-/// `scan_for_each<4>` SIMD kernel. The `void* ctx + fn-ptr` shim keeps the
-/// wrapper non-templated (one symbol) so the PostgreSQL-independent header lexer
-/// (`bioseq_io.identifier_parser`) need not include `<hwy/highway.h>`. Returns
-/// void — the lexer counts delimiters in its own visitor, not here (spec §5.1,
-/// review HIGH-02). Spec §8.4-§8.5.
+/// Visit every offset whose byte equals one of four delimiters, in ascending
+/// order. The erased callback keeps the wrapper non-templated so the header
+/// lexer does not import Highway templates.
 void scan_for_each_delim4(
     std::uint8_t d0, std::uint8_t d1, std::uint8_t d2, std::uint8_t d3,
     const std::uint8_t* data, std::size_t size,
@@ -600,7 +601,7 @@ void scan_for_each_delim4(
 // Compression-pipeline wrappers (declarations).
 // ---------------------------------------------------------------------
 
-/// Spec §5.1. In-place marker resolution. Buffer is `uint16_t[]` (the
+/// In-place marker resolution. Buffer is `uint16_t[]` (the
 /// chunk arena's storage). On entry, lanes with `value < 0x8000` are
 /// already-resolved literals; lanes with `value >= 0x8000` reference
 /// `window[value - 0x8000]`. After the call, every lane's low byte is
@@ -609,19 +610,18 @@ void replace_markers_inplace(std::uint16_t*      buffer,
                              std::size_t         buffer_size,
                              const std::uint8_t* window /* exactly 32 KiB */) noexcept;
 
-/// Spec §5.2. `dst[i] = static_cast<uint8_t>(src[i])` over `count`
+/// `dst[i] = static_cast<uint8_t>(src[i])` over `count`
 /// elements. 4×-unrolled SIMD demote per iteration; tail handles
 /// trailing lanes-1 elements via scalar.
 void narrow_lower_bytes_to_dst(const std::uint16_t* src,
                                std::uint8_t*        dst,
                                std::size_t          count) noexcept;
 
-/// Spec §5.3. Result of one Huffman fast-loop iteration. The `symbols`
-/// array holds up to 3 decoded literal-only symbols;
-/// `symbols_emitted < 3` signals the caller should fall back to the
-/// scalar path for the breaking symbol.
+/// Maximum literals decoded by one Huffman fast-loop iteration.
 inline constexpr std::size_t huffman_fast_loop_unroll = 3;
 
+/// Result of one Huffman fast-loop iteration. A short result signals
+/// that the caller must decode the breaking symbol through the scalar path.
 struct huffman_fast_loop_result {
     std::array<std::uint16_t, huffman_fast_loop_unroll> symbols;
     std::size_t                                       symbols_emitted;
@@ -642,10 +642,8 @@ void huffman_fast_loop_store(
     const huffman_fast_loop_result& result,
     std::uint16_t*                  window_cursor) noexcept;
 
-/// Spec §5.4. Highway CRC-32/ISO-HDLC entry point. Implemented but
-/// **not wired** into the chunk pipeline by default — the orchestrator
-/// keeps calling zlib's `crc32_z`. Same return semantics as
-/// `crc32_update` in `compression/crc32.cppm` (they are bit-exact).
+/// Highway CRC-32/ISO-HDLC update with zlib-compatible running-state
+/// semantics.
 [[nodiscard]] std::uint32_t crc32_iso_hdlc_simd(
     std::uint32_t        running,
     const std::uint8_t*  bytes,
@@ -711,7 +709,7 @@ void scan_for_each_delim4(std::uint8_t d0,
 }
 
 // ---------------------------------------------------------------------
-// Compression-pipeline wrappers (definitions). Spec §5.
+// Compression-pipeline wrapper definitions.
 // ---------------------------------------------------------------------
 
 void replace_markers_inplace(std::uint16_t* buffer,

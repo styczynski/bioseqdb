@@ -87,12 +87,8 @@ public:
         return decoder;
     }
 
-    /// Light-weight validity check without building any of the lookup
-    /// tables. Used by `plan_chunks` to filter false-positive block
-    /// candidates at ~5× the speed of a full `build()` — the table
-    /// fills here are a 4-13 KiB zero/store cycle that dominates
-    /// per-candidate cost. This returns the same `is_valid()` answer a
-    /// full `build()` would have set.
+    /// Validate code lengths without constructing lookup tables. This
+    /// returns the same validity result as `build()`.
     [[nodiscard]] static constexpr bool is_valid_code_lengths(
         std::span<const std::uint8_t> code_lengths) noexcept {
         std::array<std::uint32_t, maximum_code_bits + 2> length_counts{};
@@ -120,6 +116,7 @@ public:
         return kraft_sum == kraft_target || single_one_bit;
     }
 
+    /// Return whether construction produced a complete supported code tree.
     [[nodiscard]] constexpr bool is_valid() const noexcept { return _is_valid; }
 
     /// Decode the next symbol from `reader`. Returns `invalid_symbol`
@@ -138,7 +135,7 @@ public:
         return decode_fallthrough(reader);
     }
 
-    /// Direct primary-table view for the Huffman fast loop (§5.3).
+    /// Direct primary-table view for the Huffman fast loop.
     /// Each entry packs `(symbol << 4) | code_length`; `code_length == 0`
     /// signals "consult fallthrough".
     [[nodiscard]] std::span<const std::uint16_t, primary_table_size>
@@ -320,9 +317,8 @@ using precode_decoder  = canonical_huffman_decoder<7,  detail::precode_alphabet>
 
 /// FIXED Huffman tables (RFC 1951 §3.2.6) — same across every gzip file.
 /// `consteval` build runs at compile time; `inline` lets the linker
-/// share one copy across all translation units. ~10% of real-world
-/// blocks use FIXED encoding; this saves the per-block primary-table
-/// build on those.
+/// share one copy across all translation units and avoid rebuilding
+/// the primary tables for fixed-Huffman blocks.
 inline const lit_len_decoder fixed_literal_length_decoder =
     lit_len_decoder::build(detail::fixed_lit_len_code_lengths());
 inline const distance_decoder fixed_distance_decoder =

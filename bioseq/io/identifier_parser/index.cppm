@@ -37,21 +37,21 @@ static_assert(__cplusplus >= 202302L, "C++23-or-later");
 export namespace bioseq::io::identifier_parser {
 
 // =====================================================================
-// §4.3 — slot type, user mapping, column descriptor, routing, result
+// Mapping and routing types
 // =====================================================================
 
-using destination_slot = std::int32_t;   // one slot int type everywhere
+/// Dense writer destination index used by every route type.
+using destination_slot = std::int32_t;
 
 /// One entry of the SQL `columns => ARRAY[(column_name, data_source)]` argument.
-/// The PG side flattens the composite into these borrowed `string_view`s; they
-/// stay valid until `resolve_identifier_mapping` returns (§4.3 lifetime contract).
+/// The caller flattens the composite into borrowed `string_view`s that remain
+/// valid until `resolve_identifier_mapping` returns.
 struct user_column_mapping {
     std::string_view column_name;
     std::string_view data_source;
 };
 
-/// One non-seq column as the PG side describes it to the resolver. NO Postgres
-/// types — `Form_pg_attribute` is flattened into these plain fields.
+/// One non-sequence destination column described without database types.
 struct column_descriptor {
     std::string_view name;        // raw column name
     bool             is_text;     // TEXT/VARCHAR/BPCHAR (fast path, no input fn)
@@ -61,8 +61,7 @@ struct column_descriptor {
     bool             is_identity_or_generated;
 };
 
-/// Routes the parser produces -> destination "slots". A slot is a dense index
-/// into the PG-side coercion table. One field may route to MANY slots (D5).
+/// Routes one normalized field key to one or more destination slots.
 /// Route counts are tiny and resolved once per load, so vector-backed route
 /// lists avoid exposing Boost flat_map internals through this module BMI.
 struct identifier_key_route {
@@ -70,17 +69,19 @@ struct identifier_key_route {
     std::vector<destination_slot> slots;
 };
 
+/// Routes one positional field index to one or more destination slots.
 struct identifier_position_route {
     std::uint32_t position;
     std::vector<destination_slot> slots;
 };
 
+/// Complete routing table resolved once for a sequence load.
 struct identifier_routing {
     std::vector<identifier_key_route> key_routes;
     std::vector<identifier_position_route> position_routes;
     std::vector<destination_slot> identifier_slots;
     std::size_t destination_count     = 0;     // number of distinct slots
-    bool        strip_metadata = false; // D7: strip [k=v]/k=v from identifier
+    bool        strip_metadata = false; // strip routed metadata from identifier
 };
 
 /// What `resolve_identifier_mapping` returns. `slot_to_column` maps each slot to the
@@ -91,7 +92,7 @@ struct identifier_mapping_result {
 };
 
 // =====================================================================
-// §4.4 — the Writer concept (D2) + type-erased ref adapter
+// Writer protocol and erased adapter
 // =====================================================================
 
 /// The postgres-agnostic sink the parser drives. The concrete implementation
@@ -123,8 +124,7 @@ static_assert(identifier_destination_writer<example_identifier_destination_write
 
 /// Non-template adapter used by the parser hot path. Built once in the PG caller
 /// from a concept-satisfying writer; the parser takes only this erased ref, so
-/// the per-format extractors are not instantiated per writer type (the
-/// load-bearing template-explosion invariant of §3/§4.4).
+/// the per-format extractors are not instantiated per writer type.
 struct identifier_writer_reference {
     void* self = nullptr;
     void (*begin_tuple_callback)(void*) = nullptr;
@@ -144,6 +144,7 @@ struct identifier_writer_reference {
     [[nodiscard]] std::size_t destination_count() const { return destination_count_callback(self); }
 };
 
+/// Build an erased parser reference over a concept-satisfying writer.
 template <identifier_destination_writer p_writer>
 [[nodiscard]] identifier_writer_reference make_identifier_writer_reference(p_writer& w) noexcept {
     return identifier_writer_reference{
@@ -162,10 +163,12 @@ template <identifier_destination_writer p_writer>
 }
 
 // =====================================================================
-// §5.2 — lexer output + reusable per-record parser scratch
+// Lexer output and reusable parser state
 // =====================================================================
 
+/// Structural delimiters recognized during one header scan.
 enum class delimiter_kind : std::uint8_t { pipe, equals, left_bracket, right_bracket };
+/// Offset and kind of one structural header delimiter.
 struct delimiter_token { std::uint32_t offset; delimiter_kind kind; };
 
 /// One SIMD pass collecting every structural delimiter, ascending. Headers are
@@ -173,6 +176,7 @@ struct delimiter_token { std::uint32_t offset; delimiter_kind kind; };
 struct header_lexer {
     boost::container::small_vector<delimiter_token, 48> tokens;
 
+    /// Replace the token list with delimiters found in `header`.
     void lex(std::string_view header) {
         tokens.clear();
         struct lexer_context { header_lexer* self; const char* base; };
@@ -195,7 +199,7 @@ struct header_lexer {
     }
 };
 
-/// Reusable parser scratch owned by the caller (`load_context` on the PG side).
+/// Reusable parser scratch owned by the caller.
 /// No TLS and no per-record heap allocation in steady state.
 struct identifier_parse_state {
     header_lexer lexer;
@@ -205,7 +209,7 @@ struct identifier_parse_state {
 }  // namespace bioseq::io::identifier_parser
 
 // =====================================================================
-// Internal helpers (module-local; not exported). §5.4 contracts.
+// Module-local parsing helpers
 // =====================================================================
 
 namespace bioseq::io::identifier_parser::detail {
@@ -213,6 +217,7 @@ namespace bioseq::io::identifier_parser::detail {
 using std::string_view;
 namespace bc = boost::container;
 
+/// Return whether a byte is valid inside an equals-tag key.
 [[nodiscard]] constexpr bool is_key_char(char c) noexcept {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
         || (c >= '0' && c <= '9');
@@ -250,22 +255,25 @@ namespace bc = boost::container;
     return out;
 }
 
+/// Trim leading ASCII spaces from a borrowed view.
 [[nodiscard]] constexpr string_view ltrim_spaces(string_view s) noexcept {
     std::size_t b = 0;
     while (b < s.size() && s[b] == ' ') ++b;
     return s.substr(b);
 }
+/// Trim trailing ASCII spaces from a borrowed view.
 [[nodiscard]] constexpr string_view rtrim_spaces(string_view s) noexcept {
     std::size_t e = s.size();
     while (e > 0 && s[e - 1] == ' ') --e;
     return s.substr(0, e);
 }
+/// Trim leading and trailing ASCII spaces from a borrowed view.
 [[nodiscard]] constexpr string_view trim_spaces(string_view s) noexcept {
     return rtrim_spaces(ltrim_spaces(s));
 }
 
-/// §5.4 — fields between consecutive `delim` delimiters; virtual delimiters at
-/// -1 and len. Empty fields are preserved. PIPE offsets come from the lexer; any
+/// Return fields between consecutive `delim` delimiters. Empty fields are
+/// preserved. Pipe offsets come from the lexer. Any
 /// other delimiter (no current format uses one) falls back to a scalar scan.
 [[nodiscard]] inline bc::small_vector<string_view, 16> positional_split_on(
         char delim, string_view header, const header_lexer& lex) {
@@ -290,7 +298,7 @@ namespace bc = boost::container;
     return out;
 }
 
-/// §5.4 — split at the first ' '. `tail` is empty if there is no space.
+/// Split at the first space. The tail is empty when no space exists.
 [[nodiscard]] inline std::pair<string_view, string_view> split_first_space(
         string_view s) {
     const std::size_t pos = bioseq::io::simd::scan_first_byte(
@@ -314,6 +322,7 @@ bracket_spans(const header_lexer& lex) {
     return out;
 }
 
+/// Return whether an offset lies strictly inside any bracket span.
 [[nodiscard]] inline bool offset_in_any_bracket(
         const bc::small_vector<std::pair<std::uint32_t, std::uint32_t>, 8>& spans,
         std::uint32_t e) {
@@ -322,13 +331,14 @@ bracket_spans(const header_lexer& lex) {
     return false;
 }
 
+/// Accepted equals-tag delimiter and its optional fixed-format field.
 struct accepted_eq {
     std::uint32_t            ks;     // key-run start
     std::uint32_t            eq;     // '=' offset
     const header_field_definition*  field;  // matched equals_tag field (fixed) or nullptr (AUTO)
 };
 
-/// §5.3 — collect every accepted KEY=VALUE tag whose '=' falls in [begin,end) and
+/// Collect every accepted KEY=VALUE tag whose '=' falls in [begin,end) and
 /// is not in-bracket: non-empty `[A-Za-z0-9]` key run, boundary char before the
 /// key (start / space / '|'), and (fixed formats) a whitelist match against the
 /// format's equals_tag fields. Ascending by offset.
@@ -368,13 +378,14 @@ struct accepted_eq {
     return out;
 }
 
+/// Borrowed key, value, and optional fixed-format field for one equals tag.
 struct equals_tag {
     string_view             key;
     string_view             value;   // right-trimmed
     const header_field_definition* field;
 };
 
-/// §5.4 `equals_tags` — accepted EQUALS tags with right-trimmed values. Each
+/// Return accepted equals tags with right-trimmed values. Each
 /// value runs from just after its '=' to the next accepted tag's key start (or
 /// `end`), then trailing spaces are removed.
 [[nodiscard]] inline bc::small_vector<equals_tag, 16> equals_tags(
@@ -395,7 +406,7 @@ struct equals_tag {
     return out;
 }
 
-/// §5.4 `first_tag_offset` — min key-start of an accepted EQUALS tag or LBRACKET
+/// Return the first accepted equals-tag key or left-bracket offset
 /// within [begin,end), else `end`. Bounds the description / protein-name region.
 [[nodiscard]] inline std::uint32_t first_tag_offset(
         string_view header, const header_lexer& lex,
@@ -412,7 +423,7 @@ struct equals_tag {
     return first;
 }
 
-/// §5.4 `bracket_tags` — the `[KEY=VALUE]` spans (exactly one in-span '=').
+/// Return bracket spans containing exactly one `KEY=VALUE` pair.
 [[nodiscard]] inline bc::small_vector<std::pair<string_view, string_view>, 8>
 bracket_tags(string_view header, const header_lexer& lex) {
     bc::small_vector<std::pair<string_view, string_view>, 8> out;
@@ -433,7 +444,7 @@ bracket_tags(string_view header, const header_lexer& lex) {
     return out;
 }
 
-/// §5.4 `trailing_bracket_value` — trimmed contents of the LAST `[...]` span that
+/// Return trimmed contents of the last bracket span that
 /// contains no '=' (the ncbi/RefSeq value-only `[organism]` convention).
 [[nodiscard]] inline string_view trailing_bracket_value(
         string_view header, const header_lexer& lex) {
@@ -450,7 +461,7 @@ bracket_tags(string_view header, const header_lexer& lex) {
     return result;
 }
 
-/// §5.4 `trailing_bracket_start` — `lb` of that same last-no-'=' span, or npos.
+/// Return the start of the last value-only bracket span, or `npos`.
 [[nodiscard]] inline std::size_t trailing_bracket_start(
         string_view header, const header_lexer& lex) {
     std::size_t result = string_view::npos;
@@ -467,9 +478,8 @@ bracket_tags(string_view header, const header_lexer& lex) {
     return result;
 }
 
-/// §5.4 `strip_tags` — header with every accepted EQUALS tag and every bracket
-/// span removed, runs of >1 space collapsed to one and ends trimmed, written into
-/// the caller-owned `scratch`. The D7 "metadata-stripped identifier".
+/// Remove every accepted equals tag and bracket span, collapse repeated spaces,
+/// trim both ends, and write the result into caller-owned scratch storage.
 [[nodiscard]] inline string_view strip_tags(string_view header,
                                             const header_lexer& lex,
                                             std::string& scratch,
@@ -514,9 +524,10 @@ bracket_tags(string_view header, const header_lexer& lex) {
 }
 
 // ---------------------------------------------------------------------
-// Route emitter — the §6 `Emit` that consults the routing table and writes.
+// Route emitter
 // ---------------------------------------------------------------------
 
+/// Find destination slots for a normalized field key.
 [[nodiscard]] inline const std::vector<destination_slot>*
 find_key_slots(const identifier_routing& routing, string_view key) noexcept {
     for (const auto& route : routing.key_routes) {
@@ -525,6 +536,7 @@ find_key_slots(const identifier_routing& routing, string_view key) noexcept {
     return nullptr;
 }
 
+/// Find destination slots for a positional field index.
 [[nodiscard]] inline const std::vector<destination_slot>* find_position_slots(
         const identifier_routing& routing, std::uint32_t position) noexcept {
     for (const auto& route : routing.position_routes) {
@@ -533,11 +545,13 @@ find_key_slots(const identifier_routing& routing, string_view key) noexcept {
     return nullptr;
 }
 
+/// Applies resolved key and position routes to an erased writer.
 struct route_emitter {
     const identifier_routing& routing;
     identifier_writer_reference     writer;
     std::array<char, 256>     key_buffer{};   // AUTO key normalisation scratch
 
+    /// Write a nonempty value or set the destination slot to null.
     void write_or_null(destination_slot slot, string_view value) const {
         if (value.empty()) writer.set_null(slot);
         else writer.set_field(slot, value.data(),
@@ -558,11 +572,13 @@ struct route_emitter {
             keyed(nk, value);
         }
     }
+    /// Route one positional field value.
     void positional(std::uint32_t idx, string_view value) const {
         if (const auto* slots = find_position_slots(routing, idx)) {
             for (destination_slot s : *slots) write_or_null(s, value);
         }
     }
+    /// Route the selected identifier value to every identifier slot.
     void identifier(string_view value) const {
         for (destination_slot s : routing.identifier_slots) write_or_null(s, value);
     }
@@ -580,6 +596,7 @@ inline void emit_identifier(
         emit.identifier(header);
 }
 
+/// Find a format field by canonical name, token, or alias.
 [[nodiscard]] inline const header_field_definition* find_field_for_name(
         const header_format_definition& def, string_view name) {
     for (const auto& fd : def.fields) {
@@ -592,10 +609,10 @@ inline void emit_identifier(
 }
 
 // ---------------------------------------------------------------------
-// §6 — per-format extractors
+// Per-format extractors
 // ---------------------------------------------------------------------
 
-/// §6.1 — UniProtKB: `db|accession|entry` block + EQUALS tags.
+/// Parse a UniProtKB positional prefix and equals-tag metadata.
 inline void parse_uniprot(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
@@ -638,7 +655,7 @@ inline void parse_uniprot(
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.1b — first-token id + EQUALS tags (UniRef, UniParc, UniMes).
+/// Parse a first-token identifier and equals-tag metadata.
 inline void parse_keyed(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
@@ -665,7 +682,7 @@ inline void parse_keyed(
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.2 — pure positional formats (spd, gisaid, imgt).
+/// Parse a format whose fields are positionally delimited.
 inline void parse_positional(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
@@ -689,7 +706,7 @@ inline void parse_positional(
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.2b — ncbi family (ncbi generic, gi, pdb, RefSeq): id block + free-text
+/// Parse an NCBI-family identifier block plus free-text
 /// description + trailing value-only `[organism]`.
 inline void parse_ncbi(
         string_view header, identifier_parse_state& st,
@@ -739,7 +756,7 @@ inline void parse_ncbi(
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.3 — GenBank `[k=v]` bracket tags.
+/// Parse a GenBank identifier and bracketed key-value tags.
 inline void parse_genbank(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
@@ -752,14 +769,14 @@ inline void parse_genbank(
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.4 — plain / bare accession: identifier only.
+/// Parse a plain header as an identifier only.
 inline void parse_plain(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
     emit_identifier(header, st, def, /*accept_any=*/false, emit.routing, emit);
 }
 
-/// §6.5 — AUTO generic path (no fixed format chosen).
+/// Parse generic positional and keyed metadata without a fixed format.
 inline void parse_auto(
         string_view header, identifier_parse_state& st,
         const header_format_definition& def, route_emitter& emit) {
@@ -782,17 +799,17 @@ inline void parse_auto(
 }
 
 // ---------------------------------------------------------------------
-// §9.5 — detection predicates
+// Format detection predicates
 // ---------------------------------------------------------------------
 
+/// Count pipe delimiters in a header.
 [[nodiscard]] inline std::size_t pipe_count(string_view h) {
     std::size_t n = 0;
     for (char c : h) if (c == '|') ++n;
     return n;
 }
 
-/// §8 gisaid `is_date_like` — digits with exactly two '/'-or-'-' separators and
-/// three non-empty digit groups (detection heuristic only; coercion is date_in).
+/// Recognize three nonempty digit groups separated by slash or hyphen.
 [[nodiscard]] inline bool is_date_like(string_view s) {
     if (s.empty()) return false;
     int separators = 0;
@@ -816,6 +833,7 @@ inline void parse_auto(
     return separators == 2 && groups == 3;
 }
 
+/// Return whether a header contains a boundary-anchored equals tag.
 [[nodiscard]] inline bool has_equals_tag(string_view h) {
     // any boundary-anchored KEY= (cheap: ' X=' or leading 'X=')
     for (std::size_t i = 0; i < h.size(); ++i)
@@ -827,6 +845,7 @@ inline void parse_auto(
     return false;
 }
 
+/// Return whether a header contains a bracketed equals tag.
 [[nodiscard]] inline bool has_bracket_equals(string_view h) {
     std::size_t lb = h.find('[');
     while (lb != string_view::npos) {
@@ -838,6 +857,7 @@ inline void parse_auto(
     return false;
 }
 
+/// Return whether the last bracket span contains a value without a key.
 [[nodiscard]] inline bool has_trailing_value_bracket(string_view h) {
     const std::size_t rb = h.rfind(']');
     if (rb == string_view::npos) return false;
@@ -846,6 +866,7 @@ inline void parse_auto(
     return h.substr(lb + 1, rb - lb - 1).find('=') == string_view::npos;
 }
 
+/// Recognize an unpiped two-letter RefSeq accession prefix.
 [[nodiscard]] inline bool looks_like_refseq_accession(string_view h) {
     const auto [first, rest] = split_first_space(h);
     (void) rest;
@@ -857,7 +878,7 @@ inline void parse_auto(
         && first[2] == '_';
 }
 
-/// Run a single format's §8 detection predicate over one header.
+/// Test one header against a format-specific detection predicate.
 [[nodiscard]] inline bool format_matches(header_format f, string_view h) {
     const std::size_t pipes = pipe_count(h);
     switch (f) {
@@ -882,7 +903,7 @@ inline void parse_auto(
                    h.find("PE=") == string_view::npos &&
                    pipes < 2;
         case header_format::spd:
-            // "exactly 2 '|' and no '='" (§8), but a leading ncbi/UniProt prefix
+            // Exactly two pipes and no equals tag, but a leading NCBI/UniProt prefix
             // is unambiguously that family — keep spd's generic heuristic from
             // stealing `gi|N| …` etc. via the enum-order tie-break.
             return pipes == 2 && h.find('=') == string_view::npos &&
@@ -925,7 +946,7 @@ inline void parse_auto(
 }  // namespace bioseq::io::identifier_parser::detail
 
 // =====================================================================
-// §4.5 / §7 — exported entry points
+// Exported parser entry points
 // =====================================================================
 
 export namespace bioseq::io::identifier_parser {
@@ -965,8 +986,8 @@ export namespace bioseq::io::identifier_parser {
     return {};
 }
 
-/// §9.5 — detect the dialect from sampled headers (auto mode), majority vote.
-/// Ties break by §4.1 enum order; no match -> plain if no `|`/`=`/`[`, else AUTO.
+/// Detect the dialect from sampled headers by majority vote. Ties break by
+/// enum order. No match selects plain for unstructured input and automatic otherwise.
 [[nodiscard]] header_format detect_header_format(
         std::span<const std::string_view> samples) noexcept {
     if (samples.empty()) return header_format::automatic;
@@ -999,7 +1020,7 @@ export namespace bioseq::io::identifier_parser {
     return best_format;
 }
 
-/// §7.1 — resolve the column mapping ONCE per load. Pure logic over plain data.
+/// Resolve column routes once for a load using database-independent descriptors.
 [[nodiscard]] std::expected<identifier_mapping_result, std::string>
 resolve_identifier_mapping(header_format requested_format,
                            header_format effective_format,
@@ -1126,7 +1147,7 @@ resolve_identifier_mapping(header_format requested_format,
         }
     }
 
-    // ---- C. choose the identifier column from unclaimed text columns (D7/D8) ----
+    // ---- C. choose the identifier column from unclaimed text columns ----
     boost::container::small_vector<std::size_t, 4> text_candidates, primary_key_candidates, name_candidates;
     for (std::size_t i = 0; i < column_count; ++i) {
         if (!columns[i].is_text || is_user_mapped[i] || is_metadata_claimed[i])
@@ -1159,7 +1180,7 @@ resolve_identifier_mapping(header_format requested_format,
         }
     }
 
-    // ---- E. strip decision (D7), computed AFTER the dest set is final ----
+    // ---- E. compute stripping after the destination set is final ----
     routing.strip_metadata =
         (requested_format == header_format::automatic)
             ? has_key_or_position_route
