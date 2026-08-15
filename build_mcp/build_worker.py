@@ -1503,19 +1503,24 @@ def _receipt_authorized_artifact_evidence(
     # generated manifest.  Receipt-pinned execution must authenticate that
     # indirection and every referenced build-tree file, not merely the runner
     # executable that consumes it.
-    requires_cache_artifact_manifest = any(
-        argument.startswith("{")
-        and argument.endswith("}")
-        and argument != "{report}"
+    cache_artifact_keys = sorted({
+        argument[1:-1]
         for command in MODES[mode].commands
         for argument in command[1:]
-    )
-    if requires_cache_artifact_manifest:
+        if argument.startswith("{")
+        and argument.endswith("}")
+        and argument != "{report}"
+    })
+    if cache_artifact_keys:
         cache_artifact_manifest = bin_dir / "cache_native_artifacts.json"
         select_regular(cache_artifact_manifest, required=True)
-        for key, value in _cache_native_artifacts(bin_dir).items():
+        cache_artifacts = _cache_native_artifacts(bin_dir)
+        for key in cache_artifact_keys:
+            value = cache_artifacts[key]
             if not value:
-                continue
+                raise RuntimeError(
+                    "cache native artifact manifest has no path for selected "
+                    f"mode placeholder: {key}")
             referenced = Path(value)
             directory_key = key.endswith(
                 ("_postgres_bin_dir", "_postgres_stage_root"))

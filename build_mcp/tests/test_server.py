@@ -21,6 +21,7 @@ sys.path.insert(0, str(BUILD_MCP_DIR))
 
 import build_presets
 import build_worker
+import cache_modes
 import integrity
 import process_state
 import protocol
@@ -1446,9 +1447,32 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             runner.write_bytes(b"cache integration runner\n")
             manifest = bin_dir / "cache_native_artifacts.json"
             manifest.write_text('{"schema_revision":2}\n', encoding="utf-8")
+            stage_root = build_dir / "staged/postgres"
+            stage_bin = stage_root / "bin"
+            stage_bin.mkdir(parents=True)
+            stage_manifest = stage_root / "manifest.json"
+            stage_manifest.write_text("{}\n", encoding="utf-8")
             referenced = build_dir / "staged/cache--1.0.sql"
-            referenced.parent.mkdir()
             referenced.write_text("SELECT 1;\n", encoding="utf-8")
+            cache_control = build_dir / "staged/bioseq_cache.control"
+            cache_control.write_text("default_version='1.0'\n", encoding="utf-8")
+            cache_dso_input = build_dir / "staged/bioseq_cache.dylib"
+            cache_dso_input.write_bytes(b"cache test support dso\n")
+            artifacts = {
+                key: "" for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
+            }
+            artifacts.update({
+                "cache_test_support_postgres_bin_dir": str(stage_bin),
+                "cache_test_support_postgres_stage_root": str(stage_root),
+                "cache_test_support_postgres_stage_manifest":
+                    str(stage_manifest),
+                "cache_test_control": str(cache_control),
+                "cache_test_install_sql": str(referenced),
+                "cache_test_dso": str(cache_dso_input),
+                # This configured profile is not consumed by cache-integration.
+                "cache_production_postgres_stage_root":
+                    str(build_dir / "unused/missing-production-stage"),
+            })
             suffix = build_worker._native_shared_library_suffix(
                 build_worker.host_platform.system())
             (build_dir / "CMakeCache.txt").write_text(
@@ -1464,13 +1488,20 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             with mock.patch.object(
                 build_worker,
                 "_cache_native_artifacts",
-                return_value={"cache_install_sql": str(referenced)},
+                return_value=artifacts,
             ):
                 before = build_worker._receipt_authorized_artifact_evidence(
                     "cache-integration", build_dir, debug=False)
                 referenced.write_text("SELECT 2;\n", encoding="utf-8")
                 after = build_worker._receipt_authorized_artifact_evidence(
                     "cache-integration", build_dir, debug=False)
+                referenced.unlink()
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "cache native artifact manifest references a file "
+                        "outside the receipted build tree"):
+                    build_worker._receipt_authorized_artifact_evidence(
+                        "cache-integration", build_dir, debug=False)
 
         before_by_path = {
             item["relative_path"]: item for item in before}
