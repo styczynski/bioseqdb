@@ -254,10 +254,9 @@ WHERE passed_qc;
 ```
 
 For a Bioseq custom scan, `Bioseq Projected Columns` shows what the node must
-produce. `Bioseq Fetched From Meta` can show that sequence metadata supplied a
-value such as a length or symbol count. Treat the plan as a way to understand a
-specific statement. Do not assume that adding an unused full-text projection is
-free.
+produce. `Bioseq Fetched From Meta` lists supported metadata projections such
+as a symbol count. Treat the plan as a way to understand a specific statement.
+Do not assume that adding an unused full-text projection is free.
 
 Use `ANALYZE` only when it is acceptable to run the statement:
 

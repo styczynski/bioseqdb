@@ -72,8 +72,9 @@ an individual Highway ISA.
 
 ## Read every Highway EXPLAIN field
 
-Every relevant Bioseq scan reports the same five stable dispatch fields. In
-JSON they are collected once under the `Highway SIMD Dispatch` object.
+A Bioseq search node with pipeline detail uses the same five stable dispatch
+fields. In JSON they are collected once under the `Highway SIMD Dispatch`
+object.
 
 | Field | Meaning | When it is available |
 | --- | --- | --- |

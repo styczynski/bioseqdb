@@ -745,9 +745,9 @@ Plain `EXPLAIN` does not make the remote request. `EXPLAIN ANALYZE` does. The
 node's PostgreSQL actual rows and timing therefore become the main runtime view
 for the external scan.
 
-If a plan falls back to a physical sequential scan on an external relation, it
-cannot return a valid remote result. Fix the custom-scan planning issue rather
-than treating an empty physical relation as data.
+If a plan falls back to a physical sequential scan on an external relation, the
+table access method rejects that execution. Fix the custom-scan planning issue
+instead of trying to work around the missing `BioseqExternalScan`.
 
 ## BioseqIndexScan
 
