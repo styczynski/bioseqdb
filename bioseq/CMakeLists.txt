@@ -3572,9 +3572,17 @@ bioseq_register_sql_owner(
     backend/pg/types/compact_sequence/io.cppm
     backend/pg/types/compact_sequence/letter.cppm
     backend/pg/types/compact_sequence/packed_output.cppm
+    backend/pg/types/compact_sequence/packed_output_parts/materialization_trace.cppm
+    backend/pg/types/compact_sequence/packed_output_parts/async_ownership.cppm
+    backend/pg/types/compact_sequence/packed_output_parts/packing.cppm
+    backend/pg/types/compact_sequence/packed_output_parts/test_contracts.cppm
     backend/pg/types/compact_sequence/sql_catalog.cppm
     backend/pg/types/compact_sequence/subscript.cppm
     backend/pg/types/compact_sequence/tree_ops.cppm
+    backend/pg/types/compact_sequence/tree_ops_parts/ownership.cppm
+    backend/pg/types/compact_sequence/tree_ops_parts/transforms.cppm
+    backend/pg/types/compact_sequence/tree_ops_parts/validation.cppm
+    backend/pg/types/compact_sequence/tree_ops_parts/failure_contracts.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS postgres_types_compact_sequence)
