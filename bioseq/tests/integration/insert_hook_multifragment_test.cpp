@@ -13,26 +13,35 @@ import bioseq.tests.integration.support;
 using namespace bioseq_int_tests;
 
 namespace {
-// Deterministic pseudo-random dna4 string (xorshift; ACGT only, no N).
-inline std::string gen_dna4(std::size_t n, std::uint64_t seed) {
-    std::string s;
-    s.reserve(n);
-    std::uint64_t x = seed * 2862933555777941757ull + 3037000493ull;
-    for (std::size_t i = 0; i < n; ++i) {
-        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
-        s.push_back("ACGT"[(x >> 9) & 3]);
+/// Generate deterministic ACGT-only DNA with the fixture's xorshift stream.
+[[nodiscard]] std::string generate_dna4(
+        std::size_t length,
+        std::uint64_t seed) {
+    std::string sequence;
+    sequence.reserve(length);
+    std::uint64_t state = seed * 2862933555777941757ull + 3037000493ull;
+    for (std::size_t index = 0; index < length; ++index) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        sequence.push_back("ACGT"[(state >> 9) & 3]);
     }
-    return s;
+    return sequence;
 }
-inline std::set<std::tuple<long long, long long>> match_set(
+
+/// Return the unique target-coordinate pairs emitted by mmsearch.
+[[nodiscard]] std::set<std::tuple<long long, long long>> match_set(
         const connection_test_context& ctx, std::string_view table_name) {
-    auto rows = query_rows(ctx, fmt::format(
+    const auto rows = query_rows(ctx, fmt::format(
         "SELECT bioseq.target_start(target) ts, bioseq.target_end(target) te FROM {} "
         "WHERE mmsearch(target, query) ORDER BY 1,2", table_name));
-    std::set<std::tuple<long long, long long>> out;
-    for (auto& r : rows)
-        if (r[0] && r[1]) out.emplace(std::stoll(*r[0]), std::stoll(*r[1]));
-    return out;
+    std::set<std::tuple<long long, long long>> matches;
+    for (const auto& row : rows) {
+        if (row[0] && row[1]) {
+            matches.emplace(std::stoll(*row[0]), std::stoll(*row[1]));
+        }
+    }
+    return matches;
 }
 }  // namespace
 
@@ -43,7 +52,7 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
     exec_sql(ctx,
         "CREATE TABLE insert_hook_multifragment (pk int, target bioseq.seq('dna4',32), "
         "query bioseq.seq('dna4',32)) USING bioseq;");
-    const std::string target = gen_dna4(200000, 1234567); // ~7 fragments @ 32768 bp
+    const std::string target = generate_dna4(200000, 1234567); // ~7 fragments @ 32768 bp
     const std::string query = target.substr(60000, 2000); // an exact 2 kbp substring
     exec_sqlf(ctx, "INSERT INTO insert_hook_multifragment VALUES (1, '{}'::bioseq.seq('dna4',32), "
                    "'{}'::bioseq.seq('dna4',32));", target, query);
@@ -59,7 +68,8 @@ TEST_CASE("INSERT hook builds a multi-fragment index + both on-insert indexes",
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "insert_hook_multifragment") > 0);
 
     // dna4, single whole-sequence segment => assemble == recompute exactly.
-    guc_scope on(ctx, "bioseq.index.sequence_read.enabled", "on");
+    guc_scope sequence_read_on(
+        ctx, "bioseq.index.sequence_read.enabled", "on");
     const auto assembled = match_set(ctx, "insert_hook_multifragment");
     REQUIRE(!assembled.empty());
     exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = off;");

@@ -23,6 +23,7 @@ constexpr std::string_view k_source_table = "wire_source";
 constexpr std::string_view k_destination_table = "wire_destination";
 constexpr std::string_view k_binary_path = "/tmp/bioseq_seq_wire.bin";
 
+/// Seed the source relation used by the binary COPY round trip.
 void seed_pair(connection_test_context& ctx) {
     create_seq_table(
         ctx,
@@ -48,28 +49,29 @@ TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
     seed_pair(ctx);
 
     // Best-effort cleanup prevents an existing file from affecting the run.
-    std::error_code ec;
-    std::filesystem::remove(std::filesystem::path(k_binary_path), ec);
+    std::error_code cleanup_error;
+    std::filesystem::remove(
+        std::filesystem::path(k_binary_path), cleanup_error);
 
     exec_sqlf(ctx, "COPY {} TO '{}' (FORMAT binary);", k_source_table, k_binary_path);
 
     exec_sqlf(ctx, "CREATE TABLE {} (LIKE {} INCLUDING ALL);", k_destination_table, k_source_table);
     exec_sqlf(ctx, "COPY {} FROM '{}' (FORMAT binary);", k_destination_table, k_binary_path);
 
-    const auto src_rows = query_rows(
+    const auto source_rows = query_rows(
         ctx, fmt::format(
                  "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
                  "FROM {} ORDER BY pk;",
                  k_source_table));
-    const auto dst_rows = query_rows(
+    const auto destination_rows = query_rows(
         ctx,
         fmt::format(
             "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
             "FROM {} ORDER BY pk;",
             k_destination_table));
 
-    REQUIRE(src_rows == dst_rows);
-    REQUIRE(src_rows.size() == 4);
+    REQUIRE(source_rows == destination_rows);
+    REQUIRE(source_rows.size() == 4);
 }
 
 TEST_CASE("seq_recv rejects malformed wire payloads (or refuses to be invoked)",

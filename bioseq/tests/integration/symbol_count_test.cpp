@@ -1,21 +1,10 @@
-// Integration scenarios for bioseq.symbol_count:
-//   * bioseq.symbol_count(LITERAL, 'L') returns the real per-rank tally
-//     from tally_symbol_counts for every alphabet
-//     enabled by the active PostgreSQL build profile on the scalar path.
-//   * The scalar result is identical whether bioseq.vectorization.enabled is on
-//     or off — the SIMD path must not diverge from the scalar path.
-//   * On a USING bioseq columnar table the custom-scan VarInjector rewrites
-//     symbol_count(Var, 'L') into a per-row placeholder Const; with
-//     bioseq.index.sequence_read.enabled = on the stored INLINE symbol_counts chunk is
-//     preferred, but the unconditional recompute fallback guarantees a
-//     non-NULL real tally for every present row even with the index disabled
-//     and index.sequence_read.enabled = off.
-//
-// Real-tally goldens (counted directly from the literals):
-//   'ACGTACGTACGTACGT'::dna4 -> A=4, C=4, G=4, T=4
-//   'AAAAAAAA'::dna4         -> A=8, C=G=T=0
-//   'NNNNN'::dna5            -> N=5 (rank of N in dna5 is 4), A=C=G=T=0
-//   'ACGTN'::dna5            -> A=1, C=1, G=1, T=1, N=1
+/**
+ * @file Integration scenarios for `bioseq.symbol_count`.
+ *
+ * Literal tallies cover every enabled alphabet and vectorization parity.
+ * Columnar cases verify both the stored INLINE symbol-count chunk and the
+ * unconditional recompute fallback when index maintenance and reads are off.
+ */
 
 #include <tests/support/postgres.hpp>
 #include <bioseq/pg_build_profile.h>
@@ -159,7 +148,8 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
 
         // Insert a fourth row WITHOUT populating the stored INLINE index.
         {
-            guc_scope no_insert(ctx, "bioseq.index.insert_maintenance.enabled", "off");
+            guc_scope insert_maintenance_disabled(
+                ctx, "bioseq.index.insert_maintenance.enabled", "off");
             exec_sqlf(ctx,
                       "INSERT INTO {} VALUES "
                       "(4, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
@@ -169,7 +159,8 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
         // With the stored read disabled, the unconditional recompute fallback
         // must still return the correct NON-NULL real tally (A=4) — never NULL.
         {
-            guc_scope no_read(ctx, "bioseq.index.sequence_read.enabled", "off");
+            guc_scope sequence_reads_disabled(
+                ctx, "bioseq.index.sequence_read.enabled", "off");
             ctx.clear_notices();
             const auto row = query_one(
                 ctx,
@@ -182,10 +173,11 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
 			// Abort the executor after BioseqScan has populated the placeholder.
-			// The helper has already performed its normal cleanup at this point;
-			// this verifies that it leaves no ResourceOwner debt for a later projection
-			// error. The helper's internal PG_CATCH path is established by the
-			// heap-resident state and per-cleanup saved-ErrorData guards.
+            // The helper has already performed its normal cleanup at this
+            // point; this verifies that it leaves no ResourceOwner debt for a
+            // later projection error. The helper's internal PG_CATCH path is
+            // established by the heap-resident state and per-cleanup
+            // saved-ErrorData guards.
             ctx.clear_notices();
             const auto projection_error = sql_error(
                 ctx,
@@ -201,35 +193,36 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
 }
 
 TEST_CASE("inline Sequence PostgreSQL leaves preserve exact error and same-backend recovery",
-		  "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
-	auto ctx = fresh_context({k_bioseq_column});
-	seed_small_bioseq_column(ctx, k_bioseq_column);
-	exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
-	const std::string read_sql = fmt::format(
-		"SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 1;",
-		k_bioseq_column);
-	REQUIRE(query_scalar_int(ctx, read_sql) == 4);
+          "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {
+    auto ctx = fresh_context({k_bioseq_column});
+    seed_small_bioseq_column(ctx, k_bioseq_column);
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
+    const std::string read_sql = fmt::format(
+        "SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 1;",
+        k_bioseq_column);
+    REQUIRE(query_scalar_int(ctx, read_sql) == 4);
 
-	for (const std::string_view point : {
-			std::string_view{"relation_lookup"},
-			std::string_view{"tuple_read"},
-			std::string_view{"detoast"},
-			std::string_view{"close"}}) {
-		exec_sqlf(ctx,
-			"SELECT bioseq_internal.arm_inline_sequence_pg_failure('{}');",
-			point);
-		ctx.clear_notices();
-		const auto error = sql_error(ctx, read_sql);
-		REQUIRE(error.sqlstate == "58030");
-		REQUIRE(error.contains(
-			"injected inline sequence storage PostgreSQL leaf failure"));
-		REQUIRE(error.contains(fmt::format("failure_point={}", point)));
-		REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+    for (const std::string_view failure_point : {
+            std::string_view{"relation_lookup"},
+            std::string_view{"tuple_read"},
+            std::string_view{"detoast"},
+            std::string_view{"close"}}) {
+        exec_sqlf(ctx,
+            "SELECT bioseq_internal.arm_inline_sequence_pg_failure('{}');",
+            failure_point);
+        ctx.clear_notices();
+        const auto error = sql_error(ctx, read_sql);
+        REQUIRE(error.sqlstate == "58030");
+        REQUIRE(error.contains(
+            "injected inline sequence storage PostgreSQL leaf failure"));
+        REQUIRE(error.contains(
+            fmt::format("failure_point={}", failure_point)));
+        REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-		// The hook is one-shot. Both SPI/executor use in a trivial statement and
-		// a second real inline-index read must succeed in this exact backend.
-		REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-		REQUIRE(query_scalar_int(ctx, read_sql) == 4);
-		REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
-	}
+        // The hook is one-shot. Both SPI/executor use in a trivial statement
+        // and a second real inline-index read must succeed in this backend.
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        REQUIRE(query_scalar_int(ctx, read_sql) == 4);
+        REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
+    }
 }

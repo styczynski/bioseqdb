@@ -14,6 +14,7 @@ namespace {
 
 constexpr std::string_view k_table = "fragment_storage_layout";
 
+/// Return the aggregate physical size of a parent's sequence shards.
 [[nodiscard]] long long sub_table_relation_size(
     const connection_test_context& ctx, std::string_view parent_table) {
     return query_scalar_int(ctx,
@@ -66,12 +67,15 @@ TEST_CASE("non-aligned final-fragment sequences cover the off-by-one boundary",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
     constexpr long long k_fragment_bp = 32768;
     auto ctx = fresh_context({k_table});
-    for (long long bp : {k_fragment_bp - 1, k_fragment_bp, k_fragment_bp + 1,
-                          static_cast<long long>(123456ULL)}) {
+    for (long long base_pair_count : {
+             k_fragment_bp - 1,
+             k_fragment_bp,
+             k_fragment_bp + 1,
+             static_cast<long long>(123456ULL)}) {
         exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", k_table);
         exec_sqlf(ctx,
                   "SELECT bioseq.create_sample_table('{}', 1, {}, 'dna4', 42);",
-                  k_table, bp);
+                  k_table, base_pair_count);
         // Each non-empty sequence must produce a non-zero-byte sub-table.
         REQUIRE(sub_table_relation_size(ctx, k_table) > 0);
     }

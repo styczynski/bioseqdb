@@ -16,6 +16,7 @@ namespace {
 
 constexpr std::string_view k_table = "btree_sequences";
 
+/// Seed the heap relation and its default sequence btree index.
 void seed_heap(connection_test_context& ctx) {
     create_seq_table(
         ctx,
@@ -74,7 +75,7 @@ TEST_CASE("btree index path is correct when enable_seqscan is forced off",
     auto ctx = fresh_context({k_table});
     seed_heap(ctx);
 
-    guc_scope no_seq(ctx, "enable_seqscan", "off");
+    guc_scope sequence_scans_disabled(ctx, "enable_seqscan", "off");
     REQUIRE(query_int_column(
                 ctx, fmt::format(
                          "SELECT pk FROM {} "
@@ -92,7 +93,7 @@ TEST_CASE("hash opclass lookup agrees with bioseq sequence equality",
               "CREATE INDEX {0}_hash_idx ON {0} USING hash "
               "(seq0 bioseq.seq_hash_ops);",
               k_table);
-    guc_scope no_seq(ctx, "enable_seqscan", "off");
+    guc_scope sequence_scans_disabled(ctx, "enable_seqscan", "off");
     REQUIRE(query_int_column(
                 ctx, fmt::format(
                          "SELECT pk FROM {} "

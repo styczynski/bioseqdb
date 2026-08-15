@@ -1,4 +1,4 @@
-/*
+/**
  * Standalone PostgreSQL runtime-evidence protocol for SQL-boundary safety.
  *
  * This file intentionally uses .cc so the ordinary integration-test source
@@ -114,11 +114,13 @@ constexpr std::string_view k_authorization_marker =
 constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     "invoke_pg_as_cpp.vacuum_cleanup_restore";
 
+/// Raise a context-rich harness failure.
 [[noreturn]] void fail(std::string_view context, std::string_view message) {
     throw std::runtime_error{
         fmt::format("{}: {}", context, message)};
 }
 
+/// Read an entire bounded fixture or receipt file.
 [[nodiscard]] std::string read_file(const fs::path& path) {
     std::ifstream input{path, std::ios::binary};
     if (!input) {
@@ -140,10 +142,11 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return result;
 }
 
+/// Encode a byte sequence as lowercase hexadecimal.
 [[nodiscard]] std::string hex_digest(
         const unsigned char* bytes,
         std::size_t size) {
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr auto digits = std::to_array("0123456789abcdef");
     std::string result(size * 2, '\0');
     for (std::size_t index = 0; index < size; ++index) {
         result[index * 2] = digits[bytes[index] >> 4U];
@@ -152,10 +155,11 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return result;
 }
 
+/// Hash an in-memory byte sequence with SHA-256.
 [[nodiscard]] std::string sha256_bytes(std::string_view bytes) {
-    using digest_context =
+    using evp_digest_context =
         std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
-    digest_context context{EVP_MD_CTX_new(), &EVP_MD_CTX_free};
+    evp_digest_context context{EVP_MD_CTX_new(), &EVP_MD_CTX_free};
     if (!context
         || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1
         || EVP_DigestUpdate(
@@ -172,10 +176,12 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return hex_digest(digest.data(), digest_size);
 }
 
+/// Hash a complete file with SHA-256.
 [[nodiscard]] std::string sha256_file(const fs::path& path) {
     return sha256_bytes(read_file(path));
 }
 
+/// Return whether a string is one canonical lowercase SHA-256 digest.
 [[nodiscard]] bool lowercase_sha256(std::string_view value) noexcept {
     if (value.size() != 64) {
         return false;
@@ -189,6 +195,7 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return true;
 }
 
+/// Parse arbitrary JSON while rejecting duplicate object keys.
 [[nodiscard]] json parse_json_value(
         std::string_view bytes,
         std::string_view context) {
@@ -229,6 +236,7 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     }
 }
 
+/// Parse a top-level JSON object while rejecting duplicate keys.
 [[nodiscard]] json parse_json(
         std::string_view bytes,
         std::string_view context) {
@@ -239,17 +247,20 @@ constexpr std::string_view k_backend_scoped_vacuum_fault_key =
     return result;
 }
 
+/// Load and parse a top-level JSON object from disk.
 [[nodiscard]] json load_json(
         const fs::path& path,
         std::string_view context) {
     return parse_json(read_file(path), context);
 }
 
+/// Serialize JSON using the harness's canonical compact representation.
 [[nodiscard]] std::string canonical_json(const json& value) {
     return value.dump(-1, ' ', false, json::error_handler_t::strict)
         + "\n";
 }
 
+/// Publish bytes through a randomized sibling and atomic rename.
 void write_atomic(const fs::path& path, std::string_view bytes) {
     if (!path.is_absolute()) {
         fail(path.string(), "output path must be absolute");
@@ -291,6 +302,7 @@ void write_atomic(const fs::path& path, std::string_view bytes) {
     }
 }
 
+/// Return a required JSON field or fail with its owning context.
 [[nodiscard]] const json& require_field(
         const json& object,
         std::string_view field,
@@ -305,6 +317,7 @@ void write_atomic(const fs::path& path, std::string_view bytes) {
     return *found;
 }
 
+/// Require an object to contain exactly the declared field set.
 void require_exact_fields(
         const json& object,
         std::initializer_list<std::string_view> fields,
@@ -342,6 +355,7 @@ void require_exact_fields(
             fmt::join(unknown, ",")));
 }
 
+/// Reject object fields outside the declared forward-compatible set.
 void require_known_fields(
         const json& object,
         std::initializer_list<std::string_view> fields,
@@ -368,6 +382,7 @@ void require_known_fields(
     }
 }
 
+/// Read a required nonempty JSON string.
 [[nodiscard]] std::string require_string(
         const json& value,
         std::string_view context) {
@@ -381,6 +396,7 @@ void require_known_fields(
     return result;
 }
 
+/// Read a required nonempty string field from a JSON object.
 [[nodiscard]] std::string require_string_field(
         const json& object,
         std::string_view field,
@@ -390,6 +406,7 @@ void require_known_fields(
         fmt::format("{}.{}", context, field));
 }
 
+/// Parse a canonical unsigned decimal integer with overflow checking.
 [[nodiscard]] std::uint64_t parse_unsigned(
         std::string_view value,
         std::string_view context) {
@@ -413,6 +430,7 @@ void require_known_fields(
     return result;
 }
 
+/// Generate a cryptographically random lowercase token.
 [[nodiscard]] std::string random_token() {
     std::array<unsigned char, 32> bytes{};
     if (RAND_bytes(
@@ -422,6 +440,7 @@ void require_known_fields(
     return hex_digest(bytes.data(), bytes.size());
 }
 
+/// Own one libpq result and clear it on every exit path.
 struct pg_result final {
     explicit pg_result(PGresult* value) noexcept
         : value_{value} {}
@@ -456,6 +475,7 @@ private:
     PGresult* value_ = nullptr;
 };
 
+/// Hold the connection fields accepted by the private-cluster harness.
 struct connection_parameters final {
     std::string host;
     std::string port;
@@ -464,6 +484,7 @@ struct connection_parameters final {
     std::string password;
 };
 
+/// Parse validated private-cluster connection parameters.
 [[nodiscard]] connection_parameters parse_connection(
         const json& config) {
     const json& value = require_field(
@@ -482,11 +503,12 @@ struct connection_parameters final {
     };
 }
 
+/// Own one libpq connection used by the standalone safety harness.
 class pg_connection final {
 public:
     explicit pg_connection(
             const connection_parameters& parameters) {
-        const char* keywords[] = {
+        const auto keywords = std::to_array<const char*>({
             "host",
             "port",
             "dbname",
@@ -494,8 +516,8 @@ public:
             "password",
             "application_name",
             nullptr,
-        };
-        const char* values[] = {
+        });
+        const auto values = std::to_array<const char*>({
             parameters.host.c_str(),
             parameters.port.c_str(),
             parameters.database.c_str(),
@@ -503,8 +525,8 @@ public:
             parameters.password.c_str(),
             "bioseq-safety-runtime",
             nullptr,
-        };
-        value_ = PQconnectdbParams(keywords, values, 0);
+        });
+        value_ = PQconnectdbParams(keywords.data(), values.data(), 0);
         if (value_ == nullptr || PQstatus(value_) != CONNECTION_OK) {
             const std::string message =
                 value_ == nullptr
@@ -527,11 +549,13 @@ public:
         }
     }
 
+    /// Execute one SQL statement and return its owned result.
     [[nodiscard]] pg_result execute(std::string_view sql) const {
         return pg_result{
             PQexec(value_, std::string{sql}.c_str())};
     }
 
+    /// Execute one parameterized SQL statement with text parameters.
     [[nodiscard]] pg_result execute_parameters(
             std::string_view sql,
             std::span<const std::string> parameters) const {
@@ -551,16 +575,19 @@ public:
             0)};
     }
 
+    /// Return the server process identifier for this connection.
     [[nodiscard]] int backend_pid() const noexcept {
         return PQbackendPID(value_);
     }
 
+    /// Return the current libpq connection status.
     [[nodiscard]] ConnStatusType connection_status() const noexcept {
         return value_ == nullptr
             ? CONNECTION_BAD
             : PQstatus(value_);
     }
 
+    /// Return the current libpq transaction status.
     [[nodiscard]] PGTransactionStatusType
     transaction_status() const noexcept {
         return PQtransactionStatus(value_);
@@ -570,12 +597,14 @@ private:
     PGconn* value_ = nullptr;
 };
 
+/// Return whether libpq reports a command or tuples result.
 [[nodiscard]] bool command_success(const pg_result& result) noexcept {
     return result.get() != nullptr
         && (PQresultStatus(result.get()) == PGRES_COMMAND_OK
             || PQresultStatus(result.get()) == PGRES_TUPLES_OK);
 }
 
+/// Require a successful libpq command and preserve its diagnostic.
 void require_success(
         const pg_result& result,
         std::string_view context) {
@@ -588,6 +617,7 @@ void require_success(
     }
 }
 
+/// Materialize every nullable text cell from a tuples result.
 [[nodiscard]] std::vector<std::vector<std::optional<std::string>>>
 rows(const pg_result& result, std::string_view context) {
     if (result.get() == nullptr
@@ -624,6 +654,7 @@ rows(const pg_result& result, std::string_view context) {
     return output;
 }
 
+/// Materialize exactly one nullable result row.
 [[nodiscard]] std::vector<std::optional<std::string>> one_row(
         const pg_result& result,
         std::string_view context) {
@@ -634,6 +665,7 @@ rows(const pg_result& result, std::string_view context) {
     return std::move(result_rows.front());
 }
 
+/// Return one required nonnull result cell.
 [[nodiscard]] std::string nonnull_cell(
         const std::vector<std::optional<std::string>>& row,
         std::size_t index,
@@ -644,11 +676,13 @@ rows(const pg_result& result, std::string_view context) {
     return *row[index];
 }
 
+/// Count the complete and test-only GUCs expected for a build profile.
 struct guc_profile_counts final {
     std::uint64_t total = 0;
     std::uint64_t test_only = 0;
 };
 
+/// Describe the generated GUC manifest bound to this executable.
 struct guc_manifest_contract final {
     std::string profile;
     std::string registry_module;
@@ -658,12 +692,14 @@ struct guc_manifest_contract final {
     std::vector<json> registrations;
 };
 
+/// Capture the installed GUC projection and its canonical digest.
 struct installed_guc_profile final {
     guc_profile_counts counts;
     json properties;
     std::string properties_sha256;
 };
 
+/// Return the exact GUC counts for one supported build profile.
 [[nodiscard]] guc_profile_counts expected_guc_profile(
         std::string_view profile) {
     if (profile == "production") {
@@ -683,6 +719,7 @@ struct installed_guc_profile final {
         fmt::format("unsupported profile '{}'", profile));
 }
 
+/// Map a manifest GUC kind to PostgreSQL's public kind spelling.
 [[nodiscard]] std::string expected_pg_guc_kind(
         std::string_view manifest_kind) {
     if (manifest_kind == "bool") {
@@ -705,6 +742,7 @@ struct installed_guc_profile final {
         fmt::format("unknown GUC kind '{}'", manifest_kind));
 }
 
+/// Map a manifest GUC kind to its internal storage spelling.
 [[nodiscard]] std::string expected_guc_storage_kind(
         std::string_view manifest_kind) {
     if (manifest_kind == "bool") {
@@ -727,6 +765,7 @@ struct installed_guc_profile final {
         fmt::format("unknown GUC kind '{}'", manifest_kind));
 }
 
+/// Map a manifest context to PostgreSQL's public context spelling.
 [[nodiscard]] std::string expected_pg_guc_context(
         std::string_view manifest_context) {
     if (manifest_context == "sighup") {
@@ -744,6 +783,7 @@ struct installed_guc_profile final {
             "unknown GUC context '{}'", manifest_context));
 }
 
+/// Project the generated GUC authority into its sealed profile shape.
 [[nodiscard]] json guc_profile_projection(
         const guc_manifest_contract& manifest,
         const json& owner_facet) {
@@ -757,6 +797,7 @@ struct installed_guc_profile final {
         {"owner_facet", owner_facet}};
 }
 
+/// Compare one generated GUC property with the live server projection.
 void validate_live_guc_property(
         const json& generated_live_authority,
         const json& live,
@@ -808,6 +849,7 @@ void validate_live_guc_property(
     }
 }
 
+/// Validate generated scalar, flag, enum, and hook authority for one GUC.
 void validate_generated_live_guc_authority(
         const json& registration,
         const json& generated,
@@ -915,8 +957,10 @@ void validate_generated_live_guc_authority(
     }
 }
 
+/// Quote one text value as a PostgreSQL SQL literal.
 [[nodiscard]] std::string sql_literal(std::string_view value);
 
+/// Load the control DSO and create its temporary GUC contract binding.
 void create_guc_contract_binding(
         const pg_connection& connection,
         const fs::path& control_dso) {
@@ -943,6 +987,7 @@ void create_guc_contract_binding(
         "create GUC internal contract binding");
 }
 
+/// Capture internal flags and hook presence for one registered GUC.
 struct internal_guc_property final {
     std::uint64_t raw_flags{};
     bool check_hook_present{};
@@ -950,6 +995,7 @@ struct internal_guc_property final {
     bool show_hook_present{};
 };
 
+/// Parse the control DSO's closed internal GUC contract.
 [[nodiscard]] std::map<
     std::string,
     internal_guc_property,
@@ -1020,6 +1066,7 @@ parse_internal_guc_contract(std::string_view raw) {
     return result;
 }
 
+/// Verify the installed PostgreSQL GUC catalog against generated authority.
 [[nodiscard]] installed_guc_profile verify_installed_guc_profile(
         const pg_connection& connection,
         const guc_manifest_contract& manifest) {
@@ -1404,6 +1451,7 @@ void validate_guc_property_receipt(
     return result;
 }
 
+/// Read and normalize an absolute path field from a JSON object.
 [[nodiscard]] fs::path require_absolute_path(
         const json& object,
         std::string_view field,
@@ -1418,6 +1466,7 @@ void validate_guc_property_receipt(
     return result.lexically_normal();
 }
 
+/// Check whether a canonicalized child remains strictly below a root.
 [[nodiscard]] bool path_within(
         const fs::path& child,
         const fs::path& root) {
@@ -1433,6 +1482,7 @@ void validate_guc_property_receipt(
         && *relative.begin() != "..";
 }
 
+/// Validate the private-cluster authorization marker and permissions.
 void require_private_authorization(
         const fs::path& marker,
         const fs::path& expected_data_directory) {
@@ -1455,6 +1505,7 @@ void require_private_authorization(
     }
 }
 
+/// Validate every path, identity, and command in a cluster configuration.
 void validate_cluster_config(
         const json& config,
         std::string_view expected_profile) {
@@ -1615,6 +1666,7 @@ void validate_cluster_config(
     }
 }
 
+/// Spawn an authorized command and require a normal zero exit status.
 void run_command(
         const json& command,
         std::string_view context) {
@@ -1664,6 +1716,7 @@ void run_command(
     }
 }
 
+/// Atomically install a hash-sealed artifact into the private stage.
 void install_artifact(
         const fs::path& source,
         const fs::path& destination,
@@ -1748,6 +1801,7 @@ void install_artifact(
     }
 }
 
+/// Connect to PostgreSQL with the bounded activation retry policy.
 [[nodiscard]] std::unique_ptr<pg_connection> connect_with_retry(
         const connection_parameters& parameters) {
     std::string last_error;
@@ -1766,6 +1820,7 @@ void install_artifact(
             "server did not become ready: {}", last_error));
 }
 
+/// Read a bounded array of SQL statements from a case definition.
 [[nodiscard]] std::vector<std::string> sql_array(
         const json& object,
         std::string_view field,
@@ -1804,6 +1859,7 @@ void install_artifact(
     return result;
 }
 
+/// Return whether a case identifier is safe for artifact names.
 [[nodiscard]] bool case_id(std::string_view value) {
     static const std::regex pattern{
         "[a-z0-9][a-z0-9_.-]{0,127}"};
@@ -1811,6 +1867,7 @@ void install_artifact(
         value.begin(), value.end(), pattern);
 }
 
+/// Return whether a fault key conforms to the runtime protocol alphabet.
 [[nodiscard]] bool valid_fault_key(
         std::string_view value) noexcept {
     if (value.empty() || value.size() >= 129) {
@@ -1826,6 +1883,7 @@ void install_artifact(
         });
 }
 
+/// Return whether a site ID contains the complete revision-two probe digest.
 [[nodiscard]] bool probe_site_id(
         std::string_view value) noexcept {
     constexpr std::string_view prefix = "probe:";
@@ -1834,12 +1892,14 @@ void install_artifact(
         && lowercase_sha256(value.substr(prefix.size()));
 }
 
+/// Concrete visit, trigger, and ordering expectations for a probe relation.
 struct probe_contract_values final {
     std::uint64_t expected_visit_count;
     std::uint64_t expected_trigger_count;
     std::string_view ordering;
 };
 
+/// Resolve the fixed probe contract associated with a catalog relation.
 [[nodiscard]] probe_contract_values contract_for_relation(
         std::string_view relation,
         std::string_view context) {
@@ -1868,6 +1928,7 @@ struct probe_contract_values final {
         "injected_after_site_success");
 }
 
+/// Render a relation's probe contract in its receipt JSON representation.
 [[nodiscard]] json probe_contract_for_relation(
         std::string_view relation,
         std::string_view context) {
@@ -1882,6 +1943,7 @@ struct probe_contract_values final {
         {"ordering", std::string{values.ordering}}};
 }
 
+/// Require a JSON probe contract to equal the relation-derived contract.
 void require_probe_contract(
         const json& value,
         std::string_view relation,
@@ -1914,6 +1976,7 @@ void require_probe_contract(
     }
 }
 
+/// Validate and normalize one runtime case catalog entry.
 [[nodiscard]] json normalized_catalog_entry(
         const json& raw,
         std::string_view context) {
@@ -2142,15 +2205,18 @@ void require_probe_contract(
     return result;
 }
 
+/// Catalog and execution halves of one sealed runtime case.
 struct case_definition final {
     json catalog;
     json execution;
 };
 
+/// Case definitions indexed by their artifact-safe identifiers.
 struct case_plan final {
     std::map<std::string, case_definition, std::less<>> cases;
 };
 
+/// Load and validate the compiled, hash-sealed runtime case plan.
 [[nodiscard]] case_plan load_case_plan() {
     const fs::path path{k_case_plan_path};
     if (!path.is_absolute() || !fs::is_regular_file(path)) {
@@ -2384,12 +2450,14 @@ struct case_plan final {
     return result;
 }
 
+/// Parsed protocol command, options, and resolved executable identity.
 struct command_line final {
     std::string command;
     std::map<std::string, std::string, std::less<>> options;
     fs::path executable;
 };
 
+/// Parse and validate the strict runtime-evidence command-line protocol.
 [[nodiscard]] command_line parse_command_line(
         int argc,
         char** argv) {
@@ -2445,6 +2513,7 @@ struct command_line final {
         .executable = std::move(executable)};
 }
 
+/// Return a required nonempty command-line option value.
 [[nodiscard]] std::string require_option(
         const command_line& command,
         std::string_view name) {
@@ -2458,6 +2527,7 @@ struct command_line final {
     return found->second;
 }
 
+/// Require a protocol command to contain exactly the allowed options.
 void require_exact_options(
         const command_line& command,
         std::initializer_list<std::string_view> expected) {
@@ -2477,11 +2547,13 @@ void require_exact_options(
     }
 }
 
+/// Hash the currently executing harness binary.
 [[nodiscard]] std::string self_sha256(
         const command_line& command) {
     return sha256_file(command.executable);
 }
 
+/// Query the PostgreSQL identity fields bound into runtime evidence.
 [[nodiscard]] json query_cluster_identity(
         const pg_connection& connection) {
     const pg_result result = connection.execute(
@@ -2544,6 +2616,7 @@ void require_exact_options(
          nonnull_cell(row, 9, "cluster identity") == "true"}};
 }
 
+/// Require the connected server to be the authorized private cluster.
 void validate_private_cluster_identity(
         const json& cluster,
         const json& config) {
@@ -2591,6 +2664,7 @@ void validate_private_cluster_identity(
         expected_data_directory);
 }
 
+/// Validated SQL manifest inventories needed by activation and case runs.
 struct sql_manifest_contract final {
     std::string sha256;
     std::string script_sha256;
@@ -2601,6 +2675,7 @@ struct sql_manifest_contract final {
     std::set<std::string, std::less<>> finfo_symbols;
 };
 
+/// Extract and validate the generated GUC portion of the SQL manifest.
 [[nodiscard]] guc_manifest_contract load_guc_manifest_contract(
         const json& manifest) {
     constexpr std::string_view context = "SQL manifest.guc_generation";
@@ -3055,6 +3130,7 @@ struct sql_manifest_contract final {
         .registrations = std::move(sealed_registrations)};
 }
 
+/// Read one nonempty, duplicate-free string inventory from the SQL manifest.
 [[nodiscard]] std::set<std::string, std::less<>>
 manifest_string_set(
         const json& manifest,
@@ -3081,6 +3157,7 @@ manifest_string_set(
     return result;
 }
 
+/// Load the generated SQL manifest and close all symbol inventories.
 [[nodiscard]] sql_manifest_contract load_sql_manifest() {
     const fs::path manifest_path{k_sql_manifest};
     const fs::path sql_path{k_sql_file};
@@ -3266,6 +3343,7 @@ manifest_string_set(
         .finfo_symbols = finfo};
 }
 
+/// Verify the installed extension catalog against the sealed SQL manifest.
 [[nodiscard]] std::uint64_t verify_installed_catalog(
         const pg_connection& connection,
         const sql_manifest_contract& manifest) {
@@ -3421,6 +3499,7 @@ manifest_string_set(
     return *extension_oid;
 }
 
+/// Install sealed artifacts, restart PostgreSQL, and emit an activation receipt.
 [[nodiscard]] int activate(
         const command_line& command) {
     require_exact_options(
@@ -3594,6 +3673,7 @@ manifest_string_set(
     return 0;
 }
 
+/// Emit the public catalog of cases for this compiled profile.
 [[nodiscard]] int describe(
         const command_line& command) {
     require_exact_options(
@@ -3622,6 +3702,7 @@ manifest_string_set(
     return 0;
 }
 
+/// Convert a JSON array into a duplicate-free string set.
 [[nodiscard]] std::set<std::string, std::less<>>
 string_set(
         const json& value,
@@ -3641,6 +3722,7 @@ string_set(
     return result;
 }
 
+/// Resolve and validate the ledger site bound to one catalog case.
 [[nodiscard]] json resolve_ledger_site(
         const json& ledger,
         const json& catalog,
@@ -3740,6 +3822,7 @@ string_set(
     return *matching_site;
 }
 
+/// Validated activation receipt and its control-DSO binding.
 struct activation_receipt final {
     json value;
     std::string sha256;
@@ -3747,6 +3830,7 @@ struct activation_receipt final {
     std::string control_dso_sha256;
 };
 
+/// Load an activation receipt and validate every request binding.
 [[nodiscard]] activation_receipt load_activation_receipt(
         const json& request,
         const fs::path& active_dso,
@@ -3951,6 +4035,7 @@ struct activation_receipt final {
         .control_dso_sha256 = control_dso_sha256};
 }
 
+/// Parsed lifecycle counters and events reported by the control DSO.
 struct probe_observation final {
     std::string profile;
     std::uint64_t start_count = 0;
@@ -3975,6 +4060,7 @@ struct probe_observation final {
         postgres_cleanup_events;
 };
 
+/// Split a protocol line without allocating its individual fields.
 [[nodiscard]] std::vector<std::string_view> split(
         std::string_view value,
         char delimiter) {
@@ -3992,6 +4078,7 @@ struct probe_observation final {
     return result;
 }
 
+/// Parse and validate a revision-two probe observation stream.
 [[nodiscard]] probe_observation parse_probe_observation(
         std::string_view value) {
     const std::vector<std::string_view> lines = split(value, '\n');
@@ -4098,6 +4185,7 @@ struct probe_observation final {
     return result;
 }
 
+/// Require a request path and digest to bind the same regular file.
 void verify_file_binding(
         const json& request,
         std::string_view path_field,
@@ -4120,6 +4208,7 @@ void verify_file_binding(
     }
 }
 
+/// Resolve exactly one requested case from a validated catalog.
 [[nodiscard]] const json& catalog_entry(
         const json& catalog,
         std::string_view case_id_value) {
@@ -4158,6 +4247,7 @@ void verify_file_binding(
     return *result;
 }
 
+/// Require a named JSON field to match between two protocol objects.
 void require_equal_field(
         const json& left,
         const json& right,
@@ -4171,6 +4261,7 @@ void require_equal_field(
     }
 }
 
+/// Resolve a target regprocedure to its non-null PostgreSQL OID.
 [[nodiscard]] std::uint64_t resolve_target_oid(
         const pg_connection& connection,
         std::string_view regprocedure) {
@@ -4185,6 +4276,7 @@ void require_equal_field(
         "target regprocedure OID");
 }
 
+/// Require the PostgreSQL connection to be transaction-idle.
 void require_idle(
         const pg_connection& connection,
         std::string_view context) {
@@ -4195,6 +4287,7 @@ void require_idle(
     }
 }
 
+/// Load the control DSO and create its temporary SQL bindings.
 void create_probe_bindings(
         const pg_connection& connection,
         const fs::path& control_dso) {
@@ -4241,6 +4334,7 @@ void create_probe_bindings(
         "create probe disarm binding");
 }
 
+/// Require every expected runtime event to occur exactly once.
 void verify_event_set(
         const std::map<
             std::string,
@@ -4265,6 +4359,7 @@ void verify_event_set(
     }
 }
 
+/// Validate a parsed observation against the catalog's causal contract.
 void verify_probe_observation(
         const probe_observation& observation,
         std::string_view expected_profile,
@@ -4354,6 +4449,7 @@ void verify_probe_observation(
         "probe PostgreSQL-cleanup events");
 }
 
+/// Serialize nullable PostgreSQL result rows without losing nulls or order.
 [[nodiscard]] json result_rows_json(
         const std::vector<
             std::vector<std::optional<std::string>>>& value) {
@@ -4372,6 +4468,7 @@ void verify_probe_observation(
     return result;
 }
 
+/// Execute an ordered SQL list while enforcing transaction-state boundaries.
 void execute_sql_list(
         const pg_connection& connection,
         const std::vector<std::string>& statements,
@@ -4400,6 +4497,7 @@ void execute_sql_list(
     }
 }
 
+/// Map a terminal fault key to its expected durable guard marker.
 [[nodiscard]] std::optional<std::string_view>
 terminal_guard_kind(std::string_view fault_key) noexcept {
     if (fault_key
@@ -4413,12 +4511,14 @@ terminal_guard_kind(std::string_view fault_key) noexcept {
     return std::nullopt;
 }
 
+/// Stable identity and byte offset for an append-only server log interval.
 struct server_log_checkpoint final {
     std::uint64_t device{};
     std::uint64_t inode{};
     std::uint64_t offset{};
 };
 
+/// Capture the current end of an authorized private-cluster server log.
 [[nodiscard]] server_log_checkpoint capture_server_log(
         const fs::path& path) {
     struct stat metadata {};
@@ -4438,6 +4538,7 @@ struct server_log_checkpoint final {
     };
 }
 
+/// Read the exact bounded server-log interval appended after a checkpoint.
 [[nodiscard]] std::string read_server_log_suffix(
         const fs::path& path,
         const server_log_checkpoint& checkpoint) {
@@ -4493,6 +4594,7 @@ struct server_log_checkpoint final {
     return result;
 }
 
+/// Wait for and validate the intended backend-exit server-log record.
 [[nodiscard]] json wait_for_terminal_server_log(
         const fs::path& path,
         const server_log_checkpoint& checkpoint,
@@ -4544,6 +4646,7 @@ struct server_log_checkpoint final {
         {"core_dump_present", core_dump}};
 }
 
+/// Require a terminal marker path to be absent before arming a probe.
 void require_terminal_marker_absent(const fs::path& path) {
     struct stat metadata {};
     if (::lstat(path.c_str(), &metadata) == 0 || errno != ENOENT) {
@@ -4553,6 +4656,7 @@ void require_terminal_marker_absent(const fs::path& path) {
     }
 }
 
+/// Read and validate the durable marker emitted by a terminal guard.
 [[nodiscard]] json read_terminal_marker(
         const fs::path& path,
         std::string_view token,
@@ -4638,6 +4742,7 @@ void require_terminal_marker_absent(const fs::path& path) {
          static_cast<std::uint64_t>(metadata.st_nlink)}};
 }
 
+/// Execute one sealed runtime case and write its complete evidence receipt.
 [[nodiscard]] int run_case(
         const command_line& command) {
     require_exact_options(command, {"--request", "--output"});
@@ -5603,6 +5708,7 @@ void require_terminal_marker_absent(const fs::path& path) {
     return 0;
 }
 
+/// Require an operation to fail with a diagnostic containing the marker.
 template <typename p_operation>
 void expect_failure(
         p_operation&& operation,
@@ -5628,6 +5734,7 @@ void expect_failure(
             diagnostic));
 }
 
+/// Exercise local protocol parsers and invariant checks without activation.
 [[nodiscard]] int self_test(
         const command_line& command) {
     require_exact_options(command, {});
@@ -6038,6 +6145,7 @@ void expect_failure(
 
 }  // namespace
 
+/// Dispatch one standalone runtime-evidence protocol command.
 int main(int argc, char** argv) {
     try {
         const command_line command =

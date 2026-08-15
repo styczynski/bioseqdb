@@ -11,23 +11,33 @@ import bioseq.tests.integration.support;
 using namespace bioseq_int_tests;
 
 namespace {
-// n rows: ~5 kbp query fragments mutated out of 200 kbp dna4 targets, no reverse.
-inline void seed_sample(const connection_test_context& ctx, std::string_view name, int n) {
-    exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", name);
+/// Seed deterministic query/target rows with fragmented DNA4 targets.
+void seed_sample(
+        const connection_test_context& ctx,
+        std::string_view table_name,
+        int row_count) {
+    exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table_name);
     exec_sqlf(ctx,
         "SELECT bioseq.create_query_target_sample_table('{}', {}, 5000, 100.0, 200000, "
-        "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.0, 13579);", name, n);
+        "0.001, 0.0005, 0.0005, 1.0, 1.0, 0.0, 13579);", table_name, row_count);
 }
-inline std::set<std::tuple<long long, long long, long long>> mmsearch_set(
+
+/// Return the ordered alignment-coordinate set produced by mmsearch.
+[[nodiscard]] std::set<std::tuple<long long, long long, long long>> mmsearch_set(
         const connection_test_context& ctx, std::string_view table_name) {
-    auto rows = query_rows(ctx, fmt::format(
+    const auto rows = query_rows(ctx, fmt::format(
         "SELECT id, bioseq.target_start(id), bioseq.target_end(id) FROM {} "
         "WHERE mmsearch(target, query) ORDER BY id", table_name));
-    std::set<std::tuple<long long, long long, long long>> out;
-    for (auto& r : rows)
-        if (r[0] && r[1] && r[2])
-            out.emplace(std::stoll(*r[0]), std::stoll(*r[1]), std::stoll(*r[2]));
-    return out;
+    std::set<std::tuple<long long, long long, long long>> matches;
+    for (const auto& row : rows) {
+        if (row[0] && row[1] && row[2]) {
+            matches.emplace(
+                std::stoll(*row[0]),
+                std::stoll(*row[1]),
+                std::stoll(*row[2]));
+        }
+    }
+    return matches;
 }
 }  // namespace
 
@@ -38,15 +48,16 @@ TEST_CASE("per-fragment storage is created on insert with the right query_keys",
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "chunked_storage_insert") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "chunked_storage_insert") == 3);
 
-    // Exact-rowno chunk placement: every indexed columnar rowno has >=1 sub_key.
-    auto rownos = query_int_column(ctx,
+    // Exact row-number placement: every indexed row has at least one sub-key.
+    const auto row_numbers = query_int_column(ctx,
         "SELECT bioseq.column_row_number('chunked_storage_insert'::regclass, ctid) "
         "FROM chunked_storage_insert ORDER BY 1");
-    REQUIRE(rownos.size() == 3);
-    for (long long sequence_rowno : rownos)
+    REQUIRE(row_numbers.size() == 3);
+    for (const long long sequence_row_number : row_numbers) {
         REQUIRE(index_distinct_sub_keys(
             ctx, "minimizers_per_fragment", "chunked_storage_insert",
-            sequence_rowno) >= 1);
+            sequence_row_number) >= 1);
+    }
 }
 
 TEST_CASE("mmsearch per-fragment assemble == recompute (single-segment dna4)",

@@ -19,7 +19,7 @@ TEST_CASE("per-table chunked indexing streams every row and persists the count",
     exec_sql(ctx, "SELECT bioseq.update_index('chunked_table_index'::regclass, 'test_table_rowcount');");
 
     // The per-table shard exists and holds the row count (one int64 LE chunk; count<256 => byte 0).
-    auto names = query_rows(ctx,
+    const auto names = query_rows(ctx,
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
         "AND c.relname LIKE 'seqidxtab\\_ttr\\_%' AND c.relname NOT LIKE '%pkey' LIMIT 1");

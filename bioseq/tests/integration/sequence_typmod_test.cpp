@@ -24,6 +24,7 @@ namespace {
 // the production pack as the single source of truth.
 template <class> inline constexpr bool always_false_v = false;
 
+/// Return a representative sequence for the selected production alphabet.
 template <class p_entry>
 constexpr std::string_view sample_for() {
     using alphabet_type = typename p_entry::alphabet_type;

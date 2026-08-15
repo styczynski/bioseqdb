@@ -34,19 +34,18 @@ constexpr std::string_view k_index_label_table = "label_index_invariance";
 
 namespace {
 
-// Result-set + aggregate-row pair so individual cases can compare
-// both an mmsearch-filtered scan and an aggregate-over-projection
-// query produce the same answer regardless of index shape.
+/// Pair the filtered rows with their aggregate projection for comparison.
 struct invariance_result {
     rowset_t row_results;
     row_t    agg_results;
 };
 
-[[nodiscard]] invariance_result
-run_invariance_queries(const connection_test_context& ctx,
-                       std::string_view table_name) {
-    invariance_result out;
-    out.row_results = query_rows(
+/// Execute both invariant queries against one candidate planner shape.
+[[nodiscard]] invariance_result run_invariance_queries(
+        const connection_test_context& ctx,
+        std::string_view table_name) {
+    invariance_result result;
+    result.row_results = query_rows(
         ctx,
         fmt::format(
             "SELECT pk, bioseq.target_start(pk), bioseq.target_end(pk), bioseq.cigar(pk) "
@@ -65,7 +64,7 @@ run_invariance_queries(const connection_test_context& ctx,
      * limitation. A separate case covers the multi-aggregate
      * behaviour we can support today.
      */
-    out.agg_results = query_one(
+    result.agg_results = query_one(
         ctx,
         fmt::format(
             "SELECT MIN(bioseq.target_start(pk)) "
@@ -73,7 +72,7 @@ run_invariance_queries(const connection_test_context& ctx,
             " WHERE mmsearch(seq0, "
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));",
             table_name));
-    return out;
+    return result;
 }
 
 }  // namespace

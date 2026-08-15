@@ -22,6 +22,7 @@ using namespace bioseq_int_tests;
 
 namespace {
 
+/// Best-effort cleanup for a database created by a raw libpq acceptance case.
 class database_cleanup_guard {
 public:
     database_cleanup_guard(PGconn* connection, const char* drop_sql) noexcept
@@ -39,6 +40,7 @@ public:
         }
     }
 
+    /// Disarm cleanup after the owning case removes the database explicitly.
     void release() noexcept { active_ = false; }
 
 private:
@@ -47,12 +49,14 @@ private:
     bool active_ = true;
 };
 
+/// Capture the status, SQLSTATE, and optional value of a prepared letter call.
 struct prepared_letter_result {
     ExecStatusType status = PGRES_FATAL_ERROR;
     std::string sqlstate;
     std::optional<std::string> value;
 };
 
+/// Execute one prepared letter parameter with caller-selected wire format.
 [[nodiscard]] prepared_letter_result execute_prepared_letter_parameter(
     PGconn* connection,
     const char* name,
@@ -60,19 +64,23 @@ struct prepared_letter_result {
     Oid letter_oid,
     const char* value,
     int length,
-    int format)
-{
+    int format) {
     PGresult* prepared = PQprepare(
         connection, name, sql, 1, &letter_oid);
     REQUIRE(prepared != nullptr);
     REQUIRE(PQresultStatus(prepared) == PGRES_COMMAND_OK);
     PQclear(prepared);
 
-    const char* values[]{value};
-    const int lengths[]{length};
-    const int formats[]{format};
+    const std::array values{value};
+    const std::array lengths{length};
+    const std::array formats{format};
     PGresult* executed = PQexecPrepared(
-        connection, name, 1, values, lengths, formats,
+        connection,
+        name,
+        1,
+        values.data(),
+        lengths.data(),
+        formats.data(),
         /* text results = */ 0);
     REQUIRE(executed != nullptr);
     prepared_letter_result result{
@@ -91,13 +99,13 @@ struct prepared_letter_result {
     return result;
 }
 
+/// Rewrite the three-byte payload in a single-row binary COPY fixture.
 void write_letter_binary_copy_variant(
     const std::string& source_path,
     const std::string& destination_path,
     std::uint8_t wire_revision,
     std::uint8_t alphabet_code,
-    std::uint8_t rank)
-{
+    std::uint8_t rank) {
     std::ifstream input(source_path, std::ios::binary);
     REQUIRE(input.is_open());
     std::vector<unsigned char> bytes{
@@ -132,10 +140,10 @@ void write_letter_binary_copy_variant(
     REQUIRE(output.good());
 }
 
-std::string sequence_acceptance_rank_pattern(
+/// Repeat the supplied alphabet ranks to an exact sequence length.
+[[nodiscard]] std::string sequence_acceptance_rank_pattern(
     const std::string& alphabet_symbols,
-    std::size_t length)
-{
+    std::size_t length) {
     REQUIRE_FALSE(alphabet_symbols.empty());
     std::string result;
     result.reserve(length);
@@ -145,13 +153,13 @@ std::string sequence_acceptance_rank_pattern(
     return result;
 }
 
+/// Verify lazy concatenation packing for every boundary in one profile.
 void require_sequence_acceptance_sql_packing_profile(
     connection_test_context& ctx,
     const char* alphabet,
     std::uint32_t storage_width_bits,
     std::uint32_t bits_per_symbol,
-    const char* alphabet_symbols)
-{
+    const char* alphabet_symbols) {
     REQUIRE(alphabet != nullptr);
     REQUIRE(alphabet_symbols != nullptr);
     REQUIRE(bits_per_symbol > 0u);
@@ -242,6 +250,7 @@ void require_sequence_acceptance_sql_packing_profile(
     REQUIRE(flattened[3] == "t");
 }
 
+/// Build the deterministic high-entropy motif used by binding tests.
 [[nodiscard]] std::string sequence_acceptance_match_binding_motif() {
     constexpr std::string_view alphabet = "ACGT";
     std::string sequence(128u, 'A');
@@ -2080,11 +2089,11 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx, "SELECT 'bioseq.letter'::regtype::oid;"));
     constexpr std::array<char, 3> physical_a{char{1}, char{0}, char{0}};
     constexpr std::array<char, 3> physical_c{char{1}, char{0}, char{1}};
-    constexpr char text_a[] = "A";
+    constexpr auto text_a = std::to_array("A");
 
     const auto ordinary_text = execute_prepared_letter_parameter(
         ctx.raw(), "sequence_acceptance_param_ordinary_text", "SELECT $1::text;",
-        letter_oid, text_a, 1, /* text = */ 0);
+        letter_oid, text_a.data(), 1, /* text = */ 0);
     REQUIRE(ordinary_text.status == PGRES_FATAL_ERROR);
     REQUIRE(ordinary_text.sqlstate == "22023");
 
@@ -2098,7 +2107,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_typmodless_insert",
         "INSERT INTO public.sequence_acceptance_letter_param_target VALUES (1,$1) "
         "RETURNING value::text;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(typmodless_text_insert.status == PGRES_FATAL_ERROR);
     REQUIRE(typmodless_text_insert.sqlstate == "22023");
     REQUIRE(query_scalar_int(
@@ -2116,7 +2125,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_typed_insert",
         "INSERT INTO public.sequence_acceptance_letter_param_typed VALUES (1,$1) "
         "RETURNING value::text;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(typed_text_insert.status == PGRES_TUPLES_OK);
     REQUIRE(typed_text_insert.value == "A");
 
@@ -2124,7 +2133,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_update_text",
         "UPDATE public.sequence_acceptance_letter_param_target SET value=$1 "
         "WHERE id=1 RETURNING value::text;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(update_text.status == PGRES_FATAL_ERROR);
     REQUIRE(update_text.sqlstate == "22023");
 
@@ -2142,7 +2151,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         "VALUES (1,'A'::bioseq.letter('dna4')) "
         "ON CONFLICT (id) DO UPDATE SET value=$1 "
         "RETURNING value::text;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(conflict_text.status == PGRES_FATAL_ERROR);
     REQUIRE(conflict_text.sqlstate == "22023");
     REQUIRE(query_scalar(
@@ -2154,7 +2163,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_insert_select_text",
         "INSERT INTO public.sequence_acceptance_letter_param_target "
         "SELECT 5,$1 RETURNING value::text;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(insert_select_text.status == PGRES_FATAL_ERROR);
     REQUIRE(insert_select_text.sqlstate == "22023");
 
@@ -2163,7 +2172,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         "MERGE INTO public.sequence_acceptance_letter_param_target AS target "
         "USING (VALUES (1)) AS source(id) ON target.id=source.id "
         "WHEN MATCHED THEN UPDATE SET value=$1;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(merge_update_text.status == PGRES_FATAL_ERROR);
     REQUIRE(merge_update_text.sqlstate == "22023");
 
@@ -2172,7 +2181,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         "MERGE INTO public.sequence_acceptance_letter_param_target AS target "
         "USING (VALUES (6)) AS source(id) ON target.id=source.id "
         "WHEN NOT MATCHED THEN INSERT (id,value) VALUES (source.id,$1);",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(merge_insert_text.status == PGRES_FATAL_ERROR);
     REQUIRE(merge_insert_text.sqlstate == "22023");
 
@@ -2180,7 +2189,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_ctas_text",
         "CREATE TABLE public.sequence_acceptance_letter_param_ctas_text AS "
         "SELECT $1 AS value;",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(ctas_text.status == PGRES_FATAL_ERROR);
     REQUIRE(ctas_text.sqlstate == "22023");
     REQUIRE(query_scalar(
@@ -2208,7 +2217,7 @@ TEST_CASE("typmodless letter persistence validates runtime Params",
         ctx.raw(), "sequence_acceptance_param_explain_insert_text",
         "EXPLAIN (ANALYZE, COSTS OFF) "
         "INSERT INTO public.sequence_acceptance_letter_param_target VALUES (7,$1);",
-        letter_oid, text_a, 1, 0);
+        letter_oid, text_a.data(), 1, 0);
     REQUIRE(explain_insert_text.status == PGRES_FATAL_ERROR);
     REQUIRE(explain_insert_text.sqlstate == "22023");
 }

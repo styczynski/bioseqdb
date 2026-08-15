@@ -1,4 +1,4 @@
-// Shared source-domain ownership and lifetime integration coverage.
+/** @file Shared source-domain ownership and lifetime integration coverage. */
 
 #include <tests/support/postgres.hpp>
 #include <bioseq/pg_build_profile.h>
@@ -22,6 +22,7 @@ using namespace bioseq_int_tests;
 #ifdef BIOSEQ_TEST_INDEXES
 namespace {
 
+/** Read one source-domain lifetime counter from the current backend. */
 [[nodiscard]] std::int64_t source_counter(
         connection_test_context& ctx, std::string_view name) {
     return query_scalar_int(ctx, fmt::format(
@@ -29,11 +30,13 @@ namespace {
         "        ->>'{}')::bigint;", name));
 }
 
+/** Reset source-domain counters before an isolated lifetime scenario. */
 void reset_source_counters(connection_test_context& ctx) {
     exec_sql(ctx,
         "SELECT bioseq_internal.reset_sequence_source_counters();");
 }
 
+/** Require that no source-domain resources remain live. */
 void require_source_quiescent(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "live_registries") == 0);
     REQUIRE(source_counter(ctx, "live_providers") == 0);
@@ -43,6 +46,7 @@ void require_source_quiescent(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "live_snapshots") == 0);
 }
 
+/** Require every created source-domain resource to have been released. */
 void require_source_resources_balanced(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "registries_created")
             == source_counter(ctx, "registries_destroyed"));
@@ -59,6 +63,7 @@ void require_source_resources_balanced(connection_test_context& ctx) {
     require_source_quiescent(ctx);
 }
 
+/** Generate stable high-entropy DNA4 input without a library RNG. */
 [[nodiscard]] std::string source_domain_high_entropy_dna4(
         std::size_t length) {
     constexpr std::string_view bases = "ACGT";
@@ -73,6 +78,7 @@ void require_source_resources_balanced(connection_test_context& ctx) {
     return result;
 }
 
+/** Return Actual Calls from the matching source-boundary EXPLAIN section. */
 [[nodiscard]] std::optional<unsigned long long>
 source_boundary_actual_calls(
         std::span<const std::string> plan,
@@ -105,6 +111,7 @@ source_boundary_actual_calls(
     return std::nullopt;
 }
 
+/** Locate the first plan line containing the requested marker. */
 [[nodiscard]] std::optional<std::size_t> plan_line_index(
         std::span<const std::string> plan,
         std::string_view needle) {
@@ -116,6 +123,7 @@ source_boundary_actual_calls(
     return std::nullopt;
 }
 
+/** Count plan lines containing the requested marker. */
 [[nodiscard]] std::size_t plan_line_count(
         std::span<const std::string> plan,
         std::string_view needle) {
@@ -126,6 +134,7 @@ source_boundary_actual_calls(
     return count;
 }
 
+/** Observed COPY OUT protocol and command completion state. */
 struct copy_out_result {
     bool started = false;
     bool stream_ok = true;
@@ -133,6 +142,7 @@ struct copy_out_result {
     std::string bytes;
 };
 
+/** Execute COPY OUT and drain both its byte stream and terminal result. */
 [[nodiscard]] copy_out_result run_copy_out(
         connection_test_context& ctx, std::string_view sql) {
     copy_out_result output;
@@ -168,6 +178,7 @@ struct copy_out_result {
     return output;
 }
 
+/** Observable stages of an asynchronous cancellation scenario. */
 struct async_cancel_result {
     bool sent = false;
     bool wait_observed = false;
@@ -176,6 +187,7 @@ struct async_cancel_result {
     std::string sqlstate;
 };
 
+/** Roll back an armed prepared transaction during exceptional cleanup. */
 class prepared_transaction_cleanup_guard {
 private:
     PGconn* connection_ = nullptr;
@@ -208,10 +220,14 @@ public:
         }
     }
 
+    /** Enable rollback cleanup after PREPARE TRANSACTION succeeds. */
     void arm() noexcept { armed_ = true; }
+
+    /** Disarm cleanup after an explicit rollback completes. */
     void release() noexcept { armed_ = false; }
 };
 
+/** Run, cancel, and fully drain one asynchronous sleeping query. */
 [[nodiscard]] async_cancel_result cancel_sleeping_query(
         connection_test_context& worker,
         connection_test_context& controller,
@@ -262,7 +278,7 @@ public:
     return output;
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE("thousands of locator rows share one binding domain",
           "[component:bioseq][layer:integration][feature:storage][resource:postgres]") {
@@ -1873,18 +1889,18 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         "AND attr_num=2 "
         "AND minimum_value IS NOT NULL AND maximum_value IS NOT NULL;") > 0);
 
-    const std::string a = "repeat('A',8192)::bioseq.seq('dna4',32)";
-    const std::string c = "repeat('C',8192)::bioseq.seq('dna4',32)";
-    const std::string g = "repeat('G',8192)::bioseq.seq('dna4',32)";
+    const std::string adenine = "repeat('A',8192)::bioseq.seq('dna4',32)";
+    const std::string cytosine = "repeat('C',8192)::bioseq.seq('dna4',32)";
+    const std::string guanine = "repeat('G',8192)::bioseq.seq('dna4',32)";
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.<) {} ORDER BY id;",
-        table, c)) == std::vector<long long>{1, 5});
+        table, cytosine)) == std::vector<long long>{1, 5});
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.=) {} ORDER BY id;",
-        table, g)) == std::vector<long long>{3, 6});
+        table, guanine)) == std::vector<long long>{3, 6});
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.>) {} ORDER BY id;",
-        table, g)) == std::vector<long long>{4});
+        table, guanine)) == std::vector<long long>{4});
     const rowset_t expected_groups{{"A"}, {"C"}, {"G"}, {"T"}};
     REQUIRE(query_rows(ctx,
         "SELECT bioseq.to_text(s[0:1]) "
@@ -1938,7 +1954,7 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         == sequence_chunks);
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.>) {} ORDER BY id;",
-        table, c)) == std::vector<long long>{3, 4, 6});
+        table, cytosine)) == std::vector<long long>{3, 4, 6});
     exec_sql(ctx, "ROLLBACK;");
     REQUIRE(query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq.chunk "
@@ -1953,7 +1969,7 @@ TEST_CASE("locator columns never trust physical minmax metadata",
         "SET enable_seqscan=off;");
     REQUIRE(query_int_column(ctx, fmt::format(
         "SELECT id FROM {} WHERE s OPERATOR(bioseq.=) {} ORDER BY id;",
-        table, a)) == std::vector<long long>{1, 5});
+        table, adenine)) == std::vector<long long>{1, 5});
 }
 
 TEST_CASE("mmsearch ownership respects RLS barriers and effectful siblings",

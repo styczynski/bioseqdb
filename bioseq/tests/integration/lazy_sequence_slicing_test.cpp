@@ -1,4 +1,4 @@
-// SQL slicing, letter, algebra, bridge, and durable-boundary integration tests.
+/** @file SQL slicing, algebra, bridge, and durable-boundary integration tests. */
 
 #include <tests/support/postgres.hpp>
 #include <bioseq/pg_build_profile.h>
@@ -18,7 +18,8 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-std::optional<std::string> boundary_explain_property(
+/** Return one property from the matching lazy-boundary EXPLAIN section. */
+[[nodiscard]] std::optional<std::string> boundary_explain_property(
         std::span<const std::string> plan,
         std::string_view mechanism,
         std::string_view reason,
@@ -55,16 +56,20 @@ std::optional<std::string> boundary_explain_property(
     return std::nullopt;
 }
 
-std::optional<std::size_t> plan_line_index(
+/** Locate the first plan line containing the requested marker. */
+[[nodiscard]] std::optional<std::size_t> plan_line_index(
         std::span<const std::string> plan,
         std::string_view needle) {
     for (std::size_t index = 0; index < plan.size(); ++index) {
-        if (plan[index].find(needle) != std::string::npos) return index;
+        if (plan[index].find(needle) != std::string::npos) {
+            return index;
+        }
     }
     return std::nullopt;
 }
 
-std::size_t plan_line_count(
+/** Count plan lines containing the requested marker. */
+[[nodiscard]] std::size_t plan_line_count(
         std::span<const std::string> plan,
         std::string_view needle) {
     return static_cast<std::size_t>(std::count_if(
