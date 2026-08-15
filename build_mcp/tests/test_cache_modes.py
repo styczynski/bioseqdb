@@ -1206,6 +1206,13 @@ class CacheModeRoutingTest(unittest.TestCase):
                 self.assertEqual(build_presets.post_build_targets_for(mode, False), ())
                 self.assertEqual(build_presets.post_build_targets_for(mode, True), ())
 
+    def test_cache_integration_materializes_receipted_production_stage(
+            self) -> None:
+        self.assertIn(
+            "bioseq_cache_production_postgres_stage",
+            build_presets.MODES["cache-integration"].targets,
+        )
+
     def test_existing_install_modes_remain_unchanged(self) -> None:
         install_modes = {
             name for name, details in build_presets.MODES.items()

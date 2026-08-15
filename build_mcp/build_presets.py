@@ -689,6 +689,7 @@ MODES: Dict[str, ModeDefinition] = {
         binary_subdir="bioseq_caching",
         targets=[
             "postgresql_bioseq_cache",
+            "bioseq_cache_production_postgres_stage",
             "postgresql_bioseq_cache_test_support",
             "bioseq_cache_integration_tests",
         ],
