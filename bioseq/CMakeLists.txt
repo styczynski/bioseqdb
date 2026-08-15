@@ -187,7 +187,8 @@ endforeach()
 # Any new concrete dependency outside those ownership boundaries fails CMake
 # configuration, making the allowlist a repository-enforced invariant.
 set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence_parts/owners.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence_parts/adapters.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/scanner.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/scanner.cppm)
 
@@ -277,6 +278,11 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/results.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/seeding_chaining.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/alignment.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/postprocessing.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/execution_stats.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm

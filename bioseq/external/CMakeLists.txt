@@ -369,7 +369,13 @@ if(TARGET bioseq_external_api_integration_tests)
   set(_bioseq_pg_free_pack_sources
     "${_bioseq_external_source_root}/backend/sequences/rank_pack_core.cppm"
     "${_bioseq_external_source_root}/backend/sequences/rank_pack.cppm"
-    "${_bioseq_external_source_root}/backend/storage/lazy_sequence.cppm")
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/view_contract.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/owners.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/adapters.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/transforms.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/materialization.cppm"
+    "${_bioseq_external_source_root}/backend/storage/lazy_sequence_parts/access_plan.cppm")
   set(_bioseq_forbidden_pack_source_regexes
     "#[ \t]*include[ \t]*[<\"](postgres(\\.h)?|fmgr\\.h|headers/pg_compat\\.h|pg_compat\\.h|access/|catalog/|commands/|executor/|nodes/|utils/)"
     "(^|[^A-Za-z0-9_])(ereport|elog|palloc|palloc0|pfree)[ \t]*\\("
