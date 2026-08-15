@@ -135,27 +135,27 @@ void check_generator(std::string_view label, std::string_view valid_chars) {
 
 }  // namespace
 
-TEST_CASE("generator: dna4/uint32",
+TEST_CASE("sequence generation produces dna4 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna4, std::uint32_t>("dna4/u32", "ACGT");
 }
 
-TEST_CASE("generator: dna4/uint64",
+TEST_CASE("sequence generation produces dna4 uint64 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna4, std::uint64_t>("dna4/u64", "ACGT");
 }
 
-TEST_CASE("generator: dna5/uint32",
+TEST_CASE("sequence generation produces dna5 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna5, std::uint32_t>("dna5/u32", "ACGTN");
 }
 
-TEST_CASE("generator: dna5/uint64",
+TEST_CASE("sequence generation produces dna5 uint64 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna5, std::uint64_t>("dna5/u64", "ACGTN");
 }
 
-TEST_CASE("generator: aa27/uint32 genericity",
+TEST_CASE("sequence generation supports aa27 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     gen::generator_params gp{};
     gp.reference_length = 2000;
@@ -169,7 +169,7 @@ TEST_CASE("generator: aa27/uint32 genericity",
     ASSERT(!pairs.front().query.to_string().empty(), "aa27 query empty");
 }
 
-TEST_CASE("generator: custom alphabet with uint16 rank extraction",
+TEST_CASE("sequence generation extracts uint16 ranks for custom alphabets",
           "[component:bioseq][layer:unit][feature:sequence]") {
     using custom_t = sequence_custom_alphabet<rank_300_alphabet, std::uint16_t>;
     using seq_t = compact_sequence_range<custom_t>;
@@ -224,7 +224,7 @@ static_assert(gen::is_valid_alphabet_probability<gen::alphabet_probability<seq::
 static_assert(gen::is_valid_alphabet_probability<gen::alphabet_probability<seq::aa27>>);
 static_assert(gen::packed_sequence_config<sequence_custom_alphabet<seq::dna4, std::uint64_t>>);
 
-TEST_CASE("generator: GPU and CPU paths produce identical bytes",
+TEST_CASE("GPU and CPU sequence generation produce identical bytes",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     gen::generator_params gp{};
     gp.reference_length = 1'000'003;
@@ -246,7 +246,7 @@ TEST_CASE("generator: GPU and CPU paths produce identical bytes",
            "GPU/CPU bytes diverge");
 }
 
-TEST_CASE("generator shader compiles for 32/64-bit packed units",
+TEST_CASE("sequence generator shaders compile for 32-bit and 64-bit packed units",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     for (const std::uint32_t word_bits : {32u, 64u}) {
         gv::shader_compile_request request{
@@ -264,7 +264,7 @@ TEST_CASE("generator shader compiles for 32/64-bit packed units",
     }
 }
 
-TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime",
+TEST_CASE("sequence generation dispatches generate_units through the Vulkan runtime",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     if (!gv::hardware_device_available(runtime)) {
@@ -310,7 +310,7 @@ TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime"
     ASSERT(any_nonzero, "generate_units smoke kernel produced an all-zero block");
 }
 
-TEST_CASE("generator: dna5 symbol frequencies",
+TEST_CASE("sequence generation preserves dna5 symbol frequencies",
           "[component:bioseq][layer:unit][feature:sequence]") {
     gen::generator_params gp{};
     gp.reference_length = 4'000'000;
@@ -422,7 +422,7 @@ template <typename p_traits, typename p_sequence>
 
 }  // namespace
 
-TEST_CASE("generator: large-scale statistical and coordinate validation",
+TEST_CASE("sequence generation preserves large-scale statistical and coordinate contracts",
           "[component:bioseq][layer:unit][feature:sequence][resource:large_memory]") {
     using generator_t = gen::alphabet_sequence_generator<seq::dna5, std::uint64_t>;
     using seq_t = typename generator_t::seq_t;
@@ -700,8 +700,8 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
                     wide_coordinate_pairs.size(), saw_high_start));
 }
 
-// Compare GPU and CPU generation after checking byte parity and real GPU dispatch.
-TEST_CASE("generator: GPU and CPU generation throughput",
+// GPU and CPU paths must produce identical packed bytes before throughput is measured.
+TEST_CASE("GPU and CPU sequence generation reports throughput",
           "[component:bioseq][layer:unit][feature:sequence]"
           "[resource:gpu][resource:large_memory]") {
     using gen_t = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;

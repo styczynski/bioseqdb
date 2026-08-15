@@ -18,10 +18,10 @@ namespace {
     return {value.data(), value.size()};
 }
 
-} // namespace
+}  // namespace
 
 TEST_CASE(
-    "edit-distance threshold handles fixed and dynamic bands exactly",
+    "edit-distance threshold accepts fixed and dynamic bands exactly",
     "[component:bioseq][layer:unit][feature:prefilter]")
 {
     using bioseq::sequences::edit_distance_within_threshold;

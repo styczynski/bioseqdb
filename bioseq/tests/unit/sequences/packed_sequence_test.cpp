@@ -54,7 +54,7 @@ struct test_arena {
 
 }  // anonymous namespace
 
-TEST_CASE("cstring to compact sequence round-trip preserves ASCII text",
+TEST_CASE("compact sequence conversion preserves ASCII text",
           "[component:bioseq][layer:unit][feature:sequence]") {
     const std::string input = "ACGTACGTACGTACGTACGTACGTACGTACGT";
 
@@ -103,8 +103,8 @@ TEST_CASE("cstring to compact sequence round-trip preserves ASCII text",
     }
 }
 
-TEST_CASE("dna4 uint64 multiline SIMD encoder handles sentinel chunks",
-          "[component:bioseq][layer:unit][feature:sequence]") {
+TEST_CASE("dna4 uint64 multiline SIMD encoding stops at sentinel chunks",
+          "[component:bioseq][layer:unit][feature:sequence][resource:highway]") {
     using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using range_t = compact_sequence_range<config_t>;
 
@@ -149,7 +149,7 @@ TEST_CASE("dna4 uint64 multiline SIMD encoder handles sentinel chunks",
     REQUIRE(decode_sequence_simd<config_t>(seq) == body);
 }
 
-TEST_CASE("storage send and receive round-trip preserves bytes",
+TEST_CASE("storage send and receive preserve packed bytes",
           "[component:bioseq][layer:unit][feature:sequence]") {
     const std::string input = "ACGTACGTACGTACGT";
     for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
@@ -197,7 +197,7 @@ TEST_CASE("storage send and receive round-trip preserves bytes",
     }
 }
 
-TEST_CASE("same-alphabet storage-width recast preserves packed bytes",
+TEST_CASE("same-alphabet storage-width recasting preserves packed bytes",
           "[component:bioseq][layer:unit][feature:sequence]") {
     const std::string input = "ACGTACGTACGTACGTACGTACGTACGT";
     test_arena arena;
@@ -220,7 +220,7 @@ TEST_CASE("same-alphabet storage-width recast preserves packed bytes",
                         src_8->unit_count() * 8u) == 0);
 }
 
-TEST_CASE("zero-copy compact sequence view preserves decoded text",
+TEST_CASE("zero-copy compact sequence views preserve decoded text",
           "[component:bioseq][layer:unit][feature:sequence]") {
     const std::string input = "ACGTACGTACGTACGT";
     for (std::uint8_t bw : {1u, 2u, 4u, 8u}) {
@@ -256,7 +256,7 @@ TEST_CASE("compact sequence type parameters round-trip through encoding",
     }
 }
 
-TEST_CASE("compact sequence data offset is uint64-aligned across pack widths",
+TEST_CASE("compact sequence data offsets remain uint64-aligned across pack widths",
           "[component:bioseq][layer:unit][feature:sequence]") {
     using supported_test_alphabets = supported_alphabets<
         alphabet_entry<seq::dna4, "dna4">,
@@ -271,7 +271,7 @@ TEST_CASE("compact sequence data offset is uint64-aligned across pack widths",
     REQUIRE(offsetof(stdc_bp64,    data) % 8u == 0u);
 }
 
-TEST_CASE("compile-time string supports composition and comparison",
+TEST_CASE("compile-time strings support composition and comparison",
           "[component:bioseq][layer:unit][feature:alphabet]") {
     using namespace ::bioseq::common::templating;
     constexpr compile_time_string a{"foo"};
@@ -310,7 +310,7 @@ TEST_CASE("supported alphabet names produce the validation list",
             == std::string_view{"'dna4', 'dna5'"});
 }
 
-TEST_CASE("supported alphabet pack enforces unique types and names",
+TEST_CASE("supported alphabet packs enforce unique types and names",
           "[component:bioseq][layer:unit][feature:alphabet]") {
     STATIC_REQUIRE(test_supported_alphabets::alphabet_count == 2u);
     using sa = test_supported_alphabets;

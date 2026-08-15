@@ -72,21 +72,21 @@ void check_split(std::size_t bp_size, std::size_t records_of_units) {
 
 }  // namespace
 
-TEST_CASE("split_units: dna4/uint64 even split",
+TEST_CASE("split_units splits dna4 uint64 sequences evenly",
           "[component:bioseq][layer:unit][feature:sequence]") {
     // 5 units/record over a 13-unit (416 bp, no padding) sequence -> 3 records.
     check_split<seq::dna4, std::uint64_t>(/*bp=*/13 * 32, /*records_of_units=*/5);
 }
-TEST_CASE("split_units: dna4/uint64 with trailing padding",
+TEST_CASE("split_units preserves dna4 uint64 trailing padding",
           "[component:bioseq][layer:unit][feature:sequence]") {
     // 416 - 5 bp = 411 bp -> last unit padded; split 4 units/record.
     check_split<seq::dna4, std::uint64_t>(/*bp=*/13 * 32 - 5, /*records_of_units=*/4);
 }
-TEST_CASE("split_units: dna5/uint64 with N + trailing padding",
+TEST_CASE("split_units preserves dna5 uint64 N symbols and trailing padding",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_split<seq::dna5, std::uint64_t>(/*bp=*/200, /*records_of_units=*/3);
 }
-TEST_CASE("split_units: dna4/uint32 single record (record_bp >= size)",
+TEST_CASE("split_units returns one dna4 uint32 record when it covers the sequence",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_split<seq::dna4, std::uint32_t>(/*bp=*/50, /*records_of_units=*/100);
 }

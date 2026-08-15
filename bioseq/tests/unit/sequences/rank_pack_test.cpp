@@ -502,8 +502,8 @@ void require_exhaustive_profile(std::string_view profile) {
 
 }  // namespace
 
-TEST_CASE("PostgreSQL-independent rank packing covers all configured profiles",
-          "[component:bioseq][layer:unit][feature:sequence]") {
+TEST_CASE("rank packing covers all configured profiles independently of PostgreSQL",
+          "[component:bioseq][layer:unit][feature:sequence][resource:highway]") {
     // The dna4/uint64 profile always covers the primary SIMD width. Expanded
     // build profiles instantiate every supported alphabet and storage width.
     require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");
