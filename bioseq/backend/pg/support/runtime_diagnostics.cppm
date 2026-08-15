@@ -2,14 +2,6 @@
  * @file runtime_diagnostics.cppm
  * @brief Provides profile-gated BPCHAR and vector ownership statistics.
  */
-/*-------------------------------------------------------------------------
- *
- * runtime_diagnostics.cppm
- *
- * Profile-gated runtime diagnostics for BPCHAR/vector ownership transitions.
- *
- *-------------------------------------------------------------------------
- */
 module;
 
 #include <cstdint>

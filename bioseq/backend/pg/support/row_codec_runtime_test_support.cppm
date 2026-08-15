@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * row_codec_runtime_test_support.cppm
- *
- * Test-profile-only live exercises for every generated SQL row codec.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file row_codec_runtime_test_support.cppm
+ * @brief Exercises every generated SQL row codec in test-profile builds.
  */
 module;
 

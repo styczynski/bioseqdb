@@ -133,16 +133,24 @@ parse_compression_algorithm(const char* value) noexcept
 {
 	Assert(value != nullptr);
 	if (std::strncmp(value, "none", NAMEDATALEN) == 0)
+	{
 		return bioseq::compression_algorithm::none;
+	}
 	if (std::strncmp(value, "pglz", NAMEDATALEN) == 0)
+	{
 		return bioseq::compression_algorithm::pglz;
+	}
 #if HAVE_CITUS_LIBLZ4
 	if (std::strncmp(value, "lz4", NAMEDATALEN) == 0)
+	{
 		return bioseq::compression_algorithm::lz4;
+	}
 #endif
 #if HAVE_LIBZSTD
 	if (std::strncmp(value, "zstd", NAMEDATALEN) == 0)
+	{
 		return bioseq::compression_algorithm::zstd;
+	}
 #endif
 	return bioseq::compression_algorithm::invalid;
 }

@@ -2,7 +2,6 @@
  * @file seq_sub_table.cppm
  * @brief Sequence sub-table catalog rows and manager operations.
  *
- * The
  * The row owns tuple decoding and the manager owns catalog operations; this
  * partition exposes only those two semantic interfaces.
  */

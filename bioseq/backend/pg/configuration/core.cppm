@@ -1,3 +1,7 @@
+/**
+ * @file core.cppm
+ * @brief Declares PostgreSQL settings shared across Bioseq subsystems.
+ */
 module;
 
 #include <bioseq/pg_compat.h>

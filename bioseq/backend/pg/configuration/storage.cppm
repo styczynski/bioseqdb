@@ -1,3 +1,7 @@
+/**
+ * @file storage.cppm
+ * @brief Declares PostgreSQL settings for Bioseq sequence storage.
+ */
 module;
 
 #include <climits>

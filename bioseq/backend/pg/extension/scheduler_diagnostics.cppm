@@ -2,15 +2,6 @@
  * @file scheduler_diagnostics.cppm
  * @brief Implements scheduler statistics and test-control SQL routines.
  */
-/*-------------------------------------------------------------------------
- *
- * mod_scheduler_diagnostics_impl.cppm
- *
- * Ordinary implementation unit for scheduler diagnostics and test controls
- * declared by bioseq.postgres.extension.
- *
- *-------------------------------------------------------------------------
- */
 module;
 
 #include <bioseq/pg_compat.h>

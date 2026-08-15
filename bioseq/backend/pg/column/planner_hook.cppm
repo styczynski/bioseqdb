@@ -54,7 +54,10 @@ struct plan_tree_mutator_context
  * vector-column producer. */
 [[nodiscard]] static inline bool is_bioseq_slice_project_scan(
 		const Plan* plan) noexcept {
-	if (plan == nullptr || !IsA(plan, CustomScan)) return false;
+	if (plan == nullptr || !IsA(plan, CustomScan))
+	{
+		return false;
+	}
 	const CustomScan* custom_scan = reinterpret_cast<const CustomScan*>(plan);
 	return custom_scan->methods != nullptr
 		&& custom_scan->methods->CustomName != nullptr

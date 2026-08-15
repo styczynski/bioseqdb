@@ -1,3 +1,7 @@
+/**
+ * @file provider.cppm
+ * @brief Publishes PostgreSQL cache-provider callbacks through the stable cache ABI.
+ */
 module;
 
 extern "C" {
@@ -193,7 +197,9 @@ batch_join_provider_descriptor() noexcept {
 /** @return True when every provider descriptor owns a registration token. */
 [[nodiscard]] bool all_providers_registered() noexcept {
     for (const bool registered : g_registered) {
-        if (!registered) return false;
+        if (!registered) {
+            return false;
+        }
     }
     return true;
 }
@@ -248,12 +254,16 @@ void rollback_registrations(const bioseq_cache_api* api) {
          ++offset) {
         const std::size_t index =
             k_provider_descriptor_count - offset - 1U;
-        if (!g_registered[index]) continue;
+        if (!g_registered[index]) {
+            continue;
+        }
         const bool removed = bioseq::postgres::support::invoke_pg_as_cpp(
             [api, index] {
                 return api->unregister_provider(&g_registrations[index]);
             });
-        if (removed) reset_registration(index);
+        if (removed) {
+            reset_registration(index);
+        }
     }
 }
 
@@ -418,7 +428,9 @@ export void bioseq_cache_provider_publish_directory() {
         static_cast<void*>(&detail::g_directory);
     detail::g_directory_published = true;
 
-    if (*detail::g_cache_api_slot == nullptr) return;
+    if (*detail::g_cache_api_slot == nullptr) {
+        return;
+    }
     const auto* api =
         static_cast<const bioseq_cache_api*>(
             *detail::g_cache_api_slot);

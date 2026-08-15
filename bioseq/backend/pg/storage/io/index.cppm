@@ -119,6 +119,7 @@ using column_mapping_codec =
     });
 }
 
+/** @brief Resolved destination sequence column and its encoded typmod facts. */
 struct load_columns {
     std::int16_t header_attno;   // 0 = none (header discarded)
     std::int16_t seq_attno;      // the one bioseq.seq column (always required)
@@ -126,10 +127,12 @@ struct load_columns {
     std::uint8_t byte_width;     // 1/2/4/8, from the seq column's typmod
 };
 
-// Discover the single bioseq.seq column and decode its alphabet and width from
-// the typmod. Identifier mapping handles the remaining destination columns.
+/**
+ * @brief Finds the single `bioseq.seq` column and decodes its typmod.
+ * @throws postgres_error If the relation has no usable unique sequence column.
+ */
 [[nodiscard]] load_columns resolve_load_columns(Relation rel) {
-    TupleDesc td = RelationGetDescr(rel);
+    const TupleDesc td = RelationGetDescr(rel);
     const Oid seq_type_oid = load_seq_type_oid();
     if (!OidIsValid(seq_type_oid)) {
         raise_load_error_as_cpp(
@@ -137,13 +140,17 @@ struct load_columns {
             "bioseq.seq type not found (is the extension installed?)");
     }
 
-    std::int16_t header_attno = 0, seq_attno = 0;
+    std::int16_t header_attno = 0;
+    std::int16_t seq_attno = 0;
     int seq_count = 0;
     for (int i = 0; i < td->natts; ++i) {
-        Form_pg_attribute attr = TupleDescAttr(td, i);
-        if (attr->attisdropped || attr->attnum <= 0) continue;
+        const Form_pg_attribute attr = TupleDescAttr(td, i);
+        if (attr->attisdropped || attr->attnum <= 0) {
+            continue;
+        }
         if (attr->atttypid == seq_type_oid) {
-            ++seq_count; seq_attno = static_cast<std::int16_t>(i + 1);
+            ++seq_count;
+            seq_attno = static_cast<std::int16_t>(i + 1);
         } else if ((attr->atttypid == TEXTOID || attr->atttypid == VARCHAROID
                    || attr->atttypid == BPCHAROID) && header_attno == 0) {
             header_attno = static_cast<std::int16_t>(i + 1);  // first text column
@@ -164,7 +171,7 @@ struct load_columns {
     }
 
     // (alphabet, width) off the seq column's typmod — NEVER hardcoded.
-    Form_pg_attribute seq_attr = TupleDescAttr(td, seq_attno - 1);
+    const Form_pg_attribute seq_attr = TupleDescAttr(td, seq_attno - 1);
     if (seq_attr->atttypmod < 0) {
         raise_load_error_as_cpp(
             ERRCODE_INVALID_TABLE_DEFINITION,
@@ -183,6 +190,7 @@ namespace idp = bioseq::io::identifier_parser;
 
 // text_with_typmod = varchar(n)/bpchar(n) with a length constraint -> must run the
 // input function so the length is enforced (NOT the raw cstring_to_text path).
+/** @brief PostgreSQL coercion route selected for one destination column. */
 enum class dest_kind : std::uint8_t {
     text,
     text_with_typmod,
@@ -191,6 +199,7 @@ enum class dest_kind : std::uint8_t {
     multirange,
 };
 
+/** @brief Cached input-function metadata for one mapped destination column. */
 struct dest_coercion {
     std::int16_t attno;        // 1-based
     std::string  column_name;  // copied once for the ErrorContextCallback
@@ -200,16 +209,24 @@ struct dest_coercion {
     std::int32_t typmod;       // column atttypmod (varchar(n), numeric(p,s), …)
 };
 
-struct default_col { std::int16_t attno; ExprState* state; };
+/** @brief Compiled default expression for one destination attribute. */
+struct default_col {
+    std::int16_t attno;
+    ExprState* state;
+};
 
 /// Two-byte substring scan without relying on the POSIX `memmem` extension.
 [[nodiscard]] const char* find_substr(const char* data, int len,
                                       const char* needle) {
     const int nlen = static_cast<int>(std::strlen(needle));
-    if (nlen == 0 || len < nlen) return nullptr;
-    for (int i = 0; i + nlen <= len; ++i)
-        if (std::memcmp(data + i, needle, static_cast<std::size_t>(nlen)) == 0)
+    if (nlen == 0 || len < nlen) {
+        return nullptr;
+    }
+    for (int i = 0; i + nlen <= len; ++i) {
+        if (std::memcmp(data + i, needle, static_cast<std::size_t>(nlen)) == 0) {
             return data + i;
+        }
+    }
     return nullptr;
 }
 
@@ -219,8 +236,13 @@ struct default_col { std::int16_t attno; ExprState* state; };
 /// text is passed straight to `<type>range_in`/`<type>multirange_in`.
 [[nodiscard]] char* make_cstr(const char* data, int len,
                               const dest_coercion& dc, MemoryContext mctx) {
-    while (len > 0 && data[0] == ' ') { ++data; --len; }
-    while (len > 0 && data[len - 1] == ' ') { --len; }
+    while (len > 0 && data[0] == ' ') {
+        ++data;
+        --len;
+    }
+    while (len > 0 && data[len - 1] == ' ') {
+        --len;
+    }
     const bool is_range = (dc.kind == dest_kind::range
                            || dc.kind == dest_kind::multirange);
     if (is_range) {
@@ -231,12 +253,24 @@ struct default_col { std::int16_t attno; ExprState* state; };
             const int la = static_cast<int>(d0 - data);
             const int hb_off = la + 2;
             const int hb = len - hb_off;
-            const char* lo = data; int lol = la;
-            while (lol && lo[0] == ' ') { ++lo; --lol; }
-            while (lol && lo[lol - 1] == ' ') --lol;
-            const char* hi = data + hb_off; int hil = hb;
-            while (hil && hi[0] == ' ') { ++hi; --hil; }
-            while (hil && hi[hil - 1] == ' ') --hil;
+            const char* lo = data;
+            int lol = la;
+            while (lol != 0 && lo[0] == ' ') {
+                ++lo;
+                --lol;
+            }
+            while (lol != 0 && lo[lol - 1] == ' ') {
+                --lol;
+            }
+            const char* hi = data + hb_off;
+            int hil = hb;
+            while (hil != 0 && hi[0] == ' ') {
+                ++hi;
+                --hil;
+            }
+            while (hil != 0 && hi[hil - 1] == ' ') {
+                --hil;
+            }
             const bool mr = (dc.kind == dest_kind::multirange);
             char* out = bioseq::postgres::support::invoke_pg_as_cpp(
                 [mctx, lol, hil] {
@@ -244,13 +278,17 @@ struct default_col { std::int16_t attno; ExprState* state; };
                         mctx, static_cast<std::size_t>(lol + hil + 6)));
                 });
             int k = 0;
-            if (mr) out[k++] = '{';
+            if (mr) {
+                out[k++] = '{';
+            }
             out[k++] = '[';
             std::memcpy(out + k, lo, static_cast<std::size_t>(lol)); k += lol;
             out[k++] = ',';
             std::memcpy(out + k, hi, static_cast<std::size_t>(hil)); k += hil;
             out[k++] = ']';
-            if (mr) out[k++] = '}';
+            if (mr) {
+                out[k++] = '}';
+            }
             out[k] = '\0';
             return out;
         }
@@ -269,6 +307,7 @@ struct default_col { std::int16_t attno; ExprState* state; };
 // Load context
 // --------------------------------------------------------------------------
 
+/** @brief Invocation-owned PostgreSQL and parser state for one streamed load. */
 struct load_context {
     Oid main_relid;                                  // parent table OID (for update_index)
     Oid db_oid, spc_oid; RelFileNumber main_relfilenode;
@@ -305,15 +344,17 @@ void bioseq_load_error_context(void* arg) {
     auto* ctx = static_cast<load_context*>(arg);
     const std::string_view h = ctx->current_header;
     const int hlen = static_cast<int>(std::min<std::size_t>(h.size(), 240));
-    if (ctx->current_column_name)
+    if (ctx->current_column_name != nullptr) {
         errcontext("bioseq.load: record %llu, column \"%s\", header \"%.*s\"",
                    static_cast<unsigned long long>(ctx->record_no),
                    ctx->current_column_name, hlen, h.data());
-    else
+    } else {
         errcontext("bioseq.load: record %llu, header \"%.*s\"",
                    static_cast<unsigned long long>(ctx->record_no), hlen, h.data());
+    }
 }
 
+/** @brief Installs bounded record context for the duration of one row write. */
 struct load_error_context_scope {
     load_context& ctx;
     ErrorContextCallback callback{};
@@ -347,6 +388,7 @@ struct pg_identifier_writer {
 	        bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.clear_all_to_null();
 	    });
 	}
+
 	void set_null(idp::destination_slot slot) {
 	    bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_null(dest[slot].attno);
 	}
@@ -387,7 +429,9 @@ struct pg_identifier_writer {
         // wins over a column default. By-reference default datums live in the
         // econtext memory and stay valid until write_column_row copies them.
         for (const default_col& d : defaults) {
-            if (!ctx.slot->tts_isnull[d.attno - 1]) continue;
+            if (!ctx.slot->tts_isnull[d.attno - 1]) {
+                continue;
+            }
 	        bool isnull = false;
 	        Datum v = bioseq::postgres::support::invoke_pg_as_cpp(
 	            [&d, this, &isnull] {
@@ -421,7 +465,11 @@ struct pg_identifier_writer {
         });
     }
     void finish() {}
-    [[nodiscard]] std::size_t destination_count() const { return dest.size(); }
+
+    /** @return The number of identifier-parser destinations. */
+    [[nodiscard]] std::size_t destination_count() const noexcept {
+        return dest.size();
+    }
 };
 static_assert(idp::identifier_destination_writer<pg_identifier_writer>);
 
@@ -480,6 +528,7 @@ void write_parent_row(load_context& ctx, pg_identifier_writer& tuple_writer,
 // Bounded packed streaming and record loading
 // --------------------------------------------------------------------------
 
+/** @brief Streams packed records directly into sequence storage and parent rows. */
 template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width>
 struct load_stream_sink {
     using col_cfg = sequence_custom_alphabet<
@@ -535,6 +584,7 @@ struct load_stream_sink {
     }
 };
 
+/** @brief Owning producer-to-consumer message for one stream callback. */
 template <typename p_storage_unit>
 struct queued_load_event {
     enum class kind_t : std::uint8_t {
@@ -550,6 +600,7 @@ struct queued_load_event {
     bool end_of_record = false;
 };
 
+/** @brief Bounded blocking queue used by the overlapped load path. */
 template <typename p_storage_unit>
 class load_event_queue {
 public:
@@ -600,14 +651,17 @@ private:
     bool closed_ = false;
 };
 
+/** @brief Signals that the consumer closed the load queue after a failure. */
 struct load_queue_closed {};
 
+/** @brief Closes a load queue when the producer task leaves its scope. */
 template <typename p_storage_unit>
 struct load_queue_close_scope {
     load_event_queue<p_storage_unit>& queue;
     ~load_queue_close_scope() noexcept { queue.close(); }
 };
 
+/** @brief Copies parser callbacks into bounded queue events. */
 template <sequence_alphabet p_alphabet, std::size_t p_column_byte_width>
 struct queued_load_stream_sink {
     using col_cfg = sequence_custom_alphabet<
@@ -658,6 +712,7 @@ struct queued_load_stream_sink {
     }
 };
 
+/** @brief Runs parsing and PostgreSQL writes as a bounded producer/consumer pair. */
 template <sequence_alphabet p_alphabet,
           std::size_t p_column_byte_width,
           bioseq::io::sequence_file_format p_file_format>
@@ -769,6 +824,7 @@ template <sequence_alphabet p_alphabet,
     return records;
 }
 
+/** @brief Streams records through the configured direct or overlapped path. */
 template <sequence_alphabet p_alphabet,
           std::size_t p_column_byte_width,
           bioseq::io::sequence_file_format p_file_format>
@@ -805,7 +861,9 @@ template <sequence_alphabet p_alphabet,
     load_stream_sink<p_alphabet, p_column_byte_width> sink{
         ctx, tuple_writer, records};
     auto on_fail = [&io_error](std::string&& msg) {
-        if (io_error.empty()) io_error = std::move(msg);
+        if (io_error.empty()) {
+            io_error = std::move(msg);
+        }
     };
 
     bioseq::io::reader_options opts = bioseq::io::default_reader_options;
@@ -831,6 +889,7 @@ template <sequence_alphabet p_alphabet,
 namespace load_dispatch {
 namespace tpl = bioseq::common::templating;
 
+/** @brief Adapts one compile-time alphabet/width pair to format dispatch. */
 template <class p_alphabet, std::size_t p_column_byte_width>
 struct file_format_adapter {
     template <bioseq::io::sequence_file_format p_file_format>
@@ -846,6 +905,7 @@ struct file_format_adapter {
     }
 };
 
+/** @brief Resolves a runtime file format for one alphabet/width pair. */
 template <class p_alphabet, std::size_t p_column_byte_width>
 struct format_dispatch {
     load_context& ctx;
@@ -868,6 +928,7 @@ struct format_dispatch {
     }
 };
 
+/** @brief Resolves the encoded storage width for one alphabet. */
 template <class p_alphabet>
 struct width_dispatch {
     load_context& ctx;
@@ -883,6 +944,7 @@ struct width_dispatch {
     }
 };
 
+/** @brief Resolves the encoded sequence alphabet before width dispatch. */
 struct alphabet_dispatch {
     load_context& ctx;
     pg_identifier_writer& tuple_writer;
@@ -899,7 +961,7 @@ struct alphabet_dispatch {
 };
 }  // namespace load_dispatch
 
-// Dispatch the resolved alphabet, storage width, and file format once.
+/** @brief Dispatches the resolved alphabet, storage width, and file format once. */
 [[nodiscard]] std::int64_t dispatch_and_stream(
         load_context& ctx, pg_identifier_writer& tuple_writer,
         const char* file_path,
@@ -915,8 +977,11 @@ struct alphabet_dispatch {
 // Batched index build after the streamed insert
 // --------------------------------------------------------------------------
 
+/** @brief Builds update-on-insert indexes after all streamed writes finish. */
 void build_indexes_if_enabled(Oid main_relid) {
-    if (!bioseq::settings::index::insert_maintenance::enabled) return;     // the GUC snapshot (columnar.cppm)
+    if (!bioseq::settings::index::insert_maintenance::enabled) {
+        return;
+    }
     // The grouped-SoA opt-in deliberately forbids the ordinary per-tuple INSERT
     // hook: that hook owns pre-publication bytes and cannot reopen a committed
     // PostgreSQL locator. bioseq.load is the explicit exception because it
@@ -938,6 +1003,7 @@ void build_indexes_if_enabled(Oid main_relid) {
     bioseq::storage::indexing::build_policy_update_on_insert_indexes(main_relid);
 }
 
+/** @brief Clears sequence caches invalidated by post-load storage allocation. */
 void reset_sequence_caches_after_load_storage_alloc() {
     // Shard allocation advances an internal sequence. Clear its backend-local
     // cache before a same-command index scan and again before returning.
@@ -948,6 +1014,7 @@ void reset_sequence_caches_after_load_storage_alloc() {
 // Open, stream, flush, close, and index
 // --------------------------------------------------------------------------
 
+/** @brief Flushes the current column stripe before post-load index work. */
 void flush_pending_load_writes(load_context& ctx) {
     // Parent rows go through ctx.write_state; fragment rows through per-subtable
     // write states opened from ctx.caches. update_index_impl uses raw columnar
@@ -967,6 +1034,7 @@ void flush_pending_load_writes(load_context& ctx) {
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
+/** @brief Finalizes parent and sequence-subtable write states exactly once. */
 void finish_load_write_states(load_context& ctx) {
     std::vector<Oid> shard_relfilenodes;
     shard_relfilenodes.reserve(ctx.caches == nullptr ? 0 : ctx.caches->entries.size());
@@ -1008,7 +1076,12 @@ void finish_load_write_states(load_context& ctx) {
 // Typed multi-column mapping setup
 // --------------------------------------------------------------------------
 
-struct column_attr { std::int16_t attno; Oid atttypid; std::int32_t atttypmod; };
+/** @brief Minimal PostgreSQL type metadata retained for a mapped column. */
+struct column_attr {
+    std::int16_t attno;
+    Oid atttypid;
+    std::int32_t atttypmod;
+};
 
 /// Decode bioseq.column_mapping[] using the element OID carried by the array.
 /// Returned string views remain in the caller's memory context for the load.
@@ -1094,7 +1167,7 @@ void setup_typed_column_mapping(
         idp::header_format requested_fmt,
         std::span<const idp::user_column_mapping> user_maps) {
     ctx.requested_fmt = requested_fmt;
-    TupleDesc td = ctx.parent_td;
+    const TupleDesc td = ctx.parent_td;
     const std::int16_t seq_attno = ctx.cols.seq_attno;
 
     // Record a single-column primary key; composite keys need no special path.
@@ -1105,9 +1178,11 @@ void setup_typed_column_mapping(
         if (OidIsValid(pk_oid)) {
             Relation pk_idx = bioseq::postgres::support::invoke_pg_as_cpp(
                 [pk_oid] { return index_open(pk_oid, AccessShareLock); });
-            if (pk_idx->rd_index != nullptr && pk_idx->rd_index->indnatts == 1)
+            if (pk_idx->rd_index != nullptr
+                && pk_idx->rd_index->indnatts == 1) {
                 pk_attno = static_cast<std::int16_t>(
                     pk_idx->rd_index->indkey.values[0]);
+            }
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [pk_idx] { index_close(pk_idx, AccessShareLock); });
         }
@@ -1118,10 +1193,14 @@ void setup_typed_column_mapping(
     std::vector<idp::column_descriptor> columns;
     std::vector<column_attr> col_attrs;
     for (int i = 0; i < td->natts; ++i) {
-        Form_pg_attribute attr = TupleDescAttr(td, i);
-        if (attr->attisdropped || attr->attnum <= 0) continue;
+        const Form_pg_attribute attr = TupleDescAttr(td, i);
+        if (attr->attisdropped || attr->attnum <= 0) {
+            continue;
+        }
         const std::int16_t attno = static_cast<std::int16_t>(i + 1);
-        if (attno == seq_attno) continue;
+        if (attno == seq_attno) {
+            continue;
+        }
         if (attr->attidentity != '\0' || attr->attgenerated != '\0') {
             raise_load_error_as_cpp(
                 ERRCODE_INVALID_TABLE_DEFINITION,
@@ -1158,17 +1237,23 @@ void setup_typed_column_mapping(
     // Sample headers to determine the effective AUTO format.
     idp::header_format effective_fmt = requested_fmt;
     if (requested_fmt == idp::header_format::automatic) {
-        auto samples = bioseq::io::sample_sequence_headers(
+        const auto samples = bioseq::io::sample_sequence_headers(
             path, kind.format, bioseq::io::default_reader_options);
         std::vector<std::string_view> views;
-        if (samples) for (const std::string& s : *samples) views.emplace_back(s);
+        if (samples) {
+            for (const std::string& sample : *samples) {
+                views.emplace_back(sample);
+            }
+        }
         effective_fmt = idp::detect_header_format(views);
         if (effective_fmt == idp::header_format::plain) {
             const bool has_metadata_target =
                 columns.size() > 1 ||
                 (columns.size() == 1 && !columns[0].is_text) ||
                 !user_maps.empty();
-            if (has_metadata_target) effective_fmt = idp::header_format::automatic;
+            if (has_metadata_target) {
+                effective_fmt = idp::header_format::automatic;
+            }
         }
     }
     ctx.effective_fmt = effective_fmt;
@@ -1186,9 +1271,13 @@ void setup_typed_column_mapping(
     // Reject an unmapped NOT NULL column that has no default. Per-row NULL
     // violations are left to ExecConstraints.
     std::vector<char> referenced(columns.size(), 0);
-    for (std::uint16_t ci : slot_to_column) referenced[ci] = 1;
+    for (const std::uint16_t column_index : slot_to_column) {
+        referenced[column_index] = 1;
+    }
     for (std::size_t i = 0; i < columns.size(); ++i) {
-        if (referenced[i]) continue;
+        if (referenced[i]) {
+            continue;
+        }
         if (columns[i].not_null && !columns[i].has_default) {
             raise_load_error_as_cpp(
                 ERRCODE_INVALID_TABLE_DEFINITION,
@@ -1201,9 +1290,10 @@ void setup_typed_column_mapping(
     // Build one cached coercion entry per resolved destination.
     ctx.dest.clear();
     ctx.dest.reserve(slot_to_column.size());
-    for (std::uint16_t ci : slot_to_column) {
+    for (const std::uint16_t ci : slot_to_column) {
         const column_attr& ca = col_attrs[ci];
-        Oid input_fn = InvalidOid, io_param = InvalidOid;
+        Oid input_fn = InvalidOid;
+        Oid io_param = InvalidOid;
         char typtype = '\0';
         bioseq::postgres::support::invoke_pg_as_cpp(
             [&ca, &input_fn, &io_param, &typtype] {
@@ -1235,17 +1325,21 @@ void setup_typed_column_mapping(
     // once per row.
     ctx.defaults.clear();
     for (std::size_t i = 0; i < columns.size(); ++i) {
-        if (!columns[i].has_default) continue;
-        Node* raw = bioseq::postgres::support::invoke_pg_as_cpp(
+        if (!columns[i].has_default) {
+            continue;
+        }
+        Node* const raw = bioseq::postgres::support::invoke_pg_as_cpp(
             [&ctx, &col_attrs, i] {
                 return build_column_default(
                     ctx.parent_rel, col_attrs[i].attno);
             });
-        if (raw == nullptr) continue;
-        Expr* planned = bioseq::postgres::support::invoke_pg_as_cpp([raw] {
+        if (raw == nullptr) {
+            continue;
+        }
+        Expr* const planned = bioseq::postgres::support::invoke_pg_as_cpp([raw] {
             return expression_planner(reinterpret_cast<Expr*>(raw));
         });
-        ExprState* state = bioseq::postgres::support::invoke_pg_as_cpp(
+        ExprState* const state = bioseq::postgres::support::invoke_pg_as_cpp(
             [planned] { return ExecInitExpr(planned, nullptr); });
         ctx.defaults.push_back(default_col{
             col_attrs[i].attno, state});
@@ -1281,7 +1375,9 @@ void setup_typed_column_mapping(
 
 /// Tear down the optional per-load executor state. This is idempotent.
 void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
-	if (ctx.estate == nullptr) return;
+	if (ctx.estate == nullptr) {
+        return;
+    }
 	// FreeExecutorState destroys the estate's executor contexts.  The checked
 	// PostgreSQL boundary restores the context that was current on entry, so it
 	// must enter from a caller-owned context that survives the deletion.
@@ -1301,6 +1397,7 @@ void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
     ctx.result_rel_info = nullptr;
 }
 
+/** @brief Releases invocation-owned executor, slot, and parent-relation state. */
 void cleanup_load_context(
 		load_context& ctx, bool commit, MemoryContext stable_context) {
 	MemoryContextSwitchTo(stable_context);
@@ -1328,6 +1425,7 @@ void cleanup_load_context(
     }
 }
 
+/** @brief Owns the complete streamed-load lifecycle and converges cleanup. */
 [[nodiscard]] std::int64_t run_load(
         Oid relid, const char* path, bioseq::io::sequence_file_kind kind,
         idp::header_format requested_fmt,

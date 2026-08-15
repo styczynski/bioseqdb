@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * mod_index_admin_impl.cppm
- *
- * Ordinary implementation unit for index administration and storage fixture
- * routines declared by bioseq.postgres.extension.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file index_admin.cppm
+ * @brief Implements index administration and storage-fixture entry points.
  */
 module;
 
@@ -184,7 +179,10 @@ list_metadata() {
 			"JOIN pg_namespace tn ON t.typnamespace=tn.oid WHERE a.attrelid={}::oid AND t.typname='seq' "
 			"AND tn.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
 			static_cast<unsigned>(rel));
-		if (execute_spi(colsql.c_str(), true) != SPI_OK_SELECT) continue;
+		if (execute_spi(colsql.c_str(), true) != SPI_OK_SELECT)
+		{
+			continue;
+		}
 		std::vector<std::pair<std::int16_t, std::string>> cols;
 		for (std::uint64_t c = 0; c < SPI_processed; ++c) {
 			auto att_cell = bioseq::postgres::support::pg_spi_cell::get(
@@ -328,17 +326,18 @@ std::int64_t update_index(
         rel, kind.data(), kind.size());
 }
 
+/** @return The merge-run count recorded by the most recent index build. */
 std::int64_t last_index_merge_run_count() {
 	return static_cast<std::int64_t>(
         bioseq::storage::indexing::g_last_index_merge_run_count);
 }
 
-
+/** @brief Clears backend-local active-read-policy diagnostic counters. */
 void reset_active_read_policy_debug() {
 	bioseq::storage::indexing::reset_active_read_policy_debug_state();
 }
 
-
+/** @return One row containing active-read-policy resolution diagnostics. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::active_read_policy_debug_row>
 active_read_policy_debug() {
@@ -380,6 +379,7 @@ active_read_policy_debug() {
             std::move(rows)};
 }
 
+/** @return The number of rows stored for the named index. */
 std::int64_t index_table_row_count(
 	Oid rel,
 	std::string name) {
@@ -387,6 +387,7 @@ std::int64_t index_table_row_count(
 		index_table_row_count_impl(rel, name);
 }
 
+/** @return Evidence that a cold no-index path has no persisted artifacts. */
 bioseq::postgres::support::named_output<
 	bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>
 inspect_cold_no_index_absence(
@@ -541,6 +542,7 @@ inspect_generation_storage_transition(
 			std::move(rows)};
 }
 
+/** @return The number of distinct subkeys for one index query key. */
 std::int64_t index_distinct_sub_keys(
 	Oid rel,
 	std::string name,
@@ -549,10 +551,12 @@ std::int64_t index_distinct_sub_keys(
 		index_distinct_sub_keys_impl(rel, name, query_key);
 }
 
+/** @brief Drops every physical sequence-index table owned by this database. */
 void drop_all_index_tables() {
 	bioseq::storage::indexing::drop_all_index_tables_impl();
 }
 
+/** @brief Applies the named persistence policy to one logical index. */
 void set_index_policy(
 	Oid rel,
 	std::string name,
@@ -572,6 +576,7 @@ void set_index_policy(
 	}
 }
 
+/** @brief Selects the logical index used by relation read paths. */
 void set_active_read_index(
 	Oid rel,
 	std::string name) {
@@ -590,6 +595,7 @@ void set_active_read_index(
 	}
 }
 
+/** @return The logical column-store row number encoded by @p ctid. */
 std::int64_t column_row_number(
 	Oid rel,
 	bioseq::postgres::support::tuple_identifier ctid) {
@@ -637,6 +643,7 @@ void arm_inline_sequence_pg_failure(std::string failure_point) {
 		arm_inline_sequence_pg_leaf_failure(failure);
 }
 
+/** @brief Inserts or replaces one physical sequence-index chunk. */
 void write_index_chunk(
 	Oid rel,
 	std::string name,
@@ -735,6 +742,7 @@ void write_index_chunk(
 	}
 }
 
+/** @brief Deletes the directory manifest for one logical index key. */
 void delete_index_manifest(
 	Oid rel,
 	std::string name,

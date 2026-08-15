@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * support/sql_boundary/aggregate.cppm
- *
- * Checked aggregate-state and Numeric result boundaries for generated fmgr
- * entrypoints.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file aggregate.cppm
+ * @brief Provides checked aggregate-state and Numeric fmgr boundaries.
  */
 module;
 

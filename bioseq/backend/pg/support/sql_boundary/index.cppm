@@ -1,15 +1,9 @@
 /**
  * @file index.cppm
  * @brief Reexports the complete PostgreSQL SQL-boundary API.
- */
-/*-------------------------------------------------------------------------
  *
- * support/sql_boundary/index.cppm
- *
- * Bioseq facade over the common generated SQL boundary plus Bioseq-specific
- * aggregate, GUC-storage, row-codec, and vector facets.
- *
- *-------------------------------------------------------------------------
+ * Combines the common generated boundary with Bioseq aggregate, GUC-storage,
+ * row-codec, and vector facets.
  */
 export module bioseq.postgres.support.sql_boundary;
 

@@ -1,3 +1,7 @@
+/**
+ * @file aligner.cppm
+ * @brief Declares PostgreSQL settings for sequence alignment execution.
+ */
 export module bioseq.postgres.configuration.aligner;
 
 import bioseq.codegen.sql.annotation_model;

@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * support/sql_boundary/vector.cppm
- *
- * Checked, typed views over the private vector-executor fmgr ABI.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file vector.cppm
+ * @brief Provides checked typed views over the private vector-executor fmgr ABI.
  */
 module;
 
@@ -37,17 +33,22 @@ import bioseq.postgres.vectorization.types;
 
 export namespace bioseq::postgres::support {
 
+/** @brief Maps one generated SQL type and lane to its vector storage contract. */
 template<auto p_sql_type, class p_lane>
 struct vector_lane_traits;
 
+/** @brief Checked non-owning view of one typed vector column. */
 template<auto p_sql_type, class p_lane>
 class vector_column;
 
+/** @brief Checked view of either a scalar constant or typed vector column. */
 template<auto p_sql_type, class p_lane>
 class vector_operand;
 
+/** @brief Checked view of a vector argument's null bitmap. */
 class vector_null_mask;
 
+/** @brief Owning typed result vector returned through fmgr. */
 template<auto p_sql_type, class p_lane>
 class vector_result;
 
@@ -73,7 +74,9 @@ public:
               std::exchange(other.owns_packed_copy_, false)} {}
 
     bpchar_view& operator=(bpchar_view&& other) noexcept {
-        if (this == &other) return *this;
+        if (this == &other) {
+            return *this;
+        }
         reset();
         source_ = std::exchange(other.source_, Datum{});
         packed_ = std::exchange(other.packed_, nullptr);
@@ -344,11 +347,13 @@ concept registered_vector_lane =
         } -> std::same_as<p_lane>;
     };
 
+/** @brief Discriminates a scalar constant from a column-backed operand. */
 enum class vector_operand_kind : std::uint8_t {
     constant,
     column,
 };
 
+/** @brief Checked non-owning access to a typed PostgreSQL vector column. */
 template<auto p_sql_type, class p_lane>
 class vector_column final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
@@ -362,11 +367,11 @@ public:
     }
 
     [[nodiscard]] std::span<const bool> nulls() const noexcept {
-        return {column_->is_null, column_->lane_count};
+        return {column_->is_null.data(), column_->lane_count};
     }
 
     [[nodiscard]] const bool* null_data() const noexcept {
-        return column_->is_null;
+        return column_->is_null.data();
     }
 
     [[nodiscard]] bool is_null(std::size_t lane_index) const {
@@ -434,7 +439,7 @@ public:
     }
 
     [[nodiscard]] std::span<const bool> nulls() const noexcept {
-        return {column_->is_null, column_->lane_count};
+        return {column_->is_null.data(), column_->lane_count};
     }
 
     [[nodiscard]] std::size_t non_null_count() const noexcept {
@@ -456,6 +461,7 @@ private:
     ::vector_column_storage* column_ = nullptr;
 };
 
+/** @brief Checked access to a scalar-or-column vector argument. */
 template<auto p_sql_type, class p_lane>
 class vector_operand final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
@@ -514,6 +520,7 @@ private:
     Oid collation_ = InvalidOid;
 };
 
+/** @brief Owns a newly allocated typed vector result until fmgr transfer. */
 template<auto p_sql_type, class p_lane>
 class vector_result final {
     static_assert(registered_vector_lane<p_sql_type, p_lane>);
@@ -526,7 +533,9 @@ public:
         : column_{std::exchange(other.column_, nullptr)} {}
 
     vector_result& operator=(vector_result&& other) noexcept {
-        if (this == &other) return *this;
+        if (this == &other) {
+            return *this;
+        }
         reset();
         column_ = std::exchange(other.column_, nullptr);
         return *this;
@@ -569,11 +578,11 @@ public:
     }
 
     [[nodiscard]] std::span<bool> nulls() noexcept {
-        return {column_->is_null, column_->lane_count};
+        return {column_->is_null.data(), column_->lane_count};
     }
 
     [[nodiscard]] bool* null_data() noexcept {
-        return column_->is_null;
+        return column_->is_null.data();
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
@@ -591,8 +600,12 @@ private:
     }
 
     void reset() noexcept {
-        if (column_ == nullptr) return;
-        if (column_->data != nullptr) pfree(column_->data);
+        if (column_ == nullptr) {
+            return;
+        }
+        if (column_->data != nullptr) {
+            pfree(column_->data);
+        }
         pfree(column_);
         column_ = nullptr;
     }

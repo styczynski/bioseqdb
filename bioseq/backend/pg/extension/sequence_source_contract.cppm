@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * mod_sequence_source_contract_impl.cppm
- *
- * Ordinary implementation unit for sequence-source and catalog runtime
- * contract routines declared by bioseq.postgres.extension.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file sequence_source_contract.cppm
+ * @brief Implements sequence-source and catalog runtime contract probes.
  */
 module;
 
@@ -336,11 +331,26 @@ classify_bpchar_source(Datum source) noexcept {
 	using enum bioseq::postgres::support::runtime_diagnostics::
 		bpchar_source_form;
 	const Pointer raw = DatumGetPointer(source);
-	if (raw == nullptr) return unknown;
-	if (VARATT_IS_EXTERNAL_ONDISK(raw)) return external;
-	if (VARATT_IS_COMPRESSED(raw)) return compressed;
-	if (VARATT_IS_4B_U(raw)) return four_byte_uncompressed;
-	if (VARATT_IS_SHORT(raw)) return short_header;
+	if (raw == nullptr)
+	{
+		return unknown;
+	}
+	if (VARATT_IS_EXTERNAL_ONDISK(raw))
+	{
+		return external;
+	}
+	if (VARATT_IS_COMPRESSED(raw))
+	{
+		return compressed;
+	}
+	if (VARATT_IS_4B_U(raw))
+	{
+		return four_byte_uncompressed;
+	}
+	if (VARATT_IS_SHORT(raw))
+	{
+		return short_header;
+	}
 	return unknown;
 }
 
@@ -722,7 +732,10 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 					[active_scan = scan] {
 						return systable_getnext(active_scan);
 					});
-			if (!HeapTupleIsValid(tuple)) break;
+			if (!HeapTupleIsValid(tuple))
+			{
+				break;
+			}
 			++row_count;
 			bool id_is_null = false;
 			bool value_is_null = false;
@@ -863,7 +876,10 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 					[active_scan = scan] {
 						return systable_getnext(active_scan);
 					});
-			if (!HeapTupleIsValid(tuple)) break;
+			if (!HeapTupleIsValid(tuple))
+			{
+				break;
+			}
 			bool id_is_null = false;
 			bool value_is_null = false;
 			const Datum id_datum = heap_getattr(
@@ -969,7 +985,10 @@ inline void validate_bpchar_lifetime_statistics() {
 
 namespace bioseq::pg::sql_routines {
 
-
+/**
+ * @brief Arms or immediately executes a named sequence-source contract probe.
+ * @param failure_point Stable diagnostic selector exposed to SQL tests.
+ */
 void arm_sequence_source_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
 	constexpr std::string_view catalog_barrier_prefix{
@@ -1169,7 +1188,7 @@ void arm_sequence_source_failure(std::string failure_point) {
 #endif
 }
 
-
+/** @brief Clears the backend-local sequence-source fault injection. */
 void disarm_sequence_source_failure() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
@@ -1179,7 +1198,7 @@ void disarm_sequence_source_failure() {
 #endif
 }
 
-
+/** @brief Resets sequence-source lifecycle counters and any armed fault. */
 void reset_sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
@@ -1190,7 +1209,7 @@ void reset_sequence_source_counters() {
 #endif
 }
 
-
+/** @return Current sequence-source lifecycle counters as one JSON object. */
 bioseq::postgres::support::jsonb_value sequence_source_counters() {
 #ifdef BIOSEQ_TEST_INDEXES
 	const auto counters =
@@ -1280,7 +1299,6 @@ bioseq::postgres::support::jsonb_value sequence_source_counters() {
 #endif
 }
 
-
 /**
  * @brief Arms one SliceProject DSM payload as incomplete, malformed, or
  * absent for worker-state validation.
@@ -1289,7 +1307,7 @@ void arm_slice_dsm_fixture(std::string mode) {
 	bioseq_arm_slice_dsm_fixture_for_test(mode);
 }
 
-
+/** @return Whether cross-thread use is rejected without corrupting state. */
 bool sequence_source_wrong_thread_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_wrong_thread();
@@ -1299,7 +1317,7 @@ bool sequence_source_wrong_thread_probe() {
 #endif
 }
 
-
+/** @return Whether every injected sequence-source cleanup point is safe. */
 bool sequence_source_fault_contract_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_fault_contract();
@@ -1309,7 +1327,7 @@ bool sequence_source_fault_contract_probe() {
 #endif
 }
 
-
+/** @return Whether route aliases resolve to the same provider identity. */
 bool sequence_source_route_alias_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	return bioseq::storage::validate_pg_sequence_source_route_aliases();
@@ -1319,7 +1337,7 @@ bool sequence_source_route_alias_probe() {
 #endif
 }
 
-
+/** @return The decoded facade orientation, or no value for SQL NULL. */
 std::optional<bool> sequence_facade_orientation_probe(
 	std::optional<Datum> sequence) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1334,7 +1352,7 @@ std::optional<bool> sequence_facade_orientation_probe(
 #endif
 }
 
-
+/** @brief Verifies that PREPARE TRANSACTION rejects live source domains. */
 void sequence_source_pre_prepare_probe() {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::validate_pg_sequence_source_pre_prepare();

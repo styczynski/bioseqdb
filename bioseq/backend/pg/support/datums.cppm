@@ -1,16 +1,9 @@
 /**
  * @file datums.cppm
  * @brief Provides zero-cost typed wrappers for PostgreSQL Datum values.
- */
-/*-------------------------------------------------------------------------
  *
- * support/datums.cppm
- *
- * Zero-cost C++ wrappers for PostgreSQL Datum values: typed scalar
- * conversion, nullable cells, fixed value/null arrays, tuple updates,
- * tuple-slot views, detoast ownership helpers, and SPI cell extraction.
- *
- *-------------------------------------------------------------------------
+ * Covers scalar conversion, nullable cells, fixed value/null arrays, tuple
+ * updates, slot views, detoast ownership, and SPI cell extraction.
  */
 module;
 
@@ -563,18 +556,21 @@ struct pg_datum_list
 		nulls[idx] = false;
 	}
 
+	/** @brief Selects one PostgreSQL object-identifier replacement. */
 	void
 	set_oid(int attnum, Oid value) noexcept
 	{
 		set_raw(attnum, pg_datum::from_oid(value));
 	}
 
+	/** @brief Selects one unsigned 32-bit replacement. */
 	void
 	set_uint32(int attnum, std::uint32_t value) noexcept
 	{
 		set_raw(attnum, pg_datum::from_uint32(value));
 	}
 
+	/** @brief Selects one unsigned 64-bit replacement. */
 	void
 	set_uint64(int attnum, std::uint64_t value) noexcept
 	{

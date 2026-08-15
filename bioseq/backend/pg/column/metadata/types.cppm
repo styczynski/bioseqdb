@@ -2,8 +2,8 @@
  * @file types.cppm
  * @brief Shared columnar metadata data types and ABI guards.
  *
- * Table I/O, transaction
- * state, and catalog operations depend on this leaf partition without pulling
+ * Table I/O, transaction state, and catalog operations depend on this leaf
+ * partition without pulling
  * in catalog implementation details.
  */
 module;
@@ -60,8 +60,8 @@ export struct chunk_skip_node
 
 /** @brief Chunk metadata used to skip irrelevant row groups.
  *
- * Contains a column chunk
- * skip node for each chunk of each column. chunk_skip_nodes[column][chunk]
+ * Contains a column chunk skip node for each chunk of each column.
+ * chunk_skip_nodes[column][chunk]
  * is the entry for the specified column chunk.
  */
 export struct stripe_skip_list
@@ -83,8 +83,8 @@ export struct cached_string_info
 
 /** @brief Decompressed values and presence bits for a row chunk.
  *
- * values_by_column stores
- * the values of data, and present_values stores whether a value is present.
+ * values_by_column stores the values, and present_values records whether a
+ * value is present.
  * value_buffer is used to store (uncompressed) serialized values referenced by
  * Datum's in values_by_column. It is only used for by-reference Datum's. There is a
  * one-to-one correspondence between values_by_column and present_values.
