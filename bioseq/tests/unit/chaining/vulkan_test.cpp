@@ -1,23 +1,7 @@
-// bioseq/tests/unit/chaining/vulkan_test.cpp
-//
-// Validation tests for the Vulkan tiled-DP chaining backend.
-//
-//    Mandatory Vulkan errors — vulkan_tiled_dp with vulkan_enabled=false
-//                                    must fail instead of running scalar fallback.
-//    GPU chaining invariants  — chain_anchors_vulkan output is structurally
-//                                    valid (chain count, bounds, monotonicity,
-//                                    range boundaries, min-score, span!=15,
-//                                    equal-score tie policy).
-//    End-to-end GPU smoke     — when a usable device exists, the pipeline
-//                                    dispatches the kernel and emits matches.
-//    Large coordinates        — ref_position > 2^32 is not truncated.
-//    Shader compile/layout    — the checked-in GLSL compiles for every
-//                                    pipeline key and the SPIR-V carries the
-//                                    direct-anchor layout (stride 24, offsets
-//                                    {0,8,16,20}, bindings 0..3, 32-byte push).
-//
-// The GPU-only cases skip cleanly when is_vulkan_chaining_supported() is false;
-// the parity / shader-layout cases run on every machine.
+/**
+ * @file
+ * @brief Verifies Vulkan chaining, CIGAR, coordinate, and shader-layout contracts.
+ */
 
 #include <array>
 #include <cstddef>
@@ -34,13 +18,13 @@ import bioseq.common.context;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
 import bioseq.sequences;
-import bioseq.pipeline.minimap_port;    // minimap2_parameters / match_result(_collection)
-import bioseq.pipeline.pipe;            // pipeline entry point
-import bioseq.chaining.core;            // anchor / chain / chaining_parameters
-import bioseq.chaining.vulkan;          // chain_anchors_vulkan / is_vulkan_chaining_supported
-import bioseq.gpu.vulkan.runtime;       // runtime / scan_spirv_layout / pipeline key
+import bioseq.pipeline.minimap_port; // minimap2_parameters / match_result(_collection)
+import bioseq.pipeline.pipe;         // pipeline entry point
+import bioseq.chaining.core;         // anchor / chain / chaining_parameters
+import bioseq.chaining.vulkan;       // chain_anchors_vulkan / is_vulkan_chaining_supported
+import bioseq.gpu.vulkan.runtime;    // runtime / scan_spirv_layout / pipeline key
 import bioseq.gpu.vulkan.shader_compiler;
-import bioseq.storage.lazy_sequence;    // make_resident_lazy_sequence
+import bioseq.storage.lazy_sequence; // make_resident_lazy_sequence
 
 using namespace seq::literals;
 
@@ -60,18 +44,15 @@ using sequence_range_type = compact_sequence_range<dna4_u64>;
  * @param[out] params Parameters receiving the target kernels and alphabet identity.
  */
 void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
-    const auto& binding =
-        ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto& binding = ::bioseq::simd_dispatch::highway_test_target_binding();
     params.highway_kernels = binding.kernels;
     params.highway_executed_target = binding.target;
-    const auto* identity = binding.kernels == nullptr
-            || !binding.kernels->is_complete()
-        ? nullptr : binding.kernels->resolve_alphabet_identity<seq::dna4>();
-    if (identity == nullptr
-        || binding.kernels->resolve_alphabet_identity(
-               identity->alphabet_code) != identity) {
-        throw std::logic_error{
-            "generated fixed-target test binding lacks DNA4 identity"};
+    const auto* identity = binding.kernels == nullptr || !binding.kernels->is_complete()
+                               ? nullptr
+                               : binding.kernels->resolve_alphabet_identity<seq::dna4>();
+    if (identity == nullptr ||
+        binding.kernels->resolve_alphabet_identity(identity->alphabet_code) != identity) {
+        throw std::logic_error{"generated fixed-target test binding lacks DNA4 identity"};
     }
     params.alphabet_code = identity->alphabet_code;
 }
@@ -152,9 +133,8 @@ struct chain_outputs {
  * @param[in] params Chaining parameters.
  * @return Owned chains and reordered anchors.
  */
-[[nodiscard]] chain_outputs run_vulkan_chain(
-    std::span<const ch::anchor> anchors, const ch::chaining_parameters& params)
-{
+[[nodiscard]] chain_outputs run_vulkan_chain(std::span<const ch::anchor> anchors,
+                                             const ch::chaining_parameters& params) {
     context::context runtime_context;
     context::installed_context_scope installed_context{runtime_context};
     auto chains_slab = ch::make_arena_slab<ch::chain>();
@@ -177,7 +157,7 @@ struct chain_outputs {
 
 /** @brief Returns prepared default chaining parameters for focused tests. */
 [[nodiscard]] ch::chaining_parameters default_chain_params() {
-    ch::chaining_parameters params;  // kmer_size=15, max_gap=5000, bandwidth=500, ...
+    ch::chaining_parameters params; // kmer_size=15, max_gap=5000, bandwidth=500, ...
     params.prepare();
     return params;
 }
@@ -187,7 +167,8 @@ struct chain_outputs {
  * @return `true` when the caller must return from the current test case.
  */
 [[nodiscard]] bool skip_untrusted_vulkan_chaining() {
-    if (ch::is_vulkan_chaining_supported()) return false;
+    if (ch::is_vulkan_chaining_supported())
+        return false;
     SUCCEED("Vulkan chaining correctness cases require a trusted hardware Vulkan device");
     return true;
 }
@@ -225,7 +206,7 @@ void check_chain_invariants(const chain_outputs& outputs,
     }
 }
 
-}  // namespace
+} // namespace
 
 // ===========================================================================
 // Mandatory Vulkan errors
@@ -266,7 +247,8 @@ TEST_CASE("software Vulkan chaining fails loudly",
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
     if (!runtime.is_usable() || !runtime.features().software_device) {
-        SUCCEED("No software Vulkan device detected; hardware GPU cases cover the selected backend");
+        SUCCEED(
+            "No software Vulkan device detected; hardware GPU cases cover the selected backend");
         return;
     }
 
@@ -285,7 +267,8 @@ TEST_CASE("software Vulkan chaining fails loudly",
 
 TEST_CASE("Vulkan chaining output invariants",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
     const auto params = default_chain_params();
 
     SECTION("forward diagonal, 12 anchors, span==15") {
@@ -366,7 +349,7 @@ TEST_CASE("Vulkan chaining output invariants",
             anchors.push_back(make_anchor(1000 + gap + i * 12, 9000 + i * 12, 0, 15));
         }
         const auto out = run_vulkan_chain(anchors, params);
-        check_chain_invariants(out, anchors, params);  // boundary invariant enforced here
+        check_chain_invariants(out, anchors, params); // boundary invariant enforced here
     }
 }
 
@@ -377,14 +360,13 @@ TEST_CASE("Vulkan chaining output invariants",
 TEST_CASE("end-to-end GPU chaining smoke",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     INFO("Vulkan runtime error: " << gv::runtime::instance().initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     bioseq::simd::minimap2_parameters params;
-    params.chaining_algorithm =
-        bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming;
+    params.chaining_algorithm = bioseq::simd::chaining_algorithm::vulkan_tiled_dynamic_programming;
     params.vulkan_enabled = true;
-    params.minimizer_algorithm =
-        bioseq::simd::minimizer_algorithm::two_stack_nthash;
+    params.minimizer_algorithm = bioseq::simd::minimizer_algorithm::two_stack_nthash;
     bind_fixed_highway(params);
 
     auto query_sequence = make_dna4(300, 0x6A5A);
@@ -399,8 +381,8 @@ TEST_CASE("end-to-end GPU chaining smoke",
 
     INFO("dispatch_count before=" << before << " after=" << after
                                   << " matches=" << matches.results.size());
-    REQUIRE(after > before);                    // the GPU kernel actually ran
-    REQUIRE_FALSE(matches.results.empty());     // at least one match emitted
+    REQUIRE(after > before);                // the GPU kernel actually ran
+    REQUIRE_FALSE(matches.results.empty()); // at least one match emitted
     for (const auto& match : matches.results) {
         REQUIRE(match.query_start >= 0);
         REQUIRE(match.query_end <= static_cast<int32_t>(query_sequence.size()));
@@ -413,7 +395,8 @@ TEST_CASE("Vulkan simple extension emits CIGAR",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     constexpr std::uint32_t k_length = 100u;
     std::vector<std::uint32_t> query_symbols(k_length);
@@ -459,9 +442,11 @@ TEST_CASE("Vulkan simple extension emits CIGAR",
 
     const std::uint64_t before = runtime.alignment_extension_dispatch_count();
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/1u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/1u);
     const std::uint64_t after = runtime.alignment_extension_dispatch_count();
 
     REQUIRE(after > before);
@@ -484,7 +469,8 @@ TEST_CASE("Vulkan long exact CIGAR avoids bounded traceback",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     constexpr std::uint32_t k_length = 2048u;
     std::vector<std::uint32_t> query_symbols(k_length);
@@ -529,9 +515,11 @@ TEST_CASE("Vulkan long exact CIGAR avoids bounded traceback",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/1u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/1u);
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 1);
@@ -550,7 +538,8 @@ TEST_CASE("Vulkan simple CIGAR scores mismatches",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     constexpr std::uint32_t k_length = 16u;
     std::vector<std::uint32_t> query_symbols(k_length);
@@ -598,16 +587,18 @@ TEST_CASE("Vulkan simple CIGAR scores mismatches",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/1u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/1u);
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 1);
     const gv::gpu_alignment_cigar_result_wire& r = result.results.front();
     CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
-    CHECK(r.score == static_cast<std::int32_t>((13u * params.match_score) -
-                                               (3u * params.mismatch_penalty)));
+    CHECK(r.score ==
+          static_cast<std::int32_t>((13u * params.match_score) - (3u * params.mismatch_penalty)));
     CHECK(r.max_score == r.score);
     CHECK(r.query_start == 101u);
     CHECK(r.query_end == 101u + k_length);
@@ -622,15 +613,30 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     const std::vector<std::uint32_t> query_symbols{
-        0, 1, 2, 3, 0,
-        0, 1, 3, 0,
+        0,
+        1,
+        2,
+        3,
+        0,
+        0,
+        1,
+        3,
+        0,
     };
     const std::vector<std::uint32_t> target_symbols{
-        0, 1, 3, 0,
-        0, 1, 2, 3, 0,
+        0,
+        1,
+        3,
+        0,
+        0,
+        1,
+        2,
+        3,
+        0,
     };
 
     const std::vector<gv::gpu_alignment_cigar_job_wire> jobs{
@@ -681,15 +687,16 @@ TEST_CASE("Vulkan simple CIGAR emits one-base gaps",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/6u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/6u);
 
     REQUIRE(result.results.size() == 2);
     REQUIRE(result.packed_cigar.size() == 6);
     const std::int32_t expected_score = static_cast<std::int32_t>(
-        (4u * params.match_score) -
-        (params.gap_open_short + params.gap_extend_short));
+        (4u * params.match_score) - (params.gap_open_short + params.gap_extend_short));
 
     CHECK(result.results[0].status == gv::k_gpu_alignment_extension_status_ok);
     CHECK(result.results[0].score == expected_score);
@@ -720,7 +727,8 @@ TEST_CASE("Vulkan bounded DP CIGAR emits multiple gaps",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     const std::vector<std::uint32_t> query_symbols{0, 1, 2, 3, 0, 1, 2};
     const std::vector<std::uint32_t> target_symbols{0, 1, 3, 0, 2, 1, 2};
@@ -759,9 +767,11 @@ TEST_CASE("Vulkan bounded DP CIGAR emits multiple gaps",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/5u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/5u);
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 5);
@@ -786,7 +796,8 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     constexpr std::uint32_t k_target_length = 620u;
     std::vector<std::uint32_t> target_symbols(k_target_length);
@@ -799,8 +810,7 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
 
     std::vector<std::uint32_t> query_symbols;
     query_symbols.reserve(k_target_length);
-    query_symbols.insert(
-        query_symbols.end(), target_symbols.begin(), target_symbols.begin() + 200);
+    query_symbols.insert(query_symbols.end(), target_symbols.begin(), target_symbols.begin() + 200);
     query_symbols.insert(
         query_symbols.end(), target_symbols.begin() + 208, target_symbols.begin() + 400);
     const std::uint32_t inserted_symbol = (target_symbols[400] + 1u) & 3u;
@@ -845,9 +855,11 @@ TEST_CASE("Vulkan long greedy CIGAR emits three gaps",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/6u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/6u);
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 6);
@@ -871,7 +883,8 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     INFO("Vulkan runtime error: " << runtime.initialization_error());
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
 
     constexpr std::uint32_t k_target_length = 900u;
     constexpr std::uint32_t k_deletion_count = 80u;
@@ -888,8 +901,8 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
     query_symbols.reserve(k_target_length - k_deletion_count);
     std::uint32_t skipped = 0;
     for (std::uint32_t i = 0; i < k_target_length; ++i) {
-        const bool skip_base = skipped < k_deletion_count && i >= k_first_deletion
-            && ((i - k_first_deletion) % k_deletion_spacing) == 0u;
+        const bool skip_base = skipped < k_deletion_count && i >= k_first_deletion &&
+                               ((i - k_first_deletion) % k_deletion_spacing) == 0u;
         if (skip_base) {
             ++skipped;
             continue;
@@ -899,15 +912,13 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
     REQUIRE(skipped == k_deletion_count);
     REQUIRE(query_symbols.size() == k_target_length - k_deletion_count);
 
-    const std::uint64_t traceback_words_u64 =
-        gv::gpu_alignment_cigar_gridded_traceback_words(
-            static_cast<std::uint32_t>(query_symbols.size()),
-            k_target_length,
-            gv::k_gpu_alignment_cigar_traceback_tile_len,
-            gv::k_gpu_alignment_cigar_traceback_tile_len);
+    const std::uint64_t traceback_words_u64 = gv::gpu_alignment_cigar_gridded_traceback_words(
+        static_cast<std::uint32_t>(query_symbols.size()),
+        k_target_length,
+        gv::k_gpu_alignment_cigar_traceback_tile_len,
+        gv::k_gpu_alignment_cigar_traceback_tile_len);
     REQUIRE(traceback_words_u64 <= std::numeric_limits<std::uint32_t>::max());
-    const std::uint32_t traceback_words =
-        static_cast<std::uint32_t>(traceback_words_u64);
+    const std::uint32_t traceback_words = static_cast<std::uint32_t>(traceback_words_u64);
 
     const std::vector<gv::gpu_alignment_cigar_job_wire> jobs{
         gv::gpu_alignment_cigar_job_wire{
@@ -943,18 +954,19 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
     };
 
     const gv::alignment_cigar_batch_result result =
-        runtime.run_alignment_simple_cigar_roundtrip(
-            query_symbols, target_symbols, jobs, params,
-            /*packed_cigar_capacity=*/256u);
+        runtime.run_alignment_simple_cigar_roundtrip(query_symbols,
+                                                     target_symbols,
+                                                     jobs,
+                                                     params,
+                                                     /*packed_cigar_capacity=*/256u);
 
     REQUIRE(result.results.size() == 1);
     REQUIRE(result.packed_cigar.size() == 256);
     const gv::gpu_alignment_cigar_result_wire& r = result.results.front();
     CHECK(r.status == gv::k_gpu_alignment_extension_status_ok);
     CHECK(r.score == static_cast<std::int32_t>(
-                         query_symbols.size() * params.match_score
-                         - k_deletion_count
-                             * (params.gap_open_short + params.gap_extend_short)));
+                         query_symbols.size() * params.match_score -
+                         k_deletion_count * (params.gap_open_short + params.gap_extend_short)));
     CHECK(r.query_start == 700u);
     CHECK(r.query_end == 700u + query_symbols.size());
     CHECK(r.target_start == 1100u);
@@ -993,9 +1005,10 @@ TEST_CASE("Vulkan gridded CIGAR handles long many-gap traceback",
 
 TEST_CASE("Vulkan chaining preserves ref_position > 2^32",
           "[component:bioseq][layer:unit][feature:chaining][resource:gpu]") {
-    if (skip_untrusted_vulkan_chaining()) return;
+    if (skip_untrusted_vulkan_chaining())
+        return;
     const auto params = default_chain_params();
-    const std::uint64_t base = (std::uint64_t{1} << 32) + 5'000'000'000ULL;  // ~9.3 Gbp
+    const std::uint64_t base = (std::uint64_t{1} << 32) + 5'000'000'000ULL; // ~9.3 Gbp
     std::vector<ch::anchor> anchors;
     for (std::uint64_t i = 0; i < 12; ++i) {
         anchors.push_back(make_anchor(base + i * 12, 1000 + i * 12, 0, 15));
@@ -1033,9 +1046,9 @@ TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
         f.max_shared_memory_bytes = shared;
         return ch::choose_vulkan_chaining_pipeline(f);
     };
-    keys.push_back(fixture_key(128u, 16u * 1024u));        // -> 384/128
-    keys.push_back(fixture_key(512u, 32u * 1024u));        // -> 512/128
-    keys.push_back(fixture_key(1024u, 48u * 1024u));       // -> 1024/256
+    keys.push_back(fixture_key(128u, 16u * 1024u));  // -> 384/128
+    keys.push_back(fixture_key(512u, 32u * 1024u));  // -> 512/128
+    keys.push_back(fixture_key(1024u, 48u * 1024u)); // -> 1024/256
 
     for (const auto& key : keys) {
         INFO("tile_size=" << key.tile_size << " local_size=" << key.local_size);
@@ -1056,5 +1069,5 @@ TEST_CASE("chain_tiled_dp shader compiles with the anchor layout contract",
     }
 }
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
+} // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

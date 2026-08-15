@@ -1,4 +1,7 @@
-#include <tests/support/common.hpp>
+/**
+ * @file
+ * @brief Verifies exact edit accounting across KSW2 and Block Aligner routes.
+ */
 
 #include <cstddef>
 #include <cstdint>
@@ -6,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tests/support/common.hpp>
 #include <vector>
 
 import bioseq.common.seqan_adapter;
@@ -31,28 +35,32 @@ namespace {
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_type = compact_sequence_range<dna4_u64>;
 
+/**
+ * @brief Resolves the generated DNA4 alignment table for the fixed test target.
+ * @return Complete typed alignment kernel table.
+ * @throws std::logic_error If the generated table lacks its DNA4 identity or entry.
+ */
 [[nodiscard]] auto fixed_alignment_kernels() -> const alignment_kernels<seq::dna4>& {
-    const auto& root =
-        ::bioseq::simd_dispatch::highway_test_kernel_table();
-    const auto* identity = root.is_complete()
-        ? root.resolve_alphabet_identity<seq::dna4>() : nullptr;
-    if (identity == nullptr
-        || root.resolve_alphabet_identity(identity->alphabet_code)
-            != identity) {
-        throw std::logic_error{
-            "generated fixed-target test table lacks DNA4 identity"};
+    const auto& root = ::bioseq::simd_dispatch::highway_test_kernel_table();
+    const auto* identity =
+        root.is_complete() ? root.resolve_alphabet_identity<seq::dna4>() : nullptr;
+    if (identity == nullptr ||
+        root.resolve_alphabet_identity(identity->alphabet_code) != identity) {
+        throw std::logic_error{"generated fixed-target test table lacks DNA4 identity"};
     }
     for (const auto& entry : root.alignment_by_alphabet) {
-        if (entry.alphabet_code == identity->alphabet_code
-            && entry.typed_table != nullptr) {
-            return *static_cast<const alignment_kernels<seq::dna4>*>(
-                entry.typed_table);
+        if (entry.alphabet_code == identity->alphabet_code && entry.typed_table != nullptr) {
+            return *static_cast<const alignment_kernels<seq::dna4>*>(entry.typed_table);
         }
     }
-    throw std::logic_error{
-        "generated fixed-target test table lacks DNA4 alignment"};
+    throw std::logic_error{"generated fixed-target test table lacks DNA4 alignment"};
 }
 
+/**
+ * @brief Converts ASCII symbols into a DNA4 fixture sequence.
+ * @param[in] text DNA4 text accepted by SeqAn.
+ * @return DNA4 symbols in source order.
+ */
 [[nodiscard]] auto dna4_from_ascii(std::string_view text) -> std::vector<seq::dna4> {
     std::vector<seq::dna4> sequence(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
@@ -61,6 +69,14 @@ using range_type = compact_sequence_range<dna4_u64>;
     return sequence;
 }
 
+/**
+ * @brief Constructs an anchor with independent query and reference coordinates.
+ * @param[in] query_position Inclusive query seed end coordinate.
+ * @param[in] ref_position Inclusive reference seed end coordinate.
+ * @param[in] reverse Strand flag.
+ * @param[in] span Seed span in symbols.
+ * @return Initialized chaining anchor.
+ */
 [[nodiscard]] auto make_anchor(std::uint64_t query_position,
                                std::uint64_t ref_position,
                                bool reverse,
@@ -75,25 +91,34 @@ using range_type = compact_sequence_range<dna4_u64>;
     };
 }
 
+/**
+ * @brief Constructs a diagonal anchor with equal query and reference coordinates.
+ * @param[in] position Shared query and reference coordinate.
+ * @param[in] reverse Strand flag.
+ * @param[in] span Seed span in symbols.
+ * @return Initialized chaining anchor.
+ */
 [[nodiscard]] auto make_anchor(std::uint64_t position, bool reverse, std::uint8_t span = 8)
     -> ::bioseq::chaining::anchor {
     return make_anchor(position, position, reverse, span);
 }
 
+/**
+ * @brief Builds fixed-target alignment parameters with exact edit accounting enabled.
+ * @return Prepared fixture parameters for all three alignment routes.
+ * @throws std::logic_error If the generated binding lacks its DNA4 identity.
+ */
 [[nodiscard]] auto exact_alignment_params() -> minimap2_parameters {
     minimap2_parameters parameters{};
-    const auto& binding =
-        ::bioseq::simd_dispatch::highway_test_target_binding();
+    const auto& binding = ::bioseq::simd_dispatch::highway_test_target_binding();
     parameters.highway_kernels = binding.kernels;
     parameters.highway_executed_target = binding.target;
-    const auto* identity = binding.kernels == nullptr
-            || !binding.kernels->is_complete()
-        ? nullptr : binding.kernels->resolve_alphabet_identity<seq::dna4>();
-    if (identity == nullptr
-        || binding.kernels->resolve_alphabet_identity(
-               identity->alphabet_code) != identity) {
-        throw std::logic_error{
-            "generated fixed-target test binding lacks DNA4 identity"};
+    const auto* identity = binding.kernels == nullptr || !binding.kernels->is_complete()
+                               ? nullptr
+                               : binding.kernels->resolve_alphabet_identity<seq::dna4>();
+    if (identity == nullptr ||
+        binding.kernels->resolve_alphabet_identity(identity->alphabet_code) != identity) {
+        throw std::logic_error{"generated fixed-target test binding lacks DNA4 identity"};
     }
     parameters.alphabet_code = identity->alphabet_code;
     parameters.match_score = 2;
@@ -113,6 +138,12 @@ using range_type = compact_sequence_range<dna4_u64>;
     return parameters;
 }
 
+/**
+ * @brief Initializes one alignment region from a contiguous anchor span.
+ * @param[in] anchors Anchors owned by the caller for the duration of the call.
+ * @param[in] query_length Full query length in symbols.
+ * @return Region with coordinates derived from `anchors`.
+ */
 [[nodiscard]] auto make_region(std::span<const ::bioseq::chaining::anchor> anchors,
                                sequence_size_t query_length) -> alignment_region {
     alignment_region region{};
@@ -122,42 +153,50 @@ using range_type = compact_sequence_range<dna4_u64>;
     return region;
 }
 
+/** @brief Query and target lengths consumed by a decoded CIGAR. */
 struct cigar_consumption {
     sequence_size_t query = 0;
     sequence_size_t target = 0;
 };
 
+/**
+ * @brief Counts query and target symbols consumed by a CIGAR.
+ * @param[in] cigar Operations to inspect in source order.
+ * @return Independent query and target consumption totals.
+ */
 [[nodiscard]] auto measure_cigar_consumption(std::span<const cigar_operation> cigar)
     -> cigar_consumption {
     cigar_consumption consumption{};
     for (const cigar_operation op : cigar) {
         switch (op.opcode) {
-            case cigar_match_opcode:
-            case cigar_equal_opcode:
-            case cigar_mismatch_opcode:
-                consumption.query += op.length;
-                consumption.target += op.length;
-                break;
-            case cigar_insertion_opcode:
-                consumption.query += op.length;
-                break;
-            case cigar_deletion_opcode:
-            case cigar_reference_skip_opcode:
-                consumption.target += op.length;
-                break;
-            default:
-                FAIL("unexpected CIGAR opcode in edit-distance fixture");
+        case cigar_match_opcode:
+        case cigar_equal_opcode:
+        case cigar_mismatch_opcode:
+            consumption.query += op.length;
+            consumption.target += op.length;
+            break;
+        case cigar_insertion_opcode:
+            consumption.query += op.length;
+            break;
+        case cigar_deletion_opcode:
+        case cigar_reference_skip_opcode:
+            consumption.target += op.length;
+            break;
+        default:
+            FAIL("unexpected CIGAR opcode in edit-distance fixture");
         }
     }
     return consumption;
 }
 
+/** @brief Alignment regions produced by the three compared backend routes. */
 struct backend_regions {
     alignment_region ksw2;
     alignment_region block;
     alignment_region batched;
 };
 
+/** @brief Selects the coordinate and mismatch layout for one alignment fixture. */
 enum class fixture_kind {
     single_seed_collision,
     multi_seed_mismatch,
@@ -166,21 +205,25 @@ enum class fixture_kind {
     left_extension_orientation,
 };
 
+/**
+ * @brief Runs one deterministic fixture through KSW2, Block Aligner, and batched KSW2.
+ * @param[in] reverse Strand flag applied to fixture anchors.
+ * @param[in] kind Fixture geometry and mismatch layout.
+ * @param[in] max_gap Maximum gap passed to the alignment routes.
+ * @param[in] do_cigar Whether the caller explicitly requests a CIGAR.
+ * @return Owned alignment regions from all three routes.
+ */
 [[nodiscard]] auto
 run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_cigar = true)
     -> backend_regions {
-    const std::size_t query_length = kind == fixture_kind::out_of_band_gap
-        ? 256u
-        : 128u;
-    const std::size_t target_length = kind == fixture_kind::out_of_band_gap
-        ? 256u
-        : 128u;
+    const std::size_t query_length = kind == fixture_kind::out_of_band_gap ? 256u : 128u;
+    const std::size_t target_length = kind == fixture_kind::out_of_band_gap ? 256u : 128u;
     std::string query_text = kind == fixture_kind::left_extension_orientation
-        ? (reverse ? "TTTTTTTTACGTACGT" : "ACGTACGTAAAAAAAA")
-        : std::string(query_length, reverse ? 'T' : 'A');
+                                 ? (reverse ? "TTTTTTTTACGTACGT" : "ACGTACGTAAAAAAAA")
+                                 : std::string(query_length, reverse ? 'T' : 'A');
     std::string target_text = kind == fixture_kind::left_extension_orientation
-        ? "ACGTAAAAAAAAA"
-        : std::string(target_length, 'A');
+                                  ? "ACGTAAAAAAAAA"
+                                  : std::string(target_length, 'A');
     std::vector<::bioseq::chaining::anchor> anchors;
     if (kind == fixture_kind::single_seed_collision) {
         anchors.push_back(make_anchor(31, reverse));
@@ -222,8 +265,8 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
         parameters.gap_ext2 = 1;
         parameters.end_bonus = 100;
     }
-    const auto anchor_span = std::span<const ::bioseq::chaining::anchor>{
-        anchors.data(), anchors.size()};
+    const auto anchor_span =
+        std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()};
 
     backend_regions fixture_regions{
         .ksw2 = make_region(anchor_span, query_text.size()),
@@ -258,21 +301,27 @@ run_fixture(bool reverse, fixture_kind kind, std::int32_t max_gap = 0, bool do_c
     return fixture_regions;
 }
 
+/**
+ * @brief Checks exact edit distance and coordinate consumption for one region.
+ * @param[in] region Completed alignment region.
+ * @param[in] expected_edit_distance Expected mismatch and gap count.
+ * @param[in] expected_query_length Expected consumed query symbols.
+ * @param[in] expected_target_length Expected consumed target symbols.
+ */
 auto check_exact_region(const alignment_region& region,
                         sequence_size_t expected_edit_distance,
                         sequence_size_t expected_query_length,
                         sequence_size_t expected_target_length) -> void {
     CHECK(region.edit_distance == expected_edit_distance);
     const cigar_consumption consumed = measure_cigar_consumption(
-        std::span<const cigar_operation>{
-            region.cigar.data(), region.cigar.size()});
+        std::span<const cigar_operation>{region.cigar.data(), region.cigar.size()});
     CHECK(consumed.query == expected_query_length);
     CHECK(consumed.target == expected_target_length);
     CHECK(region.query_end - region.query_start == consumed.query);
     CHECK(region.ref_end - region.ref_start == consumed.target);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("implicit seed CIGAR assembly is one neutral canonical contract",
           "[component:bioseq][layer:unit][feature:alignment][resource:highway]") {
@@ -303,8 +352,7 @@ TEST_CASE("Single-seed exact edit accounting compares implicit seed ranks",
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::single_seed_collision);
+        const backend_regions regions = run_fixture(reverse, fixture_kind::single_seed_collision);
         check_exact_region(regions.ksw2, 2, 8, 8);
         check_exact_region(regions.block, 2, 8, 8);
         check_exact_region(regions.batched, 2, 8, 8);
@@ -321,8 +369,7 @@ TEST_CASE("Multi-seed exact edit accounting is unchanged by implicit seed handli
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::multi_seed_mismatch);
+        const backend_regions regions = run_fixture(reverse, fixture_kind::multi_seed_mismatch);
         check_exact_region(regions.ksw2, 2, 40, 40);
         check_exact_region(regions.block, 2, 40, 40);
         check_exact_region(regions.batched, 2, 40, 40);
@@ -336,8 +383,8 @@ TEST_CASE("Exact edit accounting forces traceback when CIGAR was not requested",
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::single_seed_collision, 16, false);
+        const backend_regions regions =
+            run_fixture(reverse, fixture_kind::single_seed_collision, 16, false);
         CHECK(regions.ksw2.edit_distance == 2);
         CHECK(regions.block.edit_distance == 2);
         CHECK(regions.batched.edit_distance == 2);
@@ -354,16 +401,15 @@ TEST_CASE("Left-extension exact counting uses source-order CIGAR windows",
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::left_extension_orientation, 16);
+        const backend_regions regions =
+            run_fixture(reverse, fixture_kind::left_extension_orientation, 16);
         CHECK(regions.ksw2.edit_distance == 3);
         CHECK(regions.batched.edit_distance == 3);
         CHECK(regions.batched.query_start == regions.ksw2.query_start);
         CHECK(regions.batched.query_end == regions.ksw2.query_end);
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
-        CHECK(format_cigar(regions.batched.cigar)
-              == format_cigar(regions.ksw2.cigar));
+        CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
         check_exact_region(regions.ksw2, 3, 16, 13);
         check_exact_region(regions.batched, 3, 16, 13);
     }
@@ -376,8 +422,7 @@ TEST_CASE("Exact gap fills disable z-drop with the supported sentinel",
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::off_diagonal_gap);
+        const backend_regions regions = run_fixture(reverse, fixture_kind::off_diagonal_gap);
         check_exact_region(regions.ksw2, 3, 40, 43);
         check_exact_region(regions.block, 3, 40, 43);
         check_exact_region(regions.batched, 3, 40, 43);
@@ -391,47 +436,30 @@ TEST_CASE("Exact mandatory gaps are unbanded before SneakySnake rejection",
 
     constexpr sequence_size_t query_gap_length = 40;
     constexpr sequence_size_t target_gap_length = 177;
-    constexpr sequence_size_t length_difference =
-        target_gap_length - query_gap_length;
+    constexpr sequence_size_t length_difference = target_gap_length - query_gap_length;
     const minimap2_parameters params = exact_alignment_params();
-    const std::int32_t normal_align_bandwidth = static_cast<std::int32_t>(
-        params.bandwidth * 1.5 + 1.0);
-    REQUIRE(length_difference
-            > static_cast<sequence_size_t>(normal_align_bandwidth));
+    const std::int32_t normal_align_bandwidth =
+        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
+    REQUIRE(length_difference > static_cast<sequence_size_t>(normal_align_bandwidth));
 
     const std::vector<std::uint8_t> query_ranks(query_gap_length, 0u);
     const std::vector<std::uint8_t> target_ranks(target_gap_length, 0u);
-    const prefilter_result prefilter = sneaky_snake_scalar(
-        query_ranks, target_ranks, 16u);
+    const prefilter_result prefilter = sneaky_snake_scalar(query_ranks, target_ranks, 16u);
     REQUIRE(prefilter.lower_bound == length_difference);
     REQUIRE_FALSE(is_prefilter_accepted(prefilter));
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);
-        const backend_regions regions = run_fixture(
-            reverse, fixture_kind::out_of_band_gap);
-        check_exact_region(
-            regions.ksw2,
-            length_difference,
-            query_gap_length,
-            target_gap_length);
-        check_exact_region(
-            regions.block,
-            length_difference,
-            query_gap_length,
-            target_gap_length);
-        check_exact_region(
-            regions.batched,
-            length_difference,
-            query_gap_length,
-            target_gap_length);
+        const backend_regions regions = run_fixture(reverse, fixture_kind::out_of_band_gap);
+        check_exact_region(regions.ksw2, length_difference, query_gap_length, target_gap_length);
+        check_exact_region(regions.block, length_difference, query_gap_length, target_gap_length);
+        check_exact_region(regions.batched, length_difference, query_gap_length, target_gap_length);
         CHECK(regions.batched.query_start == regions.ksw2.query_start);
         CHECK(regions.batched.query_end == regions.ksw2.query_end);
         CHECK(regions.batched.ref_start == regions.ksw2.ref_start);
         CHECK(regions.batched.ref_end == regions.ksw2.ref_end);
         CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
-        CHECK(format_cigar(regions.batched.cigar)
-              == format_cigar(regions.ksw2.cigar));
+        CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
         CHECK(prefilter.lower_bound == regions.ksw2.edit_distance);
     }
 }
@@ -442,10 +470,9 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
     context::installed_context_scope installed_context(test_context);
 
     for (const bool reverse : {false, true}) {
-        for (const fixture_kind kind : {
-                 fixture_kind::single_seed_collision,
-                 fixture_kind::multi_seed_mismatch,
-                 fixture_kind::off_diagonal_gap}) {
+        for (const fixture_kind kind : {fixture_kind::single_seed_collision,
+                                        fixture_kind::multi_seed_mismatch,
+                                        fixture_kind::off_diagonal_gap}) {
             CAPTURE(reverse, kind);
             const backend_regions regions = run_fixture(reverse, kind, 16);
             CHECK(regions.batched.query_start == regions.ksw2.query_start);
@@ -456,19 +483,15 @@ TEST_CASE("Batched exact CIGAR and coordinates match unbatched KSW2 extensions",
             CHECK(regions.batched.edit_distance == regions.ksw2.edit_distance);
             CHECK(regions.batched.match_length == regions.ksw2.match_length);
             CHECK(regions.batched.block_length == regions.ksw2.block_length);
-            CHECK(format_cigar(regions.batched.cigar)
-                  == format_cigar(regions.ksw2.cigar));
+            CHECK(format_cigar(regions.batched.cigar) == format_cigar(regions.ksw2.cigar));
 
-            const cigar_consumption consumed = measure_cigar_consumption(
-                std::span<const cigar_operation>{
-                    regions.batched.cigar.data(),
-                    regions.batched.cigar.size()});
-            CHECK(consumed.query
-                  == regions.batched.query_end - regions.batched.query_start);
-            CHECK(consumed.target
-                  == regions.batched.ref_end - regions.batched.ref_start);
+            const cigar_consumption consumed =
+                measure_cigar_consumption(std::span<const cigar_operation>{
+                    regions.batched.cigar.data(), regions.batched.cigar.size()});
+            CHECK(consumed.query == regions.batched.query_end - regions.batched.query_start);
+            CHECK(consumed.target == regions.batched.ref_end - regions.batched.ref_start);
         }
     }
 }
 
-}  // namespace bioseq::simd
+} // namespace bioseq::simd

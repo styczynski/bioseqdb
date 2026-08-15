@@ -1,30 +1,54 @@
-#include <tests/support/common.hpp>
+/**
+ * @file
+ * @brief Compares unsigned 128-bit SIMD sort routes with `std::sort`.
+ */
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <random>
-#include <vector>
-
 #include <hwy/highway.h>
+#include <random>
+#include <tests/support/common.hpp>
+#include <vector>
 
 import bioseq.simd.sorting;
 
-extern "C" void bioseq_sort_pair_run_u128_keys(
-    hwy::uint128_t* keys,
-    std::size_t key_count,
-    int sort_impl) noexcept;
+/**
+ * @brief Sorts one sidecar key run through the selected production route.
+ * @param[in,out] keys Contiguous keys to reorder in place.
+ * @param[in] key_count Number of keys available at `keys`.
+ * @param[in] sort_impl Production route selector exercised by the test.
+ */
+extern "C" void
+bioseq_sort_pair_run_u128_keys(hwy::uint128_t* keys, std::size_t key_count, int sort_impl) noexcept;
 
 namespace {
 
+/**
+ * @brief Constructs a Highway 128-bit integer from high and low words.
+ * @param[in] high Most-significant 64 bits.
+ * @param[in] low Least-significant 64 bits.
+ * @return Combined unsigned 128-bit value.
+ */
 [[nodiscard]] auto make_u128(std::uint64_t high, std::uint64_t low) -> hwy::uint128_t {
     return hwy::uint128_t{.lo = low, .hi = high};
 }
 
+/**
+ * @brief Orders unsigned 128-bit values lexicographically by high then low word.
+ * @param[in] left Left comparison operand.
+ * @param[in] right Right comparison operand.
+ * @return `true` when `left` precedes `right`.
+ */
 [[nodiscard]] auto u128_less(const hwy::uint128_t& left, const hwy::uint128_t& right) -> bool {
     return (left.hi == right.hi) ? (left.lo < right.lo) : (left.hi < right.hi);
 }
 
+/**
+ * @brief Generates a deterministic key vector with repeated high and low words.
+ * @param[in] key_count Number of keys to generate.
+ * @return Reproducible unsorted key vector.
+ */
 [[nodiscard]] auto random_u128_case(std::size_t key_count) -> std::vector<hwy::uint128_t> {
     std::mt19937_64 random_engine(0x5EED12345678ULL + key_count);
     std::vector<hwy::uint128_t> keys;
@@ -37,6 +61,10 @@ namespace {
     return keys;
 }
 
+/**
+ * @brief Builds boundary, duplicate, sorted, and reversed sorting fixtures.
+ * @return Complete set of unsigned 128-bit sorting inputs.
+ */
 [[nodiscard]] auto u128_sort_cases() -> std::vector<std::vector<hwy::uint128_t>> {
     std::vector<std::vector<hwy::uint128_t>> cases;
     for (const std::size_t key_count :
@@ -71,6 +99,10 @@ namespace {
     return cases;
 }
 
+/**
+ * @brief Checks ascending and descending parity for one vector-stream width.
+ * @tparam p_stream_width Number of independently scheduled SIMD streams.
+ */
 template <std::size_t p_stream_width> auto check_u128_vector_stream_width() -> void {
     for (const auto& input : u128_sort_cases()) {
         auto expected_asc = input;
@@ -95,7 +127,7 @@ template <std::size_t p_stream_width> auto check_u128_vector_stream_width() -> v
     }
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("u128 vector_stream sort matches std::sort",
           "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]") {
@@ -111,8 +143,7 @@ TEST_CASE("u128 default sort uses vector_stream ordering",
     auto expected = input;
     std::sort(expected.begin(), expected.end(), u128_less);
 
-    bioseq::simd::sorting::sort_unsigned_128_ascending(
-        input.data(), input.size());
+    bioseq::simd::sorting::sort_unsigned_128_ascending(input.data(), input.size());
     ASSERT(input == expected);
 }
 

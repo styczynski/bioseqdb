@@ -1,11 +1,14 @@
-#include <tests/support/common.hpp>
+/**
+ * @file
+ * @brief Verifies vector-stream operations against direct Highway operations.
+ */
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <type_traits>
-
 #include <hwy/highway.h>
+#include <tests/support/common.hpp>
+#include <type_traits>
 
 import bioseq.simd.utils;
 import bioseq.simd.vector_stream;
@@ -16,17 +19,17 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// =============================================================================
-// Equivalence-test harness
-//
-// For each lifted op, we verify three argument shapes against the equivalent
-// direct hn::* call:
-//   stream(s) ⊕ stream(s)
-//   stream(s) ⊕ plain_vec   (broadcast right)
-//   plain_vec ⊕ stream(s)   (broadcast left)
-// and assert per-slot byte-equality.
-// =============================================================================
-
+/**
+ * @brief Checks stream-stream and both stream-vector broadcast shapes.
+ * @tparam p_descriptor Highway descriptor type.
+ * @tparam p_stream_width Number of independent vector slots.
+ * @tparam p_lifted Lifted vector-stream operation type.
+ * @tparam p_highway_operation Direct Highway operation type.
+ * @param[in] d Highway descriptor used for lanes and direct operations.
+ * @param[in] lifted Vector-stream operation under test.
+ * @param[in] hn_op Equivalent Highway operation.
+ * @param[in] name Operation name used for diagnostics.
+ */
 template <class p_descriptor,
           std::size_t p_stream_width,
           typename p_lifted,
@@ -40,17 +43,14 @@ auto check_binary_vec_op(p_descriptor d,
     const auto vb = hn::Set(d, static_cast<lane_type>(0x55));
     const auto vc = hn::Set(d, static_cast<lane_type>(0x12));
 
-    auto sa = vector_stream<
-        p_descriptor, lane_type, p_stream_width>::pack(va, vb);
-    auto sb = vector_stream<
-        p_descriptor, lane_type, p_stream_width>::pack(vb, vc);
+    auto sa = vector_stream<p_descriptor, lane_type, p_stream_width>::pack(va, vb);
+    auto sb = vector_stream<p_descriptor, lane_type, p_stream_width>::pack(vb, vc);
 
     {
         auto rs = lifted(sa, sb);
         for (std::size_t k = 0; k < p_stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(
-                d, hn_op(sa[k], sb[k]));
+            const auto want = extract_lanes<lane_type>(d, hn_op(sa[k], sb[k]));
             ASSERT(got == want);
         }
     }
@@ -58,8 +58,7 @@ auto check_binary_vec_op(p_descriptor d,
         auto rs = lifted(sa, vc);
         for (std::size_t k = 0; k < p_stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(
-                d, hn_op(sa[k], vc));
+            const auto want = extract_lanes<lane_type>(d, hn_op(sa[k], vc));
             ASSERT(got == want);
         }
     }
@@ -67,15 +66,24 @@ auto check_binary_vec_op(p_descriptor d,
         auto rs = lifted(va, sb);
         for (std::size_t k = 0; k < p_stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(
-                d, hn_op(va, sb[k]));
+            const auto want = extract_lanes<lane_type>(d, hn_op(va, sb[k]));
             ASSERT(got == want);
         }
     }
     bioseq_log<logging_level::debug>("[vector_stream binary] op={} OK", name);
 }
 
-// Comparison ops: result is a mask_stream. Compare via VecFromMask round-trip.
+/**
+ * @brief Checks a lifted comparison through mask-to-vector round trips.
+ * @tparam p_descriptor Highway descriptor type.
+ * @tparam p_stream_width Number of independent mask slots.
+ * @tparam p_lifted Lifted mask-stream comparison type.
+ * @tparam p_highway_operation Direct Highway comparison type.
+ * @param[in] d Highway descriptor used for lanes and mask conversion.
+ * @param[in] lifted Mask-stream operation under test.
+ * @param[in] hn_op Equivalent Highway comparison.
+ * @param[in] name Operation name used for diagnostics.
+ */
 template <class p_descriptor,
           std::size_t p_stream_width,
           typename p_lifted,
@@ -88,17 +96,13 @@ auto check_binary_cmp_op(p_descriptor d,
     const auto va = hn::Set(d, static_cast<lane_type>(5));
     const auto vb = hn::Set(d, static_cast<lane_type>(10));
 
-    auto sa = vector_stream<
-        p_descriptor, lane_type, p_stream_width>::pack(va, vb);
-    auto sb = vector_stream<
-        p_descriptor, lane_type, p_stream_width>::pack(vb, va);
+    auto sa = vector_stream<p_descriptor, lane_type, p_stream_width>::pack(va, vb);
+    auto sb = vector_stream<p_descriptor, lane_type, p_stream_width>::pack(vb, va);
 
     auto ms = lifted(sa, sb);
     for (std::size_t k = 0; k < p_stream_width; ++k) {
-        const auto got = extract_lanes<lane_type>(
-            d, hn::VecFromMask(d, ms[k]));
-        const auto want = extract_lanes<lane_type>(
-            d, hn::VecFromMask(d, hn_op(sa[k], sb[k])));
+        const auto got = extract_lanes<lane_type>(d, hn::VecFromMask(d, ms[k]));
+        const auto want = extract_lanes<lane_type>(d, hn::VecFromMask(d, hn_op(sa[k], sb[k])));
         ASSERT(got == want);
     }
     bioseq_log<logging_level::debug>("[vector_stream cmp] op={} OK", name);
@@ -110,68 +114,89 @@ auto check_binary_cmp_op(p_descriptor d,
 
 TEMPLATE_TEST_CASE("vector_stream binary arithmetic equivalence",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
 
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return add(a, b); },
-        [](auto&& a, auto&& b){ return hn::Add(a, b); }, "Add");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return subtract(a, b); },
-        [](auto&& a, auto&& b){ return hn::Sub(a, b); }, "Sub");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return minimum(a, b); },
-        [](auto&& a, auto&& b){ return hn::Min(a, b); }, "Min");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return maximum(a, b); },
-        [](auto&& a, auto&& b){ return hn::Max(a, b); }, "Max");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return add(a, b); },
+        [](auto&& a, auto&& b) { return hn::Add(a, b); },
+        "Add");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return subtract(a, b); },
+        [](auto&& a, auto&& b) { return hn::Sub(a, b); },
+        "Sub");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return minimum(a, b); },
+        [](auto&& a, auto&& b) { return hn::Min(a, b); },
+        "Min");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return maximum(a, b); },
+        [](auto&& a, auto&& b) { return hn::Max(a, b); },
+        "Max");
 }
 
 TEMPLATE_TEST_CASE("vector_stream binary bitwise equivalence",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
 
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return bit_and(a, b); },
-        [](auto&& a, auto&& b){ return hn::And(a, b); }, "And");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return bit_or(a, b); },
-        [](auto&& a, auto&& b){ return hn::Or(a, b); }, "Or");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return bit_xor(a, b); },
-        [](auto&& a, auto&& b){ return hn::Xor(a, b); }, "Xor");
-    check_binary_vec_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return bit_and_not(a, b); },
-        [](auto&& a, auto&& b){ return hn::AndNot(a, b); }, "AndNot");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return bit_and(a, b); },
+        [](auto&& a, auto&& b) { return hn::And(a, b); },
+        "And");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return bit_or(a, b); },
+        [](auto&& a, auto&& b) { return hn::Or(a, b); },
+        "Or");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return bit_xor(a, b); },
+        [](auto&& a, auto&& b) { return hn::Xor(a, b); },
+        "Xor");
+    check_binary_vec_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return bit_and_not(a, b); },
+        [](auto&& a, auto&& b) { return hn::AndNot(a, b); },
+        "AndNot");
 }
 
 TEMPLATE_TEST_CASE("mask_stream AndNot broadcasts a plain mask",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     // The two-stack collector combines a mask stream with one live-lane mask.
     // Verify that the plain mask is broadcast to each stream slot.
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
 
     const auto pal_a = hn::Eq(hn::Set(d, static_cast<lane_type>(5)),
-                              hn::Set(d, static_cast<lane_type>(5)));   // all-true
+                              hn::Set(d, static_cast<lane_type>(5))); // all-true
     const auto pal_b = hn::Ne(hn::Set(d, static_cast<lane_type>(5)),
-                              hn::Set(d, static_cast<lane_type>(5)));   // all-false
+                              hn::Set(d, static_cast<lane_type>(5))); // all-false
     const auto live = hn::Eq(hn::Set(d, static_cast<lane_type>(7)),
-                             hn::Set(d, static_cast<lane_type>(7)));    // all-true
+                             hn::Set(d, static_cast<lane_type>(7))); // all-true
 
     auto pal_stream = mask_stream<decltype(d), 2>::pack(pal_a, pal_b);
 
     // Lifted: mask_stream ⊕ plain mask
     auto result_stream = bit_and_not(pal_stream, live);
     for (std::size_t s = 0; s < 2; ++s) {
-        const auto got  = extract_lanes<lane_type>(d,
-            hn::VecFromMask(d, result_stream[s]));
-        const auto want = extract_lanes<lane_type>(d,
-            hn::VecFromMask(d, hn::AndNot(pal_stream[s], live)));
+        const auto got = extract_lanes<lane_type>(d, hn::VecFromMask(d, result_stream[s]));
+        const auto want =
+            extract_lanes<lane_type>(d, hn::VecFromMask(d, hn::AndNot(pal_stream[s], live)));
         ASSERT(got == want);
     }
     bioseq_log<logging_level::debug>("[mask_stream AndNot+broadcast] OK");
@@ -179,33 +204,49 @@ TEMPLATE_TEST_CASE("mask_stream AndNot broadcasts a plain mask",
 
 TEMPLATE_TEST_CASE("vector_stream binary comparisons",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
 
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return equal(a, b); },
-        [](auto&& a, auto&& b){ return hn::Eq(a, b); }, "Eq");
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return not_equal(a, b); },
-        [](auto&& a, auto&& b){ return hn::Ne(a, b); }, "Ne");
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return less(a, b); },
-        [](auto&& a, auto&& b){ return hn::Lt(a, b); }, "Lt");
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return greater(a, b); },
-        [](auto&& a, auto&& b){ return hn::Gt(a, b); }, "Gt");
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return less_equal(a, b); },
-        [](auto&& a, auto&& b){ return hn::Le(a, b); }, "Le");
-    check_binary_cmp_op<decltype(d), 2>(d,
-        [](auto&& a, auto&& b){ return greater_equal(a, b); },
-        [](auto&& a, auto&& b){ return hn::Ge(a, b); }, "Ge");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return equal(a, b); },
+        [](auto&& a, auto&& b) { return hn::Eq(a, b); },
+        "Eq");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return not_equal(a, b); },
+        [](auto&& a, auto&& b) { return hn::Ne(a, b); },
+        "Ne");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return less(a, b); },
+        [](auto&& a, auto&& b) { return hn::Lt(a, b); },
+        "Lt");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return greater(a, b); },
+        [](auto&& a, auto&& b) { return hn::Gt(a, b); },
+        "Gt");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return less_equal(a, b); },
+        [](auto&& a, auto&& b) { return hn::Le(a, b); },
+        "Le");
+    check_binary_cmp_op<decltype(d), 2>(
+        d,
+        [](auto&& a, auto&& b) { return greater_equal(a, b); },
+        [](auto&& a, auto&& b) { return hn::Ge(a, b); },
+        "Ge");
 }
 
 TEMPLATE_TEST_CASE("vector_stream templated shifts",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -234,7 +275,9 @@ TEMPLATE_TEST_CASE("vector_stream templated shifts",
 
 TEMPLATE_TEST_CASE("vector_stream runtime same-amount shifts",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -264,13 +307,15 @@ TEMPLATE_TEST_CASE("vector_stream runtime same-amount shifts",
 
 TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
 
-    const auto m_a = hn::Lt(hn::Set(d, lane_type{1}), hn::Set(d, lane_type{2}));   // all-true
-    const auto m_b = hn::Lt(hn::Set(d, lane_type{2}), hn::Set(d, lane_type{1}));   // all-false
+    const auto m_a = hn::Lt(hn::Set(d, lane_type{1}), hn::Set(d, lane_type{2})); // all-true
+    const auto m_b = hn::Lt(hn::Set(d, lane_type{2}), hn::Set(d, lane_type{1})); // all-false
     auto ms = mask_stream<decltype(d), stream_width>::pack(m_a, m_b);
 
     const auto va = hn::Set(d, static_cast<lane_type>(0xAA));
@@ -284,8 +329,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         static_assert(k_is_vector_stream<decltype(rs)>);
         for (std::size_t k = 0; k < stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(d,
-                hn::IfThenElse(ms[k], sa[k], sb[k]));
+            const auto want = extract_lanes<lane_type>(d, hn::IfThenElse(ms[k], sa[k], sb[k]));
             ASSERT(got == want);
         }
     }
@@ -295,8 +339,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         auto rs = if_then_else(ms, sa, vb);
         for (std::size_t k = 0; k < stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(d,
-                hn::IfThenElse(ms[k], sa[k], vb));
+            const auto want = extract_lanes<lane_type>(d, hn::IfThenElse(ms[k], sa[k], vb));
             ASSERT(got == want);
         }
     }
@@ -306,8 +349,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         auto rs = if_then_else(ms, va, sb);
         for (std::size_t k = 0; k < stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(d,
-                hn::IfThenElse(ms[k], va, sb[k]));
+            const auto want = extract_lanes<lane_type>(d, hn::IfThenElse(ms[k], va, sb[k]));
             ASSERT(got == want);
         }
     }
@@ -319,8 +361,7 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
                       "if_then_else(mask_stream, vec, vec) must produce vector_stream");
         for (std::size_t k = 0; k < stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(d,
-                hn::IfThenElse(ms[k], va, vb));
+            const auto want = extract_lanes<lane_type>(d, hn::IfThenElse(ms[k], va, vb));
             ASSERT(got == want);
         }
     }
@@ -330,19 +371,19 @@ TEMPLATE_TEST_CASE("vector_stream if_then_else — every argument shape",
         auto rs = if_then_else(m_a, sa, sb);
         for (std::size_t k = 0; k < stream_width; ++k) {
             const auto got = extract_lanes<lane_type>(d, rs[k]);
-            const auto want = extract_lanes<lane_type>(d,
-                hn::IfThenElse(m_a, sa[k], sb[k]));
+            const auto want = extract_lanes<lane_type>(d, hn::IfThenElse(m_a, sa[k], sb[k]));
             ASSERT(got == want);
         }
     }
 
-    bioseq_log<logging_level::debug>(
-        "[vector_stream if_then_else] all 5 shapes OK");
+    bioseq_log<logging_level::debug>("[vector_stream if_then_else] all 5 shapes OK");
 }
 
 TEMPLATE_TEST_CASE("vector_stream static factories",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -365,7 +406,9 @@ TEMPLATE_TEST_CASE("vector_stream static factories",
 
 TEMPLATE_TEST_CASE("mask_stream static factory splat_false",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -378,7 +421,9 @@ TEMPLATE_TEST_CASE("mask_stream static factory splat_false",
 
 TEMPLATE_TEST_CASE("vector_stream bit_not / negate / absolute",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -404,31 +449,31 @@ TEMPLATE_TEST_CASE("vector_stream bit_cast across types",
 
     const auto va = hn::Set(d_in, std::uint32_t{0xDEADBEEF});
     const auto vb = hn::Set(d_in, std::uint32_t{0x12345678});
-    auto sa =
-        vector_stream<decltype(d_in), std::uint32_t, stream_width>::pack(va, vb);
+    auto sa = vector_stream<decltype(d_in), std::uint32_t, stream_width>::pack(va, vb);
 
     auto rs = bit_cast(d_out, sa);
     static_assert(k_is_vector_stream<decltype(rs)>);
-    static_assert(std::is_same_v<typename decltype(rs)::tag_type,
-                                   std::remove_cvref_t<decltype(d_out)>>);
+    static_assert(
+        std::is_same_v<typename decltype(rs)::tag_type, std::remove_cvref_t<decltype(d_out)>>);
 
     for (std::size_t k = 0; k < stream_width; ++k) {
         const auto got = extract_lanes<std::uint8_t>(d_out, rs[k]);
-        const auto want = extract_lanes<std::uint8_t>(d_out,
-            hn::BitCast(d_out, sa[k]));
+        const auto want = extract_lanes<std::uint8_t>(d_out, hn::BitCast(d_out, sa[k]));
         ASSERT(got == want);
     }
 }
 
 TEMPLATE_TEST_CASE("vector_stream vector_from_mask round-trip",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
 
-    const auto m_a = hn::Lt(hn::Set(d, lane_type{1}), hn::Set(d, lane_type{2}));   // all-true
-    const auto m_b = hn::Lt(hn::Set(d, lane_type{2}), hn::Set(d, lane_type{1}));   // all-false
+    const auto m_a = hn::Lt(hn::Set(d, lane_type{1}), hn::Set(d, lane_type{2})); // all-true
+    const auto m_b = hn::Lt(hn::Set(d, lane_type{2}), hn::Set(d, lane_type{1})); // all-false
     auto ms = mask_stream<decltype(d), stream_width>::pack(m_a, m_b);
 
     auto vs = vector_from_mask(d, ms);
@@ -442,15 +487,16 @@ TEMPLATE_TEST_CASE("vector_stream vector_from_mask round-trip",
 
 TEMPLATE_TEST_CASE("vector_stream mask_from_vector round-trip",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
 
     const auto v_all_ones = hn::Set(d, static_cast<lane_type>(static_cast<lane_type>(-1)));
     const auto v_zero = hn::Zero(d);
-    auto sa = vector_stream<decltype(d), lane_type, stream_width>::pack(
-        v_all_ones, v_zero);
+    auto sa = vector_stream<decltype(d), lane_type, stream_width>::pack(v_all_ones, v_zero);
 
     auto ms = mask_from_vector(sa);
     static_assert(k_is_mask_stream<decltype(ms)>);
@@ -461,7 +507,9 @@ TEMPLATE_TEST_CASE("vector_stream mask_from_vector round-trip",
 
 TEMPLATE_TEST_CASE("vector_stream store_stream",
                    "[component:bioseq][layer:unit][feature:simd_primitives][resource:highway]",
-                   std::uint16_t, std::uint32_t, std::uint64_t) {
+                   std::uint16_t,
+                   std::uint32_t,
+                   std::uint64_t) {
     using lane_type = TestType;
     const hn::ScalableTag<lane_type> d;
     constexpr std::size_t stream_width = 2;
@@ -471,8 +519,8 @@ TEMPLATE_TEST_CASE("vector_stream store_stream",
 
     const lane_type val_a = static_cast<lane_type>(0xAA);
     const lane_type val_b = static_cast<lane_type>(0xBB);
-    auto s = vector_stream<decltype(d), lane_type, stream_width>::pack(
-                hn::Set(d, val_a), hn::Set(d, val_b));
+    auto s = vector_stream<decltype(d), lane_type, stream_width>::pack(hn::Set(d, val_a),
+                                                                       hn::Set(d, val_b));
 
     store_stream(s, d, std::array<lane_type*, stream_width>{a.data(), b.data()});
 
@@ -490,7 +538,7 @@ TEMPLATE_TEST_CASE("vector_stream collect_all_false_per_stream",
     constexpr std::size_t stream_width = 2;
 
     const auto m_false = hn::MaskFalse(d);
-    const auto m_first = hn::FirstN(d, 1);     // at least one lane true
+    const auto m_first = hn::FirstN(d, 1); // at least one lane true
     auto ms = mask_stream<decltype(d), stream_width>::pack(m_false, m_first);
 
     const auto per = collect_all_false_per_stream(d, ms);
@@ -521,28 +569,26 @@ TEMPLATE_TEST_CASE("vector_stream stream count 1 collapses cleanly",
 // Trivially-copyable / destructible static_asserts — module-load-time check.
 // =============================================================================
 
-static_assert(std::is_trivially_copyable_v<
-    vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>,
+static_assert(
+    std::is_trivially_copyable_v<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>,
     "vector_stream must be trivially copyable");
 static_assert(std::is_trivially_destructible_v<
-    vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>,
-    "vector_stream must be trivially destructible");
+                  vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>,
+              "vector_stream must be trivially destructible");
 static_assert(std::is_trivially_copyable_v<mask_stream<hn::ScalableTag<std::uint32_t>, 2>>,
               "mask_stream must be trivially copyable");
 
 // Stream traits sanity.
-static_assert(k_is_vector_stream<
-    vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>);
+static_assert(k_is_vector_stream<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>);
 static_assert(!k_is_vector_stream<hn::Vec<hn::ScalableTag<std::uint32_t>>>);
 static_assert(k_is_mask_stream<mask_stream<hn::ScalableTag<std::uint32_t>, 2>>);
 static_assert(!k_is_mask_stream<hn::Mask<hn::ScalableTag<std::uint32_t>>>);
-static_assert(k_is_any_stream<
-    vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>);
+static_assert(k_is_any_stream<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>>);
 static_assert(k_is_any_stream<mask_stream<hn::ScalableTag<std::uint32_t>, 2>>);
-static_assert(has_stream_argument<
-    vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>, int>);
+static_assert(
+    has_stream_argument<vector_stream<hn::ScalableTag<std::uint32_t>, std::uint32_t, 2>, int>);
 static_assert(!has_stream_argument<int, double>);
 
-}  // namespace bioseq::simd::HWY_NAMESPACE
+} // namespace bioseq::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
