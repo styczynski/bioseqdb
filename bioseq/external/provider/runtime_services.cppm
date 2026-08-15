@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/runtime_services.cppm
+ * @brief Bounded runtime services supplied to provider executions.
+ */
 module;
 
 #include <array>

@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/model.cppm
+ * @brief Provider records, assets, provenance, and delivery models.
+ */
 module;
 
 #include <chrono>

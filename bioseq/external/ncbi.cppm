@@ -1,3 +1,11 @@
+/**
+ * @file external/ncbi.cppm
+ * @brief NCBI Datasets OpenAPI descriptor consumed by external client codegen.
+ *
+ * The annotation parser resolves one same-file variable to one raw-string
+ * initializer, so transport, path, and schema sections cannot be split into
+ * named modules without first extending the generator contract.
+ */
 module;
 
 #include <string_view>
@@ -15542,4 +15550,5 @@ x-bioseq-integration:
         - version
 )bioseq_openapi";
 
+/** @brief Code-generation anchor for the NCBI Datasets client. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

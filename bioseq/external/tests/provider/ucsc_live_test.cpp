@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/provider/ucsc_live_test.cpp
+ * @brief Live UCSC provider query and sequence-delivery tests.
+ */
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <expected>

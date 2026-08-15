@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/sequence_stream_live_test.cpp
+ * @brief Live NCBI streaming and bounded-channel cancellation tests.
+ */
+
 // Exercise NCBI sequence streaming and deterministic bounded-channel
 // accounting. Provider-backed cases select the network resource explicitly.
 
@@ -129,7 +134,7 @@ TEST_CASE("bounded_channel charges bytes/items and enforces backpressure",
         prov::bounded_channel<int> channel(/*bytes=*/150, /*items=*/8);
         REQUIRE(channel.push(1, 100, std::stop_token{}).has_value());
         std::atomic<bool> second_pushed{false};
-        std::thread producer([&] {
+        std::thread producer([&channel, &second_pushed] {
             // 100 more would exceed 150 with one item already charged; blocks.
             (void)channel.push(2, 100, std::stop_token{});
             second_pushed.store(true);

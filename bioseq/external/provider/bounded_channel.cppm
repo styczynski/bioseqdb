@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/bounded_channel.cppm
+ * @brief Cancellation-aware byte- and item-bounded producer channel.
+ */
 module;
 
 #include <chrono>
@@ -28,8 +32,10 @@ import bioseq.external.provider.errors; // external_error, make_external_error
 // the exact capacity is returned to the channel when the lease is destroyed.
 export namespace bioseq::external::provider {
 
+/// Terminal and open states of a bounded provider channel.
 enum class channel_state : std::uint8_t { open, done, error, cancelled };
 
+/// Result category returned by a timed channel pop.
 enum class pop_status : std::uint8_t {
   item,         // lease is engaged
   closed_done,  // producer finished cleanly, queue drained
@@ -38,23 +44,27 @@ enum class pop_status : std::uint8_t {
   timed_out     // no item yet; caller should poll interrupts and retry
 };
 
+/// Byte- and item-bounded producer-to-consumer channel.
 template <class p_value_type> class bounded_channel;
 
 // Move-only owning lease. Holds the popped value and its charged byte count;
 // the destructor returns that capacity to the channel and wakes a blocked
 // producer.
+/// Move-only item whose lifetime retains its channel capacity charge.
 template <class p_value_type> class channel_item_lease {
 public:
   channel_item_lease() = default;
   channel_item_lease(const channel_item_lease &) = delete;
   channel_item_lease &operator=(const channel_item_lease &) = delete;
 
+  /// Transfer item ownership and its outstanding capacity charge.
   channel_item_lease(channel_item_lease &&other) noexcept
       : owner_(other.owner_), value_(std::move(other.value_)),
         bytes_(other.bytes_) {
     other.owner_ = nullptr;
     other.bytes_ = 0;
   }
+  /// Release any current item and transfer another lease into this one.
   channel_item_lease &operator=(channel_item_lease &&other) noexcept {
     if (this != &other) {
       release();
@@ -66,12 +76,17 @@ public:
     }
     return *this;
   }
+  /// Return the retained capacity charge to the channel.
   ~channel_item_lease() { release(); }
 
+  /// Return mutable access to the leased item.
   [[nodiscard]] p_value_type &value() noexcept { return value_; }
+  /// Return read-only access to the leased item.
   [[nodiscard]] const p_value_type &value() const noexcept { return value_; }
+  /// Return the byte charge retained by this lease.
   [[nodiscard]] std::size_t charged_bytes() const noexcept { return bytes_; }
 
+  /// Return the retained capacity charge before destruction.
   void release() noexcept {
     if (owner_ != nullptr) {
       owner_->return_charge(bytes_);
@@ -91,13 +106,16 @@ private:
   std::size_t bytes_ = 0;
 };
 
+/// Timed pop status and an optional charged item lease.
 template <class p_value_type> struct pop_result {
   pop_status status = pop_status::timed_out;
   std::optional<channel_item_lease<p_value_type>> item;
 };
 
+/// Cancellation-aware channel bounded by both bytes and item count.
 template <class p_value_type> class bounded_channel {
 public:
+  /// Construct a channel with fixed byte and item capacities.
   bounded_channel(std::size_t maximum_bytes, std::size_t maximum_items)
       : maximum_bytes_(maximum_bytes),
         maximum_items_(maximum_items == 0 ? 1 : maximum_items) {}
@@ -105,10 +123,10 @@ public:
   bounded_channel(const bounded_channel &) = delete;
   bounded_channel &operator=(const bounded_channel &) = delete;
 
-  // Producer: blocks until the item fits under both bounds, the channel is
-  // closed, or `stop` fires. A single item larger than the byte bound is
-  // admitted only when the channel is otherwise empty (the "one staging
-  // message" the admission peak equation accounts for), so it never deadlocks.
+  /// Push an item after both byte and item capacity become available.
+  ///
+  /// A single oversized item is admitted only when the channel is otherwise
+  /// empty, preserving progress for the budgeted staging message.
   [[nodiscard]] std::expected<void, external_error>
   push(p_value_type value, std::size_t bytes, std::stop_token stop) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -136,8 +154,9 @@ public:
     return {};
   }
 
-  // Consumer: timed wait so the PG thread can poll interrupts. The returned
-  // lease keeps the item charged until released.
+  /// Wait for an item up to a caller-selected interrupt polling interval.
+  ///
+  /// A returned lease keeps the item charged until it is released.
   [[nodiscard]] pop_result<p_value_type>
   pop_for(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -168,24 +187,31 @@ public:
     return pop_result<p_value_type>{pop_status::timed_out, std::nullopt};
   }
 
+  /// Close after successful production and retain queued items for draining.
   void close_done() { close(channel_state::done, std::nullopt); }
+  /// Close with a terminal provider error.
   void close_error(external_error error) {
     close(channel_state::error, std::move(error));
   }
+  /// Cancel waiters and prevent further production.
   void cancel() { close(channel_state::cancelled, std::nullopt); }
 
+  /// Return the current channel state.
   [[nodiscard]] channel_state state() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_;
   }
+  /// Return the terminal provider error when one was supplied.
   [[nodiscard]] std::optional<external_error> error() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return error_;
   }
+  /// Return bytes retained by queued items and active leases.
   [[nodiscard]] std::size_t charged_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return charged_bytes_;
   }
+  /// Return the largest simultaneous byte charge observed.
   [[nodiscard]] std::size_t high_water_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return high_water_bytes_;

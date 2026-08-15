@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/locator.cppm
+ * @brief Provider locator-policy interface and validated remote locators.
+ */
 module;
 
 #include <cstddef>
@@ -19,23 +23,28 @@ import bioseq.external.provider.messages; // locator_scheme
 // through the registry and contains no provider/hostname switch.
 export namespace bioseq::external::provider {
 
+/// Allowed DNS suffix and whether its apex is included.
 struct locator_host_suffix_view {
   std::string_view suffix;
   bool include_apex;
 };
 
+/// Allowed port for one locator scheme.
 struct locator_port_view {
   locator_scheme scheme;
   std::uint16_t port;
 };
 
+/// Address classes a locator policy permits after DNS resolution.
 enum class locator_address_scope : std::uint8_t { public_only, test_loopback };
 
+/// Whether proxy routing is forbidden or explicitly pinned.
 enum class locator_proxy_policy : std::uint8_t {
   disabled,
   explicit_pinned_connect
 };
 
+/// Borrowed immutable outbound locator-policy profile.
 struct locator_policy_profile_view {
   locator_policy_id id;
   std::span<const locator_scheme> schemes;
@@ -50,11 +59,13 @@ struct locator_policy_profile_view {
   locator_proxy_policy proxy;
 };
 
+/// Type-erased resolver for configured locator policies.
 struct locator_policy_registry_ref {
   void *object{};
   std::expected<locator_policy_profile_view, external_error> (*resolve_fn)(
       void *, provider_id, locator_policy_id){};
 
+  /// Resolve a policy only for its owning provider.
   [[nodiscard]] std::expected<locator_policy_profile_view, external_error>
   resolve(provider_id provider, locator_policy_id policy) const {
     return resolve_fn(object, provider, policy);

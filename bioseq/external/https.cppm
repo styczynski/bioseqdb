@@ -1,3 +1,7 @@
+/**
+ * @file external/https.cppm
+ * @brief Bounded synchronous HTTPS transport with verified TLS.
+ */
 module;
 
 #include <algorithm>
@@ -417,22 +421,26 @@ struct https_state {
 
 export namespace bioseq::external {
 
+/** @brief HTTP header name and value preserved from a transport exchange. */
 struct http_header {
   std::string name;
   std::string value;
 };
 
+/** @brief Transport diagnostic with the originating library error code. */
 struct transport_error {
   std::string message;
   long transport_code{};
 };
 
+/** @brief Complete bounded HTTP response returned by the synchronous client. */
 struct transport_response {
   long status_code{};
   std::string body;
   std::vector<http_header> headers;
 };
 
+/** @brief Default decoded response-body limit for generated API clients. */
 inline constexpr std::size_t k_default_maximum_response_body_bytes =
     64U * 1024U * 1024U;
 
@@ -448,6 +456,7 @@ inline constexpr std::size_t k_default_maximum_response_body_bytes =
                  : std::string{};
 }
 
+/** @brief Reusable synchronous HTTPS client bound to one verified origin. */
 class https_client {
 public:
   /** Creates a reusable verified HTTPS transport for one host and port. */

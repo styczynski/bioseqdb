@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/gzip_decode_test.cpp
+ * @brief Gzip decoding, truncation, expansion-limit, and cancellation tests.
+ */
+
 // Exercise gzip decoding from an arbitrary io_source, including the
 // decoded-byte cap, without network access.
 

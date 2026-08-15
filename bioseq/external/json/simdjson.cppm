@@ -1,3 +1,7 @@
+/**
+ * @file external/json/simdjson.cppm
+ * @brief simdjson conversion into the provider-owned JSON value model.
+ */
 module;
 
 #include <simdjson.h>

@@ -1,3 +1,11 @@
+/**
+ * @file external/ebi.cppm
+ * @brief EBI Search OpenAPI descriptor consumed by external client codegen.
+ *
+ * The annotation parser resolves one same-file variable to one raw-string
+ * initializer, so this descriptor remains atomic until codegen accepts
+ * composed specifications or external schema inputs.
+ */
 module;
 
 #include <string_view>
@@ -2242,4 +2250,5 @@ x-bioseq-integration:
         - '"hitCount"'
 )bioseq_openapi";
 
+/** @brief Code-generation anchor for the EBI Search client. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

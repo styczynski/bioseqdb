@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/budget.cppm
+ * @brief Checked execution budgets and cancellation-aware capacity leases.
+ */
 module;
 
 #include <atomic>

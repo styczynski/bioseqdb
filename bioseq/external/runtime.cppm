@@ -1,3 +1,7 @@
+/**
+ * @file external/runtime.cppm
+ * @brief Process-lifetime initialization for the Oat++ runtime.
+ */
 module;
 
 #include <mutex>

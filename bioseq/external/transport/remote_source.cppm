@@ -1,3 +1,7 @@
+/**
+ * @file external/transport/remote_source.cppm
+ * @brief Pull-based bounded remote byte source backed by libcurl.
+ */
 module;
 
 #include <algorithm>

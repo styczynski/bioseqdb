@@ -1,3 +1,7 @@
+/**
+ * @file external/io/archive_source/openssl_md5.cppm
+ * @brief OpenSSL MD5 adapter used for archive-entry verification.
+ */
 module;
 
 #include <openssl/evp.h>

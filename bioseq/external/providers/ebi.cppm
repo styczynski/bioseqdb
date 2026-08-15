@@ -1,3 +1,7 @@
+/**
+ * @file external/providers/ebi.cppm
+ * @brief EBI provider planning, retrieval, and record parsing.
+ */
 module;
 
 #include <array>

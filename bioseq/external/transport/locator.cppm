@@ -1,3 +1,7 @@
+/**
+ * @file external/transport/locator.cppm
+ * @brief Remote-locator parsing and outbound request policy enforcement.
+ */
 module;
 
 #include <cstddef>

@@ -1,3 +1,7 @@
+/**
+ * @file external/ucsc.cppm
+ * @brief UCSC Genome Browser OpenAPI descriptor consumed by client codegen.
+ */
 module;
 
 #include <string_view>
@@ -651,4 +655,5 @@ x-bioseq-integration:
         - GATCACAGGT
 )bioseq_openapi";
 
+/** @brief Code-generation anchor for the UCSC client. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

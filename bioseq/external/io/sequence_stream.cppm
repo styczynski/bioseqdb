@@ -1,3 +1,7 @@
+/**
+ * @file external/io/sequence_stream.cppm
+ * @brief Provider sequence streaming into bounded row channels.
+ */
 module;
 
 #include <array>

@@ -1,3 +1,7 @@
+/**
+ * @file external/io/archive_source/index.cppm
+ * @brief Bounded archive-member source with path and expansion checks.
+ */
 module;
 
 // Bounded, verify-before-emit ZIP ingestion for NCBI Datasets packages.

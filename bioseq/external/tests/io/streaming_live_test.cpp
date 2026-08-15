@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/streaming_live_test.cpp
+ * @brief Deterministic local-server tests for remote streaming policy.
+ */
+
 // Exercise the libcurl pull source and locator policy with deterministic local
 // checks and live NCBI E-utilities requests. Streaming cases select the network
 // resource explicitly.

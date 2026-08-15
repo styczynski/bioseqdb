@@ -1,3 +1,11 @@
+/**
+ * @file external/uniprot.cppm
+ * @brief UniProt OpenAPI descriptor consumed by external client codegen.
+ *
+ * The annotation parser resolves one same-file variable to one raw-string
+ * initializer, so this descriptor remains atomic until codegen accepts
+ * composed specifications or external schema inputs.
+ */
 module;
 
 #include <string_view>
@@ -2806,4 +2814,5 @@ x-bioseq-integration:
         - {name: Link, valueContains: 'rel="next"'}
 )bioseq_openapi";
 
+/** @brief Code-generation anchor for the UniProt client. */
 [[bioseq::api_client(spec)]] export struct bioseq_external_api_client;

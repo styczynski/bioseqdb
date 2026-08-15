@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/messages.cppm
+ * @brief Owning messages exchanged by provider planning and retrieval stages.
+ */
 module;
 
 #include <concepts>

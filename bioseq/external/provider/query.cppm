@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/query.cppm
+ * @brief Provider query variants, validation, and stable hashing.
+ */
 module;
 
 #include <bitset>

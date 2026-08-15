@@ -1,3 +1,7 @@
+/**
+ * @file external/providers/ncbi.cppm
+ * @brief NCBI provider planning, retrieval, and Datasets archive handling.
+ */
 module;
 
 #include <array>

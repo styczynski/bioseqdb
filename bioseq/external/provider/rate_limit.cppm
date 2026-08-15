@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/rate_limit.cppm
+ * @brief Process-local request pacing keyed by provider policy identity.
+ */
 module;
 
 /// @brief Process-local GCRA request policy.

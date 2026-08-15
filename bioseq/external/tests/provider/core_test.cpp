@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/provider/core_test.cpp
+ * @brief Provider model, query, budget, and pack contract tests.
+ */
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>

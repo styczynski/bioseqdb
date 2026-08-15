@@ -1,3 +1,7 @@
+/**
+ * @file external/providers/uniprot.cppm
+ * @brief UniProt provider planning, retrieval, and response parsing.
+ */
 module;
 
 #include <array>

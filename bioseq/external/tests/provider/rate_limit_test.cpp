@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/provider/rate_limit_test.cpp
+ * @brief Deterministic request-pacing and cancellation tests.
+ */
+
 // A controllable clock makes the process-local GCRA request-policy checks
 // deterministic without network access.
 
@@ -185,7 +190,7 @@ TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
     {
         std::vector<std::jthread> threads;
         for (int t = 0; t < k_thread_count; ++t) {
-            threads.emplace_back([&] {
+            threads.emplace_back([&policy, &fx] {
                 for (int i = 0; i < k_iteration_count; ++i) {
                     auto r = policy.acquire(fx.request, {});
                     if (r.has_value() &&

@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/base.cppm
+ * @brief Provider-independent bounded values and sequence identity types.
+ */
 module;
 
 #include <array>
@@ -23,32 +27,42 @@ import bioseq.common.sink_control;
 // use `sink_control` unqualified exactly as the spec writes it.
 export namespace bioseq::external::provider {
 
-// Re-export the shared continue/stop signal into the provider namespace.
+/// Continue-or-stop result shared by provider sink callbacks.
 using bioseq::sink_control;
 
 // ---------------------------------------------------------------------------
 // Shared byte constants (contract, not placeholders).
 // ---------------------------------------------------------------------------
+/// Maximum UTF-8 bytes retained for a provider name.
 inline constexpr std::size_t maximum_provider_name_bytes = 64;
+/// Maximum UTF-8 bytes retained for an external identifier.
 inline constexpr std::size_t maximum_identifier_bytes = 4096;
+/// Maximum bytes accepted for a remote locator.
 inline constexpr std::size_t maximum_url_bytes = 16 * 1024;
+/// Maximum bytes accepted for an archive member name.
 inline constexpr std::size_t maximum_archive_member_name_bytes = 4096;
+/// Maximum bytes retained for a diagnostic message.
 inline constexpr std::size_t maximum_diagnostic_bytes = 16 * 1024;
+/// Maximum bytes retained for serialized record attributes.
 inline constexpr std::size_t maximum_attributes_json_bytes = 1 * 1024 * 1024;
 
-// 256-bit execution/plan identity key.
+/// Stable 256-bit execution and plan identity key.
 using external_execution_key = std::array<std::byte, 32>;
 
 // ---------------------------------------------------------------------------
 // Bounded owned string. `make()` rejects over-limit input before allocation so
 // every owning row/diagnostic/error/URL/JSON value has a hard compile-time cap.
 // ---------------------------------------------------------------------------
+/// Error returned when bounded string construction exceeds its capacity.
 enum class bounded_string_error : std::uint8_t { too_long };
 
+/// Owning string whose accepted length is capped at compile time.
 template <std::size_t p_maximum_size> class bounded_string {
 public:
+  /// Construct an empty bounded string.
   bounded_string() = default;
 
+  /// Copy a value when it fits within the byte capacity.
   [[nodiscard]] static std::expected<bounded_string, bounded_string_error>
   make(std::string_view value) {
     if (value.size() > p_maximum_size) {
@@ -59,7 +73,7 @@ public:
     return result;
   }
 
-  // Truncating factory for diagnostics/messages: never fails, clamps to cap.
+  /// Copy a value while truncating it to the byte capacity.
   [[nodiscard]] static bounded_string make_truncated(std::string_view value) {
     bounded_string result;
     const std::size_t take =
@@ -68,12 +82,17 @@ public:
     return result;
   }
 
+  /// Return a non-owning view of the stored bytes.
   [[nodiscard]] std::string_view view() const noexcept { return value_; }
+  /// Return the stored byte count.
   [[nodiscard]] std::size_t size() const noexcept { return value_.size(); }
+  /// Return whether no bytes are stored.
   [[nodiscard]] bool is_empty() const noexcept { return value_.empty(); }
+  /// Return the compile-time byte capacity.
   [[nodiscard]] static constexpr std::size_t capacity_bytes() noexcept {
     return p_maximum_size;
   }
+  /// Measure the object and its allocated string capacity in bytes.
   [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
     return sizeof(bounded_string) + value_.capacity();
   }
@@ -93,16 +112,19 @@ private:
 // storage. Plans serialize the canonical string and resolve it against the
 // pack.
 // ---------------------------------------------------------------------------
+/// Process-lifetime provider identity view.
 struct provider_id {
   std::string_view value; // Points to a provider type's static compile_time_string.
   constexpr auto operator<=>(const provider_id &) const = default;
 };
 
+/// Process-lifetime locator-policy identity view.
 struct locator_policy_id {
   std::string_view value; // Process-lifetime compile_time_string storage.
   constexpr auto operator<=>(const locator_policy_id &) const = default;
 };
 
+/// Process-lifetime request-policy identity view.
 struct request_policy_id {
   std::string_view value; // Process-lifetime compile_time_string storage.
   constexpr auto operator<=>(const request_policy_id &) const = default;
@@ -111,6 +133,7 @@ struct request_policy_id {
 // ---------------------------------------------------------------------------
 // Enumerations.
 // ---------------------------------------------------------------------------
+/// Biological entity represented by an external record.
 enum class entity_kind : std::uint8_t {
   taxon,
   assembly,
@@ -124,25 +147,30 @@ enum class entity_kind : std::uint8_t {
   organelle_sequence
 };
 
+/// Molecule alphabet category exposed by a provider.
 enum class molecule_kind : std::uint8_t { unknown, nucleotide, protein };
 
+/// Taxonomic predicate scope.
 enum class taxon_match : std::uint8_t { exact, descendants };
 
 // ---------------------------------------------------------------------------
 // Dates and timestamps.
 // ---------------------------------------------------------------------------
+/// Calendar date without a time zone or time of day.
 struct external_date {
   std::int16_t year;
   std::uint8_t month;
   std::uint8_t day;
 };
 
+/// UTC provider timestamp represented to microsecond precision.
 using external_timestamp = std::chrono::sys_time<std::chrono::microseconds>;
 
 // ---------------------------------------------------------------------------
 // Identity views. An accession and its version are separate values, but the
 // original identifier is retained.
 // ---------------------------------------------------------------------------
+/// Borrowed provider record identity with accession and optional version.
 struct record_key_view {
   provider_id provider;
   std::string_view domain;                    // Provider leaf database/domain.
@@ -152,16 +180,19 @@ struct record_key_view {
   std::optional<std::uint32_t> version;
 };
 
+/// Zero-based half-open interval on a provider sequence alias.
 struct genomic_interval {
   std::optional<std::string_view> assembly_accession;
   std::optional<std::string_view> assembly_database; // UCSC key, e.g. hg38.
   std::string_view sequence_alias;
   std::uint64_t start0;
   std::uint64_t end0;
+  /// Orientation of a genomic interval.
   enum class strand : std::int8_t { unknown = 0, forward = 1, reverse = -1 };
   strand orientation;
 };
 
+/// Borrowed provenance coordinates for an external sequence.
 struct sequence_origin_view {
   std::optional<std::int64_t> taxon_id;
   std::optional<std::string_view> assembly_accession;
@@ -172,7 +203,7 @@ struct sequence_origin_view {
   genomic_interval::strand orientation{genomic_interval::strand::unknown};
 };
 
-// Canonical provider molecule/entity string forms (SQL text mapping).
+/// Return the canonical SQL text for a molecule category.
 [[nodiscard]] constexpr std::string_view
 to_string(molecule_kind kind) noexcept {
   switch (kind) {
@@ -186,6 +217,7 @@ to_string(molecule_kind kind) noexcept {
   return "unknown";
 }
 
+/// Return the canonical SQL text for an entity category.
 [[nodiscard]] constexpr std::string_view to_string(entity_kind kind) noexcept {
   switch (kind) {
   case entity_kind::taxon:

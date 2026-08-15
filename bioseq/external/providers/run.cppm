@@ -1,4 +1,7 @@
-/// @brief Synchronous bridge from callers to the configured provider pack.
+/**
+ * @file external/providers/run.cppm
+ * @brief Synchronous bridge from callers to the configured provider pack.
+ */
 // Given a normalized query and target provider, the bridge uses
 // the compile-time provider pack. It
 // provider id, it dispatches once through configured_external_api_provider,
@@ -34,15 +37,13 @@ export namespace bioseq::external {
 
 namespace prov = bioseq::external::provider;
 
-// The owned outcome of one provider run. `messages` holds the normalized rows
-// and diagnostics (owning variants — self-contained, safe to outlive the run).
-// `error` is set when planning, opening, or running failed; `messages` may
-// still hold whatever was emitted before the failure.
+/// Owning messages, counters, and terminal error from one provider run.
 struct external_query_result {
   std::vector<prov::owning_provider_message> messages;
   prov::provider_statistics statistics{};
   std::optional<prov::external_error> error;
 
+  /// Return whether planning, opening, and session execution all succeeded.
   [[nodiscard]] bool is_successful() const noexcept {
     return !error.has_value();
   }
@@ -51,6 +52,7 @@ struct external_query_result {
 // Collector satisfying the owning-message push protocol; appends to a vector.
 namespace detail {
 
+/// Append one owning provider message to a vector sink.
 inline std::expected<void, prov::external_error>
 collect_message(void *self, prov::owning_provider_message &&message) {
   auto *messages =
@@ -61,11 +63,10 @@ collect_message(void *self, prov::owning_provider_message &&message) {
 
 } // namespace detail
 
-// Run one provider for one normalized query and collect its messages. Dispatch
-// is by stable provider id through the configured pack; an unknown id yields an
-// unsupported_capability error (never a fallthrough). The provider's own
-// plan()/open() decide capability — an unsupported target returns an error and
-// an empty buffer, which the PG layer renders as an empty (but valid) scan.
+/// Run one configured provider synchronously and collect its owning messages.
+///
+/// Unknown providers and unsupported targets return a bounded error instead of
+/// falling through to another adapter.
 inline external_query_result run_external_query(
     context::context &memory, const bioseq::parallelism::global_pool &pool,
     prov::external_runtime_services &runtime,

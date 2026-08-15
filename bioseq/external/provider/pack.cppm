@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/pack.cppm
+ * @brief Compile-time provider pack lookup and dispatch.
+ */
 module;
 
 #include <array>

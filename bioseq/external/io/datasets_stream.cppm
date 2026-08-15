@@ -1,3 +1,7 @@
+/**
+ * @file external/io/datasets_stream.cppm
+ * @brief NCBI Datasets archive stream selection and decoding.
+ */
 module;
 
 /// @brief Streams NCBI Datasets packages through archive validation.

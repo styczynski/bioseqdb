@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/capabilities.cppm
+ * @brief Provider capability descriptions and query compatibility checks.
+ */
 module;
 
 #include <bitset>
@@ -18,6 +22,7 @@ export namespace bioseq::external::provider {
 // ---------------------------------------------------------------------------
 // Planning and transfer statistics.
 // ---------------------------------------------------------------------------
+/// Counts and completeness reported by one provider session.
 struct provider_statistics {
   std::uint64_t requests{};
   std::uint64_t wire_bytes{};
@@ -28,12 +33,14 @@ struct provider_statistics {
   bool is_complete{};
 };
 
+/// Byte and shape limits applied during provider planning.
 struct external_planning_limits {
   std::size_t maximum_predicate_nodes;
   std::size_t maximum_query_string_bytes;
   std::size_t maximum_plan_bytes_per_provider;
 };
 
+/// Conservative resource estimate produced before plan admission.
 struct provider_plan_estimate {
   std::size_t plan_bytes;
   std::size_t metadata_page_bytes;
@@ -41,6 +48,7 @@ struct provider_plan_estimate {
   std::size_t transfer_count;
 };
 
+/// Wire-level counters reported by a transfer operation.
 struct transfer_statistics {
   std::uint64_t requests{};
   std::uint64_t wire_bytes{};
@@ -52,6 +60,7 @@ struct transfer_statistics {
 // ---------------------------------------------------------------------------
 // Capabilities.
 // ---------------------------------------------------------------------------
+/// Query or delivery feature that a provider may advertise.
 enum class provider_capability : std::uint8_t {
   taxonomy_search,
   catalog_search,
@@ -67,12 +76,14 @@ enum class provider_capability : std::uint8_t {
   count
 };
 
+/// Provider-wide capability flags and cardinality limits.
 struct provider_capabilities {
   std::bitset<static_cast<std::size_t>(provider_capability::count)> flags;
   std::size_t maximum_metadata_page;
   std::size_t maximum_identifier_batch;
 };
 
+/// Borrowed capabilities for one provider domain or database.
 struct domain_capability_view {
   std::string_view domain;
   std::span<const std::string_view> advertised_provider_fields;
@@ -82,6 +93,7 @@ struct domain_capability_view {
   std::size_t maximum_page;
 };
 
+/// Borrowed capability snapshot used for planning.
 struct provider_capability_snapshot {
   provider_id provider;
   std::string_view fingerprint;
@@ -91,6 +103,7 @@ struct provider_capability_snapshot {
   bool is_offline_baseline;
 };
 
+/// Owning capability data for one provider domain.
 struct owning_domain_capability {
   bounded_string<maximum_identifier_bytes> domain;
   std::vector<bounded_string<maximum_identifier_bytes>>
@@ -112,6 +125,7 @@ struct owning_domain_capability {
   }
 };
 
+/// Owning provider capability snapshot with bounded text fields.
 struct owning_provider_capability_snapshot {
   provider_id provider;
   bounded_string<maximum_provider_name_bytes> provider_name;

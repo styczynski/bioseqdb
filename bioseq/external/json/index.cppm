@@ -1,3 +1,7 @@
+/**
+ * @file external/json/index.cppm
+ * @brief Owned JSON value model used at external-provider boundaries.
+ */
 module;
 
 #include <cstdint>

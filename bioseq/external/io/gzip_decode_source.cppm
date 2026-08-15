@@ -1,3 +1,7 @@
+/**
+ * @file external/io/gzip_decode_source.cppm
+ * @brief Pull-based gzip decoder with bounded input and output accounting.
+ */
 module;
 
 #include <cstddef>

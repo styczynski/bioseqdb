@@ -1,3 +1,7 @@
+/**
+ * @file external/providers/ucsc.cppm
+ * @brief UCSC provider planning, retrieval, and sequence response parsing.
+ */
 module;
 
 #include <array>

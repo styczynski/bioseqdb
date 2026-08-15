@@ -1,3 +1,7 @@
+/**
+ * @file external/transport/transfer_service.cppm
+ * @brief Passkey-guarded type erasure for provider transfer services.
+ */
 module;
 
 /// @brief Type-erased transfer-service handle and borrowed passkey.

@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/provider/run_live_test.cpp
+ * @brief Live provider-run tests for NCBI, UniProt, and EBI.
+ */
+
 // Exercise the provider run path without PostgreSQL for NCBI, UniProt, and EBI.
 // The run bridge receives the same normalized query shape as the PG executor.
 #include <catch2/catch_test_macros.hpp>
@@ -121,7 +126,7 @@ void run_sequence_and_report(std::string_view provider_name,
     normalized_external_query query;
     query.target = query_target::sequence;
     query.limit = std::optional<std::uint64_t>{1};
-    const auto add_text = [&](external_field field, std::string_view v) {
+    const auto add_text = [&query](external_field field, std::string_view v) {
         comparison_predicate cmp;
         cmp.operation = predicate_operator::equal;
         cmp.field = field;
@@ -132,7 +137,7 @@ void run_sequence_and_report(std::string_view provider_name,
         node.leaf = std::move(cmp);
         query.predicates.push_back(std::move(node));
     };
-    const auto add_int = [&](external_field field, std::int64_t v) {
+    const auto add_int = [&query](external_field field, std::int64_t v) {
         comparison_predicate cmp;
         cmp.operation = predicate_operator::equal;
         cmp.field = field;

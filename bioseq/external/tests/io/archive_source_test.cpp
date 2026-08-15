@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/archive_source_test.cpp
+ * @brief Archive path-safety, resource-cap, and stream-integrity tests.
+ */
+
 // Build ZIP fixtures in memory to exercise archive path safety, resource caps,
 // catalog-based member selection, and decoded-member digest validation.
 

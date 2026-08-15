@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/transport/transfer_service_test.cpp
+ * @brief Transfer-service erasure and passkey invariant tests.
+ */
+
 // A spy service checks transfer-service erasure and passkey invariants without
 // opening sockets.
 

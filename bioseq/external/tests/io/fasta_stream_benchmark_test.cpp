@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/fasta_stream_benchmark_test.cpp
+ * @brief Bounded FASTA streaming benchmarks against a full-body baseline.
+ */
+
 // Compare bounded FASTA streaming with a full-body baseline over the same local
 // payload. The fixture requires filesystem access and a deliberately large
 // allocation.
