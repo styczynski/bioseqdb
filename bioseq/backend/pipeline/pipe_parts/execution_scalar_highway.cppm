@@ -742,7 +742,7 @@ export {
     /**
      * @brief Conditional base-level alignment stage.
      *
-     * Algorithm dispatch occurs through `p_kernel = kernel_t<p_alignment_algorithm>`;
+     * Algorithm dispatch occurs through `p_kernel = kernel_t<p_alignment_algorithm>`.
      * runtime parameters are populated by `p_kernel::populate_runtime_params(...)`.
      */
     template <class p_kernel, sequence_alphabet p_alphabet>

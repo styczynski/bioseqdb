@@ -7,7 +7,7 @@
  * The same applies to sub-tables, which also use bioseq. Verification uses:
  *   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
  *   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
- *      written; positive size verifies that data exists on disk.
+ *      written. Positive size verifies that data exists on disk.
  *   3. `bioseq.inspect_locator` on inline literals verifies the locator layout
  *      is wired. The insertion scenario exercises the stub path by writing
  *      locator stubs into the parent relation.

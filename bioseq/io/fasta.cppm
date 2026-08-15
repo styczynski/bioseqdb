@@ -39,8 +39,8 @@ enum class fasta_parser_progress : std::uint8_t {
 
 /// Outcome of a single `parse_one_fasta_record` call.
 enum class parse_outcome : std::uint8_t {
-    complete = 0,   ///< A record was emitted; cursor advanced past it.
-    incomplete,     ///< Need more bytes; refill and call again.
+    complete = 0,   ///< A record was emitted. The cursor advanced past it.
+    incomplete,     ///< Need more bytes. Refill and call again.
     at_end_of_file, ///< Slab is empty and EOF — no more records.
     abort,          ///< The failure callback requested termination.
 };

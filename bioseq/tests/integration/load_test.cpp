@@ -3,9 +3,9 @@
  * @brief Integration coverage for bioseq.load(table, file).
  *
  * Covers: round-trip correctness through the streaming fragment writer (incl. a
- * >2-fragment record so the streaming path runs) + a NON-EMPTY mmsearch hit;
- * width-agnostic equivalence (dna4/32 == dna4/64); alphabet/width coverage of
- * the storage-unit-parametric reader (dna5 A/C/G/T/N + dna4 across 8/16/32/64);
+ * >2-fragment record so the streaming path runs) + a NON-EMPTY mmsearch hit.
+ * Width-agnostic equivalence (dna4/32 == dna4/64). Alphabet/width coverage of
+ * the storage-unit-parametric reader (dna5 A/C/G/T/N + dna4 across 8/16/32/64).
  * index parity with bioseq.index.insert_maintenance.enabled on and off,
  * including write-state flushing
  * as a cross-check, plus the column-rule and malformed-file error paths.

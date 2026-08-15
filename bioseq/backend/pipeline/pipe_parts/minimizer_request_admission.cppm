@@ -269,7 +269,7 @@ export {
     /// exact_simd has two independently valid, but biologically incompatible,
     /// minimizer-selection routes for the p_window_size=10/p_kmer_size=15 dna4/u32 shape:
     ///
-    /// * the resident vector_stream route restored from the report-76 fast path;
+    /// * the resident vector_stream route.
     /// * the chronological continuation/B8 route used by persisted and fragmented
     ///   exact_simd index producers.
     ///

@@ -3,10 +3,9 @@
  * @brief PostgreSQL-free ordering of batches of lazy sequence views.
  *
  * The sorter returns a permutation so tuple ownership remains with its caller.
- * Resident, worker-shareable batches may use the Vulkan sequence-sort path;
+ * Resident, worker-shareable batches may use the Vulkan sequence-sort path.
  * every decline falls back to rank-stream comparison in the configured TBB
- * arena. Fragmented scanners are never flattened merely to make them eligible
- * for the accelerator path.
+ * arena. Fragmented scanners are not flattened for the accelerator path.
  */
 module;
 

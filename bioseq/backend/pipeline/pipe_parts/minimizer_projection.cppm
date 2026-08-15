@@ -348,7 +348,7 @@ export {
 
     inline constexpr std::string_view query_sketch_stage_name = "QuerySketchStage";
 
-    /** Cold EXPLAIN-only query-sketch route; never a dispatch-chain dimension. */
+    /** Cold EXPLAIN-only query-sketch route. Never a dispatch-chain dimension. */
     enum class query_sketch_route : std::uint8_t {
         recompute_capable,
         compatible_persisted_only,

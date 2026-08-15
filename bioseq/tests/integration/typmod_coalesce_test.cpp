@@ -3,7 +3,7 @@
  *
  * Same-alphabet width mismatches re-encode at the column width without
  * changing results or sidecar eligibility. Cross-alphabet bindings fail with
- * SQLSTATE 42804 before recoding. Result rows remain the primary contract;
+ * SQLSTATE 42804 before recoding. Result rows remain the primary contract.
  * EXPLAIN assertions provide a secondary user-visible signal.
  */
 

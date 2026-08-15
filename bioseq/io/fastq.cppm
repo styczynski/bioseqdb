@@ -35,7 +35,7 @@ enum class fastq_parser_progress : std::uint8_t {
     at_body_line_start,  ///< Peeking the first byte of the next body line.
     in_sequence_line,    ///< Mid-sequence-line scan to next '\n'.
     at_separator_line,   ///< Just consumed '+', skipping comment to '\n'.
-    in_quality_line,     ///< Mid-quality-line scan; accumulating bytes.
+    in_quality_line,     ///< Mid-quality-line scan. Accumulating bytes.
     finished_record,     ///< Ready for emit.
 };
 

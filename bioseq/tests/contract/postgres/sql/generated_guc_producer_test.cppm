@@ -30,7 +30,7 @@ struct registrar final {
 
 /**
  * Generated infrastructure is the sole caller of the narrow registration
- * access shim; ordinary importers receive only this typed operation.
+ * access shim. Ordinary importers receive only this typed operation.
  */
 inline void register_storage(
         storage& value,

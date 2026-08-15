@@ -70,7 +70,7 @@ export {
     using simd_chaining_status = ::bioseq::chaining::simd_chaining_status;
 
     /// Fail-closed error for the selected bounded ntHash route.  PostgreSQL-facing
-    /// callers catch this concrete type before entering the longjmp ERROR boundary;
+    /// callers catch this concrete type before entering the longjmp ERROR boundary.
     /// no bounded ntHash rejection is allowed to escape the C++ frame or select another
     /// minimizer implementation.
     class bounded_nthash_runtime_error final : public std::runtime_error {
@@ -381,7 +381,7 @@ export {
      *     `emitted_token<p_sink>`. The only way to construct one is to call
      *     `emit_token<p_sink>::emit_batch*`.
      *   - At most once: soft compile-time + runtime trip-wire.  `[[nodiscard]]`
-     *     makes the ergonomic shape `return std::move(token).emit_batch*(...)`;
+     *     makes the ergonomic shape `return std::move(token).emit_batch*(...)`.
      *     emitting twice trips the `DEBUG_ASSERT(sink_ptr_ != nullptr)` in debug.
      */
     template <class p_sink> class emit_token {

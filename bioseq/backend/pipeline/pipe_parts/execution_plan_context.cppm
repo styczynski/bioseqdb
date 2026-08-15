@@ -547,7 +547,7 @@ export {
     /// One operation-owned lifetime boundary between seed lookup and chaining.
     /// Borrowed persisted CPU indexes may use it only to retire an invocation-owned
     /// GPU cache. External caches never receive release authority. Every successful
-    /// seed consumer signals exactly once after dropping its local resident handle;
+    /// seed consumer signals exactly once after dropping its local resident handle.
     /// the last consumer deallocates any transient CPU lookup index and clears any
     /// internally-owned GPU cache before downstream chaining begins.
     struct post_seed_owned_lifetime {

@@ -3,15 +3,15 @@
  * @brief Correctness coverage for `bioseq::io::read_sequences_file`.
  *
  * Covers parser and streaming hardening:
- *   * round-trip FASTA / FASTQ on tiny corpora;
- *   * multi-line FASTA + multi-line FASTQ qual;
- *   * CRLF line endings;
- *   * empty file;
- *   * capacity sweep (subset of [3, 100]);
- *   * differential fuzz vs kseqpp (FASTA dna4);
- *   * mmap path round-trip;
- *   * gzip path round-trip;
- *   * strict_alphabet mode rejection of stray bytes;
+ *   * round-trip FASTA / FASTQ on tiny corpora.
+ *   * multi-line FASTA + multi-line FASTQ qual.
+ *   * CRLF line endings.
+ *   * empty file.
+ *   * capacity sweep (subset of [3, 100]).
+ *   * differential fuzz vs kseqpp (FASTA dna4).
+ *   * mmap path round-trip.
+ *   * gzip path round-trip.
+ *   * strict_alphabet mode rejection of stray bytes.
  *   * async pipeline mode round-trip.
  */
 #include <tests/support/common.hpp>
