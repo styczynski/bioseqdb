@@ -61,6 +61,7 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
@@ -241,6 +242,7 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
           "BIOSEQ_TEST_INDEXES": "OFF",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
@@ -336,6 +338,7 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",

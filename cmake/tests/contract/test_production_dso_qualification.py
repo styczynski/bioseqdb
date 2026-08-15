@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,109 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import qualify_production_extension_dsos as qualifier  # noqa: E402
+import verify_o3_compile_database as optimization  # noqa: E402
+
+
+class ProductionOptimizationContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repository_root = Path(__file__).resolve().parents[3]
+        payload = json.loads(
+            (cls.repository_root / "CMakePresets.json").read_text(
+                encoding="utf-8"))
+        cls.presets = {
+            preset["name"]: preset
+            for preset in payload["configurePresets"]
+        }
+
+    @classmethod
+    def _resolved_cache_variables(cls, name: str) -> dict[str, str]:
+        preset = cls.presets[name]
+        variables: dict[str, str] = {}
+        inherited = preset.get("inherits", [])
+        if isinstance(inherited, str):
+            inherited = [inherited]
+        for parent in inherited:
+            variables.update(cls._resolved_cache_variables(parent))
+        variables.update(preset.get("cacheVariables", {}))
+        return variables
+
+    def test_production_and_benchmark_presets_pin_c_and_cxx_o3(self) -> None:
+        for preset_name in (
+                "bench-opt",
+                "bench-opt-debug",
+                "aws-x64-linux",
+                "aws-x64-linux-debug"):
+            variables = self._resolved_cache_variables(preset_name)
+            for language in ("C", "CXX"):
+                with self.subTest(
+                        preset=preset_name, language=language):
+                    flags = variables[f"CMAKE_{language}_FLAGS"].split()
+                    optimization_flags = sorted({
+                        flag for flag in flags if flag.startswith("-O")
+                    })
+                    self.assertEqual(optimization_flags, ["-O3"])
+
+    def test_safestring_does_not_override_parent_optimization(self) -> None:
+        source = (
+            self.repository_root
+            / "vendor"
+            / "safestringlib"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        self.assertIn("PRIVATE -D_FORTIFY_SOURCE=2)", source)
+        self.assertNotIn("BIOSEQ_PACKAGE_BUILD", source)
+        self.assertEqual(
+            re.findall(r"(?<![A-Za-z0-9_])-O[^\s\)]*", source), [])
+
+    def test_compile_database_contract_covers_c_and_cxx(self) -> None:
+        entries = [
+            {
+                "file": "vendor/safestringlib/safeclib/memcpy_s.c",
+                "arguments": ["clang", "-O3", "-c", "memcpy_s.c"],
+            },
+            {
+                "file": "bioseq/bench/index.cppm",
+                "command": "clang++ -stdlib=libc++ -O3 -c index.cppm",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "compile_commands.json"
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            self.assertEqual(optimization.verify(path), {"C": 1, "CXX": 1})
+
+    def test_compile_database_contract_rejects_non_o3_commands(self) -> None:
+        invalid_flags = (None, "-O0", "-O1", "-O2", "-Og", "-Os",
+                         "-Oz", "-Ofast")
+        for suffix, compiler in ((".c", "clang"), (".cppm", "clang++")):
+            for invalid_flag in invalid_flags:
+                with self.subTest(suffix=suffix, flag=invalid_flag):
+                    arguments = [compiler]
+                    if invalid_flag is not None:
+                        arguments.append(invalid_flag)
+                    arguments.extend(("-c", f"unit{suffix}"))
+                    entries = [{
+                        "file": f"unit{suffix}",
+                        "arguments": arguments,
+                    }]
+                    with tempfile.TemporaryDirectory() as temporary:
+                        path = Path(temporary) / "compile_commands.json"
+                        path.write_text(
+                            json.dumps(entries), encoding="utf-8")
+                        with self.assertRaisesRegex(
+                                RuntimeError, "explicit -O3"):
+                            optimization.verify(path)
+
+    def test_compile_database_contract_rejects_competing_flag(self) -> None:
+        entries = [{
+            "file": "unit.c",
+            "arguments": ["clang", "-O3", "-O0", "-c", "unit.c"],
+        }]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "compile_commands.json"
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "competing"):
+                optimization.verify(path)
 
 
 class ProductionDsoQualificationTest(unittest.TestCase):
