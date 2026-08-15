@@ -15,6 +15,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// @file
+/// Implements vectorized quicksort.
+
 // Normal include guard for target-independent parts
 #ifndef HIGHWAY_HWY_CONTRIB_SORT_VQSORT_INL_H_
 #define HIGHWAY_HWY_CONTRIB_SORT_VQSORT_INL_H_

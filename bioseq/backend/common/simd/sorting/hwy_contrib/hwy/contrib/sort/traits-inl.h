@@ -13,6 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// @file
+/// Defines SIMD sorting traits.
+
 // Per-target
 #if defined(HIGHWAY_HWY_CONTRIB_SORT_TRAITS_TOGGLE) == \
     defined(HWY_TARGET_TOGGLE)
