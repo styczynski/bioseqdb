@@ -514,8 +514,8 @@ enum class block_packed_certificate_decision : std::uint8_t {
 };
 
 /// Immutable per-region state for the resident DNA4/u64 gap certificate.
-/// Matrix/contract checks are deliberately hoisted out of the seed-pair loop;
-/// exact coordinates and packed sequence contents remain per-gap inputs.
+/// Matrix and contract checks are deliberately hoisted out of the seed-pair loop.
+/// Exact coordinates and packed sequence contents remain per-gap inputs.
 struct block_global_gap_certificate_plan {
     block_aligner_parameters parameters{};  ///< Validated global parameters.
     std::int8_t match_score = 0;  ///< Projected DNA4 match score.

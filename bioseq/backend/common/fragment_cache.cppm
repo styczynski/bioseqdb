@@ -25,7 +25,7 @@ export namespace bioseq::common {
  * @brief Stores a bounded set of movable values in generation-tracked slots.
  *
  * The cache owns all values inline and performs no dynamic allocation. Calls
- * are not synchronized; one thread must own an instance. A slot reference is
+ * are not synchronized. One thread must own an instance. A slot reference is
  * valid only while `is_valid_at()` accepts its index/generation pair.
  *
  * @tparam p_value_type Movable value stored in each slot.
@@ -162,7 +162,7 @@ public:
      * @brief Evicts a specified occupied slot.
      *
      * @tparam p_eviction_callback Callable accepting a mutable stored value.
-     * @param[in] slot_index Slot to clear; out-of-range and empty slots are ignored.
+     * @param[in] slot_index Slot to clear. Out-of-range and empty slots are ignored.
      * @param[in] on_evict Callback invoked before an occupied slot is cleared.
      * @warning `on_evict` must not throw and may not retain its value reference.
      */

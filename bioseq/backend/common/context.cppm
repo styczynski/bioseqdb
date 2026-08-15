@@ -121,7 +121,7 @@ using scratch_unordered_map =
  *
  * The owner is neither copyable nor movable because arena-backed containers
  * retain allocator identity. One instance may be installed per thread with
- * `installed_context_scope`; callers must not share it concurrently.
+ * `installed_context_scope`. Callers must not share it concurrently.
  *
  * @code{.cpp}
  * context::context memory;
@@ -284,7 +284,7 @@ public:
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the alignment scope unwinds.
      * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized; the caller owns object initialization.
+     * @warning The returned storage is uninitialized. The caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_align_array(std::size_t count) {
@@ -300,7 +300,7 @@ public:
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the chain scope unwinds.
      * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized; the caller owns object initialization.
+     * @warning The returned storage is uninitialized. The caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_chain_array(std::size_t count) {
@@ -316,7 +316,7 @@ public:
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the scratch scope unwinds.
      * @throws std::bad_array_new_length When the requested byte count overflows.
-     * @warning The returned storage is uninitialized; the caller owns object initialization.
+     * @warning The returned storage is uninitialized. The caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_scratch_array(std::size_t count) {
@@ -407,7 +407,7 @@ public:
      * @brief Resets pipeline stacks and releases all tracked oversize allocations.
      *
      * Stack arenas retain reusable backing capacity according to foonathan's
-     * `shrink_to_fit` contract; aligned heap fallbacks are released immediately.
+     * `shrink_to_fit` contract. Aligned heap fallbacks are released immediately.
      */
     void reset_pipeline() noexcept {
         scratch_arena_.shrink_to_fit();
@@ -520,7 +520,7 @@ private:
      * @param[in] count Number of elements to allocate.
      * @return Span over uninitialized context-owned storage.
      * @throws std::bad_array_new_length When `count * sizeof(p_value_type)` overflows.
-     * @warning Failure of an oversize aligned allocation logs and aborts; failure to
+     * @warning Failure of an oversize aligned allocation logs and aborts. Failure to
      *          extend the heap tracker releases the new block and propagates.
      */
     template <class p_value_type, std::size_t p_alignment, class p_arena_type>
@@ -638,7 +638,7 @@ inline thread_local context* tls_current = nullptr;
 /**
  * @brief Installs a context for the current thread and restores the prior one.
  *
- * Scopes may nest; destruction restores the pointer observed by the constructor.
+ * Scopes may nest. Destruction restores the pointer observed by the constructor.
  * The guard is thread-affine and must not outlive the referenced context.
  */
 class installed_context_scope {

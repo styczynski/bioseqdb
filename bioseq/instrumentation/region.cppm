@@ -23,7 +23,7 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-/// Stack-local state captured at region begin. ~16 bytes; never allocated.
+/// Stack-local state captured at region begin. It occupies about 16 bytes and is never allocated.
 struct region_measurement {
     const region_descriptor* descriptor = nullptr;
     std::uint64_t start_time_ns = 0;

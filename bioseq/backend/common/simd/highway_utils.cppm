@@ -131,7 +131,7 @@ HWY_INLINE auto extract_lane([[maybe_unused]] p_simd_tag simd_tag,
  * @param[in] vector Vector searched for the maximum.
  * @param[in] maximum Maximum scalar value already computed by the caller.
  * @return Zero-based index of the first matching lane.
- * @pre At least one active lane equals `maximum`; violation terminates the process.
+ * @pre At least one active lane equals `maximum`. Violation terminates the process.
  */
 template <class p_simd_tag, class p_value_type = hn::TFromD<p_simd_tag>>
 HWY_INLINE auto find_first_maximum_lane(p_simd_tag simd_tag,
@@ -270,7 +270,7 @@ concept simd_lane_widenable_once =
  *
  * The object borrows an indexable matrix-storage handle and never reallocates
  * it. The caller owns the storage and synchronization. Supported active lane
- * counts are one, two, four, eight, and sixteen; wider matrices terminate
+ * counts are one, two, four, eight, and sixteen. Wider matrices terminate
  * rather than changing their coordinate or transpose semantics.
  *
  * @tparam p_simd_tag Highway descriptor type.

@@ -4,8 +4,8 @@
  *
  * Fills are collected in stable chain order, grouped by geometry and
  * orientation, aligned through the current recurrence, and stitched back
- * into their regions. Short groups retain the target-lane dispatch shape;
- * long fills retain the existing single-fill route.
+ * into their regions. Short groups retain the target-lane dispatch shape.
+ * Long fills retain the existing single-fill route.
  */
 module;
 
@@ -61,7 +61,7 @@ struct alignas(16) fill_descriptor {
     std::uint8_t reserved[2];    ///< Explicit layout-preserving padding.
 
     /// Per-fill CIGAR scratch — chain-arena slab allocated before the
-    /// fill is bucketed; the stitch stage concatenates these into the
+    /// fill is bucketed. The stitch stage concatenates these into the
     /// region's CIGAR in chain order.
     ::bioseq::chaining::arena_slab<cigar_operation>* cigar_scratch;
 

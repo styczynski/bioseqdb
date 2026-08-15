@@ -1024,7 +1024,7 @@ HWY_INLINE auto store_unaligned_stream(
 
 /**
  * @brief Reduces each mask slot independently with Highway `AllFalse`.
- * @return One boolean per stream slot; cross-stream reduction remains caller-owned.
+ * @return One boolean per stream slot. Cross-stream reduction remains caller-owned.
  */
 template <class p_simd_tag, class p_input_type>
 requires k_is_mask_stream<p_input_type>

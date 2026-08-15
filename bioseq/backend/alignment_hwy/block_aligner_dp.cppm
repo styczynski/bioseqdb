@@ -173,7 +173,7 @@ public:
         std::memset(data_.data() + 1 + length_, null_byte, block_size);
     }
 
-    /// Return the byte at a one-based padded index; index zero is the sentinel.
+    /// Return the byte at a one-based padded index. Index zero is the sentinel.
     [[nodiscard]] uint8_t byte_at(size_t index) const { return data_[index]; }
 
     /// Pointer for SIMD loads at position i in padded buffer.
@@ -263,7 +263,7 @@ private:
 /// pair can reach multi-MiB for long fill alignments.
 ///
 /// Storage is non-owning and belongs to the current alignment arena. Only the
-/// packed direction bits require initialization; DP writes the other arrays
+/// packed direction bits require initialization. DP writes the other arrays
 /// before traceback reads them.
 class block_trace {
 public:

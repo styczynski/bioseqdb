@@ -7,11 +7,11 @@
  * underlying kpc_get_thread_counters is a sysctl, so per-call overhead
  * is on the order of a few hundred nanoseconds. PMU access on macOS
  * normally requires root (kpc_force_all_ctrs_set returns EPERM
- * otherwise); the public read_thread_counters() falls back to zeros
+ * otherwise). The public read_thread_counters() falls back to zeros
  * when init fails so the rest of the pipeline keeps running.
  *
  * Only the dynamically resolved kperf/kperfdata boundary used here is
- * represented; no private framework declarations are linked at build time.
+ * represented. No private framework declarations are linked at build time.
  */
 module;
 
@@ -190,7 +190,7 @@ inline std::once_flag& initialization_once() noexcept {
 }
 
 /// The 4-event canon. The first matching alias (by lookup against the
-/// current host's PMC database) wins; on Apple Silicon the
+/// current host's PMC database) wins. On Apple Silicon the
 /// FIXED_CYCLES / FIXED_INSTRUCTIONS pair lives on dedicated fixed
 /// counters and the two branch counters consume two configurable slots.
 struct event_alias {
@@ -233,7 +233,7 @@ inline constexpr event_alias profile_events[4] = {
 
 /// Process-wide one-shot init. Returns true on success, false on any
 /// failure (permissions, missing symbols, unknown CPU, ...). The caller
-/// can call this once and remember the result; subsequent calls are
+/// can call this once and remember the result. Subsequent calls are
 /// no-ops. Failure modes are reported via stderr (cheap and visible
 /// when running the bench from a TTY) so the operator can tell
 /// `requires sudo` apart from `unknown CPU` apart from `framework
@@ -439,7 +439,7 @@ inline void shutdown_thread() noexcept {
 
 /// Read the current 4-event counter values for this thread. Returns
 /// zeros if the per-thread group is not initialized. The kernel hands
-/// back monotonically-increasing counter values; the caller is expected
+/// back monotonically-increasing counter values. The caller is expected
 /// to subtract a baseline taken at scope-begin to obtain the delta.
 [[nodiscard]] inline counter_sample read_counters() noexcept {
     auto& state = detail::get_process_state();

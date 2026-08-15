@@ -65,7 +65,7 @@ template <auto... p_values, class p_function_type>
  * @tparam p_element_type Array element type.
  * @tparam p_capacity Array capacity.
  * @param[in,out] buffer Destination array.
- * @param[in,out] live_count Number of initialized prefix elements; incremented on append.
+ * @param[in,out] live_count Number of initialized prefix elements. Incremented on append.
  * @param[in] value Candidate value.
  *
  * A full buffer is left unchanged. The operation is intended for constant

@@ -41,7 +41,7 @@ struct arena_counter {
 
 /// Per-pipeline profiler state. Owned on the stack by the dispatch fork
 /// in BatchProcessor::process_sequences when p_configuration_type::enable_profiling is
-/// true; not constructed at all when false.
+/// true. It is not constructed when false.
 template<profiling_configuration p_configuration_type>
 struct profiler_state {
     region_aggregate_table<p_configuration_type>          aggregates;
@@ -73,8 +73,8 @@ template<profiling_configuration p_configuration_type>
 inline thread_local profiler_state<p_configuration_type>* active_thread_profiler = nullptr;
 
 /// RAII installer. Construct on the stack alongside a stack-local
-/// profiler_state<p_configuration_type>; the constructor stores the address in
-/// active_thread_profiler<p_configuration_type>; the destructor restores the prior value.
+/// profiler_state<p_configuration_type>. The constructor stores the address in
+/// active_thread_profiler<p_configuration_type>. The destructor restores the prior value.
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] installed_profiler_scope {
     profiler_state<p_configuration_type>* previous_profiler = nullptr;

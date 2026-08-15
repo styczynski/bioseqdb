@@ -2,7 +2,7 @@
  * @file instrumentation/counter.cppm
  * @brief Process-wide named counters with per-thread storage.
  *
- * Counters are referenced by name; the runtime keeps a single canonical
+ * Counters are referenced by name. The runtime keeps a single canonical
  * `named_counter` per name in a process-wide registry.
  *
  * **Per-thread accumulation.** Each `add_to_counter` deposits into a slot
@@ -48,7 +48,7 @@ export namespace bioseq::instrumentation {
 /** @brief Canonical named counter with one accumulator per writer thread. */
 struct named_counter {
     const region_descriptor* descriptor = nullptr;
-    /// Per-thread accumulator. Keyed by `std::this_thread::get_id()`;
+    /// Per-thread accumulator. It is keyed by `std::this_thread::get_id()`.
     /// only ever read/written under `mu`. The mutex covers both the
     /// map structure (`unordered_map`) and the per-slot integers, which
     /// is sufficient because every access happens through the
@@ -89,7 +89,7 @@ struct counter_registry {
 
 export namespace bioseq::instrumentation {
 
-/// Returns the canonical counter for `name`. Created on first call;
+/// Returns the canonical counter for `name`. It is created on first call.
 /// subsequent calls return the same reference.
 [[nodiscard, gnu::cold]]
 inline named_counter& get_named_counter(
@@ -122,7 +122,7 @@ inline void add_to_counter(named_counter& counter, std::int64_t delta) noexcept 
 }
 
 /// Returns the calling thread's slot of `c`, or 0 if this thread has
-/// never deposited into the counter. Read-only; takes the mutex.
+/// never deposited into the counter. The read takes the mutex.
 [[nodiscard]]
 inline std::int64_t current_thread_counter_value(const named_counter& counter) noexcept {
     std::lock_guard<std::mutex> lock(counter.mutex);
@@ -131,7 +131,7 @@ inline std::int64_t current_thread_counter_value(const named_counter& counter) n
 }
 
 /// Returns the sum of every thread's slot of `c`. Useful for ad-hoc
-/// debugging and end-of-run roll-ups; the bench framework's per-
+/// debugging and end-of-run roll-ups. The bench framework's per-
 /// iteration snapshot path uses `current_thread_counter_value` instead so it sees
 /// only the worker thread's own contribution.
 [[nodiscard]]

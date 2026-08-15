@@ -9,7 +9,7 @@
  * the summary writer and resets it before the next scan.
  *
  * The block is heap-constructed once per p_configuration_type via Meyer's-singleton
- * pattern (the static-local lazy init); destruction at process exit is
+ * pattern (the static-local lazy init). Destruction at process exit is
  * fine because the destructor only frees aggregate blocks, no cross-
  * thread state.
  *

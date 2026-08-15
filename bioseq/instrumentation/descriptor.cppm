@@ -35,7 +35,7 @@ export namespace bioseq::instrumentation {
 enum class metric_kind : std::uint8_t { region, loop, counter, gauge, sample };
 
 /// A descriptor is the immutable metadata for one named profiling site.
-/// 64 bytes; cache-line aligned. The fields are laid out so that the
+/// 64 bytes and cache-line aligned. The fields are laid out so that the
 /// hottest reads (id, name, kind, flags) are in the first 32 bytes.
 struct alignas(64) region_descriptor {
     std::uint32_t  id;              // assigned at registration; 0 = invalid
@@ -64,7 +64,7 @@ struct alignas(64) loop_descriptor : region_descriptor {
 static_assert(sizeof(loop_descriptor) == 128);
 
 /// Cold-path one-time registration. The static-local idiom at the call
-/// site makes the first call run this; subsequent calls return the cached
+/// site makes the first call run this. Subsequent calls return the cached
 /// pointer.
 [[nodiscard, gnu::cold]]
 inline const region_descriptor* register_static_region(

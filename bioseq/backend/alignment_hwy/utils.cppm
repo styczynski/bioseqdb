@@ -173,7 +173,7 @@ struct scoring_matrix_storage {
     /**
      * @brief Generates scalar scores and their SIMD lookup projection.
      *
-     * Positive match input remains positive; mismatch and ambiguity inputs
+     * Positive match input remains positive. Mismatch and ambiguity inputs
      * are normalized to penalties. The last rank is the wildcard rank.
      *
      * @param[in] match Match score or its negated representation.

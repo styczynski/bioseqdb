@@ -227,7 +227,7 @@ struct minimap2_parameters {
 struct alignment_region {
     /** Region identifier. */
     std::int32_t region_id = 0;
-    /** Parent identifier, or -1 when unset; self denotes a primary region. */
+    /** Parent identifier, or -1 when unset. Self denotes a primary region. */
     std::int32_t parent = -1;
     /** Current chain score. */
     std::int32_t score = 0;

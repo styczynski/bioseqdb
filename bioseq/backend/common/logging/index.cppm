@@ -85,7 +85,7 @@ export struct bioseq_report_view {
  *
  * The registering adapter owns the pointed-to flag and every callback for as long as the
  * sink remains installed. Callbacks must be thread-safe. The table is copied atomically
- * with respect to registration and clearing; its field order and pointer representation
+ * with respect to registration and clearing. Its field order and pointer representation
  * remain stable at the module boundary.
  */
 export struct postgres_logging_sink {
@@ -125,7 +125,7 @@ struct format_with_location {
      *
      * @tparam p_source_format Source format wrapper type.
      * @param[in] source_format Compile-time format string.
-     * @param[in] source_location Caller coordinates; defaults to the construction site.
+     * @param[in] source_location Caller coordinates. Defaults to the construction site.
      */
     template<typename p_source_format>
         requires std::convertible_to<
@@ -142,7 +142,7 @@ struct format_with_location {
  * @brief Replaces a buffer with a formatted, null-terminated message.
  *
  * @tparam p_argument_types Format argument types.
- * @param[out] target Destination buffer; always ends in a null byte after success.
+ * @param[out] target Destination buffer. It ends in a null byte after success.
  * @param[in] format_string Compile-time checked format string.
  * @param[in] arguments Values interpolated into the message.
  */
@@ -168,7 +168,7 @@ namespace bioseq::common::logging_detail {
  * @brief Identity of one file-backed logging call site.
  *
  * File and format views refer to static compiler-owned storage. The complete tuple is the
- * stable source-record key; its fields and hash inputs must not be weakened or reordered.
+ * stable source-record key. Its fields and hash inputs must not be weakened or reordered.
  */
 struct log_site_key {
     std::string_view file_name;
@@ -207,7 +207,7 @@ struct log_site_key_equal {
  * @brief Owns fmtlog registration state for one stable call site.
  *
  * The entry address remains stable because the table owns it indirectly. Publication is
- * lock-free after the first successful registration; registration itself is serialized.
+ * lock-free after the first successful registration. Registration itself is serialized.
  */
 struct log_site_entry {
     std::atomic<std::uint32_t> published_fmtlog_id{0};
@@ -280,7 +280,7 @@ inline bool log_site_key_equal::operator()(
  * @param[in] severity Logging severity that participates in site identity.
  * @param[in] format_string Static-lifetime format text that participates in site identity.
  * @return Stable entry owned by the process-wide site table.
- * @note Concurrent readers share the table; only first insertion takes the exclusive lock.
+ * @note Concurrent readers share the table. Only first insertion takes the exclusive lock.
  */
 inline log_site_entry& get_or_create_file_log_site(
     bioseq_source_location location,
@@ -353,7 +353,7 @@ constexpr bool is_compiled_level_enabled(logging_level severity) noexcept
 /**
  * @brief Selects the file-fallback severity for a raw PostgreSQL error level.
  *
- * @param[in] postgres_error_level Raw PostgreSQL error level; retained for sink symmetry.
+ * @param[in] postgres_error_level Raw PostgreSQL error level. Retained for sink symmetry.
  * @return Debug severity, matching the established fallback policy.
  */
 inline logging_level fallback_logging_level_for_postgres_error(
@@ -478,7 +478,7 @@ template<logging_level p_level, typename... p_argument_types>
  *
  * @tparam p_level Severity selected at compile time.
  * @param[in] location Callback-safe source coordinates.
- * @param[in] message Message bytes; no terminator is required.
+ * @param[in] message Message bytes. No terminator is required.
  */
 template<logging_level p_level>
 inline void write_preformatted_file_log_at_level(
@@ -514,7 +514,7 @@ inline void write_preformatted_file_log_at_level(
  *
  * @param[in] severity Runtime severity to dispatch.
  * @param[in] location Callback-safe source coordinates.
- * @param[in] message Message bytes; no terminator is required.
+ * @param[in] message Message bytes. No terminator is required.
  */
 inline void write_preformatted_file_log(
     logging_level severity,
@@ -994,7 +994,7 @@ export template<bioseq_log_lazy_producer p_producer>
  * @brief Builds one structured diagnostic and emits it at scope exit.
  *
  * The builder owns its formatting buffers and is neither movable nor copyable. Instances
- * are intended for single-threaded, lexical use; the registered sink is snapshotted only
+ * are intended for single-threaded, lexical use. The registered sink is snapshotted only
  * when gating or emitting. Disabled reports avoid formatting and allocation.
  *
  * @code{.cpp}
@@ -1184,7 +1184,7 @@ private:
  *
  * @tparam p_level File-fallback severity.
  * @tparam p_target Preferred destination.
- * @param[in] location Caller coordinates; defaults to the factory call site.
+ * @param[in] location Caller coordinates. Defaults to the factory call site.
  * @return Non-copyable builder that emits at scope exit.
  */
 export template<
@@ -1206,7 +1206,7 @@ export template<
  * @brief Creates a structured report builder for a raw PostgreSQL error level.
  *
  * @param[in] postgres_error_level Raw PostgreSQL error level.
- * @param[in] location Caller coordinates; defaults to the factory call site.
+ * @param[in] location Caller coordinates. Defaults to the factory call site.
  * @return Non-copyable builder that emits at scope exit.
  */
 export [[nodiscard]] inline bioseq_report_builder bioseq_report_pg(
@@ -1253,8 +1253,8 @@ export template<
 /**
  * @brief Configures fmtlog for tests or the extension's file fallback.
  *
- * @param[in] is_test_mode When true, writes synchronously to stderr with debug enabled;
- * otherwise resolves BIOSEQ_LOG_FILE and falls back to /tmp/bioseq_loglog.log.
+ * @param[in] is_test_mode When true, writes synchronously to stderr with debug enabled.
+ * Otherwise resolves BIOSEQ_LOG_FILE and falls back to /tmp/bioseq_loglog.log.
  */
 export inline void configure_logging(const bool is_test_mode = false)
 {

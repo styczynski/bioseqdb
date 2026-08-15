@@ -2,7 +2,7 @@
  * @file highway_vector_stream.cppm
  * @brief Defines the registered Highway target source for fixed-count vector streams.
  *
- * The authored source remains target-neutral; the Highway module generator materializes
+ * The authored source remains target-neutral. The Highway module generator materializes
  * target-attributed copies while preserving the `vector_stream` source-record identity.
  */
 module;
@@ -1269,7 +1269,7 @@ HWY_INLINE void store_unaligned_stream(
 
 /**
  * @brief Reduces each mask slot independently with Highway `AllFalse`.
- * @return One boolean per stream slot; cross-stream reduction remains caller-owned.
+ * @return One boolean per stream slot. Cross-stream reduction remains caller-owned.
  */
 template <class p_simd_tag, class p_input_type>
 requires k_is_mask_stream<p_input_type>

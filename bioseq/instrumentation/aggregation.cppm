@@ -141,7 +141,7 @@ inline void record_loop_duration(
     aggregate.per_iteration_duration_distribution.add(per_iteration_ns);
 }
 
-/// Per-thread aggregate table. Direct id-indexed; 4096 blocks of 256
+/// Per-thread aggregate table. It is direct id-indexed with 4096 blocks of 256
 /// aggregates. Each block is allocated lazily on first touch.
 template<profiling_configuration p_configuration_type>
 struct region_aggregate_table {

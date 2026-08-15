@@ -361,8 +361,8 @@ public:
     /**
      * @brief Appends a contiguous byte span to the running digest.
      *
-     * Complete 64-byte blocks are compressed directly from the caller's span;
-     * only the incomplete suffix is copied into object storage.
+     * Complete 64-byte blocks are compressed directly from the caller's span.
+     * Only the incomplete suffix is copied into object storage.
      *
      * @param[in] bytes Bytes appended without framing or length prefixes.
      */
