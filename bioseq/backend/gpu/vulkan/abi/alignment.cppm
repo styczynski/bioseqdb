@@ -36,6 +36,10 @@ inline constexpr std::uint32_t
     k_gpu_alignment_extension_status_cigar_overflow = 2u;
 /**
  * @brief Computes traceback words for a gridded alignment job.
+ * @param[in] query_len Query length in symbols.
+ * @param[in] target_len Target length in symbols.
+ * @param[in] tile_query Query symbols covered by one traceback tile.
+ * @param[in] tile_target Target symbols covered by one traceback tile.
  * @return Required boundary and scratch words, or zero for invalid geometry.
  */
 [[nodiscard]] inline constexpr std::uint64_t

@@ -37,7 +37,7 @@ struct spirv_binding_layout {
 };
 
 /// @brief Decoded SPIR-V decorations used to validate storage-buffer and push-constant
-/// ABIs. Aggregate views support broad checks; binding-specific records support
+/// ABIs. Aggregate views support broad checks. Binding-specific records support
 /// exact descriptor validation with arbitrary member counts.
 struct spirv_layout_scan {
     std::vector<std::uint32_t> array_strides;
@@ -47,7 +47,9 @@ struct spirv_layout_scan {
     std::vector<spirv_binding_layout> binding_layouts;
     std::vector<std::uint32_t> push_constant_offsets;
 
-    /// @brief Return whether any reflected array uses `stride` bytes per element.
+    /// @brief Reports whether any reflected array uses the requested element stride.
+    /// @param[in] stride Element stride in bytes.
+    /// @return `true` when a reflected array has the requested stride.
     [[nodiscard]] bool has_array_stride(std::uint32_t stride) const noexcept {
         for (const std::uint32_t candidate : array_strides) {
             if (candidate == stride) return true;
@@ -55,7 +57,9 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Return whether any four-member structure has the requested offsets.
+    /// @brief Reports whether any four-member structure has the requested offsets.
+    /// @param[in] offsets Ordered member offsets in bytes.
+    /// @return `true` when a reflected structure has the requested layout.
     [[nodiscard]] bool has_struct_offsets(
         const std::array<std::uint32_t, 4>& offsets) const noexcept {
         for (const auto& candidate : structs4) {
@@ -64,7 +68,9 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Return whether any descriptor variable uses `binding`.
+    /// @brief Reports whether any descriptor variable uses the requested binding.
+    /// @param[in] binding Descriptor binding number.
+    /// @return `true` when the binding is present.
     [[nodiscard]] bool has_binding(std::uint32_t binding) const noexcept {
         for (const std::uint32_t candidate : bindings) {
             if (candidate == binding) return true;
@@ -72,7 +78,10 @@ struct spirv_layout_scan {
         return false;
     }
 
-    /// @brief Resolve the layout for one descriptor-set binding, or return null.
+    /// @brief Resolves the layout for one descriptor-set binding.
+    /// @param[in] descriptor_set Descriptor set number.
+    /// @param[in] binding Descriptor binding number.
+    /// @return Borrowed layout, or `nullptr` when the binding is absent.
     [[nodiscard]] const spirv_binding_layout* binding_layout(
         std::uint32_t descriptor_set,
         std::uint32_t binding) const noexcept
@@ -84,7 +93,11 @@ struct spirv_layout_scan {
         return nullptr;
     }
 
-    /// @brief Return whether one descriptor binding has the requested array stride.
+    /// @brief Reports whether one descriptor binding has the requested array stride.
+    /// @param[in] descriptor_set Descriptor set number.
+    /// @param[in] binding Descriptor binding number.
+    /// @param[in] stride Array element stride in bytes.
+    /// @return `true` when the binding exists with the requested stride.
     [[nodiscard]] bool has_binding_array_stride(
         std::uint32_t descriptor_set,
         std::uint32_t binding,
@@ -94,7 +107,11 @@ struct spirv_layout_scan {
         return layout != nullptr && layout->array_stride == stride;
     }
 
-    /// @brief Return whether one descriptor binding exposes the requested member offsets.
+    /// @brief Reports whether one descriptor binding exposes the requested member offsets.
+    /// @param[in] descriptor_set Descriptor set number.
+    /// @param[in] binding Descriptor binding number.
+    /// @param[in] offsets Ordered structure-member offsets in bytes.
+    /// @return `true` when the binding layout matches every offset.
     [[nodiscard]] bool has_binding_struct_offsets(
         std::uint32_t descriptor_set,
         std::uint32_t binding,
@@ -110,7 +127,9 @@ struct spirv_layout_scan {
         return true;
     }
 
-    /// @brief Return whether the push-constant block exposes the requested offsets.
+    /// @brief Reports whether the push-constant block exposes the requested offsets.
+    /// @param[in] offsets Ordered push-constant member offsets in bytes.
+    /// @return `true` when the push-constant layout matches every offset.
     [[nodiscard]] bool has_push_constant_offsets(
         std::span<const std::uint32_t> offsets) const noexcept
     {
@@ -125,7 +144,7 @@ struct spirv_layout_scan {
 /// @brief Scan a compiled SPIR-V module and resolve descriptor variables through
 /// OpVariable -> OpTypePointer -> block OpTypeStruct -> array element.
 ///
-/// @param spirv Compiled SPIR-V words, including the five-word module header.
+/// @param[in] spirv Compiled SPIR-V words, including the five-word module header.
 /// @return Reflected descriptor, structure, and push-constant decorations.
 ///
 /// The scan is device-free so malformed layouts are rejected before Vulkan or

@@ -299,7 +299,11 @@ struct seed_anchor_tie_normalization_result {
     bool gpu_ref_order_accepted = false;
 };
 
-/** @brief Mixes one value into a canonical anchor digest lane. */
+/**
+ * @brief Mixes one value into a canonical anchor digest lane.
+ * @param[in] value Unsigned field value with its caller-provided domain tag.
+ * @return SplitMix-derived digest contribution.
+ */
 [[nodiscard]] inline constexpr std::uint64_t
 seed_anchor_digest_mix(std::uint64_t value) noexcept {
     value += 0x9e3779b97f4a7c15ULL;
@@ -308,7 +312,12 @@ seed_anchor_digest_mix(std::uint64_t value) noexcept {
     return value ^ (value >> 31u);
 }
 
-/** @brief Compares two anchors using the canonical chaining order. */
+/**
+ * @brief Compares two anchors using the canonical chaining order.
+ * @param[in] left First anchor.
+ * @param[in] right Second anchor.
+ * @return `true` when `left` precedes `right`.
+ */
 [[nodiscard]] inline constexpr bool is_seed_anchor_wire_less(
     const seed_anchor_wire& left,
     const seed_anchor_wire& right) noexcept
@@ -337,7 +346,13 @@ seed_anchor_digest_mix(std::uint64_t value) noexcept {
     return left.query_position < right.query_position;
 }
 
-/** @brief Loads one anchor from a byte payload without alignment assumptions. */
+/**
+ * @brief Loads one anchor from a byte payload without alignment assumptions.
+ * @param[in] payload Contiguous anchor bytes.
+ * @param[in] index Anchor ordinal within `payload`.
+ * @return Copied anchor record.
+ * @pre `payload` contains the requested complete record.
+ */
 [[nodiscard]] inline seed_anchor_wire load_seed_anchor_wire(
     std::span<const std::byte> payload,
     std::uint64_t index) noexcept
@@ -350,7 +365,13 @@ seed_anchor_digest_mix(std::uint64_t value) noexcept {
     return anchor;
 }
 
-/** @brief Stores one anchor into a byte payload without alignment assumptions. */
+/**
+ * @brief Stores one anchor into a byte payload without alignment assumptions.
+ * @param[out] payload Contiguous anchor bytes to update.
+ * @param[in] index Anchor ordinal within `payload`.
+ * @param[in] anchor Record copied into the payload.
+ * @pre `payload` contains the requested complete record.
+ */
 inline void store_seed_anchor_wire(
     std::span<std::byte> payload,
     std::uint64_t index,
@@ -362,7 +383,11 @@ inline void store_seed_anchor_wire(
         sizeof(anchor));
 }
 
-/** @brief Encodes anchor strand and reference position as the radix-sort key. */
+/**
+ * @brief Encodes anchor strand and reference position as the radix-sort key.
+ * @param[in] anchor Anchor whose reference key is required.
+ * @return Strand in the high bit and reference position in the low bits.
+ */
 [[nodiscard]] inline constexpr std::uint64_t seed_anchor_reference_bits(
     const seed_anchor_wire& anchor) noexcept
 {
@@ -372,7 +397,13 @@ inline void store_seed_anchor_wire(
         | (anchor.ref_position & position_mask);
 }
 
-/** @brief Swaps two byte-backed anchor records in place. */
+/**
+ * @brief Swaps two byte-backed anchor records in place.
+ * @param[in,out] payload Contiguous anchor bytes to update.
+ * @param[in] left First anchor ordinal.
+ * @param[in] right Second anchor ordinal.
+ * @pre `payload` contains both complete records.
+ */
 inline void swap_seed_anchor_wires(
     std::span<std::byte> payload,
     std::uint64_t left,
@@ -388,8 +419,12 @@ inline void swap_seed_anchor_wires(
 /**
  * @brief Sorts one equal-reference run by the remaining canonical fields.
  *
- * This allocation-free heap sort normalizes a device reference-key sort; it is
+ * This allocation-free heap sort normalizes a device reference-key sort. It is
  * not a biological CPU fallback.
+ *
+ * @param[in,out] payload Contiguous anchor bytes to normalize.
+ * @param[in] begin First anchor ordinal in the tie run.
+ * @param[in] count Number of anchors in the tie run.
  */
 inline void normalize_seed_anchor_tie_run(
     std::span<std::byte> payload,
@@ -428,6 +463,8 @@ inline void normalize_seed_anchor_tie_run(
 
 /**
  * @brief Normalizes equal-reference tie runs after a device radix sort.
+ * @param[in,out] payload Contiguous anchor bytes to normalize.
+ * @param[in] anchor_count Number of anchor records in `payload`.
  * @return Normalization counters and validation status for the device order.
  */
 [[nodiscard]] inline seed_anchor_tie_normalization_result
@@ -490,6 +527,8 @@ normalize_seed_anchor_equal_ref_ties(
 
 /**
  * @brief Validates canonical anchor order and digests every explicit field.
+ * @param[in] payload Contiguous anchor bytes to validate.
+ * @param[in] anchor_count Number of anchor records in `payload`.
  * @return Order audit with independent low and high digest lanes.
  */
 [[nodiscard]] inline seed_anchor_canonical_order_audit

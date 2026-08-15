@@ -47,7 +47,11 @@ enum class gpu_grouped_soa_seed_status : std::uint32_t {
     emission = 1u << 4u,
 };
 
-/** @brief Converts a grouped-SoA seed status to its shader-visible bit mask. */
+/**
+ * @brief Converts a grouped-SoA seed status to its shader-visible bit mask.
+ * @param[in] status Status bit to encode.
+ * @return Shader-visible unsigned mask.
+ */
 [[nodiscard]] constexpr std::uint32_t encode_gpu_grouped_soa_seed_status(
     gpu_grouped_soa_seed_status status) noexcept
 {
@@ -130,14 +134,25 @@ static_assert(offsetof(gpu_grouped_soa_seed_push, query_minimizer_count) == 44u)
 static_assert(offsetof(gpu_grouped_soa_seed_push, max_occ_cap_lo) == 60u);
 static_assert(offsetof(gpu_grouped_soa_seed_push, status_index) == 68u);
 
-/** @brief Reports whether a persisted grouped-SoA scalar width is supported. */
+/**
+ * @brief Reports whether a persisted grouped-SoA scalar width is supported.
+ * @param[in] width Scalar width in bytes.
+ * @return `true` for the two-, four-, and eight-byte wire widths.
+ */
 [[nodiscard]] constexpr bool is_gpu_grouped_soa_scalar_width_valid(
     std::uint32_t width) noexcept
 {
     return width == 2u || width == 4u || width == 8u;
 }
 
-/** @brief Reports whether an aligned scalar range fits its aggregate buffer. */
+/**
+ * @brief Reports whether an aligned scalar range fits its aggregate buffer.
+ * @param[in] byte_offset First scalar byte within the aggregate buffer.
+ * @param[in] element_count Number of fixed-width scalars in the range.
+ * @param[in] width Scalar width in bytes.
+ * @param[in] buffer_bytes Aggregate buffer extent in bytes.
+ * @return `true` when the aligned range is representable and in bounds.
+ */
 [[nodiscard]] constexpr bool is_gpu_grouped_soa_scalar_range_valid(
     std::uint64_t byte_offset,
     std::uint64_t element_count,
@@ -157,6 +172,9 @@ static_assert(offsetof(gpu_grouped_soa_seed_push, status_index) == 68u);
 
 /**
  * @brief Validates a resident descriptor against aggregate buffer extents.
+ * @param[in] descriptor Partition descriptor to validate.
+ * @param[in] control_buffer_bytes Aggregate control-buffer extent in bytes.
+ * @param[in] position_buffer_bytes Aggregate position-buffer extent in bytes.
  * @return `true` when flags, widths, hash bounds, segment bounds, and all byte
  * ranges satisfy the grouped-SoA upload contract.
  */

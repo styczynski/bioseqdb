@@ -19,7 +19,12 @@ enum class gpu_sequence_record_flags : std::uint32_t {
     query_record = 1u << 2u,
 };
 
-/** @brief Combines packed-sequence routing flags. */
+/**
+ * @brief Combines packed-sequence routing flags.
+ * @param[in] left First routing mask.
+ * @param[in] right Second routing mask.
+ * @return Bitwise union of both masks.
+ */
 [[nodiscard]] constexpr gpu_sequence_record_flags operator|(
     gpu_sequence_record_flags left,
     gpu_sequence_record_flags right) noexcept {

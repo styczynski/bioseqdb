@@ -25,6 +25,9 @@ inline constexpr std::uint32_t k_gpu_buffer_offset_alignment = 256u;
 inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
 /**
  * @brief Computes physical X groups for a grid-striding shader.
+ * @param[in] logical_items Number of logical work items.
+ * @param[in] local_size Shader invocations in one workgroup.
+ * @param[in] max_workgroups Device limit for the X workgroup dimension.
  * @return A device-legal group count without truncating logical coverage.
  */
 [[nodiscard]] constexpr std::uint32_t grid_stride_dispatch_group_count(

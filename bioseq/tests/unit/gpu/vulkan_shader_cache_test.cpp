@@ -1,5 +1,3 @@
-#include <tests/support/common.hpp>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -10,24 +8,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <stdexcept>
+#include <sys/stat.h>
+#include <tests/support/common.hpp>
 #include <type_traits>
+#include <unistd.h>
 #include <utility>
 #include <vector>
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #include <vulkan/vulkan.h>
 
 import bioseq.gpu.vulkan.shader_cache;
@@ -50,6 +47,7 @@ std::vector<std::byte> expected_shader_module_metallib;
 std::filesystem::path seal_identity_mutation_path;
 bool seal_identity_mutation_succeeded = false;
 
+/** @brief Mutates the staged seal artifact without changing its byte length. */
 void mutate_seal_artifact_same_size() noexcept {
     seal_identity_mutation_succeeded = false;
     const int fd = ::open(
@@ -64,6 +62,7 @@ void mutate_seal_artifact_same_size() noexcept {
     (void)::close(fd);
 }
 
+/** @brief Records that the Vulkan shader-module callback was invoked. */
 VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     VkDevice,
     const VkShaderModuleCreateInfo*,
@@ -74,6 +73,7 @@ VKAPI_ATTR VkResult VKAPI_CALL record_shader_module_create(
     return VK_SUCCESS;
 }
 
+/** @brief Validates the exact retained metallib payload passed to Vulkan. */
 VKAPI_ATTR VkResult VKAPI_CALL record_exact_shader_module_create(
     VkDevice,
     const VkShaderModuleCreateInfo* create_info,
@@ -94,6 +94,7 @@ VKAPI_ATTR VkResult VKAPI_CALL record_exact_shader_module_create(
     return VK_SUCCESS;
 }
 
+/** @brief Counts compile requests without publishing cache artifacts. */
 struct no_publish_compile_service {
     int calls = 0;
 
@@ -105,6 +106,7 @@ struct no_publish_compile_service {
     }
 };
 
+/** @brief Owns an isolated shader-cache test directory. */
 struct temporary_directory {
     std::filesystem::path path;
 
@@ -124,6 +126,7 @@ struct temporary_directory {
     }
 };
 
+/** @brief Restores one process environment variable when the test scope ends. */
 struct scoped_environment_variable {
     std::string name;
     std::optional<std::string> previous;
@@ -147,6 +150,7 @@ struct scoped_environment_variable {
     }
 };
 
+/** @brief Resets the process-local archive-helper store around one test scope. */
 struct scoped_archive_helper_store_reset {
     scoped_archive_helper_store_reset() {
         REQUIRE(gv::qualified_metal_archive_helper_process_store_instance()
@@ -158,6 +162,12 @@ struct scoped_archive_helper_store_reset {
     }
 };
 
+/**
+ * @brief Reports whether a shader key occurs in a key vector.
+ * @param[in] keys Shader keys to inspect.
+ * @param[in] needle Shader key to find.
+ * @return `true` when `needle` is present.
+ */
 [[nodiscard]] bool contains_key(
     const std::vector<gv::shader_variant_key>& keys,
     gv::shader_variant_key needle)
@@ -165,21 +175,36 @@ struct scoped_archive_helper_store_reset {
     return std::find(keys.begin(), keys.end(), needle) != keys.end();
 }
 
+/**
+ * @brief Validates the canonical lowercase shader-cache digest form.
+ * @param[in] digest Candidate digest text.
+ * @return `true` for a sixteen-character lowercase hexadecimal digest.
+ */
 [[nodiscard]] bool is_hex_digest(std::string_view digest)
 {
-    return digest.size() == 16
-        && std::all_of(digest.begin(), digest.end(), [](char c) {
-               return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    return digest.size() == 16 && std::all_of(digest.begin(), digest.end(), [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
            });
 }
 
+/**
+ * @brief Copies string bytes into a byte vector.
+ * @param[in] text Source bytes.
+ * @return Owned byte vector.
+ */
 [[nodiscard]] std::vector<std::byte> bytes_of(std::string_view text)
 {
-    std::vector<std::byte> out(text.size());
-    std::memcpy(out.data(), text.data(), text.size());
-    return out;
+    std::vector<std::byte> bytes(text.size());
+    std::memcpy(bytes.data(), text.data(), text.size());
+    return bytes;
 }
 
+/**
+ * @brief Reads an entire fixture file as bytes.
+ * @param[in] path Fixture path.
+ * @return Complete file contents.
+ */
 [[nodiscard]] std::vector<std::byte> read_file_bytes(
     const std::filesystem::path& path)
 {
@@ -195,6 +220,15 @@ struct scoped_archive_helper_store_reset {
     return bytes;
 }
 
+/**
+ * @brief Writes a matching qualification receipt for a synthetic archive.
+ * @param[in] archive Archive path.
+ * @param[in] archive_bytes Archive payload.
+ * @param[in] key Shader cache key.
+ * @param[in] metallib_bytes Metallib payload bound by the receipt.
+ * @param[in] entry_name Metal entrypoint name.
+ * @param[in] max_threads Maximum pipeline threads per threadgroup.
+ */
 void write_fake_archive_qualification(
     const std::filesystem::path& archive,
     std::span<const std::byte> archive_bytes,
@@ -251,6 +285,11 @@ void write_fake_archive_qualification(
         *qualification_bytes));
 }
 
+/**
+ * @brief Writes a complete synthetic sealed-cache artifact set.
+ * @param[in] cache_dir Destination cache directory.
+ * @param[in] keys Shader variants to materialize.
+ */
 void write_fake_sealed_shader_artifacts(
     const std::filesystem::path& cache_dir,
     std::span<const gv::shader_variant_key> keys)
@@ -290,6 +329,12 @@ void write_fake_sealed_shader_artifacts(
     }
 }
 
+/**
+ * @brief Counts one SPIR-V opcode in a structurally valid module.
+ * @param[in] words SPIR-V words.
+ * @param[in] opcode Opcode to count.
+ * @return Occurrence count, or zero for malformed input.
+ */
 [[nodiscard]] std::size_t spirv_opcode_count(
     std::span<const std::uint32_t> words,
     std::uint16_t opcode) noexcept
@@ -322,7 +367,7 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
     };
 
     std::vector<gv::shader_variant_key> keys;
-    gv::for_each_static_shader_variant(inputs, [&](gv::shader_variant_key key) {
+    gv::for_each_static_shader_variant(inputs, [&keys](gv::shader_variant_key key) {
         INFO("variant stem: " << gv::cache_file_stem(key));
         CHECK(gv::is_shader_variant_key_valid(key));
         keys.push_back(key);
@@ -330,8 +375,8 @@ TEST_CASE("shader variants enumerate the runtime AOT set",
 
     REQUIRE(keys.size() == 43);
     auto sorted = keys;
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
-        return gv::cache_file_stem(a) < gv::cache_file_stem(b);
+    std::sort(sorted.begin(), sorted.end(), [](const auto& left, const auto& right) {
+        return gv::cache_file_stem(left) < gv::cache_file_stem(right);
     });
     CHECK(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
 
@@ -460,7 +505,7 @@ TEST_CASE("grouped-SoA current ABI direct seed shaders pin raw SoA and local-pos
     std::vector<gv::shader_variant_key> static_keys;
     gv::for_each_static_shader_variant(
         gv::vulkan_static_variant_inputs{},
-        [&](gv::shader_variant_key key) { static_keys.push_back(key); });
+        [&static_keys](gv::shader_variant_key key) { static_keys.push_back(key); });
     for (const gv::shader_kind kind : kinds) {
         const auto key = gv::make_shader_key(kind, 384u, 128u, 3u);
         CHECK(gv::checked_shader_kind(key.kind) == kind);
@@ -908,7 +953,7 @@ TEST_CASE("persisted grouped-SoA coordinate receipt is strict and one-shot",
                         unsupported_zero_audits,
                         unsupported_zero_expectations));
 
-        const auto config_tamper_fails = [&](auto mutate) {
+        const auto config_tamper_fails = [&audits, &expectations](auto mutate) {
             auto tampered = expectations;
             mutate(tampered[0].configuration);
             return !gv::persisted_grouped_soa_coordinate_operation_receipt::
@@ -1807,10 +1852,9 @@ TEST_CASE("sealed shader cache rejects artifact, wire, and symlink mutation",
 
 TEST_CASE("archive helper success sentinel is unique and final",
           "[component:bioseq][layer:unit][feature:gpu_runtime]") {
-    CHECK(gv::archive_helper_transcript_is_exact_success(
-        "qualification evidence\nRESULT: ok\n"));
-    CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
-        "qualification evidence\nRESULT: failed\n"));
+    CHECK(gv::archive_helper_transcript_is_exact_success("qualification record\nRESULT: ok\n"));
+    CHECK_FALSE(
+        gv::archive_helper_transcript_is_exact_success("qualification record\nRESULT: failed\n"));
     CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
         "RESULT: ok\ntrailing output\n"));
     CHECK_FALSE(gv::archive_helper_transcript_is_exact_success(
@@ -1948,8 +1992,8 @@ TEST_CASE("failed archive helper output is never promoted",
     REQUIRE(std::filesystem::exists(final));
 
     // A merely nonempty preexisting archive is not reusable while building a
-    // new seed. Qualification removes it first; failure leaves nothing that a
-    // later manifest publication could accidentally bless.
+    // replacement seed. Qualification removes it first. Failure leaves nothing
+    // that a later manifest publication could accidentally bless.
     const auto result = gv::ensure_compiled_for_sealed_seed(
         temp.path, key, gv::msl_version{});
     REQUIRE_FALSE(result);

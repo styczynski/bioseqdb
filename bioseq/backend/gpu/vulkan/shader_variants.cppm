@@ -25,51 +25,12 @@ struct chaining_pipeline_key {
     [[nodiscard]] bool operator==(const chaining_pipeline_key&) const = default;
 };
 
-/// @brief Convert a serialized shader-kind value to the corresponding shader family.
+/// @brief Converts a serialized shader-kind value to its registered shader family.
 ///
-/// @param raw Serialized shader-kind discriminator.
+/// @param[in] raw Serialized shader-kind discriminator.
 /// @return The validated shader kind.
-/// @throws shader_compile_error when `raw` is not a registered discriminator.
-[[nodiscard]] shader_kind checked_shader_kind(std::uint32_t raw);
-
-/// @brief Shared shader-cache compile-request identity. Depending on shader_kind, a
-/// field may be an established selector/sentinel rather than the reflected
-/// SPIR-V execution geometry; use `expected_shader_workgroup_size(key)` for the
-/// latter.
-struct shader_variant_key {
-    std::uint32_t kind = 0;
-    std::uint32_t tile_size = 384;
-    std::uint32_t local_size = 128;
-    std::uint32_t max_span = 0;
-
-    /// @brief Compare every cache-identity selector.
-    [[nodiscard]] bool operator==(const shader_variant_key&) const = default;
-
-    /// @brief Materialize the compiler request represented by this cache key.
-    ///
-    /// @return A validated shader compilation request.
-    /// @throws shader_compile_error when `kind` is not registered.
-    [[nodiscard]] shader_compile_request to_request() const {
-        shader_compile_request request{};
-        request.kind = checked_shader_kind(kind);
-        request.tile_size = tile_size;
-        request.local_size = local_size;
-        request.max_span = max_span;
-        return request;
-    }
-};
-static_assert(sizeof(shader_variant_key) == 16);
-static_assert(std::is_standard_layout_v<shader_variant_key>);
-
-/// @brief Inputs for selectors that must run without a Vulkan device object.
-struct vulkan_static_variant_inputs {
-    std::uint32_t max_workgroup_invocations = 0;
-    std::uint32_t max_shared_memory_bytes = 0;
-    std::uint32_t default_window_size = 10;
-};
-
-[[nodiscard]] inline shader_kind checked_shader_kind(std::uint32_t raw)
-{
+/// @throws shader_compile_error When `raw` is not a registered discriminator.
+[[nodiscard]] inline shader_kind checked_shader_kind(std::uint32_t raw) {
     switch (raw) {
         case static_cast<std::uint32_t>(shader_kind::chain_tiled_dp_u64):
         case static_cast<std::uint32_t>(shader_kind::seed_lookup_anchors):
@@ -120,9 +81,45 @@ struct vulkan_static_variant_inputs {
     }
 }
 
+/// @brief Shared shader-cache compile-request identity. Depending on shader_kind, a
+/// field may be an established selector/sentinel rather than the reflected
+/// SPIR-V execution geometry. Use `expected_shader_workgroup_size(key)` for the
+/// latter.
+struct shader_variant_key {
+    std::uint32_t kind = 0;
+    std::uint32_t tile_size = 384;
+    std::uint32_t local_size = 128;
+    std::uint32_t max_span = 0;
+
+    /// @brief Compare every cache-identity selector.
+    [[nodiscard]] bool operator==(const shader_variant_key&) const = default;
+
+    /// @brief Materialize the compiler request represented by this cache key.
+    ///
+    /// @return A validated shader compilation request.
+    /// @throws shader_compile_error when `kind` is not registered.
+    [[nodiscard]] shader_compile_request to_request() const {
+        shader_compile_request request{};
+        request.kind = checked_shader_kind(kind);
+        request.tile_size = tile_size;
+        request.local_size = local_size;
+        request.max_span = max_span;
+        return request;
+    }
+};
+static_assert(sizeof(shader_variant_key) == 16);
+static_assert(std::is_standard_layout_v<shader_variant_key>);
+
+/// @brief Inputs for selectors that must run without a Vulkan device object.
+struct vulkan_static_variant_inputs {
+    std::uint32_t max_workgroup_invocations = 0;
+    std::uint32_t max_shared_memory_bytes = 0;
+    std::uint32_t default_window_size = 10;
+};
+
 /// @brief Select the fixed subgroup-owned tiled-chaining variant.
 ///
-/// @param inputs Device-independent selector inputs reserved for capability checks.
+/// @param[in] inputs Device-independent selector inputs reserved for capability checks.
 /// @return The cache identity selectors for the chaining workgroup.
 [[nodiscard]] inline constexpr chaining_pipeline_key choose_chaining_variant(
     const vulkan_static_variant_inputs& inputs) noexcept
@@ -135,7 +132,7 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Compute the largest supported bitonic anchor-sort workgroup.
 ///
-/// @param inputs Device-independent workgroup and shared-memory limits.
+/// @param[in] inputs Device-independent workgroup and shared-memory limits.
 /// @return The largest power-of-two capacity accepted by both limits, or zero.
 [[nodiscard]] inline constexpr std::uint32_t anchor_sort_capacity(
     const vulkan_static_variant_inputs& inputs) noexcept
@@ -155,10 +152,10 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Construct the serialized cache identity for one shader compilation.
 ///
-/// @param kind Shader family.
-/// @param tile_size Compile-time tile selector.
-/// @param local_size Compile-time workgroup-size selector.
-/// @param max_span Compile-time algorithm-bound selector.
+/// @param[in] kind Shader family.
+/// @param[in] tile_size Compile-time tile selector.
+/// @param[in] local_size Compile-time workgroup-size selector.
+/// @param[in] max_span Compile-time algorithm-bound selector.
 /// @return The corresponding shader variant key.
 [[nodiscard]] inline constexpr shader_variant_key make_shader_key(
     shader_kind kind,
@@ -172,7 +169,7 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Resolve the compiled workgroup geometry represented by a cache key.
 ///
-/// @param key Shader cache identity.
+/// @param[in] key Shader cache identity.
 /// @return The workgroup dimensions encoded in the compiled shader.
 [[nodiscard]] inline shader_workgroup_size expected_shader_workgroup_size(
     const shader_variant_key& key)
@@ -180,7 +177,9 @@ struct vulkan_static_variant_inputs {
     return expected_shader_workgroup_size(key.to_request());
 }
 
-/// @brief Return whether a key is the exact tiled-chaining shader identity.
+/// @brief Reports whether a key is the exact tiled-chaining shader identity.
+/// @param[in] key Shader cache identity.
+/// @return `true` only for the supported tiled-chaining key.
 [[nodiscard]] inline constexpr bool is_chain_key(
     const shader_variant_key& key) noexcept
 {
@@ -192,7 +191,7 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Validate the complete selector tuple for a registered shader family.
 ///
-/// @param key Shader cache identity to validate.
+/// @param[in] key Shader cache identity to validate.
 /// @return True only when every selector is accepted by the shader family.
 [[nodiscard]] inline constexpr bool is_shader_variant_key_valid(
     const shader_variant_key& key) noexcept
@@ -277,7 +276,7 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Format the stable filename stem for a shader cache key.
 ///
-/// @param key Shader cache identity.
+/// @param[in] key Shader cache identity.
 /// @return The fixed-width hexadecimal cache filename stem.
 [[nodiscard]] inline std::string cache_file_stem(const shader_variant_key& key)
 {
@@ -290,8 +289,9 @@ struct vulkan_static_variant_inputs {
 
 /// @brief Visit every shader variant published by the static production cache.
 ///
-/// @param inputs Device-independent selector inputs.
-/// @param visitor Callable invoked once per valid key.
+/// @tparam p_visitor Callable accepting one `shader_variant_key`.
+/// @param[in] inputs Device-independent selector inputs.
+/// @param[in] visitor Callable invoked once per valid key.
 template <class p_visitor>
 inline void for_each_static_shader_variant(
     const vulkan_static_variant_inputs& inputs,

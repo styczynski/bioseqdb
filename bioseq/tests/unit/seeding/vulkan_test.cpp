@@ -43,26 +43,37 @@ namespace seed = bioseq::seeding;
 namespace vk = bioseq::gpu::vulkan;
 namespace idx_ns = bioseq::indexing;
 
-[[nodiscard]] static std::uint64_t enc(std::uint64_t pos, std::uint64_t strand) {
-    return (pos << 1) | (strand & 1u);
+/**
+ * @brief Encodes a target position and strand in the minimizer-index scalar form.
+ * @param[in] position Target position in base pairs.
+ * @param[in] strand Zero for forward and one for reverse.
+ * @return Packed position and strand scalar.
+ */
+[[nodiscard]] static std::uint64_t encode_position_strand(std::uint64_t position,
+                                                          std::uint64_t strand) {
+    return (position << 1) | (strand & 1u);
 }
 
-/// A target index with forward/reverse repeats and one position above 2^32.
+/**
+ * @brief Builds a target index with strand repeats and one position above 2^32.
+ * @return Populated minimizer index.
+ */
 [[nodiscard]] static minimizer_hashmap_fragment_index build_target() {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
-    pairs.emplace_back(0x111ULL, enc(5u, 0u));
-    pairs.emplace_back(0x222ULL, enc(9u, 1u));
-    pairs.emplace_back(0x222ULL, enc(40u, 0u));
-    pairs.emplace_back(0x222ULL, enc(100u, 1u));
-    pairs.emplace_back(0x333ULL, enc(13u, 0u));
-    pairs.emplace_back(0x444ULL, enc(std::uint64_t{0x1'0000'0005ULL}, 1u));  // > 2^32
-    minimizer_hashmap_fragment_index idx;
-    idx.build_from_pairs(std::span<std::pair<std::uint64_t, std::uint64_t>>{
-                             pairs.data(), pairs.size()},
-                         std::uint64_t{0x2'0000'0000ULL});
-    return idx;
+    pairs.emplace_back(0x111ULL, encode_position_strand(5u, 0u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(9u, 1u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(40u, 0u));
+    pairs.emplace_back(0x222ULL, encode_position_strand(100u, 1u));
+    pairs.emplace_back(0x333ULL, encode_position_strand(13u, 0u));
+    pairs.emplace_back(0x444ULL, encode_position_strand(std::uint64_t{0x1'0000'0005ULL}, 1u));
+    minimizer_hashmap_fragment_index target_index;
+    target_index.build_from_pairs(
+        std::span<std::pair<std::uint64_t, std::uint64_t>>{pairs.data(), pairs.size()},
+        std::uint64_t{0x2'0000'0000ULL});
+    return target_index;
 }
 
+/** @brief Returns the deterministic query minimizers used by parity cases. */
 [[nodiscard]] static std::vector<minimap_sketch_data> build_query() {
     return {
         minimap_sketch_data{0x222ULL, 7u, 0u},
@@ -72,25 +83,43 @@ namespace idx_ns = bioseq::indexing;
     };
 }
 
+/**
+ * @brief Converts an arena slab to comparable explicit-field anchor tuples.
+ * @param[in] slab Anchor slab to copy.
+ * @return Anchor fields in slab order.
+ */
 [[nodiscard]] static std::vector<std::tuple<std::uint64_t, std::uint64_t,
                                             std::uint32_t, std::uint8_t,
                                             std::uint8_t, std::uint16_t>>
 anchor_tuples(const ch::arena_slab<anchor>& slab) {
-    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint32_t,
-                           std::uint8_t, std::uint8_t, std::uint16_t>> out;
-    for (std::size_t i = 0; i < slab.size(); ++i) {
-        const anchor& a = slab.data()[i];
-        out.emplace_back(a.ref_position, a.query_position, a.is_reverse,
-                         a.query_span, a.flags, a.segment_id);
+    std::vector<std::tuple<std::uint64_t,
+                           std::uint64_t,
+                           std::uint32_t,
+                           std::uint8_t,
+                           std::uint8_t,
+                           std::uint16_t>>
+        tuples;
+    for (std::size_t index = 0; index < slab.size(); ++index) {
+        const anchor& anchor_record = slab.data()[index];
+        tuples.emplace_back(anchor_record.ref_position,
+                            anchor_record.query_position,
+                            anchor_record.is_reverse,
+                            anchor_record.query_span,
+                            anchor_record.flags,
+                            anchor_record.segment_id);
     }
-    return out;
+    return tuples;
 }
 
+/**
+ * @brief Reports whether slab anchors are ordered by reference sort key.
+ * @param[in] slab Anchor slab to inspect.
+ * @return `true` when keys are nondecreasing.
+ */
 [[nodiscard]] static bool nondecreasing_reference_sort_keys(
         const ch::arena_slab<anchor>& slab) {
-    for (std::size_t i = 1; i < slab.size(); ++i) {
-        if (slab.data()[i].reference_sort_key()
-                < slab.data()[i - 1].reference_sort_key()) {
+    for (std::size_t index = 1; index < slab.size(); ++index) {
+        if (slab.data()[index].reference_sort_key() < slab.data()[index - 1].reference_sort_key()) {
             return false;
         }
     }
@@ -237,8 +266,9 @@ TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immu
         {.hash = 0x10u, .pos_offset = 0u, .pos_count = 2u},
         {.hash = 0x20u, .pos_offset = 2u, .pos_count = 1u},
     };
-    std::vector<std::uint64_t> positions{
-        enc(3u, 0u), enc(5u, 1u), enc(8u, 0u)};
+    std::vector<std::uint64_t> positions{encode_position_strand(3u, 0u),
+                                         encode_position_strand(5u, 1u),
+                                         encode_position_strand(8u, 0u)};
     std::uint64_t checksum = idx_ns::k_gpu_source_direct_checksum_seed;
     for (const auto& control : controls) {
         checksum = idx_ns::gpu_source_direct_checksum_word(
@@ -648,12 +678,12 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
     context::context ctx;
     context::installed_context_scope install{ctx};
 
-    const auto run_case = [&](std::uint64_t target_position,
-                              std::uint64_t target_length,
-                              std::uint32_t expected_passes) {
+    const auto run_case = [&runtime, anchor_count](std::uint64_t target_position,
+                                                   std::uint64_t target_length,
+                                                   std::uint32_t expected_passes) {
         constexpr std::uint64_t hash = 0x7a11u;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
-            {hash, enc(target_position, 0u)}};
+            {hash, encode_position_strand(target_position, 0u)}};
         minimizer_hashmap_fragment_index idx;
         idx.build_from_pairs(
             std::span<std::pair<std::uint64_t, std::uint64_t>>{

@@ -19,15 +19,13 @@
 // The GPU-only cases skip cleanly when is_vulkan_chaining_supported() is false;
 // the parity / shader-layout cases run on every machine.
 
-#include <hwy/highway.h>
-#include <tests/support/common.hpp>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <hwy/highway.h>
 #include <span>
 #include <stdexcept>
-#include <string>
+#include <tests/support/common.hpp>
 #include <vector>
 
 import bioseq.common.logging;
@@ -55,8 +53,12 @@ namespace ch = ::bioseq::chaining;
 namespace gv = ::bioseq::gpu::vulkan;
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using range_t  = compact_sequence_range<dna4_u64>;
+using sequence_range_type = compact_sequence_range<dna4_u64>;
 
+/**
+ * @brief Binds the generated fixed-width Highway implementation to test parameters.
+ * @param[out] params Parameters receiving the target kernels and alphabet identity.
+ */
 void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
     const auto& binding =
         ::bioseq::simd_dispatch::highway_test_target_binding();
@@ -74,91 +76,87 @@ void bind_fixed_highway(bioseq::simd::minimap2_parameters& params) {
     params.alphabet_code = identity->alphabet_code;
 }
 
-[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
-    std::vector<seq::dna4> v(n);
-    std::uint64_t s = seed;
-    for (std::size_t i = 0; i < n; ++i) {
-        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-        seq::dna4 c;
-        c.assign_rank(static_cast<decltype(c.to_rank())>((s >> 33) & 0x3));
-        v[i] = c;
+/**
+ * @brief Generates a deterministic DNA4 sequence for pipeline tests.
+ * @param[in] sequence_length Number of bases to generate.
+ * @param[in] seed Initial linear-congruential state.
+ * @return Generated DNA4 bases.
+ */
+[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t sequence_length, std::uint64_t seed) {
+    std::vector<seq::dna4> bases(sequence_length);
+    std::uint64_t random_state = seed;
+    for (std::size_t index = 0; index < sequence_length; ++index) {
+        random_state = random_state * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna4 base;
+        base.assign_rank(static_cast<decltype(base.to_rank())>((random_state >> 33) & 0x3));
+        bases[index] = base;
     }
-    return v;
+    return bases;
 }
 
-/// Reverse complement of a dna4 vector (rank complement is 3 - rank).
-[[nodiscard]] std::vector<seq::dna4> revcomp(const std::vector<seq::dna4>& in) {
-    std::vector<seq::dna4> out(in.size());
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        seq::dna4 c;
-        c.assign_rank(static_cast<decltype(c.to_rank())>(3 - in[in.size() - 1 - i].to_rank()));
-        out[i] = c;
-    }
-    return out;
-}
-
-/// Canonicalise a match_result_collection into a comparable, sorted string set
-/// (same shape used by lazy_pipeline_parity_test.cpp).
-[[nodiscard]] std::vector<std::string> canon(
-    const match_result_collection& c) {
-    std::vector<std::string> out;
-    for (const auto& m : c.results) {
-        std::string cg;
-        for (const auto& op : m.cigar)
-            cg += fmt::format("{}:{},", op.length, static_cast<int>(op.opcode));
-        out.push_back(fmt::format(
-            "qs={} qe={} rev={} ts={} te={} nm={} bl={} mapq={} cs={} cg={}",
-            m.query_start, m.query_end, m.is_reverse, m.target_start, m.target_end,
-            m.num_matches, m.block_length, m.mapq, m.chain_score, cg));
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-/// Run the full pipeline over an in-memory query/target with the given params.
-/// Takes the sequences by value so they are non-const lvalues: the
-/// `compact_sequence_range` constructor binds a non-const reference to the
-/// underlying container (matching lazy_pipeline_parity_test.cpp's usage).
-[[nodiscard]] match_result_collection run_pipeline(
-    std::vector<seq::dna4> qd,
-    std::vector<seq::dna4> td,
-    const bioseq::simd::minimap2_parameters& params)
-{
-    range_t q_range(qd);
-    range_t t_range(td);
-    auto lazy_q = bioseq::storage::make_resident_lazy_sequence(q_range);
-    auto lazy_t = bioseq::storage::make_resident_lazy_sequence(t_range);
-    const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_q);
-    const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_t);
+/**
+ * @brief Runs the complete pipeline over owned in-memory query and target sequences.
+ *
+ * Values remain mutable because `compact_sequence_range` binds the underlying
+ * containers by non-const reference.
+ *
+ * @param[in] query_sequence Query bases owned by the invocation.
+ * @param[in] target_sequence Target bases owned by the invocation.
+ * @param[in] params Minimap pipeline parameters.
+ * @return Pipeline matches.
+ */
+[[nodiscard]] match_result_collection
+run_pipeline(std::vector<seq::dna4> query_sequence,
+             std::vector<seq::dna4> target_sequence,
+             const bioseq::simd::minimap2_parameters& params) {
+    sequence_range_type query_range(query_sequence);
+    sequence_range_type target_range(target_sequence);
+    auto lazy_query = bioseq::storage::make_resident_lazy_sequence(query_range);
+    auto lazy_target = bioseq::storage::make_resident_lazy_sequence(target_range);
+    const auto query_view = bioseq::storage::make_lazy_sequence_view(lazy_query);
+    const auto target_view = bioseq::storage::make_lazy_sequence_view(lazy_target);
     return minimap_port(query_view, target_view, params);
 }
 
-[[nodiscard]] ch::anchor make_anchor(
-    std::uint64_t ref, std::uint64_t query, std::uint32_t is_reverse, std::uint8_t span)
-{
-    ch::anchor a{};
-    a.ref_position = ref;
-    a.query_position = query;
-    a.is_reverse = is_reverse;
-    a.query_span = span;
-    a.flags = 0;
-    a.segment_id = 0;
-    return a;
+/**
+ * @brief Builds one chaining anchor with explicit wire-visible fields.
+ * @param[in] reference_position Target coordinate.
+ * @param[in] query_position Query coordinate.
+ * @param[in] is_reverse Strand discriminator.
+ * @param[in] query_span Seed span in bases.
+ * @return Initialized anchor.
+ */
+[[nodiscard]] ch::anchor make_anchor(std::uint64_t reference_position,
+                                     std::uint64_t query_position,
+                                     std::uint32_t is_reverse,
+                                     std::uint8_t query_span) {
+    ch::anchor anchor{};
+    anchor.ref_position = reference_position;
+    anchor.query_position = query_position;
+    anchor.is_reverse = is_reverse;
+    anchor.query_span = query_span;
+    anchor.flags = 0;
+    anchor.segment_id = 0;
+    return anchor;
 }
 
-/// Copies of the chain outputs, taken before the local context unwinds.
+/** @brief Owns chain outputs copied before the local arena context unwinds. */
 struct chain_outputs {
     std::vector<ch::chain> chains;
     std::vector<ch::anchor> reordered;
 };
 
-/// Install a fresh arena context, run chain_anchors_vulkan, and copy the
-/// outputs out (the slabs live in the local context's chain arena).
+/**
+ * @brief Runs Vulkan chaining in a fresh arena and copies results to owned vectors.
+ * @param[in] anchors Input anchors.
+ * @param[in] params Chaining parameters.
+ * @return Owned chains and reordered anchors.
+ */
 [[nodiscard]] chain_outputs run_vulkan_chain(
     std::span<const ch::anchor> anchors, const ch::chaining_parameters& params)
 {
-    context::context ctx;
-    context::installed_context_scope install{ctx};
+    context::context runtime_context;
+    context::installed_context_scope installed_context{runtime_context};
     auto chains_slab = ch::make_arena_slab<ch::chain>();
     auto reordered_slab = ch::make_arena_slab<ch::anchor>();
     // Reserve a guaranteed upper bound before the call, matching the pipeline
@@ -171,50 +169,58 @@ struct chain_outputs {
     chains_slab.reserve(upper_bound);
     reordered_slab.reserve(upper_bound);
     ch::chain_anchors_vulkan(anchors, params, chains_slab, reordered_slab);
-    chain_outputs out;
-    out.chains.assign(chains_slab.data(), chains_slab.data() + chains_slab.size());
-    out.reordered.assign(reordered_slab.data(), reordered_slab.data() + reordered_slab.size());
-    return out;
+    chain_outputs outputs;
+    outputs.chains.assign(chains_slab.data(), chains_slab.data() + chains_slab.size());
+    outputs.reordered.assign(reordered_slab.data(), reordered_slab.data() + reordered_slab.size());
+    return outputs;
 }
 
+/** @brief Returns prepared default chaining parameters for focused tests. */
 [[nodiscard]] ch::chaining_parameters default_chain_params() {
     ch::chaining_parameters params;  // kmer_size=15, max_gap=5000, bandwidth=500, ...
     params.prepare();
     return params;
 }
 
+/**
+ * @brief Skips a hardware-only chaining case when no trusted device is available.
+ * @return `true` when the caller must return from the current test case.
+ */
 [[nodiscard]] bool skip_untrusted_vulkan_chaining() {
     if (ch::is_vulkan_chaining_supported()) return false;
     SUCCEED("Vulkan chaining correctness cases require a trusted hardware Vulkan device");
     return true;
 }
 
-/// Assert every structural invariant required of a chain set.
-void check_chain_invariants(
-    const chain_outputs& out,
-    std::span<const ch::anchor> anchors,
-    const ch::chaining_parameters& params)
-{
-    REQUIRE(out.chains.size() <= anchors.size());
-    for (const auto& chain : out.chains) {
+/**
+ * @brief Asserts the structural invariants required of a chain set.
+ * @param[in] outputs Owned chain output.
+ * @param[in] anchors Original input anchors.
+ * @param[in] params Chaining constraints.
+ */
+void check_chain_invariants(const chain_outputs& outputs,
+                            std::span<const ch::anchor> anchors,
+                            const ch::chaining_parameters& params) {
+    REQUIRE(outputs.chains.size() <= anchors.size());
+    for (const auto& chain : outputs.chains) {
         REQUIRE(chain.anchor_count >= params.min_seed_count);
         REQUIRE(chain.score >= params.min_chain_score);
         REQUIRE(chain.anchor_start >= 0);
         const std::size_t start = static_cast<std::size_t>(chain.anchor_start);
         const std::size_t count = static_cast<std::size_t>(chain.anchor_count);
-        REQUIRE(start + count <= out.reordered.size());
+        REQUIRE(start + count <= outputs.reordered.size());
 
         const std::uint64_t max_dist_x =
             static_cast<std::uint64_t>(std::max(params.max_gap, params.bandwidth));
-        for (std::size_t i = start + 1; i < start + count; ++i) {
-            const ch::anchor& prev = out.reordered[i - 1];
-            const ch::anchor& cur = out.reordered[i];
+        for (std::size_t index = start + 1; index < start + count; ++index) {
+            const ch::anchor& previous = outputs.reordered[index - 1];
+            const ch::anchor& current = outputs.reordered[index];
             // Monotonic in both ref and query position.
-            REQUIRE(cur.ref_position > prev.ref_position);
-            REQUIRE(cur.query_position > prev.query_position);
+            REQUIRE(current.ref_position > previous.ref_position);
+            REQUIRE(current.query_position > previous.query_position);
             // No chain crosses a hard range boundary.
-            REQUIRE(cur.strand_partition_key() == prev.strand_partition_key());
-            REQUIRE(cur.ref_position - prev.ref_position <= max_dist_x);
+            REQUIRE(current.strand_partition_key() == previous.strand_partition_key());
+            REQUIRE(current.ref_position - previous.ref_position <= max_dist_x);
         }
     }
 }
@@ -245,10 +251,13 @@ TEST_CASE("vulkan_tiled_dp with vulkan_enabled=false fails",
     }
 
     SECTION("public pipeline rejects selected Vulkan backend") {
-        auto qd = make_dna4(250, 0x1357);
-        auto td = make_dna4(1000, 0x2468);
-        for (std::size_t i = 0; i < qd.size(); ++i) td[300 + i] = qd[i];
-        REQUIRE_THROWS_AS(run_pipeline(qd, td, vulkan_params), gv::vulkan_runtime_error);
+        auto query_sequence = make_dna4(250, 0x1357);
+        auto target_sequence = make_dna4(1000, 0x2468);
+        for (std::size_t index = 0; index < query_sequence.size(); ++index) {
+            target_sequence[300 + index] = query_sequence[index];
+        }
+        REQUIRE_THROWS_AS(run_pipeline(query_sequence, target_sequence, vulkan_params),
+                          gv::vulkan_runtime_error);
     }
 }
 
@@ -378,23 +387,25 @@ TEST_CASE("end-to-end GPU chaining smoke",
         bioseq::simd::minimizer_algorithm::two_stack_nthash;
     bind_fixed_highway(params);
 
-    auto qd = make_dna4(300, 0x6A5A);
-    auto td = make_dna4(1500, 0x9C9C);
-    for (std::size_t i = 0; i < qd.size(); ++i) td[600 + i] = qd[i];
+    auto query_sequence = make_dna4(300, 0x6A5A);
+    auto target_sequence = make_dna4(1500, 0x9C9C);
+    for (std::size_t index = 0; index < query_sequence.size(); ++index) {
+        target_sequence[600 + index] = query_sequence[index];
+    }
 
     const std::uint64_t before = gv::runtime::instance().chaining_dispatch_count();
-    const auto matches = run_pipeline(qd, td, params);
+    const auto matches = run_pipeline(query_sequence, target_sequence, params);
     const std::uint64_t after = gv::runtime::instance().chaining_dispatch_count();
 
     INFO("dispatch_count before=" << before << " after=" << after
                                   << " matches=" << matches.results.size());
     REQUIRE(after > before);                    // the GPU kernel actually ran
     REQUIRE_FALSE(matches.results.empty());     // at least one match emitted
-    for (const auto& m : matches.results) {
-        REQUIRE(m.query_start >= 0);
-        REQUIRE(m.query_end <= static_cast<int32_t>(qd.size()));
-        REQUIRE(m.target_start >= 0);
-        REQUIRE(m.target_end <= static_cast<int32_t>(td.size()));
+    for (const auto& match : matches.results) {
+        REQUIRE(match.query_start >= 0);
+        REQUIRE(match.query_end <= static_cast<int32_t>(query_sequence.size()));
+        REQUIRE(match.target_start >= 0);
+        REQUIRE(match.target_end <= static_cast<int32_t>(target_sequence.size()));
     }
 }
 
