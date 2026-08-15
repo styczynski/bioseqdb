@@ -1,5 +1,5 @@
 /**
- * @file extension/minimizer_diagnostics.cppm
+ * @file minimizer_diagnostics.cppm
  * @brief Ready-minimizer inspection, probes, and integration fixture SQL routines.
  */
 module;
@@ -36,11 +36,10 @@ namespace {
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-[[nodiscard]] std::string hash_major_minimizer_generation_inspection_json(
-		const bioseq::storage::indexing::
-			hash_major_minimizer_generation_inspection& inspection)
-{
-	std::string result =
+[[nodiscard]] auto hash_major_minimizer_generation_inspection_json(
+    const bioseq::storage::indexing::hash_major_minimizer_generation_inspection& inspection)
+    -> std::string {
+    std::string result =
 			R"({"schema":"bioseq.hash_major_minimizer_generation_inspection","revision":1,"layout":"hash_major")";
 	result.reserve(4'096);
 	const auto append = [&result](
@@ -60,14 +59,14 @@ using bioseq::pg::detail::fixed_hex_u64;
 		result.append(value);
 		result += '"';
 	};
-	const auto bounded_name = []<std::size_t p_capacity>(
-			const std::array<char, p_capacity>& value) {
-		const auto end = std::find(value.begin(), value.end(), '\0');
+    const auto bounded_name =
+        []<std::size_t p_capacity>(const std::array<char, p_capacity>& value) -> std::string_view {
+        const auto end = std::find(value.begin(), value.end(), '\0');
 		return std::string_view{
 			value.data(),
 			static_cast<std::size_t>(end - value.begin())};
-	};
-	const auto stream_kind_name = [](
+    };
+    const auto stream_kind_name = [](
 			const bioseq::indexing::hash_major_minimizer_stream_kind kind)
 			-> std::string_view {
 		switch (kind) {
@@ -239,11 +238,10 @@ using bioseq::pg::detail::fixed_hex_u64;
 	return result;
 }
 
-[[nodiscard]] std::string hash_major_minimizer_parallel_scan_stats_json(
-		const bioseq::storage::indexing::
-			hash_major_minimizer_parallel_scan_stats& stats)
-{
-	std::string result =
+[[nodiscard]] auto hash_major_minimizer_parallel_scan_stats_json(
+    const bioseq::storage::indexing::hash_major_minimizer_parallel_scan_stats& stats)
+    -> std::string {
+    std::string result =
 		R"({"schema":"bioseq_internal.hash_major_minimizer_parallel_scan_probe","revision":1)";
 	result.reserve(768);
 	const auto append = [&result](
@@ -276,10 +274,9 @@ using bioseq::pg::detail::fixed_hex_u64;
 	return result;
 }
 
-[[nodiscard]] std::string cold_index_selective_probe_json(
-		const bioseq::storage::indexing::cold_index_preparation_stats& stats)
-{
-	std::string result =
+[[nodiscard]] auto cold_index_selective_probe_json(
+    const bioseq::storage::indexing::cold_index_preparation_stats& stats) -> std::string {
+    std::string result =
 		R"({"schema":"bioseq.cold_index_selective_probe","revision":2,"timing_semantics":"payload_inclusive_wall","decode_timing_available":false,"transfer_timing_available":false)";
 	result.reserve(1024);
 	const auto append = [&result](
@@ -340,8 +337,8 @@ inspect_ready_minimizer_generation(
 		inspect_ready_minimizer_generation_impl(
 			rel, index_name,
 			static_cast<std::uint64_t>(query_key));
-	const auto sql_bigint = [](std::uint64_t value, const char* field) {
-		if (!bioseq::indexing::sql_bigint_can_represent(value)) {
+    const auto sql_bigint = [](std::uint64_t value, const char* field) -> std::int64_t {
+        if (!bioseq::indexing::sql_bigint_can_represent(value)) {
 			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 				{
@@ -351,9 +348,9 @@ inspect_ready_minimizer_generation(
 				});
 		}
 		return static_cast<std::int64_t>(value);
-	};
-	const auto sql_smallint = [](std::uint64_t value, const char* field) {
-		if (value > static_cast<std::uint64_t>(
+    };
+    const auto sql_smallint = [](std::uint64_t value, const char* field) -> std::int16_t {
+        if (value > static_cast<std::uint64_t>(
 				(std::numeric_limits<std::int16_t>::max)())) {
 			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -364,9 +361,9 @@ inspect_ready_minimizer_generation(
 				});
 		}
 		return static_cast<std::int16_t>(value);
-	};
-	const auto sql_integer = [](std::uint64_t value, const char* field) {
-		if (value > static_cast<std::uint64_t>(
+    };
+    const auto sql_integer = [](std::uint64_t value, const char* field) -> std::int32_t {
+        if (value > static_cast<std::uint64_t>(
 				(std::numeric_limits<std::int32_t>::max)())) {
 			bioseq::postgres::support::raise_sql_error(
 				ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -377,8 +374,8 @@ inspect_ready_minimizer_generation(
 				});
 		}
 		return static_cast<std::int32_t>(value);
-	};
-	std::vector<
+    };
+    std::vector<
 		bioseq::postgres::sql_rows::inspect_ready_minimizer_generation_row> rows;
 	rows.push_back({
 		sql_bigint(inspection.identity.generation_id, "generation_id"),
@@ -473,12 +470,11 @@ bioseq::postgres::support::jsonb_value hash_major_minimizer_parallel_scan_probe(
 } // namespace bioseq::pg::sql_routines
 namespace {
 
-template<class p_result>
-[[nodiscard]] static p_result fixture_sql_integer(
-		const std::uint64_t value,
-		const std::string_view context,
-		const std::string_view field) {
-	static_assert(
+template <class p_result>
+[[nodiscard]] static auto fixture_sql_integer(const std::uint64_t value,
+                                              const std::string_view context,
+                                              const std::string_view field) -> p_result {
+    static_assert(
 		std::is_same_v<p_result, std::int32_t>
 		|| std::is_same_v<p_result, std::int64_t>);
 	if (value > static_cast<std::uint64_t>(

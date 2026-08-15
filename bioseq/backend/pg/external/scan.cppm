@@ -1,4 +1,7 @@
-/// @brief PostgreSQL CustomScan execution for external-provider relations.
+/**
+ * @file scan.cppm
+ * @brief Executes PostgreSQL custom scans for external-provider relations.
+ */
 module;
 #include <bioseq/pg_compat.h>
 
@@ -718,7 +721,7 @@ create_scan_state(CustomScan *custom_scan)
     state->custom_scan_state.ss.ps.type = T_CustomScanState;
     state->custom_scan_state.methods = &execution_methods;
     state->runtime = nullptr;
-    (void) custom_scan;
+    static_cast<void>(custom_scan);
     return reinterpret_cast<Node *>(state);
 }
 
@@ -751,7 +754,7 @@ begin_scan(CustomScanState *node, EState *executor_state, int flags)
         /* Provider request is deferred to the first tuple fetch so EXPLAIN (no
          * ANALYZE), which never calls the access method, issues no remote
          * request. */
-        (void) flags;
+        static_cast<void>(flags);
     }
     catch (const std::exception &error)
     {
@@ -929,8 +932,8 @@ next_scan_tuple(CustomScanState *node)
 bool
 recheck_scan_tuple(CustomScanState *node, TupleTableSlot *slot)
 {
-    (void) node;
-    (void) slot;
+    static_cast<void>(node);
+    static_cast<void>(slot);
     return true;
 }
 
@@ -966,7 +969,7 @@ explain_scan(CustomScanState *node, List *ancestors,
 			 ExplainState *explain_state)
 {
 	scan_state *state = reinterpret_cast<scan_state *>(node);
-    (void) ancestors;
+    static_cast<void>(ancestors);
 
     try
     {
@@ -1008,9 +1011,9 @@ plan_custom_path(PlannerInfo *root, RelOptInfo *relation_info,
 				 CustomPath *best_path, List *target_list,
 				 List *clauses, List *custom_plans)
 {
-    (void) root;
+    static_cast<void>(root);
 
-	CustomScan *custom_scan = makeNode(CustomScan);
+    CustomScan *custom_scan = makeNode(CustomScan);
 	custom_scan->scan.plan.targetlist = target_list;
 	custom_scan->scan.plan.qual = extract_actual_clauses(clauses, false);
 	custom_scan->scan.plan.startup_cost = best_path->path.startup_cost;
@@ -1038,8 +1041,8 @@ bool
 add_scan_paths(PlannerInfo *root, RelOptInfo *relation_info,
 			   RangeTblEntry *range_table_entry, Relation relation)
 {
-    (void) root;
-	(void) range_table_entry;
+    static_cast<void>(root);
+    static_cast<void>(range_table_entry);
 
     if (!uses_table_access_method(relation))
         return false;

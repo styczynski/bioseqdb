@@ -1,4 +1,7 @@
-/// @brief Materializes normalized provider messages into virtual tuples.
+/**
+ * @file row_writer.cppm
+ * @brief Materializes normalized provider messages into virtual tuples.
+ */
 module;
 #include <bioseq/pg_compat.h>
 
@@ -12,6 +15,7 @@ extern "C" {
 #include "catalog/pg_type_d.h"  /* INT8OID, TEXTOID */
 }
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -41,9 +45,9 @@ export namespace bioseq::postgres::external {
  * Catalog messages expand into gene or location rows for the corresponding
  * relation. Non-row messages and mismatched variants return zero.
  */
-[[nodiscard]] std::size_t message_row_count(
-	relation_entity entity,
-	const provider::owning_provider_message &message) noexcept;
+[[nodiscard]] auto message_row_count(relation_entity entity,
+                                     const provider::owning_provider_message& message) noexcept
+    -> std::size_t;
 
 /**
  * @brief Materializes one message sub-row into a cleared virtual tuple slot.
@@ -53,10 +57,10 @@ export namespace bioseq::postgres::external {
  * values use PostgreSQL's current memory context and remain valid for
  * `ExecStoreVirtualTuple`.
  */
-bool materialize_message_row(
-	relation_entity entity,
-	const provider::owning_provider_message &message,
-	std::size_t row_index, TupleTableSlot *slot);
+auto materialize_message_row(relation_entity entity,
+                             const provider::owning_provider_message& message,
+                             std::size_t row_index,
+                             TupleTableSlot* slot) -> bool;
 
 } // namespace bioseq::postgres::external
 
@@ -87,8 +91,11 @@ namespace {
 inline void
 append_json_escaped(std::string& out, std::string_view sv)
 {
-	static constexpr char hex_digits[] = "0123456789abcdef";
-	for (unsigned char c : sv)
+    static constexpr auto hex_digits = std::to_array("0123456789abcdef");
+    static_assert(hex_digits.size() == 17u);
+    static_assert(sizeof(hex_digits) == sizeof("0123456789abcdef"));
+    static_assert(alignof(decltype(hex_digits)) == alignof(char));
+    for (unsigned char c : sv)
 	{
 		switch (c)
 		{
@@ -122,8 +129,8 @@ set_null(TupleTableSlot* slot, std::size_t i)
 inline void
 set_text(TupleTableSlot* slot, std::size_t i, std::string_view sv)
 {
-	const char* p = sv.empty() ? "" : sv.data();
-	slot->tts_values[i] =
+    const char* const p = sv.empty() ? "" : sv.data();
+    slot->tts_values[i] =
 		PointerGetDatum(cstring_to_text_with_len(p, static_cast<int>(sv.size())));
 	slot->tts_isnull[i] = false;
 }
@@ -240,10 +247,8 @@ set_date_opt(TupleTableSlot* slot, std::size_t i, const std::optional<provider::
 /* jsonb helpers                                                             */
 /* ------------------------------------------------------------------------ */
 
-inline Datum
-jsonb_datum_from_cstring(const char* cstr)
-{
-	return DirectFunctionCall1(jsonb_in, CStringGetDatum(cstr));
+inline auto jsonb_datum_from_cstring(const char* cstr) -> Datum {
+    return DirectFunctionCall1(jsonb_in, CStringGetDatum(cstr));
 }
 
 inline void
@@ -299,12 +304,11 @@ set_bigint_array_opt(TupleTableSlot* slot, std::size_t i,
 		return;
 	}
 	const std::size_t n = v->size();
-	Datum* elems = static_cast<Datum*>(palloc(sizeof(Datum) * (n == 0 ? 1 : n)));
-	for (std::size_t k = 0; k < n; ++k)
+    Datum* const elems = static_cast<Datum*>(palloc(sizeof(Datum) * (n == 0 ? 1 : n)));
+    for (std::size_t k = 0; k < n; ++k)
 		elems[k] = Int64GetDatum((*v)[k]);
-	ArrayType* arr =
-		construct_array(elems, static_cast<int>(n), INT8OID, 8, true, 'd');
-	slot->tts_values[i] = PointerGetDatum(arr);
+    ArrayType* const arr = construct_array(elems, static_cast<int>(n), INT8OID, 8, true, 'd');
+    slot->tts_values[i] = PointerGetDatum(arr);
 	slot->tts_isnull[i] = false;
 }
 
@@ -319,17 +323,16 @@ set_text_array_opt(TupleTableSlot* slot, std::size_t i,
 		return;
 	}
 	const std::size_t n = v->size();
-	Datum* elems = static_cast<Datum*>(palloc(sizeof(Datum) * (n == 0 ? 1 : n)));
-	for (std::size_t k = 0; k < n; ++k)
+    Datum* const elems = static_cast<Datum*>(palloc(sizeof(Datum) * (n == 0 ? 1 : n)));
+    for (std::size_t k = 0; k < n; ++k)
 	{
 		const std::string_view sv = (*v)[k].view();
-		const char* p = sv.empty() ? "" : sv.data();
-		elems[k] =
+        const char* const p = sv.empty() ? "" : sv.data();
+        elems[k] =
 			PointerGetDatum(cstring_to_text_with_len(p, static_cast<int>(sv.size())));
 	}
-	ArrayType* arr =
-		construct_array(elems, static_cast<int>(n), TEXTOID, -1, false, 'i');
-	slot->tts_values[i] = PointerGetDatum(arr);
+    ArrayType* const arr = construct_array(elems, static_cast<int>(n), TEXTOID, -1, false, 'i');
+    slot->tts_values[i] = PointerGetDatum(arr);
 	slot->tts_isnull[i] = false;
 }
 
@@ -636,11 +639,9 @@ fill_sequence_chunk(const provider::owning_sequence_payload& row,
 /* Public entry point definitions                                            */
 /* ======================================================================== */
 
-std::size_t
-message_row_count(relation_entity entity,
-				  const provider::owning_provider_message &message) noexcept
-{
-	switch (entity)
+auto message_row_count(relation_entity entity,
+                       const provider::owning_provider_message& message) noexcept -> std::size_t {
+    switch (entity)
 	{
 		case relation_entity::taxonomy:
 			return std::get_if<provider::owning_taxonomy_row>(&message) != nullptr
@@ -676,12 +677,11 @@ message_row_count(relation_entity entity,
 	}
 }
 
-bool
-materialize_message_row(relation_entity entity,
-						const provider::owning_provider_message &message,
-						std::size_t row_index, TupleTableSlot *slot)
-{
-	switch (entity)
+auto materialize_message_row(relation_entity entity,
+                             const provider::owning_provider_message& message,
+                             std::size_t row_index,
+                             TupleTableSlot* slot) -> bool {
+    switch (entity)
 	{
 		case relation_entity::taxonomy:
 		{

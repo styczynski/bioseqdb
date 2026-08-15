@@ -1,10 +1,6 @@
-/**-------------------------------------------------------------------------
- *
- * highway_target_test_support.cppm
- *
- * SQL test seam for selecting one runnable Highway target.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file highway_target_test_support.cppm
+ * @brief Exposes test-only SQL routines for selecting a Highway target.
  */
 module;
 
@@ -31,14 +27,13 @@ struct highway_target_test_state_record {
 	std::int64_t baseline_runnable_targets = 0;
 };
 
-[[nodiscard]] highway_target_test_state_record&
-highway_target_test_state() noexcept {
-	static highway_target_test_state_record state{};
+[[nodiscard]] auto highway_target_test_state() noexcept -> highway_target_test_state_record& {
+    static highway_target_test_state_record state{};
 	return state;
 }
 
-[[nodiscard]] std::int64_t highway_baseline_runnable_targets() {
-	auto& state = highway_target_test_state();
+[[nodiscard]] auto highway_baseline_runnable_targets() -> std::int64_t {
+    auto& state = highway_target_test_state();
 	if (state.baseline_runnable_targets != 0) {
 		return state.baseline_runnable_targets;
 	}
@@ -144,9 +139,9 @@ std::string set_highway_target_for_test(std::int64_t target) {
 				.message = "Highway forced target has no canonical name",
 			});
 	}
-	std::string canonical_target_name{target_name};
+    std::string canonical_target_name{target_name};
 
-	hwy::SetSupportedTargetsForTest(target);
+    hwy::SetSupportedTargetsForTest(target);
 	const auto forced = bioseq::simd_dispatch::
 		registered_highway_dispatch_plan();
 	if (forced.cpu_supported_targets != target
@@ -165,7 +160,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	}
 	return canonical_target_name;
 #else
-	(void)target;
+	static_cast<void>(target);
 	bioseq::postgres::support::raise_sql_error(
 		ERRCODE_FEATURE_NOT_SUPPORTED,
 		{

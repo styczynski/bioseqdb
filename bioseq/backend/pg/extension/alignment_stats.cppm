@@ -33,10 +33,13 @@ import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
-[[nodiscard]] std::string fixed_hex_u64(std::uint64_t value)
-{
-	constexpr char digits[] = "0123456789abcdef";
-	std::string result(16, '0');
+/** @brief Formats an unsigned value as 16 lower-case hexadecimal digits. */
+[[nodiscard]] auto fixed_hex_u64(std::uint64_t value) -> std::string {
+    constexpr auto digits = std::to_array("0123456789abcdef");
+    static_assert(digits.size() == 17u);
+    static_assert(sizeof(digits) == sizeof("0123456789abcdef"));
+    static_assert(alignof(decltype(digits)) == alignof(char));
+    std::string result(16, '0');
 	for (std::size_t i = 0; i < result.size(); ++i) {
 		result[result.size() - i - 1] = digits[value & 0x0fU];
 		value >>= 4U;
@@ -54,10 +57,10 @@ using bioseq::pg::detail::fixed_hex_u64;
 
 inline constexpr int alignment_stats_column_count = 151;
 
-[[nodiscard]] std::string cold_index_preparation_json(
-		const bioseq::pipeline_stats::pipeline_operational_stats& stats)
-{
-	/*
+[[nodiscard]] auto
+cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_stats& stats)
+    -> std::string {
+    /*
 	 * Keep the cold-read diagnostic surface self-contained
 	 * without permanently widening the already-large SRF by one column per
 	 * counter.  Values are saturated before reaching this boundary, so every
@@ -154,10 +157,10 @@ inline constexpr int alignment_stats_column_count = 151;
 	return result;
 }
 
-[[nodiscard]] std::string simd_execution_stats_json(
-		const bioseq::pipeline_stats::pipeline_execution_stats& stats)
-{
-	/*
+[[nodiscard]] auto
+simd_execution_stats_json(const bioseq::pipeline_stats::pipeline_execution_stats& stats)
+    -> std::string {
+    /*
 	 * One compact object carries the exact SIMD execution counters without
 	 * widening the scalar row for each new counter. Every value comes from the
 	 * immutable alignment snapshot copied before the SRF emits its stage rows.
@@ -348,11 +351,10 @@ struct alignment_stats_row_builder {
 
 namespace bioseq::pg::detail {
 
-[[nodiscard]] bioseq::pipeline_stats::executed_backend
-validate_alignment_snapshot_environment(
-		const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot)
-{
-	const auto& stats = snapshot.pipeline;
+[[nodiscard]] auto validate_alignment_snapshot_environment(
+    const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot)
+    -> bioseq::pipeline_stats::executed_backend {
+    const auto& stats = snapshot.pipeline;
 	bioseq::pipeline_stats::executed_backend environment_backend =
 		stats.actual_backend;
 	if (!bioseq::pipeline_stats::is_concrete_backend(environment_backend)) {
@@ -414,12 +416,11 @@ validate_alignment_snapshot_environment(
 
 namespace {
 
-[[nodiscard]] bioseq::postgres::support::pg_datum_list<alignment_stats_column_count>
-make_alignment_stats_row(
-		const alignment_exec::alignment_execution_snapshot& snapshot,
-		bioseq::pipeline_stats::pipeline_stage stage)
-{
-	alignment_stats_row_builder<alignment_stats_column_count> out{};
+[[nodiscard]] auto
+make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& snapshot,
+                         bioseq::pipeline_stats::pipeline_stage stage)
+    -> bioseq::postgres::support::pg_datum_list<alignment_stats_column_count> {
+    alignment_stats_row_builder<alignment_stats_column_count> out{};
 	const auto& stats = snapshot.pipeline;
 	const auto& environment = stats.environment;
 	const auto& operational = stats.operational;
@@ -648,11 +649,11 @@ struct alignment_optional_traits<std::optional<p_value>> {
 	using contained_type = p_value;
 };
 
-template<class p_value, std::size_t p_column_count>
-[[nodiscard]] p_value alignment_stats_field(
-		const bioseq::postgres::support::pg_datum_list<p_column_count>& raw,
-		const int attnum) {
-	if constexpr (alignment_optional_traits<p_value>::is_optional) {
+template <class p_value, std::size_t p_column_count>
+[[nodiscard]] auto
+alignment_stats_field(const bioseq::postgres::support::pg_datum_list<p_column_count>& raw,
+                      const int attnum) -> p_value {
+    if constexpr (alignment_optional_traits<p_value>::is_optional) {
 		if (raw.is_null(attnum)) {
 			return std::nullopt;
 		}
@@ -861,10 +862,11 @@ template<class p_value, std::size_t p_column_count>
 	.persisted_segment_rebase_calls = alignment_stats_field<std::int64_t>(raw, 149), \
 	.cold_index_preparation = alignment_stats_field<bioseq::postgres::support::jsonb_value>(raw, 150),
 
-[[nodiscard]] auto make_owned_alignment_stats_row(
-		const alignment_exec::alignment_execution_snapshot& snapshot,
-		const bioseq::pipeline_stats::pipeline_stage stage) {
-	auto raw = make_alignment_stats_row(snapshot, stage);
+[[nodiscard]] auto
+make_owned_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& snapshot,
+                               const bioseq::pipeline_stats::pipeline_stage stage)
+    -> bioseq::postgres::sql_rows::alignment_execution_stats_row {
+    auto raw = make_alignment_stats_row(snapshot, stage);
 	return bioseq::postgres::sql_rows::alignment_execution_stats_row{
 		BIOSEQ_ALIGNMENT_COMMON_FIELDS(raw)
 		.simd_execution_stats =
@@ -890,7 +892,7 @@ last_alignment_execution_stats() {
 		bioseq::postgres::sql_rows::alignment_execution_stats_row> rows;
 	if (last_alignment_execution_snapshot.has_value()) {
 		const auto& snapshot = *last_alignment_execution_snapshot;
-		(void)validate_alignment_snapshot_environment(snapshot);
+		static_cast<void>(validate_alignment_snapshot_environment(snapshot));
 		rows.reserve(bioseq::pipeline_stats::k_pipeline_stage_count);
 		for (std::size_t stage_no = 0;
 				stage_no < bioseq::pipeline_stats::k_pipeline_stage_count;

@@ -109,12 +109,10 @@ namespace {
 		});
 }
 
-template<class p_result>
-[[nodiscard]] p_result unowned_projection_result(
-		const std::string_view routine_name,
-		p_result fallback)
-{
-	bioseq_log<logging_level::debug>(
+template <class p_result>
+[[nodiscard]] auto unowned_projection_result(const std::string_view routine_name, p_result fallback)
+    -> p_result {
+    bioseq_log<logging_level::debug>(
 		"[bioseq] pg: {}() direct call without a custom-scan rewrite",
 		routine_name);
 	return fallback;
@@ -339,13 +337,9 @@ vulkan_runtime_status() {
 std::int64_t symbol_count(
         Datum el,
         std::string sym) {
-	bioseq::pg_types::seq* sequence_header =
-		bioseq::postgres::support::invoke_pg_as_cpp(
-		[el] {
-			return reinterpret_cast<bioseq::pg_types::seq*>(
-				PG_DETOAST_DATUM(el));
-		});
-	if (sym.size() != 1) {
+    auto* const sequence_header = bioseq::postgres::support::invoke_pg_as_cpp(
+        [el] { return reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(el)); });
+    if (sym.size() != 1) {
         bioseq::postgres::support::pfree_if_distinct_from(
             bioseq::postgres::support::pg_datum::from_raw(el),
 			sequence_header);
@@ -425,21 +419,18 @@ struct first_var_finder final {
 };
 
 struct first_var_visitor final {
-	[[nodiscard]] pg_walk_step
-	operator()(
-			pg_expression_walk_cursor,
-			const pg_node_view node,
-			first_var_finder& finder) const noexcept
-	{
-		if (finder.found_var != nullptr) {
+    [[nodiscard]] auto operator()(pg_expression_walk_cursor,
+                                  const pg_node_view node,
+                                  first_var_finder& finder) const noexcept -> pg_walk_step {
+        if (finder.found_var != nullptr) {
 			return pg_walk_step::stop;
 		}
-		if (Var* var = node.try_cast<Var>()) {
-			finder.found_var = var;
+        if (auto* const var = node.try_cast<Var>()) {
+            finder.found_var = var;
 			return pg_walk_step::stop;
-		}
-		return pg_walk_step::descend;
-	}
+        }
+        return pg_walk_step::descend;
+    }
 };
 
 /**

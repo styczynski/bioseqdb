@@ -1,12 +1,6 @@
-/**-------------------------------------------------------------------------
- *
- * highway_ksw_target_test_support.cppm
- *
- * Test-indexes-only SQL receipt for exact KSW2 parity across the production
- * Highway target registry. The caller selects one target through the existing
- * set_highway_target_for_test() seam before requesting this receipt.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file highway_ksw_target_test_support.cppm
+ * @brief Exposes test-only SQL receipts for KSW2 Highway target parity.
  */
 module;
 
@@ -48,7 +42,7 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     63u, 64u, 65u,
 };
 
-[[nodiscard]] const alignment_table_t& selected_alignment_table() {
+[[nodiscard]] auto selected_alignment_table() -> const alignment_table_t& {
     const auto dispatch =
         bioseq::simd_dispatch::registered_highway_dispatch_plan();
     const auto runnable = static_cast<std::uint64_t>(
@@ -104,8 +98,8 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
         });
 }
 
-[[nodiscard]] std::vector<seq::dna4> make_query(
-    const std::size_t length, std::uint64_t seed) {
+[[nodiscard]] auto make_query(const std::size_t length, std::uint64_t seed)
+    -> std::vector<seq::dna4> {
     std::vector<seq::dna4> sequence(length);
     for (std::size_t index = 0u; index < length; ++index) {
         seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -116,8 +110,7 @@ inline constexpr std::array<std::size_t, 9> k_boundary_lengths{
     return sequence;
 }
 
-[[nodiscard]] std::vector<seq::dna4> make_target(
-    const std::vector<seq::dna4>& query) {
+[[nodiscard]] auto make_target(const std::vector<seq::dna4>& query) -> std::vector<seq::dna4> {
     std::vector<seq::dna4> target = query;
     const std::array<std::size_t, 4> mutation_positions{
         query.size() / 5u,
@@ -181,7 +174,7 @@ void append_result(
     receipt.push_back(';');
 }
 
-[[nodiscard]] std::string make_boundary_receipt() {
+[[nodiscard]] auto make_boundary_receipt() -> std::string {
     const alignment_table_t& table = selected_alignment_table();
     const auto scoring =
         bioseq::simd::scoring_matrix<dna4_u64>::generate(2, 4, 1);

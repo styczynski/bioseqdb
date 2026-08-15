@@ -49,9 +49,8 @@ using namespace bioseq::postgres::support;
 
 namespace {
 
-[[nodiscard]] int to_postgres_error_level(const logging_level level) noexcept
-{
-	switch (level) {
+[[nodiscard]] auto to_postgres_error_level(const logging_level level) noexcept -> int {
+    switch (level) {
 		case logging_level::debug: return DEBUG1;
 		case logging_level::info: return LOG;
 		case logging_level::warning: return WARNING;
@@ -61,15 +60,12 @@ namespace {
 	return ERROR;
 }
 
-[[nodiscard]] bool postgres_message_is_enabled(const int error_level) noexcept
-{
-	return error_level >= ERROR || message_level_is_interesting(error_level);
+[[nodiscard]] auto postgres_message_is_enabled(const int error_level) noexcept -> bool {
+    return error_level >= ERROR || message_level_is_interesting(error_level);
 }
 
-[[nodiscard]] bool logging_message_is_enabled(
-		const logging_level level) noexcept
-{
-	return postgres_message_is_enabled(to_postgres_error_level(level));
+[[nodiscard]] auto logging_message_is_enabled(const logging_level level) noexcept -> bool {
+    return postgres_message_is_enabled(to_postgres_error_level(level));
 }
 
 void write_postgres_message(
@@ -137,6 +133,7 @@ void write_logging_report(const bioseq_report_view& report)
 	}
 }
 
+/** @brief Initializes the extension once in the current PostgreSQL backend. */
 void initialize_extension()
 {
 	static bool is_initialized = false;

@@ -1,8 +1,6 @@
 /**
  * @file handles.cppm
- * @brief Lightweight Postgres index-storage handle factories and active-read
- *        policy resolver. Kept separate from admin.cppm so scheduler
- *        pipeline code does not import the broad admin/update_index registry.
+ * @brief Creates PostgreSQL index handles and resolves active-read policy.
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -54,7 +52,7 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
         });
     if (r != nullptr) {
         id.tablespace_oid = OidIsValid(r->rd_rel->reltablespace) ? r->rd_rel->reltablespace : MyDatabaseTableSpace;
-        id.relfilenode = (Oid)r->rd_locator.relNumber;
+        id.relfilenode = static_cast<Oid>(r->rd_locator.relNumber);
         if (!OidIsValid(id.relfilenode)) id.relfilenode = RelationGetRelid(r);
         bioseq::postgres::support::invoke_pg_as_cpp(
             [r] { relation_close(r, AccessShareLock); });
@@ -63,7 +61,7 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
 }
 
 [[nodiscard]] inline MemoryContext make_handle_ctx(MemoryContext parent, const char* /*tag*/) {
-    MemoryContext owning_parent = parent ? parent : CurrentMemoryContext;
+    const MemoryContext owning_parent = parent ? parent : CurrentMemoryContext;
     return bioseq::postgres::support::invoke_pg_as_cpp([owning_parent] {
         return AllocSetContextCreate(
             owning_parent, "bioseq_index_handle", ALLOCSET_SMALL_SIZES);
@@ -80,9 +78,14 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     fragment_index_storage s;
     s.db_oid_=db; s.tablespace_oid_=spc; s.main_relfilenode_=relfn; s.user_relid_=user_relid;
     s.read_caches_=caches; s.column_attno_=attno; s.index_name_=index_name;
-    s.bucket_idx_=(std::uint8_t)loc.bucket_index; s.shard_idx_=loc.shard_index; s.query_key_=sequence_rowno;
+    s.bucket_idx_ = static_cast<std::uint8_t>(loc.bucket_index);
+    s.shard_idx_ = loc.shard_index;
+    s.query_key_ = sequence_rowno;
     s.own_mctx_ = make_handle_ctx(mctx, "idx_fragment_handle");
-    s.run_buffer_override_bytes_ = bioseq::settings::index_build::run_buffer_bytes > 0 ? (std::size_t)bioseq::settings::index_build::run_buffer_bytes : 0;
+    s.run_buffer_override_bytes_ =
+        bioseq::settings::index_build::run_buffer_bytes > 0
+            ? static_cast<std::size_t>(bioseq::settings::index_build::run_buffer_bytes)
+            : 0;
     return s;
 }
 
@@ -94,7 +97,9 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     sequence_index_storage s;
     s.db_oid_=db; s.tablespace_oid_=spc; s.main_relfilenode_=relfn; s.user_relid_=user_relid;
     s.read_caches_=caches; s.column_attno_=attno; s.index_name_=index_name;
-    s.bucket_idx_=(std::uint8_t)loc.bucket_index; s.shard_idx_=loc.shard_index; s.query_key_=sequence_rowno;
+    s.bucket_idx_ = static_cast<std::uint8_t>(loc.bucket_index);
+    s.shard_idx_ = loc.shard_index;
+    s.query_key_ = sequence_rowno;
     s.own_mctx_ = make_handle_ctx(mctx, "idx_sequence_handle");
     return s;
 }

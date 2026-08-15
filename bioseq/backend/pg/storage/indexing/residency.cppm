@@ -44,12 +44,12 @@ struct registered_callbacks {
     bool installed = false;
 };
 
-[[nodiscard]] registered_callbacks& callback_state() {
+[[nodiscard]] auto callback_state() -> registered_callbacks& {
     static registered_callbacks state{};
     return state;
 }
 
-[[nodiscard]] std::uint64_t fnv_mix(std::uint64_t seed, std::uint64_t value) noexcept {
+[[nodiscard]] auto fnv_mix(std::uint64_t seed, std::uint64_t value) noexcept -> std::uint64_t {
     std::uint64_t hash = seed;
     for (int byte_index = 0; byte_index < 8; ++byte_index) {
         hash ^= value & 0xffu;
@@ -59,7 +59,8 @@ struct registered_callbacks {
     return hash;
 }
 
-[[nodiscard]] std::uint64_t fnv_mix_bytes(std::uint64_t seed, std::string_view bytes) noexcept {
+[[nodiscard]] auto fnv_mix_bytes(std::uint64_t seed, std::string_view bytes) noexcept
+    -> std::uint64_t {
     std::uint64_t hash = seed;
     for (const char byte : bytes) {
         hash ^= static_cast<std::uint8_t>(byte);
@@ -69,8 +70,7 @@ struct registered_callbacks {
 }
 
 template <class p_key>
-[[nodiscard]] bool same_relation_identity(
-        const p_key& lhs, const p_key& rhs) noexcept {
+[[nodiscard]] auto same_relation_identity(const p_key& lhs, const p_key& rhs) noexcept -> bool {
     return lhs.db_oid == rhs.db_oid
         && lhs.user_relid == rhs.user_relid
         && lhs.tablespace_oid == rhs.tablespace_oid
@@ -180,12 +180,11 @@ struct assembled_index_cache_hit {
     std::shared_ptr<const bioseq::indexing::minimizer_hashmap_fragment_index> index;
 };
 
-[[nodiscard]] inline std::uint64_t index_name_hash(
-        Oid db_oid,
-        Oid tablespace_oid,
-        Oid main_relfilenode,
-        std::int16_t column_attno,
-        std::string_view index_name) noexcept {
+[[nodiscard]] inline auto index_name_hash(Oid db_oid,
+                                          Oid tablespace_oid,
+                                          Oid main_relfilenode,
+                                          std::int16_t column_attno,
+                                          std::string_view index_name) noexcept -> std::uint64_t {
     std::uint64_t hash = 1469598103934665603ull;
     hash = residency_detail::fnv_mix(hash, static_cast<std::uint64_t>(db_oid));
     hash = residency_detail::fnv_mix(hash, static_cast<std::uint64_t>(tablespace_oid));
@@ -244,7 +243,7 @@ struct residency_state {
     std::uint64_t assembled_bytes = 0;
 };
 
-[[nodiscard]] inline residency_state& get_residency_state() {
+[[nodiscard]] inline auto get_residency_state() -> residency_state& {
     static residency_state state{};
     return state;
 }
@@ -616,11 +615,11 @@ void store_assembled_index(
     state.assembled_entries.push_back(std::move(entry));
 }
 
-[[nodiscard]] std::uint64_t query_minimizer_signature(
-        std::span<const bioseq::indexing::minimap_sketch_data> minimizers,
-        std::uint32_t kmer_size,
-        std::uint32_t window_size,
-        std::uint32_t max_occ) noexcept {
+[[nodiscard]] auto
+query_minimizer_signature(std::span<const bioseq::indexing::minimap_sketch_data> minimizers,
+                          std::uint32_t kmer_size,
+                          std::uint32_t window_size,
+                          std::uint32_t max_occ) noexcept -> std::uint64_t {
     std::uint64_t hash = 1469598103934665603ull;
     hash = residency_detail::fnv_mix(hash, kmer_size);
     hash = residency_detail::fnv_mix(hash, window_size);
@@ -631,7 +630,7 @@ void store_assembled_index(
     return hash;
 }
 
-[[nodiscard]] std::uint64_t cached_index_residency_bytes() noexcept {
+[[nodiscard]] auto cached_index_residency_bytes() noexcept -> std::uint64_t {
     const residency_state& state = get_residency_state();
     return state.chunk_bytes + state.assembled_bytes;
 }
