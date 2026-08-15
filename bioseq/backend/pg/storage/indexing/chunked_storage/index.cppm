@@ -6,6 +6,8 @@
  * actions, mapped fragment images, read sessions, hash-major persistence, and
  * concrete storage adapters independently owned while preserving one public
  * module for existing consumers.
+ * Implementation partitions remain reachable only through their stable
+ * facade partitions.
  */
 export module bioseq.postgres.storage.indexing.chunked_storage;
 
