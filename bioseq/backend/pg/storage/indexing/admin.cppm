@@ -68,9 +68,6 @@ import bioseq.highway.dispatch_contract;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.residency;
-#ifdef BIOSEQ_TEST_INDEXES
-import bioseq.postgres.storage.indexing.sorted_runs;
-#endif
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
