@@ -1,5 +1,5 @@
 /**
- * @file tool_minimap2.cppm
+ * @file bench/minimap2/index.cppm
  * @brief Black-box C++26 wrapper around the original minimap2 C pipeline.
  *
  * Exposes conversion and execution entry points that return the same PAF-like
@@ -29,7 +29,7 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-export module bench.tool_minimap2;
+export module bioseq.bench.minimap2;
 
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
@@ -38,7 +38,7 @@ import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.instrumentation;
 // The explicit import retains the C trampoline definitions in the module graph.
-import bench.tool_minimap2.instr_shim;
+import :instr_shim;
 
 export {
 

@@ -1,5 +1,5 @@
 /**
- * @file bench/alignment/index.cppm
+ * @file bench/minimap2/alignment/index.cppm
  * @brief Aligner benchmark entry point on `bioseq.bench.framework`.
  *
  * The driver binds input construction, measured execution, evaluation, and
@@ -42,7 +42,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq.bench.alignment;
+export module bioseq.bench.minimap2.alignment;
 
 import bioseq.common.logging;
 import bioseq.common.context;
@@ -62,7 +62,7 @@ import bioseq.instrumentation;
 import bioseq.parallelism.memory_admission;
 import bioseq.bench.framework;
 import bioseq.bench.prefilter_pipeline_metrics;
-import bench.tool_minimap2;
+import bioseq.bench.minimap2;
 import bioseq.sequences.generation;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.bench.prefilters;

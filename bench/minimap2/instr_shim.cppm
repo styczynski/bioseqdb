@@ -1,5 +1,5 @@
 /**
- * @file instr_shim.cppm
+ * @file bench/minimap2/instr_shim.cppm
  * @brief C-linkage bridge from native minimap2 markers to instrumentation.
  *
  * Native sources call the stable functions declared by `instr_shim.h`.
@@ -10,7 +10,7 @@ module;
 
 #include <cstdint>
 
-export module bench.tool_minimap2.instr_shim;
+module bioseq.bench.minimap2:instr_shim;
 
 import bioseq.instrumentation;
 

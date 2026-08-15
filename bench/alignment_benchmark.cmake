@@ -18,10 +18,10 @@ bioseq_collect_authored_sources(
   BIOSEQ_ALIGNMENT_BENCHMARK_MODULES
   BASE_DIRECTORY "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}"
   INCLUDE_PATTERNS
-    "alignment/*.cppm"
+    "minimap2/*.cppm"
+    "minimap2/alignment/*.cppm"
     "prefilters/*.cppm"
-    "tool_minimap2/*.cppm"
-  EXCLUDE_PATHS "alignment/main.cppm"
+  EXCLUDE_PATHS "minimap2/alignment/main.cppm"
   EXPECTED_COUNT 4)
 
 # minimap2 C reference sources are linked alongside the bench TU.
@@ -77,7 +77,7 @@ bioseq_add_postgresql_extension(
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
-    "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/alignment/main.cppm"
+    "${BIOSEQ_ALIGNMENT_BENCHMARK_DIR}/minimap2/alignment/main.cppm"
     # Keep the upstream reference linkage deliberately narrow. The complete
     # worktree is vendored for provenance/data, but no driver, kthread, CUDA,
     # FPGA, or HLS source participates in bioseq_benchmark.
