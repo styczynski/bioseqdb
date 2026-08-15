@@ -7,9 +7,19 @@ keywords: [query cache, reusable fragments, statistics, invalidation, BioseqScan
 draft: false
 ---
 
-The `bioseq_cache` extension is preloaded before `bioseq` and registers the
-production cache provider used by Bioseq plans. Start with
-[[sql:bioseq_cache.version|`bioseq_cache.version()`]], then use
+The query cache is disabled by default. To use it, add `bioseq_cache` before
+`bioseq` in `shared_preload_libraries`, restart PostgreSQL, and install both
+extensions:
+
+```sql
+CREATE EXTENSION bioseq_cache;
+CREATE EXTENSION bioseq;
+```
+
+Setting a cache mode before the preload and restart fails instead of running
+without a cache.
+
+Start with [[sql:bioseq_cache.version|`bioseq_cache.version()`]], then use
 [[sql:bioseq_cache.stats|`stats()`]] and
 [[sql:bioseq_cache.entries|`entries()`]] to observe decisions. These
 diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
@@ -17,8 +27,8 @@ diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
 ## Exact-query hits
 
 `exact_query` stores the final result for one complete statement. The hidden
-setup below runs the same `BioseqScan` twice; the visible query publishes the
-real production counters after the cold production and warm hit.
+setup below runs the same `BioseqScan` twice. The visible query shows the
+counters after the first run and the repeated run.
 
 ```sql runnable id=cache_exact_query timeout=30s entity="sql:function:bioseq_cache.stats()"
 -- bioseq:setup
@@ -52,12 +62,10 @@ provider readiness before increasing cache capacity.
 
 ## Reusable-fragment mode
 
-`reusable_fragments` keeps cacheable coverage below the final statement when a
-provider supports it, while still allowing exact provider results. Bioseq's
-current persisted index recipes are named `minimizers_per_sequence` for the
-direct minimizer-bucket layout and `minimizers_per_fragment` for the
-minimizer-fragment layout. Use those semantic names in index administration;
-do not copy internal layout or revision spellings from diagnostics.
+`reusable_fragments` can reuse cached work across related searches. It can also
+reuse a complete result when the statements match. The supported index recipe
+names are `minimizers_per_sequence` and `minimizers_per_fragment`. Use these
+names when you create or update an index.
 
 ```sql runnable id=cache_reusable_fragments timeout=30s entity="sql:function:bioseq_cache.stats()" entity="sql:function:bioseq_cache.entries()"
 -- bioseq:setup
@@ -88,8 +96,12 @@ DROP TABLE cache_reusable_reads;
 ```
 
 Compare `logical_bytes` and `stored_bytes` in `stats()` when sizing shared
-memory. Reuse is most useful for repeated, selective searches; disable caching
-for one-off scans whose materialized result would dominate the saved work.
+memory. Reuse is most useful for repeated, selective searches. Leave the cache
+disabled for one-off scans that would store large results.
+
+Use `EXPLAIN (ANALYZE, VERBOSE)` to inspect `Cache Mode` and
+`Actual Cache Action`. These fields show whether the query produced, reused,
+or bypassed a cache entry.
 
 ## Invalidation and privilege errors
 
@@ -106,9 +118,8 @@ SELECT bioseq_cache.invalidate_all();
 SELECT bioseq_cache.reset_stats();
 ```
 
-The website examples run as isolated, non-superuser roles. This executable
-negative case proves that production administration fails closed with
-`insufficient_privilege` rather than silently skipping invalidation.
+The website examples run as isolated, non-superuser roles. This example shows
+that an unauthorized invalidation fails with `insufficient_privilege`.
 
 ```sql runnable id=cache_invalidation_denied timeout=15s expect=error sqlstate=42501 entity="sql:function:bioseq_cache.invalidate_relation(regclass)"
 -- bioseq:setup
@@ -120,6 +131,8 @@ SELECT bioseq_cache.invalidate_relation(
 DROP TABLE cache_invalidation_target;
 ```
 
-Treat repeated fallbacks, rapid invalidations, or stored bytes near the configured
-limit as operational signals. Prefer a smaller selective query, confirm the
-provider and index recipe in `EXPLAIN`, and only then tune cache capacity.
+Repeated fallbacks mean the cache could not serve the query. Frequent
+invalidations can mean that table writes are removing entries before they are
+reused. If stored bytes approach the configured limit, first narrow the query
+and check its cache action in `EXPLAIN`. Increase cache capacity only after
+those checks.

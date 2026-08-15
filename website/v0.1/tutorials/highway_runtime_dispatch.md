@@ -9,12 +9,12 @@ draft: false
 
 Bioseq compiles vector kernels for a closed Highway target set and intersects it
 with the targets supported by the current CPU. The scheduler binds one runnable
-target to the plan, and every worker executes that exact target bit.
+target to the plan, and every worker executes that exact target.
 
 ## Inspect dispatch evidence
 
-The following query executes a real `BioseqScan`. Its JSON plan carries the five
-stable labels used by production diagnostics: `Highway Compiled Targets`,
+The following query executes a real `BioseqScan`. Its JSON plan carries five
+labels: `Highway Compiled Targets`,
 `CPU-Supported Targets`, `Runnable Targets`, `Planned Architecture`, and
 `Executed Architecture`.
 
@@ -43,13 +43,20 @@ ORDER BY pk;
 DROP TABLE highway_dispatch_reads;
 ```
 
-`Runnable Targets` is the intersection of `Highway Compiled Targets` and
-`CPU-Supported Targets`. `Planned Architecture` records the single target bound
-by the leader. With `ANALYZE`, `Executed Architecture` reports the target that
-actually ran, or `mixed` only when execution evidence genuinely disagrees.
+`Highway Compiled Targets` lists the kernels in the extension binary.
+`CPU-Supported Targets` lists the targets allowed by the current CPU and
+operating system. Their intersection is `Runnable Targets`. Target names vary
+between builds and hosts, so do not compare them with a fixed list.
+
+`Planned Architecture` is the one runnable target selected when the plan is
+created. Every worker uses that same target. With `ANALYZE`,
+`Executed Architecture` reports the target that ran. It is `mixed` only when
+workers report different executed targets.
+
+`EXPLAIN` without `ANALYZE` shows the first four labels. Add `ANALYZE` when you
+also need the executed target.
 
 Dispatch is fail-closed. If the stored alphabet, storage width, or selected
-operation has no compiled runnable coordinate, Bioseq reports an unsupported
-coordinate instead of falling back to an unreported scalar implementation.
-That makes the five labels suitable for release qualification and incident
-diagnosis, not just performance hints.
+operation has no compiled runnable combination, Bioseq reports an error instead
+of falling back to an unreported scalar implementation.
+Use the five labels together when checking why a target was or was not used.
