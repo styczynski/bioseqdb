@@ -39,7 +39,7 @@ enum class sequence_iteration_part : std::uint8_t {
  * @tparam p_finish_type Callable invoked after the masked tail is consumed.
  * @tparam p_iterator_type Iterator into the packed range.
  * @tparam p_maximum_delay Maximum admitted delay in logical symbols.
- * @param sequence Packed sequence range; storage remains borrowed.
+ * @param sequence Packed sequence range. Storage remains borrowed.
  * @param begin First packed unit to inspect.
  * @param end One-past-last packed unit.
  * @param context_bps Logical-symbol context required by the caller.
@@ -340,15 +340,15 @@ inline void iterate_sequence_bp_simd_offsets(
  * The tail transitions from a full mask to the left mask before completion.
  *
  * @tparam p_stream_count Number of interleaved streams, in the range `[1, 4]`.
- * @tparam p_descriptor_tag Optional Highway descriptor override; `void` selects
+ * @tparam p_descriptor_tag Optional Highway descriptor override. `void` selects
  * the scalable descriptor for the view's storage unit.
- * @tparam p_delay_types Reserved delay argument types; the pack must be empty.
+ * @tparam p_delay_types Reserved delay argument types. The pack must be empty.
  * @tparam p_sequence_view Packed sequence view satisfying the bit-cast contract.
  * @tparam p_handler_type Callable receiving full/partial state, offsets,
  * descriptor, live mask, and the vector stream.
  * @tparam p_finish_type Callable receiving offsets, descriptor, and final mask.
  * @tparam p_iterator_type Iterator exposed by the sequence view.
- * @param sequence Borrowed sequence view; no sequence materialization occurs.
+ * @param sequence Borrowed sequence view. No sequence materialization occurs.
  * @param begin First packed view unit.
  * @param end One-past-last packed view unit.
  * @param context_bps Logical-symbol context required by the caller.

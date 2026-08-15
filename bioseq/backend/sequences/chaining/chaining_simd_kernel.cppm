@@ -8,9 +8,9 @@
  *
  * Every biological score is evaluated by Highway vectors, including ranges
  * with one to five predecessors and final partial vectors. Batches that cannot
- * improve the current score update exact max-skip state from SIMD masks;
- * improvement-capable batches replay only scalar control in descending order.
- * chain extraction is local to this backend: predecessor paths are gathered
+ * improve the current score update exact max-skip state from SIMD masks.
+ * Improvement-capable batches replay only scalar control in descending order.
+ * Chain extraction is local to this backend: predecessor paths are gathered
  * in lane batches and committed with vector visited-prefix operations in
  * strict score-rank order.
  */
@@ -858,7 +858,7 @@ void simd_dp_forward_pass_exact(
 
 /// Explicitly approximate forward chaining. Every biological pair score,
 /// including masked tails and the one-candidate rescue, is produced by
-/// the specialized SIMD batch scorer; scalar work is limited to batch
+/// the specialized SIMD batch scorer. Scalar work is limited to batch
 /// orchestration and extracting the vector-reduced winning predecessor.
 template<class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
@@ -1822,7 +1822,7 @@ void run_simd_chaining(
 
 /**
  * Named SIMD DP chaining. Supplying stats is optional and does not alter the
- * requested policy. Unsupported inputs throw; this entry point never calls a
+ * requested policy. Unsupported inputs throw. This entry point never calls a
  * scalar scoring or backtracking implementation.
  */
 void chain_anchors_simd(

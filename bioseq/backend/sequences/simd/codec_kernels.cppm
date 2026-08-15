@@ -98,8 +98,8 @@ HWY_INLINE hn::Vec<p_simd_tag> dna4_lookup_ranks(
 /// `[0, 3]` — caller is responsible for screening `0xFF` sentinels.
 ///
 /// Pipeline: variable per-lane left shift puts each rank in its 2-bit
-/// slot; `SumsOf4` reduces every 4 adjacent shifted bytes into one
-/// packed byte (since the slots are disjoint, sum == OR); `Mul +
+/// slot. `SumsOf4` reduces every 4 adjacent shifted bytes into one
+/// packed byte because the slots are disjoint. `Mul +
 /// ReduceSum` collapses the 4 packed bytes into one `uint32_t`.
 template <class p_simd_tag>
 HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
@@ -211,11 +211,11 @@ HWY_INLINE void merge_variable_chunk_into_partial(
 /// newlines / CR before passing the span (or use the multiline
 /// variant below).
 ///
-/// `p_policy == drop`          — uses the 16-entry low-nibble LUT;
+/// `p_policy == drop`          — uses the 16-entry low-nibble LUT.
 ///                               sentinel-detect + scalar fallback for
 ///                               chunks containing `0xFF`. 2×-unrolled.
 /// `p_policy == map_to_default` — uses the 32-byte LUT split across two
-///                               16-byte halves; no sentinels can
+///                               16-byte halves. No sentinels can
 ///                               appear, so no compaction or fallback
 ///                               is needed.
 template <typename p_storage_unit,

@@ -175,7 +175,7 @@ requires supports_compact_sequence_range<p_source_configuration>
 
 /// One-shot SIMD decoder. Adapter around `decode_words_to_ascii` —
 /// SIMD path engages for `(dna4, uint64, 2, 32)` and
-/// `(dna5, uint8, 3, 2)`; everything else uses the scalar bit-walk.
+/// `(dna5, uint8, 3, 2)`. Everything else uses the scalar bit-walk.
 /// Falls back to the iterator-based scalar path for non-custom-alphabet
 /// ranges.
 template <class p_source_configuration>

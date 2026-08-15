@@ -21,7 +21,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 /**
  * One fixed-target, one-shot resident two_stack_nthash call. The exact target-local
- * continuation is created, consumed and finalized inside the checked driver;
+ * continuation is created, consumed and finalized inside the checked driver.
  * no target-dependent state crosses the neutral ABI.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>

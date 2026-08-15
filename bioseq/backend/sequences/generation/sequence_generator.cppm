@@ -69,7 +69,7 @@ struct generator_params {
     std::uint64_t seed                    = 42;
 
     /// Explicit selector for the Vulkan HybridTaus generator. When enabled,
-    /// dispatch failure is fatal; ordinary callers stay on the CPU path.
+    /// dispatch failure is fatal. Ordinary callers stay on the CPU path.
     bool use_vulkan = false;
 };
 

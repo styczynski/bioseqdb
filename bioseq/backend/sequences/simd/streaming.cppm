@@ -70,7 +70,7 @@ struct encode_state {
     /// every record (or batch). The encoder appends to `*output_storage`.
     base_container* output_storage = nullptr;
     /// Offset into `*output_storage` where the current record's first
-    /// packed word starts. Captured at `reset()`; the FSM reads it back
+    /// packed word starts. Captured at `reset()`. The FSM reads it back
     /// in `finalize_encode_state` to compute the record's slice.
     std::size_t record_start_offset = 0;
     /// Bits accumulated for the partial word that has not yet been
@@ -157,7 +157,7 @@ void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
 /// Build the 256-entry ASCII → rank LUT for `p_alphabet`. Two policies
 /// for unknown bytes:
 ///
-/// * `drop`            — unknown bytes map to `0xFF` skip-sentinel; the
+/// * `drop`            — unknown bytes map to `0xFF` skip-sentinel. The
 ///                       scalar `append_ranks` and the SIMD multiline
 ///                       compaction path detect and drop them.
 /// * `map_to_default`  — unknown bytes map to the alphabet's default
@@ -212,7 +212,7 @@ build_letter_to_rank_lut() {
 /// Build the two 16-byte halves of a `c & 0x1F`-indexed 32-byte rank
 /// LUT for `p_alphabet` under `p_policy`. Returns `{low, high}` where
 /// `low[i] = lut32[i]` and `high[i] = lut32[i + 16]`. Indexed by 5 low
-/// bits of the input ASCII byte; case folding is automatic because
+/// bits of the input ASCII byte. Case folding is automatic because
 /// bit 5 is the case bit.
 ///
 /// The 32-byte LUT is the SIMD-friendly cousin of the 256-byte LUT —
@@ -261,7 +261,7 @@ build_letter_to_rank_lut_32() {
 }
 
 /// Build the 256-entry rank → ASCII LUT for `p_alphabet`. Indexed by
-/// rank values; entries past the alphabet's cardinality are 0 and
+/// rank values. Entries past the alphabet's cardinality are 0 and
 /// unreachable when the input is well-formed.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] consteval std::array<std::uint8_t, 256>
@@ -295,7 +295,7 @@ build_dna4_low_nibble_lut() {
 }
 
 /// Build the 16-entry rank → ASCII LUT for the dna4 SIMD decoder.
-/// Indexed by ranks in [0..3]; remaining entries are zero.
+/// Indexed by ranks in [0..3]. Remaining entries are zero.
 [[nodiscard]] consteval std::array<std::uint8_t, 16>
 build_dna4_rank_to_ascii_lut() {
     std::array<std::uint8_t, 16> lut{};
@@ -469,7 +469,7 @@ finalize_encode_state(
 }
 
 /// Convert `size` ASCII bytes to ranks via the alphabet's 256-entry
-/// LUT. Generic scalar implementation; correct for every alphabet.
+/// LUT. This generic scalar implementation is correct for every alphabet.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_policy = unknown_byte_policy::drop>
 inline void ascii_to_rank_scalar(

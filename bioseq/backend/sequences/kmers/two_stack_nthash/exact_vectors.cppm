@@ -32,17 +32,15 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
 /**
  * The packed K15/W10/B8 kernel stores candidate hashes in u32 lanes and raw
  * minimizers in u64 lanes.  Both persisted-index representations used by the
- * production pipeline satisfy that contract:
+ * index layouts satisfy that contract:
  *
- *  * `minimizer_representation<33, 15>` for target postings (30 hash bits); and
+ *  * `minimizer_representation<33, 15>` for target postings (30 hash bits).
  *  * `minimap_sketch_data == minimizer_representation<28, 15>` for query sketches
  *    (35 hash bits, of which minimap-int uses the low 30).
  *
- * The original gate admitted only the target layout even though every raw
- * construction below is already parameterized by `k_hash_shift`,
- * `k_position_field_mask`, and `k_position_shift`.  Keep the admission deliberately narrow
- * to these two persisted-compatible layouts rather than silently widening the
- * kernel to arbitrary `p_minimizer_type` encodings.
+ * Admission is limited to these two persisted-compatible layouts. The raw
+ * construction is parameterized by `k_hash_shift`, `k_position_field_mask`,
+ * and `k_position_shift`. Arbitrary `p_minimizer_type` encodings are rejected.
  */
 template <class p_minimizer_type>
 inline constexpr bool exact_k15_w10_b8_representation_v =
@@ -156,7 +154,7 @@ template<class p_simd_tag>
  * lane types between stages, which reaches a nonexistent u128 lane for u64
  * matrices. This network instead recursively transposes four half-width
  * quadrants and joins them with Highway Combine. The only base operation is a
- * two-lane Interleave; there are no scalar lane or event-record stores.
+ * two-lane Interleave. There are no scalar lane or event-record stores.
  */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
@@ -400,7 +398,7 @@ decode_packed_dna4_rank_vector(
  * storage unit (three bits per symbol do not divide 8/16/32/64).  Treating the
  * storage words as one contiguous bit stream would therefore shift every rank
  * after a word boundary.  The address/shift arrays below describe the source
- * word for each lane; rank extraction, rank-to-nt4 normalization, and
+ * word for each lane. Rank extraction, rank-to-nt4 normalization, and
  * ambiguity classification all execute as Highway vector operations.  The
  * scalar loop only prepares gather-equivalent addresses and never hashes,
  * canonicalizes, reduces a minimizer window, or emits an event.
@@ -554,7 +552,7 @@ struct exact_fast_minimum_vectors {
 /**
  * Reduce four overlapping K15/W10 hash windows.  The sequential <= scan
  * deliberately preserves the exact rightmost-minimum rule used by the
- * scalar oracle; metadata follows the same mask at every chronological slot.
+ * scalar oracle. Metadata follows the same mask at every chronological slot.
  */
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 [[nodiscard]] HWY_INLINE exact_fast_minimum_vectors<p_uint32_simd_tag, p_uint64_simd_tag>
@@ -606,7 +604,7 @@ reduce_exact_k15_w10_minimum_metadata(
 
 /**
  * Four chronological K15/W10 windows in parallel. Hash decisions stay in
- * u32 lanes; raw minimizers and ordinals stay in u64 lanes throughout.
+ * u32 lanes. Raw minimizers and ordinals stay in u64 lanes throughout.
  */
 template<
     class p_minimizer_type,

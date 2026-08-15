@@ -60,7 +60,7 @@ make_lane_index_table() noexcept
  * Portable unsigned lane ordinals for targets such as NEON where Highway's
  * Iota overload is intentionally unavailable for 64-bit lanes. The table is
  * constant-initialized once per compiled target and enters the kernel through
- * one vector load; all offset, packed-shift, and candidate-position work stays
+ * one vector load. All offset, packed-shift, and candidate-position work stays
  * in vector registers.
  */
 template<class p_simd_tag>
@@ -205,7 +205,7 @@ struct sequence_simd_iteration_state {
 
     /// Per-base-pair body for the bounded ntHash two-stack inner loop,
     /// expressed bundle-uniformly. p_stream_count enters only via the template
-    /// parameter on `vector_stream_type` / `mask_stream_type`; there is NO
+    /// parameter on `vector_stream_type` / `mask_stream_type`. There is NO
     /// `if constexpr (p_stream_count …)` branching for per-stream replication
     /// anywhere in this body.
     ///
@@ -999,7 +999,7 @@ template<class p_sequence_range, class p_collector_type>
 /**
  * Stats-returning full-resident entry point for the resident-vector-stream fast kernel.
  * It is limited to the admitted production resident shape. Other shapes use
- * the checked chronological continuation; there is no scalar fallback here.
+ * the checked chronological continuation. There is no scalar fallback here.
  */
 template<
     class p_minimizer_type,

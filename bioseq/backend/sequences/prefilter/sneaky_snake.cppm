@@ -3,7 +3,7 @@
  * @brief Alphabet-generic SneakySnake edit-distance lower-bound prefilter.
  *
  * The primitive consumes already-normalized uint8 rank buffers.  Equal-length
- * jobs run the source SneakySnake maze walk; unequal-length jobs use only the
+ * jobs run the source SneakySnake maze walk. Unequal-length jobs use only the
  * always-safe length-difference lower bound.  The batch ABI intentionally
  * matches the Vulkan job/result layout.
  */
@@ -188,7 +188,7 @@ struct scalar_traversal final {
 /**
  * Target-neutral SneakySnake maze control shared by scalar and generated
  * fixed-target Highway policies. The policy owns only the two rank-scan
- * primitives; maze geometry, escape accounting, and result semantics have one
+ * primitives. Maze geometry, escape accounting, and result semantics have one
  * implementation in this facade.
  */
 template <class p_traversal_type>

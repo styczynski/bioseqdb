@@ -140,7 +140,7 @@ struct rmq_tree {
 
     // --- avl rotations (translated from krmq.h) ---
 
-    /// Single rotation. Direction zero rotates left; one rotates right.
+    /// Single rotation. Direction zero rotates left. One rotates right.
     static rmq_node* rotate_single(rmq_node* node, int direction) {
         rmq_node* other = node->children[1 - direction];
         node->children[1 - direction] = other->children[direction];
@@ -607,7 +607,7 @@ struct rmq_tree {
 /// tree(s). Out-of-range anchors are pruned. Then an rmq query finds
 /// the best predecessor in the valid query-position range.
 ///
-/// @param anchors                  Sorted anchor array (read-only span; the
+/// @param anchors                  Sorted anchor array. The read-only span
 ///                                  kernel only reads positions and emits a
 ///                                  freshly-reordered anchor span).
 /// @param params                   Chaining parameters (must have prepare()
@@ -615,7 +615,7 @@ struct rmq_tree {
 /// @param chains_out               Output slab — surviving chains are appended
 ///                                  here in score-descending order.
 /// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                  appended in chain order; `chain::anchor_start`
+///                                  appended in chain order. `chain::anchor_start`
 ///                                  indexes into this slab.
 /// @param max_dist_inner           Inner tree max distance (0 = disabled).
 /// @param cap_rmq_size             Maximum tree size before pruning (default

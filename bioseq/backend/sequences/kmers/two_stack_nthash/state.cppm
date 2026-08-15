@@ -33,7 +33,7 @@ using ::bioseq::minimizers::two_stack_route;
 /**
  * Compile-time upper bound on the window size `w` is_internally_consistent by the
  * two-stack collectors in this file. Our minimap2 ports run at the
- * default `w = 10`; bumping past 256 also blows the L1-friendly stack
+ * default `w = 10`. Bumping past 256 also blows the L1-friendly stack
  * footprint of the parallel ring buffers.
  */
 using ::bioseq::minimizers::k_max_two_stack_window;

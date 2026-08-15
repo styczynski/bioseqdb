@@ -665,10 +665,10 @@ private:
 public:
     /**
      * Complete adjacent dedup across the seven logical-stream joins using
-     * bounded metadata only. The first event of lanes 1..7 was withheld; it
+     * bounded metadata only. The first event of lanes 1..7 was withheld. It
      * is appended here unless it equals the nearest preceding non-empty
      * lane's final event. p_collector_type append order is intentionally unspecified,
-     * as it already is for eight lock-step SIMD streams; record identity is
+     * as it already is for eight lock-step SIMD streams. Record identity is
      * globally adjacent-deduplicated.
      */
     template<class p_offsets_type>
@@ -939,8 +939,8 @@ template<
 /**
  * Checked resident entry point for the production-oriented packed bounded_nthash-ntHash
  * kernel. [begin,end) must be ordered and aligned to the resident range's
- * storage units. The zero-copy bounded u32 view emits segment-local positions;
- * segmented callers add their known global base offset after collection.
+ * storage units. The zero-copy bounded u32 view emits segment-local positions.
+ * Segmented callers add their known global base offset after collection.
  */
 template<
     std::size_t p_kmer_size = 15,
@@ -1081,7 +1081,7 @@ collect_minimizers_bounded_nthash_simd_checked(
 }
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_bounded_nthash_simd_checked
 
-/** Whole-resident convenience overload; still performs the checked gate. */
+/** Whole-resident convenience overload. It still performs the checked gate. */
 template<
     std::size_t p_kmer_size = 15,
     std::size_t p_window_size = 10,
