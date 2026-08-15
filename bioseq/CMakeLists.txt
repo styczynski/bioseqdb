@@ -2399,6 +2399,7 @@ target_sources(bioseq_testing_support
       "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm")
 target_link_libraries(bioseq_testing_support
   PUBLIC
@@ -2453,6 +2454,16 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/grouped_soa_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/01_contracts_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/02_grouped_reader_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/03_query_waves_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/04_matcher_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/05_occurrence_capacity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/06_page_advice_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/07_query_identity_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/08_direct_execution_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/anchor_planner/09_admission_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/reader_codec/10_payload_corruption_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/storage_concept_test.cpp"
