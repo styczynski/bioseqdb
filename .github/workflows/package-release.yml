@@ -1,0 +1,162 @@
+name: Native package release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bioseq-native-package-release-main
+  cancel-in-progress: false
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+  AWS_REGION: us-east-1
+  AWS_DEFAULT_REGION: us-east-1
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  package-release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 720
+
+    steps:
+      - name: Check out the exact main commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify release source identity and matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 infra/package_builder.py matrix --require-complete \
+            > "$RUNNER_TEMP/package-matrix.json"
+          package_version=$(jq -r .package_version "$RUNNER_TEMP/package-matrix.json")
+          [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'PACKAGE_VERSION=%s\n' "$package_version" >> "$GITHUB_ENV"
+
+      - name: Create ephemeral builder access
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ssh-keygen -q -t ed25519 -N '' \
+            -f "$RUNNER_TEMP/package-builder-key"
+          python3 infra/package_builder.py open-ci-access \
+            --region "$AWS_REGION" \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json"
+
+      - name: Build and collect the complete package matrix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 infra/package_builder.py run \
+            --existing-only \
+            --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --region "$AWS_REGION"
+          python3 infra/package_builder.py collect \
+            --region "$AWS_REGION" \
+            --run-result infra/package_build_infra/.runtime/last-run.json \
+            --output-dir "$RUNNER_TEMP/release-assets" \
+            --expected-revision "$GITHUB_SHA"
+
+      - name: Preserve verified packages and receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bioseq-packages-${{ github.sha }}
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Stop builders before publishing
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cleanup_status=0
+          python3 infra/package_builder.py stop \
+            --region "$AWS_REGION" || cleanup_status=$?
+          python3 infra/package_builder.py close-ci-access \
+            --region "$AWS_REGION" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json" \
+            || cleanup_status=$?
+          if [[ $cleanup_status -eq 0 ]]; then
+            printf 'PACKAGE_BUILDERS_CLEANED=1\n' >> "$GITHUB_ENV"
+          fi
+          exit "$cleanup_status"
+
+      - name: Create deterministic GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -Eeuo pipefail
+          short_sha=${GITHUB_SHA:0:12}
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"
+          title="Bioseq native packages ${PACKAGE_VERSION} (${short_sha})"
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' \
+            "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
+            "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
+            "Source commit: ${GITHUB_SHA}" > "$notes"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)" = "$GITHUB_SHA"
+            draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft --jq .isDraft)
+            if [[ "$draft" = false ]]; then
+              find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f \
+                -exec basename {} \; | LC_ALL=C sort > "$RUNNER_TEMP/expected-assets.txt"
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json assets --jq '.assets[].name' | LC_ALL=C sort \
+                > "$RUNNER_TEMP/observed-assets.txt"
+              diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/observed-assets.txt"
+              exit 0
+            fi
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes-file "$notes" \
+              --draft
+          fi
+
+          gh release upload "$tag" "$RUNNER_TEMP"/release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          expected=$(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | wc -l | tr -d ' ')
+          observed=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets | length')
+          test "$observed" = "$expected"
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Stop builders and revoke ephemeral access
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ${PACKAGE_BUILDERS_CLEANED:-} == 1 ]]; then
+            exit 0
+          fi
+          cleanup_status=0
+          python3 infra/package_builder.py stop \
+            --region "$AWS_REGION" || cleanup_status=$?
+          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            python3 infra/package_builder.py close-ci-access \
+              --region "$AWS_REGION" \
+              --receipt "$RUNNER_TEMP/package-builder-access.json" \
+              || cleanup_status=$?
+          fi
+          exit "$cleanup_status"

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -16,6 +17,12 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "package_builder.py"
+WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".github"
+    / "workflows"
+    / "package-release.yml"
+)
 SPEC = importlib.util.spec_from_file_location("package_builder", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 package_builder = importlib.util.module_from_spec(SPEC)
@@ -2731,6 +2738,68 @@ class ReleaseAutomationTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(parser.parse_args(argv).command, command)
+
+
+class PackageReleaseWorkflowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    def test_workflow_is_main_only_serial_and_exact_revision_bound(self) -> None:
+        self.assertIn("branches:\n      - main", self.workflow)
+        self.assertIn("if: github.ref == 'refs/heads/main'", self.workflow)
+        self.assertIn("group: bioseq-native-package-release-main", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
+        self.assertIn("ref: ${{ github.sha }}", self.workflow)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow)
+
+    def test_workflow_uses_only_secret_backed_standard_credential_env(self) -> None:
+        self.assertIn(
+            "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}", self.workflow
+        )
+        self.assertIn(
+            "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}", self.workflow
+        )
+        self.assertEqual(self.workflow.count("${{ secrets.GH_PAT }}"), 1)
+        self.assertIn("GH_TOKEN: ${{ secrets.GH_PAT }}", self.workflow)
+        self.assertNotIn("aws configure", self.workflow)
+
+    def test_workflow_reuses_full_matrix_and_has_cost_cleanup(self) -> None:
+        self.assertIn("package_builder.py matrix --require-complete", self.workflow)
+        self.assertIn("package_builder.py run \\", self.workflow)
+        self.assertIn("--existing-only", self.workflow)
+        self.assertNotIn("--architectures", self.workflow)
+        self.assertNotIn("--distros", self.workflow)
+        self.assertNotIn("--postgres", self.workflow)
+        self.assertGreaterEqual(self.workflow.count("package_builder.py stop"), 2)
+        self.assertGreaterEqual(
+            self.workflow.count("package_builder.py close-ci-access"), 2
+        )
+        self.assertIn("if: always()", self.workflow)
+        self.assertLess(
+            self.workflow.index("- name: Stop builders before publishing"),
+            self.workflow.index("- name: Create deterministic GitHub release"),
+        )
+
+    def test_third_party_actions_are_immutable_sha_pinned(self) -> None:
+        uses = re.findall(
+            r"^\s*uses:\s*([^\s#]+)(?:\s+#.*)?$", self.workflow, re.MULTILINE
+        )
+        self.assertEqual(len(uses), 2)
+        for value in uses:
+            owner_action, separator, revision = value.partition("@")
+            self.assertTrue(separator)
+            self.assertIn("/", owner_action)
+            self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_release_is_draft_until_asset_count_is_complete(self) -> None:
+        self.assertIn(
+            'tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"', self.workflow
+        )
+        self.assertIn("gh release create", self.workflow)
+        self.assertIn("--draft", self.workflow)
+        self.assertIn('test "$observed" = "$expected"', self.workflow)
+        self.assertIn("gh release edit", self.workflow)
+        self.assertIn("--draft=false", self.workflow)
 
 
 if __name__ == "__main__":
