@@ -32,38 +32,13 @@ module;
 
 #include <bioseq/pg_build_profile.h>
 
-// The chain primitive (`pipe::detail::dispatch_chain`) relies
-// on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
-// gcc and clang honour the attribute at -O1+, but downgrade silently at -O0.
-// Build configs that compile this module without optimisation produce
-// stack-spilled adaptor frames that defeat the point of the cascade; refuse
-// to compile in that mode.
-#if !defined(__OPTIMIZE__) && !defined(BIOSEQ_PACKAGE_O0_PROFILE)
-#error "pipeline chain primitive requires -O1 or higher. " \
-        "Use -Og or -O1 -g for debug builds of pipeline/pipe.cppm; only the explicit " \
-        "distribution package O0 profile may disable this guard."
-#endif
-
-#ifndef BIOSEQ_PIPELINE_FORCE_INLINE
-#define BIOSEQ_PIPELINE_FORCE_INLINE 1
-#endif
-
-#if defined(BIOSEQ_PACKAGE_O0_PROFILE) && BIOSEQ_PIPELINE_FORCE_INLINE
-#error "BIOSEQ_PACKAGE_O0_PROFILE requires BIOSEQ_PIPELINE_FORCE_INLINE=0"
-#endif
-
-#if BIOSEQ_PIPELINE_FORCE_INLINE
+// Production and package profiles compile the recursive dispatch cascade at
+// -O3, so its inlining contract is unconditional.
 #define BIOSEQ_PIPELINE_INLINE_ATTR [[gnu::always_inline]]
 #define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR [[gnu::always_inline, gnu::flatten]]
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard, gnu::always_inline]]
 #define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR                                              \
     [[nodiscard, gnu::always_inline, gnu::flatten]]
-#else
-#define BIOSEQ_PIPELINE_INLINE_ATTR
-#define BIOSEQ_PIPELINE_INLINE_FLATTEN_ATTR
-#define BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR [[nodiscard]]
-#define BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR [[nodiscard]]
-#endif
 
 #include <algorithm>
 #include <array>

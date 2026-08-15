@@ -489,6 +489,27 @@ if(BIOSEQ_PACKAGE_BUILD)
     message(FATAL_ERROR
       "BIOSEQ_PACKAGE_BUILD requires AWS_MACHINE_LINUX_CLANG22")
   endif()
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+      "BIOSEQ_PACKAGE_BUILD requires CMAKE_BUILD_TYPE=Release; got "
+      "'${CMAKE_BUILD_TYPE}'")
+  endif()
+  set(_bioseq_package_release_flags
+    "-O3 -DNDEBUG -fno-omit-frame-pointer")
+  foreach(_bioseq_package_language IN ITEMS C CXX)
+    set(_bioseq_package_flags_variable
+      "CMAKE_${_bioseq_package_language}_FLAGS_RELEASE")
+    if(NOT "${${_bioseq_package_flags_variable}}" STREQUAL
+        "${_bioseq_package_release_flags}")
+      message(FATAL_ERROR
+        "BIOSEQ_PACKAGE_BUILD requires ${_bioseq_package_flags_variable}="
+        "'${_bioseq_package_release_flags}'; got "
+        "'${${_bioseq_package_flags_variable}}'")
+    endif()
+  endforeach()
+  unset(_bioseq_package_flags_variable)
+  unset(_bioseq_package_language)
+  unset(_bioseq_package_release_flags)
   if(NOT DEFINED ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
       OR NOT "$ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64"
       OR NOT "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64")
@@ -990,9 +1011,6 @@ if(BIOSEQ_PACKAGE_BUILD)
     endif()
     target_link_libraries(${_bioseq_package_target} PRIVATE
       bioseq_package_static_cxx_runtime)
-    target_compile_definitions(${_bioseq_package_target} PRIVATE
-      BIOSEQ_PACKAGE_O0_PROFILE=1
-      BIOSEQ_PIPELINE_FORCE_INLINE=0)
     set_target_properties(${_bioseq_package_target} PROPERTIES
       BUILD_RPATH ""
       INSTALL_RPATH ""

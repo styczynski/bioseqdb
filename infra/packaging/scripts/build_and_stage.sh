@@ -145,8 +145,8 @@ package_cmake_invariants() {
     CMAKE_CXX_COMPILER_LAUNCHER "${compiler_launcher}" \
     CMAKE_C_FLAGS "" \
     CMAKE_CXX_FLAGS "-stdlib=libc++" \
-    CMAKE_C_FLAGS_RELEASE "-O0 -DNDEBUG -fno-omit-frame-pointer" \
-    CMAKE_CXX_FLAGS_RELEASE "-O0 -DNDEBUG -fno-omit-frame-pointer" \
+    CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG -fno-omit-frame-pointer" \
+    CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -fno-omit-frame-pointer" \
     CMAKE_EXE_LINKER_FLAGS "-stdlib=libc++ -static-libstdc++ -static-libgcc" \
     CMAKE_SKIP_RPATH ON \
     PostgreSQL_CONFIG "${pg_config}" \
@@ -218,8 +218,8 @@ if [[ "${action}" == "build" ]]; then
       -DCMAKE_CXX_COMPILER_LAUNCHER="${compiler_launcher}" \
       -DCMAKE_C_FLAGS= \
       -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
-      -DCMAKE_C_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
-      -DCMAKE_CXX_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
+      -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -fno-omit-frame-pointer" \
+      -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -fno-omit-frame-pointer" \
       -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -static-libstdc++ -static-libgcc" \
       -DCMAKE_SKIP_RPATH=ON \
       -DPostgreSQL_CONFIG="${pg_config}" \

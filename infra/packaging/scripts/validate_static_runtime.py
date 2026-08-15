@@ -59,7 +59,7 @@ extern "C" __attribute__((visibility("default"))) int bioseq_runtime_probe() {
             [
                 str(cxx),
                 "-std=c++20",
-                "-O0",
+                "-O3",
                 "-fPIC",
                 "-shared",
                 "-stdlib=libc++",

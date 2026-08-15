@@ -464,7 +464,9 @@ class CliAndContainerTests(unittest.TestCase):
 
 
 class FormatPlanTests(unittest.TestCase):
-    def test_deb_and_rpm_metadata_and_build_plans_are_direct_and_o0(self) -> None:
+    def test_deb_and_rpm_metadata_and_build_plans_are_direct_and_optimized(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             debian = cell_context(root, model.DistroId.DEBIAN_13)
@@ -1462,6 +1464,186 @@ class PipelineOrchestrationTests(unittest.TestCase):
             )
 
 
+class PackageOptimizationContractTests(unittest.TestCase):
+    @staticmethod
+    def _write_compile_database(directory: Path, entries: object) -> Path:
+        path = directory / "compile_commands.json"
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _verify_compile_database(path: Path) -> int:
+        namespace = runpy.run_path(
+            str(
+                PACKAGING_ROOT
+                / "scripts"
+                / "verify_compile_optimization.py"
+            )
+        )
+        return namespace["verify"](path)
+
+    def test_compile_database_verifier_accepts_arguments_and_command_o3(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = self._write_compile_database(
+                Path(raw),
+                [
+                    {
+                        "file": "first.cpp",
+                        "arguments": [
+                            "clang++",
+                            "-stdlib=libc++",
+                            "-O3",
+                            "-c",
+                            "first.cpp",
+                        ],
+                    },
+                    {
+                        "file": "second.cpp",
+                        "command": "clang++ -O3 -c second.cpp",
+                    },
+                ],
+            )
+            self.assertEqual(self._verify_compile_database(path), 2)
+
+    def test_compile_database_verifier_rejects_non_o3_profiles(self) -> None:
+        invalid_arguments = {
+            "missing": ["clang++", "-c", "unit.cpp"],
+            "O0": ["clang++", "-O0", "-c", "unit.cpp"],
+            "O1": ["clang++", "-O1", "-c", "unit.cpp"],
+            "O2": ["clang++", "-O2", "-c", "unit.cpp"],
+            "Og": ["clang++", "-Og", "-c", "unit.cpp"],
+            "Os": ["clang++", "-Os", "-c", "unit.cpp"],
+            "Oz": ["clang++", "-Oz", "-c", "unit.cpp"],
+            "Ofast": ["clang++", "-Ofast", "-c", "unit.cpp"],
+            "mixed": ["clang++", "-O3", "-O0", "-c", "unit.cpp"],
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for name, arguments in invalid_arguments.items():
+                with self.subTest(name=name):
+                    path = self._write_compile_database(
+                        directory,
+                        [{"file": "unit.cpp", "arguments": arguments}],
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "explicit -O3"):
+                        self._verify_compile_database(path)
+
+    def test_compile_database_verifier_rejects_lto(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for flag in ("-flto", "-flto=thin"):
+                with self.subTest(flag=flag):
+                    path = self._write_compile_database(
+                        directory,
+                        [
+                            {
+                                "file": "unit.cpp",
+                                "arguments": [
+                                    "clang++",
+                                    "-O3",
+                                    flag,
+                                    "-c",
+                                    "unit.cpp",
+                                ],
+                            }
+                        ],
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "forbidden LTO"):
+                        self._verify_compile_database(path)
+
+    def test_compile_database_verifier_rejects_malformed_inputs(self) -> None:
+        invalid_databases = {
+            "empty": [],
+            "not-a-list": {},
+            "non-object-entry": [[]],
+            "invalid-arguments": [
+                {"file": "unit.cpp", "arguments": ["clang++", 3]}
+            ],
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            for name, entries in invalid_databases.items():
+                with self.subTest(name=name):
+                    path = self._write_compile_database(directory, entries)
+                    with self.assertRaises(RuntimeError):
+                        self._verify_compile_database(path)
+
+            malformed_path = directory / "malformed.json"
+            malformed_path.write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "cannot read"):
+                self._verify_compile_database(malformed_path)
+
+    def test_package_authorities_pin_o3_without_obsolete_profiles(self) -> None:
+        root_cmake = (REPOSITORY_ROOT / "CMakeLists.txt").read_text(
+            encoding="utf-8"
+        )
+        presets = (REPOSITORY_ROOT / "CMakePresets.json").read_text(
+            encoding="utf-8"
+        )
+        bioseq_cmake = (
+            REPOSITORY_ROOT / "bioseq" / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        pipeline = (
+            REPOSITORY_ROOT / "bioseq" / "backend" / "pipeline" / "pipe.cppm"
+        ).read_text(encoding="utf-8")
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        codegen_cmake = (
+            REPOSITORY_ROOT / "cmake" / "bioseq_codegen.cmake"
+        ).read_text(encoding="utf-8")
+        runtime_probe = (
+            PACKAGING_ROOT / "scripts" / "validate_static_runtime.py"
+        ).read_text(encoding="utf-8")
+
+        release_flags = "-O3 -DNDEBUG -fno-omit-frame-pointer"
+        self.assertIn(
+            'if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")',
+            root_cmake,
+        )
+        self.assertIn(
+            "foreach(_bioseq_package_language IN ITEMS C CXX)",
+            root_cmake,
+        )
+        self.assertIn(release_flags, root_cmake)
+        self.assertGreaterEqual(build_script.count(release_flags), 4)
+        self.assertEqual(codegen_cmake.count(release_flags), 2)
+        self.assertIn('"-O3",', runtime_probe)
+        self.assertNotIn('"-O0",', runtime_probe)
+
+        for triplet_name in (
+            "arm64-linux-libcxx.cmake",
+            "x64-linux-libcxx.cmake",
+        ):
+            with self.subTest(triplet=triplet_name):
+                triplet = (
+                    REPOSITORY_ROOT / "cmake" / "triplets" / triplet_name
+                ).read_text(encoding="utf-8")
+                self.assertIn('VCPKG_C_FLAGS_RELEASE "-O3"', triplet)
+                self.assertIn('VCPKG_CXX_FLAGS_RELEASE "-O3"', triplet)
+                self.assertNotIn('FLAGS_RELEASE "-O0"', triplet)
+
+        former_profile_authorities = (
+            root_cmake,
+            presets,
+            bioseq_cmake,
+            pipeline,
+        )
+        for token in (
+            "BIOSEQ_PACKAGE_O0_PROFILE",
+            "BIOSEQ_PIPELINE_FORCE_INLINE",
+            "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL",
+        ):
+            for source in former_profile_authorities:
+                with self.subTest(token=token):
+                    self.assertNotIn(token, source)
+        self.assertNotIn("__OPTIMIZE__", pipeline)
+        self.assertIn("BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0", bioseq_cmake)
+        self.assertIn("preset -O3", bioseq_cmake)
+
+
 class BuildAndStageContractTests(unittest.TestCase):
     def test_build_revalidates_complete_package_cmake_profile(self) -> None:
         build_script = (
@@ -1494,11 +1676,11 @@ class BuildAndStageContractTests(unittest.TestCase):
             ("CMAKE_CXX_FLAGS", "-stdlib=libc++"),
             (
                 "CMAKE_C_FLAGS_RELEASE",
-                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+                "-O3 -DNDEBUG -fno-omit-frame-pointer",
             ),
             (
                 "CMAKE_CXX_FLAGS_RELEASE",
-                "-O0 -DNDEBUG -fno-omit-frame-pointer",
+                "-O3 -DNDEBUG -fno-omit-frame-pointer",
             ),
             (
                 "CMAKE_EXE_LINKER_FLAGS",
@@ -1542,6 +1724,17 @@ class BuildAndStageContractTests(unittest.TestCase):
             "--target postgresql_bioseq postgresql_bioseq_cache",
         )
         self.assertLess(profile_check, build_targets)
+        optimization_checks = [
+            match.start()
+            for match in re.finditer(
+                "verify_compile_optimization.py",
+                build_script,
+            )
+        ]
+        self.assertEqual(len(optimization_checks), 2)
+        self.assertLess(optimization_checks[0], build_targets)
+        self.assertGreater(optimization_checks[1], build_targets)
+        self.assertIn("mapfile -t compile_databases", build_script)
 
     def test_build_consumes_exact_generated_production_dso_inventory(self) -> None:
         manifest_name = "bioseq-package-target-artifacts.tsv"

@@ -7,10 +7,10 @@ set(VCPKG_LIBRARY_LINKAGE static)
 set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 
 set(VCPKG_C_FLAGS "")
-set(VCPKG_C_FLAGS_RELEASE "-O0")
+set(VCPKG_C_FLAGS_RELEASE "-O3")
 set(VCPKG_CXX_FLAGS
   "-stdlib=libc++ -D__TBB_WAITPKG_INTRINSICS_PRESENT=0 -Wno-unused-command-line-argument")
-set(VCPKG_CXX_FLAGS_RELEASE "-O0")
+set(VCPKG_CXX_FLAGS_RELEASE "-O3")
 set(VCPKG_LINKER_FLAGS "-stdlib=libc++ -rtlib=compiler-rt")
 
 set(VCPKG_CHAINLOAD_TOOLCHAIN_FILE

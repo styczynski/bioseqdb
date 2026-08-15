@@ -1636,11 +1636,6 @@ endif()
 # POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
 # Domain P consumers care about the major-version-conditional code paths.
 target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
-if(BIOSEQ_PACKAGE_BUILD)
-  target_compile_definitions(bioseq_modules_nopg PRIVATE
-    BIOSEQ_PACKAGE_O0_PROFILE=1
-    BIOSEQ_PIPELINE_FORCE_INLINE=0)
-endif()
 target_compile_definitions(bioseq_modules_nopg PUBLIC
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 target_compile_options(bioseq_modules_nopg PRIVATE
@@ -1719,11 +1714,6 @@ target_sources(bioseq_pipeline_dispatch_owners PRIVATE
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_IMPLEMENTATION_UNITS})
 target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
-if(BIOSEQ_PACKAGE_BUILD)
-  target_compile_definitions(bioseq_pipeline_dispatch_owners PRIVATE
-    BIOSEQ_PACKAGE_O0_PROFILE=1
-    BIOSEQ_PIPELINE_FORCE_INLINE=0)
-endif()
 target_compile_options(bioseq_pipeline_dispatch_owners PRIVATE
   "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>"
   "$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
@@ -2536,20 +2526,9 @@ if(NOT BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
     REGEX "/backend/pg/external/(errors|row_writer|scan)\\.cppm$")
 endif()
 
-# GCC 16.1 can spend many hours and >64 GiB RSS compiling one typed
-# dispatch wrapper at -O3. Keep this as a build knob, not a C++ ifdef:
-# runtime dispatch and algorithm selection are unchanged, and non-GCC
-# builds stay on the preset's normal -O3 path.
-set(BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL "O1" CACHE STRING
-  "Optimization level for GCC 16.1 AWS typed dispatch module units. \
-Allowed: O0, O1, O2, O3. O3 preserves the global preset behavior.")
-set_property(CACHE BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL PROPERTY STRINGS O0 O1 O2 O3)
-if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL MATCHES "^O[0123]$")
-  message(FATAL_ERROR
-    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL must be one of O0, O1, O2, O3; got "
-    "'${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}'")
-endif()
-
+# GCC heavy dispatch owners inherit the production preset's -O3 codegen.
+# Scheduling and forced-template-inlining controls bound compiler resources
+# without lowering optimization or changing runtime dispatch.
 set(BIOSEQ_GCC_TYPED_DISPATCH_JOBS "1" CACHE STRING
   "Ninja compile-pool width for GCC 16.1 AWS typed dispatch module units. \
 0 = inherit the target compile pool.")
@@ -2759,8 +2738,7 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
     set_property(SOURCE ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
       APPEND PROPERTY COMPILE_DEFINITIONS
-        BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0
-        BIOSEQ_PIPELINE_FORCE_INLINE=0)
+        BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0)
   endif()
   if(BIOSEQ_GCC_TYPED_DISPATCH_JOBS GREATER 0)
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS
@@ -2769,18 +2747,10 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
       ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
       PROPERTIES JOB_POOL_COMPILE gcc_typed_dispatch_compile)
   endif()
-  if(NOT BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL STREQUAL "O3")
-    set_property(SOURCE ${BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS}
-      APPEND PROPERTY COMPILE_OPTIONS
-        "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}")
-  endif()
   message(STATUS
-    "bioseq: GCC typed dispatch module units use "
-    "-${BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL}, compile jobs="
+    "bioseq: GCC typed dispatch module units use preset -O3, compile jobs="
     "${BIOSEQ_GCC_TYPED_DISPATCH_JOBS}, template force-inline="
-    "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}; set "
-    "BIOSEQ_GCC_TYPED_DISPATCH_OPT_LEVEL=O3 and "
-    "BIOSEQ_GCC_TEMPLATE_FORCE_INLINE=ON to restore the global preset")
+    "${BIOSEQ_GCC_TEMPLATE_FORCE_INLINE}")
   unset(BIOSEQ_GCC_HEAVY_DISPATCH_IMPLEMENTATION_UNITS)
 endif()
 

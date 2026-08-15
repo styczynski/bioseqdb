@@ -53,6 +53,7 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         self.assertEqual(subject.ARCHITECTURE, "arm64")
         self.assertEqual(subject.IMAGE_TAG, "debian:trixie")
         self.assertEqual(subject.POSTGRES_MAJOR, 17)
+        self.assertEqual(subject.PACKAGE_PROFILE_REVISION, 3)
         self.assertEqual(
             subject.PACKAGE_CACHE_VALUES[
                 "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail unless every package compile command uses only compiler -O0."""
+"""Fail unless every package compile command uses explicit compiler -O3."""
 
 from __future__ import annotations
 
@@ -32,17 +32,14 @@ def verify(path: Path) -> int:
         if not isinstance(entry, dict):
             raise RuntimeError(f"invalid compile command in {path}")
         arguments = command_arguments(entry)
-        forbidden = sorted(
-            {argument for argument in arguments if argument.startswith("-O") and argument != "-O0"}
+        optimization_arguments = sorted(
+            {argument for argument in arguments if argument.startswith("-O")}
         )
-        if forbidden:
+        if optimization_arguments != ["-O3"]:
             raise RuntimeError(
-                f"package compile command contains forbidden optimization {forbidden}: "
+                "package compile command must contain explicit -O3 and no "
+                f"competing optimization flags; found {optimization_arguments}: "
                 f"{entry.get('file', '<unknown>')}"
-            )
-        if "-O0" not in arguments:
-            raise RuntimeError(
-                f"package compile command omits explicit -O0: {entry.get('file', '<unknown>')}"
             )
         forbidden_lto = sorted(
             {
@@ -65,7 +62,7 @@ def main() -> int:
     parser.add_argument("compile_databases", nargs="+", type=Path)
     args = parser.parse_args()
     checked = sum(verify(path) for path in args.compile_databases)
-    print(f"verified {checked} package compile commands at explicit -O0")
+    print(f"verified {checked} package compile commands at explicit -O3")
     return 0
 
 
