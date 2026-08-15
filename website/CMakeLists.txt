@@ -972,6 +972,16 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
   set(_browser_deploy_stamp "${_output_root}/browser-deployment-base.stamp")
   set(_browser_root_stamp "${_output_root}/browser-root-base.stamp")
   set(_browser_bioseqdb_stamp "${_output_root}/browser-bioseqdb-base.stamp")
+  set(_benchmark_fixture_dir
+      "${CMAKE_SOURCE_DIR}/website/tests/fixtures/benchmark_artifacts")
+  set(_benchmark_browser_fixtures
+      "${_benchmark_fixture_dir}/bench_v10_configuration.json"
+      "${_benchmark_fixture_dir}/bench_e2e_configuration.json"
+      "${_benchmark_fixture_dir}/io_bench_v10_configuration.json"
+      "${_benchmark_fixture_dir}/report_138.json"
+      "${_benchmark_fixture_dir}/report_159.json"
+      "${_benchmark_fixture_dir}/report_154.json"
+      "${_benchmark_fixture_dir}/report_7.json")
   set(_fixture_root_slash "${_output_root}/fixture-root")
   set(_fixture_root_bioseqdb "${_output_root}/fixture-bioseqdb")
   add_custom_command(
@@ -1036,6 +1046,7 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             "${CMAKE_SOURCE_DIR}/website/tests/support/static_fixture_server.py"
             "${CMAKE_SOURCE_DIR}/website/tests/support/browser_test_launcher.cmake"
             "${CMAKE_SOURCE_DIR}/website/tests/fixtures/search_tokens_golden.json"
+            ${_benchmark_browser_fixtures}
             ${_design_reference_files}
     COMMENT "website: two-base-path render + pinned browser acceptance"
     USES_TERMINAL VERBATIM)
