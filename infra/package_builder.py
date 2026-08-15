@@ -89,7 +89,7 @@ DEFAULT_REGION = "us-east-1"
 DEFAULT_S3_PREFIX = "bioseq/packages"
 RESOURCE_NAME_PREFIX = "bioseq-package-builder"
 CI_ACCESS_SCHEMA_REVISION = 1
-COLLECTION_SCHEMA_REVISION = 1
+COLLECTION_SCHEMA_REVISION = 2
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
 REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
@@ -1680,16 +1680,16 @@ def stop_existing_builders(region: str, matrix: Matrix) -> dict[str, str]:
         region, matrix, ephemeral_ssh=False
     )
     states = {name: instance_state(records[name]) for name in matrix.architectures}
-    requested: set[str] = set()
     errors: list[str] = []
-    for name, builder in builders.items():
+
+    def stop_builder(name: str, builder: Builder) -> None:
         state = states[name]
         if state == "stopped":
             info(f"{name} builder {builder.instance_id} is already stopped; no-op")
-            continue
+            return
         if state == "stopping":
-            continue
-        if state == "pending":
+            pass
+        elif state == "pending":
             run_command(
                 [
                     require_executable("aws"),
@@ -1706,7 +1706,7 @@ def stop_existing_builders(region: str, matrix: Matrix) -> dict[str, str]:
             raise PackageBuilderError(
                 f"cannot stop {name} builder {builder.instance_id} from state {state!r}"
             )
-        try:
+        if state != "stopping":
             wait_for_ssm_online(region, builder.instance_id)
             response = aws_json(
                 region,
@@ -1729,12 +1729,6 @@ def stop_existing_builders(region: str, matrix: Matrix) -> dict[str, str]:
                 raise PackageBuilderError(
                     f"SSM did not acknowledge stop command for {builder.instance_id}"
                 )
-            requested.add(name)
-        except Exception as error:
-            errors.append(f"{name}: {error}")
-    for name, builder in builders.items():
-        if states[name] not in {"stopping"} and name not in requested:
-            continue
         run_command(
             [
                 require_executable("aws"),
@@ -1747,6 +1741,20 @@ def stop_existing_builders(region: str, matrix: Matrix) -> dict[str, str]:
                 builder.instance_id,
             ]
         )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-builder-stop"
+    ) as executor:
+        futures = {
+            executor.submit(stop_builder, name, builder): name
+            for name, builder in builders.items()
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                errors.append(f"{name}: {error}")
     final_records = validate_builders(region, builders, matrix)
     final_states = {
         name: instance_state(final_records[name]) for name in matrix.architectures
@@ -3787,11 +3795,12 @@ def collect_release_assets(
     run_id = str(result.get("run_id", ""))
     if RUN_ID_RE.fullmatch(run_id) is None:
         raise PackageBuilderError("package run id is malformed")
-    run_receipt = output_dir / f"package-run-{run_id}.json"
+    release_identity = f"v{EXPECTED_PACKAGE_VERSION}-{revision[:12]}"
+    run_receipt = output_dir / f"package-run-{release_identity}.json"
     write_json_atomic(run_receipt, result, mode=0o644)
     for architecture in sorted(manifests):
         write_json_atomic(
-            output_dir / f"package-manifest-{run_id}-{architecture}.json",
+            output_dir / f"package-manifest-{release_identity}-{architecture}.json",
             manifests[architecture],
             mode=0o644,
         )
@@ -3799,6 +3808,7 @@ def collect_release_assets(
         "schema_revision": COLLECTION_SCHEMA_REVISION,
         "package_version": EXPECTED_PACKAGE_VERSION,
         "source_revision": revision,
+        "release_identity": release_identity,
         "run_id": run_id,
         "matrix": {
             "architectures": list(selection.architectures),
@@ -3809,7 +3819,7 @@ def collect_release_assets(
         "assets": assets,
     }
     write_json_atomic(
-        output_dir / f"package-assets-{run_id}.json", collection, mode=0o644
+        output_dir / f"package-assets-{release_identity}.json", collection, mode=0o644
     )
     checksummed = sorted(path for path in output_dir.iterdir() if path.is_file())
     checksums = "".join(
@@ -3817,6 +3827,274 @@ def collect_release_assets(
     )
     (output_dir / "SHA256SUMS").write_text(checksums, encoding="ascii")
     return collection
+
+
+def read_release_json(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PackageBuilderError(f"cannot read {label} {path.name}: {error}") from error
+    if not isinstance(value, dict):
+        raise PackageBuilderError(f"{label} {path.name} must be an object")
+    return value
+
+
+def verify_release_asset_directory(
+    *, asset_dir: Path, expected_revision: str,
+) -> dict[str, Any]:
+    """Validate a downloaded published release without AWS or mutable state."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None:
+        raise PackageBuilderError("expected release revision must be a full Git SHA-1")
+    if asset_dir.is_symlink() or not asset_dir.is_dir():
+        raise PackageBuilderError(f"release asset directory is not a real directory: {asset_dir}")
+    entries = list(asset_dir.iterdir())
+    if any(path.is_symlink() or not path.is_file() for path in entries):
+        raise PackageBuilderError("release asset directory may contain only regular files")
+    entry_names = {path.name for path in entries}
+    if len(entry_names) != len(entries):
+        raise PackageBuilderError("release asset directory contains duplicate names")
+
+    matrix = load_matrix()
+    selection = Selection(
+        tuple(matrix.architectures),
+        tuple(matrix.distributions),
+        matrix.postgresql_majors,
+    )
+    expected_count = (
+        len(selection.architectures)
+        * len(selection.distributions)
+        * len(selection.postgresql_majors)
+    )
+    release_identity = f"v{EXPECTED_PACKAGE_VERSION}-{expected_revision[:12]}"
+    collection_name = f"package-assets-{release_identity}.json"
+    run_name = f"package-run-{release_identity}.json"
+    manifest_names = {
+        architecture: f"package-manifest-{release_identity}-{architecture}.json"
+        for architecture in selection.architectures
+    }
+
+    collection = read_release_json(
+        asset_dir / collection_name, label="release collection receipt"
+    )
+    require_exact_keys(
+        collection,
+        {
+            "schema_revision",
+            "package_version",
+            "source_revision",
+            "release_identity",
+            "run_id",
+            "matrix",
+            "assets",
+        },
+        "release collection receipt",
+    )
+    if (
+        type(collection["schema_revision"]) is not int
+        or collection["schema_revision"] != COLLECTION_SCHEMA_REVISION
+        or collection["package_version"] != EXPECTED_PACKAGE_VERSION
+        or collection["source_revision"] != expected_revision
+        or collection["release_identity"] != release_identity
+    ):
+        raise PackageBuilderError("release collection identity is not current")
+    run_id = collection["run_id"]
+    run_match = RUN_ID_RE.fullmatch(run_id) if isinstance(run_id, str) else None
+    if run_match is None or run_match.group("revision") != expected_revision[:12]:
+        raise PackageBuilderError("release collection run id does not match the source revision")
+
+    matrix_receipt = collection["matrix"]
+    if not isinstance(matrix_receipt, dict):
+        raise PackageBuilderError("release collection matrix must be an object")
+    require_exact_keys(
+        matrix_receipt,
+        {"architectures", "distributions", "postgresql_majors", "artifact_count"},
+        "release collection matrix",
+    )
+    expected_matrix = {
+        "architectures": list(selection.architectures),
+        "distributions": list(selection.distributions),
+        "postgresql_majors": list(selection.postgresql_majors),
+        "artifact_count": expected_count,
+    }
+    if matrix_receipt != expected_matrix:
+        raise PackageBuilderError("release collection matrix is not the complete current matrix")
+
+    assets = collection["assets"]
+    if not isinstance(assets, list) or len(assets) != expected_count:
+        raise PackageBuilderError(
+            f"release collection must contain exactly {expected_count} packages"
+        )
+    expected_cells = {
+        (architecture, distro, postgres)
+        for architecture in selection.architectures
+        for distro in selection.distributions
+        for postgres in selection.postgresql_majors
+    }
+    observed_cells: set[tuple[str, str, int]] = set()
+    package_names: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, dict):
+            raise PackageBuilderError("release collection contains a malformed package entry")
+        require_exact_keys(
+            asset,
+            {
+                "filename",
+                "architecture",
+                "distro",
+                "postgresql_major",
+                "package_format",
+                "size",
+                "sha256",
+                "s3",
+            },
+            "release package entry",
+        )
+        architecture = asset["architecture"]
+        distro = asset["distro"]
+        postgres = asset["postgresql_major"]
+        cell = (architecture, distro, postgres)
+        if cell not in expected_cells or cell in observed_cells:
+            raise PackageBuilderError(f"release collection has unexpected package cell {cell}")
+        observed_cells.add(cell)
+        filename = asset["filename"]
+        prefix = f"{distro}--{architecture}--pg{postgres}--"
+        if (
+            not isinstance(filename, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", filename) is None
+            or not filename.startswith(prefix)
+            or filename == prefix
+            or filename in package_names
+        ):
+            raise PackageBuilderError(f"release package filename is invalid: {filename!r}")
+        package_names.add(filename)
+        if asset["package_format"] != matrix.distributions[distro].package_format:
+            raise PackageBuilderError(f"release package format mismatch for {filename}")
+        size = asset["size"]
+        digest = asset["sha256"]
+        if (
+            type(size) is not int
+            or size <= 0
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise PackageBuilderError(f"release package byte identity is invalid: {filename}")
+        package_path = asset_dir / filename
+        if (
+            not package_path.is_file()
+            or package_path.stat().st_size != size
+            or sha256_file(package_path) != digest
+        ):
+            raise PackageBuilderError(f"release package bytes do not match receipt: {filename}")
+        s3 = asset["s3"]
+        if not isinstance(s3, dict):
+            raise PackageBuilderError(f"release package S3 identity is invalid: {filename}")
+        require_exact_keys(
+            s3,
+            {"bucket", "key", "version_id", "etag", "server_side_encryption"},
+            f"release package S3 identity for {filename}",
+        )
+        if (
+            any(
+                not isinstance(s3[key], str) or not s3[key]
+                for key in ("bucket", "key", "version_id", "etag")
+            )
+            or s3["server_side_encryption"] != "AES256"
+        ):
+            raise PackageBuilderError(f"release package S3 identity is incomplete: {filename}")
+    if observed_cells != expected_cells:
+        raise PackageBuilderError("release collection omitted matrix cells")
+
+    run_result = require_current_package_run_result(
+        read_release_json(asset_dir / run_name, label="release run receipt"),
+        label="release run receipt",
+    )
+    expected_selection = {
+        "architectures": list(selection.architectures),
+        "distributions": list(selection.distributions),
+        "postgresql_majors": list(selection.postgresql_majors),
+    }
+    if (
+        run_result.get("status") != "success"
+        or run_result.get("revision") != expected_revision
+        or run_result.get("source_revision") != expected_revision
+        or run_result.get("run_id") != run_id
+        or run_result.get("selection") != expected_selection
+        or run_result.get("artifact_count") != expected_count
+    ):
+        raise PackageBuilderError("release run receipt does not match the release identity")
+    embedded_manifests = run_result.get("manifests")
+    if not isinstance(embedded_manifests, dict) or set(embedded_manifests) != set(
+        selection.architectures
+    ):
+        raise PackageBuilderError("release run receipt does not contain both manifests")
+    for architecture, manifest_name in manifest_names.items():
+        manifest = require_current_package_manifest(
+            read_release_json(asset_dir / manifest_name, label="release manifest"),
+            label=f"{architecture} release manifest",
+        )
+        if manifest != embedded_manifests[architecture]:
+            raise PackageBuilderError(f"{architecture} release manifest differs from run receipt")
+        requested = manifest.get("requested")
+        cells = manifest.get("cells")
+        manifest_cells = {
+            (cell.get("distro"), cell.get("postgres_major"))
+            for cell in cells
+            if isinstance(cell, dict)
+        } if isinstance(cells, list) else set()
+        if (
+            manifest.get("status") != "success"
+            or manifest.get("package_version") != EXPECTED_PACKAGE_VERSION
+            or manifest.get("architecture") != architecture
+            or manifest.get("source_revision") != expected_revision
+            or not isinstance(requested, dict)
+            or requested.get("distros") != list(selection.distributions)
+            or requested.get("postgres") != list(selection.postgresql_majors)
+            or manifest_cells
+            != {
+                (distro, postgres)
+                for distro in selection.distributions
+                for postgres in selection.postgresql_majors
+            }
+        ):
+            raise PackageBuilderError(f"{architecture} release manifest matrix mismatch")
+
+    expected_names = package_names | {
+        collection_name,
+        run_name,
+        *manifest_names.values(),
+        "SHA256SUMS",
+    }
+    if entry_names != expected_names or len(entry_names) != expected_count + 5:
+        raise PackageBuilderError(
+            f"release asset set is incomplete: expected={sorted(expected_names)} "
+            f"observed={sorted(entry_names)}"
+        )
+    try:
+        checksum_text = (asset_dir / "SHA256SUMS").read_text(encoding="ascii")
+    except (OSError, UnicodeError) as error:
+        raise PackageBuilderError(f"cannot read release SHA256SUMS: {error}") from error
+    if not checksum_text.endswith("\n"):
+        raise PackageBuilderError("release SHA256SUMS must end with a newline")
+    checksums: dict[str, str] = {}
+    for line in checksum_text.splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._+~-]*)", line)
+        if match is None or match.group(2) in checksums:
+            raise PackageBuilderError("release SHA256SUMS contains a malformed entry")
+        checksums[match.group(2)] = match.group(1)
+    checksum_names = expected_names - {"SHA256SUMS"}
+    if set(checksums) != checksum_names:
+        raise PackageBuilderError("release SHA256SUMS does not cover the exact asset set")
+    for filename, digest in checksums.items():
+        if sha256_file(asset_dir / filename) != digest:
+            raise PackageBuilderError(f"release SHA256SUMS mismatch for {filename}")
+    return {
+        "status": "valid",
+        "release_identity": release_identity,
+        "source_revision": expected_revision,
+        "package_count": expected_count,
+        "asset_count": len(entry_names),
+    }
 
 
 def write_last_run(payload: dict[str, Any]) -> None:
@@ -4644,6 +4922,14 @@ def cmd_collect(args: argparse.Namespace) -> None:
     print(json.dumps(collection, indent=2, sort_keys=True))
 
 
+def cmd_verify_release_assets(args: argparse.Namespace) -> None:
+    result = verify_release_asset_directory(
+        asset_dir=Path(args.asset_dir).expanduser().resolve(),
+        expected_revision=args.expected_revision,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 def cmd_output(args: argparse.Namespace) -> None:
     del args
     print(json.dumps(tofu_outputs(), indent=2, sort_keys=True))
@@ -4888,6 +5174,14 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--output-dir", required=True)
     collect_parser.add_argument("--expected-revision", required=True)
     collect_parser.set_defaults(handler=cmd_collect)
+
+    verify_release_parser = subparsers.add_parser(
+        "verify-release-assets",
+        help="verify a downloaded release asset set without AWS access",
+    )
+    verify_release_parser.add_argument("--asset-dir", required=True)
+    verify_release_parser.add_argument("--expected-revision", required=True)
+    verify_release_parser.set_defaults(handler=cmd_verify_release_assets)
     return parser
 
 

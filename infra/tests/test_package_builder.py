@@ -2545,11 +2545,18 @@ class ReleaseAutomationTests(unittest.TestCase):
             {"Command": {"CommandId": "cmd-arm64"}},
             {"Command": {"CommandId": "cmd-x64"}},
         ]
+        ssm_wait_barrier = threading.Barrier(2)
+
+        def wait_for_ssm(_region, _instance_id):
+            ssm_wait_barrier.wait(timeout=2)
+
         with mock.patch.object(package_builder, "aws_preflight"), mock.patch.object(
             package_builder,
             "discover_existing_builders",
             return_value=(builders, records),
-        ), mock.patch.object(package_builder, "wait_for_ssm_online"), mock.patch.object(
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online", side_effect=wait_for_ssm
+        ), mock.patch.object(
             package_builder, "aws_json", side_effect=acknowledgements
         ) as aws, mock.patch.object(package_builder, "run_command") as run, mock.patch.object(
             package_builder, "validate_builders", return_value=stopped
@@ -2662,14 +2669,42 @@ class ReleaseAutomationTests(unittest.TestCase):
                         "upload": upload,
                     }
                 )
-            manifests[architecture] = {"cells": cells}
+            manifests[architecture] = {
+                "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
+                "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
+                "architecture": architecture,
+                "status": "success",
+                "started_at": "2026-08-15T12:00:00+00:00",
+                "completed_at": "2026-08-15T12:01:00+00:00",
+                "requested": {
+                    "postgres": list(self.matrix.postgresql_majors),
+                    "distros": list(self.matrix.distributions),
+                },
+                "s3": {
+                    "bucket": "bucket",
+                    "region": "us-east-1",
+                    "base_prefix": "bioseq/packages",
+                },
+                "signing": {
+                    "fingerprint": package_builder.EXPECTED_SIGNING_FINGERPRINT,
+                },
+                "source_revision": revision,
+                "poetry_lock_sha256": lock_sha256,
+                "python_environment": {"python": "3.12", "poetry": "2.1"},
+                "cells": cells,
+                "errors": [],
+            }
             uploads_by_architecture[architecture] = uploads
         result = {
+            "schema_revision": package_builder.PACKAGE_RUN_SCHEMA_REVISION,
             "status": "success",
             "run_id": run_id,
             "revision": revision,
             "source_revision": revision,
             "poetry_lock_sha256": lock_sha256,
+            "worker_generation": package_builder.WORKER_GENERATION,
+            "worker_generation_revision": package_builder.WORKER_GENERATION_REVISION,
+            "completed_at": "2026-08-15T12:01:00+00:00",
             "selection": {
                 "architectures": list(self.matrix.architectures),
                 "distributions": list(self.matrix.distributions),
@@ -2678,7 +2713,11 @@ class ReleaseAutomationTests(unittest.TestCase):
             "bucket": "bucket",
             "s3_prefix": "bioseq/packages",
             "artifact_count": 10,
+            "python_environments": {},
+            "worker_units": {},
+            "worker_launch_acknowledged": {},
             "manifests": manifests,
+            "builders_left_running": {},
         }
 
         def validate(_manifest, *, architecture, **_kwargs):
@@ -2693,10 +2732,6 @@ class ReleaseAutomationTests(unittest.TestCase):
             run_result.write_text(json.dumps(result), encoding="utf-8")
             output = root / "assets"
             with mock.patch.object(
-                package_builder,
-                "require_current_package_run_result",
-                return_value=result,
-            ), mock.patch.object(
                 package_builder,
                 "_result_poetry_environment",
                 return_value=mock.sentinel.environment,
@@ -2717,6 +2752,24 @@ class ReleaseAutomationTests(unittest.TestCase):
             self.assertEqual(len(list(output.glob("*.json"))), 4)
             self.assertEqual(len(list(output.iterdir())), 15)
             self.assertTrue((output / "SHA256SUMS").is_file())
+            release_identity = f"v4.2.3-{revision[:12]}"
+            self.assertTrue(
+                (output / f"package-run-{release_identity}.json").is_file()
+            )
+            self.assertFalse(any(run_id in path.name for path in output.iterdir()))
+            verified = package_builder.verify_release_asset_directory(
+                asset_dir=output, expected_revision=revision
+            )
+            self.assertEqual(verified["package_count"], 10)
+            self.assertEqual(verified["asset_count"], 15)
+            next(iter(output.glob("*.deb"))).write_bytes(b"tampered")
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError,
+                "package bytes do not match receipt",
+            ):
+                package_builder.verify_release_asset_directory(
+                    asset_dir=output, expected_revision=revision
+                )
 
     def test_parser_exposes_release_automation_commands(self) -> None:
         parser = package_builder.build_parser()
@@ -2736,6 +2789,16 @@ class ReleaseAutomationTests(unittest.TestCase):
                 ],
                 "collect",
             ),
+            (
+                [
+                    "verify-release-assets",
+                    "--asset-dir",
+                    "assets",
+                    "--expected-revision",
+                    "a" * 40,
+                ],
+                "verify-release-assets",
+            ),
         ):
             self.assertEqual(parser.parse_args(argv).command, command)
 
@@ -2749,17 +2812,21 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("if: github.ref == 'refs/heads/main'", self.workflow)
         self.assertIn("group: bioseq-native-package-release-main", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
+        self.assertIn("timeout-minutes: 360", self.workflow)
+        self.assertIn("timeout-minutes: 270", self.workflow)
+        self.assertIn("timeout-minutes: 40", self.workflow)
         self.assertIn("ref: ${{ github.sha }}", self.workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow)
 
     def test_workflow_uses_only_secret_backed_standard_credential_env(self) -> None:
-        self.assertIn(
-            "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}", self.workflow
-        )
-        self.assertIn(
-            "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}", self.workflow
-        )
-        self.assertEqual(self.workflow.count("${{ secrets.GH_PAT }}"), 1)
+        access_mapping = "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}"
+        secret_mapping = "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}"
+        self.assertEqual(self.workflow.count(access_mapping), 4)
+        self.assertEqual(self.workflow.count(secret_mapping), 4)
+        global_environment = self.workflow.split("jobs:", 1)[0]
+        self.assertNotIn(access_mapping, global_environment)
+        self.assertNotIn(secret_mapping, global_environment)
+        self.assertEqual(self.workflow.count("${{ secrets.GH_PAT }}"), 2)
         self.assertIn("GH_TOKEN: ${{ secrets.GH_PAT }}", self.workflow)
         self.assertNotIn("aws configure", self.workflow)
 
@@ -2775,6 +2842,13 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
             self.workflow.count("package_builder.py close-ci-access"), 2
         )
         self.assertIn("if: always()", self.workflow)
+        self.assertGreaterEqual(
+            self.workflow.count("if: env.RELEASE_ALREADY_COMPLETE != '1'"), 5
+        )
+        self.assertIn(
+            'if [[ ! -f "$RUNNER_TEMP/package-builder-access.json" ]]',
+            self.workflow,
+        )
         self.assertLess(
             self.workflow.index("- name: Stop builders before publishing"),
             self.workflow.index("- name: Create deterministic GitHub release"),
@@ -2800,6 +2874,20 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('test "$observed" = "$expected"', self.workflow)
         self.assertIn("gh release edit", self.workflow)
         self.assertIn("--draft=false", self.workflow)
+        self.assertIn("[.name, .digest]", self.workflow)
+        self.assertIn("sha256sum", self.workflow)
+        self.assertIn("verify-release-assets", self.workflow)
+        self.assertIn("RELEASE_ALREADY_COMPLETE=1", self.workflow)
+        self.assertIn("git/matching-refs/tags/$tag", self.workflow)
+        self.assertIn('test "$tag_target" = "$GITHUB_SHA"', self.workflow)
+        self.assertLess(
+            self.workflow.index("Reuse an already published exact-commit release"),
+            self.workflow.index("Create ephemeral builder access"),
+        )
+        self.assertLess(
+            self.workflow.index("git/matching-refs/tags/$tag"),
+            self.workflow.index("gh release create"),
+        )
 
 
 if __name__ == "__main__":

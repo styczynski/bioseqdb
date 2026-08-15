@@ -14,8 +14,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
   AWS_REGION: us-east-1
   AWS_DEFAULT_REGION: us-east-1
   PYTHONUNBUFFERED: "1"
@@ -24,7 +22,7 @@ jobs:
   package-release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 720
+    timeout-minutes: 360
 
     steps:
       - name: Check out the exact main commit
@@ -35,6 +33,7 @@ jobs:
           ref: ${{ github.sha }}
 
       - name: Verify release source identity and matrix
+        timeout-minutes: 5
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -45,8 +44,62 @@ jobs:
           [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           printf 'PACKAGE_VERSION=%s\n' "$package_version" >> "$GITHUB_ENV"
 
-      - name: Create ephemeral builder access
+      - name: Reuse an already published exact-commit release
+        timeout-minutes: 10
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -Eeuo pipefail
+          short_sha=${GITHUB_SHA:0:12}
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          if [[ -n "$tag_target" ]]; then
+            test "$tag_target" = "$GITHUB_SHA"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            exit 0
+          fi
+          test "$tag_target" = "$GITHUB_SHA"
+          draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft)
+          if [[ "$draft" = true ]]; then
+            exit 0
+          fi
+
+          published_assets="$RUNNER_TEMP/published-release-assets"
+          mkdir -m 0700 "$published_assets"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --dir "$published_assets"
+          python3 infra/package_builder.py verify-release-assets \
+            --asset-dir "$published_assets" \
+            --expected-revision "$GITHUB_SHA"
+          for asset in "$published_assets"/*; do
+            printf '%s\tsha256:%s\n' \
+              "$(basename "$asset")" \
+              "$(sha256sum "$asset" | cut -d ' ' -f 1)"
+          done | LC_ALL=C sort > "$RUNNER_TEMP/published-local-digests.txt"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq '.assets[] | [.name, .digest] | @tsv' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/published-api-digests.txt"
+          diff -u \
+            "$RUNNER_TEMP/published-local-digests.txt" \
+            "$RUNNER_TEMP/published-api-digests.txt"
+          printf 'RELEASE_ALREADY_COMPLETE=1\n' >> "$GITHUB_ENV"
+
+      - name: Create ephemeral builder access
+        if: env.RELEASE_ALREADY_COMPLETE != '1'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
           set -Eeuo pipefail
           ssh-keygen -q -t ed25519 -N '' \
@@ -57,7 +110,12 @@ jobs:
             --receipt "$RUNNER_TEMP/package-builder-access.json"
 
       - name: Build and collect the complete package matrix
+        if: env.RELEASE_ALREADY_COMPLETE != '1'
+        timeout-minutes: 270
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
           set -Eeuo pipefail
           python3 infra/package_builder.py run \
@@ -71,6 +129,8 @@ jobs:
             --expected-revision "$GITHUB_SHA"
 
       - name: Preserve verified packages and receipts
+        if: env.RELEASE_ALREADY_COMPLETE != '1'
+        timeout-minutes: 15
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bioseq-packages-${{ github.sha }}
@@ -80,7 +140,12 @@ jobs:
           retention-days: 30
 
       - name: Stop builders before publishing
+        if: env.RELEASE_ALREADY_COMPLETE != '1'
+        timeout-minutes: 15
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
           set -Eeuo pipefail
           cleanup_status=0
@@ -96,6 +161,8 @@ jobs:
           exit "$cleanup_status"
 
       - name: Create deterministic GitHub release
+        if: env.RELEASE_ALREADY_COMPLETE != '1'
+        timeout-minutes: 15
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
@@ -110,17 +177,37 @@ jobs:
             "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
             "Source commit: ${GITHUB_SHA}" > "$notes"
 
+          verify_assets() {
+            local expected_assets="$RUNNER_TEMP/expected-assets.txt"
+            local observed_assets="$RUNNER_TEMP/observed-assets.txt"
+            for asset in "$RUNNER_TEMP"/release-assets/*; do
+              printf '%s\tsha256:%s\n' \
+                "$(basename "$asset")" \
+                "$(sha256sum "$asset" | cut -d ' ' -f 1)"
+            done | LC_ALL=C sort > "$expected_assets"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              --jq '.assets[] | [.name, .digest] | @tsv' \
+              | LC_ALL=C sort > "$observed_assets"
+            diff -u "$expected_assets" "$observed_assets"
+          }
+
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          if [[ -n "$tag_target" ]]; then
+            test "$tag_target" = "$GITHUB_SHA"
+          fi
+
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)" = "$GITHUB_SHA"
+            test "$tag_target" = "$GITHUB_SHA"
             draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
               --json isDraft --jq .isDraft)
             if [[ "$draft" = false ]]; then
-              find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f \
-                -exec basename {} \; | LC_ALL=C sort > "$RUNNER_TEMP/expected-assets.txt"
-              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-                --json assets --jq '.assets[].name' | LC_ALL=C sort \
-                > "$RUNNER_TEMP/observed-assets.txt"
-              diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/observed-assets.txt"
+              verify_assets
               exit 0
             fi
           else
@@ -140,23 +227,29 @@ jobs:
           observed=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
             --json assets --jq '.assets | length')
           test "$observed" = "$expected"
+          verify_assets
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
 
       - name: Stop builders and revoke ephemeral access
         if: always()
+        timeout-minutes: 40
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
           set -Eeuo pipefail
           if [[ ${PACKAGE_BUILDERS_CLEANED:-} == 1 ]]; then
             exit 0
           fi
+          if [[ ! -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
+            exit 0
+          fi
           cleanup_status=0
           python3 infra/package_builder.py stop \
             --region "$AWS_REGION" || cleanup_status=$?
-          if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]; then
-            python3 infra/package_builder.py close-ci-access \
-              --region "$AWS_REGION" \
-              --receipt "$RUNNER_TEMP/package-builder-access.json" \
-              || cleanup_status=$?
-          fi
+          python3 infra/package_builder.py close-ci-access \
+            --region "$AWS_REGION" \
+            --receipt "$RUNNER_TEMP/package-builder-access.json" \
+            || cleanup_status=$?
           exit "$cleanup_status"
