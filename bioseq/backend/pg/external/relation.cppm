@@ -1,4 +1,5 @@
-/// @brief Read-only PostgreSQL table access method for external relations.
+/// @file
+/// @brief Defines the read-only table access method for external relations.
 module;
 #include <bioseq/pg_compat.h>
 

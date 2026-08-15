@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Implements typed sequence dispatch for generated namespaces.
+ */
 // Attribute-driven namespace-materialization input only. This scan-only module
 // supplies canonical source geometry; it is never attached to a compiler target.
 module;

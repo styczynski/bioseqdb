@@ -348,7 +348,7 @@ void bioseq_rescan(TableScanDesc sscan,
                    bool allow_pagemode) {
     column_scan_handle scan = reinterpret_cast<column_scan_handle>(sscan);
 
-    /* XXX: hack to pass in new quals that aren't actually scan keys */
+    /* Adapts the scan-key pointer to the column reader's qualifier list. */
     List* scan_qual = reinterpret_cast<List*>(key);
 
     if (scan->read_state != nullptr) {
@@ -466,7 +466,7 @@ init_index_fetch_seq_cache(index_fetch_state* scan, Relation rel, MemoryContext 
 IndexFetchTableData* bioseq_index_fetch_begin(Relation rel) {
     Oid relfilelocator = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilelocator, GetCurrentSubTransactionId())) {
-        /* XXX: maybe we can just flush the data and continue */
+        /* Rejects index fetches while a parent transaction has pending writes. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "cannot read from index when there is unflushed data in "
             "upper transactions");
@@ -494,7 +494,7 @@ export IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel,
                                                               Bitmapset* attr_needed) {
     Oid relfilenode = rel->rd_locator.relNumber;
     if (writes_pending_in_parent_transactions(relfilenode, GetCurrentSubTransactionId())) {
-        /* XXX: maybe we can just flush the data and continue */
+        /* Rejects index fetches while a parent transaction has pending writes. */
         bioseq_log<logging_level::error, logging_target::postgres>(
             "cannot read from index when there is unflushed data in "
             "upper transactions");

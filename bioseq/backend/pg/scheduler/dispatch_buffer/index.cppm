@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Implements buffered sequence dispatch for custom scans.
+ */
 /*-------------------------------------------------------------------------
  *
  * scheduler/dispatch_buffer/index.cppm

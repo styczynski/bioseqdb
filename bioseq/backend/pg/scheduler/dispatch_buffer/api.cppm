@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Declares the custom-scan API for buffered sequence dispatch.
+ */
 /*-------------------------------------------------------------------------
  *
  * scheduler/dispatch_buffer/api.cppm

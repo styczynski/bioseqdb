@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Declares batch processing for sequence dispatch.
+ */
 /*-------------------------------------------------------------------------
  *
  * scheduler/dispatch_processor/index.cppm

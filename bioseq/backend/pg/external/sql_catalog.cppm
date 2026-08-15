@@ -1,4 +1,5 @@
-/// @brief Declarative SQL schema for external-provider relations.
+/// @file
+/// @brief Declares the SQL schema for external-provider relations.
 module;
 
 #include <cstdint>
