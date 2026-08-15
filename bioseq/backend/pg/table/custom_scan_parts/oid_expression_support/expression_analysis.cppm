@@ -1,0 +1,295 @@
+/**
+ * @file
+ * @brief Analyzes volatility, mmsearch calls, and coarse operand shape.
+ */
+module;
+// Anchor Highway in this global module fragment so target-specific definitions
+// imported through multiple module graphs share one translation-unit context.
+#include <bioseq/pg_compat.h>
+#include <hwy/highway.h>
+
+extern "C" {
+#include "catalog/namespace.h"
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_language_d.h"
+#include "catalog/pg_proc.h"
+#include "commands/extension.h"
+#include "optimizer/appendinfo.h"
+#include "optimizer/planmain.h"
+#include "storage/dsm.h"
+#include "storage/shmem.h"
+#include "utils/inval.h"
+#include "utils/syscache.h"
+
+#include "rewrite/rewriteManip.h"
+}
+
+export module bioseq.postgres.table:custom_scan_oid_expression_support_expression_analysis;
+
+import std;
+import bioseq.postgres.table.io;
+import :access_method;
+import :access_common;
+import :utils;
+import bioseq.postgres.column.table_access;
+import bioseq.postgres.configuration.aligner;
+import bioseq.postgres.configuration.core;
+import bioseq.postgres.vectorization.types;
+import bioseq.postgres.vectorization.execution;
+import bioseq.common.logging;
+import bioseq.common.checked_arithmetic;
+import bioseq.highway.dispatch_contract;
+import bioseq.postgres.external.path_builder_slot;
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.table.types;
+import bioseq.postgres.table.scan_state;
+import bioseq.postgres.table.sql_row_codecs;
+import bioseq.postgres.table.sql_rows;
+import bioseq.postgres.support;
+import bioseq.postgres.support.datums;
+import bioseq.codegen.sql.annotation_model;
+import bioseq.postgres.scheduler.dispatch_buffer.api;
+import bioseq.postgres.scheduler.supervisor;
+import bioseq.postgres.scheduler.supervisor.vulkan;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.memory_admission;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.pipeline.stats;
+import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.pipe;
+import bioseq.sequences.cigar;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.postgres.storage.manager;
+import bioseq.storage.layout;
+import bioseq.storage.size;
+import bioseq.storage.coordinates;
+import bioseq.storage.lazy_sequence;
+import bioseq.postgres.storage.scanner;
+import bioseq.indexing.type;
+import bioseq.indexing.symbol_counts;
+import bioseq.postgres.storage.indexing.chunked_storage;
+import bioseq.postgres.storage.indexing.admin;
+import bioseq.instrumentation.summary_writer;
+import bioseq.common.seqan_adapter;
+import bioseq.postgres.table.batch_sort_scan;
+
+import :custom_scan_runtime_support;
+
+import :custom_scan_oid_expression_support_oid_catalog;
+
+using namespace bioseq::postgres::support;
+
+export {
+    /*
+     * Classifier used by planner ownership and BeginCustomScan discovery. Returns
+     * true if funcid
+     * matches any of the bioseq projection stubs (i.e. anything that
+     * VarInjectorMutator will rewrite into a placeholder Const).
+     */
+    /*
+     * Accepts either the 2-arg mmsearch(seq, seq) or the 3-arg
+     * mmsearch(seq, seq, bioseq_aligner_options). Call sites care about
+     * "is this a match qual" rather than the arity, so funnelling both
+     * overloads here avoids scattering the same disjunction everywhere.
+     */
+    [[nodiscard]] inline bool is_mmsearch_funcid(Oid funcid, const bioseq_stub_oids& o) {
+        return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
+    }
+
+    struct raw_mmsearch_options_validation {
+        const bioseq_stub_oids* oids = nullptr;
+    };
+
+    [[nodiscard]] inline bool is_volatile_sql_function(const Oid function_oid) {
+        HeapTuple procedure_tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(function_oid));
+        if (!HeapTupleIsValid(procedure_tuple))
+            return false;
+        const Form_pg_proc procedure = reinterpret_cast<Form_pg_proc>(GETSTRUCT(procedure_tuple));
+        const bool result =
+            procedure->provolatile == PROVOLATILE_VOLATILE && procedure->prolang == SQLlanguageId;
+        ReleaseSysCache(procedure_tuple);
+        return result;
+    }
+
+    inline bool contains_volatile_sql_function_node(Node* node, void* context);
+
+    [[nodiscard]] inline bool contains_volatile_sql_function_query(Query* query, void* context) {
+        return query != nullptr &&
+               query_tree_walker(
+                   query, contains_volatile_sql_function_node, context, QTW_EXAMINE_RTES_BEFORE);
+    }
+
+    [[nodiscard]] inline bool contains_volatile_sql_function_node(Node* node, void* context) {
+        if (node == nullptr)
+            return false;
+        if (FuncExpr* expression = try_cast_pg_node<FuncExpr>(node);
+            expression != nullptr && is_volatile_sql_function(expression->funcid))
+            return true;
+        if (IsA(node, RangeTblEntry)) {
+            /* query_tree_walker owns traversal of RTE expressions and subqueries. */
+            return false;
+        }
+        if (Query* query = try_cast_pg_node<Query>(node)) {
+            return contains_volatile_sql_function_query(query, context);
+        }
+        return expression_tree_walker(node, contains_volatile_sql_function_node, context);
+    }
+
+    /* Identify only volatile SQL functions whose wrapper provenance can be lost
+     * when standard_planner simplifies their options subtree.  This catalog walk
+     * inspects nodes without invoking any expression. */
+    [[nodiscard]] inline bool contains_volatile_sql_function(Node* expression) {
+        return contains_volatile_sql_function_node(expression, nullptr);
+    }
+
+    inline bool validate_raw_mmsearch_options_node(Node* node,
+                                                   raw_mmsearch_options_validation* validation);
+
+    inline void validate_raw_mmsearch_options_query(Query* query,
+                                                    raw_mmsearch_options_validation* validation) {
+        if (query == nullptr) {
+            return;
+        }
+        (void)query_tree_walker(
+            query, validate_raw_mmsearch_options_node, validation, QTW_EXAMINE_RTES_BEFORE);
+    }
+
+    inline bool validate_raw_mmsearch_options_node(Node* node,
+                                                   raw_mmsearch_options_validation* validation) {
+        if (node == nullptr) {
+            return false;
+        }
+        if (FuncExpr* expression = try_cast_pg_node<FuncExpr>(node);
+            expression != nullptr && is_mmsearch_funcid(expression->funcid, *validation->oids) &&
+            expression->funcid == validation->oids->mmsearch_with_opts_oid &&
+            list_length(expression->args) == 3) {
+            Node* options = reinterpret_cast<Node*>(list_nth(expression->args, 2));
+            if (contains_volatile_sql_function(options)) {
+                ereport(
+                    ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("mmsearch qualifier is not owned by a Bioseq executor"),
+                     errdetail("Volatile aligner options cannot be reduced to a statement-stable "
+                               "executor-owned value."),
+                     errhint(
+                         "Pass a constant bioseq_aligner_options value as the third argument.")));
+            }
+        }
+        if (IsA(node, RangeTblEntry)) {
+            /* query_tree_walker owns traversal of RTE expressions and subqueries. */
+            return false;
+        }
+        if (IsA(node, Query)) {
+            validate_raw_mmsearch_options_query(castNode(Query, node), validation);
+            return false;
+        }
+        return expression_tree_walker(node, validate_raw_mmsearch_options_node, validation);
+    }
+
+    /** @brief Reject volatile raw options before planner simplification removes their provenance.
+     *
+     * Called by the top-level planner hook while the analyzed Query still retains
+     * SQL-function volatility.  standard_planner simplification may erase that
+     * provenance by replacing the wrapper with its constant body. */
+    void bioseq_validate_raw_mmsearch_options(Query* query) {
+        const bioseq_stub_oids* oids = try_get_cached_stub_oids();
+        if (query == nullptr || oids == nullptr) {
+            return;
+        }
+        raw_mmsearch_options_validation validation{oids};
+        validate_raw_mmsearch_options_query(query, &validation);
+    }
+
+    struct mmsearch_qualifier_walker {
+        const bioseq_stub_oids* oids = nullptr;
+    };
+
+    struct mmsearch_qualifier_visitor {
+        [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
+                                              pg_node_view node,
+                                              mmsearch_qualifier_walker& data) const {
+            if (FuncExpr* fe = node.try_cast<FuncExpr>()) {
+                if (is_mmsearch_funcid(fe->funcid, *data.oids)) {
+                    return pg_walk_step::stop;
+                }
+            }
+            return pg_walk_step::descend;
+        }
+    };
+
+    [[nodiscard]] bool contains_mmsearch_qualifier(Node* node, const bioseq_stub_oids& oids) {
+        mmsearch_qualifier_walker data{&oids};
+        mmsearch_qualifier_visitor visitor;
+        return walk_pg_expression_including_root(node, data, visitor);
+    }
+
+    struct mmsearch_occurrence_counter {
+        const bioseq_stub_oids* oids = nullptr;
+        std::size_t count = 0;
+    };
+
+    struct mmsearch_occurrence_visitor {
+        [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
+                                              pg_node_view node,
+                                              mmsearch_occurrence_counter& data) const {
+            if (FuncExpr* fe = node.try_cast<FuncExpr>();
+                fe != nullptr && is_mmsearch_funcid(fe->funcid, *data.oids)) {
+                ++data.count;
+            }
+            return pg_walk_step::descend;
+        }
+    };
+
+    [[nodiscard]] std::size_t count_mmsearch_occurrences(Node* node, const bioseq_stub_oids& oids) {
+        mmsearch_occurrence_counter data{&oids, 0};
+        mmsearch_occurrence_visitor visitor;
+        walk_pg_expression_including_root(node, data, visitor);
+        return data.count;
+    }
+
+    struct owned_mmsearch_restriction {
+        RestrictInfo* restriction = nullptr;
+        FuncExpr* normalized_expr = nullptr;
+        List* extra_restrictions = NIL;
+        List* extra_normalized_exprs = NIL;
+    };
+
+    /* Cheap prefilter used by the early clause-ownership pass.  The complete
+     * grammar/nulling/type validation lives beside the per-row recipe validator
+     * (which
+     * is declared later in this translation unit); this predicate only keeps a
+     * potentially base-local sequence expression alive until that validation can
+     * run in AddBioseqColumnScanPath.  Volatility inside an operand is deliberately
+     * not rejected: the expression remains at its original baserel frontier and is
+     * evaluated once by its authoritative ExprState. */
+    [[nodiscard]] bool coarse_base_mmsearch_operand_candidate(Node* expression,
+                                                              RelOptInfo* rel,
+                                                              const bioseq_stub_oids& oids,
+                                                              const bool require_sequence_var) {
+        if (expression == nullptr || rel == nullptr ||
+            exprType(expression) != oids.bioseq_seq_type_oid ||
+            expression_returns_set(expression) || contain_subplans(expression))
+            return false;
+        constexpr int pull_flags =
+            PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+        List* variables = pull_var_clause(expression, pull_flags);
+        bool saw_sequence_var = false;
+        bool valid = true;
+        for (Var* variable : postgres_list<Var>(variables)) {
+            if (variable == nullptr || !bioseq_is_concrete_rte_varno(variable->varno) ||
+                variable->varno != rel->relid || variable->varattno <= 0 ||
+                variable->varlevelsup != 0 || !bms_is_empty(variable->varnullingrels)) {
+                valid = false;
+                break;
+            }
+            if (variable->vartype == oids.bioseq_seq_type_oid) {
+                saw_sequence_var = true;
+            }
+        }
+        list_free(variables);
+        return valid && (!require_sequence_var || saw_sequence_var);
+    }
+
+} // export custom-scan partition declarations

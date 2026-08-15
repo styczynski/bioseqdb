@@ -283,7 +283,7 @@ export {
             planner_owned_target_recipe != nullptr &&
             try_cast_pg_node<Var>(planner_owned_target_recipe) == nullptr;
 
-        /* XXX: also need to store projected column list for EXPLAIN */
+        /* EXPLAIN does not retain a separate projected-column list here. */
 
         if (bioseq::settings::planner::qual_pushdown::enabled) {
             /*
@@ -295,10 +295,8 @@ export {
              * separate from the list of all clauses by making them sublists of a
              * 2-element list.
              *
-             * XXX: custom_exprs are the quals that will be pushed into the
-             * columnar reader code; some of these may not be usable. We should
-             * fix this by processing the quals more completely and using
-             * ScanKeys.
+             * custom_exprs retains every selected pushdown qualifier. Reader-side
+             * eligibility is decided later without precompiling ScanKeys here.
              */
             postgres_list<List> private_lists(best_path->custom_private);
             List* plain_clauses =
