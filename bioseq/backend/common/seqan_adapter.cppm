@@ -1,9 +1,10 @@
 /**
- * @file
+ * @file seqan_adapter.cppm
  * @brief SeqAn alphabet adapter and formatting integration.
  */
 module;
 
+// clang-format off
 #include <bit>
 #include <cassert>
 #include <charconv>
@@ -24,6 +25,7 @@ module;
 #include <version>
 
 #include <seqan3/contrib/sdsl-lite.hpp>
+// clang-format on
 
 export module bioseq.common.seqan_adapter;
 
@@ -59,9 +61,7 @@ struct fmt::formatter<p_alphabet> : formatter<std::string> {
      */
     template <typename p_format_context>
     auto format(p_alphabet symbol, p_format_context& context) const {
-        return formatter<std::string>::format(
-            std::string(1u, seqan3::to_char(symbol)),
-            context);
+        return formatter<std::string>::format(std::string(1u, seqan3::to_char(symbol)), context);
     }
 };
 
