@@ -7,7 +7,7 @@ int main() {
       bioseq::highway_gcc_canary::run_imported_binder_canary();
   if (!result.ok || result.first_target == result.second_target
       || result.first_name == nullptr || result.second_name == nullptr
-      || result.checksum != 976u) {
+      || result.checksum != 976U) {
     return 1;
   }
   printf(

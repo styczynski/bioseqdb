@@ -18,7 +18,7 @@
 
 namespace hwy {
 
-HWY_DLLEXPORT std::int64_t SupportedTargets() {
+HWY_DLLEXPORT auto SupportedTargets() -> std::int64_t {
   // Both entries are portable on the selected native arm64/x86_64 host: its
   // mandatory baseline SIMD target and Highway's software EMU128 fallback.
   // The nonempty-HWY_TARGET_STR probe is compiled and link-anchored elsewhere
@@ -26,7 +26,7 @@ HWY_DLLEXPORT std::int64_t SupportedTargets() {
   return @SIMD_TARGET_TOKEN@ | HWY_EMU128;
 }
 
-HWY_DLLEXPORT ChosenTarget& GetChosenTarget() {
+HWY_DLLEXPORT auto GetChosenTarget() -> ChosenTarget& {
   static ChosenTarget chosen_target;
   return chosen_target;
 }

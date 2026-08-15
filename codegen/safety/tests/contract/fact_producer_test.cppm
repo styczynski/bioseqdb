@@ -428,10 +428,10 @@ struct runtime_error : exception {
     bridge_kind expected) {
     return std::ranges::any_of(
         functions,
-        [&](const function_flow& function) {
+        [&expected](const function_flow& function) -> bool {
             return std::ranges::any_of(
                 function.calls,
-                [&](const flow_call_site& call) {
+                [&expected](const flow_call_site& call) -> bool {
                     return call.bridge_transition == expected
                         && call.bridge_primitive_evidence
                             .has_value();
@@ -450,10 +450,10 @@ inline void run_bridge_contracts() {
     const std::filesystem::path boundary_path = module_path(
         fixture,
         "common/postgres/sql_boundary/index.cppm");
-    const auto scan = [&](
+    const auto scan = [&fixture](
         const std::filesystem::path& path,
         std::string_view source,
-        std::string_view profile) {
+        std::string_view profile) -> std::vector<function_flow> {
         return scan_safety_flow_from_code(
             path,
             source,
@@ -512,7 +512,7 @@ void subtransaction::commit() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan_context]() -> void {
             static_cast<void>(scan_context(
                 subtransaction_decoy,
                 "bridge-subtransaction-decoy"));
@@ -544,7 +544,7 @@ void subtransaction::commit() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan_context]() -> void {
             static_cast<void>(scan_context(
                 subtransaction_multiple,
                 "bridge-subtransaction-multiple"));
@@ -575,7 +575,7 @@ void subtransaction::commit() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan_context]() -> void {
             static_cast<void>(scan_context(
                 subtransaction_redefined,
                 "bridge-subtransaction-redefined"));
@@ -601,7 +601,7 @@ void subtransaction::commit() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan_context]() -> void {
             static_cast<void>(scan_context(
                 subtransaction_wrapped,
                 "bridge-subtransaction-wrapped"));
@@ -626,7 +626,7 @@ void subtransaction::commit() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan_context]() -> void {
             static_cast<void>(scan_context(
                 subtransaction_catch,
                 "bridge-subtransaction-catch"));
@@ -721,7 +721,7 @@ void invoke_root() {
             "positive invoke_pg_as_cpp bridge evidence is absent");
     }
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             const std::string mutation = replace_once(
                 invoke_positive,
                 "inline void invoke_pg_as_cpp_erased(",
@@ -733,7 +733,7 @@ void invoke_root() {
         },
         "erased bridge definition is not explicitly inline");
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             const std::string mutation = replace_once(
                 invoke_positive,
                 "state->postgres_error_data = CopyErrorData();",
@@ -745,7 +745,7 @@ void invoke_root() {
         },
         "error-capture helper call inventory differs");
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             const std::string mutation = replace_once(
                 invoke_positive,
                 "state->error_capture_failed = true;",
@@ -757,7 +757,7 @@ void invoke_root() {
         },
         "CopyErrorData/FlushErrorState recovery is not exact");
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             const std::string mutation = replace_once(
                 invoke_positive,
                 "MemoryContextSwitchTo(restore_context);\n"
@@ -774,7 +774,7 @@ void invoke_root() {
         },
         "error-capture helper call inventory differs");
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             const std::string mutation = replace_once(
                 invoke_positive,
                 "throw postgres_error_capture_failure{};",
@@ -893,7 +893,7 @@ void invoke_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             static_cast<void>(scan(
                 error_boundary_path,
                 invoke_token_decoy,
@@ -944,7 +944,7 @@ void invoke_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             static_cast<void>(scan(
                 error_boundary_path,
                 invoke_unprotected_erased,
@@ -1002,7 +1002,7 @@ void invoke_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &error_boundary_path]() -> void {
             static_cast<void>(scan(
                 error_boundary_path,
                 invoke_constexpr_init_escape,
@@ -1065,7 +1065,7 @@ int boundary_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &boundary_path]() -> void {
             static_cast<void>(scan(
                 boundary_path,
                 tail_token_decoy,
@@ -1098,7 +1098,7 @@ int boundary_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &boundary_path]() -> void {
             static_cast<void>(scan(
                 boundary_path,
                 tail_inside_handler,
@@ -1130,7 +1130,7 @@ int boundary_root() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan, &boundary_path]() -> void {
             static_cast<void>(scan(
                 boundary_path,
                 tail_wrong_handlers,
@@ -1161,9 +1161,9 @@ inline void run_runtime_probe_contracts() {
     const std::filesystem::path path = module_path(
         fixture,
         "bioseq/runtime_probe_contract.cppm");
-    const auto scan = [&](
+    const auto scan = [&path, &fixture](
         std::string_view source,
-        std::string_view profile) {
+        std::string_view profile) -> isolated_compiler_fact_scan {
         return scan_safety_facts_from_code(
             path,
             source,
@@ -1298,7 +1298,7 @@ void invalid_probe(throwing_member_call& member) {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(scan(
                 throwing_member,
                 "runtime-throwing-member"));
@@ -1323,7 +1323,7 @@ void invalid_probe(bool escape) {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(sibling_exit, "runtime-sibling-exit"));
         },
@@ -1343,7 +1343,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(computed_key, "runtime-computed-key"));
         },
@@ -1362,7 +1362,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(scan(
                 concatenated_key,
                 "runtime-concatenated-key"));
@@ -1383,7 +1383,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(macro_key, "runtime-macro-key"));
         },
@@ -1410,7 +1410,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(scan(
                 lookalike_string_view,
                 "runtime-lookalike-string-view"));
@@ -1430,7 +1430,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(throwing_probe, "runtime-throwing-probe"));
         },
@@ -1451,7 +1451,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(indirect_probe, "runtime-indirect-probe"));
         },
@@ -1474,7 +1474,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(negated_trigger, "runtime-negated-trigger"));
         },
@@ -1497,7 +1497,7 @@ void invalid_probe(bool branch) {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(ambiguous_site, "runtime-ambiguous-site"));
         },
@@ -1518,7 +1518,7 @@ void invalid_probe(bool enabled) {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(guarded_visit, "runtime-guarded-visit"));
         },
@@ -1546,7 +1546,7 @@ void invalid_probe(bool bypass) {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(scan(
                 bypassed_after_success,
                 "runtime-bypassed-after-success"));
@@ -1570,7 +1570,7 @@ void invalid_probe() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&scan]() -> void {
             static_cast<void>(
                 scan(mismatched_keys, "runtime-mismatched-keys"));
         },
@@ -1713,12 +1713,12 @@ void configure_unregistered_worker() {
         scan_safety_facts_from_code(
             path, source, {"-std=c++26"});
     const auto has_root =
-        [&](std::string_view family,
+        [&facts](std::string_view family,
             std::string_view slot,
-            std::string_view target) {
+            std::string_view target) -> bool {
             return std::ranges::any_of(
                 facts.callback_roots,
-                [&](const postgres_callback_root& root) {
+                [&family, &slot, &target](const postgres_callback_root& root) -> bool {
                     return root.family == family
                         && root.slot == slot
                         && root.target_qualified_name == target
@@ -1797,7 +1797,7 @@ void configure_unregistered_worker() {
             "PostgreSQL callback root");
     }
     require_scan_failure(
-        [&] {
+        [&path]() -> void {
             const std::string mutation = replace_once(
                 source,
                 "\"background_main\"",
@@ -1912,7 +1912,7 @@ void structural_root() {
         facts, "bioseq::contract::structural_root");
     const auto call = std::ranges::find_if(
         root.calls,
-        [&](const flow_call_site& candidate) {
+        [&target](const flow_call_site& candidate) -> bool {
             return candidate.targets.size() == 1
                 && candidate.targets.front()
                        .target_qualified_name
@@ -1986,7 +1986,7 @@ void second_use() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&arguments, &fixture]() -> void {
             static_cast<void>(scan_safety_flow_from_code(
                 module_path(
                     fixture,
@@ -2062,7 +2062,7 @@ void call_partial_pg_candidate() {
 }
 )cpp";
     require_scan_failure(
-        [&] {
+        [&header_root, &provenance]() -> void {
             static_cast<void>(scan_safety_flow_from_code(
                 std::filesystem::temp_directory_path()
                     / "bioseq_safety_incoherent_pg_candidate.cpp",
@@ -2336,8 +2336,8 @@ void pg_report_root() {
                 + link.string());
         }
     };
-    const auto prepare_pg_header_tree = [&](
-        const std::filesystem::path& root) {
+    const auto prepare_pg_header_tree = [](
+        const std::filesystem::path& root) -> void {
         std::error_code error;
         std::filesystem::create_directories(
             root / "utils", error);
@@ -2407,7 +2407,7 @@ void pg_report_root() {
         split_physical_root / "utils/palloc.h",
         split_include_root / "utils/palloc.h");
     fact_contract_detail::require_scan_failure(
-        [&] {
+        [&split_include_root, &pg_provenance]() -> void {
             static_cast<void>(scan_safety_flow_from_code(
                 std::filesystem::temp_directory_path()
                     / "bioseq_safety_split_pg_report_contract.cpp",
@@ -2427,7 +2427,7 @@ void spoofed_pg_report_root() {
 }
 )cpp";
     fact_contract_detail::require_scan_failure(
-        [&] {
+        [&pg_header_root, &pg_provenance]() -> void {
             static_cast<void>(scan_safety_flow_from_code(
                 std::filesystem::temp_directory_path()
                     / "bioseq_safety_spoofed_pg_report_contract.cpp",
@@ -2552,13 +2552,13 @@ void spoofed_pg_report_root() {
         std::string_view expected) {
         return std::ranges::any_of(
             call.targets,
-            [&](const flow_call_target& target) {
+            [&expected](const flow_call_target& target) -> bool {
                 return target.target_qualified_name == expected;
             });
     };
     const auto report_argument_call = std::ranges::find_if(
         pg_report_root.calls,
-        [&](const flow_call_site& call) {
+        [&has_target](const flow_call_site& call) -> bool {
             return has_target(call, "errcode");
         });
     const bool exact_report_macro_chain =
@@ -2693,7 +2693,7 @@ void spoofed_pg_report_root() {
     require_adversarial_fact(
         std::ranges::any_of(
             derived_destructor.calls,
-            [&](const flow_call_site& call) {
+            [&has_target](const flow_call_site& call) -> bool {
                 return has_target(
                     call, "base_a::~base_a");
             }),
@@ -2701,7 +2701,7 @@ void spoofed_pg_report_root() {
     require_adversarial_fact(
         std::ranges::any_of(
             derived_destructor.calls,
-            [&](const flow_call_site& call) {
+            [&has_target](const flow_call_site& call) -> bool {
                 return has_target(
                     call, "base_b::~base_b");
             }),
@@ -2749,7 +2749,7 @@ void spoofed_pg_report_root() {
     require_adversarial_fact(
         std::ranges::none_of(
             discarded_constexpr.calls,
-            [&](const flow_call_site& call) {
+            [&has_target](const flow_call_site& call) -> bool {
                 return has_target(call, "leaf");
             }),
         "discarded constexpr leaf exclusion");

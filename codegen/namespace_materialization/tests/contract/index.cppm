@@ -74,8 +74,8 @@ inline void require_rejected(p_callable&& callable, std::string_view message) {
 [[nodiscard]] inline std::size_t occurrences(
     std::string_view source,
     std::string_view needle) noexcept {
-    std::size_t count = 0u;
-    std::size_t position = 0u;
+    std::size_t count = 0U;
+    std::size_t position = 0U;
     while ((position = source.find(needle, position))
            != std::string_view::npos) {
         ++count;
@@ -304,12 +304,12 @@ public:
                 reinterpret_cast<std::uintptr_t>(this));
         const std::filesystem::path base =
             std::filesystem::temp_directory_path();
-        for (std::uint32_t attempt = 0u; attempt != 32u; ++attempt) {
+        for (std::uint32_t attempt = 0U; attempt != 32U; ++attempt) {
             std::error_code error;
             const std::filesystem::path candidate = base
                 / ("bioseq-namespace-materialization-contract-"
                    + bioseq::common::sha256_hex(seed + ':' + std::to_string(attempt)).substr(
-                       0u, 20u));
+                       0U, 20U));
             if (!std::filesystem::create_directory(candidate, error)) {
                 if (!error) continue;
                 throw std::runtime_error(
@@ -408,7 +408,7 @@ long root(std::uint8_t abi_code, int value) {
         "fixture.output",
         emission_policy::selector_api,
         source);
-    topology_plan topology = build_topology_plan(std::move(region), 16u);
+    topology_plan topology = build_topology_plan(std::move(region), 16U);
     validate_entry_ownership(topology);
     return generation_plan{
         .topology = std::move(topology),
@@ -420,7 +420,7 @@ long root(std::uint8_t abi_code, int value) {
         .source_sha256 = bioseq::common::sha256_hex(source),
         .name = "flatten_fixture",
         .profile = "all_coordinates",
-        .enabled_ordinals = {0u, 1u, 2u, 3u},
+        .enabled_ordinals = {0U, 1U, 2U, 3U},
         .clang_release = "contract-test",
         .compilation_signature = "contract-test",
         .compiler_module_inventory_sha256 =
@@ -481,7 +481,7 @@ int owner_segmented(int value) {
         "fixture.owner",
         emission_policy::implementation_owners,
         source);
-    topology_plan topology = build_topology_plan(std::move(region), 16u);
+    topology_plan topology = build_topology_plan(std::move(region), 16U);
     std::vector<std::uint32_t> enabled = enabled_ordinals(topology, profile);
     validate_enabled_ordinals(topology, profile, enabled);
     validate_entry_ownership(topology);
@@ -566,19 +566,19 @@ inline void attach_fixture_frontend_evidence(generation_plan& plan) {
         plan.declaration_probes.push_back(std::move(probe));
     }
     plan.frontend_actions = frontend_action_counts{
-        .dependency_preparation_validations = 1u,
-        .canonical_token_slice_scans = 2u,
-        .signature_donor_token_slice_scans = 1u
+        .dependency_preparation_validations = 1U,
+        .canonical_token_slice_scans = 2U,
+        .signature_donor_token_slice_scans = 1U
             + static_cast<std::uint32_t>(plan.declaration_probes.size()),
         .body_free_declaration_probe_scans =
             static_cast<std::uint32_t>(plan.declaration_probes.size()),
-        .artifact_render_passes = 2u,
-        .body_bearing_compiler_invocations = 0u,
+        .artifact_render_passes = 2U,
+        .body_bearing_compiler_invocations = 0U,
     };
     const bool selector = plan.policy == emission_policy::selector_api;
     plan.compilation_obligations = cmake_compilation_obligations{
-        .api_partition_units = selector ? 1u : 0u,
-        .selector_partition_units = selector ? 1u : 0u,
+        .api_partition_units = selector ? 1U : 0U,
+        .selector_partition_units = selector ? 1U : 0U,
         .body_bearing_implementation_units =
             static_cast<std::uint32_t>(plan.enabled_ordinals.size()),
     };
@@ -644,7 +644,7 @@ enum class topology_mutation : std::uint8_t {
         "fixture.output",
         emission_policy::selector_api,
         source);
-    topology_plan topology = build_topology_plan(std::move(region), 16u);
+    topology_plan topology = build_topology_plan(std::move(region), 16U);
     validate_entry_ownership(topology);
     std::vector<std::uint32_t> enabled = enabled_ordinals(
         topology, "all_coordinates");
@@ -669,9 +669,9 @@ enum class topology_mutation : std::uint8_t {
 
 inline void verify_closed_grammar() {
     require(
-        topology_schema_revision == 2u
-            && artifact_schema_revision == 4u
-            && publication_schema_revision == 1u
+        topology_schema_revision == 2U
+            && artifact_schema_revision == 4U
+            && publication_schema_revision == 1U
             && parse_emission_policy("selector_api")
                 == emission_policy::selector_api
             && parse_emission_policy("implementation_owners")
@@ -698,7 +698,7 @@ inline void verify_closed_grammar() {
     const std::vector<std::string> parsed = parse_closed_string_arguments(
         R"("identity", "abi", "i32", "::std::int32_t")");
     require(
-        parsed.size() == 4u && parsed[0] == "identity"
+        parsed.size() == 4U && parsed[0] == "identity"
             && parsed[3] == "::std::int32_t",
         "closed grammar decodes ordinary narrow string literals");
     require_rejected(
@@ -776,7 +776,7 @@ inline void verify_malformed_materialization_sources() {
                     "fixture.output",
                     emission_policy::selector_api,
                     source);
-                static_cast<void>(build_topology_plan(std::move(region), 32u));
+                static_cast<void>(build_topology_plan(std::move(region), 32U));
             },
             message);
     };
@@ -825,13 +825,13 @@ int root(int abi_code) { return abi_code; }
 inline void verify_zip_product_and_digest() {
     generation_plan plan = fixture_plan();
     require(
-        plan.topology.groups.size() == 2u
+        plan.topology.groups.size() == 2U
             && plan.topology.groups[0].name == "abi"
-            && plan.topology.groups[0].binding_indices.size() == 2u
+            && plan.topology.groups[0].binding_indices.size() == 2U
             && plan.topology.groups[1].name == "shape",
         "same-group bindings zip while first declaration orders groups");
     require(
-        plan.topology.coordinates.size() == 4u
+        plan.topology.coordinates.size() == 4U
             && plan.topology.coordinates[0].assignments[0].case_label == "i32"
             && plan.topology.coordinates[0].assignments[1].case_label == "root"
             && plan.topology.coordinates[1].assignments[1].case_label == "leaf"
@@ -839,12 +839,12 @@ inline void verify_zip_product_and_digest() {
         "different groups form a rightmost-fast Cartesian product");
     require(
         plan.topology.identity_representative_ordinals
-            == std::vector<std::uint32_t>{0u, 2u},
+            == std::vector<std::uint32_t>{0U, 2U},
         "shard cases do not create additional stable API identities");
     const std::string digest = plan.topology.topology_digest;
     plan.topology.region.bindings[1].cases[1].spelling = "16";
     topology_plan changed = build_topology_plan(
-        std::move(plan.topology.region), 16u);
+        std::move(plan.topology.region), 16U);
     require(
         digest != changed.topology_digest,
         "topology digest authenticates every zipped binding replacement");
@@ -883,7 +883,7 @@ inline void verify_owner_entry_rejection() {
                     emission_policy::implementation_owners,
                     source);
                 topology_plan topology =
-                    build_topology_plan(std::move(region), 16u);
+                    build_topology_plan(std::move(region), 16U);
                 validate_entry_ownership(topology);
             },
             message);
@@ -917,13 +917,13 @@ inline void verify_configure_structural_digest_mutations() {
         std::string_view{
             "8d7878969841fd89d88d2472a217c4443bc2ec61839b04df206d1b95cbd6080d"},
     };
-    std::array<generation_plan, 4u> plans{
+    std::array<generation_plan, 4U> plans{
         fixture_plan(),
         fixture_plan(topology_mutation::reordered),
         fixture_plan(topology_mutation::grown),
         fixture_plan(topology_mutation::shrunk),
     };
-    for (std::size_t index = 0u; index < plans.size(); ++index) {
+    for (std::size_t index = 0U; index < plans.size(); ++index) {
         require(
             plans[index].topology.topology_digest == expected_digests[index],
             "configure/structural topology digest golden drifted");
@@ -931,12 +931,12 @@ inline void verify_configure_structural_digest_mutations() {
             plans[index].topology, expected_digests[index]);
     }
     require(
-        plans[0].topology.coordinates.size() == 4u
-            && plans[1].topology.coordinates.size() == 4u
-            && plans[2].topology.coordinates.size() == 6u
-            && plans[3].topology.coordinates.size() == 2u,
+        plans[0].topology.coordinates.size() == 4U
+            && plans[1].topology.coordinates.size() == 4U
+            && plans[2].topology.coordinates.size() == 6U
+            && plans[3].topology.coordinates.size() == 2U,
         "normal/reordered/grown/shrunk fixture cardinalities are exact");
-    for (std::size_t index = 1u; index < plans.size(); ++index) {
+    for (std::size_t index = 1U; index < plans.size(); ++index) {
         require_rejected(
             [&plans, index] {
                 validate_configure_topology_digest(
@@ -1163,7 +1163,7 @@ inline void verify_scheduler_profile_policy() {
         "axes and leaves absent axes unconstrained");
 }
 
-inline constexpr std::array<std::string_view, 8u>
+inline constexpr std::array<std::string_view, 8U>
     scheduler_identity_namespaces{
         "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w1",
         "bioseq::simd::typed_dispatch::bioseq_flattened::alphabet_dna4::width_w2",
@@ -1185,7 +1185,7 @@ inline void verify_production_scheduler_golden() {
         plan.topology,
         "2ae12145f57a4deaae2edff7c05f4ddd668a7bdfd8354fdb0fc3082373b5ff64");
     require(
-        plan.topology.groups.size() == 3u
+        plan.topology.groups.size() == 3U
             && plan.topology.groups[0].name == "alphabet"
             && plan.topology.groups[0].role == axis_role::identity
             && plan.topology.groups[1].name == "width"
@@ -1212,23 +1212,23 @@ inline void verify_production_scheduler_golden() {
                 },
         "production scheduler cases/replacements/ordinals drifted");
     require(
-        plan.topology.coordinates.size() == 56u
+        plan.topology.coordinates.size() == 56U
             && plan.topology.identity_representative_ordinals
                 == std::vector<std::uint32_t>{
-                    0u, 7u, 14u, 21u, 28u, 35u, 42u, 49u},
+                    0U, 7U, 14U, 21U, 28U, 35U, 42U, 49U},
         "production scheduler must retain 56 rows and eight identities");
-    for (std::size_t ordinal = 0u;
+    for (std::size_t ordinal = 0U;
          ordinal < plan.topology.coordinates.size();
          ++ordinal) {
         const materialization_coordinate& coordinate =
             plan.topology.coordinates[ordinal];
-        const std::size_t alphabet = ordinal / 28u;
-        const std::size_t width = (ordinal / 7u) % 4u;
-        const std::size_t shape = ordinal % 7u;
+        const std::size_t alphabet = ordinal / 28U;
+        const std::size_t width = (ordinal / 7U) % 4U;
+        const std::size_t shape = ordinal % 7U;
         require(
             coordinate.ordinal == ordinal
                 && coordinate.assignments[0].case_label
-                    == (alphabet == 0u ? "dna4" : "dna5")
+                    == (alphabet == 0U ? "dna4" : "dna5")
                 && coordinate.assignments[1].case_label
                     == std::array{
                         std::string_view{"w1"},
@@ -1247,18 +1247,18 @@ inline void verify_production_scheduler_golden() {
                         std::string_view{"inmemory_chunked_segmented"},
                     }[shape]
                 && coordinate.identity_namespace
-                    == scheduler_identity_namespaces[alphabet * 4u + width],
+                    == scheduler_identity_namespaces[alphabet * 4U + width],
             "production scheduler coordinate order drifted");
     }
     require(
         enabled_ordinals(plan.topology, "dna4_uint64")
                 == std::vector<std::uint32_t>{
-                    21u, 22u, 23u, 24u, 25u, 26u, 27u}
+                    21U, 22U, 23U, 24U, 25U, 26U, 27U}
             && enabled_ordinals(plan.topology, "all_alphabets_uint64")
                 == std::vector<std::uint32_t>{
-                    21u, 22u, 23u, 24u, 25u, 26u, 27u,
-                    49u, 50u, 51u, 52u, 53u, 54u, 55u}
-            && enabled_ordinals(plan.topology, "all_coordinates").size() == 56u,
+                    21U, 22U, 23U, 24U, 25U, 26U, 27U,
+                    49U, 50U, 51U, 52U, 53U, 54U, 55U}
+            && enabled_ordinals(plan.topology, "all_coordinates").size() == 56U,
         "production scheduler semantic profile projections must remain 7/14/56");
 
     struct role_golden {
@@ -1380,16 +1380,16 @@ inline void verify_production_pipe_owner_golden() {
                     plan.topology.canonical_digest_input),
         "production pipe topology digest seals schema and emission policy");
     require(
-        plan.topology.groups.size() == 2u
+        plan.topology.groups.size() == 2U
             && plan.topology.groups[0].name == "alphabet"
             && plan.topology.groups[0].role == axis_role::identity
             && plan.topology.groups[0].binding_indices
-                == std::vector<std::size_t>{0u}
+                == std::vector<std::size_t>{0U}
             && plan.topology.groups[1].name == "route"
             && plan.topology.groups[1].role == axis_role::shard
             && plan.topology.groups[1].binding_indices
-                == std::vector<std::size_t>{1u}
-            && plan.topology.region.bindings.size() == 2u
+                == std::vector<std::size_t>{1U}
+            && plan.topology.region.bindings.size() == 2U
             && plan.topology.region.bindings[0].declaration.name
                 == "owner_dna5"
             && plan.topology.region.bindings[1].declaration.name
@@ -1407,7 +1407,7 @@ inline void verify_production_pipe_owner_golden() {
                     "fragment_query=5@5",
                 },
         "production pipe owns exactly two alphabets by six ordered routes");
-    constexpr std::array<std::string_view, 6u> routes{
+    constexpr std::array<std::string_view, 6U> routes{
         "raw",
         "segmented",
         "fragment_index",
@@ -1416,18 +1416,18 @@ inline void verify_production_pipe_owner_golden() {
         "fragment_query",
     };
     require(
-        plan.topology.coordinates.size() == 12u
+        plan.topology.coordinates.size() == 12U
             && plan.topology.identity_representative_ordinals
-                == std::vector<std::uint32_t>{0u, 6u},
+                == std::vector<std::uint32_t>{0U, 6U},
         "pipe product is twelve units with two alphabet identities");
-    for (std::size_t ordinal = 0u;
+    for (std::size_t ordinal = 0U;
          ordinal < plan.topology.coordinates.size();
          ++ordinal) {
         const materialization_coordinate& coordinate =
             plan.topology.coordinates[ordinal];
         require(
             coordinate.ordinal == ordinal
-                && coordinate.assignments.size() == 2u
+                && coordinate.assignments.size() == 2U
                 && coordinate.assignments[0].case_label
                     == (ordinal < routes.size() ? "dna4" : "dna5")
                 && coordinate.assignments[1].case_label
@@ -1441,24 +1441,24 @@ inline void verify_production_pipe_owner_golden() {
     }
     require(
         enabled_ordinals(plan.topology, "dna4_uint64")
-                == std::vector<std::uint32_t>{0u, 1u, 2u, 3u, 4u, 5u}
+                == std::vector<std::uint32_t>{0U, 1U, 2U, 3U, 4U, 5U}
             && enabled_ordinals(plan.topology, "all_alphabets_uint64")
                 == std::vector<std::uint32_t>{
-                    0u, 1u, 2u, 3u, 4u, 5u,
-                    6u, 7u, 8u, 9u, 10u, 11u}
+                    0U, 1U, 2U, 3U, 4U, 5U,
+                    6U, 7U, 8U, 9U, 10U, 11U}
             && enabled_ordinals(plan.topology, "all_coordinates").size()
-                == 12u
+                == 12U
             && enabled_ordinals(
                    plan.topology,
                    "all_coordinates_adaptive_lengths")
                    .size()
-                == 12u
+                == 12U
             && enabled_ordinals(
                    plan.topology, "extended_kmer_coordinates")
                    .size()
-                == 12u
+                == 12U
             && enabled_ordinals(plan.topology, "full_specialization").size()
-                == 12u,
+                == 12U,
         "pipe profiles project to exact 6/12 owner obligations without reordering");
 
     struct owner_golden final {
@@ -1479,14 +1479,14 @@ inline void verify_production_pipe_owner_golden() {
     require(
         plan.topology.region.controlled_declarations.size() == owners.size(),
         "pipe owns seven external definitions across six routes");
-    for (std::size_t index = 0u; index < owners.size(); ++index) {
+    for (std::size_t index = 0U; index < owners.size(); ++index) {
         const owned_declaration& declaration =
             plan.topology.region.controlled_declarations[index];
         require(
             declaration.declaration.name == owners[index].name
                 && declaration.declaration.specifiers.is_definition
                 && !declaration.generated_api_entry
-                && declaration.clauses.size() == 1u
+                && declaration.clauses.size() == 1U
                 && declaration.clauses.front().group == "route"
                 && declaration.clauses.front().accepted_case_labels
                     == std::vector<std::string>{
@@ -1498,21 +1498,21 @@ inline void verify_production_pipe_owner_golden() {
     require(
         artifact_count(
             generated, materialization_artifact::kind::api_partition)
-                == 0u
+                == 0U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::selector_partition)
-                == 0u
+                == 0U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::declaration_probe)
-                == 2u
+                == 2U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::implementation_unit)
-                == 12u,
+                == 12U,
         "full pipe rendering has two inspection probes and 0/0/12 body obligations");
-    std::size_t rendered_definitions = 0u;
+    std::size_t rendered_definitions = 0U;
     for (const materialization_artifact& artifact : generated.artifacts) {
         require(
             !artifact.content.contains("typed_flat_api")
@@ -1525,10 +1525,10 @@ inline void verify_production_pipe_owner_golden() {
             continue;
         }
         require(
-            occurrences(artifact.content, "module bioseq.pipeline.pipe;") == 1u
+            occurrences(artifact.content, "module bioseq.pipeline.pipe;") == 1U
                 && occurrences(
                        artifact.content, "namespace bioseq::simd {")
-                    == 1u,
+                    == 1U,
             "every pipe owner unit attaches and opens its direct boundary once");
         const structural_analysis::translation_unit unit =
             structural_analysis::scan_token_slice(
@@ -1546,7 +1546,7 @@ inline void verify_production_pipe_owner_golden() {
         }
     }
     require(
-        rendered_definitions == 14u,
+        rendered_definitions == 14U,
         "twelve pipe units own fourteen definitions because each alphabet's "
         "fragment-index coordinate owns batch then vector");
 
@@ -1556,7 +1556,7 @@ inline void verify_production_pipe_owner_golden() {
         artifact_count(
             dna4_generated,
             materialization_artifact::kind::implementation_unit)
-            == 6u,
+            == 6U,
         "dna4 pipe profile has exactly six body-bearing owner units");
 }
 
@@ -1594,13 +1594,13 @@ inline void verify_production_declaration_heads_and_probes() {
                 "0e2611246a40e4734b730623f55ea29ec3c0005d51904e4fe28f20514c4a2558"}},
     };
     require(
-        generated.artifacts.size() == 66u,
+        generated.artifacts.size() == 66U,
         "full scheduler rendering must own API, selector, eight probes, and 56 units");
 
     const materialization_artifact* api = nullptr;
     const materialization_artifact* selector = nullptr;
     std::map<std::uint32_t, const materialization_artifact*> implementations;
-    std::size_t probe_count = 0u;
+    std::size_t probe_count = 0U;
     std::set<std::uint32_t> probe_representatives;
     for (const materialization_artifact& artifact : generated.artifacts) {
         if (artifact.artifact_kind
@@ -1616,7 +1616,7 @@ inline void verify_production_declaration_heads_and_probes() {
         } else if (artifact.artifact_kind
                    == materialization_artifact::kind::implementation_unit) {
             require(
-                artifact.logical_coordinate_ordinals.size() == 1u
+                artifact.logical_coordinate_ordinals.size() == 1U
                     && implementations.emplace(
                            artifact.logical_coordinate_ordinals.front(),
                            &artifact).second,
@@ -1625,7 +1625,7 @@ inline void verify_production_declaration_heads_and_probes() {
                    == materialization_artifact::kind::declaration_probe) {
             ++probe_count;
             require(
-                artifact.logical_coordinate_ordinals.size() == 7u
+                artifact.logical_coordinate_ordinals.size() == 7U
                     && probe_representatives.insert(
                            artifact.logical_coordinate_ordinals.front()).second
                     && !artifact.content.contains(
@@ -1635,10 +1635,10 @@ inline void verify_production_declaration_heads_and_probes() {
     }
     require(
         api != nullptr && selector != nullptr
-            && implementations.size() == 56u && probe_count == 8u
+            && implementations.size() == 56U && probe_count == 8U
             && probe_representatives
                 == std::set<std::uint32_t>{
-                    0u, 7u, 14u, 21u, 28u, 35u, 42u, 49u},
+                    0U, 7U, 14U, 21U, 28U, 35U, 42U, 49U},
         "scheduler API/probe/implementation cardinalities drifted");
     require(
         !api->content.contains(":cpu_preparation")
@@ -1688,12 +1688,12 @@ inline void verify_production_declaration_heads_and_probes() {
             "generated API must own each exact entry head in all eight identities");
     }
 
-    constexpr std::array<std::size_t, 7u> head_index_by_shape{
-        6u, 0u, 1u, 2u, 3u, 4u, 5u};
+    constexpr std::array<std::size_t, 7U> head_index_by_shape{
+        6U, 0U, 1U, 2U, 3U, 4U, 5U};
     for (const materialization_coordinate& coordinate :
          plan.topology.coordinates) {
-        const std::size_t identity_index = coordinate.ordinal / 7u;
-        const std::size_t shape_index = coordinate.ordinal % 7u;
+        const std::size_t identity_index = coordinate.ordinal / 7U;
+        const std::size_t shape_index = coordinate.ordinal % 7U;
         const std::string_view identity =
             scheduler_identity_namespaces.at(identity_index);
         const auto& [name, expected_digest] =
@@ -1703,16 +1703,16 @@ inline void verify_production_declaration_heads_and_probes() {
         require(
             occurrences(
                 implementation.content,
-                "import :cpu_preparation;") == 1u
+                "import :cpu_preparation;") == 1U
                 && occurrences(
                     implementation.content,
                     "namespace " + std::string{identity} + " {")
-                    == 1u,
+                    == 1U,
             "each scheduler implementation must import preparation support and own its exact identity namespace");
         const structural_analysis::translation_unit implementation_unit =
             structural_analysis::scan_token_slice(
                 implementation.relative_path, implementation.content);
-        std::size_t definition_matches = 0u;
+        std::size_t definition_matches = 0U;
         for (const structural_analysis::declaration_record& declaration :
              implementation_unit.declarations) {
             if (declaration.name != name) continue;
@@ -1725,34 +1725,34 @@ inline void verify_production_declaration_heads_and_probes() {
                 "generated implementation declaration-head digest drifted");
         }
         require(
-            definition_matches == 1u,
+            definition_matches == 1U,
             "generated shard must own exactly one selected entry definition");
     }
 
     require(
-        occurrences(selector->content, "\n    switch (alphabet_code)") == 1u
+        occurrences(selector->content, "\n    switch (alphabet_code)") == 1U
             && occurrences(
                    selector->content,
                    "\n            switch (storage_unit_byte_width)")
-                == 2u
-            && occurrences(selector->content, "\n        case 0: {") == 1u
-            && occurrences(selector->content, "\n        case 1: {") == 1u,
+                == 2U
+            && occurrences(selector->content, "\n        case 0: {") == 1U
+            && occurrences(selector->content, "\n        case 1: {") == 1U,
         "scheduler selector must route the exact two-by-four identity switch");
-    constexpr std::array<std::string_view, 4u> width_case_spellings{
+    constexpr std::array<std::string_view, 4U> width_case_spellings{
         "1", "2", "4", "8"};
     std::array<std::size_t, scheduler_identity_namespaces.size()>
         route_positions{};
-    for (std::size_t identity_index = 0u;
+    for (std::size_t identity_index = 0U;
          identity_index < scheduler_identity_namespaces.size();
          ++identity_index) {
         const std::string route =
             "\n                case "
-            + std::string{width_case_spellings[identity_index % 4u]}
+            + std::string{width_case_spellings[identity_index % 4U]}
             + ": {\n                    return ::"
             + std::string{scheduler_identity_namespaces[identity_index]}
             + "::process_sequences(";
         require(
-            occurrences(selector->content, route) == 1u,
+            occurrences(selector->content, route) == 1U,
             "scheduler selector must bind every width case to its exact identity");
         route_positions[identity_index] = selector->content.find(route);
     }
@@ -1778,25 +1778,25 @@ inline void verify_exact_edits() {
     const std::string edited = apply_exact_edits(
         source,
         {
-            source_edit{.begin_byte = 2u, .end_byte = 4u, .replacement = "A"},
-            source_edit{.begin_byte = 7u, .end_byte = 9u, .replacement = "B"},
+            source_edit{.begin_byte = 2U, .end_byte = 4U, .replacement = "A"},
+            source_edit{.begin_byte = 7U, .end_byte = 9U, .replacement = "B"},
         });
     require(edited == "01A456B9", "exact edits apply in reverse byte order");
     require_rejected(
-        [&] {
+        [&source]() -> void {
             static_cast<void>(apply_exact_edits(
                 source,
                 {
-                    source_edit{.begin_byte = 2u, .end_byte = 6u},
-                    source_edit{.begin_byte = 5u, .end_byte = 7u},
+                    source_edit{.begin_byte = 2U, .end_byte = 6U},
+                    source_edit{.begin_byte = 5U, .end_byte = 7U},
                 }));
         },
         "overlapping exact edits fail closed");
     require_rejected(
-        [&] {
+        [&source]() -> void {
             static_cast<void>(apply_exact_edits(
                 source,
-                {source_edit{.begin_byte = 9u, .end_byte = 11u}}));
+                {source_edit{.begin_byte = 9U, .end_byte = 11U}}));
         },
         "out-of-bounds exact edits fail closed");
 }
@@ -1819,13 +1819,13 @@ inline void verify_coordinate_axis_domains() {
     validate_coordinate_axis_domain(explicit_coordinate);
 
     const materialization_coordinate external_coordinate{
-        .ordinal = 1u,
+        .ordinal = 1U,
         .assignments = {
             axis_case_assignment{
                 .group = "highway_target",
                 .role = axis_role::external,
                 .case_label = "HWY_SSE2",
-                .case_ordinal = 1u,
+                .case_ordinal = 1U,
             },
         },
     };
@@ -1834,7 +1834,7 @@ inline void verify_coordinate_axis_domains() {
     materialization_coordinate mixed = explicit_coordinate;
     mixed.assignments.push_back(external_coordinate.assignments.front());
     require_rejected(
-        [&] { validate_coordinate_axis_domain(mixed); },
+        [&mixed]() -> void { validate_coordinate_axis_domain(mixed); },
         "a coordinate cannot mix explicit axes with an external provider");
     require_rejected(
         [] { validate_coordinate_axis_domain(materialization_coordinate{}); },
@@ -1848,7 +1848,7 @@ inline void verify_record_probe_provenance_placement() {
         structural_analysis::scan_token_slice(
             "record_probe_contract.cppm", source);
     require(
-        sliced.declarations.size() == 1u
+        sliced.declarations.size() == 1U
             && sliced.declarations.front().kind
                 == structural_analysis::declaration_kind::record,
         "record probe fixture has one structural record declaration");
@@ -1856,7 +1856,7 @@ inline void verify_record_probe_provenance_placement() {
     owned_declaration entry{
         .declaration = sliced.declarations.front(),
     };
-    const materialization_coordinate coordinate{.ordinal = 7u};
+    const materialization_coordinate coordinate{.ordinal = 7U};
     const std::string rendered = render_entry_head(
         plan, entry, coordinate, true);
     const std::string expected =
@@ -1876,7 +1876,7 @@ inline void verify_alias_probe_provenance_placement() {
         structural_analysis::scan_token_slice(
             "alias_probe_contract.cppm", source);
     require(
-        sliced.declarations.size() == 1u
+        sliced.declarations.size() == 1U
             && sliced.declarations.front().kind
                 == structural_analysis::declaration_kind::alias,
         "alias probe fixture has one structural alias declaration");
@@ -1888,16 +1888,16 @@ inline void verify_alias_probe_provenance_placement() {
         .cases = {replacement_case{
             .label = "selected",
             .spelling = "long",
-            .ordinal = 0u,
+            .ordinal = 0U,
         }},
     };
     const materialization_coordinate coordinate{
-        .ordinal = 7u,
+        .ordinal = 7U,
         .assignments = {axis_case_assignment{
             .group = "abi",
             .role = axis_role::identity,
             .case_label = "selected",
-            .case_ordinal = 0u,
+            .case_ordinal = 0U,
         }},
     };
     const std::string rendered = render_binding_declaration(
@@ -1918,23 +1918,23 @@ inline void verify_generated_topology() {
     require(
         plan.policy == emission_policy::selector_api
             && plan.topology.region.policy == emission_policy::selector_api
-            && generated.artifacts.size() == 9u
+            && generated.artifacts.size() == 9U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::api_partition)
-                == 1u
+                == 1U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::selector_partition)
-                == 1u
+                == 1U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::declaration_probe)
-                == 2u
+                == 2U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::implementation_unit)
-                == 4u,
+                == 4U,
         "two identities/two shards render API, selector, two probes, four units, and one topology manifest");
     require(
         generated.topology_manifest_json.contains(
@@ -1945,8 +1945,8 @@ inline void verify_generated_topology() {
             && generated.topology_manifest_json.contains(
                 "\"emission_policy\": \"selector_api\""),
         "topology manifest uses the current schema and generator identity");
-    std::size_t probes = 0u;
-    std::size_t instances = 0u;
+    std::size_t probes = 0U;
+    std::size_t instances = 0U;
     for (const materialization_artifact& artifact : generated.artifacts) {
         require(
             artifact.artifact_kind == materialization_artifact::kind::manifest
@@ -1979,7 +1979,7 @@ inline void verify_generated_topology() {
                 "instances attach once and import the private API partition");
         }
     }
-    require(probes == 2u && instances == 4u, "probe/heavy action counts are exact");
+    require(probes == 2U && instances == 4U, "probe/heavy action counts are exact");
 
     generation_plan mismatch = plan;
     mismatch.policy = emission_policy::implementation_owners;
@@ -1995,25 +1995,25 @@ inline void verify_owner_generated_topology() {
         plan.policy == emission_policy::implementation_owners
             && plan.topology.region.policy
                 == emission_policy::implementation_owners
-            && plan.topology.coordinates.size() == 4u
+            && plan.topology.coordinates.size() == 4U
             && plan.topology.identity_representative_ordinals
-                == std::vector<std::uint32_t>{0u, 2u}
+                == std::vector<std::uint32_t>{0U, 2U}
             && artifact_count(
                    provisional,
                    materialization_artifact::kind::api_partition)
-                == 0u
+                == 0U
             && artifact_count(
                    provisional,
                    materialization_artifact::kind::selector_partition)
-                == 0u
+                == 0U
             && artifact_count(
                    provisional,
                    materialization_artifact::kind::declaration_probe)
-                == 2u
+                == 2U
             && artifact_count(
                    provisional,
                    materialization_artifact::kind::implementation_unit)
-                == 4u,
+                == 4U,
         "owner provisional rendering has body-free probes and exactly four "
         "implementation units, with no typed API or selector");
     for (const materialization_artifact& artifact : provisional.artifacts) {
@@ -2025,7 +2025,7 @@ inline void verify_owner_generated_topology() {
             "owner rendering must not reuse selector-policy partitions or wrappers");
         if (artifact.artifact_kind
             == materialization_artifact::kind::declaration_probe) {
-            std::size_t expected_heads = 0u;
+            std::size_t expected_heads = 0U;
             for (const std::uint32_t ordinal :
                  artifact.logical_coordinate_ordinals) {
                 const materialization_coordinate& coordinate =
@@ -2042,29 +2042,29 @@ inline void verify_owner_generated_topology() {
                             render_entry_head(
                                 plan, owned, coordinate, true)
                                 + ";")
-                            == 1u,
+                            == 1U,
                         "owner probe must carry every exact selected external declaration head once");
                 }
             }
             require(
-                occurrences(artifact.content, "module fixture.owner;") == 1u
+                occurrences(artifact.content, "module fixture.owner;") == 1U
                     && artifact.content.contains("namespace fixture::owner {")
                     && !artifact.content.contains("return value +")
-                    && expected_heads == 2u,
+                    && expected_heads == 2U,
                 "owner probes attach to the primary and contain only direct-boundary declaration heads");
         } else if (artifact.artifact_kind
                    == materialization_artifact::kind::implementation_unit) {
             require(
-                occurrences(artifact.content, "module fixture.owner;") == 1u
+                occurrences(artifact.content, "module fixture.owner;") == 1U
                     && occurrences(
                            artifact.content,
                            "import fixture.neutral;")
-                        == 1u
+                        == 1U
                     && occurrences(
                            artifact.content,
                            "namespace fixture::owner {")
-                        == 1u
-                    && artifact.logical_coordinate_ordinals.size() == 1u,
+                        == 1U
+                    && artifact.logical_coordinate_ordinals.size() == 1U,
                 "owner units attach once, import neutral dependencies once, "
                 "and render directly in the authored namespace");
         }
@@ -2073,24 +2073,24 @@ inline void verify_owner_generated_topology() {
     attach_fixture_frontend_evidence(plan);
     const generation_result generated = render_generation(plan);
     require(
-        plan.compilation_obligations.api_partition_units == 0u
-            && plan.compilation_obligations.selector_partition_units == 0u
+        plan.compilation_obligations.api_partition_units == 0U
+            && plan.compilation_obligations.selector_partition_units == 0U
             && plan.compilation_obligations
                    .body_bearing_implementation_units
-                == 4u
-            && generated.artifacts.size() == 5u
+                == 4U
+            && generated.artifacts.size() == 5U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::declaration_probe)
-                == 0u
+                == 0U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::implementation_unit)
-                == 4u
+                == 4U
             && artifact_count(
                    generated,
                    materialization_artifact::kind::manifest)
-                == 1u,
+                == 1U,
         "owner publication owns 0/0/N compilable outputs and excludes inspection-only probes");
     require(
         generated.topology_manifest_json.contains(
@@ -2120,14 +2120,14 @@ inline void verify_emission_policy_manifest_tamper() {
     generation_plan selector = fixture_plan();
     attach_fixture_frontend_evidence(selector);
     const generation_result generated = render_generation(selector);
-    const auto reject_artifact_manifest = [&](
+    const auto reject_artifact_manifest = [&generated, &selector](
                                               std::string_view before,
                                               std::string_view after,
-                                              std::string_view contract) {
+                                              std::string_view contract) -> void {
         const std::string tampered = resealed_replace_once(
             generated.artifact_manifest_json, before, after);
         require_rejected(
-            [&] {
+            [&selector, &tampered]() -> void {
                 validate_template_flatten_publication_manifest(
                     tampered,
                     "emission-policy contract mutation",
@@ -2161,7 +2161,7 @@ inline void verify_emission_policy_manifest_tamper() {
         "topology rendering rejects stale canonical-schema bytes under the current digest");
 
     generation_plan false_selector_obligation = selector;
-    false_selector_obligation.compilation_obligations.api_partition_units = 0u;
+    false_selector_obligation.compilation_obligations.api_partition_units = 0U;
     require_rejected(
         [&false_selector_obligation] {
             static_cast<void>(render_generation(false_selector_obligation));
@@ -2171,7 +2171,7 @@ inline void verify_emission_policy_manifest_tamper() {
     generation_plan owner = owner_fixture_plan();
     attach_fixture_frontend_evidence(owner);
     generation_plan false_owner_obligation = owner;
-    false_owner_obligation.compilation_obligations.api_partition_units = 1u;
+    false_owner_obligation.compilation_obligations.api_partition_units = 1U;
     require_rejected(
         [&false_owner_obligation] {
             static_cast<void>(render_generation(false_owner_obligation));
@@ -2190,7 +2190,7 @@ inline void verify_template_flatten_manifest_evidence() {
 
     const generation_result generated = render_generation(plan);
     require(
-        generated.manifest_identity.size() == 64u
+        generated.manifest_identity.size() == 64U
             && generated.artifact_manifest_json.contains(
                 "\"schema_revision\": 4")
             && generated.artifact_manifest_json.contains(
@@ -2212,26 +2212,34 @@ inline void verify_template_flatten_manifest_evidence() {
         "separately from CMake compilation obligations");
 
     generation_plan false_action = plan;
-    false_action.frontend_actions.canonical_token_slice_scans = 1u;
+    false_action.frontend_actions.canonical_token_slice_scans = 1U;
     require_rejected(
-        [&] { static_cast<void>(render_generation(false_action)); },
+        [&false_action]() -> void {
+            static_cast<void>(render_generation(false_action));
+        },
         "template-flatten manifest rejects a fabricated frontend action count");
     false_action = plan;
-    false_action.frontend_actions.body_free_declaration_probe_scans = 1u;
+    false_action.frontend_actions.body_free_declaration_probe_scans = 1U;
     require_rejected(
-        [&] { static_cast<void>(render_generation(false_action)); },
+        [&false_action]() -> void {
+            static_cast<void>(render_generation(false_action));
+        },
         "template-flatten manifest binds probe scans to probe evidence");
     generation_plan duplicate_probe = plan;
     duplicate_probe.declaration_probes.back() =
         duplicate_probe.declaration_probes.front();
     require_rejected(
-        [&] { static_cast<void>(render_generation(duplicate_probe)); },
+        [&duplicate_probe]() -> void {
+            static_cast<void>(render_generation(duplicate_probe));
+        },
         "template-flatten manifest binds each probe to one exact artifact");
     generation_plan false_obligation = plan;
     false_obligation.compilation_obligations
-        .body_bearing_implementation_units = 3u;
+        .body_bearing_implementation_units = 3U;
     require_rejected(
-        [&] { static_cast<void>(render_generation(false_obligation)); },
+        [&false_obligation]() -> void {
+            static_cast<void>(render_generation(false_obligation));
+        },
         "template-flatten manifest rejects a truncated CMake compilation obligation");
 
     generation_result wrong_validation = render_generation(plan, false);
@@ -2254,7 +2262,7 @@ inline void verify_template_flatten_manifest_evidence() {
     wrong_validation.artifacts.back().content_sha256 =
         bioseq::common::sha256_hex(wrong_validation.artifacts.back().content);
     require_rejected(
-        [&] {
+        [&plan, &wrong_validation]() -> void {
             static_cast<void>(render_artifact_manifest(
                 plan, wrong_validation.artifacts, std::string_view{}));
         },
@@ -2293,11 +2301,11 @@ inline void verify_policy_neutral_publication_envelope() {
                 "\"evidence\": {\"schema_revision\":1"),
         "the shared publication envelope owns only common fields and opaque policy evidence");
     require(
-        rendered.manifest_identity.size() == 64u
+        rendered.manifest_identity.size() == 64U
             && rendered.json.contains(rendered.manifest_identity),
         "the shared publication envelope is self-sealed");
     require_rejected(
-        [&] {
+        [&content, &output_root]() -> void {
             static_cast<void>(render_publication_manifest(
                 publication_manifest_request{
                     .output_root = output_root,
@@ -2356,14 +2364,17 @@ inline void verify_authenticated_incremental_publication() {
             .artifacts = std::move(artifacts),
         });
     };
-    const auto render = [&](std::string prior,
+    const auto render = [&render_for_topology, &topology_digest](
+                            std::string prior,
                             std::vector<publication_artifact> artifacts) {
         return render_for_topology(
             std::move(prior), std::move(artifacts), topology_digest);
     };
-    const auto publish_at = [&](const rendered_publication_manifest& rendered,
+    const auto publish_at = [&manifest, &root](
+                                const rendered_publication_manifest& rendered,
                                 std::vector<publication_artifact> artifacts,
-                                const std::filesystem::path& publication_stamp) {
+                                const std::filesystem::path& publication_stamp)
+        -> void {
         publish_artifacts(publication_request{
             .output_root = root,
             .artifact_manifest = manifest,
@@ -2372,8 +2383,10 @@ inline void verify_authenticated_incremental_publication() {
             .artifacts = std::move(artifacts),
         });
     };
-    const auto publish = [&](const rendered_publication_manifest& rendered,
-                             std::vector<publication_artifact> artifacts) {
+    const auto publish = [&publish_at, &stamp](
+                             const rendered_publication_manifest& rendered,
+                             std::vector<publication_artifact> artifacts)
+        -> void {
         publish_at(rendered, std::move(artifacts), stamp);
     };
 
@@ -2410,7 +2423,9 @@ inline void verify_authenticated_incremental_publication() {
     const rendered_publication_manifest unauthorized_repeat = render(
         bioseq::common::sha256_hex("unauthorized predecessor"), initial_artifacts);
     require_rejected(
-        [&] { publish(unauthorized_repeat, initial_artifacts); },
+        [&initial_artifacts, &publish, &unauthorized_repeat]() -> void {
+            publish(unauthorized_repeat, initial_artifacts);
+        },
         "semantic no-op publication still requires the authenticated predecessor");
     rendered_publication_manifest tampered_repeat = repeat;
     tampered_repeat.json = replace_once(
@@ -2418,24 +2433,28 @@ inline void verify_authenticated_incremental_publication() {
         "\"name\": \"incremental_contract\"",
         "\"name\": \"tampered_contract\"");
     require_rejected(
-        [&] { publish(tampered_repeat, initial_artifacts); },
+        [&initial_artifacts, &publish, &tampered_repeat]() -> void {
+            publish(tampered_repeat, initial_artifacts);
+        },
         "publication rejects a byte mutation not covered by its stale self-seal");
     const detail::previous_publication_snapshot authenticated_snapshot =
         detail::read_previous_publication_snapshot(
             manifest, root, "contract", topology_digest);
     publish_artifact_if_changed(manifest, repeat.json);
     require_rejected(
-        [&] {
+        [&authenticated_snapshot, &manifest]() -> void {
             detail::require_unchanged_previous_publication_snapshot(
                 manifest, authenticated_snapshot);
         },
         "publication rejects a newer manifest swapped after authentication");
     publish_artifact_if_changed(manifest, first_manifest_bytes);
     require_rejected(
-        [&] { publish_at(repeat, initial_artifacts, manifest); },
+        [&initial_artifacts, &manifest, &publish_at, &repeat]() -> void {
+            publish_at(repeat, initial_artifacts, manifest);
+        },
         "publication stamp cannot alias the artifacts manifest");
     require_rejected(
-        [&] {
+        [&initial_artifacts, &manifest, &publish_at, &repeat]() -> void {
             publish_at(
                 repeat,
                 initial_artifacts,
@@ -2443,7 +2462,7 @@ inline void verify_authenticated_incremental_publication() {
         },
         "publication stamp cannot alias the artifacts manifest temporary path");
     require_rejected(
-        [&] {
+        [&initial_artifacts, &manifest, &publish_at, &repeat]() -> void {
             publish_at(
                 repeat,
                 initial_artifacts,
@@ -2452,10 +2471,12 @@ inline void verify_authenticated_incremental_publication() {
         },
         "publication stamp cannot nest beneath a protocol-owned file path");
     require_rejected(
-        [&] { publish_at(repeat, initial_artifacts, keep); },
+        [&initial_artifacts, &keep, &publish_at, &repeat]() -> void {
+            publish_at(repeat, initial_artifacts, keep);
+        },
         "publication stamp cannot alias a desired artifact");
     require_rejected(
-        [&] {
+        [&initial_artifacts, &keep, &publish_at, &repeat]() -> void {
             publish_at(
                 repeat,
                 initial_artifacts,
@@ -2478,16 +2499,22 @@ inline void verify_authenticated_incremental_publication() {
             shrunk_artifacts,
             replacement_topology_digest);
     require_rejected(
-        [&] { publish(empty_cross_topology, shrunk_artifacts); },
+        [&empty_cross_topology, &publish, &shrunk_artifacts]() -> void {
+            publish(empty_cross_topology, shrunk_artifacts);
+        },
         "cross-topology cleanup requires a non-empty predecessor identity");
     require_rejected(
-        [&] { publish(unauthorized_cross_topology, shrunk_artifacts); },
+        [&publish, &shrunk_artifacts, &unauthorized_cross_topology]() -> void {
+            publish(unauthorized_cross_topology, shrunk_artifacts);
+        },
         "cross-topology cleanup requires the exact predecessor identity");
     require_rejected(
-        [&] { publish_at(shrunk, shrunk_artifacts, stale); },
+        [&publish_at, &shrunk, &shrunk_artifacts, &stale]() -> void {
+            publish_at(shrunk, shrunk_artifacts, stale);
+        },
         "publication stamp cannot alias an authenticated stale artifact");
     require_rejected(
-        [&] {
+        [&publish_at, &shrunk, &shrunk_artifacts, &stale]() -> void {
             publish_at(
                 shrunk,
                 shrunk_artifacts,
@@ -2501,7 +2528,9 @@ inline void verify_authenticated_incremental_publication() {
         "rejected cross-topology and stamp aliases preserve prior ownership");
     publish_artifact_if_changed(stale, "locally modified stale artifact\n");
     require_rejected(
-        [&] { publish(shrunk, shrunk_artifacts); },
+        [&publish, &shrunk, &shrunk_artifacts]() -> void {
+            publish(shrunk, shrunk_artifacts);
+        },
         "modified stale artifacts cannot be deleted by manifest ownership alone");
     require(
         std::filesystem::is_regular_file(stale),
@@ -2523,7 +2552,7 @@ inline void verify_authenticated_incremental_publication() {
         "authenticated cross-topology shrink removes only the prior stale "
         "artifact and publishes the new self-sealed ownership");
     require_rejected(
-        [&] {
+        [&root, &topology_digest]() -> void {
             static_cast<void>(render_publication_manifest(
                 publication_manifest_request{
                     .output_root = root,
@@ -2549,14 +2578,14 @@ inline void verify_interrupted_publication_recovery() {
         std::size_t ordinal{};
     };
     constexpr std::array faults{
-        fault_case{publication_fault_point::preparing_intent_durable, 0u},
-        fault_case{publication_fault_point::desired_artifact_staged, 0u},
-        fault_case{publication_fault_point::desired_artifact_staged, 1u},
-        fault_case{publication_fault_point::ready_intent_durable, 0u},
-        fault_case{publication_fault_point::desired_artifact_promoted, 0u},
-        fault_case{publication_fault_point::desired_artifact_promoted, 1u},
-        fault_case{publication_fault_point::stale_artifact_removed, 0u},
-        fault_case{publication_fault_point::manifest_committed, 0u},
+        fault_case{publication_fault_point::preparing_intent_durable, 0U},
+        fault_case{publication_fault_point::desired_artifact_staged, 0U},
+        fault_case{publication_fault_point::desired_artifact_staged, 1U},
+        fault_case{publication_fault_point::ready_intent_durable, 0U},
+        fault_case{publication_fault_point::desired_artifact_promoted, 0U},
+        fault_case{publication_fault_point::desired_artifact_promoted, 1U},
+        fault_case{publication_fault_point::stale_artifact_removed, 0U},
+        fault_case{publication_fault_point::manifest_committed, 0U},
     };
     const auto make_artifact = [](std::filesystem::path path,
                                   std::string content) {
@@ -2588,8 +2617,10 @@ inline void verify_interrupted_publication_recovery() {
                     .artifacts = std::move(artifacts),
                 });
             };
-            const auto publish = [&](const rendered_publication_manifest& rendered,
-                                     std::vector<publication_artifact> artifacts) {
+            const auto publish = [&manifest, &root, &stamp](
+                                     const rendered_publication_manifest& rendered,
+                                     std::vector<publication_artifact> artifacts)
+                -> void {
                 publish_artifacts(publication_request{
                     .output_root = root,
                     .artifact_manifest = manifest,
@@ -2628,7 +2659,9 @@ inline void verify_interrupted_publication_recovery() {
                 .ordinal = fault.ordinal,
             };
             require_rejected(
-                [&] { publish(transition_manifest, transition); },
+                [&publish, &transition, &transition_manifest]() -> void {
+                    publish(transition_manifest, transition);
+                },
                 "every durable publication boundary must be interruptible");
             publication_fault_for_testing.reset();
 
@@ -2713,8 +2746,10 @@ inline void verify_interrupted_publication_recovery() {
             .artifacts = std::move(artifacts),
         });
     };
-    const auto publish = [&](const rendered_publication_manifest& rendered,
-                             std::vector<publication_artifact> artifacts) {
+    const auto publish = [&manifest, &root, &stamp](
+                             const rendered_publication_manifest& rendered,
+                             std::vector<publication_artifact> artifacts)
+        -> void {
         publish_artifacts(publication_request{
             .output_root = root,
             .artifact_manifest = manifest,
@@ -2736,14 +2771,16 @@ inline void verify_interrupted_publication_recovery() {
         .point = publication_fault_point::ready_intent_durable,
     };
     require_rejected(
-        [&] { publish(second, replacement); },
+        [&publish, &replacement, &second]() -> void {
+            publish(second, replacement);
+        },
         "adversarial fixture must stop with an authenticated READY intent");
     publication_fault_for_testing.reset();
     publish_artifact_if_changed(
         std::filesystem::path{(root / "replace.cppm").string() + ".tmp"},
         "tampered staged bytes\n");
     require_rejected(
-        [&] {
+        [&manifest, &root, &stamp]() -> void {
             recover_interrupted_publication(
                 root, manifest, stamp, "contract");
         },
@@ -2768,23 +2805,23 @@ inline void verify_preparation_action_trace_stamp_binding() {
     validate_frontend_action_trace_stamp_binding(
         stamp, action_trace);
     require_rejected(
-        [&] {
+        [&action_trace, &stamp]() -> void {
             validate_frontend_action_trace_stamp_binding(
                 stamp, action_trace + " ");
         },
         "PREPARE stamp accepts independently substituted action-trace bytes");
     require_rejected(
-        [&] {
+        [&action_trace, &stamp]() -> void {
             validate_frontend_action_trace_stamp_binding(
                 replace_once(
                     stamp,
                     bioseq::common::sha256_hex(action_trace),
-                    std::string(64u, '0')),
+                    std::string(64U, '0')),
                 action_trace);
         },
         "PREPARE stamp accepts a stale action-trace digest");
     require_rejected(
-        [&] {
+        [&action_trace, &stamp]() -> void {
             validate_frontend_action_trace_stamp_binding(
                 stamp + "prepare_action_trace_sha256="
                     + bioseq::common::sha256_hex(action_trace) + "\n",
@@ -2859,7 +2896,7 @@ struct prepare_transaction_fixture {
             physical_pcm_root, configured_pcm_root);
         const std::filesystem::path clang{
             BIOSEQ_PREPARE_TEST_CLANG_BINARY};
-        const auto arguments = [&](
+        const auto arguments = [this, &clang](
                                    const std::filesystem::path& source,
                                    bool use_response = false) {
             std::vector<std::string> result{
@@ -2874,11 +2911,11 @@ struct prepare_transaction_fixture {
             result.push_back(source.string());
             return result;
         };
-        const auto render_command = [&](
+        const auto render_command = [this, &arguments](
                                         std::ostringstream& output,
                                         const std::filesystem::path& source,
                                         bool use_response,
-                                        bool first) {
+                                        bool first) -> void {
             output << (first ? "" : ",\n")
                    << "  {\n    \"directory\": \""
                    << json_escape(root.string())
@@ -2977,14 +3014,16 @@ class scoped_prepare_checkpoint final {
 
 inline void verify_prepare_authority_revalidation_transaction() {
     prepare_transaction_fixture fixture;
-    const auto require_failed_without_stamp =
-        [&](std::string_view contract) {
+    const auto require_failed_without_stamp = [&fixture](
+                                                  std::string_view contract)
+        -> void {
             require(
                 !std::filesystem::exists(fixture.canonical_stamp()),
                 std::string{contract}
                     + " left a PREPARE completion stamp after failure");
         };
-    const auto require_clean_retry = [&](std::string_view contract) {
+    const auto require_clean_retry = [&fixture](
+                                         std::string_view contract) -> void {
         require(
             execute_prepare_contract(fixture.command) == 0
                 && std::filesystem::is_regular_file(
@@ -2992,17 +3031,22 @@ inline void verify_prepare_authority_revalidation_transaction() {
             std::string{contract}
                 + " did not converge on a clean stamped retry");
     };
-    const auto verify_file_mutation = [&]<typename p_mutator>(
+    const auto verify_file_mutation = [
+                                          &fixture,
+                                          &require_clean_retry,
+                                          &require_failed_without_stamp]
+        <typename p_mutator>(
                                           const std::filesystem::path& path,
                                           prepare_publication_checkpoint point,
                                           std::string_view contract,
-                                          p_mutator&& mutator) {
+                                          p_mutator&& mutator) -> void {
         preserved_prepare_file preserved{path};
         bool fired = false;
         std::string rejection_diagnostic;
         {
             scoped_prepare_checkpoint checkpoint{
-                [&](const prepare_publication_checkpoint actual) {
+                [&fired, &mutator, &preserved, point](
+                    const prepare_publication_checkpoint actual) -> void {
                     if (actual != point || std::exchange(fired, true)) {
                         return;
                     }
@@ -3066,7 +3110,8 @@ inline void verify_prepare_authority_revalidation_transaction() {
     bool throw_fired = false;
     {
         scoped_prepare_checkpoint checkpoint{
-            [&](const prepare_publication_checkpoint point) {
+            [&throw_fired](
+                const prepare_publication_checkpoint point) -> void {
                 if (point
                         == prepare_publication_checkpoint::
                             after_db_manifest_publish
@@ -3076,7 +3121,7 @@ inline void verify_prepare_authority_revalidation_transaction() {
                 }
             }};
         require_rejected(
-            [&] {
+            [&fixture]() -> void {
                 static_cast<void>(
                     execute_prepare_contract(fixture.command));
             },
@@ -3089,7 +3134,8 @@ inline void verify_prepare_authority_revalidation_transaction() {
     bool retarget_fired = false;
     {
         scoped_prepare_checkpoint checkpoint{
-            [&](const prepare_publication_checkpoint point) {
+            [&fixture, &retarget_fired](
+                const prepare_publication_checkpoint point) -> void {
                 if (point
                         != prepare_publication_checkpoint::
                             after_environment_built
@@ -3105,7 +3151,7 @@ inline void verify_prepare_authority_revalidation_transaction() {
                     fixture.configured_pcm_root);
             }};
         require_rejected(
-            [&] {
+            [&fixture]() -> void {
                 static_cast<void>(
                     execute_prepare_contract(fixture.command));
             },

@@ -72,7 +72,8 @@ HWY_ATTR void attribute_target_only_bf16_dot_product(
 #endif
 
 template <class p_value>
-HWY_ATTR p_value attribute_function_template(const p_value value) noexcept {
+HWY_ATTR auto attribute_function_template(const p_value value) noexcept
+    -> p_value {
   return value + p_value{1};
 }
 
@@ -82,49 +83,50 @@ struct attribute_worker final {
   HWY_ATTR attribute_worker(const std::uint32_t input) noexcept
       : value(input) {}
 
-  HWY_ATTR std::uint32_t operator()() const noexcept {
+  HWY_ATTR auto operator()() const noexcept -> std::uint32_t {
     return value + std::uint32_t{2};
   }
 
-  HWY_ATTR std::uint32_t member() const noexcept {
+  HWY_ATTR auto member() const noexcept -> std::uint32_t {
     return value + std::uint32_t{3};
   }
 
   template <class p_value>
-  HWY_ATTR p_value member_template(const p_value input) const noexcept {
+  HWY_ATTR auto member_template(const p_value input) const noexcept -> p_value {
     return input + static_cast<p_value>(value);
   }
 };
 
-HWY_ATTR std::uint32_t attribute_free_function(
-    const std::uint32_t value) noexcept {
+HWY_ATTR auto attribute_free_function(
+    const std::uint32_t value) noexcept -> std::uint32_t {
   return value + std::uint32_t{4};
 }
 
 // Named attributed driver forces code generation for every representative
 // placement emitted by body_with_highway_attributes().
-HWY_ATTR std::uint32_t highway_attribute_coverage(
-    const std::uint32_t input) noexcept {
+HWY_ATTR auto highway_attribute_coverage(
+    const std::uint32_t input) noexcept -> std::uint32_t {
   attribute_worker worker{input};
   const auto local = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR (
       const std::uint32_t value) constexpr noexcept
       [[gnu::always_inline]] -> std::uint32_t {
     return value + std::uint32_t{5};
   };
-  const auto no_parameters = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR {
+  const auto no_parameters = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR () -> std::uint32_t {
     return std::uint32_t{6};
   };
   const auto generic = []<class p_value> BIOSEQ_HIGHWAY_LAMBDA_ATTR (
-      const p_value value) {
+      const p_value value) -> p_value {
     return value + p_value{7};
   };
   const auto constrained_generic = []<class p_value>
       requires (sizeof(p_value) > 0) BIOSEQ_HIGHWAY_LAMBDA_ATTR (
-          const p_value value) static noexcept {
+          const p_value value) static noexcept -> p_value {
     return value + p_value{8};
   };
   const auto invented_generic = [] BIOSEQ_HIGHWAY_LAMBDA_ATTR (
-      const auto value) noexcept(noexcept(value + decltype(value){9})) {
+      const auto value) noexcept(noexcept(value + decltype(value){9}))
+      -> decltype(value) {
     return value + decltype(value){9};
   };
 

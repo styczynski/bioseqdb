@@ -91,8 +91,8 @@ inline void validate_frontend_action_trace_stamp_binding(
             "PREPARE stamp action-trace binding has the wrong schema");
     }
     std::string sealed_digest;
-    std::size_t binding_count = 0u;
-    std::size_t line_begin = 0u;
+    std::size_t binding_count = 0U;
+    std::size_t line_begin = 0U;
     while (line_begin < stamp_content.size()) {
         const std::size_t line_end = stamp_content.find(
             '\n', line_begin);
@@ -106,16 +106,16 @@ inline void validate_frontend_action_trace_stamp_binding(
             sealed_digest = line.substr(prefix.size());
         }
         if (line_end == std::string_view::npos) break;
-        line_begin = line_end + 1u;
+        line_begin = line_end + 1U;
     }
-    const bool has_lowercase_sha256 = sealed_digest.size() == 64u
+    const bool has_lowercase_sha256 = sealed_digest.size() == 64U
         && std::ranges::all_of(
             sealed_digest,
             [](const char value) {
                 return (value >= '0' && value <= '9')
                     || (value >= 'a' && value <= 'f');
             });
-    if (binding_count != 1u
+    if (binding_count != 1U
         || !has_lowercase_sha256
         || sealed_digest != bioseq::common::sha256_hex(action_trace_content)) {
         throw std::runtime_error(
@@ -206,7 +206,7 @@ namespace fs = std::filesystem;
 [[nodiscard]] inline std::string json_escape(std::string_view value) {
     std::string result;
     result.reserve(value.size() + 8);
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr std::string_view digits = "0123456789abcdef";
     for (const unsigned char character : value) {
         switch (character) {
             case '"': result += "\\\""; break;
@@ -502,14 +502,14 @@ inline void validate_plan_identity(const generation_plan& plan) {
         }
     }
 
-    if (plan.frontend_actions.dependency_preparation_validations != 1u
-        || plan.frontend_actions.canonical_token_slice_scans != 2u
+    if (plan.frontend_actions.dependency_preparation_validations != 1U
+        || plan.frontend_actions.canonical_token_slice_scans != 2U
         || plan.frontend_actions.signature_donor_token_slice_scans
-            != 1u + plan.declaration_probes.size()
+            != 1U + plan.declaration_probes.size()
         || plan.frontend_actions.body_free_declaration_probe_scans
             != plan.declaration_probes.size()
-        || plan.frontend_actions.artifact_render_passes != 2u
-        || plan.frontend_actions.body_bearing_compiler_invocations != 0u
+        || plan.frontend_actions.artifact_render_passes != 2U
+        || plan.frontend_actions.body_bearing_compiler_invocations != 0U
         || plan.declaration_probes.size()
             != plan.topology.identity_representative_ordinals.size()) {
         throw std::runtime_error(
@@ -519,7 +519,7 @@ inline void validate_plan_identity(const generation_plan& plan) {
             "zero body-bearing compiler-action invariant");
     }
     const std::uint32_t expected_partition_units =
-        plan.policy == emission_policy::selector_api ? 1u : 0u;
+        plan.policy == emission_policy::selector_api ? 1U : 0U;
     if (plan.compilation_obligations.api_partition_units
             != expected_partition_units
         || plan.compilation_obligations.selector_partition_units
@@ -1090,7 +1090,7 @@ inline void replace_authenticated_identity(
             + ": canonical publication identity field is unterminated");
     }
     const std::size_t value_size = value_end - value_begin;
-    if ((!allow_empty || value_size != 0u) && value_size != 64u) {
+    if ((!allow_empty || value_size != 0U) && value_size != 64U) {
         throw std::runtime_error(
             std::string{owner}
             + ": canonical publication identity has an invalid length");
@@ -1386,25 +1386,25 @@ inline void validate_template_flatten_publication_manifest(
                 "dependency_preparation_validations",
                 owner),
             "frontend_action_ledger.dependency_preparation_validations")
-            != 1u
+            != 1U
         || require_unsigned(
                require_member(
                    frontend_actions, "canonical_token_slice_scans", owner),
                "frontend_action_ledger.canonical_token_slice_scans")
-            != 2u
-        || signature_donor_slice_count != 1u + body_free_probe_count
+            != 2U
+        || signature_donor_slice_count != 1U + body_free_probe_count
         || require_unsigned(
                require_member(
                    frontend_actions, "artifact_render_passes", owner),
                "frontend_action_ledger.artifact_render_passes")
-            != 2u
+            != 2U
         || require_unsigned(
                require_member(
                    frontend_actions,
                    "body_bearing_compiler_invocations",
                    owner),
                "frontend_action_ledger.body_bearing_compiler_invocations")
-            != 0u) {
+            != 0U) {
         throw std::runtime_error(
             std::string{owner}
             + ": frontend ledger must record one preparation validation, "
@@ -1425,7 +1425,7 @@ inline void validate_template_flatten_publication_manifest(
         },
         "template_flatten evidence cmake_compilation_obligations");
     const std::uint64_t expected_partition_units =
-        emission == emission_policy::selector_api ? 1u : 0u;
+        emission == emission_policy::selector_api ? 1U : 0U;
     if (require_unsigned(
             require_member(obligations, "api_partition_units", owner),
             "cmake_compilation_obligations.api_partition_units")
@@ -1589,11 +1589,11 @@ inline void validate_template_flatten_publication_manifest(
               "complete publication set");
     }
     std::string previous_path;
-    std::uint64_t api_partition_count = 0u;
-    std::uint64_t selector_partition_count = 0u;
-    std::uint64_t declaration_probe_count = 0u;
-    std::uint64_t implementation_unit_count = 0u;
-    std::uint64_t manifest_count = 0u;
+    std::uint64_t api_partition_count = 0U;
+    std::uint64_t selector_partition_count = 0U;
+    std::uint64_t declaration_probe_count = 0U;
+    std::uint64_t implementation_unit_count = 0U;
+    std::uint64_t manifest_count = 0U;
     for (std::size_t index = 0; index < artifacts.children.size(); ++index) {
         const json_value& artifact = artifacts.children[index];
         require_exact_members(
@@ -1687,7 +1687,7 @@ inline void validate_template_flatten_publication_manifest(
                    path_text,
                    std::string{module},
                    publication.artifacts[index].content_sha256})
-                != 1u) {
+                != 1U) {
             throw std::runtime_error(
                 std::string{owner}
                 + ": declaration probe evidence does not bind its exact "
@@ -1695,7 +1695,7 @@ inline void validate_template_flatten_publication_manifest(
         }
     }
     const std::uint64_t expected_published_probe_count =
-        emission == emission_policy::selector_api ? body_free_probe_count : 0u;
+        emission == emission_policy::selector_api ? body_free_probe_count : 0U;
     const bool probe_evidence_bound =
         emission == emission_policy::selector_api
         ? unmatched_probe_evidence.empty()
@@ -1704,7 +1704,7 @@ inline void validate_template_flatten_publication_manifest(
         || selector_partition_count != expected_partition_units
         || declaration_probe_count != expected_published_probe_count
         || implementation_unit_count != body_bearing_obligation_count
-        || manifest_count != 1u || !probe_evidence_bound) {
+        || manifest_count != 1U || !probe_evidence_bound) {
         throw std::runtime_error(
             std::string{owner}
             + ": rendered artifacts disagree with distinct CMake "
@@ -2996,7 +2996,7 @@ render_publication_manifest(const publication_manifest_request& request) {
                 == materialization_artifact::kind::declaration_probe;
         });
     if (plan.policy == emission_policy::implementation_owners) {
-        if (rendered_probe_count != 0u) {
+        if (rendered_probe_count != 0U) {
             throw std::runtime_error(
                 "implementation-owner declaration probes are provisional and must not be published");
         }
@@ -3192,7 +3192,7 @@ inline thread_local std::optional<publication_fault_injection>
 
 inline void maybe_inject_publication_fault(
     const publication_fault_point point,
-    const std::size_t ordinal = 0u) {
+    const std::size_t ordinal = 0U) {
     if (!publication_fault_for_testing.has_value()
         || publication_fault_for_testing->point != point
         || publication_fault_for_testing->ordinal != ordinal) {
@@ -3626,7 +3626,7 @@ inline void roll_forward_ready_publication(
     require_pending_content_unchanged(pending);
     require_unchanged_previous_publication_snapshot(
         protocol.manifest, previous_snapshot);
-    for (std::size_t ordinal = 0u; ordinal < promotions.size(); ++ordinal) {
+    for (std::size_t ordinal = 0U; ordinal < promotions.size(); ++ordinal) {
         const promotion& item = promotions[ordinal];
         if (regular_file_digest(
                 item.staging, "revalidated staged publication artifact")
@@ -3656,7 +3656,7 @@ inline void roll_forward_ready_publication(
         maybe_inject_publication_fault(
             publication_fault_point::desired_artifact_promoted, ordinal);
     }
-    for (std::size_t ordinal = 0u; ordinal < stale_artifacts.size(); ++ordinal) {
+    for (std::size_t ordinal = 0U; ordinal < stale_artifacts.size(); ++ordinal) {
         const owned_publication_artifact& artifact = *stale_artifacts[ordinal];
         const std::filesystem::path stale =
             protocol.output_root / artifact.relative_path;
@@ -3905,7 +3905,7 @@ inline void publish_artifacts(const publication_request& request) {
     detail::maybe_inject_publication_fault(
         detail::publication_fault_point::preparing_intent_durable);
 
-    std::size_t staged_ordinal = 0u;
+    std::size_t staged_ordinal = 0U;
     for (const publication_artifact& artifact : request.artifacts) {
         const std::filesystem::path destination =
             request.output_root / artifact.relative_path;

@@ -5,6 +5,6 @@ import bioseq.highway.gcc_canary.contract;
 
 export namespace bioseq::highway_gcc_canary::@TARGET_NAMESPACE@ {
 
-[[nodiscard]] const target_binding* bind_highway_target();
+[[nodiscard]] auto bind_highway_target() -> const target_binding*;
 
 }  // namespace bioseq::highway_gcc_canary::@TARGET_NAMESPACE@

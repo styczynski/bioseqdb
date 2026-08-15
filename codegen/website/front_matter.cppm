@@ -1,5 +1,6 @@
 module;
 
+#include <array>
 #include <yaml-cpp/yaml.h>
 #include <yaml-cpp/eventhandler.h>
 
@@ -343,11 +344,11 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
         throw std::runtime_error("site.yaml must be a YAML mapping: " + std::string(path));
     }
     site_configuration config;
-    static constexpr std::string_view known_keys[] = {
+    static constexpr auto known_keys = std::to_array<std::string_view>({
         "title", "short_description", "canonical_origin", "default_base_path",
         "repository_url", "source_url_template", "default_social_image",
         "status_label", "copyright_holder", "copyright_year", "navigation",
-        "cpp_public_modules", "required_documentation_entities"};
+        "cpp_public_modules", "required_documentation_entities"});
     for (const auto& entry : root) {
         const auto key = entry.first.as<std::string>();
         bool known = false;

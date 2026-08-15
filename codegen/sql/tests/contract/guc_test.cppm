@@ -203,7 +203,7 @@ inline void run_guc_generator_contract_self_tests() {
         collected_program structural_constexpr = program;
         const auto core_authority = std::ranges::find_if(
             structural_constexpr.enum_authority_units,
-            [&](const auto& unit) {
+            [&owners](const auto& unit) -> bool {
                 return unit.source_path == owners[2];
             });
         require(
@@ -392,7 +392,8 @@ inline void run_guc_generator_contract_self_tests() {
             structural_analysis::repository_source_identity(owners[2]);
         std::erase_if(
             missing_owner_source.module_graph.units,
-            [&](const structural_analysis::module_graph_unit& unit) {
+            [&core_source_identity](
+                const structural_analysis::module_graph_unit& unit) -> bool {
                 return unit.source_identity == core_source_identity;
             });
         guc_contract_detail::require_rejected(
@@ -465,7 +466,7 @@ inline void run_guc_generator_contract_self_tests() {
     require(
         std::ranges::all_of(
             test_only_gucs,
-            [&](std::string_view name) {
+            [&production, &test_indexes](std::string_view name) -> bool {
                 return std::ranges::none_of(
                            production.gucs,
                            [name](const collected_guc& value) {

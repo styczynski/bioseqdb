@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -592,9 +593,9 @@ void verify_website_pipeline() {
         "}\n"
         "namespace hidden { struct Internal { int y; }; }\n",
         {"-std=c++20", "-xc++"});
-    const auto has_entity = [&](std::string_view name) {
+    const auto has_entity = [&clang_index](std::string_view name) -> bool {
         return std::ranges::any_of(
-            clang_index.entities, [&](const reference_entity& candidate) {
+            clang_index.entities, [name](const reference_entity& candidate) -> bool {
                 return candidate.qualified_name == name;
             });
     };
@@ -814,7 +815,7 @@ namespace {
 namespace fs = std::filesystem;
 
 [[nodiscard]] std::string hex64(std::uint64_t value) {
-    static constexpr char digits[] = "0123456789abcdef";
+    static constexpr std::string_view digits = "0123456789abcdef";
     std::string out(16, '0');
     for (int index = 15; index >= 0; --index) {
         out[index] = digits[value & 0xF];
@@ -868,7 +869,7 @@ namespace fs = std::filesystem;
 /// @return RFC 3986 unreserved bytes plus optional slashes, with all others encoded.
 [[nodiscard]] std::string encode_source_url_value(
     std::string_view value, bool preserve_slashes) {
-    static constexpr char hexadecimal[] = "0123456789ABCDEF";
+    static constexpr std::string_view hexadecimal = "0123456789ABCDEF";
     std::string encoded;
     encoded.reserve(value.size());
     for (const unsigned char byte : value) {
@@ -1140,7 +1141,7 @@ void process_annotations(std::vector<content_node>& nodes, const std::string& wh
         std::size_t count;  // annotations attached so far
     };
     std::vector<block_ref> blocks;
-    const auto find_block = [&](const std::string& id) -> block_ref* {
+    const auto find_block = [&blocks](const std::string& id) -> block_ref* {
         for (block_ref& block : blocks) {
             if (block.id == id) {
                 return &block;
@@ -1362,7 +1363,7 @@ void record_example_run(std::string_view example_id, std::chrono::milliseconds e
         case '\t': out += "\\t"; break;
         default:
             if (byte < 0x20) {
-                static constexpr char hex[] = "0123456789abcdef";
+                static constexpr std::string_view hex = "0123456789abcdef";
                 out += "\\u00";
                 out.push_back(hex[byte >> 4]);
                 out.push_back(hex[byte & 0x0F]);
@@ -1963,7 +1964,8 @@ struct entity_reference_index {
     for (const reference_entity& entity : sql_entities) {
         real_spellings.insert(entity.qualified_name);
     }
-    const auto add_entity = [&](const reference_entity& entity) {
+    const auto add_entity = [&grouped_names, &index](
+                                const reference_entity& entity) -> void {
         const entity_query_domain domain = entity.domain == entity_domain::sql
             ? entity_query_domain::sql : entity_query_domain::cpp;
         index.add(domain, entity.canonical_id, entity.canonical_id);
@@ -2030,11 +2032,11 @@ void split_shorthand_text(const std::string& text,
         return (character >= 'a' && character <= 'z')
             || (character >= 'A' && character <= 'Z') || character == '_';
     };
-    const auto is_part = [&](char character) {
+    const auto is_part = [is_start](char character) -> bool {
         return is_start(character) || (character >= '0' && character <= '9');
     };
     std::string pending;
-    const auto flush = [&]() {
+    const auto flush = [&out, &pending]() -> void {
         if (pending.empty()) {
             return;
         }
@@ -2588,7 +2590,9 @@ void verify_reference_pipeline() {
 
     const entity_reference_index grouped_index = build_entity_reference_index(
         {}, {overload_a, overload_b, mmsearch_group});
-    const auto lookup = [&](entity_query_domain domain, std::string_view spelling) {
+    const auto lookup = [&grouped_index](
+                            entity_query_domain domain,
+                            std::string_view spelling) -> std::string {
         const auto found = grouped_index.by_key.find(
             entity_reference_index::domain_key(domain) + std::string(spelling));
         return found == grouped_index.by_key.end() ? std::string() : found->second;
@@ -2627,8 +2631,9 @@ void verify_reference_pipeline() {
         "sql:overload_group:unusual_schema.mmsearch";
     const entity_reference_index relocated_index =
         build_entity_reference_index({}, {relocated_a, relocated_group});
-    const auto relocated_lookup =
-        [&](entity_query_domain domain, std::string_view spelling) {
+    const auto relocated_lookup = [&relocated_index](
+                                      entity_query_domain domain,
+                                      std::string_view spelling) -> std::string {
             const auto found = relocated_index.by_key.find(
                 entity_reference_index::domain_key(domain)
                 + std::string(spelling));
@@ -2817,10 +2822,10 @@ void verify_reference_pipeline() {
 /// @param args Options after the `plan` token.
 /// @return Zero on success; two on CLI usage errors; three on parse/validation.
 [[nodiscard]] int execute_plan_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "templates", "static",
-        "base-path", "source-revision", "output", "report-dir"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts"};
+        "base-path", "source-revision", "output", "report-dir"});
+    static constexpr auto flag_keys = std::to_array<std::string_view>({"include-drafts"});
     const auto options = parse_options(args, value_keys, flag_keys);
     const auto stage_started = std::chrono::steady_clock::now();
     const fs::path source = require_option(options, "source");
@@ -2907,9 +2912,9 @@ namespace {
 /// @param args Options after the `cpp_index` token.
 /// @return Zero on success; two on usage errors; three on parse/validation.
 [[nodiscard]] int execute_cpp_index_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "doxygen-xml", "compile-db", "reachable-units", "source-root", "site-config",
-        "output", "coverage-output", "report-dir"};
+        "output", "coverage-output", "report-dir"});
     const auto options = parse_options(args, value_keys, {});
     const fs::path doxygen_xml = require_option(options, "doxygen-xml");
     const fs::path compile_db = require_option(options, "compile-db");
@@ -3017,14 +3022,14 @@ namespace {
 /// @param args Options after the `execute-sql` token.
 /// @return Zero on success; two on usage errors; three on execution failure.
 [[nodiscard]] int execute_sql_example_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
         "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms",
-        "sql-manifest"};
-    static constexpr std::string_view flag_keys[] = {
-        "isolated", "allow-plain-template"};
-    static constexpr std::string_view repeatable_value_keys[] = {
-        "sql-manifest"};
+        "sql-manifest"});
+    static constexpr auto flag_keys = std::to_array<std::string_view>({
+        "isolated", "allow-plain-template"});
+    static constexpr auto repeatable_value_keys = std::to_array<std::string_view>({
+        "sql-manifest"});
     const auto options = parse_options(
         args, value_keys, flag_keys, repeatable_value_keys);
 
@@ -3121,10 +3126,10 @@ namespace {
 /// @param args Options after the `catalog` token.
 /// @return Zero on success; two on usage errors; three on capture failure.
 [[nodiscard]] int execute_catalog_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
-        "conninfo", "sql-manifest", "output"};
-    static constexpr std::string_view repeatable_value_keys[] = {
-        "sql-manifest"};
+    static constexpr auto value_keys = std::to_array<std::string_view>({
+        "conninfo", "sql-manifest", "output"});
+    static constexpr auto repeatable_value_keys = std::to_array<std::string_view>({
+        "sql-manifest"});
     const auto options = parse_options(
         args, value_keys, {}, repeatable_value_keys);
     const std::string conninfo = require_option(options, "conninfo");
@@ -3177,7 +3182,7 @@ namespace {
 /// @param args Options after the `render-fragment` token.
 /// @return Zero on success; two on usage errors; three on render failure.
 [[nodiscard]] int execute_template_render_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {"template", "context", "output"};
+    static constexpr auto value_keys = std::to_array<std::string_view>({"template", "context", "output"});
     const auto options = parse_options(args, value_keys, {});
     const fs::path template_path = require_option(options, "template");
     const fs::path context_path = require_option(options, "context");
@@ -3332,7 +3337,7 @@ void atomic_publish(const fs::path& staging, const fs::path& output) {
 // event handler or style, no external script/stylesheet resource, exactly one
 // <h1>, the meta CSP present, and frame-ancestors kept out of the meta element.
 void validate_generated_html(std::string_view route, std::string_view html) {
-    const auto fail = [&](std::string_view why) {
+    const auto fail = [route](std::string_view why) -> void {
         throw std::runtime_error("generated HTML validation failed for "
                                  + std::string(route) + ": " + std::string(why));
     };
@@ -3555,9 +3560,14 @@ void decorate_code_entity_ranges(
     const std::string& base_path, const std::string& revision,
     const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging) {
     const std::string version = model.version.path_component;
-    const auto url = [&](std::string_view rel) { return base_path + std::string(rel); };
-    const auto route = [&](std::string_view rel) { return "/" + std::string(rel); };
-    const auto canonical = [&](std::string_view rel) {
+    const auto url = [&base_path](std::string_view rel) -> std::string {
+        return base_path + std::string(rel);
+    };
+    const auto route = [](std::string_view rel) -> std::string {
+        return "/" + std::string(rel);
+    };
+    const auto canonical = [&config, &url](
+                               std::string_view rel) -> std::string {
         std::string trimmed(rel);
         if (trimmed.ends_with("index.html")) {
             trimmed.erase(trimmed.size() - std::string_view("index.html").size());
@@ -3615,9 +3625,12 @@ void decorate_code_entity_ranges(
     site.nav_tutorials = config.navigation.at("tutorials");
     site.nav_reference = config.navigation.at("reference");
 
-    const auto render = [&](std::string_view rel, std::string_view template_name,
-                            std::string_view page_object, std::string_view key,
-                            std::string_view collection) {
+    const auto render = [&route, &site, &templates_dir, &writer](
+                            std::string_view rel,
+                            std::string_view template_name,
+                            std::string_view page_object,
+                            std::string_view key,
+                            std::string_view collection) -> void {
         const std::string context =
             build_page_context(site, page_object, key, collection);
         const std::string html =
@@ -3634,7 +3647,13 @@ void decorate_code_entity_ranges(
     std::vector<reference_entity> sql_entities = model.sql_entities;
     std::set<std::string> seen_routes;
     std::set<std::string> seen_ids;
-    const auto assign_routes = [&](std::vector<reference_entity>& list) {
+    const auto assign_routes = [
+                                   &seen_ids,
+                                   &seen_routes,
+                                   &url,
+                                   &version](
+                                   std::vector<reference_entity>& list)
+        -> void {
         for (reference_entity& entity : list) {
             if (!seen_ids.insert(entity.canonical_id).second) {
                 throw std::runtime_error("duplicate canonical id: " + entity.canonical_id);
@@ -3683,7 +3702,8 @@ void decorate_code_entity_ranges(
         }
         for (const std::string& member_id : group.overload_ids) {
             const auto member = std::ranges::find_if(
-                sql_entities, [&](const reference_entity& candidate) {
+                sql_entities, [&member_id](
+                                  const reference_entity& candidate) -> bool {
                     return candidate.canonical_id == member_id;
                 });
             if (member == sql_entities.end()) {
@@ -3731,7 +3751,9 @@ void decorate_code_entity_ranges(
     for (auto& [parent, children] : children_by_parent) {
         std::ranges::sort(children);
     }
-    const auto attach_relations = [&](std::vector<reference_entity>& list) {
+    const auto attach_relations = [&children_by_parent, &route_by_id](
+                                      std::vector<reference_entity>& list)
+        -> void {
         for (reference_entity& entity : list) {
             if (const auto found = children_by_parent.find(entity.qualified_name);
                 found != children_by_parent.end()) {
@@ -3757,7 +3779,8 @@ void decorate_code_entity_ranges(
     // Shared breadcrumb serializer and tutorial-backlink reverse map.
     // Each crumb is {label, href}; the last crumb is the current page.
     const auto breadcrumb_json =
-        [&](const std::vector<std::pair<std::string, std::string>>& crumbs) {
+        [](const std::vector<std::pair<std::string, std::string>>& crumbs)
+            -> std::string {
             std::string out = "[";
             bool first = true;
             for (const auto& [name, href] : crumbs) {
@@ -3837,11 +3860,19 @@ void decorate_code_entity_ranges(
         }
         return text;
     };
-    const auto build_on_this_page = [&](std::vector<content_node>& nodes) {
+    const auto build_on_this_page = [&heading_slug, &node_plain_text](
+                                        std::vector<content_node>& nodes)
+        -> std::string {
         std::set<std::string> used;
         std::string toc = "[";
         bool first = true;
-        const auto walk = [&](std::vector<content_node>& list, auto&& self_walk) -> void {
+        const auto walk = [
+                              &first,
+                              &heading_slug,
+                              &node_plain_text,
+                              &toc,
+                              &used](std::vector<content_node>& list,
+                                     auto&& self_walk) -> void {
             for (content_node& node : list) {
                 if (node.kind == content_node_kind::heading) {
                     const std::string text = node_plain_text(node, node_plain_text);
@@ -3915,13 +3946,14 @@ void decorate_code_entity_ranges(
     // in the supplied documentation sidebar; there is intentionally no separate
     // tutorial-listing route. Executed result subtrees were injected by execute, so
     // rendering here is database-free.
-    const auto adjacent_tutorial_title = [&](const std::optional<std::string>& slug)
+    const auto adjacent_tutorial_title = [&model](
+        const std::optional<std::string>& slug)
         -> std::optional<std::string> {
         if (!slug) {
             return std::nullopt;
         }
         const auto found = std::ranges::find_if(
-            model.tutorials, [&](const tutorial& candidate) {
+            model.tutorials, [&slug](const tutorial& candidate) -> bool {
                 return candidate.metadata.slug == *slug;
             });
         if (found == model.tutorials.end()) {
@@ -3984,8 +4016,24 @@ void decorate_code_entity_ranges(
                      {version, url(version + "/")}, {"Reference", url(version + "/reference/")}})
                + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
-    const auto render_domain = [&](std::string_view domain, std::string_view label,
-                                   const std::vector<reference_entity>& entities) {
+    const auto render_domain = [
+                                   &backlinks_by_id,
+                                   &breadcrumb_json,
+                                   &canonical,
+                                   &config,
+                                   &doc_nav,
+                                   &identity_by_reference,
+                                   &model,
+                                   &render,
+                                   &revision,
+                                   &route_by_id,
+                                   &tooltip_url,
+                                   &url,
+                                   &version](
+                                   std::string_view domain,
+                                   std::string_view label,
+                                   const std::vector<reference_entity>& entities)
+        -> void {
         const std::string index_rel =
             version + "/reference/" + std::string(domain) + "/index.html";
         render(index_rel, "entity_index.html.j2",
@@ -4023,7 +4071,9 @@ void decorate_code_entity_ranges(
                 backlinks_by_id.find(entity.canonical_id) != backlinks_by_id.end();
             std::string entity_toc = "[";
             bool toc_first = true;
-            const auto add_toc = [&](std::string_view text, std::string_view anchor) {
+            const auto add_toc = [&entity_toc, &toc_first](
+                                     std::string_view text,
+                                     std::string_view anchor) -> void {
                 if (!toc_first) {
                     entity_toc.push_back(',');
                 }
@@ -4118,7 +4168,8 @@ void decorate_code_entity_ranges(
     // Documentation-coverage page and machine-readable report, taken from
     // the resolved model so execute and render agree exactly. Missing docs are broken
     // out into summary/parameter/return dimensions and totalled per module/SQL domain.
-    const auto id_array = [&](const std::vector<std::string>& ids) {
+    const auto id_array = [](const std::vector<std::string>& ids)
+        -> std::string {
         std::string out = "[";
         for (std::size_t index = 0; index < ids.size(); ++index) {
             if (index > 0) {
@@ -4197,8 +4248,11 @@ void decorate_code_entity_ranges(
         entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
         search_entries.push_back(std::move(entry));
     }
-    const auto add_page_entry = [&](std::string id, std::string title, std::string_view rel,
-                                    std::string summary) {
+    const auto add_page_entry = [&search_entries, &url](
+                                    std::string id,
+                                    std::string title,
+                                    std::string_view rel,
+                                    std::string summary) -> void {
         search_index_entry entry;
         entry.id = std::move(id);
         entry.group = "Pages";
@@ -4335,15 +4389,15 @@ void decorate_code_entity_ranges(
 /// @param args Options after the `publish` token.
 /// @return Zero on success; two on usage errors; three on parse/validation.
 [[nodiscard]] int execute_publish_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "cpp-entities", "sql-entities",
         "templates", "static", "output", "base-path", "source-revision",
         "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
         "staged-extension-sha256", "cpp-signature", "sql-manifest",
-        "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
-    static constexpr std::string_view repeatable_value_keys[] = {
-        "sql-manifest"};
+        "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"});
+    static constexpr auto flag_keys = std::to_array<std::string_view>({"include-drafts", "isolated"});
+    static constexpr auto repeatable_value_keys = std::to_array<std::string_view>({
+        "sql-manifest"});
     const auto options = parse_options(
         args, value_keys, flag_keys, repeatable_value_keys);
     const fs::path output = require_option(options, "output");
@@ -4531,7 +4585,8 @@ void decorate_code_entity_ranges(
     if (const auto found = options.find("report-dir");
         found != options.end() && !found->second.empty()) {
         const fs::path report_dir(found->second);
-        const auto fragment = [&](std::string_view name) -> std::string {
+        const auto fragment = [&report_dir](
+                                  std::string_view name) -> std::string {
             std::error_code exists_error;
             const fs::path path = report_dir / (std::string(name) + ".json");
             if (!fs::exists(path, exists_error)) {
@@ -4590,14 +4645,14 @@ void decorate_code_entity_ranges(
 /// @param args Options after the `execute` token.
 /// @return Zero on success; two on usage errors; three on parse/execution failure.
 [[nodiscard]] int execute_site_model_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "source", "version", "site-config", "cpp-entities", "sql-entities",
         "sql-manifest", "base-path", "source-revision", "output-model", "cpp-signature",
         "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
-        "port", "template-db", "report-dir"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
-    static constexpr std::string_view repeatable_value_keys[] = {
-        "sql-manifest"};
+        "port", "template-db", "report-dir"});
+    static constexpr auto flag_keys = std::to_array<std::string_view>({"include-drafts", "isolated"});
+    static constexpr auto repeatable_value_keys = std::to_array<std::string_view>({
+        "sql-manifest"});
     const auto options = parse_options(
         args, value_keys, flag_keys, repeatable_value_keys);
     const fs::path source = require_option(options, "source");
@@ -4669,9 +4724,9 @@ void decorate_code_entity_ranges(
 /// @param args Options after the `render` token.
 /// @return Zero on success; two on usage errors; three on parse/render failure.
 [[nodiscard]] int execute_render_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "model", "site-config", "templates", "static", "output", "base-path",
-        "source-revision", "model-validation-stamp", "report-dir"};
+        "source-revision", "model-validation-stamp", "report-dir"});
     const auto options = parse_options(args, value_keys, {});
     const fs::path model_path = require_option(options, "model");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -4740,7 +4795,7 @@ void decorate_code_entity_ranges(
 /// @param args Options after the `assemble` token.
 /// @return Zero on success; two on usage errors; three on validation failure.
 [[nodiscard]] int execute_assemble_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {"site-roots", "output"};
+    static constexpr auto value_keys = std::to_array<std::string_view>({"site-roots", "output"});
     const auto options = parse_options(args, value_keys, {});
     const std::string roots_list = require_option(options, "site-roots");
     const fs::path output = require_option(options, "output");
@@ -4901,9 +4956,9 @@ void decorate_code_entity_ranges(
 /// @param args Options after the `source_graph` token.
 /// @return Zero on success; two on usage errors; three on validation failure.
 [[nodiscard]] int execute_source_graph_command(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
+    static constexpr auto value_keys = std::to_array<std::string_view>({
         "reachable-units", "entrypoint-units", "compile-db", "source-root",
-        "site-config", "output", "reachable-output"};
+        "site-config", "output", "reachable-output"});
     const auto options = parse_options(args, value_keys, {});
     const fs::path reachable_units = require_option(options, "reachable-units");
     const fs::path entrypoint_units = require_option(options, "entrypoint-units");

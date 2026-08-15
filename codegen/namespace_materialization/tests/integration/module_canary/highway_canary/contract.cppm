@@ -12,7 +12,7 @@ using add_one_kernel = void (*)(
 struct kernel_table final {
   add_one_kernel add_one = nullptr;
 
-  [[nodiscard]] constexpr bool complete() const noexcept {
+  [[nodiscard]] constexpr auto complete() const noexcept -> bool {
     return add_one != nullptr;
   }
 };
@@ -22,7 +22,7 @@ struct target_binding final {
   const char* target_name = nullptr;
   const kernel_table* kernels = nullptr;
 
-  [[nodiscard]] constexpr bool complete() const noexcept {
+  [[nodiscard]] constexpr auto complete() const noexcept -> bool {
     return target != 0 && target_name != nullptr && kernels != nullptr
         && kernels->complete();
   }

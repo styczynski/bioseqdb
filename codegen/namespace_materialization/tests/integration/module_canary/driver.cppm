@@ -4,7 +4,7 @@ import :typed_flat_selector;
 
 namespace bioseq::codegen::namespace_materialization::canary {
 
-int linked_sum() noexcept {
+auto linked_sum() noexcept -> int {
   return dispatch_process_sequences_typed(0, 1)
        + dispatch_process_sequences_typed(1, 1);
 }

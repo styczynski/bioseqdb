@@ -445,7 +445,8 @@ inline void validate_options(
                            std::initializer_list<std::string_view> allowed) {
         return std::ranges::find(allowed, name) != allowed.end();
     };
-    const auto natural_option = [&](std::string_view name) {
+    const auto natural_option = [kind, one_of](
+                                    std::string_view name) -> bool {
         switch (kind) {
             case entity_kind::function:
                 return one_of(name, {
@@ -2066,7 +2067,9 @@ collect_direct_import_enum_authorities(
         if (authority.module_name.empty()
             || !std::ranges::any_of(
                 module_graph.units,
-                [&](const structural_analysis::module_graph_unit& owner) {
+                [&authority](
+                    const structural_analysis::module_graph_unit& owner)
+                    -> bool {
                     return std::ranges::contains(
                                owner.exported_imports,
                                authority.module_name)

@@ -28,7 +28,7 @@ static constexpr int compile_shard
 
 namespace {
 
-[[nodiscard]] int common_support(const int value) noexcept {
+[[nodiscard]] auto common_support(const int value) noexcept -> int {
     return value + bias;
 }
 
@@ -36,14 +36,15 @@ namespace {
 
 [[bioseq::template_flatten_when("shape", "leaf")]]
 [[bioseq::template_flatten_entry("leaf")]]
-[[nodiscard]] value_type leaf(const int abi_code, const int value) noexcept {
+[[nodiscard]] auto leaf(const int abi_code, const int value) noexcept
+    -> value_type {
     static_cast<void>(abi_code);
     return static_cast<value_type>(common_support(value));
 }
 
 [[bioseq::template_flatten_when("shape", "root")]]
 [[bioseq::template_flatten_entry("root")]]
-[[nodiscard]] int root(const int abi_code, const int value) noexcept {
+[[nodiscard]] auto root(const int abi_code, const int value) noexcept -> int {
     return static_cast<int>(leaf(abi_code, value));
 }
 
@@ -56,7 +57,7 @@ namespace {
 // input fails immediately, making the dependency-only boundary executable.
 namespace bioseq::codegen::namespace_materialization::canary_prepare_guard {
 
-[[maybe_unused]] inline int canonical_body_must_not_reach_sema() {
+[[maybe_unused]] inline auto canonical_body_must_not_reach_sema() -> int {
     static_assert(false, "canonical materialization input reached Sema");
     return 0;
 }

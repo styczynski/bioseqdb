@@ -176,6 +176,8 @@ add_custom_command(
     "${BIOSEQ_CODEGEN_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/generated_client.cmake"
     "${_bioseq_external_inventory_file}"
+    "${_bioseq_external_scan_stamp}"
+    ${_bioseq_external_scan_inputs}
     ${_bioseq_external_descriptors}
   WORKING_DIRECTORY "${BIOSEQ_REPOSITORY_ROOT}"
   COMMENT "Generating external API clients from Bioseq annotations"

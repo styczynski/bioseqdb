@@ -31,14 +31,14 @@ using target_binder = const target_binding* (*)();
 
 // This volatile address is a link-time anchor only. The attributed target is
 // deliberately absent from HWY_TARGETS and can never enter runtime dispatch.
-[[nodiscard]] bool attributed_binder_is_linked() noexcept {
+[[nodiscard]] auto attributed_binder_is_linked() noexcept -> bool {
   static target_binder volatile binder =
       &@ATTRIBUTED_TARGET_NAMESPACE@::bind_highway_target;
   return binder != nullptr;
 }
 
-[[nodiscard]] const target_binding* select_target(
-    const std::int64_t target) noexcept {
+[[nodiscard]] auto select_target(
+    const std::int64_t target) noexcept -> const target_binding* {
   constexpr std::int64_t compiled_targets =
       @SIMD_TARGET_TOKEN@ | HWY_EMU128;
   if (target != 0
@@ -62,7 +62,7 @@ using target_binder = const target_binding* (*)();
       : nullptr;
 }
 
-[[nodiscard]] constexpr std::int64_t second_target() noexcept {
+[[nodiscard]] constexpr auto second_target() noexcept -> std::int64_t {
   return HWY_EMU128;
 }
 

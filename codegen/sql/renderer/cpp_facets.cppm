@@ -432,6 +432,7 @@ inline void validate_row_codec_text_lifetime_contract(
     }
 }
 
+/// Renders one strongly typed PostgreSQL row codec from normalized fields.
 [[nodiscard]] inline std::string render_row_codec(
     const normalized_entity& row,
     std::vector<const normalized_entity*> columns) {
@@ -484,10 +485,10 @@ inline void validate_row_codec_text_lifetime_contract(
             << field.attribute_number << ";\n"
             << "    static constexpr Oid type_oid = "
             << field.type_oid << ";\n"
-            << "    [[nodiscard]] static consteval RegProcedure "
+            << "    [[nodiscard]] static consteval auto "
                "comparison_procedure(\n"
             << "            bioseq::postgres::support::scan_comparison "
-               "comparison) {\n"
+               "comparison) -> RegProcedure {\n"
             << "        switch (comparison) {\n"
             << "            case "
                "bioseq::postgres::support::scan_comparison::equal:\n"
@@ -596,11 +597,12 @@ inline void validate_row_codec_text_lifetime_contract(
         << "    template<auto p_member>\n"
         << "    using member_type = typename field<p_member>::value_type;\n\n"
         << "    template<auto p_member>\n"
-        << "    [[nodiscard]] static consteval AttrNumber "
-           "attribute_number() noexcept {\n"
+        << "    [[nodiscard]] static consteval auto "
+           "attribute_number() noexcept -> AttrNumber {\n"
         << "        return field<p_member>::attribute_number;\n"
         << "    }\n\n"
-        << "    static void validate_descriptor(TupleDesc descriptor) {\n"
+        << "    static auto validate_descriptor(TupleDesc descriptor) "
+           "-> void {\n"
         << "        bioseq::postgres::support::validate_row_descriptor(\n"
         << "            descriptor, row_name, expected_descriptor);\n"
         << "    }\n\n"
@@ -615,28 +617,29 @@ inline void validate_row_codec_text_lifetime_contract(
         << "    class encoded_row final {\n"
         << "    public:\n"
         << "        encoded_row(const encoded_row&) = delete;\n"
-        << "        encoded_row& operator=(const encoded_row&) = delete;\n"
+        << "        auto operator=(const encoded_row&) -> encoded_row& = delete;\n"
         << "        encoded_row(encoded_row&&) noexcept = default;\n"
-        << "        encoded_row& operator=(encoded_row&&) noexcept = "
+        << "        auto operator=(encoded_row&&) noexcept -> encoded_row& = "
            "default;\n\n"
-        << "        [[nodiscard]] encoded_tuple_data tuple_data(\n"
-        << "                TupleDesc descriptor) {\n"
+        << "        [[nodiscard]] auto tuple_data(\n"
+        << "                TupleDesc descriptor) -> encoded_tuple_data {\n"
         << "            validate_descriptor(descriptor);\n"
         << "            return {\n"
         << "                .values = data_.values_data(),\n"
         << "                .nulls = data_.nulls_data(),\n"
         << "            };\n"
         << "        }\n\n"
-        << "        [[nodiscard]] const_encoded_tuple_data tuple_data(\n"
-        << "                TupleDesc descriptor) const {\n"
+        << "        [[nodiscard]] auto tuple_data(\n"
+        << "                TupleDesc descriptor) const "
+           "-> const_encoded_tuple_data {\n"
         << "            validate_descriptor(descriptor);\n"
         << "            return {\n"
         << "                .values = data_.values_data(),\n"
         << "                .nulls = data_.nulls_data(),\n"
         << "            };\n"
         << "        }\n\n"
-        << "        [[nodiscard]] HeapTuple form_tuple(\n"
-        << "                TupleDesc descriptor) {\n"
+        << "        [[nodiscard]] auto form_tuple(\n"
+        << "                TupleDesc descriptor) -> HeapTuple {\n"
         << "            return data_.form_tuple(\n"
         << "                descriptor, row_name, expected_descriptor);\n"
         << "        }\n\n"
@@ -864,13 +867,13 @@ inline void validate_row_codec_text_lifetime_contract(
         << "        bioseq::postgres::support::encoded_row_data<field_count> "
            "data_{};\n"
         << "    };\n\n"
-        << "    [[nodiscard]] static encoded_row encode(\n"
+        << "    [[nodiscard]] static auto encode(\n"
         << "            const row_type& row";
     if (has_by_reference_fields) {
         output << ",\n            MemoryContext value_context";
     }
     output
-        << ") {\n"
+        << ") -> encoded_row {\n"
         << "        return encoded_row{row";
     if (has_by_reference_fields) {
         output << ", value_context";
@@ -880,17 +883,17 @@ inline void validate_row_codec_text_lifetime_contract(
         << "    }\n\n";
     if (!has_by_reference_fields) {
         output
-            << "    [[nodiscard]] static encoded_row encode(\n"
+            << "    [[nodiscard]] static auto encode(\n"
             << "            const row_type& row,\n"
-            << "            MemoryContext) {\n"
+            << "            MemoryContext) -> encoded_row {\n"
             << "        return encoded_row{row};\n"
             << "    }\n\n";
     }
     output
-        << "    [[nodiscard]] static row_type deform(\n"
+        << "    [[nodiscard]] static auto deform(\n"
         << "            HeapTuple tuple,\n"
         << "            TupleDesc descriptor,\n"
-        << "            MemoryContext result_context) {\n"
+        << "            MemoryContext result_context) -> row_type {\n"
         << "        const auto data =\n"
         << "            bioseq::postgres::support::deformed_row_data<field_count>::"
            "deform(\n"
@@ -1065,12 +1068,12 @@ inline void validate_row_codec_text_lifetime_contract(
         << "    public:\n"
         << "        update() noexcept = default;\n"
         << "        update(const update&) = delete;\n"
-        << "        update& operator=(const update&) = delete;\n"
+        << "        auto operator=(const update&) -> update& = delete;\n"
         << "        update(update&&) noexcept = default;\n"
-        << "        update& operator=(update&&) noexcept = default;\n\n"
+        << "        auto operator=(update&&) noexcept -> update& = default;\n\n"
         << "        template<auto p_member>\n"
         << "            requires (!field<p_member>::by_reference)\n"
-        << "        update& set(member_type<p_member> value) noexcept {\n"
+        << "        auto set(member_type<p_member> value) noexcept -> update& {\n"
         << "            if constexpr (field<p_member>::nullable) {\n"
         << "                if (!value.has_value()) {\n"
         << "                    data_.set_null("
@@ -1129,9 +1132,9 @@ inline void validate_row_codec_text_lifetime_contract(
         << "        }\n\n"
         << "        template<auto p_member>\n"
         << "            requires field<p_member>::by_reference\n"
-        << "        update& set(\n"
+        << "        auto set(\n"
         << "                member_type<p_member> value,\n"
-        << "                MemoryContext value_context) {\n"
+        << "                MemoryContext value_context) -> update& {\n"
         << "            bioseq::postgres::support::require_row_result_context(\n"
         << "                value_context, row_name);\n"
         << "            if constexpr (field<p_member>::name_value) {\n"
@@ -1170,7 +1173,7 @@ inline void validate_row_codec_text_lifetime_contract(
         << "            } else if constexpr "
            "(field<p_member>::text_string) {\n"
         << "                const auto encode_text = [this, value_context](\n"
-        << "                        std::string_view text_value) {\n"
+        << "                        std::string_view text_value) -> void {\n"
         << "                    data_.set_raw(\n"
         << "                        attribute_number<p_member>(),\n"
         << "                        bioseq::postgres::support::pg_datum::from_raw(\n"
@@ -1235,13 +1238,13 @@ inline void validate_row_codec_text_lifetime_contract(
         << "        }\n\n"
         << "        template<auto p_member>\n"
         << "            requires field<p_member>::nullable\n"
-        << "        update& set_null() noexcept {\n"
+        << "        auto set_null() noexcept -> update& {\n"
         << "            data_.set_null(attribute_number<p_member>());\n"
         << "            return *this;\n"
         << "        }\n\n"
-        << "        [[nodiscard]] HeapTuple modify(\n"
+        << "        [[nodiscard]] auto modify(\n"
         << "                HeapTuple old_tuple,\n"
-        << "                TupleDesc descriptor) {\n"
+        << "                TupleDesc descriptor) -> HeapTuple {\n"
         << "            return data_.modify(\n"
         << "                old_tuple,\n"
         << "                descriptor,\n"
@@ -1257,8 +1260,8 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                 bioseq::postgres::support::scan_comparison::equal>\n"
         << "        requires (!field<p_member>::by_reference\n"
         << "                  && !field<p_member>::nullable)\n"
-        << "    [[nodiscard]] static ScanKeyData scan_key(\n"
-        << "            member_type<p_member> value) {\n"
+        << "    [[nodiscard]] static auto scan_key(\n"
+        << "            member_type<p_member> value) -> ScanKeyData {\n"
         << "        return bioseq::postgres::support::make_row_scan_key(\n"
         << "            attribute_number<p_member>(),\n"
         << "            {\n"
@@ -1268,7 +1271,8 @@ inline void validate_row_codec_text_lifetime_contract(
         << "                .procedure =\n"
         << "                    "
            "field<p_member>::comparison_procedure(p_comparison),\n"
-        << "                .datum = [value] {\n"
+        << "                .datum = [value]() "
+           "-> bioseq::postgres::support::pg_datum {\n"
         << "                    if constexpr (field<p_member>::oid_value) {\n"
         << "                        return "
            "bioseq::postgres::support::pg_datum::from_oid(value);\n"
@@ -1296,6 +1300,7 @@ inline void validate_row_codec_text_lifetime_contract(
     return rendered;
 }
 
+/// Renders a module containing its deterministic set of row codecs.
 [[nodiscard]] inline std::string render_row_codec_module(
     const rendered_row_codec_module& module,
     const std::vector<std::pair<

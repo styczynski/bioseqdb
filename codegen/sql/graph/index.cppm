@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -56,7 +57,7 @@ namespace detail {
 
 [[nodiscard]] inline bool reserved_sql_identifier(
     std::string_view value) noexcept {
-    static constexpr std::string_view reserved[] = {
+    static constexpr auto reserved = std::to_array<std::string_view>({
         "all", "analyse", "analyze", "and", "any", "array", "as",
         "asc", "asymmetric", "authorization", "binary", "both",
         "case", "cast", "check", "collate", "collation", "column",
@@ -73,7 +74,7 @@ namespace detail {
         "right", "select", "session_user", "similar", "some", "symmetric",
         "system_user", "table", "tablesample", "then", "to", "trailing",
         "true", "union", "unique", "user", "using", "variadic", "verbose",
-        "when", "where", "window", "with"};
+        "when", "where", "window", "with"});
     return std::ranges::binary_search(reserved, value);
 }
 

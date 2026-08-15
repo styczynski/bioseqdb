@@ -1567,8 +1567,11 @@ pg_allowlist_for(
             }
             return {};
         };
-    const auto authentic_report_expansion =
-        [&](const macro_expansion_record& expansion) {
+    const auto authentic_report_expansion = [
+                                                &environment,
+                                                report_record_id](
+                                                const macro_expansion_record& expansion)
+        -> bool {
             const std::string_view record_id =
                 report_record_id(expansion.name);
             if (record_id.empty()) return false;
@@ -1598,7 +1601,7 @@ pg_allowlist_for(
             }
             return std::ranges::any_of(
                 environment.postgresql_header_roots,
-                [&](const std::string& root) {
+                [&expansion](const std::string& root) -> bool {
                     return path_within(
                         expansion.definition.source_file, root);
                 });
@@ -2833,7 +2836,7 @@ void authenticate_bridge_macro(
         "/" + record.upstream_file.substr(include_prefix.size());
     const bool authenticated_root = std::ranges::any_of(
         environment.postgresql_header_roots,
-        [&](const std::string& root) {
+        [&expansion](const std::string& root) -> bool {
             return path_within(
                 expansion.definition.source_file, root);
         });
@@ -3566,7 +3569,8 @@ void require_generated_tail_structure(
     clang::ASTContext& context) {
     const std::string implementation_name =
         qualified_name(definition);
-    const auto reject = [&](std::string_view predicate) {
+    const auto reject = [&implementation_name](
+                            std::string_view predicate) -> void {
         fact_failure(
             implementation_name,
             "generated tail is not after exact catch/unwind "
@@ -3624,12 +3628,12 @@ void require_generated_tail_structure(
             + std::to_string(try_statement->getNumHandlers())
             + ", expected 4");
     }
-    const auto require_typed_handler =
-        [&](std::size_t handler_index,
+    const auto require_typed_handler = [try_statement, &reject](
+            std::size_t handler_index,
             std::string_view ordinal,
             std::string_view expected_record,
             bool const_referent,
-            bool standard_record) {
+            bool standard_record) -> void {
             const clang::CXXCatchStmt* handler =
                 try_statement->getHandler(handler_index);
             if (handler->getExceptionDecl() == nullptr) {
@@ -4571,7 +4575,7 @@ struct runtime_frontier {
         result += call_id;
         const auto marker = std::ranges::find_if(
             markers,
-            [&](const runtime_marker& value) {
+            [&call_id](const runtime_marker& value) -> bool {
                 return value.call->fact.stable_site_id
                     == call_id;
             });
@@ -4710,8 +4714,16 @@ struct runtime_frontier {
         destination.reaches_exit |= source.reaches_exit;
         destination.contains_cycle |= source.contains_cycle;
     };
-    std::function<runtime_frontier(cfg_element_key)> visit =
-        [&](const cfg_element_key point) {
+    std::function<runtime_frontier(cfg_element_key)> visit = [
+                                                                &active,
+                                                                &blocks,
+                                                                &cfg,
+                                                                &markers,
+                                                                &memoized,
+                                                                &merge_frontier,
+                                                                &visit](
+                                                                const cfg_element_key point)
+        -> runtime_frontier {
             if (const auto found = memoized.find(point);
                 found != memoized.end()) {
                 return found->second;
@@ -5121,7 +5133,7 @@ extract_runtime_probe_facts(
                 *after_visit.call_ids.begin();
             const auto site = std::ranges::find_if(
                 marker_storage,
-                [&](const runtime_marker& marker) {
+                [&site_id](const runtime_marker& marker) -> bool {
                     return marker.kind
                             == runtime_marker_kind::site
                         && marker.call->fact.stable_site_id
@@ -5173,7 +5185,11 @@ extract_runtime_probe_facts(
         // branch for the injected std::exception path.  Only the exact
         // generated boundary may carry those authenticated tail markers
         // beside the visit on its true-path frontier.
-        const bool true_routes_to_visit = [&] {
+        const bool true_routes_to_visit = [
+                                              generated_boundary,
+                                              &marker_storage,
+                                              &true_frontier,
+                                              &visit]() -> bool {
             if (exact_frontier_call(
                     true_frontier,
                     visit.call->fact.stable_site_id)) {
@@ -5188,7 +5204,7 @@ extract_runtime_probe_facts(
             }
             return std::ranges::all_of(
                 true_frontier.call_ids,
-                [&](const std::string& id) {
+                [&marker_storage, &visit](const std::string& id) -> bool {
                     if (id
                         == visit.call->fact.stable_site_id) {
                         return true;
@@ -5196,7 +5212,7 @@ extract_runtime_probe_facts(
                     const auto marker =
                         std::ranges::find_if(
                             marker_storage,
-                            [&](const runtime_marker& value) {
+                            [&id](const runtime_marker& value) -> bool {
                                 return value.call->fact
                                            .stable_site_id
                                     == id;
@@ -5218,7 +5234,7 @@ extract_runtime_probe_facts(
                 *after_visit.call_ids.begin();
             const auto site = std::ranges::find_if(
                 marker_storage,
-                [&](const runtime_marker& marker) {
+                [&candidate](const runtime_marker& marker) -> bool {
                     return marker.kind
                             == runtime_marker_kind::site
                         && marker.call->fact.stable_site_id
@@ -5250,7 +5266,7 @@ extract_runtime_probe_facts(
                 *true_frontier.call_ids.begin();
             const auto generated = std::ranges::find_if(
                 marker_storage,
-                [&](const runtime_marker& marker) {
+                [&candidate_injected](const runtime_marker& marker) -> bool {
                     return marker.kind
                             == runtime_marker_kind::site
                         && marker.call->fact.stable_site_id

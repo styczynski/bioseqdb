@@ -412,7 +412,7 @@ registered_guc_module_graph_unit(
     const collected_entity& entity) {
     const option_value* option = find_option(entity, "flags");
     if (!option) return {};
-    static constexpr std::string_view names[] = {
+    static constexpr auto names = std::to_array<std::string_view>({
         "no_show_all",
         "not_in_sample",
         "unit_kb",
@@ -421,7 +421,7 @@ registered_guc_module_graph_unit(
         "unit_ms",
         "unit_s",
         "unit_min",
-    };
+    });
     std::vector<std::string> result;
     for (const std::string_view name : names) {
         if (option->expression.contains(name)
@@ -436,15 +436,15 @@ registered_guc_module_graph_unit(
     const collected_entity& entity) {
     const option_value* option = find_option(entity, "flags");
     if (!option) return std::nullopt;
-    static constexpr std::pair<std::string_view, std::string_view>
-        units[] = {
+    static constexpr auto units = std::to_array<
+        std::pair<std::string_view, std::string_view>>({
             {"unit_kb", "kb"},
             {"unit_mb", "mb"},
             {"unit_blocks", "blocks"},
             {"unit_ms", "ms"},
             {"unit_s", "s"},
             {"unit_min", "min"},
-        };
+        });
     for (const auto& [token, spelling] : units) {
         if (option->expression.contains(token)) {
             return std::string{spelling};
@@ -710,13 +710,19 @@ struct parsed_enum {
 
     const structural_analysis::translation_unit* unit = nullptr;
     const structural_analysis::declaration_record* declaration = nullptr;
-    const auto consider_units =
-        [&](const auto& units) {
+    const auto consider_units = [
+                                    &declaration,
+                                    &entity,
+                                    &qualified_name,
+                                    &unit](
+                                    const auto& units) -> void {
             for (const structural_analysis::translation_unit& candidate :
                  units) {
                 const auto match = std::ranges::find_if(
                     candidate.declarations,
-                    [&](const structural_analysis::declaration_record& item) {
+                    [&qualified_name](
+                        const structural_analysis::declaration_record& item)
+                        -> bool {
                         return item.kind
                                 == structural_analysis::declaration_kind::
                                     enumeration
@@ -961,12 +967,12 @@ inline void validate_documentation(const collected_entity& entity) {
     const std::string documentation = lower_ascii(
         entity.documentation.brief + " "
         + entity.documentation.details);
-    static constexpr std::string_view forbidden[] = {
+    static constexpr auto forbidden = std::to_array<std::string_view>({
         "doc0",
         "prototype",
         " phase ",
         " stage ",
-    };
+    });
     for (const std::string_view token : forbidden) {
         if (documentation.contains(token)) {
             throw std::runtime_error(
@@ -1214,8 +1220,9 @@ struct resolved_enum_default {
         std::vector<
             const structural_analysis::declaration_record*>
             constants;
-        const auto collect_constants =
-            [&](const structural_analysis::translation_unit& unit) {
+        const auto collect_constants = [&authored, &constants, &leaf](
+                                           const structural_analysis::translation_unit& unit)
+            -> void {
                 for (const structural_analysis::declaration_record& candidate :
                      unit.declarations) {
                     if (candidate.kind

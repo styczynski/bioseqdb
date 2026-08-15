@@ -787,7 +787,7 @@ inline void run_safety_analyzer_contract_self_tests() {
                 "pg-callback:"
                 + std::string(32, '0');
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &callback_facts, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -957,7 +957,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         compiler_analysis_facts bad = serialization_facts;
         bad.schema_revision = 3;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     render_compiler_analysis_facts_json(bad));
             },
@@ -968,7 +968,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.runtime_probes.front().relation =
             runtime_relation::natural_at_site;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     render_compiler_analysis_facts_json(bad));
             },
@@ -979,7 +979,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         std::get<json_value::object>(bad.value)
             .erase("runtime_probes");
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -991,7 +991,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         std::get<json_value::object>(bad.value).emplace(
             "unexpected", json_value{true});
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1009,7 +1009,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             probes.front().value)
             .emplace("unexpected", json_value{true});
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1023,7 +1023,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         root["schema_revision"] =
             json_value{std::size_t{3}};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1041,7 +1041,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             probes.front().value)["relation"] =
                 json_value{"unknown"};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1063,7 +1063,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         probe["trigger_call_stable_id"] =
             json_value{"trigger-site"};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1085,7 +1085,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         probe["trigger_call_stable_id"] =
             json_value{nullptr};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1104,7 +1104,7 @@ inline void run_safety_analyzer_contract_self_tests() {
                 probes.front().value);
         probe["site_call_stable_id"] = json_value{""};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_compiler_analysis_facts_json(
                         render_json(bad)));
@@ -1116,7 +1116,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.parents.front().audited_stops.front()
             .evidence.fragment_sha256 = std::string(64, '0');
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad, &provenance, &policy]() -> void {
                 validate_safety_ledger(
                     bad,
                     provenance,
@@ -1132,7 +1132,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad_manifest.owners.front()
             .generated_wrapper_module.clear();
         analyzer_test_detail::require_failure(
-            [&] {
+            [&bad_manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         bad_manifest,
@@ -1151,7 +1151,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls.front()
             .constant_integer_arguments.front().value = 21;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1171,7 +1171,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         crossing.canonical_type = "std::string";
         crossing.trivially_destructible = false;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1195,7 +1195,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             bad.functions.front(),
             bad.functions.front().calls.size());
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1245,7 +1245,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             ->implementation_contract_sha256 =
                 std::string(64, '0');
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1280,7 +1280,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             bad.functions.front(),
             bad.functions.front().calls.size());
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1301,7 +1301,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             bridge_kind::invoke_pg_as_cpp;
         transition.analyzer_entered_bridge_callable = true;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1319,7 +1319,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls.front()
             .live_objects.front().stable_object_id.clear();
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1341,7 +1341,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls[1].live_objects.push_back(
             std::move(conflicting));
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1359,7 +1359,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls.front()
             .spelling.source_file.clear();
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1377,7 +1377,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls.front()
             .macro_chain.front().definition_sha256 = "not-a-hash";
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1397,7 +1397,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         call.resolution = resolution_status::unresolved_indirect;
         call.target_set_complete = false;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1417,7 +1417,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         call.resolution = resolution_status::resolved_indirect;
         call.target_set_complete = false;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1436,7 +1436,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             .targets.front()
             .external_provenance->record_id.clear();
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1456,7 +1456,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             .external_provenance->declaration_sha256 =
             std::string(64, '0');
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1476,7 +1476,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             bad.functions.back().calls[1]
                 .targets.front().external_provenance;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1502,7 +1502,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             &provenance_record::record_id);
         record->user_code_callback_free = false;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &callback_provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1521,7 +1521,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             .targets.front().external_mode =
             external_call_mode::analyze_body;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1541,7 +1541,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             .pg_no_longjmp_allowlist_evidence
             ->postgresql_revision = std::string(40, '0');
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1559,7 +1559,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.back().calls[2].targets.front().domain =
             callee_domain::project;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1630,7 +1630,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         compiler_analysis_facts bad = facts;
         ++bad.functions.back().ast_callsite_count;
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1648,7 +1648,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.root_usrs = {
             "c:@F@plausible_but_not_the_wrapper#"};
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1677,7 +1677,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             compiler_analysis_facts bad = facts;
             (bad.*sealed_hash).clear();
             analyzer_test_detail::require_failure(
-                [&] {
+                [&manifest, &bad, &provenance, &policy]() -> void {
                     static_cast<void>(
                         analyze_postgres_error_safety(
                             manifest,
@@ -1693,7 +1693,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     }
     {
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &facts, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1710,7 +1710,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         compiler_analysis_facts bad = facts;
         bad.functions.erase(bad.functions.begin());
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1728,7 +1728,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         bad.functions.front().module_name =
             "bioseq.postgres.sql.generated.test_indexes.fixture.entrypoints";
         analyzer_test_detail::require_failure(
-            [&] {
+            [&manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         manifest,
@@ -1759,7 +1759,7 @@ inline void run_safety_analyzer_contract_self_tests() {
             .overloads.front().source_line = 20;
         bad.functions.push_back(std::move(disconnected));
         analyzer_test_detail::require_failure(
-            [&] {
+            [&disconnected_manifest, &bad, &provenance, &policy]() -> void {
                 static_cast<void>(
                     analyze_postgres_error_safety(
                         disconnected_manifest,
@@ -1826,7 +1826,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         schema_revision_marker.size(),
         "\"schema_revision\": 1, \"manifest_version\": 1");
     analyzer_test_detail::require_failure(
-        [&] {
+        [&legacy_revision_manifest, &manifest_policy]() -> void {
             static_cast<void>(parse_safety_manifest(
                 legacy_revision_manifest, manifest_policy));
         },
@@ -1859,7 +1859,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         const std::string residual_manifest =
             manifest_with_consistent_identity(residual_identity);
         analyzer_test_detail::require_failure(
-            [&] {
+            [&residual_manifest, &manifest_policy]() -> void {
                 static_cast<void>(parse_safety_manifest(
                     residual_manifest, manifest_policy));
             },
@@ -1868,7 +1868,7 @@ inline void run_safety_analyzer_contract_self_tests() {
     const std::string non_regprocedure_manifest =
         manifest_with_consistent_identity("public.fixture");
     analyzer_test_detail::require_failure(
-        [&] {
+        [&non_regprocedure_manifest, &manifest_policy]() -> void {
             static_cast<void>(parse_safety_manifest(
                 non_regprocedure_manifest, manifest_policy));
         },
@@ -1893,7 +1893,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         converter_marker.size(),
         R"json([""])json");
     analyzer_test_detail::require_failure(
-        [&] {
+        [&empty_converter_manifest, &manifest_policy]() -> void {
             static_cast<void>(parse_safety_manifest(
                 empty_converter_manifest, manifest_policy));
         },
@@ -1905,7 +1905,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         marker.size(),
         "\"generated_wrapper\": false");
     analyzer_test_detail::require_failure(
-        [&] {
+        [&incomplete_manifest, &manifest_policy]() -> void {
             static_cast<void>(parse_safety_manifest(
                 incomplete_manifest, manifest_policy));
         },
@@ -1919,7 +1919,7 @@ inline void run_safety_analyzer_contract_self_tests() {
         implementation_marker.size(),
         "\"implementation_declarations\": [\"other\"]");
     analyzer_test_detail::require_failure(
-        [&] {
+        [&mismatched_owner_manifest, &manifest_policy]() -> void {
             static_cast<void>(parse_safety_manifest(
                 mismatched_owner_manifest, manifest_policy));
         },

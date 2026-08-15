@@ -2,10 +2,10 @@ export module bioseq.codegen.namespace_materialization.owner_canary;
 
 export namespace bioseq::codegen::namespace_materialization::owner_canary {
 
-[[nodiscard]] int owner_increment(int value) noexcept;
-[[nodiscard]] long long owner_increment(long long value) noexcept;
+[[nodiscard]] auto owner_increment(int value) noexcept -> int;
+[[nodiscard]] auto owner_increment(long long value) noexcept -> long long;
 
-[[nodiscard]] int owner_scale(int value) noexcept;
-[[nodiscard]] long long owner_scale(long long value) noexcept;
+[[nodiscard]] auto owner_scale(int value) noexcept -> int;
+[[nodiscard]] auto owner_scale(long long value) noexcept -> long long;
 
 } // namespace bioseq::codegen::namespace_materialization::owner_canary

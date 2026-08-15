@@ -35,7 +35,7 @@ namespace detail {
     std::string_view text) {
     std::string result;
     result.reserve(text.size() + 8);
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr std::string_view digits = "0123456789abcdef";
     for (const unsigned char value : text) {
         switch (value) {
             case '"': result += "\\\""; break;

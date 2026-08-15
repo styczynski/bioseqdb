@@ -205,8 +205,8 @@ private:
 [[nodiscard]] inline std::optional<std::size_t> raw_string_end(
     std::string_view source,
     std::size_t offset) {
-    static constexpr std::string_view prefixes[] = {
-        "R\"", "u8R\"", "uR\"", "UR\"", "LR\""};
+    static constexpr auto prefixes = std::to_array<std::string_view>({
+        "R\"", "u8R\"", "uR\"", "UR\"", "LR\""});
     std::size_t quote = std::string_view::npos;
     for (const std::string_view prefix : prefixes) {
         if (source.substr(offset).starts_with(prefix)) {
@@ -337,9 +337,9 @@ lex_source(std::string_view source) {
             continue;
         }
         const std::size_t begin = index;
-        static constexpr std::string_view multi[] = {
+        static constexpr auto multi = std::to_array<std::string_view>({
             "::", "->", "&&", "||", "==", "!=", "<=>", "<=", ">=",
-            "...", "<<", ">>", "++", "--"};
+            "...", "<<", ">>", "++", "--"});
         bool matched = false;
         for (const std::string_view punctuation : multi) {
             if (source.substr(index).starts_with(punctuation)) {
@@ -2498,7 +2498,7 @@ collect_preprocessor_directives(
         std::remove_if(
             result.imported_modules.begin(),
             result.imported_modules.end(),
-            [&](const std::string& imported) {
+            [&seen_imports](const std::string& imported) -> bool {
                 return !seen_imports.insert(imported).second;
             }),
         result.imported_modules.end());
@@ -3279,7 +3279,8 @@ previous_identifier_token(
                 block.attributes.end());
         }
     }
-    const auto has_token = [&](std::string_view expected) {
+    const auto has_token = [&tokens, begin, head_end](
+                               std::string_view expected) -> bool {
         return std::ranges::any_of(
             tokens.begin() + static_cast<std::ptrdiff_t>(begin),
             tokens.begin() + static_cast<std::ptrdiff_t>(head_end),
@@ -3508,7 +3509,8 @@ inline void populate_slice_overloads_and_references(
             }
             const bool appears = std::ranges::any_of(
                 tokens,
-                [&](const lexical_token& token) {
+                [&declaration, &referenced](
+                    const lexical_token& token) -> bool {
                     return token.range.begin.byte_offset
                             >= declaration.declaration_head_range
                                    .begin.byte_offset
@@ -3545,7 +3547,7 @@ inline void populate_slice_overloads_and_references(
     std::ranges::copy_if(
         raw_tokens,
         std::back_inserter(structural_tokens),
-        [&](const lexical_token& token) {
+        [&directives](const lexical_token& token) -> bool {
             return !offset_in_directive(
                 token.range.begin.byte_offset, directives);
         });
@@ -3667,7 +3669,8 @@ inline void populate_slice_overloads_and_references(
         std::string qualified_name = target.name;
         const auto semantic_namespace = std::ranges::find_if(
             result.namespaces,
-            [&](const namespace_record& candidate) {
+            [&structural_tokens, &target](
+                const namespace_record& candidate) -> bool {
                 return candidate.name_range.begin.byte_offset
                         == structural_tokens[target.name_token]
                                .range.begin.byte_offset
@@ -3762,7 +3765,7 @@ inline void validate_body_free_probe_syntax(
                 == declaration_payload_kind::variable_initializer
             && std::ranges::any_of(
                 probe.tokens,
-                [&](const lexical_token& token) {
+                [&declaration](const lexical_token& token) -> bool {
                     return token.spelling == "{"
                         && token.range.begin.byte_offset
                             >= declaration.body_or_initializer_range
@@ -5226,7 +5229,9 @@ class structural_visitor final
             lambda->getCallOperator();
         const source_range body_range = source_range_of(
             body->getSourceRange(), sources_, language_);
-        const auto direct_main_file_location = [&](clang::SourceLocation location) {
+        const auto direct_main_file_location = [this](
+                                                   clang::SourceLocation location)
+            -> clang::SourceLocation {
             if (location.isInvalid() || location.isMacroID()) {
                 return clang::SourceLocation{};
             }
@@ -5825,7 +5830,8 @@ class structural_visitor final
                 namespace_qualified_name(immediate_namespace);
             const auto namespace_fact = std::ranges::find_if(
                 output_.namespaces,
-                [&](const namespace_record& candidate) {
+                [&immediate_qualified, &record](
+                    const namespace_record& candidate) -> bool {
                     return candidate.qualified_name
                             == immediate_qualified
                         && record.range.begin.byte_offset
@@ -6060,7 +6066,7 @@ class structural_consumer final : public clang::ASTConsumer {
         std::ranges::copy_if(
             raw_tokens,
             std::back_inserter(structural_tokens),
-            [&](const lexical_token& token) {
+            [&unit](const lexical_token& token) -> bool {
                 return !detail::offset_in_directive(
                     token.range.begin.byte_offset,
                     unit.preprocessor_directives);
@@ -6861,8 +6867,14 @@ void validate_owned_compile_database(
     std::vector<std::filesystem::path>& dependencies) {
     std::vector<std::string> result;
     std::set<std::filesystem::path> active_responses;
-    std::function<void(const std::string&)> append_argument =
-        [&](const std::string& argument) {
+    std::function<void(const std::string&)> append_argument = [
+                                                                   &active_responses,
+                                                                   &append_argument,
+                                                                   &command,
+                                                                   &dependencies,
+                                                                   &result](
+                                                                   const std::string& argument)
+        -> void {
         if (argument.empty() || argument.front() != '@') {
             result.push_back(argument);
             return;
@@ -7176,7 +7188,7 @@ struct relocation_context {
             case '\t': result += "\\t"; break;
             default:
                 if (character < 0x20) {
-                    static constexpr char hex[] = "0123456789abcdef";
+                    static constexpr std::string_view hex = "0123456789abcdef";
                     result += "\\u00";
                     result.push_back(hex[character >> 4]);
                     result.push_back(hex[character & 0xf]);
@@ -7399,7 +7411,7 @@ parse_make_depfile(
     std::vector<std::filesystem::path> result;
     std::string token;
     escaped = false;
-    const auto flush = [&] {
+    const auto flush = [&command_directory, &result, &token]() -> void {
         if (token.empty()) return;
         std::filesystem::path dependency{token};
         if (dependency.is_relative()) {
@@ -8373,8 +8385,9 @@ class scoped_pcm_publication {
     const std::filesystem::path& pcm_root) {
     std::filesystem::path common =
         absolute_normalized_path(pcm_root);
-    const auto include =
-        [&](const std::filesystem::path& candidate_path) {
+    const auto include = [&common](
+                             const std::filesystem::path& candidate_path)
+        -> void {
             const std::filesystem::path candidate =
                 absolute_normalized_path(candidate_path);
             while (
@@ -9019,7 +9032,8 @@ void scan_make_dependencies(module_build_record& record) {
     if (record.discovered_dependencies.empty()
         || !std::ranges::any_of(
             record.discovered_dependencies,
-            [&](const std::filesystem::path& dependency) {
+            [&canonical_source](
+                const std::filesystem::path& dependency) -> bool {
                 return weakly_canonical_path(dependency)
                     == canonical_source;
             })) {
@@ -9343,9 +9357,13 @@ namespace {
     std::map<std::string, std::filesystem::path, std::less<>>
         prepared_pcm_by_module;
     std::set<std::filesystem::path> prepared_pcm_paths;
-    const auto add_prepared_pcm =
-        [&](std::string module_name,
-            const std::filesystem::path& configured_pcm) {
+    const auto add_prepared_pcm = [
+                                      &pcm_root,
+                                      &prepared_pcm_by_module,
+                                      &prepared_pcm_paths](
+                                      std::string module_name,
+                                      const std::filesystem::path& configured_pcm)
+        -> void {
             const std::filesystem::path prepared_pcm =
                 clang_backend::absolute_normalized_path(configured_pcm);
             if (module_name.empty()
@@ -10030,8 +10048,26 @@ prepare_compilation_environment(
     std::map<std::string, int, std::less<>> visit_state;
     std::vector<std::string> build_order;
     std::vector<std::string> visit_stack;
-    std::function<void(const std::string&)> visit =
-        [&](const std::string& module_name) {
+    std::function<void(const std::string&)> visit = [
+                                                        &ambiguous_selected_commands,
+                                                        &build_order,
+                                                        &clang_binary,
+                                                        &clang_binary_sha256,
+                                                        &clang_scan_deps,
+                                                        &clang_scan_deps_sha256,
+                                                        &compiler_profile,
+                                                        &dependencies,
+                                                        &import_scan_root,
+                                                        &modules,
+                                                        &observed_actions,
+                                                        &relocation,
+                                                        &relocation_root,
+                                                        &toolchain,
+                                                        &visit,
+                                                        &visit_stack,
+                                                        &visit_state](
+                                                        const std::string& module_name)
+        -> void {
             const int state = visit_state[module_name];
             if (state == 2) return;
             if (state == 1) {
@@ -10218,8 +10254,13 @@ prepare_compilation_environment(
         record.direct_arguments = record.base_arguments;
         std::set<std::string, std::less<>> mapped_modules;
         std::vector<std::string> mapping_order;
-        std::function<void(const std::string&)> collect_mapping =
-            [&](const std::string& imported) {
+        std::function<void(const std::string&)> collect_mapping = [
+                                                                       &collect_mapping,
+                                                                       &mapped_modules,
+                                                                       &mapping_order,
+                                                                       &modules](
+                                                                       const std::string& imported)
+            -> void {
                 if (!mapped_modules.insert(imported).second) {
                     return;
                 }
@@ -10262,7 +10303,8 @@ prepare_compilation_environment(
             || record.discovered_dependencies.empty()
             || !std::ranges::any_of(
                 record.discovered_dependencies,
-                [&](const std::filesystem::path& dependency) {
+                [&canonical_record_source](
+                    const std::filesystem::path& dependency) -> bool {
                     return clang_backend::weakly_canonical_path(
                         dependency) == canonical_record_source;
                 })) {
@@ -10991,7 +11033,7 @@ prepare_compilation_environment(
             retargeted.Filename = source.string();
             const bool has_retargeted_source = std::ranges::any_of(
                 retargeted.CommandLine,
-                [&](const std::string& argument) {
+                [&retargeted, &source](const std::string& argument) -> bool {
                     return !argument.empty()
                         && argument.front() != '-'
                         && clang_backend::absolute_normalized_path(
@@ -11273,7 +11315,8 @@ derive_dependency_compilation_authority(
             !alternates.empty()
             && (std::ranges::any_of(
                     alternates,
-                    [&](const std::filesystem::path& alternate) {
+                    [&raw_source_paths](
+                        const std::filesystem::path& alternate) -> bool {
                         return raw_source_paths.contains(
                                    clang_backend::absolute_normalized_path(
                                        alternate))
@@ -11313,8 +11356,15 @@ derive_dependency_compilation_authority(
 
     std::set<std::filesystem::path> roots{signature_source};
     std::set<std::string, std::less<>> visited_canonical_modules;
-    std::function<void(std::string_view)> visit_canonical =
-        [&](const std::string_view canonical_module) {
+    std::function<void(std::string_view)> visit_canonical = [
+                                                                &canonical_by_module,
+                                                                &canonical_inputs,
+                                                                &providers_by_module,
+                                                                &roots,
+                                                                &visit_canonical,
+                                                                &visited_canonical_modules](
+                                                                const std::string_view canonical_module)
+        -> void {
             if (!visited_canonical_modules.emplace(
                     canonical_module).second) {
                 return;
@@ -11772,7 +11822,7 @@ validate_dependency_compilation_environment(
             "PREPARE PCM manifest root is not an object");
     }
     const auto required_string =
-        [&](const llvm::json::Object& object,
+        [](const llvm::json::Object& object,
             std::string_view field) -> std::string {
             const std::optional<llvm::StringRef> value =
                 object.getString(field);
@@ -11871,9 +11921,9 @@ validate_dependency_compilation_environment(
         throw std::runtime_error(
             "PREPARE relocation root differs from generation inputs");
     }
-    const auto require_configured_path =
-        [&](std::string_view field,
-            const std::filesystem::path& configured) {
+    const auto require_configured_path = [root, &required_string](
+            std::string_view field,
+            const std::filesystem::path& configured) -> void {
             const std::filesystem::path sealed =
                 required_string(*root, field);
             if (clang_backend::weakly_canonical_path(sealed)
@@ -12475,8 +12525,17 @@ validate_dependency_compilation_environment(
     }
 
     std::map<std::string, int, std::less<>> validation_state;
-    std::function<void(const std::string&)> validate_module_artifacts =
-        [&](const std::string& name) {
+    std::function<void(const std::string&)> validate_module_artifacts = [
+                                                                            &clang_binary_sha256,
+                                                                            &clang_scan_deps_sha256,
+                                                                            &compiler_profile,
+                                                                            &dependency_root,
+                                                                            &modules,
+                                                                            &pcm_root,
+                                                                            &validate_module_artifacts,
+                                                                            &validation_state](
+                                                                            const std::string& name)
+        -> void {
             if (validation_state[name] == 2) {
                 return;
             }
@@ -12654,8 +12713,12 @@ validate_dependency_compilation_environment(
     }
 
     std::set<std::string, std::less<>> reached;
-    std::function<void(const std::string&)> collect_reached =
-        [&](const std::string& name) {
+    std::function<void(const std::string&)> collect_reached = [
+                                                                  &collect_reached,
+                                                                  &modules,
+                                                                  &reached](
+                                                                  const std::string& name)
+        -> void {
             if (!reached.insert(name).second) {
                 return;
             }
@@ -12779,8 +12842,13 @@ validate_dependency_compilation_environment(
             expected_mapping_closure;
         std::vector<std::string> expected_mapping_order;
         std::function<void(const std::string&)>
-            collect_expected_mapping =
-                [&](const std::string& imported) {
+            collect_expected_mapping = [
+                                           &collect_expected_mapping,
+                                           &expected_mapping_closure,
+                                           &expected_mapping_order,
+                                           &modules](
+                                           const std::string& imported)
+                -> void {
                     if (!expected_mapping_closure.insert(
                             imported).second) {
                         return;
@@ -13127,7 +13195,7 @@ frontend_action_outcome_spelling(
          ++index) {
         const dependency_module_identity& input =
             payload.canonical_inputs[index];
-        output << (index == 0u ? "\n" : ",\n")
+        output << (index == 0U ? "\n" : ",\n")
             << "    {\"module\":\""
             << clang_backend::json_escape(input.module_name)
             << "\",\"source_sha256\":\""
@@ -13140,7 +13208,7 @@ frontend_action_outcome_spelling(
          ++index) {
         const frontend_action_record& action =
             payload.actions[index];
-        output << (index == 0u ? "\n" : ",\n")
+        output << (index == 0U ? "\n" : ",\n")
             << "    {\"ordinal\":" << index
             << ",\"kind\":\""
             << frontend_action_kind_spelling(action.kind)
@@ -13525,7 +13593,7 @@ validate_frontend_action_trace(
     if (!prepared_keys.contains(donor_key)
         || std::ranges::any_of(
             canonical_keys,
-            [&](const identity_key& key) {
+            [&prepared_keys](const identity_key& key) -> bool {
                 return prepared_keys.contains(key);
             })) {
         throw std::runtime_error(
@@ -13614,7 +13682,7 @@ validate_frontend_action_trace(
             != recomputed.canonical_token_slice_actions
         || payload.counts.canonical_semantic_frontend_actions
             != recomputed.canonical_semantic_frontend_actions
-        || recomputed.canonical_semantic_frontend_actions != 0u) {
+        || recomputed.canonical_semantic_frontend_actions != 0U) {
         throw std::runtime_error(
             "PREPARE action trace summary differs from observed actions");
     }

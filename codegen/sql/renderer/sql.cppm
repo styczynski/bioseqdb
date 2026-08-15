@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <cstddef>
@@ -141,9 +142,9 @@ inline void trim_checked_sql_edge_newlines(std::string& value) {
                || value.front() == '\n' || value.front() == '\r')) {
         value.remove_prefix(1);
     }
-    static constexpr std::string_view prefixes[] = {
+    static constexpr auto prefixes = std::to_array<std::string_view>({
         "\"", "R\"", "u8\"", "u8R\"", "u\"", "uR\"",
-        "U\"", "UR\"", "L\"", "LR\""};
+        "U\"", "UR\"", "L\"", "LR\""});
     for (const std::string_view prefix : prefixes) {
         if (value.starts_with(prefix)) return true;
     }
@@ -894,7 +895,7 @@ struct type_role_binding {
             result.push_back(binding);
         }
     }
-    static constexpr std::string_view order[] = {
+    static constexpr auto order = std::to_array<std::string_view>({
         "type_input",
         "type_output",
         "type_receive",
@@ -903,7 +904,7 @@ struct type_role_binding {
         "type_typmod_out",
         "type_analyze",
         "type_subscript",
-    };
+    });
     std::ranges::sort(
         result,
         [](const type_role_binding& left,
@@ -911,7 +912,7 @@ struct type_role_binding {
             const auto rank = [](std::string_view name) {
                 const auto found = std::ranges::find(order, name);
                 return static_cast<std::size_t>(
-                    std::distance(order, found));
+                    std::ranges::distance(order.begin(), found));
             };
             return rank(left.role->source.annotation_name)
                 < rank(right.role->source.annotation_name);
@@ -1099,8 +1100,8 @@ struct type_role_binding {
     std::string current;
     const auto flush = [&current, &result] {
         if (current.empty()) return;
-        static constexpr std::string_view ignored[] = {
-            "bioseq", "entities", "sql", "type_of"};
+        static constexpr auto ignored = std::to_array<std::string_view>({
+            "bioseq", "entities", "sql", "type_of"});
         if (!std::ranges::contains(ignored, current)) {
             result.push_back(leaf_cpp_name(current));
         }
@@ -1204,7 +1205,8 @@ struct type_role_binding {
             ? "EXECUTE"
             : "";
     }
-    static constexpr std::pair<std::string_view, std::string_view> values[] = {
+    static constexpr auto values = std::to_array<
+        std::pair<std::string_view, std::string_view>>({
         {"select", "SELECT"},
         {"insert", "INSERT"},
         {"update", "UPDATE"},
@@ -1216,7 +1218,7 @@ struct type_role_binding {
         {"execute", "EXECUTE"},
         {"create", "CREATE"},
         {"all", "ALL"},
-    };
+    });
     std::string result;
     for (const auto [token, spelling] : values) {
         if (privileges->expression.contains(token)) {
@@ -1296,7 +1298,7 @@ natural_type_statements(
         find_option(source, "internal_length");
     const option_value* variable_length =
         find_option(source, "variable_length");
-    static constexpr std::string_view base_option_names[] = {
+    static constexpr auto base_option_names = std::to_array<std::string_view>({
         "internal_length",
         "variable_length",
         "passed_by_value",
@@ -1308,7 +1310,7 @@ natural_type_statements(
         "collatable",
         "element",
         "default_value",
-    };
+    });
     const bool base_type = !roles.empty()
         || std::ranges::any_of(
             base_option_names,

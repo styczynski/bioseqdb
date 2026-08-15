@@ -176,7 +176,11 @@ void attach_reference_content(reference_entity& target, const reference_entity& 
     std::vector<bool> clang_matched(merged.size(), false);
     std::vector<bool> doxygen_used(documented.size(), false);
 
-    const auto apply_rule = [&](auto predicate) {
+    const auto apply_rule = [
+                                &clang_matched,
+                                &documented,
+                                &doxygen_used,
+                                &merged](auto predicate) -> void {
         for (std::size_t clang = 0; clang < merged.size(); ++clang) {
             if (clang_matched[clang]) {
                 continue;

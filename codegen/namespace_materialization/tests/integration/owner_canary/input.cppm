@@ -33,15 +33,15 @@ constexpr int owner_bias = owner_wide ? 100 : 10;
 } // namespace
 
 [[bioseq::template_flatten_when("route", "increment")]]
-[[nodiscard, gnu::noinline]] owner_value owner_increment(
-    owner_value value) noexcept
+[[nodiscard, gnu::noinline]] auto owner_increment(
+    owner_value value) noexcept -> owner_value
 {
     return value + static_cast<owner_value>(owner_bias);
 }
 
 [[bioseq::template_flatten_when("route", "scale")]]
-[[nodiscard, gnu::noinline]] owner_value owner_scale(
-    owner_value value) noexcept
+[[nodiscard, gnu::noinline]] auto owner_scale(
+    owner_value value) noexcept -> owner_value
 {
     return value * owner_value{2} + static_cast<owner_value>(owner_bias);
 }

@@ -956,7 +956,10 @@ inline void run_safety_contract_self_tests() {
         malformed_test_indexes.symbol_groups.front()
             .sql_identities.pop_back();
         detail::require_failure(
-            [&] {
+            [&malformed_production,
+             &malformed_test_indexes,
+             &policy,
+             &provenance]() -> void {
                 validate_profile_pair(
                     malformed_production,
                     malformed_test_indexes,

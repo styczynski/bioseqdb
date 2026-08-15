@@ -96,7 +96,7 @@ namespace detail {
 
 [[nodiscard]] inline std::string module_identifier(std::string_view value) {
     std::string result;
-    result.reserve(value.size() + 1u);
+    result.reserve(value.size() + 1U);
     if (value.empty() || (value.front() >= '0' && value.front() <= '9')) {
         result.push_back('_');
     }
@@ -113,7 +113,7 @@ namespace detail {
     const std::size_t separator = value.rfind("::");
     return separator == std::string_view::npos
         ? std::string{}
-        : std::string{value.substr(0u, separator)};
+        : std::string{value.substr(0U, separator)};
 }
 
 [[nodiscard]] inline std::string global_module_fragment(
@@ -124,7 +124,7 @@ namespace detail {
         throw std::runtime_error(
             "source module declaration range is outside the authored source");
     }
-    std::string result = plan.source_text.substr(0u, end);
+    std::string result = plan.source_text.substr(0U, end);
     if (!result.empty() && result.back() != '\n') result.push_back('\n');
     return result;
 }
@@ -412,7 +412,7 @@ enabled_root_identities(const generation_plan& plan) {
             throw std::runtime_error(
                 "root entry parameters must be named for exact selector forwarding");
         }
-        if (index != 0u) output << ", ";
+        if (index != 0U) output << ", ";
         output << parameter.name;
     }
     return output.str();
@@ -428,7 +428,7 @@ inline void render_selector_switch(
     const std::size_t indent) {
     const std::string padding(indent, ' ');
     if (group_index == identity_groups.size()) {
-        if (candidates.size() != 1u) {
+        if (candidates.size() != 1U) {
             throw std::runtime_error(
                 "selector terminal does not identify exactly one root coordinate");
         }
@@ -462,8 +462,8 @@ inline void render_selector_switch(
             root,
             identity_groups,
             selected,
-            group_index + 1u,
-            indent + 8u);
+            group_index + 1U,
+            indent + 8U);
         output << padding << "    }\n";
     }
     output << padding << "}\n";
@@ -686,7 +686,7 @@ inline void render_selector_switch(
                 support_range,
                 "implementation-owner support island");
             if (support_range.end.byte_offset > support_range.begin.byte_offset
-                && plan.source_text[support_range.end.byte_offset - 1u]
+                && plan.source_text[support_range.end.byte_offset - 1U]
                     != '\n') {
                 output << '\n';
             }
@@ -694,7 +694,7 @@ inline void render_selector_switch(
         }
 
         const std::string identity_key = detail::identity_key(identity);
-        std::size_t declaration_count = 0u;
+        std::size_t declaration_count = 0U;
         for (const materialization_coordinate& coordinate
              : plan.topology.coordinates) {
             if (detail::identity_key(coordinate) != identity_key) continue;
@@ -715,7 +715,7 @@ inline void render_selector_switch(
                 ++declaration_count;
             }
         }
-        if (declaration_count == 0u) {
+        if (declaration_count == 0U) {
             throw std::runtime_error(
                 "implementation-owner identity has no module-safe declaration probe heads");
         }
@@ -727,7 +727,7 @@ inline void render_selector_switch(
     const std::string module =
         "bioseq.codegen.probes."
         + detail::module_identifier(plan.name) + ".t"
-        + plan.topology.topology_digest.substr(0u, 12u) + ".identity_"
+        + plan.topology.topology_digest.substr(0U, 12U) + ".identity_"
         + std::to_string(identity.ordinal);
     output << detail::global_module_fragment(plan)
            << "export module " << module << ";\n\n";
@@ -762,6 +762,7 @@ inline void render_selector_switch(
     return output.str();
 }
 
+/// Renders the typed selector without changing authenticated identity order.
 [[nodiscard]] inline std::string render_selector_partition(
     const generation_plan& plan) {
     const owned_declaration& root = detail::root_entry(plan);
@@ -803,8 +804,8 @@ inline void render_selector_switch(
         root,
         identity_groups,
         identities,
-        0u,
-        4u);
+        0U,
+        4U);
     const bool scheduler_selector =
         plan.topology.region.configured_output_module_name
             == detail::scheduler_output_module
@@ -883,7 +884,7 @@ inline void render_selector_switch(
                     ? plan.topology.region.configured_output_module_name
                     : "bioseq.codegen.probes."
                         + detail::module_identifier(plan.name) + ".t"
-                        + plan.topology.topology_digest.substr(0u, 12u)
+                        + plan.topology.topology_digest.substr(0U, 12U)
                         + ".identity_" + std::to_string(representative),
                 std::move(covered),
                 validation_class::body_free,
