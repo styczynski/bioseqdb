@@ -1,8 +1,7 @@
-// bioseq/tests/unit/indexing/merge_runs_multicursor_test.cpp
-//
-// External-sort spill/merge coverage for fake_fragment_storage
-// (is_external_sort_spill_storage): >=3 spilled runs with interleaved kmers,
-// k-way merged, must equal a single-pass sort+unique over all runs. No SIMD here.
+/**
+ * @file merge_runs_multicursor_test.cpp
+ * @brief Tests ordered k-way merging of interleaved external-sort spill runs.
+ */
 
 #include <tests/support/common.hpp>
 
@@ -37,18 +36,23 @@ import bioseq.tests.support.indexing_storage_fakes;
 namespace {
 
 using bioseq::indexing::test::fake_fragment_storage;
+/// Pair representation accepted by the external-sort fixture.
 using pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
-// Reference k-way merge: concatenate every run, sort, dedup per kmer.
+/// Concatenate, sort, and deduplicate every fixture run.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 reference_merge(const std::vector<std::vector<pair_t>>& runs) {
-    std::vector<pair_t> all;
-    for (const auto& r : runs) all.insert(all.end(), r.begin(), r.end());
-    std::sort(all.begin(), all.end());
-    all.erase(std::unique(all.begin(), all.end()), all.end());
-    std::map<std::uint64_t, std::vector<std::uint64_t>> out;
-    for (const auto& [kmer, enc] : all) out[kmer].push_back(enc);   // already ascending+unique
-    return out;
+    std::vector<pair_t> pairs;
+    for (const auto& run : runs) {
+        pairs.insert(pairs.end(), run.begin(), run.end());
+    }
+    std::sort(pairs.begin(), pairs.end());
+    pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
+    std::map<std::uint64_t, std::vector<std::uint64_t>> output;
+    for (const auto& [kmer, encoded_position] : pairs) {
+        output[kmer].push_back(encoded_position);
+    }
+    return output;
 }
 
 }  // namespace
@@ -74,14 +78,19 @@ TEST_CASE("merge_runs over >=3 interleaved spilled runs equals sort+unique",
     std::map<std::uint64_t, std::vector<std::uint64_t>> got;
     std::uint64_t prev_kmer = 0;
     bool have_prev = false;
-    storage.merge_runs([&](std::uint64_t kmer, auto&& positions) {
-        if (have_prev) REQUIRE(kmer > prev_kmer);     // strictly ascending distinct kmers
-        prev_kmer = kmer; have_prev = true;
+    storage.merge_runs([&got, &prev_kmer, &have_prev](std::uint64_t kmer, auto&& positions) {
+        if (have_prev)
+            REQUIRE(kmer > prev_kmer); // strictly ascending distinct kmers
+        prev_kmer = kmer;
+        have_prev = true;
 
         std::vector<std::uint64_t> v;
-        positions.for_each_batch([&](std::span<const std::uint64_t> b) { v.insert(v.end(), b.begin(), b.end()); });
+        positions.for_each_batch([&v](std::span<const std::uint64_t> batch) {
+            v.insert(v.end(), batch.begin(), batch.end());
+        });
         REQUIRE(v.size() == positions.total_count());
-        for (std::size_t i = 1; i < v.size(); ++i) REQUIRE(v[i - 1] < v[i]);   // ascending + unique
+        for (std::size_t i = 1; i < v.size(); ++i)
+            REQUIRE(v[i - 1] < v[i]); // ascending + unique
         got.emplace(kmer, std::move(v));
     });
 
@@ -90,7 +99,7 @@ TEST_CASE("merge_runs over >=3 interleaved spilled runs equals sort+unique",
     // release_runs drops the spill; a subsequent merge yields nothing.
     storage.release_runs();
     std::size_t calls = 0;
-    storage.merge_runs([&](std::uint64_t, auto&&) { ++calls; });
+    storage.merge_runs([&calls](std::uint64_t, auto&&) { ++calls; });
     REQUIRE(calls == 0u);
 }
 

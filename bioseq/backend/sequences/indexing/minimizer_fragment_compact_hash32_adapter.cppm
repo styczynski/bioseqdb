@@ -38,10 +38,12 @@ static_assert(sizeof(std::size_t) <= sizeof(std::uint64_t),
 
 export namespace bioseq::indexing {
 
-/// Non-owning view assembled at the already-open minimizer-fragment generation boundary.
-/// `head` and `manifest` are copied during `open`. The directory view and the
-/// owner of `mapped_payload` are borrowed: both must remain alive, immobile,
-/// and immutable until every plan/build source replay has returned.
+/**
+ * @brief Borrows an already-open grouped-SoA minimizer generation.
+ *
+ * The directory and mapped payload must remain alive and immutable through
+ * every compact-index replay.
+ */
 struct opened_minimizer_fragment_generation_view {
     const minimizer_generation_head* head = nullptr;
     const minimizer_generation_manifest* manifest = nullptr;
@@ -49,25 +51,25 @@ struct opened_minimizer_fragment_generation_view {
     std::span<const std::byte> mapped_payload{};
 };
 
-/// Scratch and emission bounds for compact-hash source replay.
+/** @brief Configures scratch and emission bounds for compact-hash replay. */
 struct minimizer_fragment_compact_hash32_options {
     /// Runs at or below this count are buffered once. Larger runs use three
     /// bounded mapping passes (count, strand zero, strand one). The open path
-    /// clamps this to the authenticated minimizer-fragment occurrence cap; callers
+    /// clamps this to the authenticated minimizer-fragment occurrence cap. Callers
     /// normally set it to the compact index's persisted cap.
     std::uint64_t buffered_run_position_cap =
         k_grouped_soa_default_max_occurrence_cap;
     std::size_t emission_chunk_positions = 4'096u;
 };
 
-/// Exact retained-memory and replay-cost estimate computed during open.
+/** @brief Records retained-memory and replay-cost estimates computed at open. */
 struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t manifest_fragment_count = 0u;
     std::uint64_t nonempty_fragment_count = 0u;
     std::uint64_t directory_entry_count = 0u;
     std::uint64_t fragment_controls_per_source_scan = 0u;
     std::uint64_t control_scalar_bytes_per_source_scan = 0u;
-    /// Persistent O(nonempty fragments) merge plan; no control/posting data.
+    /// Persistent O(nonempty fragments) merge plan. It contains no control or posting data.
     std::uint64_t fragment_plan_owner_capacity_bytes = 0u;
     std::uint64_t source_token_owner_bytes = 0u;
     std::uint64_t compact_prebuild_source_scan_count = 2u;
@@ -83,11 +85,11 @@ struct minimizer_fragment_compact_hash32_prebuild_estimate {
     std::uint64_t maximum_buffered_run_scratch_bytes = 0u;
     std::uint64_t emission_chunk_scratch_bytes = 0u;
     std::uint64_t maximum_logical_scratch_bytes = 0u;
-    /// The adapter borrows the authenticated mapping; this must stay zero.
+    /// The adapter borrows the authenticated mapping. This must stay zero.
     std::uint64_t owned_target_control_or_position_bytes = 0u;
 };
 
-/// Saturating counters for one or more replayable source scans.
+/** @brief Records saturating counters for replayable source scans. */
 struct minimizer_fragment_compact_hash32_scan_stats {
     std::uint64_t source_scan_attempts = 0u;
     std::uint64_t source_scans_completed = 0u;
@@ -104,67 +106,70 @@ struct minimizer_fragment_compact_hash32_scan_stats {
 };
 
 /**
- * Adapts authenticated grouped-SoA generation storage into sorted hash runs.
+ * @brief Adapts authenticated grouped-SoA storage into sorted hash runs.
  *
  * The adapter borrows generation storage, retains only fragment cursors, and
  * exposes a replayable source accepted by the compact-hash image builder.
  */
 class minimizer_fragment_compact_hash32_adapter {
 private:
-    struct source_token {
-        minimizer_fragment_compact_hash32_adapter* owner = nullptr;
-    };
+  /** @brief Provides move-stable dispatch identity to borrowed run sources. */
+  struct source_token {
+      minimizer_fragment_compact_hash32_adapter* owner = nullptr;
+  };
 
-    struct fragment_plan {
-        std::size_t entry_begin = 0u;
-        std::size_t entry_end = 0u;
-        std::uint64_t first_control_byte = 0u;
-        std::uint64_t first_position_relative_byte = 0u;
-        std::uint64_t core_begin_bp = 0u;
-        std::uint64_t core_end_bp = 0u;
-    };
+  /** @brief Records one nonempty fragment's directory and payload bounds. */
+  struct fragment_plan {
+      std::size_t entry_begin = 0u;
+      std::size_t entry_end = 0u;
+      std::uint64_t first_control_byte = 0u;
+      std::uint64_t first_position_relative_byte = 0u;
+      std::uint64_t core_begin_bp = 0u;
+      std::uint64_t core_end_bp = 0u;
+  };
 
-    struct decoded_control {
-        std::uint32_t hash = 0u;
-        std::uint64_t position_begin = 0u;
-        std::uint64_t position_end = 0u;
-        std::uint64_t exact_count = 0u;
-        std::uint64_t position_extent_byte = 0u;
-        std::uint64_t core_begin_bp = 0u;
-        std::uint64_t core_end_bp = 0u;
-        minimizer_scalar_width position_width = minimizer_scalar_width::u16;
-    };
+  /** @brief Holds one validated grouped-SoA control record. */
+  struct decoded_control {
+      std::uint32_t hash = 0u;
+      std::uint64_t position_begin = 0u;
+      std::uint64_t position_end = 0u;
+      std::uint64_t exact_count = 0u;
+      std::uint64_t position_extent_byte = 0u;
+      std::uint64_t core_begin_bp = 0u;
+      std::uint64_t core_end_bp = 0u;
+      minimizer_scalar_width position_width = minimizer_scalar_width::u16;
+  };
 
-    struct fragment_cursor {
-        std::size_t entry_ordinal = 0u;
-        std::size_t entry_end = 0u;
-        std::uint64_t entry_control_byte = 0u;
-        std::uint64_t entry_position_relative_byte = 0u;
-        std::uint64_t control_ordinal = 0u;
-        std::uint64_t core_begin_bp = 0u;
-        std::uint64_t core_end_bp = 0u;
-        grouped_soa_control_plane_offsets layout{};
-        std::uint64_t previous_hash = 0u;
-        std::uint64_t previous_position_end = 0u;
-        bool have_previous_hash = false;
-        bool active = false;
-        decoded_control current{};
-    };
+  /** @brief Tracks one fragment during the hash-ordered merge. */
+  struct fragment_cursor {
+      std::size_t entry_ordinal = 0u;
+      std::size_t entry_end = 0u;
+      std::uint64_t entry_control_byte = 0u;
+      std::uint64_t entry_position_relative_byte = 0u;
+      std::uint64_t control_ordinal = 0u;
+      std::uint64_t core_begin_bp = 0u;
+      std::uint64_t core_end_bp = 0u;
+      grouped_soa_control_plane_offsets layout{};
+      std::uint64_t previous_hash = 0u;
+      std::uint64_t previous_position_end = 0u;
+      bool have_previous_hash = false;
+      bool active = false;
+      decoded_control current{};
+  };
 
-    struct heap_node {
-        std::uint32_t hash = 0u;
-        std::uint32_t fragment_ordinal = 0u;
-    };
+  /** @brief Identifies the current hash of one active fragment cursor. */
+  struct heap_node {
+      std::uint32_t hash = 0u;
+      std::uint32_t fragment_ordinal = 0u;
+  };
 
-    struct heap_greater {
-        [[nodiscard]] bool operator()(
-                const heap_node& left,
-                const heap_node& right) const noexcept {
-            return left.hash != right.hash
-                ? left.hash > right.hash
-                : left.fragment_ordinal > right.fragment_ordinal;
-        }
-    };
+  /** @brief Orders merge-heap nodes by hash and fragment ordinal. */
+  struct heap_greater {
+      [[nodiscard]] bool operator()(const heap_node& left, const heap_node& right) const noexcept {
+          return left.hash != right.hash ? left.hash > right.hash
+                                         : left.fragment_ordinal > right.fragment_ordinal;
+      }
+  };
 
     minimizer_generation_head head_{};
     minimizer_generation_manifest manifest_{};
@@ -572,9 +577,12 @@ private:
                 for (const std::uint32_t fragment : matched_fragments) {
                     const auto counted = visit_positions_(
                         cursors[fragment].current,
-                        [&](std::uint64_t encoded)
-                                -> std::expected<void,
-                                    direct_inverted_index_error> {
+                        [&previous_global,
+                         &strand_zero_count,
+                         &positions_seen,
+                         &buffered,
+                         &run_positions](std::uint64_t encoded)
+                            -> std::expected<void, direct_inverted_index_error> {
                             if (previous_global
                                 && encoded < *previous_global) {
                                 return std::unexpected(
@@ -585,7 +593,8 @@ private:
                                 ++strand_zero_count;
                             }
                             ++positions_seen;
-                            if (buffered) run_positions.push_back(encoded);
+                            if (buffered)
+                                run_positions.push_back(encoded);
                             return {};
                         });
                     if (!counted) return counted;
@@ -608,20 +617,21 @@ private:
                 }
                 ++stats_.run_headers_emitted;
                 emission_chunk.clear();
-                const auto flush = [&]()
-                        -> std::expected<void,
-                            direct_inverted_index_error> {
-                    if (emission_chunk.empty()) return {};
+                const auto flush = [this, &emission_chunk, &receiver]()
+                    -> std::expected<void, direct_inverted_index_error> {
+                    if (emission_chunk.empty())
+                        return {};
                     const auto consumed = receiver.consume_positions(
                         emission_chunk);
-                    if (!consumed) return consumed;
+                    if (!consumed)
+                        return consumed;
                     ++stats_.receiver_position_chunks;
                     emission_chunk.clear();
                     return {};
                 };
-                const auto emit = [&](std::uint64_t encoded)
-                        -> std::expected<void,
-                            direct_inverted_index_error> {
+                const auto emit =
+                    [this, &emission_chunk, &logical_positions_emitted, &flush](
+                        std::uint64_t encoded) -> std::expected<void, direct_inverted_index_error> {
                     emission_chunk.push_back(encoded);
                     ++logical_positions_emitted;
                     ++stats_.positions_emitted;
@@ -655,9 +665,8 @@ private:
                                 : matched_fragments) {
                             const auto emitted_positions = visit_positions_(
                                 cursors[fragment].current,
-                                [&](std::uint64_t encoded)
-                                        -> std::expected<void,
-                                            direct_inverted_index_error> {
+                                [&strand_one, &previous_strand, &emit](std::uint64_t encoded)
+                                    -> std::expected<void, direct_inverted_index_error> {
                                     if (((encoded & 1u) != 0u)
                                             != strand_one) {
                                         return {};
@@ -720,34 +729,39 @@ private:
     }
 
 public:
-    minimizer_fragment_compact_hash32_adapter() = default;
-    minimizer_fragment_compact_hash32_adapter(
-            minimizer_fragment_compact_hash32_adapter&& other) noexcept
-        : head_(std::move(other.head_)),
-          manifest_(std::move(other.manifest_)),
-          profile_(std::move(other.profile_)),
-          entries_(other.entries_),
-          payload_(other.payload_),
-          fragments_(std::move(other.fragments_)),
-          options_(other.options_),
-          estimate_(other.estimate_),
-          stats_(other.stats_),
-          total_control_bytes_(other.total_control_bytes_),
-          geometry_(other.geometry_),
-          source_token_(std::move(other.source_token_)),
-          ready_(other.ready_) {
-        if (source_token_ != nullptr) source_token_->owner = this;
-        other.entries_ = {};
-        other.payload_ = {};
-        other.total_control_bytes_ = 0u;
-        other.ready_ = false;
-    }
+  /** @brief Creates an unopened adapter. */
+  minimizer_fragment_compact_hash32_adapter() = default;
+  /**
+   * @brief Moves an adapter while preserving issued source-token identity.
+   * @param other Adapter to move
+   */
+  minimizer_fragment_compact_hash32_adapter(
+      minimizer_fragment_compact_hash32_adapter&& other) noexcept
+      : head_(std::move(other.head_)), manifest_(std::move(other.manifest_)),
+        profile_(std::move(other.profile_)), entries_(other.entries_), payload_(other.payload_),
+        fragments_(std::move(other.fragments_)), options_(other.options_),
+        estimate_(other.estimate_), stats_(other.stats_),
+        total_control_bytes_(other.total_control_bytes_), geometry_(other.geometry_),
+        source_token_(std::move(other.source_token_)), ready_(other.ready_) {
+      if (source_token_ != nullptr)
+          source_token_->owner = this;
+      other.entries_ = {};
+      other.payload_ = {};
+      other.total_control_bytes_ = 0u;
+      other.ready_ = false;
+  }
     minimizer_fragment_compact_hash32_adapter& operator=(
         minimizer_fragment_compact_hash32_adapter&&) = delete;
     minimizer_fragment_compact_hash32_adapter(const minimizer_fragment_compact_hash32_adapter&) = delete;
     minimizer_fragment_compact_hash32_adapter& operator=(
         const minimizer_fragment_compact_hash32_adapter&) = delete;
 
+    /**
+     * @brief Opens and validates a grouped-SoA generation for compact replay.
+     * @param generation Borrowed authenticated generation
+     * @param options Scratch and emission bounds
+     * @return Ready adapter or a validation diagnostic
+     */
     [[nodiscard]] static std::expected<
         minimizer_fragment_compact_hash32_adapter,
         minimizer_generation_encoding_error>
@@ -1020,9 +1034,10 @@ public:
         return std::move(adapter);
     }
 
-    /// The returned source borrows this adapter, its grouped-SoA directory,
-    /// and its mapped payload owner through both compact-index replays. Adapter moves are safe
-    /// because dispatch uses a heap-stable token; destruction is invalidation.
+    /**
+     * @brief Creates a replayable sorted-run source borrowing this adapter.
+     * @return Source valid until adapter destruction
+     */
     [[nodiscard]] compact_hash32_sorted_run_source sorted_run_source() noexcept {
         return compact_hash32_sorted_run_source{
             .context = ready_ && source_token_ != nullptr
@@ -1031,6 +1046,12 @@ public:
         };
     }
 
+    /**
+     * @brief Builds compact-index options from the authenticated generation.
+     * @param persisted_max_occ_cap Persisted occurrence cap
+     * @param max_image_bytes Maximum permitted image size
+     * @return Compact build options or a contract diagnostic
+     */
     [[nodiscard]] std::expected<compact_hash32_build_options,
         direct_inverted_index_error>
     compact_build_options(
@@ -1055,14 +1076,30 @@ public:
         };
     }
 
+    /**
+     * @brief Reports whether open completed successfully.
+     * @return `true` when replay is available
+     */
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 
+    /**
+     * @brief Returns the immutable prebuild estimate.
+     * @return Estimate computed during open
+     */
     [[nodiscard]] const minimizer_fragment_compact_hash32_prebuild_estimate&
     prebuild_estimate() const noexcept { return estimate_; }
 
+    /**
+     * @brief Returns accumulated replay counters.
+     * @return Source-scan counters
+     */
     [[nodiscard]] const minimizer_fragment_compact_hash32_scan_stats&
     scan_stats() const noexcept { return stats_; }
 
+    /**
+     * @brief Returns the compact hash-domain geometry.
+     * @return Geometry derived from the authenticated manifest
+     */
     [[nodiscard]] compact_hash32_geometry geometry() const noexcept {
         return geometry_;
     }

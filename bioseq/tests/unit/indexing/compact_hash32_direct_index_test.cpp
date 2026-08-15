@@ -1,4 +1,7 @@
-// Differential tests for the PG-free hash32 direct inverted index.
+/**
+ * @file compact_hash32_direct_index_test.cpp
+ * @brief Tests compact hash32 wire encoding, validation, and direct queries.
+ */
 
 #include <tests/support/common.hpp>
 
@@ -30,6 +33,7 @@ namespace {
 
 namespace idx = bioseq::indexing;
 
+/// Construct the persisted identity shared by direct-index fixtures.
 [[nodiscard]] constexpr idx::direct_index_identity identity(
         std::uint64_t target_length) noexcept {
     return idx::direct_index_identity{
@@ -40,6 +44,7 @@ namespace idx = bioseq::indexing;
     };
 }
 
+/// Construct direct-index build options for one target geometry.
 [[nodiscard]] idx::direct_index_build_options options(
         std::uint64_t target_length,
         std::uint64_t fragment_span = 0u,
@@ -51,6 +56,7 @@ namespace idx = bioseq::indexing;
     };
 }
 
+/// Decode one unsigned integer with the independent little-endian reader.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 [[nodiscard]] constexpr p_unsigned_integer reference_read_le(
@@ -65,6 +71,7 @@ requires std::is_unsigned_v<p_unsigned_integer>
     return value;
 }
 
+/// Encode one unsigned integer with the independent little-endian writer.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 constexpr void reference_write_le(
@@ -95,6 +102,7 @@ constexpr void reference_write_le(
     return checksum;
 }
 
+/// Rewrite the direct-index header checksum after fixture mutation.
 void reference_reseal_header(std::vector<std::byte>& image) {
     std::vector<std::byte> header(
         image.begin(),
@@ -111,6 +119,7 @@ void reference_reseal_header(std::vector<std::byte>& image) {
         reference_crc64(header));
 }
 
+/// Rewrite the compact-hash32 header checksum after fixture mutation.
 void reference_reseal_compact_hash32_header(
         std::vector<std::byte>& image) {
     REQUIRE(image.size() >= idx::k_compact_hash32_direct_index_header_bytes);
@@ -127,6 +136,7 @@ void reference_reseal_compact_hash32_header(
         reference_crc64(header));
 }
 
+/// Rewrite the controls checksum and enclosing direct-index header checksum.
 void reference_reseal_controls(std::vector<std::byte>& image) {
     const std::uint64_t offset = reference_read_le<std::uint64_t>(image, 112u);
     const std::uint64_t bytes = reference_read_le<std::uint64_t>(image, 120u);
@@ -139,8 +149,10 @@ void reference_reseal_controls(std::vector<std::byte>& image) {
     reference_reseal_header(image);
 }
 
+/// Hash-to-occurrence map used as a direct-query oracle.
 using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurrence>>;
 
+/// Group fixture occurrences by hash without changing multiplicity.
 [[nodiscard]] oracle_type make_oracle(
         std::span<const idx::direct_index_occurrence> input) {
     oracle_type oracle;
@@ -150,6 +162,7 @@ using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurr
     return oracle;
 }
 
+/// Count strand-zero occurrences in one oracle bucket.
 [[nodiscard]] std::uint64_t oracle_strand_zero_count(
         const std::vector<idx::direct_index_occurrence>& occurrences) noexcept {
     return static_cast<std::uint64_t>(std::count_if(
@@ -159,11 +172,13 @@ using oracle_type = std::map<std::uint32_t, std::vector<idx::direct_index_occurr
         }));
 }
 
+/// Own postings collected for each selected query ordinal.
 struct collected_postings {
     std::vector<std::vector<std::uint64_t>> by_selection{};
     std::uint64_t callback_count = 0u;
 };
 
+/// Append one posting through the erased direct-query callback.
 bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
     auto& collected = *static_cast<collected_postings*>(opaque);
     if (posting.selection_ordinal >= collected.by_selection.size()) {
@@ -176,6 +191,7 @@ bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
         == ((posting.encoded_position & 1u) != 0u);
 }
 
+/// Encode expected postings in fragment, strand, and position order.
 [[nodiscard]] std::vector<std::uint64_t> expected_postings(
         std::vector<idx::direct_index_occurrence> occurrences,
         std::uint64_t fragment_span) {
@@ -201,6 +217,7 @@ bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
     return result;
 }
 
+/// Build a direct-index image and require success.
 [[nodiscard]] std::vector<std::byte> build_or_fail(
         std::span<const idx::direct_index_occurrence> input,
         const idx::direct_index_build_options& build_options) {
@@ -209,6 +226,7 @@ bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
     return std::move(*image);
 }
 
+/// Validate a direct-index image and require success.
 [[nodiscard]] idx::direct_inverted_index_view validate_or_fail(
         const std::vector<std::byte>& image,
         const idx::direct_index_identity& expected_identity) {
@@ -217,6 +235,7 @@ bool collect_posting(void* opaque, const idx::direct_index_posting& posting) {
     return *view;
 }
 
+/// Compare every planned query result with the hash-to-occurrence oracle.
 void require_matches_oracle(
         const idx::direct_index_query_plan& plan,
         std::span<const idx::direct_index_query_occurrence> queries,
@@ -253,11 +272,13 @@ void require_matches_oracle(
     }
 }
 
+/// Own one sorted compact-hash32 run.
 struct compact_test_run {
     idx::compact_hash32_sorted_run_header header{};
     std::vector<std::uint64_t> encoded_positions{};
 };
 
+/// Own initial and optional replay runs for a compact source callback.
 struct compact_test_source {
     std::vector<compact_test_run> runs{};
     std::vector<compact_test_run> replay_runs{};
@@ -265,6 +286,7 @@ struct compact_test_source {
     std::uint64_t scans = 0u;
 };
 
+/// Replay compact fixture runs through the erased source callback.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 scan_compact_test_runs(
         void* opaque,
@@ -293,6 +315,7 @@ scan_compact_test_runs(
     return {};
 }
 
+/// Return the erased source bound to one compact fixture.
 [[nodiscard]] idx::compact_hash32_sorted_run_source compact_source_ref(
         compact_test_source& source) noexcept {
     return idx::compact_hash32_sorted_run_source{
@@ -301,6 +324,7 @@ scan_compact_test_runs(
     };
 }
 
+/// Derive a compact hash domain from its bit width.
 [[nodiscard]] constexpr idx::compact_hash32_geometry compact_geometry(
         std::uint8_t bits) noexcept {
     return idx::compact_hash32_geometry{
@@ -312,6 +336,7 @@ scan_compact_test_runs(
     };
 }
 
+/// Construct compact-hash32 build options for one target and cap.
 [[nodiscard]] idx::compact_hash32_build_options compact_options(
         std::uint64_t target_length,
         std::uint32_t max_occ_cap,
@@ -323,6 +348,7 @@ scan_compact_test_runs(
     };
 }
 
+/// Construct bounded-open expectations from compact build options.
 [[nodiscard]] idx::compact_hash32_bounded_open_options compact_bounded_options(
         const idx::compact_hash32_build_options& build_options,
         std::optional<std::uint64_t> expected_direct_header_crc64 =
@@ -335,12 +361,14 @@ scan_compact_test_runs(
     };
 }
 
+/// Pack a target position and strand into the persisted word.
 [[nodiscard]] constexpr std::uint64_t encoded_position(
         std::uint64_t bp,
         bool strand_one) noexcept {
     return (bp << 1u) | static_cast<std::uint64_t>(strand_one);
 }
 
+/// Build a compact-hash32 image and require success.
 [[nodiscard]] std::vector<std::byte> build_compact_or_fail(
         compact_test_source& source,
         const idx::compact_hash32_build_options& build_options) {
@@ -350,6 +378,7 @@ scan_compact_test_runs(
     return std::move(*image);
 }
 
+/// Validate a compact-hash32 image and require success.
 [[nodiscard]] idx::compact_hash32_direct_index_view validate_compact_or_fail(
         const std::vector<std::byte>& image,
         const idx::compact_hash32_build_options& build_options) {
@@ -362,6 +391,7 @@ scan_compact_test_runs(
     return *view;
 }
 
+/// Rewrite compact payload-section checksums and the enclosing header checksum.
 void reference_reseal_compact_hash32_payload_and_header(
         std::vector<std::byte>& image) {
     const auto reseal_section = [&image](
@@ -390,6 +420,7 @@ void reference_reseal_compact_hash32_payload_and_header(
     reference_reseal_compact_hash32_header(image);
 }
 
+/// Open a bounded compact image while retaining its shared byte owner.
 [[nodiscard]] std::expected<idx::compact_hash32_bounded_open_view,
     idx::direct_inverted_index_error>
 open_compact_bounded_owned(
@@ -1642,7 +1673,8 @@ TEST_CASE(
         idx::visit_compact_hash32_direct_index_selection_spans(
             view,
             *unique_plan,
-            [&](const idx::compact_hash32_selection_posting_spans& selected) {
+            [&selection_callback_count, &span_shape_valid, &bulk_positions](
+                const idx::compact_hash32_selection_posting_spans& selected) {
                 ++selection_callback_count;
                 if (selected.selection_ordinal != 0u
                     || selected.dense_ordinal != 0u
@@ -1696,19 +1728,19 @@ TEST_CASE(
             *p64_range_accessor,
             0u,
             1u,
-            [&](const idx::compact_hash32_selection_posting_spans& selected) {
+            [&p64_span,
+             &p64_range_positions](const idx::compact_hash32_selection_posting_spans& selected) {
                 if (selected.selection_ordinal != 0u
                     || selected.span_count != 1u
                     || selected.spans.front().posting_width_bytes != 8u) {
                     return false;
                 }
                 p64_span = selected.spans.front();
-                const auto decoded =
-                    selected.spans.front().visit_encoded_positions(
-                        [&](std::uint64_t encoded) {
-                            p64_range_positions.push_back(encoded);
-                            return true;
-                        });
+                const auto decoded = selected.spans.front().visit_encoded_positions(
+                    [&p64_range_positions](std::uint64_t encoded) {
+                        p64_range_positions.push_back(encoded);
+                        return true;
+                    });
                 return decoded.has_value() && *decoded == 1u;
             });
     REQUIRE(p64_range_visited.has_value());
@@ -1723,11 +1755,10 @@ TEST_CASE(
         truncated_p64_span.encoded_bytes.first(7u);
     std::uint64_t truncated_callbacks = 0u;
     const auto truncated_p64 =
-        truncated_p64_span.visit_encoded_positions(
-            [&](std::uint64_t) {
-                ++truncated_callbacks;
-                return true;
-            });
+        truncated_p64_span.visit_encoded_positions([&truncated_callbacks](std::uint64_t) {
+            ++truncated_callbacks;
+            return true;
+        });
     REQUIRE_FALSE(truncated_p64.has_value());
     CHECK(truncated_p64.error()
         == idx::direct_inverted_index_error::query_plan);
@@ -1737,11 +1768,10 @@ TEST_CASE(
     wrong_strand_p64_span.target_strand_one = false;
     std::uint64_t wrong_strand_callbacks = 0u;
     const auto wrong_strand_p64 =
-        wrong_strand_p64_span.visit_encoded_positions(
-            [&](std::uint64_t) {
-                ++wrong_strand_callbacks;
-                return true;
-            });
+        wrong_strand_p64_span.visit_encoded_positions([&wrong_strand_callbacks](std::uint64_t) {
+            ++wrong_strand_callbacks;
+            return true;
+        });
     REQUIRE_FALSE(wrong_strand_p64.has_value());
     CHECK(wrong_strand_p64.error()
         == idx::direct_inverted_index_error::query_plan);
@@ -1751,19 +1781,18 @@ TEST_CASE(
     out_of_range_p64_span.target_length = 1u;
     std::uint64_t out_of_range_callbacks = 0u;
     const auto out_of_range_p64 =
-        out_of_range_p64_span.visit_encoded_positions(
-            [&](std::uint64_t) {
-                ++out_of_range_callbacks;
-                return true;
-            });
+        out_of_range_p64_span.visit_encoded_positions([&out_of_range_callbacks](std::uint64_t) {
+            ++out_of_range_callbacks;
+            return true;
+        });
     REQUIRE_FALSE(out_of_range_p64.has_value());
     CHECK(out_of_range_p64.error()
         == idx::direct_inverted_index_error::query_plan);
     CHECK(out_of_range_callbacks == 0u);
 
     std::uint64_t rejected_callbacks = 0u;
-    const auto rejected_p64 = p64_span->visit_encoded_positions(
-        [&](std::uint64_t) {
+    const auto rejected_p64 =
+        p64_span->visit_encoded_positions([&rejected_callbacks](std::uint64_t) {
             ++rejected_callbacks;
             return false;
         });
@@ -2160,19 +2189,15 @@ TEST_CASE(
         == source.runs.front().encoded_positions);
 
     std::uint64_t sparse_selection_callbacks = 0u;
-    const auto sparse_bulk_visited =
-        idx::visit_compact_hash32_direct_index_selection_spans(
-            view,
-            *sparse,
-            [&](const idx::compact_hash32_selection_posting_spans& selected) {
-                ++sparse_selection_callbacks;
-                return selected.selection_ordinal == 0u
-                    && selected.dense_ordinal == 0u
-                    && selected.query_ordinal == 1u
-                    && selected.global_count == 1u
-                    && selected.strand_zero_count == 1u
-                    && selected.span_count == 1u;
-            });
+    const auto sparse_bulk_visited = idx::visit_compact_hash32_direct_index_selection_spans(
+        view,
+        *sparse,
+        [&sparse_selection_callbacks](const idx::compact_hash32_selection_posting_spans& selected) {
+            ++sparse_selection_callbacks;
+            return selected.selection_ordinal == 0u && selected.dense_ordinal == 0u &&
+                   selected.query_ordinal == 1u && selected.global_count == 1u &&
+                   selected.strand_zero_count == 1u && selected.span_count == 1u;
+        });
     REQUIRE(sparse_bulk_visited.has_value());
     CHECK(sparse_selection_callbacks == 1u);
     CHECK(sparse_bulk_visited->selection_callbacks == 1u);
@@ -2232,7 +2257,8 @@ TEST_CASE(
         idx::visit_compact_hash32_direct_index_selection_spans(
             view,
             *equal,
-            [&](const idx::compact_hash32_selection_posting_spans& selected) {
+            [&callback_order, &bulk_postings, &bulk_span_strands, &all_bulk_positions_decoded](
+                const idx::compact_hash32_selection_posting_spans& selected) {
                 callback_order.emplace_back(
                     selected.selection_ordinal,
                     selected.dense_ordinal,
@@ -2314,13 +2340,14 @@ TEST_CASE(
         ranged_callback_order;
     std::vector<std::vector<std::uint64_t>> ranged_postings(
         equal->selections.size());
-    const auto visit_range = [&](std::uint64_t selection_begin,
-                                 std::uint64_t selection_end) {
+    const auto visit_range = [&range_accessor, &ranged_callback_order, &ranged_postings](
+                                 std::uint64_t selection_begin, std::uint64_t selection_end) {
         return idx::visit_compact_hash32_direct_index_selection_span_range(
             *range_accessor,
             selection_begin,
             selection_end,
-            [&](const idx::compact_hash32_selection_posting_spans& selected) {
+            [&ranged_callback_order,
+             &ranged_postings](const idx::compact_hash32_selection_posting_spans& selected) {
                 ranged_callback_order.emplace_back(
                     selected.selection_ordinal,
                     selected.dense_ordinal,
@@ -2337,12 +2364,13 @@ TEST_CASE(
                      ++span_ordinal) {
                     const auto& span = selected.spans[span_ordinal];
                     const auto decoded = span.visit_encoded_positions(
-                        [&](std::uint64_t encoded) {
+                        [&ranged_postings, &selected](std::uint64_t encoded) {
                             ranged_postings[selected.selection_ordinal]
                                 .push_back(encoded);
                             return true;
                         });
-                    if (!decoded || *decoded != span.count) return false;
+                    if (!decoded || *decoded != span.count)
+                        return false;
                 }
                 return true;
             });
@@ -2385,15 +2413,14 @@ TEST_CASE(
              std::pair{std::uint64_t{0u}, std::uint64_t{2u}},
              std::pair{std::uint64_t{2u}, std::uint64_t{3u}},
          }) {
-        const auto revisited =
-            idx::visit_compact_hash32_direct_index_selection_span_range(
-                *range_accessor,
-                selection_begin,
-                selection_end,
-                [&](const idx::compact_hash32_selection_posting_spans&) {
-                    ++second_pass_callbacks;
-                    return true;
-                });
+        const auto revisited = idx::visit_compact_hash32_direct_index_selection_span_range(
+            *range_accessor,
+            selection_begin,
+            selection_end,
+            [&second_pass_callbacks](const idx::compact_hash32_selection_posting_spans&) {
+                ++second_pass_callbacks;
+                return true;
+            });
         REQUIRE(revisited.has_value());
     }
     CHECK(second_pass_callbacks == equal->selections.size());
@@ -2401,15 +2428,14 @@ TEST_CASE(
     for (const std::uint64_t empty_boundary :
          std::array<std::uint64_t, 3u>{0u, 1u, 3u}) {
         std::uint64_t empty_callbacks = 0u;
-        const auto empty =
-            idx::visit_compact_hash32_direct_index_selection_span_range(
-                *range_accessor,
-                empty_boundary,
-                empty_boundary,
-                [&](const idx::compact_hash32_selection_posting_spans&) {
-                    ++empty_callbacks;
-                    return true;
-                });
+        const auto empty = idx::visit_compact_hash32_direct_index_selection_span_range(
+            *range_accessor,
+            empty_boundary,
+            empty_boundary,
+            [&empty_callbacks](const idx::compact_hash32_selection_posting_spans&) {
+                ++empty_callbacks;
+                return true;
+            });
         REQUIRE(empty.has_value());
         CHECK(empty_callbacks == 0u);
         CHECK(empty->selection_callbacks == 0u);
@@ -2424,15 +2450,14 @@ TEST_CASE(
              std::pair{std::uint64_t{4u}, std::uint64_t{4u}},
          }) {
         std::uint64_t invalid_callbacks = 0u;
-        const auto invalid =
-            idx::visit_compact_hash32_direct_index_selection_span_range(
-                *range_accessor,
-                selection_begin,
-                selection_end,
-                [&](const idx::compact_hash32_selection_posting_spans&) {
-                    ++invalid_callbacks;
-                    return true;
-                });
+        const auto invalid = idx::visit_compact_hash32_direct_index_selection_span_range(
+            *range_accessor,
+            selection_begin,
+            selection_end,
+            [&invalid_callbacks](const idx::compact_hash32_selection_posting_spans&) {
+                ++invalid_callbacks;
+                return true;
+            });
         REQUIRE_FALSE(invalid.has_value());
         CHECK(invalid.error()
             == idx::direct_inverted_index_error::query_plan);
@@ -2457,14 +2482,13 @@ TEST_CASE(
             CHECK(binding.error()
                 == idx::direct_inverted_index_error::query_plan);
             std::uint64_t callback_count = 0u;
-            const auto rejected =
-                idx::visit_compact_hash32_direct_index_selection_spans(
-                    view,
-                    forged,
-                    [&](const idx::compact_hash32_selection_posting_spans&) {
-                        ++callback_count;
-                        return true;
-                    });
+            const auto rejected = idx::visit_compact_hash32_direct_index_selection_spans(
+                view,
+                forged,
+                [&callback_count](const idx::compact_hash32_selection_posting_spans&) {
+                    ++callback_count;
+                    return true;
+                });
             REQUIRE_FALSE(rejected.has_value());
             CHECK(rejected.error()
                 == idx::direct_inverted_index_error::query_plan);
@@ -2529,14 +2553,13 @@ TEST_CASE(
     CHECK(none->stats.selection_retained_capacity_elements == 0u);
     CHECK(none->stats.selection_retained_capacity_bytes == 0u);
     std::uint64_t absent_selection_callbacks = 0u;
-    const auto none_visited =
-        idx::visit_compact_hash32_direct_index_selection_spans(
-            view,
-            *none,
-            [&](const idx::compact_hash32_selection_posting_spans&) {
-                ++absent_selection_callbacks;
-                return true;
-            });
+    const auto none_visited = idx::visit_compact_hash32_direct_index_selection_spans(
+        view,
+        *none,
+        [&absent_selection_callbacks](const idx::compact_hash32_selection_posting_spans&) {
+            ++absent_selection_callbacks;
+            return true;
+        });
     REQUIRE(none_visited.has_value());
     CHECK(absent_selection_callbacks == 0u);
     CHECK(none_visited->selection_callbacks == 0u);

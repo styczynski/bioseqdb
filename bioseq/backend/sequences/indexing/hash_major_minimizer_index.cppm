@@ -1381,7 +1381,7 @@ public:
 
     /**
      * Open against a caller-owned sorted-unique canonical image. The caller
-     * keeps that image alive for the reader lifetime; no query hash is copied,
+     * keeps that image alive for the reader lifetime. No query hash is copied,
      * widened, sorted, or deduplicated here.
      */
     [[nodiscard]] static std::expected<
@@ -1793,9 +1793,10 @@ public:
                 .control_stream_crc = &control_stream_crc,
                 .max_occ = max_occ,
             };
-            auto deliver_control_wave = [&]()
-                    -> std::expected<void, hash_major_minimizer_error> {
-                if (control_ranges.empty()) return {};
+            auto deliver_control_wave = [&control_ranges, &delivery, &source, &reader, &scratch]()
+                -> std::expected<void, hash_major_minimizer_error> {
+                if (control_ranges.empty())
+                    return {};
                 delivery.ranges = &control_ranges;
                 delivery.next_range = 0u;
                 bool delivered = false;

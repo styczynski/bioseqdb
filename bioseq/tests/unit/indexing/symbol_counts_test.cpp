@@ -1,8 +1,7 @@
-// bioseq/tests/unit/indexing/symbol_counts_test.cpp
-//
-// tally_symbol_counts (real per-rank int64[2^bits_per_char]
-// histogram) + the symbol_counts_index sequence_inline index. This test does NOT
-// touch the SIMD minimizer kernels, so it needs NO Highway namespace wrapper.
+/**
+ * @file symbol_counts_test.cpp
+ * @brief Tests per-rank symbol histograms and the inline symbol-count index.
+ */
 
 #include <tests/support/common.hpp>
 
@@ -42,27 +41,34 @@ using bioseq::storage::lazy_sequence;
 using bioseq::storage::make_resident_lazy_sequence;
 using bioseq::indexing::test::fake_sequence_storage;
 
+/// Packed DNA4 alphabet used by histogram fixtures.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using range_t  = compact_sequence_range<dna4_u64>;
-using chunked  = chunked_span_sequence_scanner<std::uint64_t, 1024>;
+/// Resident DNA4 range used by histogram fixtures.
+using range_t = compact_sequence_range<dna4_u64>;
+/// Small chunked scanner used to exercise fragmented counting.
+using chunked = chunked_span_sequence_scanner<std::uint64_t, 1024>;
 
-[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
-    std::vector<seq::dna4> v(n);
-    std::uint64_t s = seed;
-    for (std::size_t i = 0; i < n; ++i) {
-        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-        seq::dna4 c;
-        c.assign_rank(static_cast<decltype(c.to_rank())>((s >> 33) & 0x3));
-        v[i] = c;
+/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
+                                               std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
+    std::vector<seq::dna4> symbols(symbol_count);
+    std::uint64_t state = seed;
+    for (std::size_t index = 0; index < symbol_count; ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna4 symbol;
+        symbol.assign_rank(static_cast<decltype(symbol.to_rank())>((state >> 33) & 0x3));
+        symbols[index] = symbol;
     }
-    return v;
+    return symbols;
 }
 
-// Independent expected histogram straight off the dna4 rank data.
+/// Count DNA4 ranks directly from the unpacked fixture symbols.
 [[nodiscard]] std::array<std::int64_t, 4> expected_histogram(const std::vector<seq::dna4>& data) {
-    std::array<std::int64_t, 4> h{};
-    for (const seq::dna4& c : data) ++h[static_cast<std::size_t>(c.to_rank())];
-    return h;
+    std::array<std::int64_t, 4> histogram{};
+    for (const seq::dna4& symbol : data) {
+        ++histogram[static_cast<std::size_t>(symbol.to_rank())];
+    }
+    return histogram;
 }
 
 }  // namespace
@@ -82,8 +88,8 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
         REQUIRE(got.size() == 4u);
         std::int64_t total = 0;
         for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
-        REQUIRE(total == (std::int64_t)data.size());
-        REQUIRE(total == (std::int64_t)lazy.bp_size());
+        REQUIRE(total == static_cast<std::int64_t>(data.size()));
+        REQUIRE(total == static_cast<std::int64_t>(lazy.bp_size()));
     }
     // fragmented (chunked) path.
     {
@@ -94,7 +100,7 @@ TEST_CASE("tally_symbol_counts is exact over scanner_none AND chunked",
         REQUIRE(got.size() == 4u);
         std::int64_t total = 0;
         for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
-        REQUIRE(total == (std::int64_t)data.size());
+        REQUIRE(total == static_cast<std::int64_t>(data.size()));
     }
 }
 

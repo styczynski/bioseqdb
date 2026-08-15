@@ -5,7 +5,7 @@
  * The open-addressed and hash-sorted dense GPU control representations derived
  * from `minimizer_hashmap_fragment_index` resolve the same (hash -> positions)
  * hits as CPU `lookup`, and distinct `assembly_identity` values produce
- * distinct cache keys / hashes. Pure-host tests cover both layouts; resident
+ * distinct cache keys / hashes. Pure-host tests cover both layouts. Resident
  * upload tests skip when no device exists.
  */
 #include <tests/support/common.hpp>
@@ -45,6 +45,7 @@ using bioseq::indexing::minimizer_hashmap_fragment_index;
 namespace idx_ns = bioseq::indexing;
 
 /// Host simulation of the shader's open-addressed `find_slot`.
+/// Host simulation of open-addressed lookup over an explicit slot span.
 [[nodiscard]] static std::uint32_t host_find_slot(
     const idx_ns::gpu_minimizer_index_upload& upload, std::uint64_t hash) {
     std::uint32_t p = static_cast<std::uint32_t>(idx_ns::splitmix64(hash)) & upload.slot_mask;
@@ -90,6 +91,7 @@ namespace idx_ns = bioseq::indexing;
     return 0xffffffffu;
 }
 
+/// Build the repeated-hash CPU index used by upload tests.
 [[nodiscard]] static minimizer_hashmap_fragment_index build_demo_index() {
     std::vector<minimap_sketch_data> minimizers;
     // Several distinct kmers; one with multiple positions (a repeat).
@@ -104,22 +106,26 @@ namespace idx_ns = bioseq::indexing;
     return idx;
 }
 
+/// Restore the process-wide index-memory cap at scope exit.
 class index_memory_cap_scope {
 public:
-    explicit index_memory_cap_scope(std::uint64_t cap)
-        : controller_(bioseq::parallelism::memory_admission_controller::instance()),
-          previous_(controller_.index_memory_cap_bytes()) {
-        controller_.set_index_memory_cap_bytes(cap);
-    }
-    ~index_memory_cap_scope() {
-        controller_.set_index_memory_cap_bytes(previous_);
-    }
+  /// Install a temporary index-memory cap.
+  explicit index_memory_cap_scope(std::uint64_t cap)
+      : controller_(bioseq::parallelism::memory_admission_controller::instance()),
+        previous_(controller_.index_memory_cap_bytes()) {
+      controller_.set_index_memory_cap_bytes(cap);
+  }
+  /// Restore the cap observed by the constructor.
+  ~index_memory_cap_scope() {
+      controller_.set_index_memory_cap_bytes(previous_);
+  }
 
 private:
     bioseq::parallelism::memory_admission_controller& controller_;
     std::uint64_t previous_ = 0u;
 };
 
+/// Allocate a valid adoptable device index with optional query gating.
 [[nodiscard]] static bioseq::gpu::vulkan::gpu_built_index
 make_adoptable_gpu_built_index(
     bioseq::gpu::vulkan::runtime& runtime,
@@ -230,6 +236,7 @@ make_adoptable_gpu_built_index(
     return built;
 }
 
+/// Encode one unsigned fixture scalar in little-endian order.
 template <class p_unsigned_integer>
 requires (std::is_unsigned_v<p_unsigned_integer>)
 static void store_test_le(
@@ -246,6 +253,7 @@ static void store_test_le(
     }
 }
 
+/// Own encoded grouped-SoA rows and their authenticated metadata.
 struct grouped_soa_gpu_resident_fixture {
     std::array<std::vector<std::byte>, 2> control_bytes;
     std::array<std::vector<std::byte>, 2> position_bytes;
@@ -255,6 +263,7 @@ struct grouped_soa_gpu_resident_fixture {
     idx_ns::grouped_soa_directory_view directory;
 };
 
+/// Construct the identity expected by grouped-SoA GPU ingestion.
 [[nodiscard]] constexpr idx_ns::expected_minimizer_generation_identity
 grouped_soa_gpu_expected_identity() noexcept {
     return {
@@ -274,6 +283,7 @@ grouped_soa_gpu_expected_identity() noexcept {
     };
 }
 
+/// Build two authenticated grouped-SoA partitions for GPU ingestion tests.
 [[nodiscard]] static grouped_soa_gpu_resident_fixture
 make_grouped_soa_gpu_resident_fixture() {
     grouped_soa_gpu_resident_fixture fixture;
@@ -458,6 +468,7 @@ make_grouped_soa_gpu_resident_fixture() {
     return fixture;
 }
 
+/// Construct a deterministic synthetic Vulkan device UUID.
 [[nodiscard]] static bioseq::gpu::vulkan::gpu_device_uuid synthetic_device_uuid(
     std::uint8_t seed) noexcept
 {
@@ -473,7 +484,7 @@ TEST_CASE("vulkan index: GPU slot table resolves the same hits as CPU lookup",
     const auto idx = build_demo_index();
     const auto upload = idx_ns::build_gpu_minimizer_upload(idx);
 
-    idx.for_each_table_entry([&](std::uint64_t kmer, std::uint64_t) {
+    idx.for_each_table_entry([&idx, &upload](std::uint64_t kmer, std::uint64_t) {
         const auto cpu_hits = idx.lookup(kmer);  // span of encoded positions
         const std::uint32_t slot_idx = host_find_slot(upload, kmer);
         ASSERT(slot_idx != 0xffffffffu,

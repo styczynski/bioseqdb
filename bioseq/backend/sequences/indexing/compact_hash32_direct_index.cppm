@@ -1,11 +1,11 @@
 /**
  * @file compact_hash32_direct_index.cppm
- * @brief storage-boundary-free mmap-ready hash32 target-global direct inverted-index implementation.
+ * @brief Storage-independent mmap-ready hash32 target-global direct inverted index.
  *
  * The persisted image contains no native object representation and no native
  * pointers.  Every scalar is encoded explicitly in little-endian order.
  * Lookup uses an occupancy/rank open-addressed dictionary, so a query touches
- * only its probe chain and selected run summaries; it never scans all target
+ * only its probe chain and selected run summaries. It never scans all target
  * controls.  Postings are hash-major and, within a hash (and optional target
  * fragment), strand-major.  Consequently exact forward/reverse output sizes
  * are known before any selected position is read.
@@ -283,7 +283,8 @@ struct direct_index_image_plan {
      *   P = N*W, W in {4,8}
      *   image = postings_offset+P.
      * `estimated_build_scratch_bytes` excludes the returned image and equals
-     * N*sizeof(direct_index_prepared_occurrence)+N*sizeof(direct_index_hash_group)+B*8 in this implementation.
+     * N*sizeof(direct_index_prepared_occurrence)
+     * +N*sizeof(direct_index_hash_group)+B*8 in this implementation.
      */
     std::uint8_t posting_width_bytes = 0u;
     std::uint64_t occurrence_count = 0u;
@@ -431,11 +432,11 @@ export namespace bioseq::indexing {
 
 inline constexpr std::uint64_t k_compact_hash32_direct_index_magic =
     0x3143443233485342ULL;
-/// Persisted compact-hash image revision; current images retain byte value 2.
+/// Persisted compact-hash image revision. Current images retain byte value 2.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_layout_revision = 2u;
 inline constexpr std::uint32_t k_compact_hash32_direct_index_header_bytes = 256u;
 /// `{u32 posting_or_inline,u16 count,u16 strand0}`. A P32 singleton is
-/// encoded in the first word; every other run names its first posting ordinal.
+/// encoded in the first word. Every other run names its first posting ordinal.
 inline constexpr std::uint16_t k_compact_hash32_direct_index_descriptor_bytes = 8u;
 inline constexpr std::uint32_t k_compact_hash32_direct_index_rank_group_bits = 256u;
 inline constexpr std::uint8_t k_compact_hash32_full_hash_bits = 32u;
@@ -627,7 +628,7 @@ struct compact_hash32_direct_index_view {
 
 /// Storage-contract receipt supplied by the enclosing persisted-image format.
 /// The bounded opener authenticates and decodes only the fixed direct-index
-/// header; it deliberately does not fault in or checksum any payload page.
+/// header. It deliberately does not fault in or checksum any payload page.
 struct compact_hash32_bounded_open_options {
     direct_index_identity expected_identity{};
     std::uint32_t expected_max_occ_cap = 0u;
@@ -647,10 +648,10 @@ struct compact_hash32_bounded_open_stats {
 /// Alias-bound direct-index view returned by the bounded timed-open path.  The
 /// shared pointer is an alias whose stored address is the beginning of the
 /// nested direct section while its control block preserves the supplied owner
-/// token.  A genuinely owning token can retain the enclosing mmap; a
+/// token. A genuinely owning token can retain the enclosing mmap. A
 /// transaction-bound or otherwise non-owning token still requires its external
 /// mapping lease to outlive this view.  The direct section may begin at any
-/// nonzero offset; the token's stored pointer need not equal image.data().
+/// nonzero offset. The token's stored pointer need not equal image.data().
 class compact_hash32_bounded_open_view {
 public:
     compact_hash32_bounded_open_view(
@@ -757,7 +758,7 @@ static_assert(sizeof(compact_hash32_unique_selection) == 8u);
 /// Accepted-only result for a strictly increasing unique-hash probe.  Each
 /// retained mapping names the dense descriptor directly, so later posting
 /// traversal never repeats membership/rank lookup.  The private seal binds
-/// the public accounting and mappings to the factory-built plan; a copied
+/// the public accounting and mappings to the factory-built plan. A copied
 /// plan whose public fields are mutated is rejected before traversal.
 struct compact_hash32_unique_query_plan {
     std::uint64_t image_header_crc64 = 0u;
@@ -961,7 +962,7 @@ struct compact_hash32_selection_span_visit_stats {
 
 /// Authenticated, non-owning binding of one accepted-only query plan to one
 /// direct-index view.  Construction authenticates the whole plan exactly
-/// once; range visits thereafter validate only constant-size binding state and
+/// once. Range visits thereafter validate only constant-size binding state and
 /// the descriptors in their requested half-open range.  The bound plan,
 /// selection storage, and image mapping must remain alive and unmodified for
 /// the accessor lifetime.  Const range visits have no shared mutable state and
@@ -2521,8 +2522,11 @@ validate_compact_hash32_direct_index(
                 }
                 std::array<std::uint64_t, 2> previous_bp{};
                 std::array<bool, 2> have_previous_bp{};
-                const auto validate_encoded = [&](std::uint64_t encoded,
-                        std::uint64_t ordinal) noexcept {
+                const auto validate_encoded = [&header,
+                                               &descriptor,
+                                               &have_previous_bp,
+                                               &previous_bp](std::uint64_t encoded,
+                                                             std::uint64_t ordinal) noexcept {
                     const bool strand_one = (encoded & 1u) != 0u;
                     const bool expected_strand =
                         ordinal >= descriptor.strand_zero_count;
@@ -3465,7 +3469,7 @@ bind_compact_hash32_direct_index_selection_spans(
 
 /// Expose both strand spans for the caller-specified half-open selection range
 /// in one typed, inlinable callback per selection.  The accessor performs the
-/// whole-plan authentication only at bind time; every range visit rechecks its
+/// whole-plan authentication only at bind time. Every range visit rechecks its
 /// constant-size binding receipt and validates the selected descriptor/span
 /// geometry.  Global selection ordinals are preserved so concatenating
 /// adjacent visits is exactly equivalent to one full visit.
@@ -3685,7 +3689,7 @@ visit_compact_hash32_direct_index_selection_span_range(
 }
 
 /// Whole-plan traversal API. Its statistics remain
-/// unchanged; internally it binds once and delegates to the ranged visitor.
+/// unchanged. Internally it binds once and delegates to the ranged visitor.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
     direct_inverted_index_error>
@@ -3704,7 +3708,7 @@ visit_compact_hash32_direct_index_selection_spans(
 }
 
 /// Callback adapter over the bulk span visitor. Plan authentication, dense
-/// descriptor binding, and span bounds are shared with the bulk API; only this
+/// descriptor binding, and span bounds are shared with the bulk API. Only this
 /// adapter performs one indirect call per decoded posting.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats,
     direct_inverted_index_error>
@@ -3721,7 +3725,8 @@ visit_compact_hash32_direct_index_postings(
     const auto visited = visit_compact_hash32_direct_index_selection_spans(
         view,
         plan,
-        [&](const compact_hash32_selection_posting_spans& selected) noexcept {
+        [&callback_error, &context, &visitor, &stats](
+            const compact_hash32_selection_posting_spans& selected) noexcept {
             for (std::uint8_t span_ordinal = 0u;
                  span_ordinal < selected.span_count;
                  ++span_ordinal) {
@@ -4705,8 +4710,8 @@ validate_direct_inverted_index(
                     return std::unexpected(
                         direct_inverted_index_error::run_summary);
                 }
-                std::uint64_t previous_bp[2]{0u, 0u};
-                bool have_previous_bp[2]{false, false};
+                std::array<std::uint64_t, 2> previous_bp{};
+                std::array<bool, 2> have_previous_bp{};
                 for (std::uint64_t ordinal = 0u;
                      ordinal < summary.total_count; ++ordinal) {
                     const std::uint64_t position_offset =
@@ -4752,8 +4757,8 @@ validate_direct_inverted_index(
                 || control.summary_count != 0u) {
                 return std::unexpected(direct_inverted_index_error::control);
             }
-            std::uint64_t previous_bp[2]{0u, 0u};
-            bool have_previous_bp[2]{false, false};
+            std::array<std::uint64_t, 2> previous_bp{};
+            std::array<bool, 2> have_previous_bp{};
             for (std::uint64_t ordinal = 0u;
                  ordinal < control.global_count; ++ordinal) {
                 const std::uint64_t encoded = decode_position(

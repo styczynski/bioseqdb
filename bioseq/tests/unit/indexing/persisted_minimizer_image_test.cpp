@@ -1,4 +1,7 @@
-// Byte-exact tests for the PG-free minimizer-fragment image layout.
+/**
+ * @file persisted_minimizer_image_test.cpp
+ * @brief Tests byte-exact minimizer-fragment image planning and validation.
+ */
 
 #include <tests/support/common.hpp>
 
@@ -28,6 +31,7 @@ namespace {
 
 namespace idx = bioseq::indexing;
 
+/// Encode one unsigned integer in little-endian order for wire fixtures.
 template <class p_uint>
 requires (std::is_unsigned_v<p_uint>)
 constexpr void reference_store_le(
@@ -58,6 +62,7 @@ constexpr void reference_store_le(
     return checksum;
 }
 
+/// Compute the header checksum with its checksum field cleared.
 [[nodiscard]] constexpr std::uint64_t reference_header_crc(
         idx::encoded_minimizer_fragment_image_header header) noexcept {
     std::fill(
@@ -69,6 +74,7 @@ constexpr void reference_store_le(
     return reference_crc64_ecma182(header);
 }
 
+/// Rewrite the checksum after mutating a header fixture.
 void reference_reseal_header(std::span<std::byte> image) {
     auto header = idx::encoded_minimizer_fragment_image_header{};
     std::copy_n(image.begin(), header.size(), header.begin());
@@ -78,6 +84,7 @@ void reference_reseal_header(std::span<std::byte> image) {
         reference_header_crc(header));
 }
 
+/// Construct the byte-pinned minimizer-fragment header fixture.
 [[nodiscard]] idx::minimizer_fragment_image_header golden_header() {
     return idx::minimizer_fragment_image_header{
         .magic = idx::k_minimizer_fragment_image_magic,
@@ -122,6 +129,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     };
 }
 
+/// Extend the header fixture with a compact-hash32 direct section.
 [[nodiscard]] idx::minimizer_fragment_image_header direct_golden_header() {
     auto header = golden_header();
     const auto layout = idx::plan_minimizer_fragment_image_layout(
@@ -147,6 +155,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     return header;
 }
 
+/// Encode the byte-pinned header through the independent reference writer.
 [[nodiscard]] idx::encoded_minimizer_fragment_image_header golden_header_bytes() {
     const auto header = golden_header();
     idx::encoded_minimizer_fragment_image_header expected{};
@@ -187,6 +196,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     return expected;
 }
 
+/// Derive the exact identity expected by the image validator.
 [[nodiscard]] idx::expected_minimizer_fragment_image_identity expected_identity(
         const idx::minimizer_fragment_image_header& header) noexcept {
     return idx::expected_minimizer_fragment_image_identity{
@@ -215,6 +225,7 @@ void reference_reseal_header(std::span<std::byte> image) {
     };
 }
 
+/// Own all sections and the assembled bytes of one image fixture.
 struct image_fixture {
     idx::minimizer_fragment_image_header header{};
     std::vector<std::byte> payload{};
@@ -224,6 +235,7 @@ struct image_fixture {
     std::vector<std::byte> image{};
 };
 
+/// Build a valid grouped-SoA image with an optional opaque direct section.
 [[nodiscard]] image_fixture make_image_fixture(
         bool include_compact_hash32_direct = false) {
     constexpr std::uint64_t target_length = 100u;
@@ -449,6 +461,7 @@ struct image_fixture {
     return fixture;
 }
 
+/// Construct validation options pinned to a fixture header.
 [[nodiscard]] idx::minimizer_fragment_image_validation_options validation_options(
         const image_fixture& fixture,
         idx::minimizer_fragment_payload_crc_policy payload_crc_policy =
@@ -459,6 +472,7 @@ struct image_fixture {
     };
 }
 
+/// Decode an invalid header and return its exact error.
 [[nodiscard]] idx::minimizer_fragment_image_error decoded_error(
         std::span<const std::byte> encoded) {
     const auto result = idx::decode_minimizer_fragment_image_header(encoded);
@@ -468,10 +482,12 @@ struct image_fixture {
     return result.error();
 }
 
+/// Release one anonymous mapping at scope exit.
 struct anonymous_mapping_guard {
     void* address = MAP_FAILED;
     std::size_t bytes = 0u;
 
+    /// Unmap the owned virtual address range when present.
     ~anonymous_mapping_guard() {
         if (address != MAP_FAILED) {
             (void)::munmap(address, bytes);
@@ -1333,8 +1349,8 @@ TEST_CASE(
             == idx::minimizer_fragment_image_error::nonzero_section_padding);
     }
     // A valid grouped-SoA directory is a whole number of fixed 128-byte entries,
-    // so its end is necessarily 8-byte aligned.  Consequently the
-    // directory-to-manifest seam is empty; the two reachable non-empty seams
+    // so its end is necessarily 8-byte aligned. Consequently the
+    // directory-to-manifest gap is empty. The two reachable non-empty gaps
     // are exercised above.
     STATIC_REQUIRE(
         idx::grouped_soa_bucket_directory_entry::encoded_bytes

@@ -6,7 +6,7 @@
  * encoded and decoded explicitly in little-endian order, the complete header
  * is authenticated with its checksum field treated as zero, and all range
  * arithmetic is checked before a span is constructed. Bytes 192..223 carry
- * the feature bitmap and compact-hash receipt; bytes 224..4095 are reserved.
+ * the feature bitmap and compact-hash receipt. Bytes 224..4095 are reserved.
  */
 module;
 #include <algorithm>
@@ -87,7 +87,7 @@ struct minimizer_fragment_image_section {
 };
 
 /// Outer-image receipt for an optional compact-H32 direct image.  The nested
-/// header checksum is produced and verified by the direct-image codec; minimizer-fragment image
+/// header checksum is produced and verified by the direct-image codec. Minimizer-fragment image
 /// authenticates the receipt and the exact opaque section extent.
 struct minimizer_fragment_compact_hash32_section_receipt {
     std::uint64_t offset = 0u;
@@ -100,7 +100,7 @@ struct minimizer_fragment_compact_hash32_section_receipt {
 };
 
 /// Planning input for an opaque compact-H32 direct section.  Presence of the
-/// optional value enables the corresponding minimizer-fragment image feature bit; a present
+/// optional value enables the corresponding minimizer-fragment image feature bit. A present
 /// section must contain at least one byte.
 struct minimizer_fragment_compact_hash32_section_spec {
     std::uint64_t bytes = 0u;
@@ -111,7 +111,7 @@ struct minimizer_fragment_compact_hash32_section_spec {
         const minimizer_fragment_compact_hash32_section_spec&) = default;
 };
 
-/** @brief Decoded authenticated header; section offsets remain borrowed metadata. */
+/** @brief Decoded authenticated header. Section offsets remain borrowed metadata. */
 struct minimizer_fragment_image_header {
     std::uint64_t magic = 0u;
     std::uint32_t layout_revision = 0u;
@@ -264,55 +264,6 @@ struct validated_minimizer_fragment_image_view {
     std::uint64_t manifest_crc_bytes = 0u;
 };
 
-/**
- * @brief Plans aligned image sections without changing their serialized order.
- * @return The complete layout, or an overflow/layout diagnostic.
- */
-[[nodiscard]] constexpr std::expected<minimizer_fragment_image_layout, minimizer_fragment_image_error>
-plan_minimizer_fragment_image_layout(
-    std::uint64_t payload_bytes,
-    std::uint64_t directory_bytes,
-    std::uint64_t manifest_bytes,
-    std::uint64_t payload_crc64 = 0u,
-    std::uint64_t directory_crc64 = 0u,
-    std::uint64_t manifest_crc64 = 0u,
-    std::optional<minimizer_fragment_compact_hash32_section_spec>
-        compact_hash32_direct = std::nullopt) noexcept;
-
-/**
- * @brief Validates section offsets and addressability without reading payload bytes.
- * @return Success or the first deterministic layout diagnostic.
- */
-[[nodiscard]] constexpr std::expected<void, minimizer_fragment_image_error>
-validate_minimizer_fragment_image_layout(
-    const minimizer_fragment_image_header& header,
-    std::uint64_t actual_file_bytes,
-    minimizer_fragment_image_address_limits limits = {}) noexcept;
-
-/** @brief Encodes a validated header in its stable little-endian byte layout. */
-[[nodiscard]] constexpr std::expected<encoded_minimizer_fragment_image_header, minimizer_fragment_image_error>
-encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) noexcept;
-
-/** @brief Decodes and authenticates the fixed little-endian header. */
-[[nodiscard]] constexpr std::expected<minimizer_fragment_image_header, minimizer_fragment_image_error>
-decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexcept;
-
-/// Authenticate only the fixed outer header, complete layout, and expected
-/// identity. The returned section spans are borrowed but no byte beyond the
-/// 4 KiB header is read. Normal restart/timed opens use this entry point;
-/// publication and explicit scrub retain `validate_minimizer_fragment_image` below.
-/** @brief Opens borrowed sections after bounded header and identity validation. */
-[[nodiscard]] inline std::expected<validated_minimizer_fragment_image_view, minimizer_fragment_image_error>
-open_minimizer_fragment_image_bounded(
-    std::span<const std::byte> image,
-    const minimizer_fragment_image_validation_options& options);
-
-/** @brief Fully validates checksums and generation metadata for an image. */
-[[nodiscard]] inline std::expected<validated_minimizer_fragment_image_view, minimizer_fragment_image_error>
-validate_minimizer_fragment_image(
-    std::span<const std::byte> image,
-    const minimizer_fragment_image_validation_options& options);
-
 } // namespace bioseq::indexing
 
 namespace bioseq::indexing::minimizer_fragment_image_detail {
@@ -437,16 +388,28 @@ static_assert((k_minimizer_fragment_compact_hash32_alignment
 
 export namespace bioseq::indexing {
 
-[[nodiscard]] constexpr std::expected<minimizer_fragment_image_layout, minimizer_fragment_image_error>
-plan_minimizer_fragment_image_layout(
-        std::uint64_t payload_bytes,
-        std::uint64_t directory_bytes,
-        std::uint64_t manifest_bytes,
-        std::uint64_t payload_crc64,
-        std::uint64_t directory_crc64,
-        std::uint64_t manifest_crc64,
-        std::optional<minimizer_fragment_compact_hash32_section_spec>
-            compact_hash32_direct) noexcept {
+/**
+ * @brief Plans aligned image sections without changing serialized order.
+ *
+ * @param[in] payload_bytes Payload-section size in bytes.
+ * @param[in] directory_bytes Directory-section size in bytes.
+ * @param[in] manifest_bytes Manifest-section size in bytes.
+ * @param[in] payload_crc64 Authenticated payload checksum.
+ * @param[in] directory_crc64 Authenticated directory checksum.
+ * @param[in] manifest_crc64 Authenticated manifest checksum.
+ * @param[in] compact_hash32_direct Optional opaque direct-index receipt.
+ * @return The complete layout, or the first overflow or layout diagnostic.
+ */
+[[nodiscard]] constexpr std::expected<minimizer_fragment_image_layout,
+                                      minimizer_fragment_image_error>
+plan_minimizer_fragment_image_layout(std::uint64_t payload_bytes,
+                                     std::uint64_t directory_bytes,
+                                     std::uint64_t manifest_bytes,
+                                     std::uint64_t payload_crc64 = 0u,
+                                     std::uint64_t directory_crc64 = 0u,
+                                     std::uint64_t manifest_crc64 = 0u,
+                                     std::optional<minimizer_fragment_compact_hash32_section_spec>
+                                         compact_hash32_direct = std::nullopt) noexcept {
     minimizer_fragment_image_layout layout{};
     layout.payload = minimizer_fragment_image_section{
         .offset = k_minimizer_fragment_image_header_bytes,
@@ -522,11 +485,19 @@ plan_minimizer_fragment_image_layout(
     return layout;
 }
 
+/**
+ * @brief Validates section offsets and addressability without reading payload bytes.
+ *
+ * @param[in] header Decoded header whose offsets and extents are checked.
+ * @param[in] actual_file_bytes Complete mapped file size in bytes.
+ * @param[in] limits Native offset and mapping limits for the opening process.
+ * @return Success or the first deterministic layout diagnostic.
+ */
 [[nodiscard]] constexpr std::expected<void, minimizer_fragment_image_error>
 validate_minimizer_fragment_image_layout(
-        const minimizer_fragment_image_header& header,
-        std::uint64_t actual_file_bytes,
-        minimizer_fragment_image_address_limits limits) noexcept {
+    const minimizer_fragment_image_header& header,
+    std::uint64_t actual_file_bytes,
+    minimizer_fragment_image_address_limits limits = {}) noexcept {
     limits.max_file_offset = std::min(
         limits.max_file_offset, k_minimizer_fragment_image_default_max_file_offset);
     limits.max_mapped_bytes = std::min(
@@ -626,6 +597,12 @@ validate_minimizer_fragment_image_layout(
     return {};
 }
 
+/**
+ * @brief Encodes a validated header in its stable little-endian byte layout.
+ *
+ * @param[in] header Header values and section receipts to authenticate.
+ * @return Fixed-size encoded bytes, or the first header or layout diagnostic.
+ */
 [[nodiscard]] constexpr std::expected<encoded_minimizer_fragment_image_header, minimizer_fragment_image_error>
 encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) noexcept {
     if (header.magic != k_minimizer_fragment_image_magic) {
@@ -696,6 +673,12 @@ encode_minimizer_fragment_image_header(minimizer_fragment_image_header header) n
     return encoded;
 }
 
+/**
+ * @brief Decodes and authenticates the fixed little-endian header.
+ *
+ * @param[in] encoded Exact fixed-size header bytes.
+ * @return Decoded header, or the first structural or checksum diagnostic.
+ */
 [[nodiscard]] constexpr std::expected<minimizer_fragment_image_header, minimizer_fragment_image_error>
 decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexcept {
     if (encoded.size() != k_minimizer_fragment_image_header_bytes) {
@@ -790,6 +773,16 @@ decode_minimizer_fragment_image_header(std::span<const std::byte> encoded) noexc
     return header;
 }
 
+/**
+ * @brief Opens borrowed sections after bounded header and identity validation.
+ *
+ * No byte beyond the fixed header is read for authentication. Returned spans
+ * remain valid only while `image` remains alive.
+ *
+ * @param[in] image Complete mapped image.
+ * @param[in] options Address, identity, and checksum policy.
+ * @return Borrowed section views, or the first validation diagnostic.
+ */
 [[nodiscard]] inline std::expected<validated_minimizer_fragment_image_view, minimizer_fragment_image_error>
 open_minimizer_fragment_image_bounded(
         std::span<const std::byte> image,
@@ -853,6 +846,13 @@ open_minimizer_fragment_image_bounded(
     };
 }
 
+/**
+ * @brief Fully validates checksums and generation metadata for an image.
+ *
+ * @param[in] image Complete mapped image.
+ * @param[in] options Address, identity, and payload-checksum policy.
+ * @return Borrowed authenticated section views, or the first diagnostic.
+ */
 [[nodiscard]] inline std::expected<validated_minimizer_fragment_image_view, minimizer_fragment_image_error>
 validate_minimizer_fragment_image(
         std::span<const std::byte> image,

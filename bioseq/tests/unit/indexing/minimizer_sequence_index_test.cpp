@@ -1,13 +1,10 @@
-// bioseq/tests/unit/indexing/minimizer_sequence_index_test.cpp
-//
-// minimizers_per_sequence: the merged, globally-deduped,
-// kmer-range-partitioned per-sequence index. build() spills sorted runs through
-// the storage (run_buffer_bytes_ forced TINY so >=2 runs spill), then
-// assemble_for_query() loads only the buckets touched by the query kmers.
-//
-// Reaches collect_minimizers_view / minimap_sketch_data, so the body lives inside
-// bioseq::simd::HWY_NAMESPACE (symbols reached UNQUALIFIED). bioseq::indexing::*
-// types are named fully-qualified.
+/**
+ * @file minimizer_sequence_index_test.cpp
+ * @brief Tests spill-backed minimizers-per-sequence generation and selective reads.
+ *
+ * The tests run inside `bioseq::simd::HWY_NAMESPACE` because they call the
+ * selected minimizer collectors directly.
+ */
 
 #include <hwy/highway.h>
 #include <tests/support/common.hpp>
@@ -62,14 +59,18 @@ using bioseq::storage::chunked_span_sequence_scanner;
 using bioseq::storage::lazy_sequence;
 using bioseq::indexing::test::fake_fragment_storage;
 
+/// Packed DNA4 alphabet used by sequence-index fixtures.
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using range_t  = compact_sequence_range<dna4_u64>;
+/// Resident DNA4 range used by sequence-index fixtures.
+using range_t = compact_sequence_range<dna4_u64>;
 
+/// Return the fixed-target minimizer kernel table used by unit tests.
 [[nodiscard]] const ::bioseq::minimizers::minimizer_kernels*
 fixed_minimizer_kernels() {
     return &::bioseq::simd_dispatch::highway_test_kernel_table().minimizers;
 }
 
+/// Resolve the fixed-target code for one packed alphabet.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint8_t fixed_alphabet_code() {
     const auto& table =
@@ -85,34 +86,37 @@ template <sequence_alphabet p_alphabet>
     return identity->alphabet_code;
 }
 
-[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
-    std::vector<seq::dna4> v(n);
-    std::uint64_t s = seed;
-    for (std::size_t i = 0; i < n; ++i) {
-        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-        seq::dna4 c;
-        c.assign_rank(static_cast<decltype(c.to_rank())>((s >> 33) & 0x3));
-        v[i] = c;
+/// Generate deterministic DNA4 symbols from a seeded linear recurrence.
+[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t symbol_count,
+                                               std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
+    std::vector<seq::dna4> symbols(symbol_count);
+    std::uint64_t state = seed;
+    for (std::size_t index = 0; index < symbol_count; ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna4 symbol;
+        symbol.assign_rank(static_cast<decltype(symbol.to_rank())>((state >> 33) & 0x3));
+        symbols[index] = symbol;
     }
-    return v;
+    return symbols;
 }
 
-template<class p_range>
+/// Collect whole-sequence minimizers for a resident range.
+template <class p_range>
 [[nodiscard]] std::vector<minimap_sketch_data>
-whole_sequence_minimizers(p_range& range, std::size_t w, std::size_t k) {
+whole_sequence_minimizers(p_range& range, std::size_t window_size, std::size_t kmer_size) {
     sketch_collector collector;
     collect_minimizers_view<minimap_int_hasher, minimap_sketch_data>(
-        collector, range, range.begin(), range.end(), w, k);
+        collector, range, range.begin(), range.end(), window_size, kmer_size);
     return collector.extract_sketches_data();
 }
 
-// Generic deterministic range builder and whole-target query.
-// minimizers (pinned w=10,k=15 to match both persisted index builds).
+/// Fake spill storage shared by sequence-index fixtures.
 using test_fragment_storage = fake_fragment_storage<>;
 
+/// Build a deterministic packed range aligned to complete storage units.
 template <class p_config>
 [[nodiscard]] compact_sequence_range<p_config>
-make_deterministic_test_range(std::size_t n) {
+make_deterministic_test_range(std::size_t symbol_count) {
     // Draw ranks from the non-ambiguous letters only (ACGT, ranks
     // 0..3) so persisted-index coverage checks focus on Vulkan routing and
     // storage assembly rather than N-reset density. A letters_per_unit-multiple
@@ -128,18 +132,19 @@ make_deterministic_test_range(std::size_t n) {
     // breaking exact parity for dna5 (letters_per_unit=21 ∤ 8Mi).
     constexpr std::size_t k_letters_per_unit =
         compact_sequence_range<p_config>::traits::letters_per_unit;
-    n -= n % k_letters_per_unit;
-    std::vector<typename p_config::alphabet_type> letters(n);
-    std::uint64_t s = 0x9e3779b97f4a7c15ULL;
-    for (std::size_t i = 0; i < n; ++i) {
-        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
-        typename p_config::alphabet_type c{};
-        c.assign_rank(static_cast<std::uint8_t>((s >> 33) % k_non_ambiguous_rank_count));
-        letters[i] = c;
+    symbol_count -= symbol_count % k_letters_per_unit;
+    std::vector<typename p_config::alphabet_type> letters(symbol_count);
+    std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (std::size_t index = 0; index < symbol_count; ++index) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        typename p_config::alphabet_type symbol{};
+        symbol.assign_rank(static_cast<std::uint8_t>((state >> 33) % k_non_ambiguous_rank_count));
+        letters[index] = symbol;
     }
     return compact_sequence_range<p_config>(std::move(letters));
 }
 
+/// Collect the fixed whole-target query minimizers for a packed range.
 template <class p_config>
 [[nodiscard]] std::vector<minimap_sketch_data>
 make_deterministic_query_minimizers(compact_sequence_range<p_config>& range) {
@@ -149,8 +154,7 @@ make_deterministic_query_minimizers(compact_sequence_range<p_config>& range) {
     return collector.extract_sketches_data();
 }
 
-// (kmer -> sorted+unique encoded positions). Dedups to match the global dedup the
-// minimizers_per_sequence merge performs.
+/// Build a sorted and deduplicated lookup map for explicit hashes.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
            const std::vector<std::uint64_t>& kmers) {
@@ -166,8 +170,7 @@ lookup_map(const bioseq::indexing::minimizer_hashmap_fragment_index& idx,
     return out;
 }
 
-// Whole-sequence baseline (kmer -> sorted+unique positions), restricted to a
-// query kmer set, with the same max_occ global-count drop assemble_for_query uses.
+/// Build the whole-sequence lookup oracle under the query occurrence cap.
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 baseline_for_query(const std::vector<minimap_sketch_data>& whole,
                    const std::vector<std::uint64_t>& query_kmers,
@@ -189,6 +192,7 @@ baseline_for_query(const std::vector<minimap_sketch_data>& whole,
     return out;
 }
 
+/// Require exact equality between two hash-to-position maps.
 void require_lookup_maps_equal(
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected) {
@@ -205,6 +209,7 @@ void require_lookup_maps_equal(
     }
 }
 
+/// Require each actual lookup to contain the scalar reference positions.
 void require_lookup_maps_cover_scalar(
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected) {
@@ -225,6 +230,7 @@ void require_lookup_maps_cover_scalar(
     }
 }
 
+/// Require scalar coverage while classifying allowed tile-boundary additions.
 void require_lookup_maps_cover_scalar_with_tile_extras(
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
         const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected,
@@ -316,7 +322,7 @@ TEST_CASE("per-sequence admitted run keeps its permit live through unwind, move 
     };
 
     using probe_run = bioseq::indexing::detail::admitted_vector_run<destruction_probe>;
-    const auto make_run = [&]() {
+    const auto make_run = [&admission]() {
         constexpr std::uint64_t elements = 4u;
         const std::uint64_t headroom =
             bioseq::indexing::detail::admitted_vector_preallocation_bytes<
@@ -457,7 +463,7 @@ TEST_CASE("assemble_for_query equals whole-sequence build restricted to query km
 
     require_lookup_maps_equal(
         lookup_map(idx, kmers),
-        baseline_for_query(query, kmers, (std::size_t)INT32_MAX));
+        baseline_for_query(query, kmers, static_cast<std::size_t>(INT32_MAX)));
     require_lookup_maps_equal(
         lookup_map(exact_idx, kmers),
         lookup_map(idx, kmers));

@@ -3,10 +3,10 @@
  * @brief GPU-resident minimizer index and batch-scoped upload cache.
  *
  * Reuses the existing serialized bucket ABI (`encoded_bucket`) as the GPU slot
- * record; derives either an open-addressed or hash-sorted dense control array
+ * record. It derives either an open-addressed or hash-sorted dense control array
  * plus the positions array at upload time. Keeps
  * `minimizer_hashmap.cppm` storage-free. The cache is owned by the outer
- * query-batch/segment wave; selected Vulkan seed execution treats upload
+ * query-batch/segment wave. Selected Vulkan seed execution treats upload
  * failures and 32-bit ABI overflow as hard `vulkan_runtime_error`s.
  */
 module;
@@ -83,7 +83,7 @@ struct gpu_index_direct_fill_invariant final : std::exception {
 /// Typed diagnostic for a source-direct CPU-built minimizer-index upload. Probe
 /// callers may continue to use the nullable handle, while strict pipeline
 /// callers pass an output record and preserve the exact predicate that made
-/// the handle unavailable.  This record is stats only; it does not permit a
+/// the handle unavailable. This record is stats only. It does not permit a
 /// CPU fallback.
 enum class gpu_index_upload_decline_reason : std::uint8_t {
     none,
@@ -1047,7 +1047,7 @@ plan_gpu_index_materialization(
 }
 
 /// Construct the source-direct open-address table in its final mapped
-/// Vulkan allocation.  The CPU index remains authoritative; this function
+/// Vulkan allocation. The CPU index remains authoritative. This function
 /// allocates nothing, creates no full host upload vectors, and fails closed on
 /// malformed buckets, duplicate keys, or a full probe cycle.
 [[nodiscard]] inline gpu_index_direct_fill_stats direct_fill_gpu_minimizer_index(
@@ -1073,7 +1073,8 @@ plan_gpu_index_materialization(
     };
     const std::uint32_t mask = capacity - 1u;
     std::uint64_t inserted = 0u;
-    idx.for_each_table_entry([&](std::uint64_t hash, std::uint64_t packed) {
+    idx.for_each_table_entry([&idx, &slots, &stats, &inserted, &mask, &capacity](
+                                 std::uint64_t hash, std::uint64_t packed) {
         const std::uint64_t off64 = packed >> 32;
         const std::uint64_t cnt64 = packed & 0xffffffffULL;
         if (cnt64 == 0u
@@ -1111,7 +1112,7 @@ plan_gpu_index_materialization(
 /// Construct the hash-sorted dense representation directly in the final
 /// mapped Vulkan allocation.  The in-place radix sort uses no full-size
 /// staging allocation.  Position offsets remain valid because only controls
-/// move; the authoritative position array is copied byte-for-byte.
+/// move. The authoritative position array is copied byte-for-byte.
 [[nodiscard]] inline gpu_index_direct_fill_stats
 direct_fill_gpu_minimizer_index_sorted_dense(
         const minimizer_hashmap_fragment_index& idx,
@@ -1129,7 +1130,7 @@ direct_fill_gpu_minimizer_index_sorted_dense(
     }
 
     std::uint64_t inserted = 0u;
-    idx.for_each_table_entry([&](std::uint64_t hash, std::uint64_t packed) {
+    idx.for_each_table_entry([&idx, &slots, &inserted](std::uint64_t hash, std::uint64_t packed) {
         const std::uint64_t off64 = packed >> 32;
         const std::uint64_t cnt64 = packed & 0xffffffffULL;
         if (cnt64 == 0u
@@ -1624,7 +1625,7 @@ gpu_built_index_adoption_error_name(
 
 /// Zero-allocation ownership handoff for a runtime-built index. The original
 /// count/main admission lineage either retains an exact-R permit or carries a
-/// strict footprint-backed release commit; adoption never reserves again.
+/// strict footprint-backed release commit. Adoption never reserves again.
 [[nodiscard]] inline std::expected<
     std::shared_ptr<gpu_resident_minimizer_index>, gpu_built_index_adoption_error>
 adopt_gpu_built_index(
@@ -1821,7 +1822,7 @@ build_gpu_minimizer_upload(const minimizer_hashmap_fragment_index& idx) {
     upload.table_size = idx.table_size();
     upload.slot_mask = capacity - 1u;
 
-    idx.for_each_table_entry([&](std::uint64_t hash, std::uint64_t packed) {
+    idx.for_each_table_entry([&idx, &upload](std::uint64_t hash, std::uint64_t packed) {
         const std::uint64_t off64 = packed >> 32;
         const std::uint64_t cnt64 = packed & 0xffffffffULL;
         if (off64 > std::numeric_limits<std::uint32_t>::max() ||
@@ -1924,7 +1925,7 @@ build_gpu_minimizer_upload_from_pairs(
 }
 
 /// Batch/wave-scoped GPU minimizer index cache. Owned by the outer query
-/// batch/segment wave; uploads each distinct index once, reuses the resident
+/// batch/segment wave. It uploads each distinct index once, reuses the resident
 /// handle across queries that share it, and evicts LRU when the resident byte
 /// budget is exceeded.
 class gpu_minimizer_index_cache {
@@ -2314,7 +2315,7 @@ private:
         if (resident_limit_bytes_ != 0 && handle_bytes > resident_limit_bytes_) {
             return;
         }
-        const auto exceeds_resident_limit = [&]() noexcept {
+        const auto exceeds_resident_limit = [this, &handle_bytes]() noexcept {
             return resident_limit_bytes_ != 0
                 && (resident_bytes_ > resident_limit_bytes_
                     || handle_bytes
@@ -2373,9 +2374,10 @@ private:
         if (!ranges_fit(open_plan) && dense_plan) {
             plan = *dense_plan;
         }
-        const auto publish_plan = [&](
-                const gpu_index_materialization_plan& selected) {
-            if (decline_out == nullptr) return;
+        const auto publish_plan = [&decline_out, &upload_peak, &max_storage_buffer_range](
+                                      const gpu_index_materialization_plan& selected) {
+            if (decline_out == nullptr)
+                return;
             decline_out->resident_bytes = selected.resident_bytes;
             decline_out->upload_peak_bytes = upload_peak;
             decline_out->slot_bytes = selected.slot_bytes;
@@ -2452,7 +2454,16 @@ private:
         bioseq::parallelism::memory_admission_failure growth_failure{};
         const auto materialization = admission_controller.materialize(
             *resident_permit,
-            [&]() -> bioseq::parallelism::memory_materialization_snapshot {
+            [&resident,
+             &runtime,
+             &plan,
+             &resident_permit,
+             &growth_failure,
+             &allocation_growth_denied,
+             &denied_actual_allocation_bytes,
+             &non_host_visible,
+             &idx,
+             &fill_stats]() -> bioseq::parallelism::memory_materialization_snapshot {
                 resident->slots = runtime.create_device_buffer(
                     plan.slot_buffer_bytes, usage);
                 resident->positions = runtime.create_device_buffer(
@@ -2686,7 +2697,7 @@ static_assert(k_grouped_soa_gpu_abi_revision
     == bioseq::gpu::vulkan::k_gpu_grouped_soa_abi_revision);
 
 /// Immutable identity of one restart-cold grouped-SoA upload. The opaque
-/// cold_load_identity is supplied by the PostgreSQL/scheduler owner; it is not
+/// cold_load_identity is supplied by the PostgreSQL/scheduler owner. It is not
 /// derived from a host pointer or from query contents.
 struct gpu_grouped_soa_resident_identity {
     minimizer_generation_layout layout =
@@ -2727,7 +2738,7 @@ struct gpu_grouped_soa_resident_identity {
 }
 
 /// Positive and prohibited-work stats owned by a completed cold upload.
-/// Counts describe bytes copied directly into their final device buffers; no
+/// Counts describe bytes copied directly into their final device buffers. No
 /// decoded host index or temporary pair array is part of this representation.
 struct gpu_grouped_soa_cold_load_stats {
     std::uint64_t cold_cache_misses = 0u;

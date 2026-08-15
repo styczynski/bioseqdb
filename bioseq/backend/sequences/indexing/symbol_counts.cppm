@@ -7,26 +7,30 @@
  * module, so it cannot be named here.
  */
 module;
-#include <libassert/assert.hpp>
-#include <array>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <libassert/assert.hpp>
 #include <optional>
 #include <string_view>
 export module bioseq.indexing.symbol_counts;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
-import bioseq.storage.lazy_sequence;     // canonical lazy_sequence_view
-import bioseq.storage.size;     // sequence_size_t
-import bioseq.sequences;        // compact_sequence_range, iterator_mode
+import bioseq.storage.lazy_sequence;
+import bioseq.storage.size;
+import bioseq.sequences;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
 
-/// Real per-rank histogram over a lazy sequence. The logical-rank iterator
-/// masks `& char_mask`, so it yields a raw integer rank in [0, 2^bits_per_char).
+/**
+ * @brief Counts each logical symbol rank in a lazy sequence.
+ * @tparam p_alphabet Sequence alphabet whose ranks are counted
+ * @param seq Sequence view to scan
+ * @return Fixed-size histogram indexed by logical symbol rank
+ */
 template <sequence_alphabet p_alphabet>
 auto tally_symbol_counts(
         bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
@@ -43,25 +47,47 @@ auto tally_symbol_counts(
     return counts;
 }
 
-/// The registered INLINE_PER_SEQUENCE symbol-counts index.
+/**
+ * @brief Stores the per-sequence logical symbol histogram.
+ * @tparam p_storage Inline index storage implementation
+ */
 template <class p_storage>
 struct symbol_counts_index {
     static_assert(is_index_chunked_storage_for<
         p_storage, sequence_index_layout::sequence_inline>);
+    /// @brief Storage layout used by this index.
     static constexpr sequence_index_layout index_type = sequence_index_layout::sequence_inline;
-    static constexpr std::string_view  index_name = k_symbol_counts_index_name;
+    /// @brief Registry name of this index.
+    static constexpr std::string_view index_name = k_symbol_counts_index_name;
+    /// @brief Concrete storage type accepted by this index.
     using storage_type = p_storage;
 
+    /**
+     * @brief Builds and persists the histogram for one sequence.
+     * @tparam p_alphabet Sequence alphabet whose ranks are counted
+     * @param storage Destination inline storage
+     * @param seq Sequence view to scan
+     */
     template <sequence_alphabet p_alphabet>
     static void build(
             p_storage& storage,
             bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
-        auto counts = tally_symbol_counts(seq);                      // std::array<int64,N=2^bits_per_char>
-        storage.resize(counts.size() * sizeof(std::int64_t));        // ONE chunk, N*sizeof(int64) bytes << MAX
-        storage.template write_to_each<std::int64_t>([&counts](std::size_t c, std::int64_t* buf, std::size_t cap){
-            DEBUG_ASSERT(c == 0 && cap == counts.size(), "symbol_counts: one inline chunk");
-            std::copy(counts.begin(), counts.end(), buf); return c; });
+        const auto counts = tally_symbol_counts(seq);
+        storage.resize(counts.size() * sizeof(std::int64_t));
+        storage.template write_to_each<std::int64_t>(
+            [&counts](std::size_t chunk_no, std::int64_t* output, std::size_t capacity) {
+                DEBUG_ASSERT(chunk_no == 0 && capacity == counts.size(),
+                             "symbol_counts: one inline chunk");
+                std::copy(counts.begin(), counts.end(), output);
+                return chunk_no;
+            });
     }
+    /**
+     * @brief Replaces the persisted histogram for one sequence.
+     * @tparam p_alphabet Sequence alphabet whose ranks are counted
+     * @param storage Destination inline storage
+     * @param seq Sequence view to scan
+     */
     template <sequence_alphabet p_alphabet>
     static void rebuild(
             p_storage& storage,
@@ -70,17 +96,26 @@ struct symbol_counts_index {
         build(storage, seq);
     }
 
-    /// SQL-facing read. Returns nullopt when the index is ABSENT for this
-    /// sequence (chunk_byte_size()==0) so the caller recomputes.
+    /**
+     * @brief Reads one persisted rank count when the index is present.
+     * @param storage Source inline storage
+     * @param rank Logical symbol rank to read
+     * @return Stored count, or `std::nullopt` when no histogram is present
+     */
     static std::optional<std::int64_t> read_count(
             p_storage& storage,
             std::size_t rank) {
         const std::size_t bytes = storage.chunk_byte_size();
-        if (bytes == 0) return std::nullopt;                                        // absent index => caller recomputes
-        if (bytes % sizeof(std::int64_t) != 0)
+        if (bytes == 0) {
+            return std::nullopt;
+        }
+        if (bytes % sizeof(std::int64_t) != 0) {
             storage.index_error("symbol_counts: stored chunk byte size is not int64-aligned");
-        const std::size_t n = bytes / sizeof(std::int64_t);
-        if (rank >= n) storage.index_error("symbol_counts: rank outside stored count vector"); // present-but-truncated
+        }
+        const std::size_t rank_count = bytes / sizeof(std::int64_t);
+        if (rank >= rank_count) {
+            storage.index_error("symbol_counts: rank outside stored count vector");
+        }
         return storage.template read_chunk<std::int64_t>()[rank];
     }
 };
@@ -88,11 +123,16 @@ struct symbol_counts_index {
 }  // namespace bioseq::indexing
 
 export namespace bioseq::indexing {
+/** @brief Describes the symbol-count index to the compile-time registry. */
 template <> struct index_descriptor<symbol_counts_index> {
+    /// @brief Storage layout registered for symbol counts.
     static constexpr sequence_index_layout index_type = sequence_index_layout::sequence_inline;
-    static constexpr std::string_view  index_name = k_symbol_counts_index_name;
-    static constexpr bool allows_update_on_insert = true;   // cheap INLINE tally; default on-insert
+    /// @brief Registry name of the symbol-count index.
+    static constexpr std::string_view index_name = k_symbol_counts_index_name;
+    /// @brief Allows inexpensive histogram maintenance during insertion.
+    static constexpr bool allows_update_on_insert = true;
 };
-static_assert(requires { index_descriptor<symbol_counts_index>::index_name; },
-              "symbol_counts_index index_descriptor must be exported");
-}
+static_assert(
+    requires { index_descriptor<symbol_counts_index>::index_name; },
+    "symbol_counts_index index_descriptor must be exported");
+} // namespace bioseq::indexing

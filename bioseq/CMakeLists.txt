@@ -201,6 +201,8 @@ set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp
@@ -2365,6 +2367,7 @@ target_sources(bioseq_testing_support
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm")
 target_link_libraries(bioseq_testing_support
   PUBLIC
@@ -2411,6 +2414,10 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/merge_runs_multicursor_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_fragment_compact_hash32_adapter_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/generation_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/grouped_soa_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/persisted_minimizer_image_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/storage_concept_test.cpp"

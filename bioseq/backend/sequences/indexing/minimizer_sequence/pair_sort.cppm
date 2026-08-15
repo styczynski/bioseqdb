@@ -14,12 +14,16 @@ import bioseq.simd.sorting;
 
 namespace bioseq::indexing::detail {
 
-/// Sort packed minimizer pairs through the selected SIMD policy.
-void sort_minimizer_pair_run_keys(
-        hwy::uint128_t* keys,
-        std::size_t key_count,
-        int sort_impl) noexcept {
-    switch (sort_impl) {
+/**
+ * @brief Sorts packed minimizer pairs through the selected SIMD policy.
+ * @param keys Mutable packed pair keys
+ * @param key_count Number of keys
+ * @param sort_implementation Stable sorter ordinal
+ */
+void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
+                                  std::size_t key_count,
+                                  int sort_implementation) noexcept {
+    switch (sort_implementation) {
     case 1:
         bioseq::simd::sorting::sort_unsigned_128_ascending_vqsort(
             keys, key_count);
@@ -44,10 +48,14 @@ void sort_minimizer_pair_run_keys(
 
 } // namespace bioseq::indexing::detail
 
-extern "C" void bioseq_sort_pair_run_u128_keys(
-        hwy::uint128_t* keys,
-        std::size_t key_count,
-        int sort_impl) noexcept {
-    bioseq::indexing::detail::sort_minimizer_pair_run_keys(
-        keys, key_count, sort_impl);
+/**
+ * @brief Dispatches packed pair sorting across the C linkage boundary.
+ * @param keys Mutable packed pair keys
+ * @param key_count Number of keys
+ * @param sort_implementation Stable sorter ordinal
+ */
+extern "C" void bioseq_sort_pair_run_u128_keys(hwy::uint128_t* keys,
+                                               std::size_t key_count,
+                                               int sort_implementation) noexcept {
+    bioseq::indexing::detail::sort_minimizer_pair_run_keys(keys, key_count, sort_implementation);
 }

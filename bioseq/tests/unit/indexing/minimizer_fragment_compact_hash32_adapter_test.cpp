@@ -1,5 +1,7 @@
-// Reduced real-wire differential tests for the minimizer-fragment
-// compact-hash32 adapter.
+/**
+ * @file minimizer_fragment_compact_hash32_adapter_test.cpp
+ * @brief Tests compact-hash32 adaptation from persisted minimizer fragments.
+ */
 
 #include <tests/support/common.hpp>
 
@@ -25,6 +27,7 @@ namespace {
 
 namespace idx = bioseq::indexing;
 
+/// Encode one unsigned fixture scalar in little-endian order.
 template <class p_unsigned_integer>
 requires std::is_unsigned_v<p_unsigned_integer>
 void write_le(
@@ -39,6 +42,7 @@ void write_le(
     }
 }
 
+/// Encode one scalar using the selected grouped-SoA width.
 void write_shape_scalar(
         std::span<std::byte> output,
         std::size_t offset,
@@ -62,21 +66,25 @@ void write_shape_scalar(
     FAIL("unsupported grouped-SoA scalar width");
 }
 
+/// Describe one segment-local position and strand.
 struct local_position {
     std::uint64_t bp = 0u;
     bool strand_one = false;
 };
 
+/// Describe one hash and its sorted local positions.
 struct control_spec {
     std::uint32_t hash = 0u;
     std::vector<local_position> positions{};
 };
 
+/// Describe all controls assigned to one position segment.
 struct fragment_spec {
     std::uint32_t position_segment = 0u;
     std::vector<control_spec> controls{};
 };
 
+/// Own a valid grouped-SoA fixture consumed by the adapter.
 struct minimizer_fragment_fixture {
     idx::minimizer_generation_head head{};
     idx::minimizer_generation_manifest manifest{};
@@ -84,6 +92,7 @@ struct minimizer_fragment_fixture {
     std::vector<std::byte> payload{};
 };
 
+/// Return the positive chunk count required for one encoded extent.
 [[nodiscard]] std::uint32_t chunks_for(std::uint64_t bytes) {
     const std::uint64_t chunks = bytes
             / idx::k_grouped_soa_extent_payload_bytes
@@ -93,6 +102,7 @@ struct minimizer_fragment_fixture {
     return static_cast<std::uint32_t>(chunks);
 }
 
+/// Encode grouped-SoA fragment rows from semantic fixture specifications.
 [[nodiscard]] minimizer_fragment_fixture make_minimizer_fragment_fixture(
         std::uint64_t target_length,
         std::uint64_t segment_span,
@@ -299,8 +309,10 @@ struct minimizer_fragment_fixture {
     return fixture;
 }
 
+/// Hash-to-global-position map used as the adapter oracle.
 using oracle_type = std::map<std::uint32_t, std::vector<std::uint64_t>>;
 
+/// Globalize fixture positions and group them by hash.
 [[nodiscard]] oracle_type make_oracle(
         std::uint64_t segment_span,
         std::span<const fragment_spec> fragments) {
@@ -329,11 +341,13 @@ using oracle_type = std::map<std::uint32_t, std::vector<std::uint64_t>>;
     return oracle;
 }
 
+/// Own postings collected for each adapter selection.
 struct collected_postings {
     std::vector<std::vector<std::uint64_t>> by_selection{};
     std::uint64_t callbacks = 0u;
 };
 
+/// Append one posting through the erased query callback.
 bool collect_posting(
         void* opaque,
         const idx::direct_index_posting& posting) {
@@ -348,11 +362,13 @@ bool collect_posting(
         == ((posting.encoded_position & 1u) != 0u);
 }
 
+/// Own sorted runs captured from the adapter source.
 struct captured_runs {
     std::vector<idx::compact_hash32_sorted_run_header> headers{};
     std::vector<std::vector<std::uint64_t>> positions{};
 };
 
+/// Begin one captured adapter run.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 capture_begin(
         void* opaque,
@@ -363,6 +379,7 @@ capture_begin(
     return {};
 }
 
+/// Append one positions batch to the active captured run.
 [[nodiscard]] std::expected<void, idx::direct_inverted_index_error>
 capture_positions(
         void* opaque,
