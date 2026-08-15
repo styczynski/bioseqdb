@@ -1,3 +1,7 @@
+/**
+ * @file api_implementation.cppm
+ * @brief Adapts the narrow dispatch-buffer API to its private implementation.
+ */
 /*-------------------------------------------------------------------------
  *
  * scheduler/dispatch_buffer/api_implementation.cppm
@@ -32,6 +36,7 @@ import bioseq.postgres.storage.scanner;
 
 namespace bioseq::scheduler {
 
+/** @return The immutable Highway plan registered for scheduler dispatch. */
 bioseq::simd_dispatch::highway_dispatch_plan
 highway_dispatch_plan_for_plan() noexcept {
     return bioseq::simd_dispatch::registered_highway_dispatch_plan();
@@ -41,10 +46,12 @@ namespace {
 
 using buffer_implementation = tuple_dispatch_buffer;
 
+/** @return The private mutable buffer represented by an opaque API pointer. */
 [[nodiscard]] buffer_implementation* as_buffer(void* ptr) noexcept {
     return static_cast<buffer_implementation*>(ptr);
 }
 
+/** @return The private const buffer represented by an opaque API pointer. */
 [[nodiscard]] const buffer_implementation* as_buffer(const void* ptr) noexcept {
     return static_cast<const buffer_implementation*>(ptr);
 }
@@ -116,9 +123,9 @@ void dispatch_buffer_runtime::clear_sequence_source_provider_binding() noexcept 
     }
 }
 
-void dispatch_buffer_runtime::bind_persisted_gpu_operation_evidence_sink(
+void dispatch_buffer_runtime::bind_persisted_gpu_operation_stats_sink(
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator& sink) {
-    as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
+    as_buffer(impl)->bind_persisted_gpu_operation_stats_sink(sink);
 }
 
 void dispatch_buffer_runtime::bind_slice_async_owner(
@@ -235,6 +242,7 @@ void dispatch_buffer_runtime::begin_join_target(
 
 namespace {
 
+/** @return Internal join-query references preserving ordinal and slot identity. */
 [[nodiscard]] std::vector<buffer_implementation::join_query_ref> translate_join_queries(
     const std::span<const dispatch_join_query_ref> queries) {
     std::vector<buffer_implementation::join_query_ref> translated;

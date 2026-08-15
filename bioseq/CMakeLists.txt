@@ -2664,6 +2664,14 @@ set(BIOSEQ_ALIGNMENT_HOOK_PRIVATE_PARTITIONS
 set(BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/persist_queue_publish.cppm")
 
+set(BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/configuration.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/join_preparation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/hydration.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/join_execution.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/scan_execution.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/output.cppm")
+
 set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/lifecycle.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_operation_stats.cppm"
@@ -2685,6 +2693,7 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/supervisor/direct_minimizer_materialization.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/external/standard_library_link_support.cppm")
 list(APPEND BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
+  ${BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS}
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/indexing/sorted_runs/postgres_error.cppm")
 foreach(_bioseq_pipeline_dispatch_owner IN LISTS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)

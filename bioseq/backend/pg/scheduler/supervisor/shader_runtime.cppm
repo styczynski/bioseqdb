@@ -280,7 +280,9 @@ install_verified_runtime_archive_configuration(
         std::string first_error;
         bioseq::parallelism::global_pool::instance().parallel_for(
             begin, end, 1,
-            [&](std::size_t b, std::size_t e) {
+            [&cache_dir, &error_mu, &first_error, &inputs, &keys](
+                std::size_t b,
+                std::size_t e) {
                 for (std::size_t i = b; i < e; ++i) {
                     auto compiled =
                         bioseq::gpu::vulkan::ensure_compiled_for_sealed_seed(

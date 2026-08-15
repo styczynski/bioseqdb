@@ -1,3 +1,7 @@
+/**
+ * @file cpu_preparation.cppm
+ * @brief Implements typmod-specific admitted CPU query preparation.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -37,7 +41,9 @@ import bioseq.parallelism.memory_admission;
 
 namespace bioseq::simd::cpu_preparation_detail {
 
-/*
+/**
+ * @brief Collects canonical query hashes with optional retained sketches.
+ *
  * Hash-major preparation fans one sketch pass into the authenticated canonical
  * u32 union and, when separately admitted, the full per-query minimizer vector
  * later consumed by alignment.  This removes the typed row path's second
@@ -71,24 +77,29 @@ public:
 			&& retained_query_permit != nullptr
 			&& retained_query_bytes != nullptr) {}
 
+	/** @return The number of canonical hashes collected so far. */
 	[[nodiscard]] std::size_t size() const noexcept {
 		return destination_.size();
 	}
 
+	/** @return True when canonical capacity for `required` hashes was admitted. */
 	[[nodiscard]] bool reserve(const std::size_t required) {
 		return ensure_capacity(required);
 	}
 
+	/** @brief Appends one copied minimizer to both enabled representations. */
 	[[always_inline]] void collect(const minimap_sketch_data& minimizer) {
 		append_hash(minimizer.kmer());
 		append_retained(minimizer);
 	}
 
+	/** @brief Appends one moved minimizer to both enabled representations. */
 	[[always_inline]] void collect(minimap_sketch_data&& minimizer) {
 		append_hash(minimizer.kmer());
 		append_retained(std::move(minimizer));
 	}
 
+	/** @return True when a minimizer range was appended without admission failure. */
 	[[nodiscard, always_inline]] bool append_records(
 			const std::span<const minimap_sketch_data> records) {
 		const std::size_t old_size = destination_.size();
@@ -107,6 +118,7 @@ public:
 		return true;
 	}
 
+	/** @return True when raw minimizer storage was decoded and appended. */
 	template<class p_minimizer = minimap_sketch_data>
 	[[nodiscard, always_inline]] bool append_raw_storage(
 			const typename p_minimizer::storage_type* raw,
@@ -136,19 +148,23 @@ public:
 		return true;
 	}
 
+	/** @return True when canonical collection has not failed. */
 	[[nodiscard]] bool is_ok() const noexcept {
 		return !failed_;
 	}
 
+	/** @return True when every hash fits the authenticated 32-bit profile. */
 	[[nodiscard]] bool hash_width_valid() const noexcept {
 		return hash_width_valid_;
 	}
 
+	/** @return True when the optional retained sketch stayed fully admitted. */
 	[[nodiscard]] bool retention_complete() const noexcept {
 		return retention_complete_;
 	}
 
 private:
+	/** @brief Appends one checked canonical hash. */
 	[[always_inline]] void append_hash(const std::uint64_t hash) {
 		hash_width_valid_ =
 			hash_width_valid_
@@ -161,6 +177,7 @@ private:
 		destination_.push_back(static_cast<std::uint32_t>(hash));
 	}
 
+	/** @brief Releases optional retained storage after a best-effort failure. */
 	void abandon_retention() noexcept {
 		if (!retention_complete_
 			|| retained_query_ == nullptr
@@ -191,6 +208,7 @@ private:
 		retention_complete_ = false;
 	}
 
+	/** @return True when optional retained-sketch capacity is available. */
 	[[nodiscard]] bool ensure_retained_capacity(
 			const std::size_t required) {
 		if (!retention_complete_) return false;
@@ -345,6 +363,7 @@ private:
 			retained_query_->end(), records.begin(), records.end());
 	}
 
+	/** @return True when canonical destination capacity is admitted and available. */
 	[[nodiscard]] bool ensure_capacity(const std::size_t required) {
 		if (failed_) return false;
 		if (required <= destination_.capacity()) return true;
@@ -453,6 +472,7 @@ private:
 	bool retention_complete_ = false;
 };
 
+/** @brief Releases an uncommitted retained query and shrinks its permit. */
 void release_uncommitted_retained_query(
 		std::vector<minimap_sketch_data>& minimizers,
 		bioseq::parallelism::memory_permit& permit,
@@ -473,6 +493,7 @@ void release_uncommitted_retained_query(
 	permit.shrink_to(retained_bytes);
 }
 
+/** @return True when one retained query sketch was admitted and committed. */
 [[nodiscard]] bool try_commit_retained_query_sketch(
 		const std::uint64_t query_ordinal,
 		const std::uint64_t query_bp_size,
@@ -573,6 +594,7 @@ void release_uncommitted_retained_query(
 	return true;
 }
 
+/** @brief Appends one lazy query view to a prepared sketch representation. */
 template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_sketch_view(
 		const bioseq::storage::lazy_sequence_view<p_alphabet> query_view,
@@ -755,6 +777,7 @@ void append_cpu_prepared_query_sketch_view(
 	}
 }
 
+/** @brief Adapts one flat compact query into admitted CPU preparation. */
 template <class p_alphabet, std::size_t p_width, class p_destination_value>
 void append_cpu_prepared_query_sketch(
 		const bioseq::pg_types::seq& header,
@@ -780,6 +803,7 @@ void append_cpu_prepared_query_sketch(
 }
 
 
+/** @brief Adapts one recipe-backed query into admitted CPU preparation. */
 template <class p_alphabet, class p_destination_value>
 void append_cpu_prepared_query_recipe_sketch(
 		const Datum recipe,
@@ -813,6 +837,7 @@ void append_cpu_prepared_query_recipe_sketch(
 		retained_query_permit, retained_query_bytes);
 }
 
+/** @return The terminal state of independently admitted query preparation. */
 template <class p_alphabet, std::size_t p_width>
 [[nodiscard]] batch_processor::cpu_preparation_status
 prepare_independently_admitted_query_sketch(
@@ -884,6 +909,7 @@ prepare_independently_admitted_query_sketch(
 }
 
 
+/** @return The immutable callable table for one alphabet and storage width. */
 template <class p_alphabet, std::size_t p_width>
 [[nodiscard]] const batch_processor::cpu_preparation_typmod_operations&
 typmod_ops() noexcept {

@@ -215,7 +215,7 @@ void process_minimizer_sequence_build_claim_cpp(
     bioseq_log<logging_level::debug>(
         "[bioseq] index: async minimizer-sequence build worker backend={}",
         bioseq::minimizers::minimizer_sketch_backend_name(worker_backend));
-    const auto abandon_pg_resources_noexcept = [&]() noexcept {
+    const auto abandon_pg_resources_noexcept = [&caches, &work]() noexcept {
         if (caches != nullptr) {
             // PostgreSQL owns every relation/read-state after an ERROR. Null
             // those borrowed handles, but still run the vector destructor so
@@ -276,7 +276,14 @@ void process_minimizer_sequence_build_claim_cpp(
         bioseq::pg_types::seq::dispatch_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
-            [&]<class p_sequence>() {
+            [&caches,
+             &has_shareable_lazy_worker,
+             &meta,
+             &registered_snapshot,
+             &target,
+             &work,
+             &worker_backend,
+             &worker_kernels]<class p_sequence>() {
                 auto store = bioseq::storage::indexing::open_fragment_storage(
                     target.user_relid,
                     target.db_oid,

@@ -24,6 +24,7 @@ import bioseq.common.logging;
 
 export namespace bioseq::postgres::scheduler {
 
+/** @brief Identifies one sequence index eligible for asynchronous persistence. */
 struct persist_target {
     Oid db_oid = InvalidOid;
     Oid user_relid = InvalidOid;
@@ -40,6 +41,7 @@ struct persist_target {
 
 namespace bioseq::postgres::scheduler {
 
+/** @brief Shared-memory record used to publish one persistence job. */
 struct pg_persist_queue_slot {
     pg_atomic_uint32 state;
     pg_atomic_uint32 generation;
@@ -56,6 +58,7 @@ struct pg_persist_queue_slot {
     std::uint32_t payload_kind;
 };
 
+/** @brief Identifies the validated payload representation stored in DSM. */
 enum class persist_payload_kind : std::uint32_t {
     none = 0,
     direct_minimizer_build_identity = 3,
@@ -63,6 +66,10 @@ enum class persist_payload_kind : std::uint32_t {
 
 inline std::atomic<std::uint64_t> g_unsupported_persist_rejections{0};
 
+/**
+ * @brief Records a rejected persistence route without crossing a C boundary.
+ * @param[in] route Stable route name used in the diagnostic log.
+ */
 void record_unsupported_persist_rejection(
         std::string_view route) noexcept {
     g_unsupported_persist_rejections.fetch_add(
@@ -75,6 +82,10 @@ void record_unsupported_persist_rejection(
                 std::memory_order_relaxed)));
 }
 
+/**
+ * @brief Rounds a value up to the requested alignment.
+ * @return The aligned value or the input when alignment is zero.
+ */
 [[nodiscard]] std::uint64_t align_up_u64(
         std::uint64_t value,
         std::uint64_t alignment) noexcept {
@@ -83,6 +94,7 @@ void record_unsupported_persist_rejection(
         : ((value + alignment - 1) / alignment) * alignment;
 }
 
+/** @brief Removes a temporary payload file when a path is present. */
 void remove_temp_file_noexcept(std::string_view path) noexcept {
     if (path.empty()) {
         return;
@@ -91,6 +103,10 @@ void remove_temp_file_noexcept(std::string_view path) noexcept {
     std::remove(owned.c_str());
 }
 
+/**
+ * @brief Publishes one validated DSM payload into the shared persistence queue.
+ * @return True when an empty slot accepted the complete job record.
+ */
 [[nodiscard]] bool publish_persist_job_to_shared_queue(
         std::span<pg_persist_queue_slot> persist_queue,
         const persist_target& target,
