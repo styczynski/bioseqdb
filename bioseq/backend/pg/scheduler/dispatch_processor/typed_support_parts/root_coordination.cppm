@@ -389,7 +389,29 @@ template <class p_sequence, class p_scanner_row, class p_inmemory_row>
      * Any failed preflight or resident admission falls through to the
      * established scanner_pg row loop below.
      */
-    auto generic_rows = [&] {
+    auto generic_rows = [&batch_size,
+                         &alphabet_code,
+                         &storage_unit_byte_width,
+                         &query_hdr,
+                         &per_row_query_hdrs,
+                         &target_hdrs,
+                         &query_ids,
+                         &dispatch_params,
+                         &broadcast_query_ordinal,
+                         &stats,
+                         &scanner_pg_ctx,
+                         &per_row_query_mode,
+                         &record_target_operational_outcomes,
+                         &shared_target_outcome_recorded,
+                         &chunked_scanner_forced,
+                         &use_scanner_pg,
+                         &cached_query_minimizers,
+                         &cached_query_minimizer_stats,
+                         &cached_query_minimizer_stats_accounted,
+                         &pool,
+                         &scanner_row,
+                         &inmemory_row,
+                         &results] {
         process_generic_rows<p_sequence>(batch_size,
                                          alphabet_code,
                                          storage_unit_byte_width,
