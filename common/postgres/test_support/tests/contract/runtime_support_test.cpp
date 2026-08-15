@@ -1347,6 +1347,24 @@ TEST_CASE("private cluster configuration is portable and stage-first",
               "dynamic_library_path = '$libdir'\n")
           != std::string::npos);
     CHECK(configuration.find("/private/stage") == std::string::npos);
+    CHECK(configuration.find("bioseq_cache.query_cache.mode")
+          == std::string::npos);
+    CHECK_THROWS_WITH(
+        static_cast<void>(render_private_cluster_configuration(
+            54321, socket_directory, std::nullopt,
+            preload_libraries,
+            std::array<std::pair<std::string, std::string>, 1>{{
+                {"bioseq_cache.invalid-name", "value"},
+            }})),
+        "invalid startup GUC name: bioseq_cache.invalid-name");
+    CHECK_THROWS_WITH(
+        static_cast<void>(render_private_cluster_configuration(
+            54321, socket_directory, std::nullopt,
+            preload_libraries,
+            std::array<std::pair<std::string, std::string>, 1>{{
+                {"bioseq_cache.mode", "invalid\nvalue"},
+            }})),
+        "PostgreSQL configuration contains newline");
 
     const std::filesystem::path runtime_library_directory{
         "/private/case/runtime-library"};
