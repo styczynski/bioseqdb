@@ -282,6 +282,58 @@ make_lazy_sequence_view(const lazy_sequence<p_sequence_range, p_scanner>& owner)
                                             std::addressof(adapter_type::k_ops)};
 }
 
+namespace lazy_sequence_detail {
+
+/**
+ * Own a fragmented concrete sequence behind its canonical facade.
+ *
+ * The owner has a stable address for the lifetime of every view it returns.
+ * A source-specific lifecycle policy may explicitly finish or abandon
+ * scanner resources, but consumers cannot otherwise reach through the facade.
+ */
+template <class p_sequence_range, class p_scanner, class p_resource_lifecycle>
+    requires(p_scanner::is_fragmented())
+class fragmented_facade_owner final {
+  public:
+    using alphabet_type = typename compact_sequence_range<p_sequence_range>::traits::alphabet_type;
+
+    /// Adopt one fragmented scanner at the owner's final stable address.
+    explicit fragmented_facade_owner(p_scanner&& scanner) noexcept : owner_(std::move(scanner)) {}
+
+    fragmented_facade_owner(fragmented_facade_owner const&) = delete;
+    fragmented_facade_owner& operator=(fragmented_facade_owner const&) = delete;
+    fragmented_facade_owner(fragmented_facade_owner&&) = delete;
+    fragmented_facade_owner& operator=(fragmented_facade_owner&&) = delete;
+
+    /// Return a non-owning facade valid only while this owner remains alive.
+    [[nodiscard]] lazy_sequence_view<alphabet_type> view() const noexcept {
+        return make_lazy_sequence_view(owner_);
+    }
+
+    /// Run the source policy's success-only resource finalizer.
+    void finish_resources_as_cpp() const
+        requires requires(p_scanner const& scanner) {
+            { p_resource_lifecycle::finish_as_cpp(scanner) } -> std::same_as<void>;
+        }
+    {
+        p_resource_lifecycle::finish_as_cpp(owner_.scanner());
+    }
+
+    /// Abandon source handles without entering an unsafe external boundary.
+    void abandon_resources_noexcept() const noexcept
+        requires requires(p_scanner const& scanner) {
+            { p_resource_lifecycle::abandon_noexcept(scanner) } noexcept -> std::same_as<void>;
+        }
+    {
+        p_resource_lifecycle::abandon_noexcept(owner_.scanner());
+    }
+
+  private:
+    lazy_sequence<p_sequence_range, p_scanner> owner_;
+};
+
+} // namespace lazy_sequence_detail
+
 /** @brief Erase an already-resident compact range into the canonical facade. */
 template <class p_sequence_range>
 [[nodiscard]] inline auto

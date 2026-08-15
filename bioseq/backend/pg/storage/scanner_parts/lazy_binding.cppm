@@ -224,35 +224,75 @@ void validate_binding(const postgres_lazy_sequence_binding<p_sequence_config>& b
     }
 }
 
-/// Own one concrete scanner and lazy facade for a read-session entry.
-template <class p_sequence_config>
-struct call_state final {
+/// Own one storage-erased lazy facade for a read-session entry.
+template <class p_sequence_config> struct call_state final {
     using scanner_type = postgres_sequence_scanner<p_sequence_config>;
-    using sequence_type = lazy_sequence<p_sequence_config, scanner_type>;
-
-    explicit call_state(
-            const postgres_lazy_sequence_binding<p_sequence_config>& binding,
-            MemoryContext session_context)
-        : sequence(scanner_type{
-              binding.db_oid(), binding.tablespace_oid(),
-              binding.main_relfilenode(), binding.column_attno(),
-              binding.locator(), binding.last_fragment_padding(),
-              binding.registered_snapshot(), binding.caches(),
-              session_context}) {
-        if (!sequence.scanner().matches_pg_binding(
-                binding.db_oid(), binding.tablespace_oid(),
-                binding.main_relfilenode(), binding.column_attno(),
-                binding.locator(), binding.last_fragment_padding(),
-                binding.registered_snapshot())) {
-            bioseq::postgres::support::invoke_pg_as_cpp([] {
-                ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("lazy PostgreSQL scanner does not match its binding")));
-            });
+    struct scanner_resource_lifecycle final {
+        /// Finish scanner-owned PostgreSQL resources on the successful path.
+        static void finish_as_cpp(scanner_type const& scanner) {
+            scanner.finish_pg_resources_as_cpp();
         }
+
+        /// Abandon scanner handles without issuing PostgreSQL calls.
+        static void abandon_noexcept(scanner_type const& scanner) noexcept {
+            scanner.abandon_pg_resources_noexcept();
+        }
+    };
+    using sequence_owner_type = lazy_sequence_detail::
+        fragmented_facade_owner<p_sequence_config, scanner_type, scanner_resource_lifecycle>;
+    using view_type = lazy_sequence_view<
+        typename postgres_lazy_sequence_binding<p_sequence_config>::alphabet_type>;
+
+    explicit call_state(const postgres_lazy_sequence_binding<p_sequence_config>& binding,
+                        MemoryContext session_context)
+        : sequence_owner_(make_scanner(binding, session_context)) {}
+
+    /// Return the callback-scoped facade backed by this call state's owner.
+    [[nodiscard]] view_type view() const noexcept {
+        return sequence_owner_.view();
     }
 
-    sequence_type sequence;
+    /// Finish source resources before destroying a successfully used state.
+    void finish_resources_as_cpp() const {
+        sequence_owner_.finish_resources_as_cpp();
+    }
+
+    /// Abandon source handles before failure-path destruction.
+    void abandon_resources_noexcept() const noexcept {
+        sequence_owner_.abandon_resources_noexcept();
+    }
+
+  private:
+    sequence_owner_type sequence_owner_;
+
+    /// Construct and revalidate the scanner before transferring ownership.
+    [[nodiscard]] static scanner_type
+    make_scanner(const postgres_lazy_sequence_binding<p_sequence_config>& binding,
+                 MemoryContext session_context) {
+        scanner_type scanner{binding.db_oid(),
+                             binding.tablespace_oid(),
+                             binding.main_relfilenode(),
+                             binding.column_attno(),
+                             binding.locator(),
+                             binding.last_fragment_padding(),
+                             binding.registered_snapshot(),
+                             binding.caches(),
+                             session_context};
+        if (!scanner.matches_pg_binding(binding.db_oid(),
+                                        binding.tablespace_oid(),
+                                        binding.main_relfilenode(),
+                                        binding.column_attno(),
+                                        binding.locator(),
+                                        binding.last_fragment_padding(),
+                                        binding.registered_snapshot())) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("lazy PostgreSQL scanner does not match its binding")));
+            });
+        }
+        return scanner;
+    }
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -268,7 +308,7 @@ template <bool p_is_reversed, bool p_write_reversed, class p_sequence_config>
         std::span<std::uint8_t> output) {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     note_pg_sequence_facade_source_stream_callback();
-    const auto view = make_lazy_sequence_view(state.sequence);
+    const auto view = state.view();
     const auto cursor = view.template rank_reader<
         p_is_reversed, p_write_reversed, std::uint8_t, 2>();
     return cursor.read_at(from, count, output);
@@ -279,7 +319,7 @@ template <class p_sequence_config>
 [[nodiscard]] sequence_size_t observed_call_state_bp_size(
         void const* opaque) noexcept {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
-    return state.sequence.bp_size();
+    return state.view().bp_size();
 }
 
 /// Probe resident packed storage while recording the facade operation.
@@ -294,7 +334,7 @@ template <class p_sequence_config>
         resident_packed_result {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
     note_pg_sequence_facade_source_resident_probe();
-    return make_lazy_sequence_view(state.sequence).try_resident_packed(
+    return state.view().try_resident_packed(
         from, to, requested_width);
 }
 
@@ -314,7 +354,7 @@ template <class p_sequence_config>
             : unit_count * requested_width;
     note_pg_sequence_facade_contiguous_access();
     note_pg_sequence_facade_source_stream_callback();
-    return make_lazy_sequence_view(state.sequence).try_copy_packed_sequence(
+    return state.view().try_copy_packed_sequence(
         std::span<std::uint8_t>{
             static_cast<std::uint8_t*>(destination), destination_bytes},
         unit_count, requested_width);
@@ -325,7 +365,7 @@ template <class p_sequence_config>
 [[nodiscard]] bool observed_call_state_worker_shareable(
         void const* opaque) noexcept {
     auto const& state = *static_cast<call_state<p_sequence_config> const*>(opaque);
-    return make_lazy_sequence_view(state.sequence).worker_shareable();
+    return state.view().worker_shareable();
 }
 
 /// Backend operation table that records test-only facade observations.
@@ -417,7 +457,7 @@ template <class p_sequence_config>
 template <class p_sequence_config>
 void finish_call_state(void* opaque, bool) {
     auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
-    state->sequence.scanner().finish_pg_resources_as_cpp();
+    state->finish_resources_as_cpp();
     state->~call_state();
 }
 
@@ -425,7 +465,7 @@ void finish_call_state(void* opaque, bool) {
 template <class p_sequence_config>
 void abort_call_state_noexcept(void* opaque) noexcept {
     auto* state = static_cast<call_state<p_sequence_config>*>(opaque);
-    state->sequence.scanner().abandon_pg_resources_noexcept();
+    state->abandon_resources_noexcept();
     state->~call_state();
 }
 
@@ -502,7 +542,7 @@ inline void with_postgres_lazy_sequence(
 #ifdef BIOSEQ_TEST_INDEXES
             std::forward<p_function>(fn)(observed_call_state_view(*state));
 #else
-            std::forward<p_function>(fn)(make_lazy_sequence_view(state->sequence));
+            std::forward<p_function>(fn)(state->view());
 #endif
         });
 }
@@ -545,7 +585,7 @@ inline void with_postgres_lazy_sequence(
 
             if constexpr (std::is_same_v<p_left_sequence_config, p_right_sequence_config>) {
                 if (left_binding.matches_same_source(right_binding)) {
-                    const auto shared = make_lazy_sequence_view(left->sequence);
+                    const auto shared = left->view();
                     std::forward<p_function>(fn)(shared, shared);
                     return;
                 }
@@ -560,8 +600,7 @@ inline void with_postgres_lazy_sequence(
                          errmsg("lazy PostgreSQL read session rejected its right binding")));
                 });
             }
-            std::forward<p_function>(fn)(make_lazy_sequence_view(left->sequence),
-                                 make_lazy_sequence_view(right->sequence));
+            std::forward<p_function>(fn)(left->view(), right->view());
         });
 }
 
