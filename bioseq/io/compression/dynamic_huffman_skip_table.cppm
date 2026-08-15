@@ -19,6 +19,8 @@ export module bioseq.io.compression.dynamic_huffman_skip_table;
 
 export namespace bioseq::io::compression {
 
+/// Maps each 15-bit window to the distance of its next dynamic-Huffman
+/// candidate. Negative entries mark candidates at the absolute distance.
 inline constexpr std::array<std::int8_t, 32768> dynamic_huffman_skip_table = {{
       13,   13,   13,   13,  -13,   13,   13,   13,    1,    1,   13,   13,  -13,   13,   13,   13,
        2,    2,    2,    2,  -13,   13,   13,   13,    1,    1,   13,   13,  -13,   13,   13,   13,

@@ -142,10 +142,8 @@ template <
     using sequence_traits_type =
         typename compact_sequence_range<
             sequence_custom_alphabet<p_alphabet, p_storage_unit>>::traits;
-    constexpr std::size_t bits_per_char =
-        sequence_traits_type::bits_per_char;
-    constexpr std::size_t letters_per_unit =
-        sequence_traits_type::letters_per_unit;
+    constexpr std::size_t bits_per_char = sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
 
     DEBUG_ASSERT(state.header_storage != nullptr,
                  "fastq_parser_state must be attached to a batch via attach_to_batch");
@@ -156,7 +154,7 @@ template <
 
     std::size_t parse_cursor = cursor;
 
-    auto need_more = [&]() -> record_parse_result {
+    auto need_more = [&parse_cursor]() -> record_parse_result {
         return record_parse_result{parse_outcome::incomplete, parse_cursor};
     };
 
@@ -164,8 +162,7 @@ template <
     if (state.progress == fastq_parser_progress::at_header_sigil) {
         if (parse_cursor >= slab_size) {
             return record_parse_result{
-                is_eof ? parse_outcome::at_end_of_file : parse_outcome::incomplete,
-                parse_cursor};
+                is_eof ? parse_outcome::at_end_of_file : parse_outcome::incomplete, parse_cursor};
         }
         if (slab_data[parse_cursor] != '@') {
             emit_failure(failure_fn,

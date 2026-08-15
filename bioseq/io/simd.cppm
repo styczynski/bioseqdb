@@ -695,26 +695,28 @@ std::size_t scan_first_byte_dispatch3(
     return HWY_NAMESPACE::scan_for_first<3>(byte_tag, needles, data, size);
 }
 
-void scan_for_each_delim4(
-    std::uint8_t d0, std::uint8_t d1, std::uint8_t d2, std::uint8_t d3,
-    const std::uint8_t* data, std::size_t size,
-    void* ctx, void (*visit)(void* ctx, std::size_t offset)) noexcept {
+void scan_for_each_delim4(std::uint8_t d0,
+                          std::uint8_t d1,
+                          std::uint8_t d2,
+                          std::uint8_t d3,
+                          const std::uint8_t* data,
+                          std::size_t size,
+                          void* ctx,
+                          void (*visit)(void* ctx, std::size_t offset)) noexcept {
     namespace hn = hwy::HWY_NAMESPACE;
     const hn::ScalableTag<std::uint8_t> byte_tag;
     const std::array<std::uint8_t, 4> needles{d0, d1, d2, d3};
     HWY_NAMESPACE::scan_for_each<4>(
-        byte_tag, needles, data, size,
-        [&](std::size_t offset) { visit(ctx, offset); });
+        byte_tag, needles, data, size, [&ctx, &visit](std::size_t offset) { visit(ctx, offset); });
 }
 
 // ---------------------------------------------------------------------
 // Compression-pipeline wrappers (definitions). Spec §5.
 // ---------------------------------------------------------------------
 
-void replace_markers_inplace(
-    std::uint16_t*      buffer,
-    std::size_t         buffer_size,
-    const std::uint8_t* window) noexcept {
+void replace_markers_inplace(std::uint16_t* buffer,
+                             std::size_t buffer_size,
+                             const std::uint8_t* window) noexcept {
     namespace hn = hwy::HWY_NAMESPACE;
     const hn::ScalableTag<std::uint16_t> d_u16;
     HWY_NAMESPACE::replace_markers_inplace_one_chunk(

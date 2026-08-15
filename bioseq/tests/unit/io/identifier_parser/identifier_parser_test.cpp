@@ -1,6 +1,4 @@
 // Unit coverage for header parsing, destination mapping, and file sampling.
-#include <tests/support/common.hpp>
-
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -9,10 +7,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tests/support/common.hpp>
+#include <unistd.h>
 #include <utility>
 #include <vector>
-
-#include <unistd.h>
 
 import bioseq.common.logging;
 import bioseq.io.options;
@@ -24,13 +22,15 @@ using namespace bioseq::io::identifier_parser;
 
 namespace {
 
-// A concept-satisfying capture writer records one string (or null) per slot so
-// tests can inspect what each routed column received.
+/// Records the value routed to each destination slot for assertions.
 struct capture_identifier_writer {
     std::vector<std::optional<std::string>> values;
 
     explicit capture_identifier_writer(std::size_t n) : values(n) {}
-    void begin_tuple() { for (auto& v : values) v.reset(); }
+    void begin_tuple() {
+        for (auto& v : values)
+            v.reset();
+    }
     void set_field(destination_slot slot, const char* data, std::int32_t len) {
         values.at(static_cast<std::size_t>(slot)) =
             std::string{data, static_cast<std::size_t>(len)};
@@ -40,31 +40,47 @@ struct capture_identifier_writer {
     }
     void end_tuple() {}
     void finish() {}
-    [[nodiscard]] std::size_t destination_count() const noexcept { return values.size(); }
+    [[nodiscard]] std::size_t destination_count() const noexcept {
+        return values.size();
+    }
 };
 static_assert(identifier_destination_writer<capture_identifier_writer>);
 
-[[nodiscard]] std::size_t slot_for_column(
-        const identifier_mapping_result& map, std::uint16_t col_index) {
+/// Locate the destination slot assigned to a table column.
+[[nodiscard]] std::size_t slot_for_column(const identifier_mapping_result& map,
+                                          std::uint16_t col_index) {
     for (std::size_t slot = 0; slot < map.slot_to_column.size(); ++slot)
-        if (map.slot_to_column[slot] == col_index) return slot;
+        if (map.slot_to_column[slot] == col_index)
+            return slot;
     FAIL("column was not routed");
     return 0;
 }
 
-[[nodiscard]] const std::optional<std::string>& value_for_column(
-        const identifier_mapping_result& map,
-        const capture_identifier_writer& writer, std::uint16_t col_index) {
+/// Return the captured value for a table column.
+[[nodiscard]] const std::optional<std::string>&
+value_for_column(const identifier_mapping_result& map,
+                 const capture_identifier_writer& writer,
+                 std::uint16_t col_index) {
     return writer.values.at(slot_for_column(map, col_index));
 }
 
+/// Describe a nullable text column accepted by identifier routing.
 [[nodiscard]] column_descriptor text_col(std::string_view name) {
-    return {.name = name, .is_text = true, .is_primary_key = false,
-            .not_null = false, .has_default = false, .is_identity_or_generated = false};
+    return {.name = name,
+            .is_text = true,
+            .is_primary_key = false,
+            .not_null = false,
+            .has_default = false,
+            .is_identity_or_generated = false};
 }
+/// Describe a nullable non-text column rejected by text-only routes.
 [[nodiscard]] column_descriptor scalar_col(std::string_view name) {
-    return {.name = name, .is_text = false, .is_primary_key = false,
-            .not_null = false, .has_default = false, .is_identity_or_generated = false};
+    return {.name = name,
+            .is_text = false,
+            .is_primary_key = false,
+            .not_null = false,
+            .has_default = false,
+            .is_identity_or_generated = false};
 }
 
 // Resolve + parse in one shot; returns (mapping, writer) so callers assert values.
@@ -90,7 +106,7 @@ struct parse_run {
     return {std::move(*map), std::move(writer)};
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("identifier_parser: automatic GenBank parsing claims text columns before identifier",
           "[component:bioseq][layer:unit][feature:io]") {
@@ -281,7 +297,8 @@ TEST_CASE("identifier_parser: detect_header_format majority vote",
           "[component:bioseq][layer:unit][feature:io]") {
     const std::vector<std::string_view> uniprot{
         "tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase OS=Pseudomonas aeruginosa PE=4 SV=1",
-        "sp|P27748|ACOX_CUPNH Acetoin catabolism protein X OS=Cupriavidus necator OX=381666 GN=acoX PE=4 SV=2"};
+        "sp|P27748|ACOX_CUPNH Acetoin catabolism protein X OS=Cupriavidus necator OX=381666 "
+        "GN=acoX PE=4 SV=2"};
     REQUIRE(detect_header_format(uniprot) == header_format::uniprotkb);
 
     const std::vector<std::string_view> plain{"chr1 human chromosome 1", "chr2"};
@@ -293,19 +310,21 @@ TEST_CASE("identifier_parser: detect_header_format majority vote",
 
 namespace {
 
+/// Write identifier-parser input to a process-unique temporary file.
 std::string write_tmp_file(const std::string& content) {
     namespace fs = std::filesystem;
     static std::atomic<std::uint64_t> counter{0};
-    fs::path tmp = fs::temp_directory_path() / fmt::format(
-        "bioseq_identifier_parser_test_{}_{}",
-        ::getpid(), counter.fetch_add(1, std::memory_order_relaxed));
+    fs::path tmp =
+        fs::temp_directory_path() / fmt::format("bioseq_identifier_parser_test_{}_{}",
+                                                ::getpid(),
+                                                counter.fetch_add(1, std::memory_order_relaxed));
     std::ofstream out(tmp, std::ios::binary);
     out.write(content.data(), static_cast<std::streamsize>(content.size()));
     out.close();
     return tmp.string();
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("identifier_parser: sample_sequence_headers supports multiline FASTQ",
           "[component:bioseq][layer:unit][feature:io][resource:filesystem]") {

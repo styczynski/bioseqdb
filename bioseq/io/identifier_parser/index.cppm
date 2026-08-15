@@ -470,16 +470,18 @@ bracket_tags(string_view header, const header_lexer& lex) {
 /// §5.4 `strip_tags` — header with every accepted EQUALS tag and every bracket
 /// span removed, runs of >1 space collapsed to one and ends trimmed, written into
 /// the caller-owned `scratch`. The D7 "metadata-stripped identifier".
-[[nodiscard]] inline string_view strip_tags(
-        string_view header, const header_lexer& lex, std::string& scratch,
-        const header_format_definition& def, bool accept_any) {
-    bc::small_vector<std::pair<std::uint32_t, std::uint32_t>, 16> remove;  // [start,end)
+[[nodiscard]] inline string_view strip_tags(string_view header,
+                                            const header_lexer& lex,
+                                            std::string& scratch,
+                                            const header_format_definition& def,
+                                            bool accept_any) {
+    bc::small_vector<std::pair<std::uint32_t, std::uint32_t>, 16> remove; // [start,end)
     const auto acc = collect_accepted_equals(
         header, lex, 0, static_cast<std::uint32_t>(header.size()), def, accept_any);
     for (std::size_t i = 0; i < acc.size(); ++i) {
         const std::uint32_t start = acc[i].ks;
-        const std::uint32_t end = (i + 1 < acc.size())
-            ? acc[i + 1].ks : static_cast<std::uint32_t>(header.size());
+        const std::uint32_t end =
+            (i + 1 < acc.size()) ? acc[i + 1].ks : static_cast<std::uint32_t>(header.size());
         remove.push_back({start, end});
     }
     for (const auto& [lb, rb] : bracket_spans(lex))
@@ -487,10 +489,11 @@ bracket_tags(string_view header, const header_lexer& lex) {
     std::sort(remove.begin(), remove.end());
 
     scratch.clear();
-    auto append_collapsed = [&](string_view chunk) {
+    auto append_collapsed = [&scratch](string_view chunk) {
         for (char c : chunk) {
             if (c == ' ') {
-                if (!scratch.empty() && scratch.back() != ' ') scratch.push_back(' ');
+                if (!scratch.empty() && scratch.back() != ' ')
+                    scratch.push_back(' ');
             } else {
                 scratch.push_back(c);
             }
@@ -498,11 +501,15 @@ bracket_tags(string_view header, const header_lexer& lex) {
     };
     std::size_t cursor = 0;
     for (const auto& [start, end] : remove) {
-        if (start > cursor) append_collapsed(header.substr(cursor, start - cursor));
-        if (end > cursor) cursor = end;
+        if (start > cursor)
+            append_collapsed(header.substr(cursor, start - cursor));
+        if (end > cursor)
+            cursor = end;
     }
-    if (cursor < header.size()) append_collapsed(header.substr(cursor));
-    while (!scratch.empty() && scratch.back() == ' ') scratch.pop_back();
+    if (cursor < header.size())
+        append_collapsed(header.substr(cursor));
+    while (!scratch.empty() && scratch.back() == ' ')
+        scratch.pop_back();
     return string_view{scratch};
 }
 
@@ -510,8 +517,8 @@ bracket_tags(string_view header, const header_lexer& lex) {
 // Route emitter — the §6 `Emit` that consults the routing table and writes.
 // ---------------------------------------------------------------------
 
-[[nodiscard]] inline const std::vector<destination_slot>* find_key_slots(
-        const identifier_routing& routing, string_view key) noexcept {
+[[nodiscard]] inline const std::vector<destination_slot>*
+find_key_slots(const identifier_routing& routing, string_view key) noexcept {
     for (const auto& route : routing.key_routes) {
         if (string_view{route.key} == key) return &route.slots;
     }
@@ -987,19 +994,20 @@ export namespace bioseq::io::identifier_parser {
             best_format = static_cast<header_format>(f);
         }
     }
-    if (best == 0) return any_structure ? header_format::automatic : header_format::plain;
+    if (best == 0)
+        return any_structure ? header_format::automatic : header_format::plain;
     return best_format;
 }
 
 /// §7.1 — resolve the column mapping ONCE per load. Pure logic over plain data.
 [[nodiscard]] std::expected<identifier_mapping_result, std::string>
-resolve_identifier_mapping(
-        header_format requested_format, header_format effective_format,
-        std::span<const column_descriptor> columns,
-        std::span<const user_column_mapping> user_mappings) {
+resolve_identifier_mapping(header_format requested_format,
+                           header_format effective_format,
+                           std::span<const column_descriptor> columns,
+                           std::span<const user_column_mapping> user_mappings) {
     identifier_mapping_result result;
     identifier_routing& routing = result.routing;
-    std::vector<std::uint16_t>& destination_columns = result.slot_to_column;  // slot -> col
+    std::vector<std::uint16_t>& destination_columns = result.slot_to_column; // slot -> col
 
     const std::size_t column_count = columns.size();
     std::vector<char> is_user_mapped(column_count, 0);
@@ -1007,8 +1015,9 @@ resolve_identifier_mapping(
     std::vector<destination_slot> column_to_slot(column_count, -1);
     bool has_key_or_position_route = false;
 
-    auto slot_of = [&](std::size_t i) -> destination_slot {
-        if (column_to_slot[i] >= 0) return column_to_slot[i];
+    auto slot_of = [&column_to_slot, &destination_columns](std::size_t i) -> destination_slot {
+        if (column_to_slot[i] >= 0)
+            return column_to_slot[i];
         const destination_slot s = static_cast<destination_slot>(destination_columns.size());
         destination_columns.push_back(static_cast<std::uint16_t>(i));
         column_to_slot[i] = s;
@@ -1018,7 +1027,8 @@ resolve_identifier_mapping(
                             destination_slot s) -> bool {
         return std::find(slots.begin(), slots.end(), s) != slots.end();
     };
-    auto add_key_route = [&](std::string key, destination_slot s) {
+    auto add_key_route = [&contains_slot, &has_key_or_position_route, &routing](
+                             std::string key, destination_slot s) {
         for (identifier_key_route& route : routing.key_routes) {
             if (route.key == key) {
                 if (!contains_slot(route.slots, s)) {
@@ -1034,7 +1044,8 @@ resolve_identifier_mapping(
         });
         has_key_or_position_route = true;
     };
-    auto add_position_route = [&](std::uint32_t p, destination_slot s) {
+    auto add_position_route = [&contains_slot, &has_key_or_position_route, &routing](
+                                  std::uint32_t p, destination_slot s) {
         for (identifier_position_route& route : routing.position_routes) {
             if (route.position == p) {
                 if (!contains_slot(route.slots, s)) {
@@ -1050,25 +1061,27 @@ resolve_identifier_mapping(
         });
         has_key_or_position_route = true;
     };
-    auto find_column = [&](std::string_view raw_name) -> std::size_t {
+    auto find_column = [&column_count, &columns](std::string_view raw_name) -> std::size_t {
         for (std::size_t i = 0; i < column_count; ++i)
             if (detail::names_match_normalised(columns[i].name, raw_name))
                 return i;
         return column_count;
     };
 
-    const header_format_definition& effective_definition = header_format_definition_for(effective_format);
+    const header_format_definition& effective_definition =
+        header_format_definition_for(effective_format);
 
     // ---- A. explicit user mappings (highest priority) ----
     for (const user_column_mapping& user_mapping : user_mappings) {
         const std::size_t i = find_column(user_mapping.column_name);
         if (i == column_count)
-            return std::unexpected(fmt::format(
-                "mapping target column \"{}\" not found", user_mapping.column_name));
+            return std::unexpected(
+                fmt::format("mapping target column \"{}\" not found", user_mapping.column_name));
         if (columns[i].is_identity_or_generated)
-            return std::unexpected(fmt::format(
-                "mapping target column \"{}\" is an identity/generated column "
-                "and cannot be populated by bioseq.load", user_mapping.column_name));
+            return std::unexpected(
+                fmt::format("mapping target column \"{}\" is an identity/generated column "
+                            "and cannot be populated by bioseq.load",
+                            user_mapping.column_name));
         is_user_mapped[i] = 1;
         const destination_slot slot = slot_of(i);
 

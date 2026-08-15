@@ -305,9 +305,9 @@ struct chunk_decode_plan {
 /// the full Kraft completeness check on literal+distance trees, which
 /// is the strongest filter we have without actually decoding the body.
 [[nodiscard]] inline std::expected<std::vector<chunk_decode_plan>, std::string>
-plan_chunks(std::span<const std::uint8_t>      compressed_view,
-            const std::vector<gzip_member_descriptor>&    members,
-            std::size_t                        chunk_target_compressed_bytes) noexcept {
+plan_chunks(std::span<const std::uint8_t> compressed_view,
+            const std::vector<gzip_member_descriptor>& members,
+            std::size_t chunk_target_compressed_bytes) noexcept {
     std::vector<chunk_decode_plan> plans;
     if (members.empty()) {
         return std::unexpected(std::string{"plan_chunks: no members"});
@@ -315,14 +315,13 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
 
     const std::size_t total_bits = compressed_view.size() * 8u;
 
-    auto find_validated_block = [&](std::size_t  start_bit,
-                                    std::size_t  until_bit) noexcept -> std::size_t {
+    auto find_validated_block = [&compressed_view](std::size_t start_bit,
+                                                   std::size_t until_bit) noexcept -> std::size_t {
         std::size_t cursor = start_bit;
         while (cursor < until_bit) {
             bit_reader scan{compressed_view};
             scan.seek_to_bit(cursor);
-            const std::size_t candidate =
-                seek_dynamic_huffman_candidate(scan, until_bit);
+            const std::size_t candidate = seek_dynamic_huffman_candidate(scan, until_bit);
             if (candidate == block_finder_sentinel) {
                 return block_finder_sentinel;
             }

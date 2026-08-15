@@ -10,16 +10,15 @@
  * including write-state flushing
  * as a cross-check, plus the column-rule and malformed-file error paths.
  */
-#include <tests/support/common.hpp>
-#include <bioseq/pg_build_profile.h>
-#include <fmt/format.h>
-
 #include <algorithm>
+#include <bioseq/pg_build_profile.h>
 #include <cstdint>
-#include <fstream>
 #include <cstdlib>
+#include <fmt/format.h>
+#include <fstream>
 #include <string>
 #include <string_view>
+#include <tests/support/common.hpp>
 #include <utility>
 #include <vector>
 
@@ -29,11 +28,10 @@ namespace {
 
 namespace it = bioseq_int_tests;
 
-// Deterministic pseudo-random base generator (splitmix-style) so the loaded
-// data is reproducible and non-degenerate (degenerate runs give too few
-// minimizers for a stable mmsearch hit).
+/// Generate one reproducible base for a synthetic load corpus.
 [[nodiscard]] char gen_base_at(std::size_t i, std::uint64_t seed, bool with_n) {
-    if (with_n && i % 50 == 13) return 'N';
+    if (with_n && i % 50 == 13)
+        return 'N';
     static constexpr char k_dna4[] = "ACGT";
     static constexpr std::uint64_t k_step = 0x9E3779B97F4A7C15ull;
     std::uint64_t z = seed + k_step * (static_cast<std::uint64_t>(i) + 2ull);
@@ -43,6 +41,7 @@ namespace it = bioseq_int_tests;
     return k_dna4[z % 4ull];
 }
 
+/// Generate `n` reproducible bases, optionally including periodic `N` symbols.
 [[nodiscard]] std::string gen_bases(std::size_t n, std::uint64_t seed, bool with_n) {
     std::string out;
     out.reserve(n);
@@ -52,8 +51,7 @@ namespace it = bioseq_int_tests;
     return out;
 }
 
-// Write FASTA wrapped at 60 cols (exercises the multi-line body parse path and
-// keeps each line well within the reader slab).
+/// Write FASTA records with bodies wrapped at 60 columns.
 void write_fasta(const std::string& path,
                  const std::vector<std::pair<std::string, std::string>>& records) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
@@ -67,8 +65,12 @@ void write_fasta(const std::string& path,
     }
 }
 
-void write_generated_fasta(const std::string& path, std::string_view header,
-                           std::size_t n, std::uint64_t seed, bool with_n) {
+/// Write one generated FASTA record without retaining its complete body.
+void write_generated_fasta(const std::string& path,
+                           std::string_view header,
+                           std::size_t n,
+                           std::uint64_t seed,
+                           bool with_n) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     f << '>' << header << '\n';
     char line[60];
@@ -87,14 +89,14 @@ void write_generated_fasta(const std::string& path, std::string_view header,
     }
 }
 
-// dna4/64 fragment = 1024 units * 32 letters/unit = 32768 bp. A record larger
-// than that spans >1 fragment, exercising the streaming fragment writer.
+/// Logical bases in one dna4/64 storage fragment.
 constexpr std::size_t k_dna4_u64_fragment_bp = 1024u * 32u;
 
-}  // namespace
+} // namespace
 
-TEST_CASE("bioseq.load: round-trip + non-empty mmsearch (dna4/64, multi-fragment)",
-          "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
+TEST_CASE(
+    "bioseq.load: round-trip + non-empty mmsearch (dna4/64, multi-fragment)",
+    "[component:bioseq][layer:integration][feature:io][resource:postgres][resource:filesystem]") {
     it::connection_test_context ctx;
     it::reset_extension(ctx, { std::string_view{"load_roundtrip"} });
 
@@ -523,75 +525,80 @@ TEST_CASE("bioseq.load: hash-major minimizers_per_sequence uses the post-load lo
     // bioseq.load must propagate that exact failure, and the streamed parent
     // row/source fragments must roll back with the failed index maintenance.
     it::exec_sqlf(ctx,
-        "CREATE TABLE {} "
-        "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
-        rollback_table);
+                  "CREATE TABLE {} "
+                  "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
+                  rollback_table);
     it::exec_sqlf(ctx,
-        "SELECT bioseq.set_index_policy('{}'::regclass, "
-        "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
-        rollback_table);
+                  "SELECT bioseq.set_index_policy('{}'::regclass, "
+                  "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
+                  rollback_table);
     it::exec_sqlf(ctx,
-        "SELECT bioseq.set_index_policy('{}'::regclass, "
-        "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
-        rollback_table);
-    const long long rollback_relfilenode = it::query_scalar_int(ctx, fmt::format(
-        "SELECT pg_relation_filenode('{}'::regclass)::bigint;",
-        rollback_table));
-    const auto source_catalog_row_count = [&] {
-        return it::query_scalar_int(ctx, fmt::format(
-            "SELECT count(*) FROM bioseq_internal.sequence_source_version "
-            "WHERE user_relid='{}'::regclass "
-            "AND main_relfilenode={}::oid;",
-            rollback_table, rollback_relfilenode));
+                  "SELECT bioseq.set_index_policy('{}'::regclass, "
+                  "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
+                  rollback_table);
+    const long long rollback_relfilenode = it::query_scalar_int(
+        ctx, fmt::format("SELECT pg_relation_filenode('{}'::regclass)::bigint;", rollback_table));
+    const auto source_catalog_row_count = [&ctx, &rollback_relfilenode, &rollback_table] {
+        return it::query_scalar_int(
+            ctx,
+            fmt::format("SELECT count(*) FROM bioseq_internal.sequence_source_version "
+                        "WHERE user_relid='{}'::regclass "
+                        "AND main_relfilenode={}::oid;",
+                        rollback_table,
+                        rollback_relfilenode));
     };
-    const auto source_shard_catalog_count = [&] {
-        return it::query_scalar_int(ctx, fmt::format(
-            "SELECT count(*) FROM bioseq_internal.seq_sub_table "
-            "WHERE main_relfilenode={}::oid;",
-            rollback_relfilenode));
+    const auto source_shard_catalog_count = [&ctx, &rollback_relfilenode] {
+        return it::query_scalar_int(
+            ctx,
+            fmt::format("SELECT count(*) FROM bioseq_internal.seq_sub_table "
+                        "WHERE main_relfilenode={}::oid;",
+                        rollback_relfilenode));
     };
-    const auto source_fragment_relation_count = [&] {
-        return it::query_scalar_int(ctx, fmt::format(
-            "SELECT count(*) FROM pg_class "
-            "WHERE relnamespace='bioseq_internal'::regnamespace "
-            "AND (relname ~ '^seq_sub_[0-9]+_[0-9]+_{}_' "
-            "OR relname ~ '^idx_sidecar_[0-9]+_[0-9]+_{}_');",
-            rollback_relfilenode, rollback_relfilenode));
+    const auto source_fragment_relation_count = [&ctx, &rollback_relfilenode] {
+        return it::query_scalar_int(
+            ctx,
+            fmt::format("SELECT count(*) FROM pg_class "
+                        "WHERE relnamespace='bioseq_internal'::regnamespace "
+                        "AND (relname ~ '^seq_sub_[0-9]+_[0-9]+_{}_' "
+                        "OR relname ~ '^idx_sidecar_[0-9]+_[0-9]+_{}_');",
+                        rollback_relfilenode,
+                        rollback_relfilenode));
     };
-    const auto index_shard_catalog_count = [&] {
-        return it::query_scalar_int(ctx, fmt::format(
-            "SELECT count(*) FROM bioseq_internal.index_table_shard "
-            "WHERE main_relfilenode={}::oid;",
-            rollback_relfilenode));
+    const auto index_shard_catalog_count = [&ctx, &rollback_relfilenode] {
+        return it::query_scalar_int(
+            ctx,
+            fmt::format("SELECT count(*) FROM bioseq_internal.index_table_shard "
+                        "WHERE main_relfilenode={}::oid;",
+                        rollback_relfilenode));
     };
-    const auto metadata_interval_count = [&] {
-        return it::query_scalar_int(ctx, fmt::format(
-            "SELECT count(*) FROM bioseq_internal.metadata_age_log "
-            "WHERE user_relid='{}'::regclass "
-            "AND main_relfilenode={}::oid;",
-            rollback_table, rollback_relfilenode));
+    const auto metadata_interval_count = [&ctx, &rollback_relfilenode, &rollback_table] {
+        return it::query_scalar_int(
+            ctx,
+            fmt::format("SELECT count(*) FROM bioseq_internal.metadata_age_log "
+                        "WHERE user_relid='{}'::regclass "
+                        "AND main_relfilenode={}::oid;",
+                        rollback_table,
+                        rollback_relfilenode));
     };
-    const auto generation_relation_count = [&] {
+    const auto generation_relation_count = [&ctx] {
         return it::query_scalar_int(ctx,
-            "SELECT count(*) FROM pg_class "
-            "WHERE relnamespace='bioseq_internal'::regnamespace "
-            "AND relname LIKE 'seqidx_mps_%';");
+                                    "SELECT count(*) FROM pg_class "
+                                    "WHERE relnamespace='bioseq_internal'::regnamespace "
+                                    "AND relname LIKE 'seqidx_mps_%';");
     };
-    const long long parent_rows_before = it::query_scalar_int(ctx, fmt::format(
-        "SELECT count(*) FROM {};", rollback_table));
+    const long long parent_rows_before =
+        it::query_scalar_int(ctx, fmt::format("SELECT count(*) FROM {};", rollback_table));
     const long long source_catalog_rows_before = source_catalog_row_count();
     const long long source_shards_before = source_shard_catalog_count();
-    const long long source_fragment_relations_before =
-        source_fragment_relation_count();
+    const long long source_fragment_relations_before = source_fragment_relation_count();
     const long long index_shards_before = index_shard_catalog_count();
     const long long metadata_intervals_before = metadata_interval_count();
     const long long generation_relations_before = generation_relation_count();
-    const long long index_rows_before = it::index_table_row_count(
-        ctx, "minimizers_per_sequence", rollback_table);
+    const long long index_rows_before =
+        it::index_table_row_count(ctx, "minimizers_per_sequence", rollback_table);
     it::exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = on;");
-    const auto load_error = it::sql_error(ctx, fmt::format(
-        "SELECT bioseq.load('{}'::regclass, '{}');",
-        rollback_table, path));
+    const auto load_error = it::sql_error(
+        ctx, fmt::format("SELECT bioseq.load('{}'::regclass, '{}');", rollback_table, path));
     REQUIRE(load_error.sqlstate == "0A000");
     REQUIRE(load_error.contains(
         "requires asynchronous persistence to be disabled"));

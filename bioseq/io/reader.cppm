@@ -291,28 +291,23 @@ namespace detail {
 /// Run the synchronous read loop with a concrete source. Single-thread
 /// path: the same thread reads bytes, parses records, and invokes the
 /// user's handler. Spec §12.6 + Appendix M.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    io_source p_source,
-    typename p_handler,
-    typename p_failure>
-[[nodiscard]] std::expected<std::size_t, std::string> run_sync_pipeline(
-    p_source source,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options) {
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          io_source p_source,
+          typename p_handler,
+          typename p_failure>
+[[nodiscard]] std::expected<std::size_t, std::string>
+run_sync_pipeline(p_source source,
+                  p_handler&& handler_fn,
+                  p_failure&& failure_fn,
+                  const reader_options& options) {
 
-    using alphabet_config_type =
-        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using alphabet_config_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_type = sequence_batch<alphabet_config_type>;
-    using sequence_traits_type =
-        typename compact_sequence_range<alphabet_config_type>::traits;
+    using sequence_traits_type = typename compact_sequence_range<alphabet_config_type>::traits;
 
-    constexpr std::size_t bits_per_char =
-        sequence_traits_type::bits_per_char;
-    constexpr std::size_t letters_per_unit =
-        sequence_traits_type::letters_per_unit;
+    constexpr std::size_t bits_per_char = sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
 
     buffer_slab slab(options.io.initial_buffer_size);
     batch_type batch;
@@ -321,7 +316,7 @@ template <
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    auto failure_capture = [&](std::string&& msg) {
+    auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
             failure_fn(std::move(msg));
@@ -329,25 +324,24 @@ template <
         aborted = true;
     };
 
-    const std::size_t flush_record_threshold =
-        (options.concurrency.batch_target_record_count > 0)
-            ? options.concurrency.batch_target_record_count
-            : 4096;
+    const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
+                                                   ? options.concurrency.batch_target_record_count
+                                                   : 4096;
 
-    constexpr bool is_fastq_format =
-        p_file_format == sequence_file_format::fastq;
-    auto prepare_fresh_batch = [&]() {
+    constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
+    auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
         batch.prepare(flush_record_threshold, is_fastq_format);
         // Generous up-front reservations sized for ~256 bp records.
         // Larger corpora simply grow geometrically beyond the hint.
         batch.reserve_storage(
             /*header_bytes*/ flush_record_threshold * 32,
-            /*seq_words*/    flush_record_threshold * 8,
+            /*seq_words*/ flush_record_threshold * 8,
             /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
     };
 
-    auto flush_batch = [&]() {
-        if (batch.empty()) return;
+    auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
+        if (batch.empty())
+            return;
         handler_fn(std::move(batch));
         batch = batch_type{};
         prepare_fresh_batch();
@@ -357,10 +351,10 @@ template <
 
     if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
-        parser_state.attach_to_batch(batch.header_storage(),
-                                     batch.sequence_storage());
+        parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
-        auto emit_fasta_record = [&](std::size_t header_start,
+        auto emit_fasta_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
+                                     std::size_t header_start,
                                      std::size_t header_size,
                                      std::size_t seq_start,
                                      std::size_t seq_word_count,
@@ -377,24 +371,23 @@ template <
             (void)header_start;
             (void)seq_start;
             ++records_emitted;
-            if (batch.size() >= flush_record_threshold) flush_batch();
+            if (batch.size() >= flush_record_threshold)
+                flush_batch();
         };
 
         while (!aborted) {
             if (slab.fill_size == slab.capacity) {
                 if (!slab.make_room()) {
                     if (!slab.grow(options)) {
-                        emit_failure(failure_capture,
-                                     "buffer_limit reached at {} bytes",
-                                     slab.capacity);
+                        emit_failure(
+                            failure_capture, "buffer_limit reached at {} bytes", slab.capacity);
                         break;
                     }
                 }
             }
             const std::size_t free_room = slab.capacity - slab.fill_size;
             if (free_room > 0 && !slab.is_eof) {
-                const auto refill_result =
-                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                const auto refill_result = source.read_into(slab.raw() + slab.fill_size, free_room);
                 if (refill_result.has_error) {
                     emit_failure(failure_capture, "{}", source.last_error_message());
                     break;
@@ -408,11 +401,8 @@ template <
                 // The FSM updates `parser_state` and the batch storage
                 // directly; the emit_record callback only needs to record
                 // the (header_offset, seq_offset, padding) triple.
-                parser_state.attach_to_batch(batch.header_storage(),
-                                             batch.sequence_storage());
-                const auto step = parse_one_fasta_record<
-                    p_alphabet,
-                    std::uint64_t>(
+                parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
+                const auto step = parse_one_fasta_record<p_alphabet, std::uint64_t>(
                     parser_state,
                     slab.raw(),
                     slab.fill_size,
@@ -422,7 +412,8 @@ template <
                     emit_fasta_record,
                     failure_capture);
                 slab.parse_cursor = step.cursor;
-                if (step.outcome == parse_outcome::complete) continue;
+                if (step.outcome == parse_outcome::complete)
+                    continue;
                 if (step.outcome == parse_outcome::at_end_of_file) {
                     flush_batch();
                     if (aborted) {
@@ -436,7 +427,8 @@ template <
                 need_refill = true;
                 break;
             }
-            if (!need_refill) continue;
+            if (!need_refill)
+                continue;
             if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
                 flush_batch();
                 if (aborted) {
@@ -451,11 +443,11 @@ template <
 
     } else {
         fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
-        parser_state.attach_to_batch(batch.header_storage(),
-                                     batch.sequence_storage(),
-                                     batch.quality_storage());
+        parser_state.attach_to_batch(
+            batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
-        auto emit_fastq_record = [&](std::size_t /*header_start*/,
+        auto emit_fastq_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
+                                     std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
                                      std::size_t /*seq_start*/,
                                      std::size_t /*seq_word_count*/,
@@ -467,24 +459,23 @@ template <
             batch.sequence_paddings().push_back(padding);
             batch.quality_offsets().push_back(batch.quality_storage().size());
             ++records_emitted;
-            if (batch.size() >= flush_record_threshold) flush_batch();
+            if (batch.size() >= flush_record_threshold)
+                flush_batch();
         };
 
         while (!aborted) {
             if (slab.fill_size == slab.capacity) {
                 if (!slab.make_room()) {
                     if (!slab.grow(options)) {
-                        emit_failure(failure_capture,
-                                     "buffer_limit reached at {} bytes",
-                                     slab.capacity);
+                        emit_failure(
+                            failure_capture, "buffer_limit reached at {} bytes", slab.capacity);
                         break;
                     }
                 }
             }
             const std::size_t free_room = slab.capacity - slab.fill_size;
             if (free_room > 0 && !slab.is_eof) {
-                const auto refill_result =
-                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                const auto refill_result = source.read_into(slab.raw() + slab.fill_size, free_room);
                 if (refill_result.has_error) {
                     emit_failure(failure_capture, "{}", source.last_error_message());
                     break;
@@ -575,17 +566,12 @@ run_sync_pipeline_mmap_direct(
     p_failure&& failure_fn,
     const reader_options& options) {
 
-    using alphabet_config_type =
-        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using alphabet_config_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_type = sequence_batch<alphabet_config_type>;
-    using sequence_traits_type =
-        typename compact_sequence_range<alphabet_config_type>::traits;
-    constexpr std::size_t bits_per_char =
-        sequence_traits_type::bits_per_char;
-    constexpr std::size_t letters_per_unit =
-        sequence_traits_type::letters_per_unit;
-    constexpr bool is_fastq_format =
-        p_file_format == sequence_file_format::fastq;
+    using sequence_traits_type = typename compact_sequence_range<alphabet_config_type>::traits;
+    constexpr std::size_t bits_per_char = sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
+    constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
 
     const std::size_t file_size = source.mapped_size();
     auto [base_ptr, view_size] = source.direct_view();
@@ -595,7 +581,7 @@ run_sync_pipeline_mmap_direct(
     bool aborted = false;
     std::string captured_error;
 
-    auto failure_capture = [&](std::string&& msg) {
+    auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
             failure_fn(std::move(msg));
@@ -603,10 +589,9 @@ run_sync_pipeline_mmap_direct(
         aborted = true;
     };
 
-    const std::size_t flush_record_threshold =
-        (options.concurrency.batch_target_record_count > 0)
-            ? options.concurrency.batch_target_record_count
-            : 4096;
+    const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
+                                                   ? options.concurrency.batch_target_record_count
+                                                   : 4096;
 
     // Reservation: dna4 packs 4 letters per byte, so each input byte
     // produces ~1/16 of a 64-bit word. For the bench's 234 MiB human
@@ -617,15 +602,17 @@ run_sync_pipeline_mmap_direct(
     const std::size_t header_bytes_hint =
         std::max<std::size_t>(file_size / 256, flush_record_threshold * 32);
 
-    auto prepare_fresh_batch = [&]() {
-        batch.prepare(flush_record_threshold, is_fastq_format);
-        batch.reserve_storage(
-            header_bytes_hint, sequence_words_hint,
-            is_fastq_format ? flush_record_threshold * 256 : 0);
-    };
+    auto prepare_fresh_batch =
+        [&batch, &flush_record_threshold, &header_bytes_hint, &sequence_words_hint]() {
+            batch.prepare(flush_record_threshold, is_fastq_format);
+            batch.reserve_storage(header_bytes_hint,
+                                  sequence_words_hint,
+                                  is_fastq_format ? flush_record_threshold * 256 : 0);
+        };
 
-    auto flush_batch = [&]() {
-        if (batch.empty()) return;
+    auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
+        if (batch.empty())
+            return;
         handler_fn(std::move(batch));
         batch = batch_type{};
         prepare_fresh_batch();
@@ -635,10 +622,10 @@ run_sync_pipeline_mmap_direct(
 
     if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
-        parser_state.attach_to_batch(batch.header_storage(),
-                                     batch.sequence_storage());
+        parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
-        auto emit_fasta_record = [&](std::size_t /*header_start*/,
+        auto emit_fasta_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
+                                     std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
                                      std::size_t /*seq_start*/,
                                      std::size_t /*seq_word_count*/,
@@ -647,27 +634,26 @@ run_sync_pipeline_mmap_direct(
             batch.sequence_offsets().push_back(batch.sequence_storage().size());
             batch.sequence_paddings().push_back(padding);
             ++records_emitted;
-            if (batch.size() >= flush_record_threshold) flush_batch();
+            if (batch.size() >= flush_record_threshold)
+                flush_batch();
         };
 
         std::size_t cursor = 0;
         while (cursor < view_size && !aborted) {
-            parser_state.attach_to_batch(batch.header_storage(),
-                                         batch.sequence_storage());
-            const auto step = parse_one_fasta_record<
-                p_alphabet,
-                std::uint64_t>(
-                parser_state,
-                base_ptr,
-                view_size,
-                /*is_eof=*/true,
-                cursor,
-                cursor,
-                emit_fasta_record,
-                failure_capture);
+            parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
+            const auto step = parse_one_fasta_record<p_alphabet, std::uint64_t>(parser_state,
+                                                                                base_ptr,
+                                                                                view_size,
+                                                                                /*is_eof=*/true,
+                                                                                cursor,
+                                                                                cursor,
+                                                                                emit_fasta_record,
+                                                                                failure_capture);
             cursor = step.cursor;
-            if (step.outcome == parse_outcome::complete) continue;
-            if (step.outcome == parse_outcome::at_end_of_file) break;
+            if (step.outcome == parse_outcome::complete)
+                continue;
+            if (step.outcome == parse_outcome::at_end_of_file)
+                break;
             if (step.outcome == parse_outcome::abort) {
                 return std::unexpected(captured_error);
             }
@@ -677,15 +663,16 @@ run_sync_pipeline_mmap_direct(
             break;
         }
         flush_batch();
-        if (aborted) return std::unexpected(captured_error);
+        if (aborted)
+            return std::unexpected(captured_error);
         return records_emitted;
     } else {
         fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
-        parser_state.attach_to_batch(batch.header_storage(),
-                                     batch.sequence_storage(),
-                                     batch.quality_storage());
+        parser_state.attach_to_batch(
+            batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
-        auto emit_fastq_record = [&](std::size_t /*header_start*/,
+        auto emit_fastq_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
+                                     std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
                                      std::size_t /*seq_start*/,
                                      std::size_t /*seq_word_count*/,
@@ -697,26 +684,24 @@ run_sync_pipeline_mmap_direct(
             batch.sequence_paddings().push_back(padding);
             batch.quality_offsets().push_back(batch.quality_storage().size());
             ++records_emitted;
-            if (batch.size() >= flush_record_threshold) flush_batch();
+            if (batch.size() >= flush_record_threshold)
+                flush_batch();
         };
 
         std::size_t cursor = 0;
         while (cursor < view_size && !aborted) {
-            parser_state.attach_to_batch(batch.header_storage(),
-                                         batch.sequence_storage(),
-                                         batch.quality_storage());
-            const auto step = parse_one_fastq_record<
-                p_alphabet,
-                std::uint64_t>(
-                parser_state,
-                base_ptr,
-                view_size,
-                /*is_eof=*/true,
-                cursor,
-                cursor,
-                options.encoder.strict_fastq,
-                emit_fastq_record,
-                failure_capture);
+            parser_state.attach_to_batch(
+                batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
+            const auto step =
+                parse_one_fastq_record<p_alphabet, std::uint64_t>(parser_state,
+                                                                  base_ptr,
+                                                                  view_size,
+                                                                  /*is_eof=*/true,
+                                                                  cursor,
+                                                                  cursor,
+                                                                  options.encoder.strict_fastq,
+                                                                  emit_fastq_record,
+                                                                  failure_capture);
             cursor = step.cursor;
             if (step.outcome == parse_outcome::complete) continue;
             if (step.outcome == parse_outcome::at_end_of_file) break;
@@ -922,10 +907,9 @@ run_sync_pipeline_mmap_parallel(
     // amortises across the rest of the shard. The growth memcpy is
     // bandwidth-bound and parallelises across shards; the demand-zero
     // is kernel-serialised and does not.
-    const std::size_t flush_record_threshold =
-        (options.concurrency.batch_target_record_count > 0)
-            ? options.concurrency.batch_target_record_count
-            : 4096;
+    const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
+                                                   ? options.concurrency.batch_target_record_count
+                                                   : 4096;
 
     // Concurrency state.
     std::mutex emit_mutex;
@@ -934,18 +918,29 @@ run_sync_pipeline_mmap_parallel(
     std::mutex error_mutex;
     std::string captured_error;
 
-    auto failure_capture = [&](std::string&& msg) {
-        std::lock_guard guard{error_mutex};
-        if (!aborted.exchange(true, std::memory_order_acq_rel)) {
-            captured_error = std::move(msg);
-            failure_fn(std::string{captured_error});
-        }
-    };
+    auto failure_capture =
+        [&aborted, &captured_error, &error_mutex, &failure_fn](std::string&& msg) {
+            std::lock_guard guard{error_mutex};
+            if (!aborted.exchange(true, std::memory_order_acq_rel)) {
+                captured_error = std::move(msg);
+                failure_fn(std::string{captured_error});
+            }
+        };
 
-    auto run_shard = [&](std::size_t shard_index) {
+    auto run_shard = [&aborted,
+                      &base_ptr,
+                      &boundaries,
+                      &emit_mutex,
+                      &failure_capture,
+                      &flush_record_threshold,
+                      &handler_fn,
+                      &is_fastq_format,
+                      &options,
+                      &total_records](std::size_t shard_index) {
         const std::size_t shard_start = boundaries[shard_index];
         const std::size_t shard_end = boundaries[shard_index + 1];
-        if (shard_start >= shard_end) return;
+        if (shard_start >= shard_end)
+            return;
         const std::size_t shard_size = shard_end - shard_start;
 
         // Shard-private batch and parser state. The reservation
@@ -966,27 +961,30 @@ run_sync_pipeline_mmap_parallel(
         // synthetic cells that fall below the parallel threshold but
         // would otherwise reserve too little for one batch.
         batch_type batch;
-        const std::size_t shard_seq_words_hint = std::max<std::size_t>(
-            shard_size / 16, flush_record_threshold * 8);
-        const std::size_t shard_header_bytes_hint = std::max<std::size_t>(
-            shard_size / 256, flush_record_threshold * 32);
-        const std::size_t shard_quality_bytes_hint = is_fastq_format
-            ? std::max<std::size_t>(shard_size / 4,
-                                    flush_record_threshold * 256)
-            : 0;
+        const std::size_t shard_seq_words_hint =
+            std::max<std::size_t>(shard_size / 16, flush_record_threshold * 8);
+        const std::size_t shard_header_bytes_hint =
+            std::max<std::size_t>(shard_size / 256, flush_record_threshold * 32);
+        const std::size_t shard_quality_bytes_hint =
+            is_fastq_format ? std::max<std::size_t>(shard_size / 4, flush_record_threshold * 256)
+                            : 0;
 
-        auto prepare_fresh_batch = [&]() {
+        auto prepare_fresh_batch = [&batch,
+                                    &flush_record_threshold,
+                                    &shard_header_bytes_hint,
+                                    &shard_quality_bytes_hint,
+                                    &shard_seq_words_hint]() {
             batch.prepare(flush_record_threshold, is_fastq_format);
-            batch.reserve_storage(shard_header_bytes_hint,
-                                  shard_seq_words_hint,
-                                  shard_quality_bytes_hint);
+            batch.reserve_storage(
+                shard_header_bytes_hint, shard_seq_words_hint, shard_quality_bytes_hint);
         };
         prepare_fresh_batch();
 
         std::size_t shard_records = 0;
 
-        auto flush_batch = [&]() {
-            if (batch.empty()) return;
+        auto flush_batch = [&batch, &emit_mutex, &handler_fn, &prepare_fresh_batch]() {
+            if (batch.empty())
+                return;
             // Hand the batch to the user handler under a mutex. The
             // handler call rate is one per ~4 K records (roughly once
             // per millisecond at 5 GB/s), so the lock cost is invisible
@@ -1000,83 +998,92 @@ run_sync_pipeline_mmap_parallel(
         };
 
         if constexpr (p_file_format == sequence_file_format::fasta) {
-            fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit>
-                parser_state;
-            parser_state.attach_to_batch(batch.header_storage(),
-                                         batch.sequence_storage());
+            fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
+            parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
-            auto emit_fasta_record = [&](std::size_t /*hs*/, std::size_t /*hsz*/,
-                                         std::size_t /*ss*/, std::size_t /*sw*/,
-                                         std::size_t padding) {
+            auto emit_fasta_record = [&batch,
+                                      &flush_batch,
+                                      &shard_records,
+                                      &flush_record_threshold](std::size_t /*hs*/,
+                                                               std::size_t /*hsz*/,
+                                                               std::size_t /*ss*/,
+                                                               std::size_t /*sw*/,
+                                                               std::size_t padding) {
                 batch.header_offsets().push_back(batch.header_storage().size());
                 batch.sequence_offsets().push_back(batch.sequence_storage().size());
                 batch.sequence_paddings().push_back(padding);
                 ++shard_records;
-                if (batch.size() >= flush_record_threshold) flush_batch();
+                if (batch.size() >= flush_record_threshold)
+                    flush_batch();
             };
 
             std::size_t cursor = shard_start;
-            while (cursor < shard_end &&
-                   !aborted.load(std::memory_order_relaxed)) {
-                parser_state.attach_to_batch(batch.header_storage(),
-                                             batch.sequence_storage());
+            while (cursor < shard_end && !aborted.load(std::memory_order_relaxed)) {
+                parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
                 const auto step =
-                    parse_one_fasta_record<p_alphabet, std::uint64_t>(
-                        parser_state,
-                        base_ptr,
-                        shard_end,
-                        /*is_eof=*/true,
-                        cursor,
-                        cursor,
-                        emit_fasta_record,
-                        failure_capture);
+                    parse_one_fasta_record<p_alphabet, std::uint64_t>(parser_state,
+                                                                      base_ptr,
+                                                                      shard_end,
+                                                                      /*is_eof=*/true,
+                                                                      cursor,
+                                                                      cursor,
+                                                                      emit_fasta_record,
+                                                                      failure_capture);
                 cursor = step.cursor;
-                if (step.outcome == parse_outcome::complete) continue;
-                if (step.outcome == parse_outcome::at_end_of_file) break;
-                if (step.outcome == parse_outcome::abort) return;
-                break;  // INCOMPLETE on is_eof=true → diagnostic
+                if (step.outcome == parse_outcome::complete)
+                    continue;
+                if (step.outcome == parse_outcome::at_end_of_file)
+                    break;
+                if (step.outcome == parse_outcome::abort)
+                    return;
+                break; // INCOMPLETE on is_eof=true → diagnostic
             }
             flush_batch();
         } else {
-            fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit>
-                parser_state;
-            parser_state.attach_to_batch(batch.header_storage(),
-                                         batch.sequence_storage(),
-                                         batch.quality_storage());
+            fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
+            parser_state.attach_to_batch(
+                batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
-            auto emit_fastq_record = [&](std::size_t /*hs*/, std::size_t /*hsz*/,
-                                         std::size_t /*ss*/, std::size_t /*sw*/,
-                                         std::size_t padding,
-                                         std::size_t /*qs*/, std::size_t /*qsz*/) {
+            auto emit_fastq_record = [&batch,
+                                      &flush_batch,
+                                      &shard_records,
+                                      &flush_record_threshold](std::size_t /*hs*/,
+                                                               std::size_t /*hsz*/,
+                                                               std::size_t /*ss*/,
+                                                               std::size_t /*sw*/,
+                                                               std::size_t padding,
+                                                               std::size_t /*qs*/,
+                                                               std::size_t /*qsz*/) {
                 batch.header_offsets().push_back(batch.header_storage().size());
                 batch.sequence_offsets().push_back(batch.sequence_storage().size());
                 batch.sequence_paddings().push_back(padding);
                 batch.quality_offsets().push_back(batch.quality_storage().size());
                 ++shard_records;
-                if (batch.size() >= flush_record_threshold) flush_batch();
+                if (batch.size() >= flush_record_threshold)
+                    flush_batch();
             };
 
             std::size_t cursor = shard_start;
-            while (cursor < shard_end &&
-                   !aborted.load(std::memory_order_relaxed)) {
-                parser_state.attach_to_batch(batch.header_storage(),
-                                             batch.sequence_storage(),
-                                             batch.quality_storage());
+            while (cursor < shard_end && !aborted.load(std::memory_order_relaxed)) {
+                parser_state.attach_to_batch(
+                    batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
                 const auto step =
-                    parse_one_fastq_record<p_alphabet, std::uint64_t>(
-                        parser_state,
-                        base_ptr,
-                        shard_end,
-                        /*is_eof=*/true,
-                        cursor,
-                        cursor,
-                        options.encoder.strict_fastq,
-                        emit_fastq_record,
-                        failure_capture);
+                    parse_one_fastq_record<p_alphabet, std::uint64_t>(parser_state,
+                                                                      base_ptr,
+                                                                      shard_end,
+                                                                      /*is_eof=*/true,
+                                                                      cursor,
+                                                                      cursor,
+                                                                      options.encoder.strict_fastq,
+                                                                      emit_fastq_record,
+                                                                      failure_capture);
                 cursor = step.cursor;
-                if (step.outcome == parse_outcome::complete) continue;
-                if (step.outcome == parse_outcome::at_end_of_file) break;
-                if (step.outcome == parse_outcome::abort) return;
+                if (step.outcome == parse_outcome::complete)
+                    continue;
+                if (step.outcome == parse_outcome::at_end_of_file)
+                    break;
+                if (step.outcome == parse_outcome::abort)
+                    return;
                 break;
             }
             flush_batch();
@@ -1182,27 +1189,19 @@ template <
 /// with `logical_length == words.size()*letters_per_unit`; the final window has
 /// `end_of_record == true` and `logical_length` ≤ that), then `sink.end_record()`
 /// once. The `words` span is valid ONLY during the `chunk` call.
-template <
-    sequence_alphabet p_alphabet,
-    typename p_storage_unit,
-    sequence_file_format p_file_format,
-    io_source p_source,
-    typename p_sink,
-    typename p_failure>
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          sequence_file_format p_file_format,
+          io_source p_source,
+          typename p_sink,
+          typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string> run_sync_stream(
-    p_source source,
-    p_sink&& sink,
-    p_failure&& failure_fn,
-    const reader_options& options) {
+    p_source source, p_sink&& sink, p_failure&& failure_fn, const reader_options& options) {
 
-    using stream_config_type =
-        sequence_custom_alphabet<p_alphabet, p_storage_unit>;
-    using stream_traits_type =
-        typename compact_sequence_range<stream_config_type>::traits;
-    constexpr std::size_t bits_per_char =
-        stream_traits_type::bits_per_char;
-    constexpr std::size_t letters_per_unit =
-        stream_traits_type::letters_per_unit;
+    using stream_config_type = sequence_custom_alphabet<p_alphabet, p_storage_unit>;
+    using stream_traits_type = typename compact_sequence_range<stream_config_type>::traits;
+    constexpr std::size_t bits_per_char = stream_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit = stream_traits_type::letters_per_unit;
 
     buffer_slab slab(options.io.initial_buffer_size);
     std::size_t records_emitted = 0;
@@ -1210,8 +1209,11 @@ template <
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
-    auto failure_capture = [&](std::string&& msg) {
-        if (!aborted) { captured_error = msg; failure_fn(std::move(msg)); }
+    auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
+        if (!aborted) {
+            captured_error = msg;
+            failure_fn(std::move(msg));
+        }
         aborted = true;
     };
 
@@ -1221,44 +1223,44 @@ template <
     // size stays within ~one slab of body. `record_start_offset` in the
     // encoder stays 0 because every record starts (and every mid-record drain
     // leaves) `seq_scratch` empty.
-    std::vector<char>           header_scratch;
+    std::vector<char> header_scratch;
     std::vector<p_storage_unit> seq_scratch;
-    std::vector<std::uint8_t>   quality_scratch;     // FASTQ; content ignored
+    std::vector<std::uint8_t> quality_scratch; // FASTQ; content ignored
 
-    bool          record_open      = false;          // begin_record already called
-    std::size_t   completed_header_start = 0;
-    std::size_t   completed_header_size  = 0;
-    std::size_t   completed_padding      = 0;        // padding of the record's last
-                                                     // unit, captured in the emit
-                                                     // callback (fires BEFORE the FSM
-                                                     // resets its per-record counters)
+    bool record_open = false; // begin_record already called
+    std::size_t completed_header_start = 0;
+    std::size_t completed_header_size = 0;
+    std::size_t completed_padding = 0; // padding of the record's last
+                                       // unit, captured in the emit
+                                       // callback (fires BEFORE the FSM
+                                       // resets its per-record counters)
 
-    auto reset_record = [&]() {
-        header_scratch.clear();
-        seq_scratch.clear();
-        quality_scratch.clear();
-        record_open       = false;
-        completed_padding = 0;
-    };
+    auto reset_record =
+        [&completed_padding, &header_scratch, &quality_scratch, &record_open, &seq_scratch]() {
+            header_scratch.clear();
+            seq_scratch.clear();
+            quality_scratch.clear();
+            record_open = false;
+            completed_padding = 0;
+        };
 
-    auto emit_stream_chunk = [&](std::uint64_t chunk_bp, bool end_of_record) {
-        if constexpr (requires (
-                p_sink& sink_ref,
-                std::vector<p_storage_unit>&& owned_words,
-                std::uint64_t bp,
-                bool eof) {
-                sink_ref.chunk_owned(std::move(owned_words), bp, eof);
-            }) {
+    auto emit_stream_chunk = [&options, &quality_scratch, &seq_scratch, &sink](
+                                 std::uint64_t chunk_bp, bool end_of_record) {
+        if constexpr (requires(p_sink& sink_ref,
+                               std::vector<p_storage_unit>&& owned_words,
+                               std::uint64_t bp,
+                               bool eof) {
+                          sink_ref.chunk_owned(std::move(owned_words), bp, eof);
+                      }) {
             sink.chunk_owned(std::move(seq_scratch), chunk_bp, end_of_record);
             seq_scratch = {};
-            seq_scratch.reserve(
-                std::max<std::size_t>(
-                    options.io.initial_buffer_size / sizeof(p_storage_unit),
-                    1024));
+            seq_scratch.reserve(std::max<std::size_t>(
+                options.io.initial_buffer_size / sizeof(p_storage_unit), 1024));
         } else {
             sink.chunk(packed_sequence_chunk<p_storage_unit>{
                 std::span<const p_storage_unit>(seq_scratch.data(), seq_scratch.size()),
-                chunk_bp, end_of_record});
+                chunk_bp,
+                end_of_record});
             seq_scratch.clear();
         }
         quality_scratch.clear();
@@ -1266,19 +1268,20 @@ template <
 
     // Drain the completed words accumulated so far as a non-final chunk. Only
     // valid mid-record (body started ⇒ header complete). Keeps RSS bounded.
-    auto drain_partial = [&]() {
-        if (seq_scratch.empty()) return;
-        if (!record_open) {
-            sink.begin_record(
-                std::string_view(header_scratch.data(), header_scratch.size()));
-            record_open = true;
-        }
-        // Mid-record drained words are ALWAYS full storage units (the FSM only
-        // flushes a partial unit at record finalize), so the chunk has no padding.
-        const std::uint64_t chunk_bp =
-            static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
-        emit_stream_chunk(chunk_bp, /*end_of_record=*/false);
-    };
+    auto drain_partial =
+        [&emit_stream_chunk, &header_scratch, &record_open, &seq_scratch, &sink]() {
+            if (seq_scratch.empty())
+                return;
+            if (!record_open) {
+                sink.begin_record(std::string_view(header_scratch.data(), header_scratch.size()));
+                record_open = true;
+            }
+            // Mid-record drained words are ALWAYS full storage units (the FSM only
+            // flushes a partial unit at record finalize), so the chunk has no padding.
+            const std::uint64_t chunk_bp =
+                static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
+            emit_stream_chunk(chunk_bp, /*end_of_record=*/false);
+        };
 
     // Emit the final chunk + end the record. The final chunk's bp is the words
     // still in `seq_scratch` (those since the last drain) minus the record's
@@ -1286,10 +1289,19 @@ template <
     // `parse_one_*_record` calls `reset_for_next_record()` (which zeroes it)
     // BEFORE returning COMPLETE, so by this point it is already 0. The padding was
     // captured in the emit callback, which fires just before that reset.
-    auto complete_record = [&]() {
+    auto complete_record = [&completed_header_size,
+                            &completed_header_start,
+                            &completed_padding,
+                            &emit_stream_chunk,
+                            &header_scratch,
+                            &record_open,
+                            &records_emitted,
+                            &reset_record,
+                            &seq_scratch,
+                            &sink]() {
         if (!record_open) {
-            sink.begin_record(std::string_view(
-                header_scratch.data() + completed_header_start, completed_header_size));
+            sink.begin_record(std::string_view(header_scratch.data() + completed_header_start,
+                                               completed_header_size));
             record_open = true;
         }
         const std::uint64_t scratch_bp =
@@ -1302,33 +1314,36 @@ template <
         reset_record();
     };
 
-    auto capture_completion = [&](std::size_t header_start, std::size_t header_size,
-                                  std::size_t padding) {
-        completed_header_start = header_start;
-        completed_header_size  = header_size;
-        completed_padding      = padding;
-    };
+    auto capture_completion =
+        [&completed_header_size, &completed_header_start, &completed_padding](
+            std::size_t header_start, std::size_t header_size, std::size_t padding) {
+            completed_header_start = header_start;
+            completed_header_size = header_size;
+            completed_padding = padding;
+        };
 
     if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
-        auto emit_fasta = [&](std::size_t header_start, std::size_t header_size,
-                              std::size_t, std::size_t, std::size_t padding) {
+        auto emit_fasta = [&capture_completion](std::size_t header_start,
+                                                std::size_t header_size,
+                                                std::size_t,
+                                                std::size_t,
+                                                std::size_t padding) {
             capture_completion(header_start, header_size, padding);
         };
         while (!aborted) {
             if (slab.fill_size == slab.capacity) {
                 if (!slab.make_room()) {
                     if (!slab.grow(options)) {
-                        emit_failure(failure_capture,
-                                     "buffer_limit reached at {} bytes", slab.capacity);
+                        emit_failure(
+                            failure_capture, "buffer_limit reached at {} bytes", slab.capacity);
                         break;
                     }
                 }
             }
             const std::size_t free_room = slab.capacity - slab.fill_size;
             if (free_room > 0 && !slab.is_eof) {
-                const auto refill_result =
-                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                const auto refill_result = source.read_into(slab.raw() + slab.fill_size, free_room);
                 if (refill_result.has_error) {
                     emit_failure(failure_capture, "{}", source.last_error_message());
                     break;
@@ -1339,33 +1354,41 @@ template <
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch);
-                const auto step = parse_one_fasta_record<
-                    p_alphabet,
-                    p_storage_unit>(
-                    parser_state, slab.raw(), slab.fill_size, slab.is_eof,
-                    slab.parse_cursor, global_offset_base + slab.parse_cursor,
-                    emit_fasta, failure_capture);
+                const auto step = parse_one_fasta_record<p_alphabet, p_storage_unit>(
+                    parser_state,
+                    slab.raw(),
+                    slab.fill_size,
+                    slab.is_eof,
+                    slab.parse_cursor,
+                    global_offset_base + slab.parse_cursor,
+                    emit_fasta,
+                    failure_capture);
                 slab.parse_cursor = step.cursor;
                 if (step.outcome == parse_outcome::complete) {
                     complete_record();
                     continue;
                 }
                 if (step.outcome == parse_outcome::at_end_of_file) {
-                    if (record_open) complete_record();
-                    if (aborted) return std::unexpected(captured_error);
+                    if (record_open)
+                        complete_record();
+                    if (aborted)
+                        return std::unexpected(captured_error);
                     return records_emitted;
                 }
                 if (step.outcome == parse_outcome::abort) {
                     return std::unexpected(captured_error);
                 }
-                drain_partial();          // INCOMPLETE: bound RSS before refill
+                drain_partial(); // INCOMPLETE: bound RSS before refill
                 need_refill = true;
                 break;
             }
-            if (!need_refill) continue;
+            if (!need_refill)
+                continue;
             if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
-                if (record_open) complete_record();
-                if (aborted) return std::unexpected(captured_error);
+                if (record_open)
+                    complete_record();
+                if (aborted)
+                    return std::unexpected(captured_error);
                 return records_emitted;
             }
             global_offset_base += slab.parse_cursor;
@@ -1375,25 +1398,28 @@ template <
 
     } else {
         fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
-        auto emit_fastq = [&](std::size_t header_start, std::size_t header_size,
-                              std::size_t, std::size_t, std::size_t padding,
-                              std::size_t, std::size_t) {
+        auto emit_fastq = [&capture_completion](std::size_t header_start,
+                                                std::size_t header_size,
+                                                std::size_t,
+                                                std::size_t,
+                                                std::size_t padding,
+                                                std::size_t,
+                                                std::size_t) {
             capture_completion(header_start, header_size, padding);
         };
         while (!aborted) {
             if (slab.fill_size == slab.capacity) {
                 if (!slab.make_room()) {
                     if (!slab.grow(options)) {
-                        emit_failure(failure_capture,
-                                     "buffer_limit reached at {} bytes", slab.capacity);
+                        emit_failure(
+                            failure_capture, "buffer_limit reached at {} bytes", slab.capacity);
                         break;
                     }
                 }
             }
             const std::size_t free_room = slab.capacity - slab.fill_size;
             if (free_room > 0 && !slab.is_eof) {
-                const auto refill_result =
-                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                const auto refill_result = source.read_into(slab.raw() + slab.fill_size, free_room);
                 if (refill_result.has_error) {
                     emit_failure(failure_capture, "{}", source.last_error_message());
                     break;
@@ -1476,49 +1502,44 @@ template <typename p_failure, typename p_on_source>
         auto gz_or_err = gzip_source::try_open(path_view);
         if (!gz_or_err) {
             failure_fn(std::string{gz_or_err.error()});
-            return result_type{
-                std::unexpect,
-                std::string{gz_or_err.error()}};
+            return result_type{std::unexpect, std::string{gz_or_err.error()}};
         }
         return on_source(std::move(*gz_or_err));
     }
     auto posix_or_err = posix_read_source::try_open(path_view);
     if (!posix_or_err) {
         failure_fn(std::string{posix_or_err.error()});
-        return result_type{
-            std::unexpect,
-            std::string{posix_or_err.error()}};
+        return result_type{std::unexpect, std::string{posix_or_err.error()}};
     }
     return on_source(std::move(*posix_or_err));
 }
 
-}  // namespace detail
+} // namespace detail
 
 /// Public entry point. Reads FASTA / FASTQ from a file path, emits
 /// per-batch records via `handler_fn`, and reports the first terminal
 /// failure via `failure_fn`. Returns the count of records emitted on
 /// success, or the diagnostic message on failure (as a `std::expected`).
 /// Spec §3.5.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    typename p_path,
-    typename p_handler,
-    typename p_failure>
-[[nodiscard]] std::expected<std::size_t, std::string> read_sequences_file(
-    p_path&& file_path,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options = default_reader_options,
-    reader_backend* observed_backend = nullptr) {
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          typename p_path,
+          typename p_handler,
+          typename p_failure>
+[[nodiscard]] std::expected<std::size_t, std::string>
+read_sequences_file(p_path&& file_path,
+                    p_handler&& handler_fn,
+                    p_failure&& failure_fn,
+                    const reader_options& options = default_reader_options,
+                    reader_backend* observed_backend = nullptr) {
 
     static_assert(std::convertible_to<p_path, std::string_view>,
                   "file_path must be convertible to std::string_view");
-    const std::string_view path_view = std::string_view{
-        std::forward<p_path>(file_path)};
+    const std::string_view path_view = std::string_view{std::forward<p_path>(file_path)};
 
-    const auto record_backend = [&](reader_backend backend) noexcept {
-        if (observed_backend) *observed_backend = backend;
+    const auto record_backend = [&observed_backend](reader_backend backend) noexcept {
+        if (observed_backend)
+            *observed_backend = backend;
     };
     record_backend(reader_backend::unknown);
 
@@ -1532,31 +1553,29 @@ template <
     //      gzip_source (covers the "user explicitly asked for gzip
     //      auto-detect on a non-mmap'd reader" path).
     if (options.io.prefer_mmap) {
-        auto mmap_or_err =
-            mmap_source::try_open_with_magic(path_view, options);
+        auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
         if (mmap_or_err) {
             if (mmap_or_err->is_gzipped) {
-                const bool size_ok = mmap_or_err->file_size >=
-                    options.io.parallel_gzip_min_compressed_bytes;
+                const bool size_ok =
+                    mmap_or_err->file_size >= options.io.parallel_gzip_min_compressed_bytes;
                 if (options.io.parallel_gzip_enabled && size_ok) {
-                    auto pgz_or_err =
-                        parallel_gzip_source::try_open_from_mmap(
-                            std::move(mmap_or_err->source), options);
+                    auto pgz_or_err = parallel_gzip_source::try_open_from_mmap(
+                        std::move(mmap_or_err->source), options);
                     if (pgz_or_err) {
                         record_backend(reader_backend::parallel_gzip);
-                        return detail::run_pipeline_for_source<
-                            p_alphabet,
-                            p_file_format,
-                            parallel_gzip_source>(
+                        return detail::run_pipeline_for_source<p_alphabet,
+                                                               p_file_format,
+                                                               parallel_gzip_source>(
                             std::move(*pgz_or_err),
                             std::forward<p_handler>(handler_fn),
                             std::forward<p_failure>(failure_fn),
                             options);
                     }
                     bioseq_log<logging_level::debug>("[bioseq_io] parallel_gzip_source failed for "
-                            "'{}': {}; falling back to single-thread "
-                            "gzip_source",
-                            path_view, pgz_or_err.error());
+                                                     "'{}': {}; falling back to single-thread "
+                                                     "gzip_source",
+                                                     path_view,
+                                                     pgz_or_err.error());
                 }
                 // Construction-time fallback. Mid-stream errors are
                 // TERMINAL — never restart from byte 0; that would
@@ -1567,24 +1586,23 @@ template <
                     return std::unexpected(gz_or_err.error());
                 }
                 record_backend(reader_backend::gzip);
-                return detail::run_pipeline_for_source<
-                    p_alphabet, p_file_format, gzip_source>(
+                return detail::run_pipeline_for_source<p_alphabet, p_file_format, gzip_source>(
                     std::move(*gz_or_err),
                     std::forward<p_handler>(handler_fn),
                     std::forward<p_failure>(failure_fn),
                     options);
             }
             record_backend(reader_backend::memory_mapped);
-            return detail::run_pipeline_for_source<
-                p_alphabet, p_file_format, mmap_source>(
+            return detail::run_pipeline_for_source<p_alphabet, p_file_format, mmap_source>(
                 std::move(mmap_or_err->source),
                 std::forward<p_handler>(handler_fn),
                 std::forward<p_failure>(failure_fn),
                 options);
         }
         bioseq_log<logging_level::debug>("[bioseq_io] mmap_source unavailable for '{}': {}; "
-                "falling back to posix_read_source",
-                path_view, mmap_or_err.error());
+                                         "falling back to posix_read_source",
+                                         path_view,
+                                         mmap_or_err.error());
     }
     if (options.io.gzip_auto_detect) {
         auto gzip_source_or_err = gzip_source::try_open(path_view);
@@ -1593,8 +1611,7 @@ template <
             return std::unexpected(gzip_source_or_err.error());
         }
         record_backend(reader_backend::gzip);
-        return detail::run_pipeline_for_source<
-            p_alphabet, p_file_format, gzip_source>(
+        return detail::run_pipeline_for_source<p_alphabet, p_file_format, gzip_source>(
             std::move(*gzip_source_or_err),
             std::forward<p_handler>(handler_fn),
             std::forward<p_failure>(failure_fn),
@@ -1606,8 +1623,7 @@ template <
         return std::unexpected(posix_source_or_err.error());
     }
     record_backend(reader_backend::posix_read);
-    return detail::run_pipeline_for_source<
-        p_alphabet, p_file_format, posix_read_source>(
+    return detail::run_pipeline_for_source<p_alphabet, p_file_format, posix_read_source>(
         std::move(*posix_source_or_err),
         std::forward<p_handler>(handler_fn),
         std::forward<p_failure>(failure_fn),
@@ -1623,17 +1639,16 @@ template <
 /// buffer. Always single-threaded (the columnar write state + seq_caches are
 /// single-backend); gzip is still magic-byte sniffed by the source. Returns the
 /// record count, or the first terminal diagnostic.
-template <
-    sequence_alphabet p_alphabet,
-    typename p_storage_unit,
-    sequence_file_format p_file_format,
-    typename p_sink,
-    typename p_failure>
-[[nodiscard]] std::expected<std::size_t, std::string> stream_sequences_file(
-    const char* path,
-    p_sink&& sink,
-    p_failure&& failure_fn,
-    reader_options options = default_reader_options) {
+template <sequence_alphabet p_alphabet,
+          typename p_storage_unit,
+          sequence_file_format p_file_format,
+          typename p_sink,
+          typename p_failure>
+[[nodiscard]] std::expected<std::size_t, std::string>
+stream_sequences_file(const char* path,
+                      p_sink&& sink,
+                      p_failure&& failure_fn,
+                      reader_options options = default_reader_options) {
     // Streaming is single-threaded by contract: no async workers and no
     // mmap-parallel shards.
     options.concurrency.worker_count = 0;
@@ -1644,14 +1659,9 @@ template <
     // `read_decompressed_prefix` via `detail::with_selected_source`; the chosen
     // (concrete) source is streamed through `run_sync_stream`.
     return detail::with_selected_source(
-        path_view, options, failure_fn,
-        [&](auto&& src) {
+        path_view, options, failure_fn, [&failure_fn, &options, &sink](auto&& src) {
             using source_type = std::remove_reference_t<decltype(src)>;
-            return detail::run_sync_stream<
-                p_alphabet,
-                p_storage_unit,
-                p_file_format,
-                source_type>(
+            return detail::run_sync_stream<p_alphabet, p_storage_unit, p_file_format, source_type>(
                 std::move(src), sink, failure_fn, options);
         });
 }
@@ -1661,28 +1671,30 @@ template <
 /// `stream_sequences_file` (`detail::with_selected_source`). Used by auto-mode
 /// header sampling; gzip is transparently decompressed by `gzip_source`.
 [[nodiscard]] inline std::expected<std::string, std::string>
-read_decompressed_prefix(const char* path, std::size_t max_bytes,
-                         const reader_options& options) {
+read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_options& options) {
     const std::string_view path_view{path};
     std::string open_error;
-    auto on_open_fail = [&](std::string&& msg) {
-        if (open_error.empty()) open_error = std::move(msg);
+    auto on_open_fail = [&open_error](std::string&& msg) {
+        if (open_error.empty())
+            open_error = std::move(msg);
     };
     return detail::with_selected_source(
-        path_view, options, on_open_fail,
-        [&](auto&& src) -> std::expected<std::string, std::string> {
+        path_view,
+        options,
+        on_open_fail,
+        [&max_bytes](auto&& src) -> std::expected<std::string, std::string> {
             std::string out;
             out.resize(max_bytes);
             std::size_t total = 0;
             while (total < max_bytes) {
-                const auto r = src.read_into(
-                    reinterpret_cast<std::uint8_t*>(out.data()) + total,
-                    max_bytes - total);
+                const auto r = src.read_into(reinterpret_cast<std::uint8_t*>(out.data()) + total,
+                                             max_bytes - total);
                 if (r.has_error)
-                    return std::unexpected(std::string{
-                        "bioseq.load: failed to read file prefix for header sampling"});
+                    return std::unexpected(
+                        std::string{"bioseq.load: failed to read file prefix for header sampling"});
                 total += r.bytes_read;
-                if (r.is_eof || r.bytes_read == 0) break;
+                if (r.is_eof || r.bytes_read == 0)
+                    break;
             }
             out.resize(total);
             return out;
@@ -1696,12 +1708,14 @@ read_decompressed_prefix(const char* path, std::size_t max_bytes,
 /// FASTQ never mistakes a `@` inside a quality line for a header (HIGH-03). Line
 /// ends are found via the existing SIMD `scan_first_byte('\n', …)` kernel.
 [[nodiscard]] inline std::expected<std::vector<std::string>, std::string>
-sample_sequence_headers(const char* path, sequence_file_format file_type,
+sample_sequence_headers(const char* path,
+                        sequence_file_format file_type,
                         const reader_options& options,
                         std::size_t max_headers = 16,
                         std::size_t max_bytes = 256 * 1024) {
     auto prefix_or = read_decompressed_prefix(path, max_bytes, options);
-    if (!prefix_or) return std::unexpected(prefix_or.error());
+    if (!prefix_or)
+        return std::unexpected(prefix_or.error());
     const std::string& prefix = *prefix_or;
     const auto* base = reinterpret_cast<const std::uint8_t*>(prefix.data());
     const std::size_t n = prefix.size();
@@ -1709,10 +1723,11 @@ sample_sequence_headers(const char* path, sequence_file_format file_type,
     std::vector<std::string> headers;
     headers.reserve(max_headers);
     auto rstrip_cr = [](std::string_view s) {
-        if (!s.empty() && s.back() == '\r') s.remove_suffix(1);
+        if (!s.empty() && s.back() == '\r')
+            s.remove_suffix(1);
         return s;
     };
-    auto line_end_at = [&](std::size_t cursor) {
+    auto line_end_at = [&base, &n](std::size_t cursor) {
         return cursor + simd::scan_first_byte('\n', base + cursor, n - cursor);
     };
 
@@ -1721,19 +1736,20 @@ sample_sequence_headers(const char* path, sequence_file_format file_type,
         while (headers.size() < max_headers && cursor < n) {
             if ((cursor == 0 || prefix[cursor - 1] == '\n') && prefix[cursor] == '>') {
                 const std::size_t le = line_end_at(cursor);
-                headers.emplace_back(rstrip_cr(
-                    std::string_view{prefix}.substr(
-                        cursor + 1, le > cursor + 1 ? le - (cursor + 1) : 0)));
+                headers.emplace_back(rstrip_cr(std::string_view{prefix}.substr(
+                    cursor + 1, le > cursor + 1 ? le - (cursor + 1) : 0)));
                 cursor = le + 1;
             } else {
                 const std::size_t le = line_end_at(cursor);
-                if (le >= n) break;
+                if (le >= n)
+                    break;
                 cursor = le + 1;
             }
         }
-    } else {  // FASTQ: records may have multiline sequence / quality sections.
+    } else { // FASTQ: records may have multiline sequence / quality sections.
         while (headers.size() < max_headers && cursor < n) {
-            if (prefix[cursor] != '@') break;   // truncated/garbled prefix
+            if (prefix[cursor] != '@')
+                break; // truncated/garbled prefix
             const std::size_t he = line_end_at(cursor);
             headers.emplace_back(rstrip_cr(
                 std::string_view{prefix}.substr(

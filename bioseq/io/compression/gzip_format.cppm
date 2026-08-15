@@ -87,13 +87,12 @@ parse_gzip_header(bit_reader& reader,
     gzip_header header;
     header.flags.ftext    = (flag_byte & 0x01u) != 0;
     header.flags.fhcrc    = (flag_byte & 0x02u) != 0;
-    header.flags.fextra   = (flag_byte & 0x04u) != 0;
-    header.flags.fname    = (flag_byte & 0x08u) != 0;
+    header.flags.fextra = (flag_byte & 0x04u) != 0;
+    header.flags.fname = (flag_byte & 0x08u) != 0;
     header.flags.fcomment = (flag_byte & 0x10u) != 0;
 
-    header.modification_time =
-        static_cast<std::uint32_t>(reader.read<32>());
-    header.extra_flags     = static_cast<std::uint8_t>(reader.read<8>());
+    header.modification_time = static_cast<std::uint32_t>(reader.read<32>());
+    header.extra_flags = static_cast<std::uint8_t>(reader.read<8>());
     header.operating_system = static_cast<std::uint8_t>(reader.read<8>());
 
     if (header.flags.fextra) {
@@ -103,7 +102,7 @@ parse_gzip_header(bit_reader& reader,
         }
     }
 
-    auto skip_zero_terminated = [&]() -> std::expected<void, std::string> {
+    auto skip_zero_terminated = [&compressed_view, &reader]() -> std::expected<void, std::string> {
         // Use SIMD scan when the underlying compressed view's tail is
         // available; fall back to byte-by-byte read.
         const std::size_t bit_pos = reader.bit_position();
@@ -111,13 +110,12 @@ parse_gzip_header(bit_reader& reader,
             const std::size_t byte_pos = bit_pos / 8;
             if (byte_pos < compressed_view.size()) {
                 const std::size_t scanned =
-                    bioseq::io::simd::scan_first_byte(
-                        std::uint8_t{0},
-                        compressed_view.data() + byte_pos,
-                        compressed_view.size() - byte_pos);
+                    bioseq::io::simd::scan_first_byte(std::uint8_t{0},
+                                                      compressed_view.data() + byte_pos,
+                                                      compressed_view.size() - byte_pos);
                 if (scanned >= compressed_view.size() - byte_pos) {
-                    return std::unexpected(std::string{
-                        "gzip header: NUL terminator missing in FNAME / FCOMMENT"});
+                    return std::unexpected(
+                        std::string{"gzip header: NUL terminator missing in FNAME / FCOMMENT"});
                 }
                 // Advance past the NUL.
                 reader.seek_to_bit((byte_pos + scanned + 1) * 8);
@@ -127,7 +125,8 @@ parse_gzip_header(bit_reader& reader,
         // Fallback path.
         for (std::size_t safety = 0; safety < 65536; ++safety) {
             const std::uint64_t byte = reader.read<8>();
-            if (byte == 0) return {};
+            if (byte == 0)
+                return {};
         }
         return std::unexpected(std::string{
             "gzip header: NUL terminator absent in FNAME / FCOMMENT (>64K)"});

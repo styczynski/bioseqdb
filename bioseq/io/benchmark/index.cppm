@@ -863,29 +863,31 @@ void cleanup_lazy_expression(
 /// Write a synthetic FASTA / FASTQ corpus to `output_path`. Returns
 /// the number of bytes actually written.
 [[nodiscard]] std::size_t emit_synthetic_corpus(const std::string& output_path,
-                                                  bool is_fastq,
-                                                  std::size_t record_count,
-                                                  std::size_t mean_record_logical_length,
-                                                  std::uint64_t seed,
-                                                  std::string_view header_shape = "plain") {
+                                                bool is_fastq,
+                                                std::size_t record_count,
+                                                std::size_t mean_record_logical_length,
+                                                std::uint64_t seed,
+                                                std::string_view header_shape = "plain") {
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] failed to open '{}' for writing", output_path);
+        bioseq_log<logging_level::error>("[bioseq.io.benchmark] failed to open '{}' for writing",
+                                         output_path);
         return 0;
     }
     std::mt19937_64 rng(seed);
     std::uniform_int_distribution<int> base_dist(0, 3);
-    std::normal_distribution<double> length_dist(
-        static_cast<double>(mean_record_logical_length),
-        static_cast<double>(mean_record_logical_length) * 0.1);
+    std::normal_distribution<double> length_dist(static_cast<double>(mean_record_logical_length),
+                                                 static_cast<double>(mean_record_logical_length) *
+                                                     0.1);
     constexpr std::array<char, 4> bases{'A', 'C', 'G', 'T'};
     constexpr std::size_t fasta_wrap = 80;
 
     std::string buffer;
     buffer.reserve(64 * 1024);
     std::size_t bytes_written = 0;
-    auto flush_buffer = [&]() {
-        if (buffer.empty()) return;
+    auto flush_buffer = [&buffer, &bytes_written, &out]() {
+        if (buffer.empty())
+            return;
         out.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         bytes_written += buffer.size();
         buffer.clear();
@@ -893,17 +895,17 @@ void cleanup_lazy_expression(
 
     for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
         const double sample = length_dist(rng);
-        const std::size_t record_length = static_cast<std::size_t>(
-            std::max(8.0, sample));
+        const std::size_t record_length = static_cast<std::size_t>(std::max(8.0, sample));
         // `header_shape` defaults to "plain" so every existing IO
         // benchmark cell is byte-for-byte unchanged unless it opts in. The
         // "uniprot_metadata" shape exercises positional fields, a multi-word
         // description, EQUALS tags, alias routing and metadata stripping at once.
         if (header_shape == "uniprot_metadata" && !is_fastq) {
-            buffer.append(fmt::format(
-                ">tr|P{:06}|P{:06}_BENCH Synthetic parser benchmark protein "
-                "OS=Homo sapiens OX=9606 PE=1 SV={}\n",
-                record_index, record_index, 1 + (record_index % 9)));
+            buffer.append(fmt::format(">tr|P{:06}|P{:06}_BENCH Synthetic parser benchmark protein "
+                                      "OS=Homo sapiens OX=9606 PE=1 SV={}\n",
+                                      record_index,
+                                      record_index,
+                                      1 + (record_index % 9)));
         } else if (is_fastq) {
             buffer.append(fmt::format("@seq_{}\n", record_index));
         } else {
@@ -1394,11 +1396,13 @@ void cleanup_reader(std::string_view /*data_dir*/,
     return input;
 }
 
-[[nodiscard]] identifier_benchmark_measurement run_identifier_bench(
-        std::string_view algo, const parameter_map& /*params*/,
-        const identifier_benchmark_input& input) {
+[[nodiscard]] identifier_benchmark_measurement
+run_identifier_bench(std::string_view algo,
+                     const parameter_map& /*params*/,
+                     const identifier_benchmark_input& input) {
     identifier_benchmark_measurement out;
-    if (input.reader.corpus_path.empty()) return out;
+    if (input.reader.corpus_path.empty())
+        return out;
 
     using namespace bioseq::io;
     using namespace bioseq::io::identifier_parser;
@@ -1410,37 +1414,43 @@ void cleanup_reader(std::string_view /*data_dir*/,
     bench_identifier_writer parsed_writer{input.mapping.routing.destination_count, out};
     const auto writer_ref = make_identifier_writer_reference(parsed_writer);
 
-    auto handler_fn = [&](batch_t&& batch) {
-        for (std::size_t i = 0; i < batch.size(); ++i) {
-            const auto header = batch.header(i);
-            const auto seq_view = batch.sequence(i);
-            using traits = typename decltype(seq_view)::traits;
-            out.observed_body_bytes +=
-                seq_view.size() * traits::letters_per_unit - seq_view.padding();
-            ++out.observed_record_count;
-            out.header_bytes += header.size();
+    auto handler_fn =
+        [&algo, &dumb_header_copy, &input, &out, &parse_state, &parsed_writer, &writer_ref](
+            batch_t&& batch) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                const auto header = batch.header(i);
+                const auto seq_view = batch.sequence(i);
+                using traits = typename decltype(seq_view)::traits;
+                out.observed_body_bytes +=
+                    seq_view.size() * traits::letters_per_unit - seq_view.padding();
+                ++out.observed_record_count;
+                out.header_bytes += header.size();
 
-            if (algo == "bioseq_identifier_parse_uniprot_fasta") {
-                parsed_writer.begin_tuple();
-                auto parsed = parse_and_route_header(
-                    header_format::uniprotkb, header,
-                    input.mapping.routing, parse_state, writer_ref);
-                if (!parsed)
-                    bioseq_log<logging_level::error>("[bioseq.io.benchmark] identifier parse failed: {}", parsed.error());
-                parsed_writer.end_tuple();
-            } else {  // bioseq_dumb_header_fasta
-                dumb_header_copy.assign(header.data(), header.size());
+                if (algo == "bioseq_identifier_parse_uniprot_fasta") {
+                    parsed_writer.begin_tuple();
+                    auto parsed = parse_and_route_header(header_format::uniprotkb,
+                                                         header,
+                                                         input.mapping.routing,
+                                                         parse_state,
+                                                         writer_ref);
+                    if (!parsed)
+                        bioseq_log<logging_level::error>(
+                            "[bioseq.io.benchmark] identifier parse failed: {}", parsed.error());
+                    parsed_writer.end_tuple();
+                } else { // bioseq_dumb_header_fasta
+                    dumb_header_copy.assign(header.data(), header.size());
+                }
             }
-        }
-    };
+        };
     auto failure_fn = [](std::string&& msg) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] identifier benchmark read failed: {}", msg);
+        bioseq_log<logging_level::error>(
+            "[bioseq.io.benchmark] identifier benchmark read failed: {}", msg);
     };
     reader_options opts{};
     opts.io.gzip_auto_detect = false;
     opts.io.prefer_mmap = false;
     opts.concurrency.worker_count = 0;
-    (void) read_sequences_file<seq::dna4, sequence_file_format::fasta>(
+    (void)read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         input.reader.corpus_path, handler_fn, failure_fn, opts);
     return out;
 }
@@ -1538,8 +1548,7 @@ template <bool p_is_fastq>
             if constexpr (p_is_fastq) {
                 qual_view = batch.quality(record_index);
             }
-            accumulator ^= hash_record_xor<p_is_fastq>(
-                header_view, seq_view, qual_view);
+            accumulator ^= hash_record_xor<p_is_fastq>(header_view, seq_view, qual_view);
         }
     }
     return accumulator;
@@ -1548,40 +1557,40 @@ template <bool p_is_fastq>
 /// Slurp `path` into an in-memory list of batches via the bioseq reader.
 template <bool p_is_fasta>
 [[nodiscard]] bool slurp_corpus(const std::string& path,
-                                  std::vector<benchmark_batch>& out_batches,
-                                  std::size_t& out_record_count) {
-    constexpr auto file_type = p_is_fasta
-        ? sequence_file_format::fasta
-        : sequence_file_format::fastq;
+                                std::vector<benchmark_batch>& out_batches,
+                                std::size_t& out_record_count) {
+    constexpr auto file_type =
+        p_is_fasta ? sequence_file_format::fasta : sequence_file_format::fastq;
 
     out_batches.clear();
     out_record_count = 0;
 
-    auto handler_fn = [&](benchmark_batch&& batch) {
+    auto handler_fn = [&out_batches, &out_record_count](benchmark_batch&& batch) {
         out_record_count += batch.size();
         out_batches.push_back(std::move(batch));
     };
     auto failure_fn = [&path](std::string&& msg) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] slurp failed on '{}': {}", path, msg);
+        bioseq_log<logging_level::error>(
+            "[bioseq.io.benchmark] slurp failed on '{}': {}", path, msg);
     };
     reader_options options{};
     options.io.gzip_auto_detect = false;
-    options.io.prefer_mmap      = true;
+    options.io.prefer_mmap = true;
     options.concurrency.worker_count = 0;
 
-    auto outcome = read_sequences_file<seq::dna4, file_type>(
-        path, handler_fn, failure_fn, options);
+    auto outcome = read_sequences_file<seq::dna4, file_type>(path, handler_fn, failure_fn, options);
     if (!outcome.has_value()) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] slurp_corpus read error: {}", outcome.error());
+        bioseq_log<logging_level::error>("[bioseq.io.benchmark] slurp_corpus read error: {}",
+                                         outcome.error());
         return false;
     }
     return !out_batches.empty();
 }
 
 [[nodiscard]] writer_input build_writer_input(std::string_view data_dir,
-                                                std::string_view test_case_name,
-                                                simdjson::dom::element data,
-                                                const run_constraints& /*constraints*/) {
+                                              std::string_view test_case_name,
+                                              simdjson::dom::element data,
+                                              const run_constraints& /*constraints*/) {
     writer_input input;
 
     // The .fastq.gz cell is reader-only; writers don't have a compress
@@ -1651,10 +1660,11 @@ template <bool p_is_fasta>
         options.output_capacity_hint =
             estimated_output_bytes > 4096 ? estimated_output_bytes : 4096;
     }
-    auto writer_or_err = sequence_writer<seq::dna4, file_type>::open(
-        input.output_scratch_path, options);
+    auto writer_or_err =
+        sequence_writer<seq::dna4, file_type>::open(input.output_scratch_path, options);
     if (!writer_or_err) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer open failed: {}", writer_or_err.error());
+        bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer open failed: {}",
+                                         writer_or_err.error());
         return {};
     }
     auto& writer = *writer_or_err;
@@ -1671,11 +1681,10 @@ template <bool p_is_fasta>
         const std::size_t resolved_threads =
             thread_count > batches_total ? batches_total : thread_count;
         std::atomic<bool> any_failure{false};
-        auto run_shard = [&](std::size_t shard_index) {
-            const std::size_t shard_start =
-                (batches_total * shard_index) / resolved_threads;
-            const std::size_t shard_end =
-                (batches_total * (shard_index + 1)) / resolved_threads;
+        auto run_shard = [&any_failure, &batches_total, &input, &resolved_threads, &writer](
+                             std::size_t shard_index) {
+            const std::size_t shard_start = (batches_total * shard_index) / resolved_threads;
+            const std::size_t shard_end = (batches_total * (shard_index + 1)) / resolved_threads;
             for (std::size_t batch_index = shard_start; batch_index < shard_end; ++batch_index) {
                 if (!writer.write_batch(input.batches[batch_index])) {
                     any_failure.store(true, std::memory_order_relaxed);
@@ -1688,7 +1697,8 @@ template <bool p_is_fasta>
         for (std::size_t shard_index = 0; shard_index < resolved_threads; ++shard_index) {
             shard_threads.emplace_back(run_shard, shard_index);
         }
-        for (auto& thread : shard_threads) thread.join();
+        for (auto& thread : shard_threads)
+            thread.join();
         if (any_failure.load(std::memory_order_relaxed)) {
             (void)writer.close();
             return {};
@@ -1696,7 +1706,8 @@ template <bool p_is_fasta>
     }
     auto close_outcome = writer.close();
     if (!close_outcome) {
-        bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer close failed: {}", close_outcome.error());
+        bioseq_log<logging_level::error>("[bioseq.io.benchmark] writer close failed: {}",
+                                         close_outcome.error());
         return {};
     }
     io_measurement out;
