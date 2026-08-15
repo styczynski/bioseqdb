@@ -6,6 +6,9 @@
 // Build ZIP fixtures in memory to exercise archive path safety, resource caps,
 // catalog-based member selection, and decoded-member digest validation.
 
+#include <archive.h>
+#include <archive_entry.h>
+#include <catch2/catch_test_macros.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -15,11 +18,6 @@
 #include <string_view>
 #include <variant>
 #include <vector>
-
-#include <archive.h>
-#include <archive_entry.h>
-
-#include <catch2/catch_test_macros.hpp>
 
 import bioseq.external.provider.errors;
 import bioseq.external.provider.query;
@@ -43,7 +41,7 @@ struct zip_member {
 std::vector<std::uint8_t> build_zip(const std::vector<zip_member>& members) {
     struct archive* a = archive_write_new();
     archive_write_set_format_zip(a);
-    std::vector<char> scratch(1U << 20);  // 1 MiB is ample for the fixtures
+    std::vector<char> scratch(1U << 20); // 1 MiB is ample for the fixtures
     std::size_t used = 0;
     archive_write_open_memory(a, scratch.data(), scratch.size(), &used);
     for (const zip_member& m : members) {
@@ -55,8 +53,7 @@ std::vector<std::uint8_t> build_zip(const std::vector<zip_member>& members) {
             archive_entry_set_symlink(e, m.symlink_target.c_str());
             archive_entry_set_size(e, 0);
         } else {
-            archive_entry_set_size(
-                e, static_cast<la_int64_t>(m.content.size()));
+            archive_entry_set_size(e, static_cast<la_int64_t>(m.content.size()));
         }
         archive_write_header(a, e);
         if (m.filetype != AE_IFLNK && !m.content.empty()) {
@@ -66,8 +63,7 @@ std::vector<std::uint8_t> build_zip(const std::vector<zip_member>& members) {
     }
     archive_write_close(a);
     archive_write_free(a);
-    return std::vector<std::uint8_t>(scratch.begin(),
-                                     scratch.begin() + static_cast<long>(used));
+    return std::vector<std::uint8_t>(scratch.begin(), scratch.begin() + static_cast<long>(used));
 }
 
 // A sink that just tallies the emitted sequence letters and chunk rows.
@@ -81,27 +77,24 @@ struct chunk_counter {
     std::string last_md5;
     std::uint64_t last_record_count = 0;
     std::uint64_t last_decoded_bytes = 0;
-    std::vector<std::uint64_t> chunk_index_seq;   // every chunk_index, in order
-    std::vector<std::uint64_t> base_offset_seq;   // every base_offset, in order
-    static std::expected<void, prov::external_error> push(
-        void* self, prov::owning_provider_message&& message) {
+    std::vector<std::uint64_t> chunk_index_seq; // every chunk_index, in order
+    std::vector<std::uint64_t> base_offset_seq; // every base_offset, in order
+    static std::expected<void, prov::external_error> push(void* self,
+                                                          prov::owning_provider_message&& message) {
         auto* counter = static_cast<chunk_counter*>(self);
-        if (auto* payload =
-                std::get_if<prov::owning_sequence_payload>(&message)) {
+        if (auto* payload = std::get_if<prov::owning_sequence_payload>(&message)) {
             counter->letters += payload->bases.size();
             ++counter->chunks;
-            if (payload->end_of_record) ++counter->record_ends;
+            if (payload->end_of_record)
+                ++counter->record_ends;
             counter->chunk_index_seq.push_back(payload->chunk_index);
             counter->base_offset_seq.push_back(payload->base_offset);
-            counter->last_accession =
-                std::string(payload->key.accession.view());
+            counter->last_accession = std::string(payload->key.accession.view());
             counter->last_original_identifier =
                 std::string(payload->key.original_identifier.view());
-        } else if (auto* end = std::get_if<prov::owning_sequence_asset_end>(
-                       &message)) {
+        } else if (auto* end = std::get_if<prov::owning_sequence_asset_end>(&message)) {
             ++counter->asset_ends;
-            counter->last_md5 =
-                std::string(end->integrity.actual_value.view());
+            counter->last_md5 = std::string(end->integrity.actual_value.view());
             counter->last_record_count = end->record_count;
             counter->last_decoded_bytes = end->decoded_bytes;
         }
@@ -112,8 +105,7 @@ struct chunk_counter {
     }
 };
 
-constexpr std::string_view k_fasta_path =
-    "ncbi_dataset/data/GCF_000005845.2/cds.fna";
+constexpr std::string_view k_fasta_path = "ncbi_dataset/data/GCF_000005845.2/cds.fna";
 
 std::string fasta_body() {
     std::string body = ">lcl|test_cds\n";
@@ -127,9 +119,11 @@ std::string fasta_body() {
 // genomic.fna). Record ids are the first header token: "seg1", "seg2".
 std::string multi_record_body() {
     std::string body = ">seg1 first segment description\n";
-    for (int i = 0; i < 10; ++i) body += "ACGTACGTACGT\n";  // 120 bases
+    for (int i = 0; i < 10; ++i)
+        body += "ACGTACGTACGT\n"; // 120 bases
     body += ">seg2 second segment description\n";
-    for (int i = 0; i < 5; ++i) body += "TTTTGGGGCCCC\n";  // 60 bases
+    for (int i = 0; i < 5; ++i)
+        body += "TTTTGGGGCCCC\n"; // 60 bases
     return body;
 }
 
@@ -191,10 +185,10 @@ std::vector<zip_member> good_members() {
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog_selecting_fasta()});
-    members.push_back({.path = "ncbi_dataset/data/md5sum.txt",
-                       .content = md5sum_line(digest, k_fasta_path)});
+    members.push_back(
+        {.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog_selecting_fasta()});
+    members.push_back(
+        {.path = "ncbi_dataset/data/md5sum.txt", .content = md5sum_line(digest, k_fasta_path)});
     members.push_back({.path = std::string(k_fasta_path), .content = body});
     return members;
 }
@@ -203,28 +197,28 @@ std::vector<zip_member> good_members() {
 // full "ncbi_dataset/data/<path>" while dataset_catalog.json filePath is relative
 // to that data dir. Exercises the reader's three-way path canonicalization.
 constexpr std::string_view k_real_relative_path = "GCF_test.1/GCF_test.1_genomic.fna";
-constexpr std::string_view k_real_full_path =
-    "ncbi_dataset/data/GCF_test.1/GCF_test.1_genomic.fna";
+constexpr std::string_view k_real_full_path = "ncbi_dataset/data/GCF_test.1/GCF_test.1_genomic.fna";
 
 std::vector<zip_member> real_layout_members() {
     const std::string body = fasta_body();
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::string catalog = "{\"assemblies\":[{\"files\":[{\"filePath\":\"";
-    catalog += k_real_relative_path;  // data-dir-relative, as NCBI emits it
+    catalog += k_real_relative_path; // data-dir-relative, as NCBI emits it
     catalog += "\",\"fileType\":\"GENOMIC_NUCLEOTIDE_FASTA\"}]}]}";
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog});
-    members.push_back({.path = "md5sum.txt",  // root, full-path key
+    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog});
+    members.push_back({.path = "md5sum.txt", // root, full-path key
                        .content = md5sum_line(digest, k_real_full_path)});
     members.push_back({.path = std::string(k_real_full_path), .content = body});
     return members;
 }
 
-exio::archive_read_limits default_limits() { return exio::archive_read_limits{}; }
+exio::archive_read_limits default_limits() {
+    return exio::archive_read_limits{};
+}
 
-}  // namespace
+} // namespace
 
 TEST_CASE("archive_source compute_md5_hex matches a known vector",
           "[component:external_api][layer:integration][feature:external_source]") {
@@ -250,14 +244,18 @@ TEST_CASE("archive_source extracts and verifies a well-formed package",
           "[component:external_api][layer:integration][feature:external_source]") {
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk,
-        /*chunk_bases=*/1048572, counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     /*chunk_bases=*/1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE(result.has_value());
     REQUIRE(result->members_selected == 1);
     REQUIRE(result->members_verified == 1);
     REQUIRE(result->sequence_rows >= 1);
-    // The emitter strips the '>' header and whitespace; letters equal the raw
+    // The emitter strips the '>' header and whitespace. Letters equal the raw
     // base count and must have actually flowed to the sink.
     REQUIRE(counter.letters == expected_fasta_letters(fasta_body()));
     REQUIRE(counter.letters > 0);
@@ -274,9 +272,14 @@ TEST_CASE("archive_source keys emitted chunks by the queried accession",
     // filter matches instead of receiving the member file path.
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{}, "GCF_009858895.2");
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{},
+                                                     "GCF_009858895.2");
     REQUIRE(result.has_value());
     REQUIRE(counter.chunks >= 1);
     REQUIRE(counter.last_accession == "GCF_009858895.2");
@@ -291,9 +294,14 @@ TEST_CASE("archive_source emits one verified asset-end MD5 event per member",
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{}, "GCF_000005845.2");
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{},
+                                                     "GCF_000005845.2");
     REQUIRE(result.has_value());
     REQUIRE(counter.asset_ends == 1);
     REQUIRE(counter.last_md5 == digest);
@@ -309,23 +317,28 @@ TEST_CASE("archive_source streams every record of a multi-record member",
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog_selecting_fasta()});
-    members.push_back({.path = "ncbi_dataset/data/md5sum.txt",
-                       .content = md5sum_line(digest, k_fasta_path)});
+    members.push_back(
+        {.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog_selecting_fasta()});
+    members.push_back(
+        {.path = "ncbi_dataset/data/md5sum.txt", .content = md5sum_line(digest, k_fasta_path)});
     members.push_back({.path = std::string(k_fasta_path), .content = body});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{}, "GCF_multi.1");
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{},
+                                                     "GCF_multi.1");
     REQUIRE(result.has_value());
-    REQUIRE(counter.letters == expected_fasta_letters(body));  // both records
-    REQUIRE(counter.record_ends == 2);          // one end_of_record per record
-    REQUIRE(counter.last_accession == "GCF_multi.1");   // assembly keys all chunks
-    REQUIRE(counter.last_original_identifier == "seg2");  // last record's own id
-    REQUIRE(counter.asset_ends == 1);           // still one asset-end per member
-    REQUIRE(counter.last_record_count == 2);    // true record count, uncapped
+    REQUIRE(counter.letters == expected_fasta_letters(body)); // both records
+    REQUIRE(counter.record_ends == 2);                        // one end_of_record per record
+    REQUIRE(counter.last_accession == "GCF_multi.1");         // assembly keys all chunks
+    REQUIRE(counter.last_original_identifier == "seg2");      // last record's own id
+    REQUIRE(counter.asset_ends == 1);                         // still one asset-end per member
+    REQUIRE(counter.last_record_count == 2);                  // true record count, uncapped
     // Each record is smaller than chunk_bases, so each occupies one chunk.
     // chunk_index remains global and contiguous while base_offset resets at each
     // record boundary.
@@ -340,20 +353,24 @@ TEST_CASE("archive_source multi-record whole-sequence target counts every row",
     const std::string digest = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body.data()), body.size()));
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog_selecting_fasta()});
-    members.push_back({.path = "ncbi_dataset/data/md5sum.txt",
-                       .content = md5sum_line(digest, k_fasta_path)});
+    members.push_back(
+        {.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog_selecting_fasta()});
+    members.push_back(
+        {.path = "ncbi_dataset/data/md5sum.txt", .content = md5sum_line(digest, k_fasta_path)});
     members.push_back({.path = std::string(k_fasta_path), .content = body});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence, 1048572,
-        counter.ref(), std::stop_token{}, "GCF_multi.1");
+    const auto result = exio::extract_fasta_members_from_zip_archive(zip,
+                                                                     default_limits(),
+                                                                     prov::query_target::sequence,
+                                                                     1048572,
+                                                                     counter.ref(),
+                                                                     std::stop_token{},
+                                                                     "GCF_multi.1");
     REQUIRE(result.has_value());
     REQUIRE(result->sequence_rows == 2);
-    REQUIRE(counter.chunks == 2);          // two whole-record rows actually delivered
-    REQUIRE(counter.record_ends == 2);     // each whole record is one end_of_record row
+    REQUIRE(counter.chunks == 2);      // two whole-record rows actually delivered
+    REQUIRE(counter.record_ends == 2); // each whole record is one end_of_record row
     REQUIRE(counter.letters == expected_fasta_letters(body));
     REQUIRE(counter.chunk_index_seq == std::vector<std::uint64_t>{0, 1});
 }
@@ -364,9 +381,10 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
     // to keep the (accession, chunk_index) key unique.
     constexpr std::string_view k_first_path = "ncbi_dataset/data/GCF_x/cds.fna";
     constexpr std::string_view k_second_path = "ncbi_dataset/data/GCF_x/genomic.fna";
-    const std::string body1 = multi_record_body();          // seg1(120) + seg2(60)
+    const std::string body1 = multi_record_body(); // seg1(120) + seg2(60)
     std::string body2 = ">seg3 third segment\n";
-    for (int i = 0; i < 9; ++i) body2 += "ACGTACGTAC\n";     // 90 bases, one record
+    for (int i = 0; i < 9; ++i)
+        body2 += "ACGTACGTAC\n"; // 90 bases, one record
     const std::string d1 = exio::compute_md5_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(body1.data()), body1.size()));
     const std::string d2 = exio::compute_md5_hex(std::span<const std::uint8_t>(
@@ -381,14 +399,19 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
     members.push_back({.path = std::string(k_second_path), .content = body2});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{}, "GCF_x.1");
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{},
+                                                     "GCF_x.1");
     REQUIRE(result.has_value());
     REQUIRE(result->members_verified == 2);
-    REQUIRE(counter.asset_ends == 2);            // one asset-end per member
-    REQUIRE(counter.record_ends == 3);           // seg1, seg2, seg3
-    REQUIRE(counter.letters == 270);             // 120 + 60 + 90
+    REQUIRE(counter.asset_ends == 2);  // one asset-end per member
+    REQUIRE(counter.record_ends == 3); // seg1, seg2, seg3
+    REQUIRE(counter.letters == 270);   // 120 + 60 + 90
     // chunk_index is contiguous across members and unique under one accession,
     // while base_offset resets for each record.
     REQUIRE(counter.chunk_index_seq == std::vector<std::uint64_t>{0, 1, 2});
@@ -397,13 +420,17 @@ TEST_CASE("archive_source carries chunk_index across multiple selected members",
 
 TEST_CASE("archive_source reconciles NCBI's three path conventions",
           "[component:external_api][layer:integration][feature:external_source]") {
-    // catalog filePath is data-dir-relative; md5sum.txt + ZIP entry are full
+    // catalog filePath is data-dir-relative. md5sum.txt and the ZIP entry are full
     // paths. Canonicalization must make all three match → member selected+verified.
     const std::vector<std::uint8_t> zip = build_zip(real_layout_members());
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE(result.has_value());
     REQUIRE(result->members_selected == 1);
     REQUIRE(result->members_verified == 1);
@@ -417,9 +444,13 @@ TEST_CASE("archive_source rejects a path-traversal member",
     members.push_back({.path = "../evil.fna", .content = ">x\nACGT\n"});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::provider_contract);
 }
@@ -430,9 +461,13 @@ TEST_CASE("archive_source rejects an absolute-path member",
     members.push_back({.path = "/etc/passwd", .content = "root\n"});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::provider_contract);
 }
@@ -445,9 +480,13 @@ TEST_CASE("archive_source rejects a symlink member",
                        .symlink_target = "/etc/passwd"});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::provider_contract);
 }
@@ -455,17 +494,20 @@ TEST_CASE("archive_source rejects a symlink member",
 TEST_CASE("archive_source rejects a wrong md5sum digest (corruption)",
           "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog_selecting_fasta()});
     members.push_back(
-        {.path = "ncbi_dataset/data/md5sum.txt",
-         .content = md5sum_line("00000000000000000000000000000000", k_fasta_path)});
+        {.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog_selecting_fasta()});
+    members.push_back({.path = "ncbi_dataset/data/md5sum.txt",
+                       .content = md5sum_line("00000000000000000000000000000000", k_fasta_path)});
     members.push_back({.path = std::string(k_fasta_path), .content = fasta_body()});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::integrity);
     // No rows may reach the sink for an unverified member.
@@ -477,14 +519,18 @@ TEST_CASE("archive_source rejects a wrong md5sum digest (corruption)",
 TEST_CASE("archive_source rejects a missing md5sum.txt",
           "[component:external_api][layer:integration][feature:external_source]") {
     std::vector<zip_member> members;
-    members.push_back({.path = "ncbi_dataset/data/dataset_catalog.json",
-                       .content = catalog_selecting_fasta()});
+    members.push_back(
+        {.path = "ncbi_dataset/data/dataset_catalog.json", .content = catalog_selecting_fasta()});
     members.push_back({.path = std::string(k_fasta_path), .content = fasta_body()});
     const std::vector<std::uint8_t> zip = build_zip(members);
     chunk_counter counter;
-    const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, default_limits(), prov::query_target::sequence_chunk, 1048572,
-        counter.ref(), std::stop_token{});
+    const auto result =
+        exio::extract_fasta_members_from_zip_archive(zip,
+                                                     default_limits(),
+                                                     prov::query_target::sequence_chunk,
+                                                     1048572,
+                                                     counter.ref(),
+                                                     std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::integrity);
 }
@@ -492,12 +538,11 @@ TEST_CASE("archive_source rejects a missing md5sum.txt",
 TEST_CASE("archive_source enforces the maximum entry count",
           "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
-    limits.maximum_entries = 2;  // the well-formed package has 3 members
+    limits.maximum_entries = 2; // the well-formed package has 3 members
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
     const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, limits, prov::query_target::sequence_chunk, 1048572, counter.ref(),
-        std::stop_token{});
+        zip, limits, prov::query_target::sequence_chunk, 1048572, counter.ref(), std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::response_too_large);
 }
@@ -506,13 +551,11 @@ TEST_CASE("archive_source enforces the decoded/compressed expansion ratio",
           "[component:external_api][layer:integration][feature:external_source]") {
     exio::archive_read_limits limits = default_limits();
     // A near-zero ratio ceiling: any decoded FASTA body exceeds it.
-    limits.maximum_expansion = {.numerator = 1, .denominator = 1000000,
-                                .grace_bytes = 0};
+    limits.maximum_expansion = {.numerator = 1, .denominator = 1000000, .grace_bytes = 0};
     const std::vector<std::uint8_t> zip = build_zip(good_members());
     chunk_counter counter;
     const auto result = exio::extract_fasta_members_from_zip_archive(
-        zip, limits, prov::query_target::sequence_chunk, 1048572, counter.ref(),
-        std::stop_token{});
+        zip, limits, prov::query_target::sequence_chunk, 1048572, counter.ref(), std::stop_token{});
     REQUIRE_FALSE(result.has_value());
     REQUIRE(result.error().kind == prov::external_error_kind::response_too_large);
 }

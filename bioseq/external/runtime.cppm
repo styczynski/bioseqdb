@@ -5,13 +5,13 @@
 module;
 
 #include <mutex>
-
 #include <oatpp/Environment.hpp>
 
 export module bioseq.external.runtime;
 
 namespace bioseq::external::detail {
 
+/** Process-lifetime guard for the Oat++ environment. */
 struct oatpp_runtime_lifetime {
     /** Starts the process-wide Oat++ environment for the guard's lifetime. */
     oatpp_runtime_lifetime() {

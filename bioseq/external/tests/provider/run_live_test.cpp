@@ -6,7 +6,6 @@
 // Exercise the provider run path without PostgreSQL for NCBI, UniProt, and EBI.
 // The run bridge receives the same normalized query shape as the PG executor.
 #include <catch2/catch_test_macros.hpp>
-
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -41,20 +40,23 @@ void run_and_report(std::string_view provider_name, query_target target) {
     query.limit = std::optional<std::uint64_t>{1000};
 
     auto result = bioseq::external::run_external_query(
-        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name},
-        query, budget);
+        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name}, query, budget);
 
     std::fprintf(stderr,
                  "[run-live] provider=%.*s target=%d -> messages=%zu error=%s\n",
-                 static_cast<int>(provider_name.size()), provider_name.data(),
-                 static_cast<int>(target), result.messages.size(),
+                 static_cast<int>(provider_name.size()),
+                 provider_name.data(),
+                 static_cast<int>(target),
+                 result.messages.size(),
                  result.error.has_value() ? "yes" : "no");
     if (result.error.has_value()) {
         const auto view = result.error->message.view();
-        std::fprintf(stderr, "[run-live]   error.message=%.*s\n",
-                     static_cast<int>(view.size()), view.data());
+        std::fprintf(stderr,
+                     "[run-live]   error.message=%.*s\n",
+                     static_cast<int>(view.size()),
+                     view.data());
     }
-    // The point of this test is that the run path never aborts the process; a
+    // The run path must not abort the process. A
     // graceful error (network/parse) is acceptable. Reaching here means no crash.
     SUCCEED();
 }
@@ -62,8 +64,7 @@ void run_and_report(std::string_view provider_name, query_target target) {
 // Run a record_location query for one provider with an accession=<gene_id>
 // equality predicate (exactly what the PG scan pushes), then report how many
 // genomic intervals were parsed onto the emitted catalog rows.
-void run_location_and_report(std::string_view provider_name,
-                             std::string_view gene_id) {
+void run_location_and_report(std::string_view provider_name, std::string_view gene_id) {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
@@ -85,8 +86,7 @@ void run_location_and_report(std::string_view provider_name,
     query.predicates.push_back(std::move(node));
 
     auto result = bioseq::external::run_external_query(
-        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name},
-        query, budget);
+        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name}, query, budget);
 
     std::size_t locations = 0;
     for (const auto& msg : result.messages) {
@@ -99,14 +99,19 @@ void run_location_and_report(std::string_view provider_name,
     std::fprintf(stderr,
                  "[run-live] provider=%.*s record_location gene=%.*s -> "
                  "messages=%zu locations=%zu error=%s\n",
-                 static_cast<int>(provider_name.size()), provider_name.data(),
-                 static_cast<int>(gene_id.size()), gene_id.data(),
-                 result.messages.size(), locations,
+                 static_cast<int>(provider_name.size()),
+                 provider_name.data(),
+                 static_cast<int>(gene_id.size()),
+                 gene_id.data(),
+                 result.messages.size(),
+                 locations,
                  result.error.has_value() ? "yes" : "no");
     if (result.error.has_value()) {
         const auto view = result.error->message.view();
-        std::fprintf(stderr, "[run-live]   error.message=%.*s\n",
-                     static_cast<int>(view.size()), view.data());
+        std::fprintf(stderr,
+                     "[run-live]   error.message=%.*s\n",
+                     static_cast<int>(view.size()),
+                     view.data());
     }
     SUCCEED();
 }
@@ -115,8 +120,10 @@ void run_location_and_report(std::string_view provider_name,
 // the PG scan pushes (assembly_database / chromosome / start0 / end0) and report
 // the number of sequence payloads plus their total base count.
 void run_sequence_and_report(std::string_view provider_name,
-                             std::string_view genome, std::string_view chrom,
-                             std::int64_t start0, std::int64_t end0) {
+                             std::string_view genome,
+                             std::string_view chrom,
+                             std::int64_t start0,
+                             std::int64_t end0) {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
@@ -130,8 +137,7 @@ void run_sequence_and_report(std::string_view provider_name,
         comparison_predicate cmp;
         cmp.operation = predicate_operator::equal;
         cmp.field = field;
-        cmp.values.push_back(
-            external_scalar{*bounded_string<maximum_identifier_bytes>::make(v)});
+        cmp.values.push_back(external_scalar{*bounded_string<maximum_identifier_bytes>::make(v)});
         predicate_node node;
         node.kind = predicate_node_kind::comparison;
         node.leaf = std::move(cmp);
@@ -153,8 +159,7 @@ void run_sequence_and_report(std::string_view provider_name,
     add_int(external_field::end0, end0);
 
     auto result = bioseq::external::run_external_query(
-        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name},
-        query, budget);
+        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name}, query, budget);
 
     std::size_t seq_msgs = 0;
     std::size_t total_bases = 0;
@@ -167,16 +172,23 @@ void run_sequence_and_report(std::string_view provider_name,
     std::fprintf(stderr,
                  "[run-live] provider=%.*s sequence %.*s:%.*s:%lld-%lld -> "
                  "seq_msgs=%zu bases=%zu error=%s\n",
-                 static_cast<int>(provider_name.size()), provider_name.data(),
-                 static_cast<int>(genome.size()), genome.data(),
-                 static_cast<int>(chrom.size()), chrom.data(),
-                 static_cast<long long>(start0), static_cast<long long>(end0),
-                 seq_msgs, total_bases,
+                 static_cast<int>(provider_name.size()),
+                 provider_name.data(),
+                 static_cast<int>(genome.size()),
+                 genome.data(),
+                 static_cast<int>(chrom.size()),
+                 chrom.data(),
+                 static_cast<long long>(start0),
+                 static_cast<long long>(end0),
+                 seq_msgs,
+                 total_bases,
                  result.error.has_value() ? "yes" : "no");
     if (result.error.has_value()) {
         const auto view = result.error->message.view();
-        std::fprintf(stderr, "[run-live]   error.message=%.*s\n",
-                     static_cast<int>(view.size()), view.data());
+        std::fprintf(stderr,
+                     "[run-live]   error.message=%.*s\n",
+                     static_cast<int>(view.size()),
+                     view.data());
     }
     SUCCEED();
 }
@@ -200,16 +212,15 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
     comparison_predicate cmp;
     cmp.operation = predicate_operator::equal;
     cmp.field = external_field::accession;
-    cmp.values.push_back(external_scalar{
-        *bounded_string<maximum_identifier_bytes>::make(accession)});
+    cmp.values.push_back(
+        external_scalar{*bounded_string<maximum_identifier_bytes>::make(accession)});
     predicate_node node;
     node.kind = predicate_node_kind::comparison;
     node.leaf = std::move(cmp);
     query.predicates.push_back(std::move(node));
 
     auto result = bioseq::external::run_external_query(
-        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name},
-        query, budget);
+        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name}, query, budget);
 
     std::size_t payloads = 0;
     std::size_t total_bases = 0;
@@ -228,16 +239,22 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
     std::fprintf(stderr,
                  "[run-live] provider=%.*s target=%d acc=%.*s -> payloads=%zu "
                  "bases=%zu last_index=%llu final_closed=%s error=%s\n",
-                 static_cast<int>(provider_name.size()), provider_name.data(),
+                 static_cast<int>(provider_name.size()),
+                 provider_name.data(),
                  static_cast<int>(target),
-                 static_cast<int>(accession.size()), accession.data(), payloads,
-                 total_bases, static_cast<unsigned long long>(last_index),
+                 static_cast<int>(accession.size()),
+                 accession.data(),
+                 payloads,
+                 total_bases,
+                 static_cast<unsigned long long>(last_index),
                  final_closed ? "yes" : "no",
                  result.error.has_value() ? "yes" : "no");
     if (result.error.has_value()) {
         const auto view = result.error->message.view();
-        std::fprintf(stderr, "[run-live]   error.message=%.*s\n",
-                     static_cast<int>(view.size()), view.data());
+        std::fprintf(stderr,
+                     "[run-live]   error.message=%.*s\n",
+                     static_cast<int>(view.size()),
+                     view.data());
     }
     SUCCEED();
 }
@@ -246,8 +263,7 @@ void run_seq_by_accession_and_report(std::string_view provider_name,
 // predicate (what the PG scan pushes) and report how many taxonomy rows came
 // back and whether taxon 9606 (Homo sapiens) is among them. Exercises EBI's
 // lowering of a keyed lookup into its free-text search query.
-void run_named_taxonomy_and_report(std::string_view provider_name,
-                                   std::string_view sci_name) {
+void run_named_taxonomy_and_report(std::string_view provider_name, std::string_view sci_name) {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();
     external_runtime_services runtime{};
@@ -260,16 +276,15 @@ void run_named_taxonomy_and_report(std::string_view provider_name,
     comparison_predicate cmp;
     cmp.operation = predicate_operator::equal;
     cmp.field = external_field::scientific_name;
-    cmp.values.push_back(external_scalar{
-        *bounded_string<maximum_identifier_bytes>::make(sci_name)});
+    cmp.values.push_back(
+        external_scalar{*bounded_string<maximum_identifier_bytes>::make(sci_name)});
     predicate_node node;
     node.kind = predicate_node_kind::comparison;
     node.leaf = std::move(cmp);
     query.predicates.push_back(std::move(node));
 
     auto result = bioseq::external::run_external_query(
-        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name},
-        query, budget);
+        memory, pool, runtime, std::nullopt, provider_id{.value = provider_name}, query, budget);
 
     std::size_t rows = 0;
     bool found_9606 = false;
@@ -284,63 +299,75 @@ void run_named_taxonomy_and_report(std::string_view provider_name,
     std::fprintf(stderr,
                  "[run-live] provider=%.*s taxonomy name=%.*s -> rows=%zu "
                  "found_9606=%s error=%s\n",
-                 static_cast<int>(provider_name.size()), provider_name.data(),
-                 static_cast<int>(sci_name.size()), sci_name.data(), rows,
+                 static_cast<int>(provider_name.size()),
+                 provider_name.data(),
+                 static_cast<int>(sci_name.size()),
+                 sci_name.data(),
+                 rows,
                  found_9606 ? "yes" : "no",
                  result.error.has_value() ? "yes" : "no");
     if (result.error.has_value()) {
         const auto view = result.error->message.view();
-        std::fprintf(stderr, "[run-live]   error.message=%.*s\n",
-                     static_cast<int>(view.size()), view.data());
+        std::fprintf(stderr,
+                     "[run-live]   error.message=%.*s\n",
+                     static_cast<int>(view.size()),
+                     view.data());
     }
     SUCCEED();
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("EBI taxonomy Homo sapiens returns taxon 9606",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "EBI taxonomy Homo sapiens returns taxon 9606",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_named_taxonomy_and_report("ebi", "Homo sapiens");
 }
 
-TEST_CASE("NCBI sequence_chunks NC_012920.1 returns the mitochondrion",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
-    run_seq_by_accession_and_report("ncbi", "NC_012920.1",
-                                    query_target::sequence_chunk);
+TEST_CASE(
+    "NCBI sequence_chunks NC_012920.1 returns the mitochondrion",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+    run_seq_by_accession_and_report("ncbi", "NC_012920.1", query_target::sequence_chunk);
 }
 
-TEST_CASE("NCBI sequences NC_012920.1 returns one whole record",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
-    run_seq_by_accession_and_report("ncbi", "NC_012920.1",
-                                    query_target::sequence);
+TEST_CASE(
+    "NCBI sequences NC_012920.1 returns one whole record",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+    run_seq_by_accession_and_report("ncbi", "NC_012920.1", query_target::sequence);
 }
 
-TEST_CASE("NCBI record_location gene 7157 yields genomic intervals",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "NCBI record_location gene 7157 yields genomic intervals",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_location_and_report("ncbi", "7157");
 }
 
-TEST_CASE("UCSC sequence hg38 chrM:0-100 returns 100 bases",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "UCSC sequence hg38 chrM:0-100 returns 100 bases",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_sequence_and_report("ucsc", "hg38", "chrM", 0, 100);
 }
 
-TEST_CASE("NCBI taxonomy run path is crash-free",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "NCBI taxonomy run path is crash-free",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ncbi", query_target::taxonomy);
 }
 
-TEST_CASE("NCBI catalog run path is crash-free",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "NCBI catalog run path is crash-free",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ncbi", query_target::catalog);
 }
 
-TEST_CASE("UniProt catalog run path is crash-free",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "UniProt catalog run path is crash-free",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("uniprot", query_target::catalog);
 }
 
-TEST_CASE("EBI catalog run path is crash-free",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "EBI catalog run path is crash-free",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     run_and_report("ebi", query_target::catalog);
 }

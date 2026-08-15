@@ -24,7 +24,7 @@ import bioseq.common.sink_control;
 // dependency-free sink_control leaf so
 // every downstream provider module (errors, model, query, capabilities, ...)
 // can build on a PostgreSQL-independent, alphabet-independent foundation and
-// use `sink_control` unqualified exactly as the spec writes it.
+// use `sink_control` unqualified throughout the provider contracts.
 export namespace bioseq::external::provider {
 
 /// Continue-or-stop result shared by provider sink callbacks.
@@ -58,52 +58,56 @@ enum class bounded_string_error : std::uint8_t { too_long };
 
 /// Owning string whose accepted length is capped at compile time.
 template <std::size_t p_maximum_size> class bounded_string {
-public:
-  /// Construct an empty bounded string.
-  bounded_string() = default;
+  public:
+    /// Construct an empty bounded string.
+    bounded_string() = default;
 
-  /// Copy a value when it fits within the byte capacity.
-  [[nodiscard]] static std::expected<bounded_string, bounded_string_error>
-  make(std::string_view value) {
-    if (value.size() > p_maximum_size) {
-      return std::unexpected(bounded_string_error::too_long);
+    /// Copy a value when it fits within the byte capacity.
+    [[nodiscard]] static std::expected<bounded_string, bounded_string_error>
+    make(std::string_view value) {
+        if (value.size() > p_maximum_size) {
+            return std::unexpected(bounded_string_error::too_long);
+        }
+        bounded_string result;
+        result.value_.assign(value.data(), value.size());
+        return result;
     }
-    bounded_string result;
-    result.value_.assign(value.data(), value.size());
-    return result;
-  }
 
-  /// Copy a value while truncating it to the byte capacity.
-  [[nodiscard]] static bounded_string make_truncated(std::string_view value) {
-    bounded_string result;
-    const std::size_t take =
-        value.size() > p_maximum_size ? p_maximum_size : value.size();
-    result.value_.assign(value.data(), take);
-    return result;
-  }
+    /// Copy a value while truncating it to the byte capacity.
+    [[nodiscard]] static bounded_string make_truncated(std::string_view value) {
+        bounded_string result;
+        const std::size_t take = value.size() > p_maximum_size ? p_maximum_size : value.size();
+        result.value_.assign(value.data(), take);
+        return result;
+    }
 
-  /// Return a non-owning view of the stored bytes.
-  [[nodiscard]] std::string_view view() const noexcept { return value_; }
-  /// Return the stored byte count.
-  [[nodiscard]] std::size_t size() const noexcept { return value_.size(); }
-  /// Return whether no bytes are stored.
-  [[nodiscard]] bool is_empty() const noexcept { return value_.empty(); }
-  /// Return the compile-time byte capacity.
-  [[nodiscard]] static constexpr std::size_t capacity_bytes() noexcept {
-    return p_maximum_size;
-  }
-  /// Measure the object and its allocated string capacity in bytes.
-  [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
-    return sizeof(bounded_string) + value_.capacity();
-  }
+    /// Return a non-owning view of the stored bytes.
+    [[nodiscard]] std::string_view view() const noexcept {
+        return value_;
+    }
+    /// Return the stored byte count.
+    [[nodiscard]] std::size_t size() const noexcept {
+        return value_.size();
+    }
+    /// Return whether no bytes are stored.
+    [[nodiscard]] bool is_empty() const noexcept {
+        return value_.empty();
+    }
+    /// Return the compile-time byte capacity.
+    [[nodiscard]] static constexpr std::size_t capacity_bytes() noexcept {
+        return p_maximum_size;
+    }
+    /// Measure the object and its allocated string capacity in bytes.
+    [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
+        return sizeof(bounded_string) + value_.capacity();
+    }
 
-  friend bool operator==(const bounded_string &lhs,
-                         const bounded_string &rhs) noexcept {
-    return lhs.value_ == rhs.value_;
-  }
+    friend bool operator==(const bounded_string& lhs, const bounded_string& rhs) noexcept {
+        return lhs.value_ == rhs.value_;
+    }
 
-private:
-  std::string value_;
+  private:
+    std::string value_;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,20 +118,20 @@ private:
 // ---------------------------------------------------------------------------
 /// Process-lifetime provider identity view.
 struct provider_id {
-  std::string_view value; // Points to a provider type's static compile_time_string.
-  constexpr auto operator<=>(const provider_id &) const = default;
+    std::string_view value; // Points to a provider type's static compile_time_string.
+    constexpr auto operator<=>(const provider_id&) const = default;
 };
 
 /// Process-lifetime locator-policy identity view.
 struct locator_policy_id {
-  std::string_view value; // Process-lifetime compile_time_string storage.
-  constexpr auto operator<=>(const locator_policy_id &) const = default;
+    std::string_view value; // Process-lifetime compile_time_string storage.
+    constexpr auto operator<=>(const locator_policy_id&) const = default;
 };
 
 /// Process-lifetime request-policy identity view.
 struct request_policy_id {
-  std::string_view value; // Process-lifetime compile_time_string storage.
-  constexpr auto operator<=>(const request_policy_id &) const = default;
+    std::string_view value; // Process-lifetime compile_time_string storage.
+    constexpr auto operator<=>(const request_policy_id&) const = default;
 };
 
 // ---------------------------------------------------------------------------
@@ -135,16 +139,16 @@ struct request_policy_id {
 // ---------------------------------------------------------------------------
 /// Biological entity represented by an external record.
 enum class entity_kind : std::uint8_t {
-  taxon,
-  assembly,
-  assembly_sequence,
-  gene,
-  transcript,
-  cds,
-  nucleotide,
-  protein,
-  virus_sequence,
-  organelle_sequence
+    taxon,
+    assembly,
+    assembly_sequence,
+    gene,
+    transcript,
+    cds,
+    nucleotide,
+    protein,
+    virus_sequence,
+    organelle_sequence
 };
 
 /// Molecule alphabet category exposed by a provider.
@@ -158,9 +162,9 @@ enum class taxon_match : std::uint8_t { exact, descendants };
 // ---------------------------------------------------------------------------
 /// Calendar date without a time zone or time of day.
 struct external_date {
-  std::int16_t year;
-  std::uint8_t month;
-  std::uint8_t day;
+    std::int16_t year;
+    std::uint8_t month;
+    std::uint8_t day;
 };
 
 /// UTC provider timestamp represented to microsecond precision.
@@ -172,76 +176,75 @@ using external_timestamp = std::chrono::sys_time<std::chrono::microseconds>;
 // ---------------------------------------------------------------------------
 /// Borrowed provider record identity with accession and optional version.
 struct record_key_view {
-  provider_id provider;
-  std::string_view domain;                    // Provider leaf database/domain.
-  std::optional<std::string_view> name_space; // RefSeq/GenBank/UniProtKB/ENA.
-  std::string_view original_identifier;
-  std::string_view accession; // Accession without version.
-  std::optional<std::uint32_t> version;
+    provider_id provider;
+    std::string_view domain;                    // Provider leaf database/domain.
+    std::optional<std::string_view> name_space; // RefSeq/GenBank/UniProtKB/ENA.
+    std::string_view original_identifier;
+    std::string_view accession; // Accession without version.
+    std::optional<std::uint32_t> version;
 };
 
 /// Zero-based half-open interval on a provider sequence alias.
 struct genomic_interval {
-  std::optional<std::string_view> assembly_accession;
-  std::optional<std::string_view> assembly_database; // UCSC key, e.g. hg38.
-  std::string_view sequence_alias;
-  std::uint64_t start0;
-  std::uint64_t end0;
-  /// Orientation of a genomic interval.
-  enum class strand : std::int8_t { unknown = 0, forward = 1, reverse = -1 };
-  strand orientation;
+    std::optional<std::string_view> assembly_accession;
+    std::optional<std::string_view> assembly_database; // UCSC key, e.g. hg38.
+    std::string_view sequence_alias;
+    std::uint64_t start0;
+    std::uint64_t end0;
+    /// Orientation of a genomic interval.
+    enum class strand : std::int8_t { unknown = 0, forward = 1, reverse = -1 };
+    strand orientation;
 };
 
 /// Borrowed provenance coordinates for an external sequence.
 struct sequence_origin_view {
-  std::optional<std::int64_t> taxon_id;
-  std::optional<std::string_view> assembly_accession;
-  std::optional<std::string_view> assembly_database;
-  std::optional<std::string_view> sequence_alias;
-  std::optional<std::uint64_t> start0;
-  std::optional<std::uint64_t> end0;
-  genomic_interval::strand orientation{genomic_interval::strand::unknown};
+    std::optional<std::int64_t> taxon_id;
+    std::optional<std::string_view> assembly_accession;
+    std::optional<std::string_view> assembly_database;
+    std::optional<std::string_view> sequence_alias;
+    std::optional<std::uint64_t> start0;
+    std::optional<std::uint64_t> end0;
+    genomic_interval::strand orientation{genomic_interval::strand::unknown};
 };
 
 /// Return the canonical SQL text for a molecule category.
-[[nodiscard]] constexpr std::string_view
-to_string(molecule_kind kind) noexcept {
-  switch (kind) {
-  case molecule_kind::nucleotide:
-    return "nucleotide";
-  case molecule_kind::protein:
-    return "protein";
-  case molecule_kind::unknown:
+[[nodiscard]] constexpr std::string_view to_string(molecule_kind kind) noexcept {
+    switch (kind) {
+    case molecule_kind::nucleotide:
+        return "nucleotide";
+    case molecule_kind::protein:
+        return "protein";
+    case molecule_kind::unknown:
+        return "unknown";
+    }
     return "unknown";
-  }
-  return "unknown";
 }
 
 /// Return the canonical SQL text for an entity category.
 [[nodiscard]] constexpr std::string_view to_string(entity_kind kind) noexcept {
-  switch (kind) {
-  case entity_kind::taxon:
-    return "taxon";
-  case entity_kind::assembly:
-    return "assembly";
-  case entity_kind::assembly_sequence:
-    return "assembly_sequence";
-  case entity_kind::gene:
-    return "gene";
-  case entity_kind::transcript:
-    return "transcript";
-  case entity_kind::cds:
-    return "cds";
-  case entity_kind::nucleotide:
+    switch (kind) {
+    case entity_kind::taxon:
+        return "taxon";
+    case entity_kind::assembly:
+        return "assembly";
+    case entity_kind::assembly_sequence:
+        return "assembly_sequence";
+    case entity_kind::gene:
+        return "gene";
+    case entity_kind::transcript:
+        return "transcript";
+    case entity_kind::cds:
+        return "cds";
+    case entity_kind::nucleotide:
+        return "nucleotide";
+    case entity_kind::protein:
+        return "protein";
+    case entity_kind::virus_sequence:
+        return "virus_sequence";
+    case entity_kind::organelle_sequence:
+        return "organelle_sequence";
+    }
     return "nucleotide";
-  case entity_kind::protein:
-    return "protein";
-  case entity_kind::virus_sequence:
-    return "virus_sequence";
-  case entity_kind::organelle_sequence:
-    return "organelle_sequence";
-  }
-  return "nucleotide";
 }
 
 } // namespace bioseq::external::provider

@@ -6,9 +6,8 @@
 // A controllable clock makes the process-local GCRA request-policy checks
 // deterministic without network access.
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <array>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -36,30 +35,29 @@ struct fake_clock {
     static prov::external_timestamp wall(void*) noexcept {
         return prov::external_timestamp{};
     }
-    prov::external_clock_ref ref() { return {this, &mono, &wall}; }
+    prov::external_clock_ref ref() {
+        return {this, &mono, &wall};
+    }
 };
 
 // One-tier policy request (spacing, burst, max_in_flight).
 struct policy_fixture {
     std::array<prov::request_rate_tier_view, 1> tiers{};
     prov::policy_request_view request{};
-    policy_fixture(std::int64_t spacing_ns, std::uint32_t burst,
-                   std::uint32_t max_in_flight) {
-        tiers[0] = prov::request_rate_tier_view{
-            .name = "default",
-            .initial_spacing = ns{spacing_ns},
-            .minimum_spacing = ns{spacing_ns},
-            .burst = burst,
-            .maximum_in_flight = max_in_flight};
+    policy_fixture(std::int64_t spacing_ns, std::uint32_t burst, std::uint32_t max_in_flight) {
+        tiers[0] = prov::request_rate_tier_view{.name = "default",
+                                                .initial_spacing = ns{spacing_ns},
+                                                .minimum_spacing = ns{spacing_ns},
+                                                .burst = burst,
+                                                .maximum_in_flight = max_in_flight};
         request.profile.rate_tiers =
-            std::span<const prov::request_rate_tier_view>(tiers.data(),
-                                                          tiers.size());
+            std::span<const prov::request_rate_tier_view>(tiers.data(), tiers.size());
         request.rate_tier = "default";
         request.normalized_origin = "https://eutils.ncbi.nlm.nih.gov";
         request.credential_identity = {};
     }
 };
-}  // namespace
+} // namespace
 
 TEST_CASE("gcra enforces global spacing",
           "[component:external_api][layer:unit][feature:external_source]") {
@@ -71,7 +69,7 @@ TEST_CASE("gcra enforces global spacing",
     REQUIRE(r0.has_value());
     REQUIRE(r0->action == prov::request_policy_action::proceed);
 
-    auto r1 = policy.acquire(fx.request, {});  // immediate re-request at t=0
+    auto r1 = policy.acquire(fx.request, {}); // immediate re-request at t=0
     REQUIRE(r1.has_value());
     REQUIRE(r1->action == prov::request_policy_action::retry_at);
     REQUIRE(r1->retry_at.count() == 1000);
@@ -88,9 +86,10 @@ TEST_CASE("gcra allows an initial burst then throttles",
     policy_fixture fx(/*spacing=*/1000, /*burst=*/3, /*max_in_flight=*/0);
 
     int proceeded = 0;
-    for (int i = 0; i < 4; ++i) {  // burst=3 → 1 + 3 immediate at t=0
+    for (int i = 0; i < 4; ++i) { // burst=3 → 1 + 3 immediate at t=0
         auto r = policy.acquire(fx.request, {});
-        if (r->action == prov::request_policy_action::proceed) ++proceeded;
+        if (r->action == prov::request_policy_action::proceed)
+            ++proceeded;
     }
     REQUIRE(proceeded == 4);
 
@@ -110,13 +109,13 @@ TEST_CASE("gcra caps concurrent in-flight requests",
     REQUIRE(b->action == prov::request_policy_action::proceed);
     REQUIRE(policy.in_flight_for_tests(fx.request) == 2);
 
-    auto c = policy.acquire(fx.request, {});  // cap full → refused before reserving
+    auto c = policy.acquire(fx.request, {}); // cap full → refused before reserving
     REQUIRE(c->action == prov::request_policy_action::retry_at);
-    REQUIRE(policy.in_flight_for_tests(fx.request) == 2);  // c leaked nothing
+    REQUIRE(policy.in_flight_for_tests(fx.request) == 2); // c leaked nothing
 
     prov::policy_response_view resp{};
     resp.outcome = prov::policy_attempt_outcome::response;
-    (void)policy.observe(*a->attempt, fx.request, resp);  // releases a slot
+    (void)policy.observe(*a->attempt, fx.request, resp); // releases a slot
     REQUIRE(policy.in_flight_for_tests(fx.request) == 1);
 
     auto d = policy.acquire(fx.request, {});
@@ -130,18 +129,19 @@ TEST_CASE("gcra rolls back the in-flight slot when it throttles",
     prov::gcra_request_policy policy(clock.ref());
     policy_fixture fx(/*spacing=*/1000, /*burst=*/0, /*max_in_flight=*/2);
 
-    auto a = policy.acquire(fx.request, {});  // proceed → tat=1000, in_flight=1
+    auto a = policy.acquire(fx.request, {}); // proceed → tat=1000, in_flight=1
     REQUIRE(a->action == prov::request_policy_action::proceed);
     REQUIRE(policy.in_flight_for_tests(fx.request) == 1);
 
-    // b reserves a slot (cap has room) but GCRA rejects (now=0 < tat=1000); the
+    // b reserves a slot because the cap has room, but GCRA rejects at now=0
+    // with tat=1000. The
     // reserved slot MUST be rolled back, not left held.
     auto b = policy.acquire(fx.request, {});
     REQUIRE(b->action == prov::request_policy_action::retry_at);
     REQUIRE(b->retry_at.count() == 1000);
-    REQUIRE(policy.in_flight_for_tests(fx.request) == 1);  // rolled back, not leaked
+    REQUIRE(policy.in_flight_for_tests(fx.request) == 1); // rolled back, not leaked
 
-    clock.now = 1000;  // a later request still proceeds → cap not wedged by a leak
+    clock.now = 1000; // a later request still proceeds → cap not wedged by a leak
     auto c = policy.acquire(fx.request, {});
     REQUIRE(c->action == prov::request_policy_action::proceed);
 }
@@ -161,7 +161,7 @@ TEST_CASE("gcra applies a Retry-After penalty floor",
     resp.rate.retry_at = ns{50000};
     (void)policy.observe(*a->attempt, fx.request, resp);
 
-    auto b = policy.acquire(fx.request, {});  // blocked by penalty despite burst
+    auto b = policy.acquire(fx.request, {}); // blocked by penalty despite burst
     REQUIRE(b->action == prov::request_policy_action::retry_at);
     REQUIRE(b->retry_at.count() == 50000);
 
@@ -180,8 +180,7 @@ TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
             return prov::external_timestamp{};
         }
     };
-    prov::external_clock_ref clock{nullptr, &steady_clock_src::mono,
-                                   &steady_clock_src::wall};
+    prov::external_clock_ref clock{nullptr, &steady_clock_src::mono, &steady_clock_src::wall};
     prov::gcra_request_policy policy(clock);
     policy_fixture fx(/*spacing=*/1000, /*burst=*/1000000, /*max_in_flight=*/8);
 
@@ -193,16 +192,14 @@ TEST_CASE("gcra is thread-safe and leaks no in-flight slots under contention",
             threads.emplace_back([&policy, &fx] {
                 for (int i = 0; i < k_iteration_count; ++i) {
                     auto r = policy.acquire(fx.request, {});
-                    if (r.has_value() &&
-                        r->action == prov::request_policy_action::proceed) {
-                        (void)policy.observe(*r->attempt, fx.request,
-                                             prov::policy_response_view{});
+                    if (r.has_value() && r->action == prov::request_policy_action::proceed) {
+                        (void)policy.observe(*r->attempt, fx.request, prov::policy_response_view{});
                     }
                     // A throttled request reserves no net slot — nothing to release.
                 }
             });
         }
-    }  // jthreads join on scope exit
+    } // jthreads join on scope exit
     // Every proceed was balanced by an observe and every reject rolled back, so
     // concurrent CAS on the shared bucket leaves the in-flight count at 0.
     REQUIRE(policy.in_flight_for_tests(fx.request) == 0);
