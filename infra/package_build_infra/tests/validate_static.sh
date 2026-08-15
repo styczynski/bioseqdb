@@ -93,9 +93,10 @@ if rg --quiet --ignore-case 'rustup|rustc --version|cargo --version|\.cargo/bin'
   fail "$BOOTSTRAP must not install, expose, or verify the retired Rust/Cargo toolchain"
 fi
 
-# Persistent builders may be reconciled and snapshotted while running, but no
-# package-build path may stop, terminate, reboot, or power off an EC2 instance.
-for lifecycle_file in "$CONTROLLER" "$BOOTSTRAP" "$USER_DATA"; do
+# Bootstrap paths never change instance lifecycle. Release cleanup may issue
+# only the controller's constant SSM poweroff command, which maps to the
+# instance's configured stop behavior and preserves its EBS cache.
+for lifecycle_file in "$BOOTSTRAP" "$USER_DATA"; do
   for forbidden_lifecycle in \
     stop-instances terminate-instances \
     'sudo shutdown' 'sudo poweroff' 'sudo halt' 'sudo reboot' \
@@ -107,6 +108,17 @@ for lifecycle_file in "$CONTROLLER" "$BOOTSTRAP" "$USER_DATA"; do
     fi
   done
 done
+for forbidden_lifecycle in \
+  stop-instances terminate-instances \
+  'sudo shutdown' 'sudo poweroff' 'sudo halt' 'sudo reboot' \
+  '/sbin/shutdown' '/sbin/poweroff' '/sbin/halt' '/sbin/reboot' \
+  'systemctl halt' 'systemctl reboot' 'tofu destroy'; do
+  if rg --fixed-strings --quiet -- "$forbidden_lifecycle" "$CONTROLLER"; then
+    fail "forbidden instance lifecycle operation found in $CONTROLLER: $forbidden_lifecycle"
+  fi
+done
+assert_literal "$CONTROLLER" '"AWS-RunShellScript"'
+assert_literal "$CONTROLLER" '{"commands": ["/usr/bin/systemctl poweroff"]}'
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.

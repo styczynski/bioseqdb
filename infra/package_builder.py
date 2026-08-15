@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision, run, verify, and image BioSeq's native AWS package builders.
+"""Provision, run, verify, collect, and image BioSeq's native AWS package builders.
 
 The normal ``run`` command
 owns the complete lifecycle: it selects architecture-specific cached AMIs,
@@ -7,8 +7,9 @@ applies the isolated OpenTofu stack without permitting instance replacement,
 starts only the exact instances recorded in that stack, prepares lock-hashed
 Poetry environments, builds on both native architectures, validates the remote
 manifests and exact S3 object versions, and creates post-build AMIs only for the
-complete canonical matrix.  It never stops or terminates an instance and
-hard-rejects the two protected development instance IDs from the specification.
+complete canonical matrix. Release automation may rediscover the existing
+tagged stack without local OpenTofu state and stop it through its configured
+instance-initiated ``stop`` behavior; it never terminates an instance.
 
 Only committed source is transferred to builders.  Package signing material is
 kept in AWS Secrets Manager and is never copied through this process or placed
@@ -86,6 +87,9 @@ EXPECTED_PACKAGE_VERSION = "4.2.3"
 EXPECTED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_S3_PREFIX = "bioseq/packages"
+RESOURCE_NAME_PREFIX = "bioseq-package-builder"
+CI_ACCESS_SCHEMA_REVISION = 1
+COLLECTION_SCHEMA_REVISION = 1
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
 REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
@@ -133,14 +137,16 @@ _PACKAGE_RUN_ROOT_SHAPES = (
     _PACKAGE_RUN_COMMON_KEYS | {"worker_launch_acknowledged"},
     _PACKAGE_RUN_COMMON_KEYS | {
         "worker_launch_acknowledged", "cache_images",
+        "complete_matrix_fingerprint",
     },
     _PACKAGE_RUN_COMMON_KEYS | {
         "finalizer_revision", "finalized_from_completed_manifests",
-        "cache_images",
+        "cache_images", "complete_matrix_fingerprint",
     },
 )
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
+SECURITY_GROUP_ID_RE = re.compile(r"^sg-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RUN_ID_RE = re.compile(r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<revision>[0-9a-f]{12})$")
 PACKAGE_UNIT_RE = re.compile(r"^bioseq-package-[A-Za-z0-9_.@-]+\.service$")
@@ -430,6 +436,9 @@ class Builder:
     public_ip: str
     private_ip: str
     source_ami_id: str
+    availability_zone: str = ""
+    region: str = DEFAULT_REGION
+    ssh_access: str = "static-key"
 
 
 @dataclass(frozen=True)
@@ -877,6 +886,453 @@ def normalize_s3_prefix(value: str) -> str:
     return value
 
 
+def aws_tags(value: object, *, label: str) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise PackageBuilderError(f"{label} tags are malformed")
+    tags: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise PackageBuilderError(f"{label} tags are malformed")
+        key = item.get("Key")
+        tag_value = item.get("Value")
+        if not isinstance(key, str) or not isinstance(tag_value, str) or key in tags:
+            raise PackageBuilderError(f"{label} tags are malformed or duplicated")
+        tags[key] = tag_value
+    return tags
+
+
+def require_resource_tags(
+    value: object, expected: dict[str, str], *, label: str,
+) -> dict[str, str]:
+    tags = aws_tags(value, label=label)
+    wrong = {
+        key: (tags.get(key), expected_value)
+        for key, expected_value in expected.items()
+        if tags.get(key) != expected_value
+    }
+    if wrong:
+        raise PackageBuilderError(f"{label} failed ownership-tag validation: {wrong}")
+    return tags
+
+
+def validate_existing_artifact_bucket(
+    region: str, account: str,
+) -> str:
+    bucket = f"{RESOURCE_NAME_PREFIX}-{account}-{region}"
+    location = aws_json(region, "s3api", "get-bucket-location", "--bucket", bucket)
+    observed_region = location.get("LocationConstraint") or "us-east-1"
+    if observed_region != region:
+        raise PackageBuilderError(
+            f"package artifact bucket {bucket} is in {observed_region}, expected {region}"
+        )
+    tag_payload = aws_json(region, "s3api", "get-bucket-tagging", "--bucket", bucket)
+    require_resource_tags(
+        tag_payload.get("TagSet"),
+        {
+            "Project": "bioseq",
+            "ManagedBy": "opentofu",
+            "Component": "package-artifacts",
+            "Name": bucket,
+        },
+        label=f"bucket {bucket}",
+    )
+    versioning = aws_json(
+        region, "s3api", "get-bucket-versioning", "--bucket", bucket
+    )
+    if versioning.get("Status") != "Enabled":
+        raise PackageBuilderError(f"package artifact bucket {bucket} is not versioned")
+    encryption = aws_json(
+        region, "s3api", "get-bucket-encryption", "--bucket", bucket
+    )
+    rules = encryption.get("ServerSideEncryptionConfiguration", {}).get("Rules", [])
+    algorithms = {
+        rule.get("ApplyServerSideEncryptionByDefault", {}).get("SSEAlgorithm")
+        for rule in rules
+        if isinstance(rule, dict)
+    }
+    if algorithms != {"AES256"}:
+        raise PackageBuilderError(
+            f"package artifact bucket {bucket} must use default AES256 encryption"
+        )
+    public_access = aws_json(
+        region, "s3api", "get-public-access-block", "--bucket", bucket
+    ).get("PublicAccessBlockConfiguration", {})
+    if any(
+        public_access.get(key) is not True
+        for key in (
+            "BlockPublicAcls",
+            "IgnorePublicAcls",
+            "BlockPublicPolicy",
+            "RestrictPublicBuckets",
+        )
+    ):
+        raise PackageBuilderError(
+            f"package artifact bucket {bucket} does not block all public access"
+        )
+    ownership = aws_json(
+        region, "s3api", "get-bucket-ownership-controls", "--bucket", bucket
+    ).get("OwnershipControls", {}).get("Rules", [])
+    if not isinstance(ownership, list) or {
+        rule.get("ObjectOwnership") for rule in ownership if isinstance(rule, dict)
+    } != {"BucketOwnerEnforced"}:
+        raise PackageBuilderError(
+            f"package artifact bucket {bucket} must enforce bucket ownership"
+        )
+    return bucket
+
+
+def validate_existing_signing_secret(
+    region: str, account: str,
+) -> str:
+    name = f"{RESOURCE_NAME_PREFIX}-omnipackage-signing-key"
+    payload = aws_json(
+        region, "secretsmanager", "describe-secret", "--secret-id", name
+    )
+    arn = payload.get("ARN")
+    expected_prefix = f"arn:aws:secretsmanager:{region}:{account}:secret:{name}-"
+    if not isinstance(arn, str) or not arn.startswith(expected_prefix):
+        raise PackageBuilderError("package signing secret is outside the current account")
+    if payload.get("DeletedDate") is not None:
+        raise PackageBuilderError("package signing secret is pending deletion")
+    require_resource_tags(
+        payload.get("Tags"),
+        {
+            "Project": "bioseq",
+            "ManagedBy": "opentofu",
+            "Component": "package-signing",
+            "Name": name,
+        },
+        label=f"secret {name}",
+    )
+    return arn
+
+
+def discover_existing_builders(
+    region: str, matrix: Matrix, *, ephemeral_ssh: bool,
+) -> tuple[dict[str, Builder], dict[str, dict[str, Any]]]:
+    filters = [
+        f"Name=tag:{key},Values={value}" for key, value in EXPECTED_INSTANCE_TAGS.items()
+    ]
+    filters.append("Name=instance-state-name,Values=pending,running,stopping,stopped")
+    payload = aws_json(region, "ec2", "describe-instances", "--filters", *filters)
+    instances = [
+        instance
+        for reservation in payload.get("Reservations", [])
+        if isinstance(reservation, dict)
+        for instance in reservation.get("Instances", [])
+        if isinstance(instance, dict)
+    ]
+    candidates: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in matrix.architectures
+    }
+    for instance in instances:
+        tags = aws_tags(instance.get("Tags", []), label="discovered builder")
+        name = tags.get("BuildArchitecture")
+        if name in candidates:
+            candidates[name].append(instance)
+    wrong_counts = {name: len(values) for name, values in candidates.items() if len(values) != 1}
+    if wrong_counts:
+        raise PackageBuilderError(
+            "current AWS account must contain exactly one tagged builder per "
+            f"architecture: {wrong_counts}"
+        )
+    builders: dict[str, Builder] = {}
+    for name, values in candidates.items():
+        instance = values[0]
+        instance_id = str(instance.get("InstanceId", ""))
+        image_id = str(instance.get("ImageId", ""))
+        placement = instance.get("Placement", {})
+        availability_zone = (
+            str(placement.get("AvailabilityZone", ""))
+            if isinstance(placement, dict)
+            else ""
+        )
+        if (
+            INSTANCE_ID_RE.fullmatch(instance_id) is None
+            or AMI_ID_RE.fullmatch(image_id) is None
+            or not availability_zone.startswith(region)
+        ):
+            raise PackageBuilderError(f"discovered {name} builder identity is malformed")
+        expected = matrix.architectures[name]
+        builders[name] = Builder(
+            architecture=name,
+            instance_id=instance_id,
+            instance_type=str(instance.get("InstanceType", "")),
+            aws_architecture=str(instance.get("Architecture", "")),
+            public_ip=str(instance.get("PublicIpAddress") or ""),
+            private_ip=str(instance.get("PrivateIpAddress") or ""),
+            source_ami_id=image_id,
+            availability_zone=availability_zone,
+            region=region,
+            ssh_access="ec2-instance-connect" if ephemeral_ssh else "static-key",
+        )
+        if (
+            builders[name].instance_type != expected.instance_type
+            or builders[name].aws_architecture != expected.aws_architecture
+        ):
+            raise PackageBuilderError(f"discovered {name} builder shape is not canonical")
+    records = validate_builders(region, builders, matrix)
+    return builders, records
+
+
+def discover_existing_infrastructure(
+    region: str,
+    matrix: Matrix,
+    *,
+    ssh_key: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Builder], dict[str, dict[str, Any]]]:
+    identity = aws_preflight(region)
+    account = str(identity["Account"])
+    builders, records = discover_existing_builders(
+        region, matrix, ephemeral_ssh=ssh_key is not None
+    )
+    profile_arns = {
+        str(record.get("IamInstanceProfile", {}).get("Arn", ""))
+        for record in records.values()
+    }
+    expected_profile_arn = (
+        f"arn:aws:iam::{account}:instance-profile/{RESOURCE_NAME_PREFIX}-profile"
+    )
+    if profile_arns != {expected_profile_arn}:
+        raise PackageBuilderError(
+            "package builders do not use the current account's canonical instance profile"
+        )
+    profile = aws_json(
+        region,
+        "iam",
+        "get-instance-profile",
+        "--instance-profile-name",
+        f"{RESOURCE_NAME_PREFIX}-profile",
+    ).get("InstanceProfile", {})
+    roles = profile.get("Roles", []) if isinstance(profile, dict) else []
+    expected_role_arn = f"arn:aws:iam::{account}:role/{RESOURCE_NAME_PREFIX}-role"
+    if (
+        not isinstance(roles, list)
+        or len(roles) != 1
+        or roles[0].get("Arn") != expected_role_arn
+    ):
+        raise PackageBuilderError(
+            "package builder instance profile does not contain the canonical role"
+        )
+    bucket = validate_existing_artifact_bucket(region, account)
+    secret_arn = validate_existing_signing_secret(region, account)
+    outputs: dict[str, Any] = {
+        "account_id": account,
+        "region": region,
+        "package_bucket_name": bucket,
+        "package_bucket_arn": f"arn:aws:s3:::{bucket}",
+        "signing_key_secret_arn": secret_arn,
+    }
+    if ssh_key is not None:
+        outputs["ssh_private_key_path"] = str(ssh_key.resolve())
+    return outputs, builders, records
+
+
+def write_json_atomic(path: Path, payload: object, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    temporary.chmod(mode)
+    temporary.replace(path)
+
+
+def validated_builder_security_group(
+    region: str, records: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    groups: set[str] = set()
+    for name, record in records.items():
+        values = record.get("SecurityGroups", [])
+        if not isinstance(values, list) or len(values) != 1:
+            raise PackageBuilderError(
+                f"{name} builder must have exactly one security group"
+            )
+        group_id = str(values[0].get("GroupId", ""))
+        if SECURITY_GROUP_ID_RE.fullmatch(group_id) is None:
+            raise PackageBuilderError(f"{name} builder security group is malformed")
+        groups.add(group_id)
+    if len(groups) != 1:
+        raise PackageBuilderError("package builders do not share one security group")
+    group_id = groups.pop()
+    payload = aws_json(
+        region, "ec2", "describe-security-groups", "--group-ids", group_id
+    )
+    values = payload.get("SecurityGroups", [])
+    if not isinstance(values, list) or len(values) != 1:
+        raise PackageBuilderError(f"cannot validate builder security group {group_id}")
+    group = values[0]
+    require_resource_tags(
+        group.get("Tags"),
+        {
+            "Project": "bioseq",
+            "ManagedBy": "opentofu",
+            "Component": "package-build-machine",
+            "Name": f"{RESOURCE_NAME_PREFIX}-sg",
+        },
+        label=f"security group {group_id}",
+    )
+    permissions = group.get("IpPermissions", [])
+    if not isinstance(permissions, list):
+        raise PackageBuilderError(f"security group {group_id} ingress is malformed")
+    for permission in permissions:
+        if (
+            not isinstance(permission, dict)
+            or permission.get("IpProtocol") != "tcp"
+            or permission.get("FromPort") != 22
+            or permission.get("ToPort") != 22
+            or permission.get("Ipv6Ranges")
+            or permission.get("PrefixListIds")
+            or permission.get("UserIdGroupPairs")
+        ):
+            raise PackageBuilderError(
+                f"security group {group_id} has non-canonical ingress"
+            )
+        for value in permission.get("IpRanges", []):
+            normalize_ssh_cidr(str(value.get("CidrIp", "")))
+    return group_id, group
+
+
+def security_group_has_cidr(group: dict[str, Any], cidr: str) -> bool:
+    return any(
+        value.get("CidrIp") == cidr
+        for permission in group.get("IpPermissions", [])
+        if isinstance(permission, dict)
+        for value in permission.get("IpRanges", [])
+        if isinstance(value, dict)
+    )
+
+
+def open_ci_access(
+    *, region: str, ssh_key: Path, ssh_cidr: str | None, receipt: Path,
+) -> dict[str, Any]:
+    matrix = load_matrix()
+    key_path = ssh_key.expanduser().resolve()
+    if not key_path.is_file():
+        raise PackageBuilderError("CI access requires an ephemeral SSH key pair")
+    read_instance_connect_public_key(key_path)
+    outputs, _builders, records = discover_existing_infrastructure(
+        region, matrix, ssh_key=key_path
+    )
+    cidr = normalize_ssh_cidr(ssh_cidr)
+    group_id, group = validated_builder_security_group(region, records)
+    added = not security_group_has_cidr(group, cidr)
+    description = "bioseq package release ephemeral SSH"
+    payload = {
+        "schema_revision": CI_ACCESS_SCHEMA_REVISION,
+        "account": outputs["account_id"],
+        "region": region,
+        "security_group_id": group_id,
+        "cidr": cidr,
+        "description": description,
+        "rule_added": added,
+        "closed": False,
+    }
+    # Persist cleanup intent before the reversible AWS mutation.
+    write_json_atomic(receipt, payload)
+    if added:
+        permission = json.dumps(
+            [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [
+                        {"CidrIp": cidr, "Description": description}
+                    ],
+                }
+            ],
+            separators=(",", ":"),
+        )
+        aws_no_output(
+            region,
+            "ec2",
+            "authorize-security-group-ingress",
+            "--group-id",
+            group_id,
+            "--ip-permissions",
+            permission,
+        )
+    return payload
+
+
+def close_ci_access(*, region: str, receipt: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PackageBuilderError(f"cannot read CI access receipt {receipt}: {error}") from error
+    expected_keys = {
+        "schema_revision",
+        "account",
+        "region",
+        "security_group_id",
+        "cidr",
+        "description",
+        "rule_added",
+        "closed",
+    }
+    if not isinstance(payload, dict):
+        raise PackageBuilderError("CI access receipt must be an object")
+    require_exact_keys(payload, expected_keys, "CI access receipt")
+    if (
+        type(payload["schema_revision"]) is not int
+        or payload["schema_revision"] != CI_ACCESS_SCHEMA_REVISION
+        or re.fullmatch(r"[0-9]{12}", str(payload["account"])) is None
+        or payload["region"] != region
+        or SECURITY_GROUP_ID_RE.fullmatch(str(payload["security_group_id"])) is None
+        or payload["description"] != "bioseq package release ephemeral SSH"
+        or type(payload["rule_added"]) is not bool
+        or type(payload["closed"]) is not bool
+    ):
+        raise PackageBuilderError("CI access receipt identity is invalid")
+    cidr = normalize_ssh_cidr(str(payload["cidr"]))
+    identity = aws_preflight(region)
+    if payload["account"] != identity["Account"]:
+        raise PackageBuilderError("CI access receipt belongs to a different AWS account")
+    group_id = str(payload["security_group_id"])
+    group_payload = aws_json(
+        region, "ec2", "describe-security-groups", "--group-ids", group_id
+    )
+    groups = group_payload.get("SecurityGroups", [])
+    if not isinstance(groups, list) or len(groups) != 1:
+        raise PackageBuilderError("CI access receipt security group no longer exists")
+    group = groups[0]
+    require_resource_tags(
+        group.get("Tags"),
+        {
+            "Project": "bioseq",
+            "ManagedBy": "opentofu",
+            "Component": "package-build-machine",
+            "Name": f"{RESOURCE_NAME_PREFIX}-sg",
+        },
+        label=f"security group {group_id}",
+    )
+    if payload["rule_added"] and not payload["closed"] and security_group_has_cidr(group, cidr):
+        permission = json.dumps(
+            [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": cidr}],
+                }
+            ],
+            separators=(",", ":"),
+        )
+        aws_no_output(
+            region,
+            "ec2",
+            "revoke-security-group-ingress",
+            "--group-id",
+            group_id,
+            "--ip-permissions",
+            permission,
+        )
+    payload["closed"] = True
+    write_json_atomic(receipt, payload)
+    return payload
+
+
 def latest_cached_ami(
     region: str,
     architecture: Architecture,
@@ -983,6 +1439,19 @@ def output_builders(outputs: dict[str, Any], matrix: Matrix) -> dict[str, Builde
     return builders
 
 
+def require_builder_schema_tag(tags: dict[str, str], instance_id: str) -> None:
+    expected = str(BOOTSTRAP_SCHEMA_REVISION)
+    current = tags.get("AmiSchemaRevision")
+    legacy = tags.get("AmiSchemaVersion")
+    if not (
+        (current == expected and legacy in {None, expected})
+        or (current is None and legacy == expected)
+    ):
+        raise PackageBuilderError(
+            f"instance {instance_id} has incompatible AMI schema tags"
+        )
+
+
 def describe_builder(region: str, builder: Builder, expected: Architecture) -> dict[str, Any]:
     if builder.instance_id in PROTECTED_INSTANCE_IDS:
         raise PackageBuilderError(
@@ -1010,7 +1479,6 @@ def describe_builder(region: str, builder: Builder, expected: Architecture) -> d
         **EXPECTED_INSTANCE_TAGS,
         "BuildArchitecture": expected.name,
         "Architecture": expected.aws_architecture,
-        "AmiSchemaRevision": str(BOOTSTRAP_SCHEMA_REVISION),
     }
     wrong_tags = {
         key: (tags.get(key), value)
@@ -1021,6 +1489,7 @@ def describe_builder(region: str, builder: Builder, expected: Architecture) -> d
         raise PackageBuilderError(
             f"instance {builder.instance_id} failed ownership-tag validation: {wrong_tags}"
         )
+    require_builder_schema_tag(tags, builder.instance_id)
     if instance.get("InstanceType") != expected.instance_type:
         raise PackageBuilderError(
             f"instance {builder.instance_id} type is {instance.get('InstanceType')}, "
@@ -1072,9 +1541,15 @@ def describe_builder(region: str, builder: Builder, expected: Architecture) -> d
         "--attribute",
         "disableApiStop",
     )
-    if stop_protection.get("DisableApiStop", {}).get("Value") is not True:
+    stop_protection_value = stop_protection.get("DisableApiStop", {}).get("Value")
+    if type(stop_protection_value) is not bool:
         raise PackageBuilderError(
-            f"instance {builder.instance_id} does not have API stop protection"
+            f"instance {builder.instance_id} returned malformed API stop protection"
+        )
+    if stop_protection_value is False:
+        info(
+            f"instance {builder.instance_id} permits API stop; cleanup still uses "
+            "its instance-initiated stop behavior"
         )
     shutdown = aws_json(
         region,
@@ -1175,6 +1650,114 @@ def start_builders(
     return validate_builders(region, builders, matrix)
 
 
+def wait_for_ssm_online(
+    region: str, instance_id: str, *, timeout_seconds: int = 600,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        payload = aws_json(
+            region,
+            "ssm",
+            "describe-instance-information",
+            "--filters",
+            f"Key=InstanceIds,Values={instance_id}",
+        )
+        values = payload.get("InstanceInformationList", [])
+        if (
+            isinstance(values, list)
+            and len(values) == 1
+            and values[0].get("InstanceId") == instance_id
+            and values[0].get("PingStatus") == "Online"
+        ):
+            return
+        time.sleep(10)
+    raise PackageBuilderError(f"SSM did not become online for {instance_id}")
+
+
+def stop_existing_builders(region: str, matrix: Matrix) -> dict[str, str]:
+    aws_preflight(region)
+    builders, records = discover_existing_builders(
+        region, matrix, ephemeral_ssh=False
+    )
+    states = {name: instance_state(records[name]) for name in matrix.architectures}
+    requested: set[str] = set()
+    errors: list[str] = []
+    for name, builder in builders.items():
+        state = states[name]
+        if state == "stopped":
+            info(f"{name} builder {builder.instance_id} is already stopped; no-op")
+            continue
+        if state == "stopping":
+            continue
+        if state == "pending":
+            run_command(
+                [
+                    require_executable("aws"),
+                    "--region",
+                    region,
+                    "ec2",
+                    "wait",
+                    "instance-running",
+                    "--instance-ids",
+                    builder.instance_id,
+                ]
+            )
+        elif state != "running":
+            raise PackageBuilderError(
+                f"cannot stop {name} builder {builder.instance_id} from state {state!r}"
+            )
+        try:
+            wait_for_ssm_online(region, builder.instance_id)
+            response = aws_json(
+                region,
+                "ssm",
+                "send-command",
+                "--document-name",
+                "AWS-RunShellScript",
+                "--comment",
+                "Bioseq package release cost cleanup",
+                "--instance-ids",
+                builder.instance_id,
+                "--parameters",
+                json.dumps(
+                    {"commands": ["/usr/bin/systemctl poweroff"]},
+                    separators=(",", ":"),
+                ),
+            )
+            command_id = response.get("Command", {}).get("CommandId")
+            if not isinstance(command_id, str) or not command_id:
+                raise PackageBuilderError(
+                    f"SSM did not acknowledge stop command for {builder.instance_id}"
+                )
+            requested.add(name)
+        except Exception as error:
+            errors.append(f"{name}: {error}")
+    for name, builder in builders.items():
+        if states[name] not in {"stopping"} and name not in requested:
+            continue
+        run_command(
+            [
+                require_executable("aws"),
+                "--region",
+                region,
+                "ec2",
+                "wait",
+                "instance-stopped",
+                "--instance-ids",
+                builder.instance_id,
+            ]
+        )
+    final_records = validate_builders(region, builders, matrix)
+    final_states = {
+        name: instance_state(final_records[name]) for name in matrix.architectures
+    }
+    if set(final_states.values()) != {"stopped"}:
+        errors.append(f"final states: {final_states}")
+    if errors:
+        raise PackageBuilderError("package builder stop cleanup failed: " + "; ".join(errors))
+    return final_states
+
+
 def refreshed_builders(
     records: dict[str, dict[str, Any]], builders: dict[str, Builder]
 ) -> dict[str, Builder]:
@@ -1189,6 +1772,11 @@ def refreshed_builders(
             public_ip=str(instance.get("PublicIpAddress") or ""),
             private_ip=str(instance.get("PrivateIpAddress") or ""),
             source_ami_id=builder.source_ami_id,
+            availability_zone=str(
+                instance.get("Placement", {}).get("AvailabilityZone", "")
+            ),
+            region=builder.region,
+            ssh_access=builder.ssh_access,
         )
         if not refreshed[name].public_ip:
             raise PackageBuilderError(
@@ -1231,6 +1819,50 @@ def ssh_argv(builder: Builder, key_path: Path) -> list[str]:
     ]
 
 
+def refresh_instance_connect_key(builder: Builder, key_path: Path) -> None:
+    if builder.ssh_access != "ec2-instance-connect":
+        return
+    if not builder.availability_zone.startswith(builder.region):
+        raise PackageBuilderError(
+            f"builder {builder.instance_id} has no validated availability zone"
+        )
+    public_key = read_instance_connect_public_key(key_path)
+    result = aws_json(
+        builder.region,
+        "ec2-instance-connect",
+        "send-ssh-public-key",
+        "--instance-id",
+        builder.instance_id,
+        "--instance-os-user",
+        "ubuntu",
+        "--availability-zone",
+        builder.availability_zone,
+        "--ssh-public-key",
+        public_key,
+    )
+    if result.get("Success") is not True:
+        raise PackageBuilderError(
+            f"EC2 Instance Connect rejected key for {builder.instance_id}"
+        )
+
+
+def read_instance_connect_public_key(key_path: Path) -> str:
+    public_key_path = key_path.with_name(key_path.name + ".pub")
+    try:
+        public_key = public_key_path.read_text(encoding="ascii").strip()
+    except OSError as error:
+        raise PackageBuilderError(
+            f"cannot read ephemeral SSH public key {public_key_path}: {error}"
+        ) from error
+    if (
+        len(public_key) > 4096
+        or re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+(?: [^\r\n]+)?", public_key)
+        is None
+    ):
+        raise PackageBuilderError("ephemeral SSH public key is not a valid Ed25519 key")
+    return public_key
+
+
 def ssh_run(
     builder: Builder,
     key_path: Path,
@@ -1240,6 +1872,7 @@ def ssh_run(
     check: bool = True,
     stdout: Any = None,
 ) -> subprocess.CompletedProcess[str]:
+    refresh_instance_connect_key(builder, key_path)
     return run_command(
         ssh_argv(builder, key_path) + [remote_command],
         capture=capture,
@@ -2970,6 +3603,222 @@ def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]
                 )
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_exact_package(
+    *,
+    region: str,
+    bucket: str,
+    upload: dict[str, Any],
+    destination: Path,
+) -> None:
+    version_id = str(upload.get("version_id", ""))
+    key = str(upload.get("key", ""))
+    if not version_id or not key:
+        raise PackageBuilderError("package upload lacks exact S3 object identity")
+    temporary = destination.with_name(destination.name + ".tmp")
+    response = aws_json(
+        region,
+        "s3api",
+        "get-object",
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        "--version-id",
+        version_id,
+        str(temporary),
+    )
+    if (
+        response.get("VersionId") != version_id
+        or response.get("ServerSideEncryption") != "AES256"
+    ):
+        raise PackageBuilderError(f"exact S3 download identity mismatch for {key}")
+    size = temporary.stat().st_size
+    digest = sha256_file(temporary)
+    if size != upload.get("size") or digest != upload.get("sha256"):
+        temporary.unlink(missing_ok=True)
+        raise PackageBuilderError(f"exact S3 download bytes mismatch for {key}")
+    temporary.replace(destination)
+
+
+def collect_release_assets(
+    *,
+    region: str,
+    run_result_path: Path,
+    output_dir: Path,
+    expected_revision: str,
+) -> dict[str, Any]:
+    try:
+        raw_result = json.loads(run_result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PackageBuilderError(
+            f"cannot read package run result {run_result_path}: {error}"
+        ) from error
+    result = require_current_package_run_result(
+        raw_result, label="collected package run result"
+    )
+    if result.get("status") != "success":
+        raise PackageBuilderError("only a successful package run can be collected")
+    revision = str(result.get("source_revision", ""))
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
+        or revision != expected_revision
+        or result.get("revision") != expected_revision
+    ):
+        raise PackageBuilderError(
+            "package run source revision does not match the requested release commit"
+        )
+    matrix = load_matrix()
+    selection_payload = result.get("selection")
+    if not isinstance(selection_payload, dict):
+        raise PackageBuilderError("package run selection is malformed")
+    require_exact_keys(
+        selection_payload,
+        {"architectures", "distributions", "postgresql_majors"},
+        "package run selection",
+    )
+    selection = Selection(
+        tuple(selection_payload["architectures"]),
+        tuple(selection_payload["distributions"]),
+        tuple(selection_payload["postgresql_majors"]),
+    )
+    if not is_complete_matrix_selection(selection, matrix):
+        raise PackageBuilderError("release collection requires the complete canonical matrix")
+    bucket = str(result.get("bucket", ""))
+    prefix = normalize_s3_prefix(str(result.get("s3_prefix", "")))
+    expected_count = (
+        len(matrix.architectures)
+        * len(matrix.distributions)
+        * len(matrix.postgresql_majors)
+    )
+    if result.get("artifact_count") != expected_count:
+        raise PackageBuilderError(
+            f"package run artifact count is not the canonical {expected_count}"
+        )
+    manifests = result.get("manifests")
+    if not isinstance(manifests, dict) or set(manifests) != set(matrix.architectures):
+        raise PackageBuilderError("package run must contain both architecture manifests")
+    lock_sha256 = str(result.get("poetry_lock_sha256", ""))
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
+        raise PackageBuilderError("package run Poetry lock hash is malformed")
+
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any(output_dir.iterdir()):
+        raise PackageBuilderError(f"release output directory is not empty: {output_dir}")
+
+    uploads: list[dict[str, Any]] = []
+    cells: list[tuple[str, dict[str, Any]]] = []
+    for architecture in matrix.architectures:
+        manifest = manifests[architecture]
+        environment = _result_poetry_environment(result, architecture, lock_sha256)
+        uploads.extend(
+            validate_manifest(
+                manifest,
+                architecture=architecture,
+                selection=selection,
+                matrix=matrix,
+                bucket=bucket,
+                region=region,
+                s3_prefix=prefix,
+                source_revision=revision,
+                poetry_lock_sha256=lock_sha256,
+                python_environment=environment,
+            )
+        )
+        cells.extend((architecture, cell) for cell in manifest["cells"])
+    if len(uploads) != expected_count or len(cells) != expected_count:
+        raise PackageBuilderError("validated package manifests omitted release assets")
+    verify_s3_uploads(region, bucket, uploads)
+
+    assets: list[dict[str, Any]] = []
+    for architecture, cell in sorted(
+        cells,
+        key=lambda value: (
+            value[0],
+            int(value[1]["postgres_major"]),
+            str(value[1]["distro"]),
+        ),
+    ):
+        artifact = cell["artifact"]
+        upload = cell["upload"]
+        filename = str(artifact["filename"])
+        if (
+            Path(filename).name != filename
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", filename) is None
+        ):
+            raise PackageBuilderError(f"unsafe package filename in manifest: {filename!r}")
+        distro = str(cell["distro"])
+        postgres = int(cell["postgres_major"])
+        release_name = f"{distro}--{architecture}--pg{postgres}--{filename}"
+        destination = output_dir / release_name
+        download_exact_package(
+            region=region,
+            bucket=bucket,
+            upload=upload,
+            destination=destination,
+        )
+        assets.append(
+            {
+                "filename": release_name,
+                "architecture": architecture,
+                "distro": distro,
+                "postgresql_major": postgres,
+                "package_format": matrix.distributions[distro].package_format,
+                "size": upload["size"],
+                "sha256": upload["sha256"],
+                "s3": {
+                    "bucket": bucket,
+                    "key": upload["key"],
+                    "version_id": upload["version_id"],
+                    "etag": upload["etag"],
+                    "server_side_encryption": "AES256",
+                },
+            }
+        )
+
+    run_id = str(result.get("run_id", ""))
+    if RUN_ID_RE.fullmatch(run_id) is None:
+        raise PackageBuilderError("package run id is malformed")
+    run_receipt = output_dir / f"package-run-{run_id}.json"
+    write_json_atomic(run_receipt, result, mode=0o644)
+    for architecture in sorted(manifests):
+        write_json_atomic(
+            output_dir / f"package-manifest-{run_id}-{architecture}.json",
+            manifests[architecture],
+            mode=0o644,
+        )
+    collection = {
+        "schema_revision": COLLECTION_SCHEMA_REVISION,
+        "package_version": EXPECTED_PACKAGE_VERSION,
+        "source_revision": revision,
+        "run_id": run_id,
+        "matrix": {
+            "architectures": list(selection.architectures),
+            "distributions": list(selection.distributions),
+            "postgresql_majors": list(selection.postgresql_majors),
+            "artifact_count": expected_count,
+        },
+        "assets": assets,
+    }
+    write_json_atomic(
+        output_dir / f"package-assets-{run_id}.json", collection, mode=0o644
+    )
+    checksummed = sorted(path for path in output_dir.iterdir() if path.is_file())
+    checksums = "".join(
+        f"{sha256_file(path)}  {path.name}\n" for path in checksummed
+    )
+    (output_dir / "SHA256SUMS").write_text(checksums, encoding="ascii")
+    return collection
+
+
 def write_last_run(payload: dict[str, Any]) -> None:
     payload = require_current_package_run_result(
         payload, label="package run result")
@@ -2996,6 +3845,24 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     dict[str, Any], dict[str, Builder], dict[str, dict[str, Any]], dict[str, bool]
 ]:
     artifact_prefix = normalize_s3_prefix(args.s3_prefix)
+    if getattr(args, "existing_only", False):
+        if artifact_prefix != DEFAULT_S3_PREFIX:
+            raise PackageBuilderError(
+                "--existing-only requires the repository's canonical S3 prefix"
+            )
+        if not getattr(args, "ssh_key", None):
+            raise PackageBuilderError("--existing-only requires --ssh-key")
+        key_path = Path(args.ssh_key).expanduser().resolve()
+        outputs, builders, _ = discover_existing_infrastructure(
+            args.region, matrix, ssh_key=key_path
+        )
+        # Validate the key before any instance is started.
+        ssh_key_path(outputs)
+        records = start_builders(args.region, builders, matrix)
+        builders = refreshed_builders(records, builders)
+        return outputs, builders, records, {
+            name: True for name in matrix.architectures
+        }
     aws_preflight(args.region)
     ssh_cidr = normalize_ssh_cidr(args.ssh_cidr)
     info(f"SSH ingress is fail-closed to {ssh_cidr}")
@@ -3672,6 +4539,111 @@ def cmd_validate(args: argparse.Namespace) -> None:
     print(json.dumps({"status": "valid", "selection": selection.__dict__}, indent=2))
 
 
+def cmd_matrix(args: argparse.Namespace) -> None:
+    matrix = load_matrix()
+    selection = Selection(
+        tuple(matrix.architectures),
+        tuple(matrix.distributions),
+        matrix.postgresql_majors,
+    )
+    if args.require_complete and not is_complete_matrix_selection(selection, matrix):
+        raise PackageBuilderError("repository package matrix is not complete")
+    cells = [
+        {
+            "architecture": architecture,
+            "aws_architecture": matrix.architectures[architecture].aws_architecture,
+            "artifact_architecture": (
+                matrix.architectures[architecture].artifact_architecture
+            ),
+            "instance_type": matrix.architectures[architecture].instance_type,
+            "postgresql_major": postgres,
+            "distro": distro,
+            "package_format": matrix.distributions[distro].package_format,
+        }
+        for architecture in matrix.architectures
+        for postgres in matrix.postgresql_majors
+        for distro in matrix.distributions
+    ]
+    print(
+        json.dumps(
+            {
+                "schema_revision": PACKAGE_MATRIX_SCHEMA_REVISION,
+                "package_version": EXPECTED_PACKAGE_VERSION,
+                "cell_count": len(cells),
+                "cells": cells,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_inventory(args: argparse.Namespace) -> None:
+    matrix = load_matrix()
+    outputs, builders, records = discover_existing_infrastructure(
+        args.region, matrix
+    )
+    security_group_id, _group = validated_builder_security_group(
+        args.region, records
+    )
+    print(
+        json.dumps(
+            {
+                "account": outputs["account_id"],
+                "region": args.region,
+                "artifact_bucket": outputs["package_bucket_name"],
+                "signing_secret_arn": outputs["signing_key_secret_arn"],
+                "security_group_id": security_group_id,
+                "builders": {
+                    name: {
+                        "instance_id": builder.instance_id,
+                        "source_ami_id": builder.source_ami_id,
+                        "instance_type": builder.instance_type,
+                        "architecture": builder.aws_architecture,
+                        "availability_zone": builder.availability_zone,
+                        "state": instance_state(records[name]),
+                    }
+                    for name, builder in builders.items()
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_open_ci_access(args: argparse.Namespace) -> None:
+    payload = open_ci_access(
+        region=args.region,
+        ssh_key=Path(args.ssh_key),
+        ssh_cidr=args.ssh_cidr,
+        receipt=Path(args.receipt).expanduser().resolve(),
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_close_ci_access(args: argparse.Namespace) -> None:
+    payload = close_ci_access(
+        region=args.region, receipt=Path(args.receipt).expanduser().resolve()
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    states = stop_existing_builders(args.region, load_matrix())
+    print(json.dumps({"region": args.region, "builders": states}, indent=2, sort_keys=True))
+
+
+def cmd_collect(args: argparse.Namespace) -> None:
+    collection = collect_release_assets(
+        region=args.region,
+        run_result_path=Path(args.run_result).expanduser().resolve(),
+        output_dir=Path(args.output_dir).expanduser().resolve(),
+        expected_revision=args.expected_revision,
+    )
+    print(json.dumps(collection, indent=2, sort_keys=True))
+
+
 def cmd_output(args: argparse.Namespace) -> None:
     del args
     print(json.dumps(tofu_outputs(), indent=2, sort_keys=True))
@@ -3801,6 +4773,15 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="skip post-build AMIs (required for any partial matrix run)",
     )
+    parser.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="rediscover and start only the exact tagged existing stack; never apply OpenTofu",
+    )
+    parser.add_argument(
+        "--ssh-key",
+        help="ephemeral SSH private key used with EC2 Instance Connect in existing-only mode",
+    )
 
 
 def add_matrix_options(parser: argparse.ArgumentParser) -> None:
@@ -3824,6 +4805,19 @@ def add_matrix_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    matrix_parser = subparsers.add_parser(
+        "matrix", help="print the exact repository-declared package matrix without AWS access"
+    )
+    matrix_parser.add_argument("--require-complete", action="store_true")
+    matrix_parser.set_defaults(handler=cmd_matrix)
+
+    inventory_parser = subparsers.add_parser(
+        "inventory",
+        help="read and validate current-account package infrastructure without mutation",
+    )
+    inventory_parser.add_argument("--region", default=DEFAULT_REGION)
+    inventory_parser.set_defaults(handler=cmd_inventory)
 
     run_parser = subparsers.add_parser(
         "run", help="provision/start, build, upload and optionally image; leave running"
@@ -3862,6 +4856,38 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument("--region", default=DEFAULT_REGION)
     add_matrix_options(validate_parser)
     validate_parser.set_defaults(handler=cmd_validate)
+
+    open_access_parser = subparsers.add_parser(
+        "open-ci-access",
+        help="authorize one ephemeral /32 for the exact tagged existing builders",
+    )
+    open_access_parser.add_argument("--region", default=DEFAULT_REGION)
+    open_access_parser.add_argument("--ssh-key", required=True)
+    open_access_parser.add_argument("--ssh-cidr")
+    open_access_parser.add_argument("--receipt", required=True)
+    open_access_parser.set_defaults(handler=cmd_open_ci_access)
+
+    close_access_parser = subparsers.add_parser(
+        "close-ci-access", help="revoke only the ingress recorded by open-ci-access"
+    )
+    close_access_parser.add_argument("--region", default=DEFAULT_REGION)
+    close_access_parser.add_argument("--receipt", required=True)
+    close_access_parser.set_defaults(handler=cmd_close_ci_access)
+
+    stop_parser = subparsers.add_parser(
+        "stop", help="stop the exact tagged builders without deleting reusable resources"
+    )
+    stop_parser.add_argument("--region", default=DEFAULT_REGION)
+    stop_parser.set_defaults(handler=cmd_stop)
+
+    collect_parser = subparsers.add_parser(
+        "collect", help="download all exact-version packages and write release receipts"
+    )
+    collect_parser.add_argument("--region", default=DEFAULT_REGION)
+    collect_parser.add_argument("--run-result", required=True)
+    collect_parser.add_argument("--output-dir", required=True)
+    collect_parser.add_argument("--expected-revision", required=True)
+    collect_parser.set_defaults(handler=cmd_collect)
     return parser
 
 

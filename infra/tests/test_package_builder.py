@@ -2400,5 +2400,338 @@ class ManifestTests(unittest.TestCase):
                 python_environment=python_environment,
             )
 
+class ReleaseAutomationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.matrix = package_builder.load_matrix()
+
+    def builder_record(self, architecture: str) -> dict:
+        expected = self.matrix.architectures[architecture]
+        suffix = "1" if architecture == "arm64" else "2"
+        return {
+            "InstanceId": f"i-0aaabbbcccdddee{suffix}",
+            "ImageId": f"ami-0aaabbbcccdddee{suffix}",
+            "InstanceType": expected.instance_type,
+            "Architecture": expected.aws_architecture,
+            "PublicIpAddress": f"203.0.113.{suffix}",
+            "PrivateIpAddress": f"10.0.0.{suffix}",
+            "Placement": {"AvailabilityZone": "us-east-1c"},
+            "State": {"Name": "stopped"},
+            "SecurityGroups": [{"GroupId": "sg-0aaabbbcccdddeee1"}],
+            "Tags": [
+                {"Key": key, "Value": value}
+                for key, value in {
+                    **package_builder.EXPECTED_INSTANCE_TAGS,
+                    "BuildArchitecture": architecture,
+                    "Architecture": expected.aws_architecture,
+                    "AmiSchemaRevision": str(
+                        package_builder.BOOTSTRAP_SCHEMA_REVISION
+                    ),
+                }.items()
+            ],
+        }
+
+    def test_current_and_live_legacy_ami_schema_tags_are_exact(self) -> None:
+        package_builder.require_builder_schema_tag(
+            {"AmiSchemaRevision": "2"}, "i-0aaabbbcccdddeee1"
+        )
+        package_builder.require_builder_schema_tag(
+            {"AmiSchemaVersion": "2"}, "i-0aaabbbcccdddeee1"
+        )
+        with self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "incompatible AMI schema"
+        ):
+            package_builder.require_builder_schema_tag(
+                {"AmiSchemaRevision": "2", "AmiSchemaVersion": "1"},
+                "i-0aaabbbcccdddeee1",
+            )
+
+    def test_existing_builder_discovery_is_tagged_and_account_local(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        payload = {
+            "Reservations": [
+                {"Instances": [records["arm64"]]},
+                {"Instances": [records["x64"]]},
+            ]
+        }
+        with mock.patch.object(
+            package_builder, "aws_json", return_value=payload
+        ) as aws, mock.patch.object(
+            package_builder, "validate_builders", return_value=records
+        ) as validate:
+            builders, observed = package_builder.discover_existing_builders(
+                "us-east-1", self.matrix, ephemeral_ssh=True
+            )
+        self.assertEqual(observed, records)
+        self.assertEqual(set(builders), {"arm64", "x64"})
+        self.assertTrue(
+            all(value.ssh_access == "ec2-instance-connect" for value in builders.values())
+        )
+        argv = aws.call_args.args
+        self.assertEqual(argv[:3], ("us-east-1", "ec2", "describe-instances"))
+        self.assertIn("Name=tag:Component,Values=package-build-machine", argv)
+        self.assertIn("Name=tag:ManagedBy,Values=opentofu", argv)
+        self.assertNotIn(records["arm64"]["InstanceId"], argv)
+        validate.assert_called_once()
+
+    def test_existing_only_never_applies_opentofu(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                architecture=name,
+                instance_id=record["InstanceId"],
+                instance_type=record["InstanceType"],
+                aws_architecture=record["Architecture"],
+                public_ip=record["PublicIpAddress"],
+                private_ip=record["PrivateIpAddress"],
+                source_ami_id=record["ImageId"],
+                availability_zone="us-east-1c",
+                ssh_access="ec2-instance-connect",
+            )
+            for name, record in records.items()
+        }
+        args = argparse.Namespace(
+            region="us-east-1",
+            s3_prefix=package_builder.DEFAULT_S3_PREFIX,
+            existing_only=True,
+            ssh_key="/tmp/ephemeral-key",
+        )
+        outputs = {"ssh_private_key_path": "/tmp/ephemeral-key"}
+        with mock.patch.object(
+            package_builder,
+            "discover_existing_infrastructure",
+            return_value=(outputs, builders, records),
+        ), mock.patch.object(package_builder, "ssh_key_path"), mock.patch.object(
+            package_builder, "start_builders", return_value=records
+        ), mock.patch.object(
+            package_builder, "refreshed_builders", return_value=builders
+        ), mock.patch.object(package_builder, "tofu_apply") as tofu_apply:
+            observed = package_builder.provision_and_start(args, self.matrix)
+        self.assertEqual(observed[0], outputs)
+        tofu_apply.assert_not_called()
+
+    def test_stop_uses_instance_initiated_poweroff_for_both_builders(self) -> None:
+        records = {
+            name: {**self.builder_record(name), "State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        stopped = {
+            name: {**record, "State": {"Name": "stopped"}}
+            for name, record in records.items()
+        }
+        acknowledgements = [
+            {"Command": {"CommandId": "cmd-arm64"}},
+            {"Command": {"CommandId": "cmd-x64"}},
+        ]
+        with mock.patch.object(package_builder, "aws_preflight"), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(package_builder, "wait_for_ssm_online"), mock.patch.object(
+            package_builder, "aws_json", side_effect=acknowledgements
+        ) as aws, mock.patch.object(package_builder, "run_command") as run, mock.patch.object(
+            package_builder, "validate_builders", return_value=stopped
+        ):
+            states = package_builder.stop_existing_builders("us-east-1", self.matrix)
+        self.assertEqual(states, {"arm64": "stopped", "x64": "stopped"})
+        self.assertEqual(aws.call_count, 2)
+        for call in aws.call_args_list:
+            self.assertIn("AWS-RunShellScript", call.args)
+            self.assertIn(
+                '{"commands":["/usr/bin/systemctl poweroff"]}', call.args
+            )
+            self.assertNotIn("stop-instances", call.args)
+        self.assertEqual(run.call_count, 2)
+
+    def test_ci_ingress_receipt_revokes_only_a_rule_it_added(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        group = {
+            "Tags": [
+                {"Key": key, "Value": value}
+                for key, value in {
+                    "Project": "bioseq",
+                    "ManagedBy": "opentofu",
+                    "Component": "package-build-machine",
+                    "Name": "bioseq-package-builder-sg",
+                }.items()
+            ],
+            "IpPermissions": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("private", encoding="ascii")
+            key.with_name("key.pub").write_text(
+                "ssh-ed25519 AAAA release-test\n", encoding="ascii"
+            )
+            receipt = Path(tmp) / "access.json"
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=({"account_id": "123456789012"}, {}, records),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=("sg-0aaabbbcccdddeee1", group),
+            ), mock.patch.object(package_builder, "aws_no_output") as mutate:
+                opened = package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr="203.0.113.10/32",
+                    receipt=receipt,
+                )
+            self.assertTrue(opened["rule_added"])
+            self.assertTrue(receipt.is_file())
+            mutate.assert_called_once()
+
+            group["IpPermissions"] = [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [{"CidrIp": "203.0.113.10/32"}],
+                }
+            ]
+            with mock.patch.object(
+                package_builder,
+                "aws_preflight",
+                return_value={"Account": "123456789012", "Arn": "arn"},
+            ), mock.patch.object(
+                package_builder,
+                "aws_json",
+                return_value={"SecurityGroups": [group]},
+            ), mock.patch.object(package_builder, "aws_no_output") as mutate:
+                closed = package_builder.close_ci_access(
+                    region="us-east-1", receipt=receipt
+                )
+            self.assertTrue(closed["closed"])
+            mutate.assert_called_once()
+            self.assertIn("revoke-security-group-ingress", mutate.call_args.args)
+
+    def test_collection_enumerates_ten_exact_packages_and_four_json_receipts(self) -> None:
+        revision = "a" * 40
+        lock_sha256 = "b" * 64
+        run_id = f"20260815T120000Z-{revision[:12]}"
+        manifests: dict[str, dict] = {}
+        uploads_by_architecture: dict[str, list[dict]] = {}
+        for architecture in self.matrix.architectures:
+            cells = []
+            uploads = []
+            for distro in self.matrix.distributions:
+                suffix = package_builder.expected_artifact_suffix(
+                    self.matrix.distributions[distro].package_format
+                )
+                filename = f"bioseq-postgresql17-4.2.3-{architecture}{suffix}"
+                upload = {
+                    "key": f"bioseq/packages/{architecture}/postgresql17/{distro}/{filename}",
+                    "version_id": f"version-{architecture}-{distro}",
+                    "etag": f"etag-{architecture}-{distro}",
+                    "server_side_encryption": "AES256",
+                    "size": 1,
+                    "sha256": hashlib.sha256(b"x").hexdigest(),
+                }
+                uploads.append(upload)
+                cells.append(
+                    {
+                        "postgres_major": 17,
+                        "distro": distro,
+                        "artifact": {"filename": filename},
+                        "upload": upload,
+                    }
+                )
+            manifests[architecture] = {"cells": cells}
+            uploads_by_architecture[architecture] = uploads
+        result = {
+            "status": "success",
+            "run_id": run_id,
+            "revision": revision,
+            "source_revision": revision,
+            "poetry_lock_sha256": lock_sha256,
+            "selection": {
+                "architectures": list(self.matrix.architectures),
+                "distributions": list(self.matrix.distributions),
+                "postgresql_majors": list(self.matrix.postgresql_majors),
+            },
+            "bucket": "bucket",
+            "s3_prefix": "bioseq/packages",
+            "artifact_count": 10,
+            "manifests": manifests,
+        }
+
+        def validate(_manifest, *, architecture, **_kwargs):
+            return uploads_by_architecture[architecture]
+
+        def download(*, destination, **_kwargs):
+            destination.write_bytes(b"x")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_result = root / "run.json"
+            run_result.write_text(json.dumps(result), encoding="utf-8")
+            output = root / "assets"
+            with mock.patch.object(
+                package_builder,
+                "require_current_package_run_result",
+                return_value=result,
+            ), mock.patch.object(
+                package_builder,
+                "_result_poetry_environment",
+                return_value=mock.sentinel.environment,
+            ), mock.patch.object(
+                package_builder, "validate_manifest", side_effect=validate
+            ), mock.patch.object(package_builder, "verify_s3_uploads") as verify, mock.patch.object(
+                package_builder, "download_exact_package", side_effect=download
+            ) as download_mock:
+                collection = package_builder.collect_release_assets(
+                    region="us-east-1",
+                    run_result_path=run_result,
+                    output_dir=output,
+                    expected_revision=revision,
+                )
+            self.assertEqual(len(collection["assets"]), 10)
+            self.assertEqual(download_mock.call_count, 10)
+            verify.assert_called_once()
+            self.assertEqual(len(list(output.glob("*.json"))), 4)
+            self.assertEqual(len(list(output.iterdir())), 15)
+            self.assertTrue((output / "SHA256SUMS").is_file())
+
+    def test_parser_exposes_release_automation_commands(self) -> None:
+        parser = package_builder.build_parser()
+        for argv, command in (
+            (["matrix", "--require-complete"], "matrix"),
+            (["inventory"], "inventory"),
+            (["stop"], "stop"),
+            (
+                [
+                    "collect",
+                    "--run-result",
+                    "run.json",
+                    "--output-dir",
+                    "assets",
+                    "--expected-revision",
+                    "a" * 40,
+                ],
+                "collect",
+            ),
+        ):
+            self.assertEqual(parser.parse_args(argv).command, command)
+
+
 if __name__ == "__main__":
     unittest.main()
