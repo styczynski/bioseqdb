@@ -5,7 +5,6 @@
 module;
 
 #include <bioseq/pg_compat.h>
-
 #include <cstdint>
 #include <vector>
 
@@ -60,8 +59,7 @@ void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
     });
     PG_TRY();
     {
-        tuple = heap_form_tuple(
-            slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
+        tuple = heap_form_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
         restore_slice_materialization_scope(previous_scope);
     }
     PG_CATCH();
@@ -76,7 +74,7 @@ void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
     return tuple;
 }
 
-}  // namespace
+} // namespace
 
 /**
  * @brief Initialize the immutable tuple-slot operation table.
@@ -91,17 +89,15 @@ export void initialize_column_tuple_slot_operations() {
 }
 
 /** @return Tuple-slot operations used by every Bioseq table relation. */
-export [[nodiscard]] const TupleTableSlotOps* column_slot_callbacks(
-        Relation /*relation*/) noexcept {
+export [[nodiscard]] const TupleTableSlotOps*
+column_slot_callbacks(Relation /*relation*/) noexcept {
     return &column_slot_operations;
 }
 
 /** @return A child of the current memory context for one scan or fetch. */
 export [[nodiscard]] MemoryContext create_column_scan_memory_context() {
     return AllocSetContextCreate(
-        CurrentMemoryContext,
-        "BioseqColumn Scan Context",
-        ALLOCSET_DEFAULT_SIZES);
+        CurrentMemoryContext, "BioseqColumn Scan Context", ALLOCSET_DEFAULT_SIZES);
 }
 
 /**
@@ -110,12 +106,11 @@ export [[nodiscard]] MemoryContext create_column_scan_memory_context() {
  * @param attributes_needed Zero-based attributes required by the scan.
  * @return PostgreSQL list allocated in the current memory context.
  */
-export [[nodiscard]] List* build_needed_column_list(
-        TupleDesc tuple_descriptor, const bioseq::postgres::support::postgres_bitmapset& attributes_needed) {
+export [[nodiscard]] List*
+build_needed_column_list(TupleDesc tuple_descriptor,
+                         const bioseq::postgres::support::postgres_bitmapset& attributes_needed) {
     bioseq::postgres::support::postgres_integer_list columns;
-    for (int attribute_index = 0;
-         attribute_index < tuple_descriptor->natts;
-         ++attribute_index) {
+    for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
         if (TupleDescAttr(tuple_descriptor, attribute_index)->attisdropped) {
             continue;
         }
@@ -140,8 +135,7 @@ export void validate_logical_replication_write(Relation relation) {
     if (publication.pubactions.pubinsert) {
         bioseq_report<logging_level::error, logging_target::postgres>()
             .with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
-            .with_message(
-                "cannot insert into columnar table that is a part of a publication");
+            .with_message("cannot insert into columnar table that is a part of a publication");
     }
 }
 
@@ -154,54 +148,46 @@ export void validate_logical_replication_write(Relation relation) {
  * @param snapshot Explicit visibility snapshot used for fragment reads.
  * @param payload_context Memory context that owns hydrated values.
  */
-export [[gnu::always_inline]] inline void hydrate_sequence_columns_in_slot(
-        Relation relation,
-        TupleTableSlot* slot,
-        bioseq::storage::seq_caches* caches,
-        const bioseq::storage::table_access_cache& table_cache,
-        Snapshot snapshot,
-        MemoryContext payload_context) {
-    if (caches == nullptr
-        || table_cache.sequence_attribute_numbers.empty()) {
+export [[gnu::always_inline]] inline void
+hydrate_sequence_columns_in_slot(Relation relation,
+                                 TupleTableSlot* slot,
+                                 bioseq::storage::seq_caches* caches,
+                                 const bioseq::storage::table_access_cache& table_cache,
+                                 Snapshot snapshot,
+                                 MemoryContext payload_context) {
+    if (caches == nullptr || table_cache.sequence_attribute_numbers.empty()) {
         return;
     }
 
     const RelFileLocator& relation_locator = relation->rd_locator;
-    for (const std::int16_t attribute_number :
-         table_cache.sequence_attribute_numbers) {
+    for (const std::int16_t attribute_number : table_cache.sequence_attribute_numbers) {
         const int attribute_index = attribute_number - 1;
-        if (attribute_index < 0
-            || attribute_index >= slot->tts_tupleDescriptor->natts
-            || slot->tts_isnull[attribute_index]) {
+        if (attribute_index < 0 || attribute_index >= slot->tts_tupleDescriptor->natts ||
+            slot->tts_isnull[attribute_index]) {
             continue;
         }
 
-        const auto* compact_sequence =
-            reinterpret_cast<const bioseq::pg_types::seq*>(
-                DatumGetPointer(slot->tts_values[attribute_index]));
+        const auto* compact_sequence = reinterpret_cast<const bioseq::pg_types::seq*>(
+            DatumGetPointer(slot->tts_values[attribute_index]));
         if (!bioseq::storage::is_locator_stub(compact_sequence)) {
             continue;
         }
         if (snapshot == nullptr) {
             ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("bioseq sequence hydration requires an explicit snapshot")));
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("bioseq sequence hydration requires an explicit snapshot")));
         }
 
-        const auto sequence_locator =
-            bioseq::storage::decode_locator_from_stub(compact_sequence);
-        bioseq::storage::validate_locator_flat_materialization_length(
-            sequence_locator);
+        const auto sequence_locator = bioseq::storage::decode_locator_from_stub(compact_sequence);
+        bioseq::storage::validate_locator_flat_materialization_length(sequence_locator);
 
         // Two bits per letter is the smallest supported packed payload. The
         // storage manager validates the exact alphabet width after reading the
         // first fragment.
-        const std::uint64_t projected_payload_bytes = checked_ceil_div(
-            sequence_locator.logical_length, 4u);
+        const std::uint64_t projected_payload_bytes =
+            checked_ceil_div(sequence_locator.logical_length, 4u);
         (void)checked_materialization_allocation_size(
-            projected_payload_bytes,
-            bioseq::pg_types::seq::header_bytes(),
-            "flat sequence");
+            projected_payload_bytes, bioseq::pg_types::seq::header_bytes(), "flat sequence");
 
         bioseq::pg_types::seq* sequence =
             bioseq::storage::bioseq_default_storage_manager::fetch_payload(
@@ -223,27 +209,23 @@ export [[gnu::always_inline]] inline void hydrate_sequence_columns_in_slot(
  * @param slot Populated tuple slot to update in place.
  * @param force Ignore the scan's deferred-hydration mode when true.
  */
-export void hydrate_scan_slot(
-        TableScanDesc table_scan, TupleTableSlot* slot, bool force) {
+export void hydrate_scan_slot(TableScanDesc table_scan, TupleTableSlot* slot, bool force) {
     auto* scan = reinterpret_cast<column_scan_handle>(table_scan);
     if (scan == nullptr || (!force && scan->defers_sequence_hydration)) {
         return;
     }
     if (scan->read_state == nullptr) {
         ereport(ERROR,
-            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq scan hydration requires an initialized read state")));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq scan hydration requires an initialized read state")));
     }
 
-    const auto& table_cache =
-        bioseq::storage::get_table_access_cache(scan->scan_base.rs_rd);
-    auto* caches =
-        static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
-    hydrate_sequence_columns_in_slot(
-        scan->scan_base.rs_rd,
-        slot,
-        caches,
-        table_cache,
-        scan->read_state->snapshot,
-        scan->scan_context);
+    const auto& table_cache = bioseq::storage::get_table_access_cache(scan->scan_base.rs_rd);
+    auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->sequence_cache);
+    hydrate_sequence_columns_in_slot(scan->scan_base.rs_rd,
+                                     slot,
+                                     caches,
+                                     table_cache,
+                                     scan->read_state->snapshot,
+                                     scan->scan_context);
 }

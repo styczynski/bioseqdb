@@ -9,7 +9,6 @@
 module;
 
 #include <bioseq/pg_compat.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -47,11 +46,11 @@ export struct scan_vectorization_state {
 /**
  * @brief Per-execution state for the Bioseq columnar custom scan.
  *
- * Non-standard-layout runtime owners remain behind `runtime_state`; the
+ * Non-standard-layout runtime owners remain behind `runtime_state`. The
  * concrete runtime is created and destroyed by the custom-scan owner.
  */
 export struct scan_state {
-    /// @brief PostgreSQL custom-scan base; must remain the first member.
+    /// @brief PostgreSQL custom-scan base that must remain the first member.
     CustomScanState custom_scan_state;
     /// @brief Zero-based bitmap of physical attributes to materialize.
     bioseq::postgres::support::postgres_bitmapset attributes_needed;
@@ -73,8 +72,7 @@ export struct scan_state {
     /// @brief Reinterprets PostgreSQL's callback pointer as Bioseq scan state.
     /// @param state PostgreSQL custom-scan state pointer.
     /// @return The enclosing Bioseq state.
-    [[nodiscard]] static scan_state* from_custom_scan_state(
-        CustomScanState* state) noexcept {
+    [[nodiscard]] static scan_state* from_custom_scan_state(CustomScanState* state) noexcept {
         return reinterpret_cast<scan_state*>(state);
     }
 
@@ -126,14 +124,13 @@ export struct scan_state {
 
 /// @brief Per-execution state for the Bioseq IndexScan wrapper node.
 export struct index_scan_state {
-    /// @brief PostgreSQL custom-scan base; must remain the first member.
+    /// @brief PostgreSQL custom-scan base that must remain the first member.
     CustomScanState custom_scan_state;
     /// @brief Executor state of the wrapped PostgreSQL IndexScan.
     IndexScanState* index_scan_executor_state;
 
     /// @brief Reinterprets PostgreSQL's callback pointer as index-scan state.
-    [[nodiscard]] static index_scan_state* from_custom_scan_state(
-        CustomScanState* state) noexcept {
+    [[nodiscard]] static index_scan_state* from_custom_scan_state(CustomScanState* state) noexcept {
         return reinterpret_cast<index_scan_state*>(state);
     }
 
@@ -143,8 +140,7 @@ export struct index_scan_state {
     }
 
     /// @brief Reinterprets PostgreSQL plan state as the enclosing index-scan state.
-    [[nodiscard]] static index_scan_state* from_plan_state(
-        PlanState* state) noexcept {
+    [[nodiscard]] static index_scan_state* from_plan_state(PlanState* state) noexcept {
         return reinterpret_cast<index_scan_state*>(state);
     }
 
@@ -178,23 +174,18 @@ export struct index_scan_state {
     /// @brief Returns the wrapped PostgreSQL IndexScan plan node.
     [[nodiscard]] IndexScan* inner_index_scan_plan() noexcept {
         return reinterpret_cast<IndexScan*>(
-            bioseq::postgres::support::postgres_list<Plan>(
-                custom_scan_plan()->custom_plans).get_first());
+            bioseq::postgres::support::postgres_list<Plan>(custom_scan_plan()->custom_plans)
+                .get_first());
     }
 };
 
-static_assert(
-    std::is_standard_layout_v<scan_vectorization_state>,
-    "scan_vectorization_state must remain standard-layout");
-static_assert(
-    std::is_standard_layout_v<scan_state>,
-    "scan_state must remain standard-layout across CustomScanState callbacks");
-static_assert(
-    std::is_standard_layout_v<index_scan_state>,
-    "index_scan_state must remain standard-layout across CustomScanState callbacks");
-static_assert(
-    offsetof(scan_state, custom_scan_state) == 0,
-    "scan_state::custom_scan_state must remain the first member");
-static_assert(
-    offsetof(index_scan_state, custom_scan_state) == 0,
-    "index_scan_state::custom_scan_state must remain the first member");
+static_assert(std::is_standard_layout_v<scan_vectorization_state>,
+              "scan_vectorization_state must remain standard-layout");
+static_assert(std::is_standard_layout_v<scan_state>,
+              "scan_state must remain standard-layout across CustomScanState callbacks");
+static_assert(std::is_standard_layout_v<index_scan_state>,
+              "index_scan_state must remain standard-layout across CustomScanState callbacks");
+static_assert(offsetof(scan_state, custom_scan_state) == 0,
+              "scan_state::custom_scan_state must remain the first member");
+static_assert(offsetof(index_scan_state, custom_scan_state) == 0,
+              "index_scan_state::custom_scan_state must remain the first member");

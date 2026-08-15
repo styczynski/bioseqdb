@@ -2420,7 +2420,9 @@ target_sources(bioseq_integration_test_support
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
-      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/index.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/join_test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/integration/support/explain_test_support.cppm")
 target_link_libraries(bioseq_integration_test_support PUBLIC
   fmt
   libassert::assert
@@ -2499,6 +2501,9 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/chunked_storage_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/e2e_smoke_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_highway_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_materialization_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/explain_runtime_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/gpu_mmsearch_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_admin_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/index_invariance_test.cpp"
@@ -2507,6 +2512,8 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/insert_hook_multifragment_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/io/reader_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/join_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/join_transformed_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/integration/join_epq_aggregate_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/large_table_alignment_smoke_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_expression_property_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/integration/lazy_sequence_slicing_acceptance_test.cpp"
@@ -3628,7 +3635,7 @@ bioseq_register_sql_owner(
   SOURCES
     backend/pg/table/access_hooks.cppm
     backend/pg/table/access_method.cppm
-    backend/pg/table/custom_scan.cppm
+    backend/pg/table/custom_scan/index.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS table_access_hooks)

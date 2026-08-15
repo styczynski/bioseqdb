@@ -51,7 +51,7 @@ struct table_access_cache {
  */
 void invalidate_table_access_cache(Datum callback_argument, Oid relation_id);
 
-}  // namespace bioseq::storage
+} // namespace bioseq::storage
 
 namespace bioseq::storage {
 namespace {
@@ -67,13 +67,9 @@ void populate_sequence_attributes(table_access_cache& cache, Relation relation) 
     }
 
     TupleDesc tuple_descriptor = RelationGetDescr(relation);
-    cache.sequence_attribute_numbers.reserve(
-        static_cast<std::size_t>(tuple_descriptor->natts));
-    for (int attribute_index = 0;
-         attribute_index < tuple_descriptor->natts;
-         ++attribute_index) {
-        Form_pg_attribute attribute =
-            TupleDescAttr(tuple_descriptor, attribute_index);
+    cache.sequence_attribute_numbers.reserve(static_cast<std::size_t>(tuple_descriptor->natts));
+    for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
+        Form_pg_attribute attribute = TupleDescAttr(tuple_descriptor, attribute_index);
         if (!attribute->attisdropped && attribute->atttypid == sequence_type_oid) {
             cache.sequence_attribute_numbers.push_back(
                 static_cast<std::int16_t>(attribute_index + 1));
@@ -82,7 +78,7 @@ void populate_sequence_attributes(table_access_cache& cache, Relation relation) 
     cache.is_initialized = true;
 }
 
-}  // namespace
+} // namespace
 
 const table_access_cache& get_table_access_cache(Relation relation) {
     if (relation->rd_amcache != nullptr) {
@@ -101,12 +97,11 @@ const table_access_cache& get_table_access_cache(Relation relation) {
     return *cache;
 }
 
-void invalidate_table_access_cache(
-        Datum /*callback_argument*/, Oid /*relation_id*/) {
+void invalidate_table_access_cache(Datum /*callback_argument*/, Oid /*relation_id*/) {
     // PostgreSQL has already detached rd_amcache. Allocations are bounded by
     // the relations observed by this backend and reclaimed with
     // CacheMemoryContext; touching the relation here can corrupt the active
     // ResourceOwner during a relcache flush.
 }
 
-}  // namespace bioseq::storage
+} // namespace bioseq::storage

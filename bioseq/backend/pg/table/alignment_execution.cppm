@@ -5,7 +5,6 @@
 module;
 
 #include <bioseq/pg_compat.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -18,8 +17,7 @@ import bioseq.pipeline.stats;
 export namespace bioseq::postgres::table::alignment_execution {
 
 /** Sentinel used until a scan node has joined its statement collector. */
-inline constexpr std::size_t k_unregistered_node_index =
-    (std::numeric_limits<std::size_t>::max)();
+inline constexpr std::size_t k_unregistered_node_index = (std::numeric_limits<std::size_t>::max)();
 
 /** Per-scan-node statistics accumulated across rescans. */
 struct alignment_node_stats {
@@ -36,8 +34,7 @@ struct alignment_execution_collector {
     std::uint32_t nested_alignment_executor_count = 0;
     bool is_lifecycle_counter_saturated = false;
     std::vector<alignment_node_stats> alignment_nodes{};
-    bioseq::pipeline_stats::persisted_gpu_operation_accumulator
-        persisted_gpu_operations{};
+    bioseq::pipeline_stats::persisted_gpu_operation_accumulator persisted_gpu_operations{};
 };
 
 /**
@@ -55,8 +52,7 @@ struct alignment_execution_snapshot {
     bool is_partial = false;
     bool is_fully_drained = false;
     bioseq::pipeline_stats::pipeline_execution_stats pipeline{};
-    bioseq::pipeline_stats::persisted_gpu_operation_accumulator
-        persisted_gpu_operations{};
+    bioseq::pipeline_stats::persisted_gpu_operation_accumulator persisted_gpu_operations{};
 };
 
 /**
@@ -92,71 +88,65 @@ struct alignment_node_registration_handle {
 
     /** @return Whether the handle currently names a live collector entry. */
     [[nodiscard]] bool is_registered() const noexcept {
-        return is_bound()
-            && !binding->is_retired
-            && binding->root_collector != nullptr
-            && node_index != k_unregistered_node_index;
+        return is_bound() && !binding->is_retired && binding->root_collector != nullptr &&
+               node_index != k_unregistered_node_index;
     }
 };
 
 /** Callback supplied by the executor-hook owner to bind an `EState`. */
-using alignment_node_binder = alignment_node_registration_handle (*)(
-    EState*, std::uint32_t);
+using alignment_node_binder = alignment_node_registration_handle (*)(EState*, std::uint32_t);
 
 inline alignment_node_binder alignment_node_binder_callback = nullptr;
 
 /**
  * @brief Install the executor-hook-owned node binder.
- * @param binder Non-null callback; reinstalling a different callback is an error.
+ * @param binder Non-null callback. Reinstalling a different callback is an error.
  */
 inline void install_alignment_node_binder(alignment_node_binder binder) {
     if (binder == nullptr) {
-        ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq alignment execution binder is null")));
+        ereport(
+            ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR), errmsg("bioseq alignment execution binder is null")));
     }
-    if (alignment_node_binder_callback != nullptr
-        && alignment_node_binder_callback != binder) {
+    if (alignment_node_binder_callback != nullptr && alignment_node_binder_callback != binder) {
         ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq alignment execution binder is already installed")));
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq alignment execution binder is already installed")));
     }
     alignment_node_binder_callback = binder;
 }
 
 /** Bind a plan node to the collector associated with `executor_state`. */
-[[nodiscard]] inline alignment_node_registration_handle bind_alignment_node(
-        EState* executor_state, std::uint32_t scan_node_id) {
+[[nodiscard]] inline alignment_node_registration_handle
+bind_alignment_node(EState* executor_state, std::uint32_t scan_node_id) {
     if (alignment_node_binder_callback == nullptr) {
         ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq alignment execution hooks are not installed")));
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq alignment execution hooks are not installed")));
     }
     return alignment_node_binder_callback(executor_state, scan_node_id);
 }
 
 /** Return the live statistics entry named by `handle`. */
-[[nodiscard]] inline alignment_node_stats& get_registered_alignment_node(
-        alignment_node_registration_handle& handle) {
-    if (!handle.is_registered()
-        || handle.node_index
-            >= handle.binding->root_collector->alignment_nodes.size()) {
+[[nodiscard]] inline alignment_node_stats&
+get_registered_alignment_node(alignment_node_registration_handle& handle) {
+    if (!handle.is_registered() ||
+        handle.node_index >= handle.binding->root_collector->alignment_nodes.size()) {
         ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq alignment node registration is invalid")));
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq alignment node registration is invalid")));
     }
     return handle.binding->root_collector->alignment_nodes[handle.node_index];
 }
 
 /** Lazily register a node when its custom scan first executes. */
-inline void ensure_alignment_node_registered(
-        alignment_node_registration_handle& handle) {
+inline void ensure_alignment_node_registered(alignment_node_registration_handle& handle) {
     if (!handle.is_bound()) {
         return;
     }
-    if (handle.binding->is_retired
-        || handle.binding->root_collector == nullptr) {
-        ereport(ERROR,
+    if (handle.binding->is_retired || handle.binding->root_collector == nullptr) {
+        ereport(
+            ERROR,
             (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
              errmsg("bioseq nested alignment executor outlived its root statement"),
              errdetail("the escaped portal was retired before its root collector was released")));
@@ -170,25 +160,22 @@ inline void ensure_alignment_node_registered(
         if (registration.scan_node_id != handle.scan_node_id) {
             continue;
         }
-        if (registration.node_index
-                >= handle.binding->root_collector->alignment_nodes.size()
-            || handle.binding->root_collector
-                    ->alignment_nodes[registration.node_index]
-                    .scan_node_id
-                != handle.scan_node_id) {
+        if (registration.node_index >= handle.binding->root_collector->alignment_nodes.size() ||
+            handle.binding->root_collector->alignment_nodes[registration.node_index].scan_node_id !=
+                handle.scan_node_id) {
             ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq alignment node binding registry is invalid")));
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("bioseq alignment node binding registry is invalid")));
         }
         handle.node_index = registration.node_index;
         return;
     }
 
-    if (handle.binding->nested_executor_invoked != nullptr
-        && !*handle.binding->nested_executor_invoked) {
+    if (handle.binding->nested_executor_invoked != nullptr &&
+        !*handle.binding->nested_executor_invoked) {
         auto& root = *handle.binding->root_collector;
-        if (root.nested_alignment_executor_count
-            >= bioseq::pipeline_stats::k_sql_integer_value_max) {
+        if (root.nested_alignment_executor_count >=
+            bioseq::pipeline_stats::k_sql_integer_value_max) {
             root.is_lifecycle_counter_saturated = true;
         } else {
             ++root.nested_alignment_executor_count;
@@ -201,35 +188,30 @@ inline void ensure_alignment_node_registered(
     root.alignment_nodes.push_back(alignment_node_stats{
         .scan_node_id = handle.scan_node_id,
     });
-    handle.binding->node_registrations.push_back(
-        alignment_execution_binding::node_registration{
-            .scan_node_id = handle.scan_node_id,
-            .node_index = handle.node_index,
-        });
+    handle.binding->node_registrations.push_back(alignment_execution_binding::node_registration{
+        .scan_node_id = handle.scan_node_id,
+        .node_index = handle.node_index,
+    });
 }
 
 /**
  * @brief Borrow the statement accumulator through a live node binding.
  * @return Non-owning accumulator pointer valid only until executor cleanup.
  */
-[[nodiscard]] inline bioseq::pipeline_stats::
-persisted_gpu_operation_accumulator*
-borrow_persisted_gpu_operation_accumulator(
-        alignment_node_registration_handle& handle) {
-    if (!handle.is_bound()
-        || handle.binding->is_retired
-        || handle.binding->root_collector == nullptr) {
+[[nodiscard]] inline bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
+borrow_persisted_gpu_operation_accumulator(alignment_node_registration_handle& handle) {
+    if (!handle.is_bound() || handle.binding->is_retired ||
+        handle.binding->root_collector == nullptr) {
         ereport(ERROR,
-            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq persisted GPU operation accumulator is unavailable")));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq persisted GPU operation accumulator is unavailable")));
     }
     return &handle.binding->root_collector->persisted_gpu_operations;
 }
 
 /** Merge one successfully completed, non-empty dispatch batch exactly once. */
-inline void merge_alignment_batch(
-        alignment_node_registration_handle& handle,
-        const bioseq::pipeline_stats::pipeline_execution_stats& batch) {
+inline void merge_alignment_batch(alignment_node_registration_handle& handle,
+                                  const bioseq::pipeline_stats::pipeline_execution_stats& batch) {
     ensure_alignment_node_registered(handle);
     if (!handle.is_registered()) {
         return;
@@ -240,8 +222,7 @@ inline void merge_alignment_batch(
 }
 
 /** Record EOF after the source and every buffered output cursor are empty. */
-inline void mark_alignment_pass_fully_drained(
-        alignment_node_registration_handle& handle) {
+inline void mark_alignment_pass_fully_drained(alignment_node_registration_handle& handle) {
     ensure_alignment_node_registered(handle);
     if (handle.is_registered()) {
         get_registered_alignment_node(handle).is_current_pass_fully_drained = true;
@@ -249,8 +230,7 @@ inline void mark_alignment_pass_fully_drained(
 }
 
 /** Record a rescan and retain whether the abandoned pass was incomplete. */
-inline void record_alignment_rescan(
-        alignment_node_registration_handle& handle) {
+inline void record_alignment_rescan(alignment_node_registration_handle& handle) {
     if (!handle.is_registered()) {
         return;
     }
@@ -261,4 +241,4 @@ inline void record_alignment_rescan(
     node.is_current_pass_fully_drained = false;
 }
 
-}  // namespace bioseq::postgres::table::alignment_execution
+} // namespace bioseq::postgres::table::alignment_execution
