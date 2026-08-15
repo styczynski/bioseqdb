@@ -1,4 +1,7 @@
-/// @brief Optional planner callback for external PostgreSQL relations.
+/**
+ * @file path_builder_slot.cppm
+ * @brief Provides the optional planner callback for external relations.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -39,6 +42,7 @@ namespace bioseq::postgres::external {
 
 namespace {
 
+/** @brief Process-local callback installed by the optional provider extension. */
 path_builder_callback registered_path_builder = nullptr;
 
 } // namespace

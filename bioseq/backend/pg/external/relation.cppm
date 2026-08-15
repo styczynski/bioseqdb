@@ -161,6 +161,7 @@ const relopt_parse_elt relation_option_fields[] = {
  * values. Alphabet interpretation belongs to sequence materialization, so the
  * relation boundary accepts the stored spelling without changing it.
  */
+/** @brief Accepts the stored alphabet spelling for later sequence validation. */
 void
 accept_alphabet_option(const char *value)
 {
@@ -186,6 +187,7 @@ using external_relation_options_codec =
 using external_relation_options_row =
 	external_relation_options_codec::row_type;
 
+/** @return True when a CREATE TABLE option belongs to this access method. */
 [[nodiscard]] bool
 is_private_relation_option(const DefElem *option) noexcept
 {
@@ -200,6 +202,7 @@ is_private_relation_option(const DefElem *option) noexcept
 		|| std::strcmp(option->defname, "chunk_bases") == 0;
 }
 
+/** @return The typed relation-options catalog OID or `InvalidOid` when allowed. */
 [[nodiscard]] Oid
 relation_options_catalog_oid(bool missing_ok)
 {
@@ -223,6 +226,7 @@ relation_options_catalog_oid(bool missing_ok)
 	pg_unreachable();
 }
 
+/** @return True when a PostgreSQL text datum equals the expected C string. */
 [[nodiscard]] bool
 text_equals(const text *value, const char *expected) noexcept
 {
@@ -232,6 +236,7 @@ text_equals(const text *value, const char *expected) noexcept
 		&& std::memcmp(VARDATA_ANY(value), expected, actual_size) == 0;
 }
 
+/** @return The parsed entity or `unspecified` for an unknown spelling. */
 [[nodiscard]] relation_entity
 entity_from_text(const text *value) noexcept
 {
@@ -509,7 +514,7 @@ entity_from_options(Relation relation)
 
 namespace {
 
-/* A physical scan callback fired: the CustomScan must own external reads. */
+/** @brief Rejects a physical table scan that bypassed the required CustomScan. */
 [[noreturn]] void
 raise_custom_scan_required()
 {
@@ -523,7 +528,7 @@ raise_custom_scan_required()
 	pg_unreachable();
 }
 
-/* Any write path fired against an inherently read-only external relation. */
+/** @brief Rejects writes against an external read-only relation. */
 [[noreturn]] void
 raise_read_only()
 {
@@ -533,7 +538,7 @@ raise_read_only()
 	pg_unreachable();
 }
 
-/* An unsupported physical capability (index/parallel/sample/rewrite) fired. */
+/** @brief Rejects a physical capability not supported by external relations. */
 [[noreturn]] void
 raise_unsupported_operation(const char *feature)
 {
@@ -554,6 +559,7 @@ namespace {
 
 /* --- slot ops: virtual slots, as the CustomScan produces --------------- */
 
+/** @return Virtual slot operations used by provider-produced rows. */
 const TupleTableSlotOps *
 slot_callbacks(Relation relation)
 {
@@ -562,6 +568,7 @@ slot_callbacks(Relation relation)
 
 /* --- sequential scan: owned by the CustomScan -------------------------- */
 
+/** @brief Rejects physical scan creation in favor of the CustomScan route. */
 TableScanDesc
 begin_physical_scan(Relation relation, Snapshot snapshot,
 						   int nkeys, ScanKey key,
@@ -571,6 +578,7 @@ begin_physical_scan(Relation relation, Snapshot snapshot,
 	raise_custom_scan_required();
 }
 
+/** @brief Accepts cleanup after a physical scan creation failure. */
 void
 end_physical_scan(TableScanDesc scan)
 {
@@ -578,6 +586,7 @@ end_physical_scan(TableScanDesc scan)
 	 * nothing to tear down. Safe to call regardless. */
 }
 
+/** @brief Rejects rescan through the physical table callback. */
 void
 rescan_physical_scan(TableScanDesc scan, ScanKey key, bool set_params,
 					   bool allow_strat, bool allow_sync, bool allow_pagemode)
@@ -585,6 +594,7 @@ rescan_physical_scan(TableScanDesc scan, ScanKey key, bool set_params,
 	raise_custom_scan_required();
 }
 
+/** @brief Rejects tuple retrieval through the physical table callback. */
 bool
 next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 							TupleTableSlot *slot)
@@ -594,18 +604,21 @@ next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 
 /* --- parallel scan: external paths are always non-parallel ------------- */
 
+/** @brief Rejects parallel-scan size estimation for external relations. */
 Size
 estimate_parallel_scan(Relation rel)
 {
 	raise_unsupported_operation("parallel scan");
 }
 
+/** @brief Rejects parallel-scan initialization for external relations. */
 Size
 initialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
 	raise_unsupported_operation("parallel scan");
 }
 
+/** @brief Rejects parallel-scan reinitialization for external relations. */
 void
 reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
@@ -614,24 +627,28 @@ reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 
 /* --- index fetch: external relations reject index DDL ------------------ */
 
+/** @brief Rejects index fetch creation for external relations. */
 IndexFetchTableData *
 begin_index_fetch(Relation rel)
 {
 	raise_unsupported_operation("index scan");
 }
 
+/** @brief Accepts cleanup after index fetch creation was rejected. */
 void
 reset_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
+/** @brief Accepts final cleanup after index fetch creation was rejected. */
 void
 end_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
+/** @brief Rejects tuple retrieval through a local index. */
 bool
 fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot,
@@ -642,6 +659,7 @@ fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 
 /* --- tuple fetch / tid / snapshot -------------------------------------- */
 
+/** @brief Rejects physical tuple-version retrieval. */
 bool
 fetch_row_version(Relation relation, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot)
@@ -649,6 +667,7 @@ fetch_row_version(Relation relation, ItemPointer tid,
 	raise_custom_scan_required();
 }
 
+/** @return False because external relations expose no physical tuple IDs. */
 bool
 tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 {
@@ -657,12 +676,14 @@ tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 	return false;
 }
 
+/** @brief Rejects physical tuple-version chain traversal. */
 void
 get_latest_tuple_identifier(TableScanDesc scan, ItemPointer tid)
 {
 	raise_unsupported_operation("tuple version chains");
 }
 
+/** @return False because external relations store no local tuple versions. */
 bool
 tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 										 Snapshot snapshot)
@@ -671,6 +692,7 @@ tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	return false;
 }
 
+/** @return `InvalidTransactionId` after clearing the empty delete batch. */
 TransactionId
 delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
@@ -681,6 +703,7 @@ delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 
 /* --- all DML is rejected (read-only) ----------------------------------- */
 
+/** @brief Rejects insertion into a read-only external relation. */
 void
 insert_tuple(Relation relation, TupleTableSlot *slot,
 							 CommandId cid, int options, BulkInsertState bistate)
@@ -688,6 +711,7 @@ insert_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects speculative insertion into a read-only external relation. */
 void
 insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										 CommandId cid, int options,
@@ -696,6 +720,7 @@ insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects speculative-insert completion for an external relation. */
 void
 complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										   uint32 specToken, bool succeeded)
@@ -703,6 +728,7 @@ complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects batch insertion into a read-only external relation. */
 void
 insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 							 CommandId cid, int options, BulkInsertState bistate)
@@ -710,6 +736,7 @@ insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 	raise_read_only();
 }
 
+/** @brief Rejects tuple deletion from a read-only external relation. */
 TM_Result
 delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -718,6 +745,7 @@ delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 	raise_read_only();
 }
 
+/** @brief Rejects tuple updates on a read-only external relation. */
 TM_Result
 update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
@@ -727,6 +755,7 @@ update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects physical tuple locks on an external relation. */
 TM_Result
 lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 						   TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
@@ -736,6 +765,7 @@ lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 	raise_read_only();
 }
 
+/** @brief Rejects bulk-insert finalization for an external relation. */
 void
 finish_bulk_insert(Relation relation, int options)
 {
@@ -744,6 +774,7 @@ finish_bulk_insert(Relation relation, int options)
 
 /* --- storage lifecycle: validate, but create no physical storage ------- */
 
+/** @brief Initializes storage horizons without creating relation files. */
 void
 set_new_file_locator(Relation rel,
 											 const RelFileLocator *newrlocator,
@@ -774,18 +805,21 @@ set_new_file_locator(Relation rel,
 	*minmulti = InvalidMultiXactId;
 }
 
+/** @brief Rejects nontransactional truncation of an external relation. */
 void
 truncate_nontransactional(Relation rel)
 {
 	raise_unsupported_operation("TRUNCATE");
 }
 
+/** @brief Rejects physical data copying for an external relation. */
 void
 copy_relation_data(Relation rel, const RelFileLocator *newrlocator)
 {
 	raise_unsupported_operation("storage rewrite");
 }
 
+/** @brief Rejects physical relation rewrites for an external relation. */
 void
 copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 										  Relation OldIndex, bool use_sort,
@@ -799,6 +833,7 @@ copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 	raise_unsupported_operation("CLUSTER / VACUUM FULL");
 }
 
+/** @brief Accepts vacuum without local storage work. */
 void
 vacuum_relation(Relation rel, VacuumParams *params,
 								BufferAccessStrategy bstrategy)
@@ -809,6 +844,7 @@ vacuum_relation(Relation rel, VacuumParams *params,
 
 /* --- analyze: no local rows, no remote I/O ----------------------------- */
 
+/** @return False because external relations expose no local blocks to analyze. */
 bool
 next_analyze_block(TableScanDesc scan, ReadStream *stream)
 {
@@ -816,6 +852,7 @@ next_analyze_block(TableScanDesc scan, ReadStream *stream)
 	return false;
 }
 
+/** @return False without contacting a provider or yielding a sample tuple. */
 bool
 next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
 										double *liverows, double *deadrows,
@@ -827,6 +864,7 @@ next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
 
 /* --- index build/validate: external relations reject index DDL --------- */
 
+/** @brief Rejects local index construction for external relations. */
 double
 build_index_range_scan(Relation table_rel, Relation index_rel,
 									   IndexInfo *index_info, bool allow_sync,
@@ -839,6 +877,7 @@ build_index_range_scan(Relation table_rel, Relation index_rel,
 	raise_unsupported_operation("index build");
 }
 
+/** @brief Rejects local index validation for external relations. */
 void
 validate_index_scan(Relation table_rel, Relation index_rel,
 									IndexInfo *index_info, Snapshot snapshot,
@@ -849,6 +888,7 @@ validate_index_scan(Relation table_rel, Relation index_rel,
 
 /* --- size / toast / estimate: zero physical footprint ------------------ */
 
+/** @return Zero because external relations own no PostgreSQL forks. */
 uint64
 relation_size(Relation rel, ForkNumber forkNumber)
 {
@@ -856,6 +896,7 @@ relation_size(Relation rel, ForkNumber forkNumber)
 	return 0;
 }
 
+/** @return False because no local tuples require TOAST storage. */
 bool
 relation_needs_toast_table(Relation rel)
 {
@@ -866,6 +907,7 @@ relation_needs_toast_table(Relation rel)
 /* Provider-free estimate: fixed cardinality and local type widths only. */
 constexpr double default_estimated_rows = 1000.0;
 
+/** @brief Publishes provider-free relation size estimates to the planner. */
 void
 estimate_relation_size(Relation rel, int32 *attr_widths,
 								  BlockNumber *pages, double *tuples,
@@ -881,12 +923,14 @@ estimate_relation_size(Relation rel, int32 *attr_widths,
 
 /* --- sample scan: rejected (also blocked at plan time) ----------------- */
 
+/** @brief Rejects block sampling for external relations. */
 bool
 next_sample_block(TableScanDesc scan, SampleScanState *scanstate)
 {
 	raise_unsupported_operation("TABLESAMPLE");
 }
 
+/** @brief Rejects tuple sampling for external relations. */
 bool
 next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 									   TupleTableSlot *slot)
@@ -894,7 +938,7 @@ next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 	raise_unsupported_operation("TABLESAMPLE");
 }
 
-/* Stable PostgreSQL callback table. Null bitmap callbacks prevent bitmap paths. */
+/** @brief Stable callback table with bitmap paths disabled. */
 const TableAmRoutine table_access_methods = {
 	.type = T_TableAmRoutine,
 
@@ -990,6 +1034,7 @@ to_string(relation_entity entity) noexcept
 	return "unspecified";
 }
 
+/** @brief Registers relation options once for the backend process. */
 void
 initialize_relation_options()
 {

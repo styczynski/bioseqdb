@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * sequences/sample_table/index.cppm
- *
- * SQL owners for streaming synthetic Bioseq table generation and locator
- * metadata inspection.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file index.cppm
+ * @brief SQL owners for streamed sample-table generation and locator inspection.
  */
 module;
 

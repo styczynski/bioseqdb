@@ -1,3 +1,7 @@
+/**
+ * @file index.cppm
+ * @brief Reexports the complete PostgreSQL SQL-boundary API.
+ */
 /*-------------------------------------------------------------------------
  *
  * support/sql_boundary/index.cppm

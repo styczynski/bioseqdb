@@ -2622,7 +2622,7 @@ set(BIOSEQ_SUPERVISOR_PRIVATE_PARTITIONS
 
 set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/lifecycle.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_evidence.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_operation_stats.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/alignment_stats.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/index_admin.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/extension/minimizer_diagnostics.cppm"

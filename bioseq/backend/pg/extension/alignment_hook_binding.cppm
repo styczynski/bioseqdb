@@ -22,6 +22,7 @@ namespace bioseq::pg::detail {
 
 namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
+/** @brief Destroys an unregistered frame and detaches its cleanup token. */
 void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
@@ -38,6 +39,7 @@ void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 
 namespace {
 
+/** @brief Releases a frame when PostgreSQL resets its query memory context. */
 void alignment_frame_context_cleanup(void* argument)
 {
 	auto* token = static_cast<alignment_frame_cleanup_token*>(argument);

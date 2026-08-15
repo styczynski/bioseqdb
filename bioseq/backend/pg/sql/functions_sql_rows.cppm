@@ -1,3 +1,7 @@
+/**
+ * @file functions_sql_rows.cppm
+ * @brief Declares result rows returned by generated SQL functions.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -11,6 +15,7 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::sql_functions::result_rows {
 
+/** @brief Describes one sequence storage shard and its sidecar relation. */
 struct list_seq_storage_shard final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::regclass,

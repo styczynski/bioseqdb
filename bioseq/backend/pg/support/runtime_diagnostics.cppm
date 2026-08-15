@@ -1,3 +1,7 @@
+/**
+ * @file runtime_diagnostics.cppm
+ * @brief Provides profile-gated BPCHAR and vector ownership statistics.
+ */
 /*-------------------------------------------------------------------------
  *
  * runtime_diagnostics.cppm
@@ -14,6 +18,7 @@ export module bioseq.postgres.support.runtime_diagnostics;
 
 export namespace bioseq::postgres::support::runtime_diagnostics {
 
+/** @brief Counts observed PostgreSQL BPCHAR storage representations. */
 struct bpchar_source_form_statistics final {
     std::uint64_t short_datums = 0;
     std::uint64_t four_byte_uncompressed_datums = 0;
@@ -22,6 +27,7 @@ struct bpchar_source_form_statistics final {
     std::uint64_t unknown_datums = 0;
 };
 
+/** @brief Captures BPCHAR view and vector-payload lifetime transitions. */
 struct bpchar_lifetime_statistics final {
     std::uint64_t live_views = 0;
     std::uint64_t view_constructions = 0;
@@ -53,6 +59,7 @@ struct bpchar_lifetime_statistics final {
     bpchar_source_form_statistics view_decode_sources{};
 };
 
+/** @brief Classifies the source representation of one BPCHAR datum. */
 enum class bpchar_source_form : std::uint8_t {
     short_header,
     four_byte_uncompressed,
@@ -61,11 +68,13 @@ enum class bpchar_source_form : std::uint8_t {
     unknown,
 };
 
+/** @brief Identifies the consumer that inspected a BPCHAR source datum. */
 enum class bpchar_source_site : std::uint8_t {
     vector_copy,
     view_decode,
 };
 
+/** @brief Identifies the operation responsible for vector payload cleanup. */
 enum class vector_payload_cleanup_kind : std::uint8_t {
     explicit_cleanup,
     slot_clear,
@@ -76,15 +85,18 @@ enum class vector_payload_cleanup_kind : std::uint8_t {
 inline thread_local bpchar_lifetime_statistics
     bpchar_lifetime_statistics_state;
 
+/** @brief Resets statistics for the current backend thread. */
 inline void reset_bpchar_lifetime_statistics() noexcept {
     bpchar_lifetime_statistics_state = {};
 }
 
+/** @brief Starts one source-form observation session. */
 inline void begin_bpchar_source_observation_session() noexcept {
     bpchar_lifetime_statistics_state.source_observation_active = true;
     ++bpchar_lifetime_statistics_state.source_observation_sessions;
 }
 
+/** @brief Completes the active source-form observation session. */
 inline void end_bpchar_source_observation_session() noexcept {
     if (bpchar_lifetime_statistics_state.source_observation_active) {
         bpchar_lifetime_statistics_state.source_observation_active = false;
@@ -92,11 +104,13 @@ inline void end_bpchar_source_observation_session() noexcept {
     }
 }
 
+/** @return True when source-form observations are currently recorded. */
 [[nodiscard]] inline bool
 is_bpchar_source_observation_active() noexcept {
     return bpchar_lifetime_statistics_state.source_observation_active;
 }
 
+/** @brief Records construction of one BPCHAR view. */
 inline void record_view_construction(bool owned_copy) noexcept {
     ++bpchar_lifetime_statistics_state.live_views;
     ++bpchar_lifetime_statistics_state.view_constructions;
@@ -104,6 +118,7 @@ inline void record_view_construction(bool owned_copy) noexcept {
         ++bpchar_lifetime_statistics_state.view_owned_copies;
 }
 
+/** @brief Records destruction of one BPCHAR view. */
 inline void record_view_destruction(bool owned_copy) noexcept {
     if (bpchar_lifetime_statistics_state.live_views != 0)
         --bpchar_lifetime_statistics_state.live_views;
@@ -112,20 +127,24 @@ inline void record_view_destruction(bool owned_copy) noexcept {
         ++bpchar_lifetime_statistics_state.view_owned_frees;
 }
 
+/** @brief Records allocation of one vector-owned payload. */
 inline void record_vector_payload_allocation() noexcept {
     ++bpchar_lifetime_statistics_state.vector_payload_allocations;
 }
 
+/** @brief Records a payload free and detects live borrowed views. */
 inline void record_payload_free() noexcept {
     if (bpchar_lifetime_statistics_state.live_views != 0)
         ++bpchar_lifetime_statistics_state.payload_frees_while_view_live;
 }
 
+/** @brief Records payload release caused by vector-slot overwrite. */
 inline void record_vector_payload_overwrite_free() noexcept {
     record_payload_free();
     ++bpchar_lifetime_statistics_state.vector_payload_overwrite_frees;
 }
 
+/** @brief Records payload release attributed to a cleanup operation. */
 inline void record_vector_payload_cleanup_free(
         vector_payload_cleanup_kind kind) noexcept {
     record_payload_free();
@@ -144,6 +163,7 @@ inline void record_vector_payload_cleanup_free(
     }
 }
 
+/** @brief Records invocation of a vector cleanup operation. */
 inline void record_vector_cleanup(
         vector_payload_cleanup_kind kind) noexcept {
     switch (kind) {
@@ -159,10 +179,12 @@ inline void record_vector_cleanup(
     }
 }
 
+/** @brief Records release of one temporary detoast allocation. */
 inline void record_detoast_temporary_free() noexcept {
     ++bpchar_lifetime_statistics_state.detoast_temporary_frees;
 }
 
+/** @brief Records one BPCHAR source form for the active observation site. */
 inline void record_bpchar_source_form(
         bpchar_source_form form,
         bpchar_source_site site) noexcept {
@@ -198,14 +220,17 @@ inline void record_bpchar_source_form(
     }
 }
 
+/** @brief Records reset of the BPCHAR allocation context. */
 inline void record_bpchar_context_reset() noexcept {
     ++bpchar_lifetime_statistics_state.context_resets;
 }
 
+/** @brief Records reuse of the BPCHAR allocation context. */
 inline void record_bpchar_context_reuse() noexcept {
     ++bpchar_lifetime_statistics_state.context_reuses;
 }
 
+/** @return A copy of the current backend-thread statistics. */
 [[nodiscard]] inline bpchar_lifetime_statistics
 snapshot_bpchar_lifetime_statistics() noexcept {
     return bpchar_lifetime_statistics_state;

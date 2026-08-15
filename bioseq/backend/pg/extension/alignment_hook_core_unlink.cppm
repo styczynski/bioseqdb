@@ -16,6 +16,7 @@ extern "C" {
 module bioseq.postgres.extension:alignment_hook_core_unlink;
 
 import :alignment_hook_contract;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 

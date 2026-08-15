@@ -80,6 +80,7 @@ std::optional<bool> mmsearch(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Chaining score of the current mmsearch alignment. */
 std::int32_t score(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -93,6 +94,7 @@ std::int32_t score(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Dynamic-programming score of the current mmsearch alignment. */
 std::int32_t dp_score(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -106,6 +108,7 @@ std::int32_t dp_score(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Length of the query sequence in the current mmsearch alignment. */
 std::int64_t query_len(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -153,6 +156,7 @@ std::int64_t query_end(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Length of the stored target in the current mmsearch alignment. */
 std::int64_t target_len(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -200,6 +204,7 @@ std::int64_t target_end(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Number of matching bases in the current mmsearch alignment. */
 std::int64_t num_matches(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -213,6 +218,7 @@ std::int64_t num_matches(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Aligned block length of the current mmsearch alignment. */
 std::int64_t block_length(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -228,6 +234,7 @@ std::int64_t block_length(
     .has_cost = true,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Edit distance of the current mmsearch alignment. */
 std::int64_t edit(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -241,6 +248,7 @@ std::int64_t edit(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Mapping quality of the current mmsearch alignment. */
 std::int32_t mapq(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -254,6 +262,7 @@ std::int32_t mapq(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Primary chain score of the current mmsearch alignment. */
 std::int32_t chain_score(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -267,6 +276,7 @@ std::int32_t chain_score(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Maximum dynamic-programming score of the current alignment. */
 std::int32_t dp_max_score(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -280,6 +290,7 @@ std::int32_t dp_max_score(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Seed count retained by the current mmsearch alignment. */
 std::int32_t seed_count(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -293,6 +304,7 @@ std::int32_t seed_count(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Secondary chain score of the current mmsearch alignment. */
 std::int32_t secondary_chain_score(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -306,6 +318,7 @@ std::int32_t secondary_chain_score(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Whether the current alignment uses the reverse target strand. */
 bool is_reverse(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -319,6 +332,7 @@ bool is_reverse(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Whether the current alignment is the primary reported match. */
 bool is_primary(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -332,6 +346,7 @@ bool is_primary(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Whether the current alignment has an available CIGAR string. */
 bool has_cigar(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -345,6 +360,7 @@ bool has_cigar(
     .parallel = bioseq::sql::parallel_safety::safe,
     .support = "bioseq_placeholder_support",
 })]]
+/** @brief Estimated divergence of the current mmsearch alignment. */
 float divergence(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::anyelement,
@@ -372,6 +388,7 @@ std::string cigar(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Warms the backend-local GPU shader cache and returns its status. */
 std::string gpu_warmup_shader_cache();
 
 [[bioseq_sql::function({
@@ -380,6 +397,7 @@ std::string gpu_warmup_shader_cache();
     .volatility = bioseq::sql::volatility::stable,
     .parallel = bioseq::sql::parallel_safety::safe,
 })]]
+/** @brief Returns backend-visible Vulkan runtime and device status. */
 bioseq::postgres::support::named_output<
     bioseq::postgres::sql_rows::vulkan_runtime_status_row>
 vulkan_runtime_status();
@@ -413,6 +431,7 @@ std::int64_t symbol_count(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
+/** @brief Planner support hook for `bioseq.symbol_count`. */
 Datum bioseq_symbol_count_support(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::internal,
@@ -426,6 +445,7 @@ Datum bioseq_symbol_count_support(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
+/** @brief Planner support hook for mmsearch predicates. */
 Datum mmsearch_support(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::internal,
@@ -439,6 +459,7 @@ Datum mmsearch_support(
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::internal,
 })]]
+/** @brief Planner support hook for mmsearch result placeholders. */
 Datum bioseq_placeholder_support(
         [[bioseq_sql::param({
             .sql_type = bioseq::sql::pg::internal,
@@ -464,6 +485,7 @@ list_metadata();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Returns counters from the last alignment execution in this backend. */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::alignment_execution_stats_row>
 last_alignment_execution_stats();
@@ -475,6 +497,7 @@ last_alignment_execution_stats();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
+/** @brief Returns minimizer fragment reader statistics from the last alignment. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_minimizer_fragment_reader_stats();
 
@@ -485,6 +508,7 @@ last_alignment_minimizer_fragment_reader_stats();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
+/** @brief Returns hash-major index reader statistics from the last alignment. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_hash_major_index_reader_stats();
 
@@ -496,6 +520,7 @@ last_alignment_hash_major_index_reader_stats();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
+/** @brief Returns persisted GPU operation statistics from the last completed alignment. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_persisted_gpu_operation_stats();
 
@@ -517,6 +542,7 @@ std::int64_t update_index(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Returns the number of spill runs merged by the last index build. */
 std::int64_t last_index_merge_run_count();
 
 [[bioseq_sql::function({
@@ -527,6 +553,7 @@ std::int64_t last_index_merge_run_count();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Resets backend-local active-read policy diagnostics. */
 void reset_active_read_policy_debug();
 
 [[bioseq_sql::function({
@@ -537,6 +564,7 @@ void reset_active_read_policy_debug();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Returns backend-local active-read policy diagnostics. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::active_read_policy_debug_row>
 active_read_policy_debug();
@@ -545,6 +573,7 @@ active_read_policy_debug();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Returns statistics from the last backend-local minimizer build. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::last_minimizer_sequence_build_stats_row>
 last_minimizer_sequence_build_stats();
@@ -553,6 +582,7 @@ last_minimizer_sequence_build_stats();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Returns shared scheduler statistics for minimizer builds. */
 bioseq::postgres::support::table_rows<
     bioseq::postgres::sql_rows::scheduler_minimizer_sequence_build_stats_row>
 scheduler_minimizer_sequence_build_stats();
@@ -565,6 +595,7 @@ scheduler_minimizer_sequence_build_stats();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Arms one asynchronous minimizer worker PostgreSQL failure point. */
 bool arm_async_minimizer_sequence_worker_failure(std::string failure_point);
 
 [[bioseq_sql::function({
@@ -575,6 +606,7 @@ bool arm_async_minimizer_sequence_worker_failure(std::string failure_point);
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Clears the asynchronous minimizer worker failure selector. */
 void disarm_async_minimizer_sequence_worker_failure();
 
 [[bioseq_sql::function({
@@ -585,6 +617,7 @@ void disarm_async_minimizer_sequence_worker_failure();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Returns PostgreSQL boundary counters from the asynchronous worker. */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::async_minimizer_sequence_worker_boundary_stats_row>
 async_minimizer_sequence_worker_boundary_stats();
@@ -593,12 +626,14 @@ async_minimizer_sequence_worker_boundary_stats();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Restarts shared scheduler counters and timing. */
 void scheduler_restart();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Returns the current shared scheduler snapshot. */
 bioseq::postgres::support::table_rows<
 	bioseq::postgres::sql_rows::scheduler_stats_row>
 scheduler_stats();
@@ -607,6 +642,7 @@ scheduler_stats();
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Counts rows in one physical index table. */
 std::int64_t index_table_row_count(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -618,6 +654,7 @@ std::int64_t index_table_row_count(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Inspects the expected absence state for a cold index lookup. */
 bioseq::postgres::support::named_output<
 	bioseq::postgres::sql_rows::inspect_cold_no_index_absence_row>
 inspect_cold_no_index_absence(
@@ -950,6 +987,7 @@ build_ready_minimizer_sequence_generation(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Counts distinct subkeys stored for one logical index key. */
 std::int64_t index_distinct_sub_keys(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -962,12 +1000,14 @@ std::int64_t index_distinct_sub_keys(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Drops every physical table owned by registered Bioseq indexes. */
 void drop_all_index_tables();
 
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Sets the persistence policy for one registered sequence index. */
 void set_index_policy(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -980,6 +1020,7 @@ void set_index_policy(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Selects the registered index used for active sequence reads. */
 void set_active_read_index(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -991,6 +1032,7 @@ void set_active_read_index(
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Resolves a tuple identifier to its stable sequence row number. */
 std::int64_t column_row_number(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -1019,6 +1061,7 @@ void arm_inline_sequence_pg_failure(std::string failure_point);
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Replaces one physical index chunk for an internal storage test. */
 void write_index_chunk(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -1037,6 +1080,7 @@ void write_index_chunk(
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::or_replace,
 })]]
+/** @brief Removes one physical index manifest for an internal storage test. */
 void delete_index_manifest(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::pg::regclass,
@@ -1053,6 +1097,7 @@ void delete_index_manifest(
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Arms one sequence-source failure point in the current backend. */
 void arm_sequence_source_failure(std::string failure_point);
 
 [[bioseq_sql::function({
@@ -1063,6 +1108,7 @@ void arm_sequence_source_failure(std::string failure_point);
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Clears the current backend sequence-source failure point. */
 void disarm_sequence_source_failure();
 
 [[bioseq_sql::function({
@@ -1073,6 +1119,7 @@ void disarm_sequence_source_failure();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Resets backend-local sequence-source route counters. */
 void reset_sequence_source_counters();
 
 [[bioseq_sql::function({
@@ -1086,6 +1133,7 @@ void reset_sequence_source_counters();
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::jsonb,
 })]]
+/** @brief Returns backend-local sequence-source route counters. */
 bioseq::postgres::support::jsonb_value sequence_source_counters();
 
 [[bioseq_sql::function({
@@ -1109,6 +1157,7 @@ void arm_slice_dsm_fixture(std::string mode);
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Checks that sequence-source access rejects a foreign thread. */
 bool sequence_source_wrong_thread_probe();
 
 [[bioseq_sql::function({
@@ -1119,6 +1168,7 @@ bool sequence_source_wrong_thread_probe();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Checks the sequence-source fault injection contract. */
 bool sequence_source_fault_contract_probe();
 
 [[bioseq_sql::function({
@@ -1129,6 +1179,7 @@ bool sequence_source_fault_contract_probe();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Checks that sequence-source route aliases retain one identity. */
 bool sequence_source_route_alias_probe();
 
 [[bioseq_sql::function({
@@ -1141,6 +1192,7 @@ bool sequence_source_route_alias_probe();
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Reads orientation through the sequence facade for an optional value. */
 std::optional<bool> sequence_facade_orientation_probe(
 	[[bioseq_sql::param({
 		.sql_type = bioseq::sql::custom_type<"bioseq.seq">,
@@ -1155,34 +1207,41 @@ std::optional<bool> sequence_facade_orientation_probe(
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]
+/** @brief Exercises sequence-source preparation before a prepared statement. */
 void sequence_source_pre_prepare_probe();
 
 } // namespace bioseq::pg::sql_routines
 
 namespace bioseq::pg::detail {
 
+/** @brief Installs executor hooks that retain backend-local alignment snapshots. */
 void install_alignment_execution_hooks();
 
+/** @return The alignment snapshot currently visible to reader diagnostics. */
 [[nodiscard]] const std::optional<
 	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_alignment_execution_snapshot_ref() noexcept;
 
+/** @return The most recent completed alignment snapshot in this backend. */
 [[nodiscard]] const std::optional<
 	bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_completed_alignment_snapshot_ref() noexcept;
 
+/** @return The validated backend encoded by an alignment snapshot. */
 [[nodiscard]] bioseq::pipeline_stats::executed_backend
 validate_alignment_snapshot_environment(
 	const bioseq::postgres::table::alignment_execution::alignment_execution_snapshot& snapshot);
-
+/** @return A fixed-width lowercase hexadecimal rendering of a 64-bit value. */
 [[nodiscard]] std::string fixed_hex_u64(std::uint64_t value);
 
+/** @return The byte value unchanged for hexadecimal formatting. */
 [[nodiscard]] constexpr std::uint8_t hex_byte_value(
 		const std::uint8_t byte) noexcept
 {
 	return byte;
 }
 
+/** @return The numeric byte value used for hexadecimal formatting. */
 [[nodiscard]] constexpr std::uint8_t hex_byte_value(
 		const std::byte byte) noexcept
 {

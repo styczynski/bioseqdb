@@ -1,4 +1,7 @@
-/// @brief PostgreSQL error translation for external-provider scans.
+/**
+ * @file errors.cppm
+ * @brief Translates external-provider failures at the PostgreSQL error boundary.
+ */
 module;
 
 #include <bioseq/pg_compat.h>

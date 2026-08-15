@@ -1,3 +1,7 @@
+/**
+ * @file plan_recipe.cppm
+ * @brief Builds and validates exact cache-provider plan recipes and digests.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -17,12 +21,18 @@ import bioseq.postgres.table;
 
 export namespace bioseq::postgres::extension::cache_provider {
 
+/** @brief Stable provider identifier for exact Bioseq scans. */
 inline constexpr std::uint32_t k_bioseq_scan_provider_id = 0x42535153U;
+/** @brief Stable provider name for exact Bioseq scans. */
 inline constexpr char k_bioseq_scan_provider_name[] = "bioseq.scan.exact";
+/** @brief Digest recipe revision for exact Bioseq scans. */
 inline constexpr std::uint32_t k_bioseq_scan_recipe_revision = 1U;
+/** @brief Stable provider identifier for exact Bioseq batch joins. */
 inline constexpr std::uint32_t k_bioseq_batch_join_provider_id = 0x4253514aU;
+/** @brief Stable provider name for exact Bioseq batch joins. */
 inline constexpr char k_bioseq_batch_join_provider_name[] =
     "bioseq.batch_join.exact";
+/** @brief Digest recipe revision for exact Bioseq batch joins. */
 inline constexpr std::uint32_t k_bioseq_batch_join_recipe_revision = 1U;
 
 namespace detail {
@@ -47,6 +57,7 @@ inline constexpr int k_batch_join_recipe_semantic_snapshot = 5;
 inline constexpr std::size_t k_maximum_plan_walk_nodes = 4'096;
 inline constexpr std::uint32_t k_maximum_plan_walk_depth = 256;
 
+/** @return True when a valid digest sink accepted the supplied byte range. */
 [[nodiscard]] bool append_bytes(
         bioseq_cache_digest_sink* sink,
         const void* bytes,
@@ -58,6 +69,7 @@ inline constexpr std::uint32_t k_maximum_plan_walk_depth = 256;
         && sink->append(sink->opaque, bytes, size);
 }
 
+/** @brief Encodes one integer into a fixed little-endian byte array. */
 template <class p_integer>
 void encode_little_endian(
         p_integer value,
@@ -71,6 +83,7 @@ void encode_little_endian(
     }
 }
 
+/** @brief Mixes one serialized recipe byte into every digest lane. */
 void mix_digest_byte(
         std::array<std::uint64_t, 4>& state,
         std::uint8_t byte,
@@ -84,6 +97,7 @@ void mix_digest_byte(
     }
 }
 
+/** @return True when a PostgreSQL node recipe was serialized and digested. */
 [[nodiscard]] bool digest_recipe(
         const List* recipe,
         std::uint32_t provider_id,
@@ -117,6 +131,7 @@ void mix_digest_byte(
     return true;
 }
 
+/** @return True when the selected recipe node is an integer value. */
 [[nodiscard]] bool integer_node_value(
         const List* nodes,
         int index,
@@ -131,6 +146,7 @@ void mix_digest_byte(
     return true;
 }
 
+/** @return True when the selected recipe node is a list or PostgreSQL NIL. */
 [[nodiscard]] bool list_or_nil_node(
         const List* nodes,
         int index,
@@ -145,6 +161,7 @@ void mix_digest_byte(
     return true;
 }
 
+/** @return The relation OID addressed by a planner scan index. */
 [[nodiscard]] Oid planner_relation_oid(
         PlannerInfo* root,
         Index scan_relid) noexcept {
@@ -158,6 +175,7 @@ void mix_digest_byte(
         ? rte->relid : InvalidOid;
 }
 
+/** @return The relation OID addressed by a planned statement scan index. */
 [[nodiscard]] Oid statement_relation_oid(
         const PlannedStmt* statement,
         Index scan_relid) noexcept {
@@ -171,6 +189,7 @@ void mix_digest_byte(
         ? rte->relid : InvalidOid;
 }
 
+/** @return A copied exact-scan recipe or PostgreSQL NIL when invalid. */
 [[nodiscard]] List* make_recipe(
         const CustomScan& scan,
         Oid relation_oid) {
@@ -197,6 +216,7 @@ void mix_digest_byte(
     return recipe;
 }
 
+/** @return A copied exact batch-join recipe or PostgreSQL NIL when invalid. */
 [[nodiscard]] List* make_batch_join_recipe(
         const CustomScan& scan,
         List* semantic_snapshot) {
@@ -214,6 +234,7 @@ void mix_digest_byte(
     return recipe;
 }
 
+/** @brief Finds one exact CustomScan identity in a bounded planned-statement walk. */
 struct plan_finder {
     const CustomScanMethods* methods = nullptr;
     std::int32_t plan_node_id = -1;
@@ -224,6 +245,7 @@ struct plan_finder {
     std::size_t visited_count = 0;
     bool valid = true;
 
+    /** @return True while the bounded plan walk remains valid. */
     [[nodiscard]] bool visit(const Plan* plan, std::uint32_t depth) {
         if (!valid || plan == nullptr) return valid;
         if (depth > k_maximum_plan_walk_depth
@@ -319,6 +341,7 @@ struct plan_finder {
         }
     }
 
+    /** @return True when every plan in a PostgreSQL list was visited safely. */
     [[nodiscard]] bool visit_list(
             const List* plans,
             std::uint32_t depth) {
@@ -331,6 +354,7 @@ struct plan_finder {
     }
 };
 
+/** @return True when an exact-scan recipe has the expected shape and identity. */
 [[nodiscard]] bool parse_recipe_header(
         const List* recipe,
         std::int32_t* plan_node_id,
@@ -384,6 +408,7 @@ struct plan_finder {
     return true;
 }
 
+/** @return True when an exact batch-join recipe has the expected shape. */
 [[nodiscard]] bool parse_batch_join_recipe_header(
         const List* recipe,
         std::int32_t* plan_node_id) noexcept {
@@ -437,6 +462,10 @@ struct plan_finder {
 
 } // namespace detail
 
+/**
+ * @brief Builds an exact-scan plan recipe and expected generation digest.
+ * @return Provider ABI status describing acceptance or failure.
+ */
 [[nodiscard]] bioseq_cache_status bioseq_build_plan_digest_recipe(
         PlannerInfo* root,
         const Plan* provider_plan,
@@ -475,6 +504,10 @@ struct plan_finder {
     return bioseq_cache_status_ok;
 }
 
+/**
+ * @brief Revalidates an exact-scan recipe against the runtime plan tree.
+ * @return Provider ABI status after appending the runtime generation digest.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_append_runtime_generation_digest(
         const List* plan_domain_nodes,
@@ -526,6 +559,10 @@ bioseq_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/**
+ * @brief Builds an exact batch-join plan recipe and expected digest.
+ * @return Provider ABI status describing acceptance or failure.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_build_plan_digest_recipe(
         PlannerInfo* root,
@@ -569,6 +606,10 @@ bioseq_batch_join_build_plan_digest_recipe(
     return bioseq_cache_status_ok;
 }
 
+/**
+ * @brief Revalidates a batch-join recipe against the runtime plan tree.
+ * @return Provider ABI status after appending the runtime generation digest.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_runtime_generation_digest(
         const List* plan_domain_nodes,
@@ -617,6 +658,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending the exact-scan domain identity. */
 [[nodiscard]] bioseq_cache_status bioseq_append_domain_digest(
         const bioseq_cache_path_domain* domain,
         bioseq_cache_digest_sink* sink) {
@@ -637,6 +679,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending exact-scan generation inputs. */
 [[nodiscard]] bioseq_cache_status bioseq_append_generation_digest(
         const bioseq_cache_path_domain* domain,
         bioseq_cache_digest_sink* sink) {
@@ -673,6 +716,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending the batch-join domain identity. */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_domain_digest(
         const bioseq_cache_path_domain* domain,
@@ -694,6 +738,7 @@ bioseq_batch_join_append_domain_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending batch-join generation inputs. */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_generation_digest(
         const bioseq_cache_path_domain* domain,
@@ -731,6 +776,7 @@ bioseq_batch_join_append_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @brief Emits cache-domain EXPLAIN properties for an exact batch join. */
 void bioseq_batch_join_explain_exact_domain(
         List* plan_domain_nodes,
         bioseq_cache_explain_sink* sink) {
@@ -765,6 +811,7 @@ void bioseq_batch_join_explain_exact_domain(
     }
 }
 
+/** @brief Emits cache-domain EXPLAIN properties for an exact Bioseq scan. */
 void bioseq_explain_exact_domain(
         List* plan_domain_nodes,
         bioseq_cache_explain_sink* sink) {

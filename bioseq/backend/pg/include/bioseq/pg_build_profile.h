@@ -1,3 +1,7 @@
+/**
+ * @file pg_build_profile.h
+ * @brief Selects the checked-in PostgreSQL template specialization profile.
+ */
 #ifndef BIOSEQ_PG_BUILD_CONFIG_H
 #define BIOSEQ_PG_BUILD_CONFIG_H
 

@@ -25,8 +25,10 @@ export namespace bioseq::postgres::external::sql_rows {
     .from = bioseq::sql::public_role,
     .scope = bioseq::sql::acl_scope::all_tables_in_schema,
 })]]
+/** @brief SQL schema containing external-provider relation projections. */
 inline constexpr bioseq::sql::schema_entity bioseq_external{};
 
+/** @brief Declares the provider-backed taxonomy relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -64,6 +66,7 @@ taxonomy final {
     std::int64_t retrieved_at;
 };
 
+/** @brief Declares the provider-backed catalog relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -135,6 +138,7 @@ catalog final {
     std::int64_t retrieved_at;
 };
 
+/** @brief Declares one provider-backed record-to-gene relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -167,6 +171,7 @@ record_genes final {
     std::int64_t retrieved_at;
 };
 
+/** @brief Declares one provider-backed record-location relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -199,6 +204,7 @@ record_locations final {
     std::int64_t retrieved_at;
 };
 
+/** @brief Declares one provider-backed complete sequence relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",
@@ -235,6 +241,7 @@ sequences final {
     std::int64_t retrieved_at;
 };
 
+/** @brief Declares one provider-backed sequence chunk relation row. */
 struct [[bioseq_sql::table({
     .schema = bioseq::sql::fixed_schema<"bioseq_external">,
     .access_method = "bioseq_external",

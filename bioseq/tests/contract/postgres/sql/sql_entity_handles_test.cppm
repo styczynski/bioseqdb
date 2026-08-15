@@ -1,3 +1,7 @@
+/**
+ * @file sql_entity_handles_test.cppm
+ * @brief Checks generated SQL entity handles and row-codec metadata at compile time.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -22,6 +26,7 @@ import bioseq.postgres.table.sql_row_codecs;
 
 namespace {
 
+/** @return True when a generated handle exposes the expected stable identity. */
 template<class p_handle>
 [[nodiscard]] consteval bool generated_handle_contract(
         const p_handle& handle,
@@ -116,6 +121,7 @@ using column_mapping_codec =
         column_mapping_codec;
 using column_mapping_row = column_mapping_codec::row_type;
 
+/** @brief Matches updates that incorrectly allow a required field to be null. */
 template<class p_update>
 concept nullable_deleted_rows = requires(p_update& update) {
     update.template set_null<&chunk_group_row::deleted_rows>();

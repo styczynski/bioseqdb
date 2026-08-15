@@ -1,5 +1,5 @@
 /**
- * @file alignment_evidence.cppm
+ * @file alignment_operation_stats.cppm
  * @brief Alignment reader and persisted-GPU execution statistics.
  */
 module;
@@ -25,6 +25,7 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
+/** Serializes grouped-SoA and native fragment reader counters as JSON. */
 [[nodiscard]] std::string minimizer_fragment_reader_stats_json(
         const alignment_exec::alignment_execution_snapshot& snapshot)
 {
@@ -321,6 +322,7 @@ using bioseq::pg::detail::fixed_hex_u64;
     return result;
 }
 
+/** Serializes hash-major persisted-index reader counters as JSON. */
 [[nodiscard]] std::string hash_major_index_reader_stats_json(
 		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
@@ -451,6 +453,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 	return result;
 }
 
+/** Serializes persisted GPU operation and job counters as JSON. */
 [[nodiscard]] std::string persisted_gpu_operation_stats_json(
 		const alignment_exec::alignment_execution_snapshot& snapshot)
 {
@@ -810,6 +813,7 @@ using bioseq::pg::detail::validate_alignment_snapshot_environment;
 
 namespace {
 
+/** Validates and serializes an optional alignment execution snapshot. */
 template<class p_serializer>
 [[nodiscard]] std::optional<bioseq::postgres::support::jsonb_value>
 serialize_alignment_snapshot(
@@ -825,6 +829,7 @@ serialize_alignment_snapshot(
 
 } // namespace
 
+/** @return Statistics from the last minimizer fragment reader execution. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_minimizer_fragment_reader_stats() {
 	return serialize_alignment_snapshot(
@@ -832,6 +837,7 @@ last_alignment_minimizer_fragment_reader_stats() {
 		minimizer_fragment_reader_stats_json);
 }
 
+/** @return Statistics from the last hash-major index reader execution. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_hash_major_index_reader_stats() {
 	return serialize_alignment_snapshot(
@@ -839,6 +845,7 @@ last_alignment_hash_major_index_reader_stats() {
 		hash_major_index_reader_stats_json);
 }
 
+/** @return Persisted GPU operation statistics from the last completed alignment. */
 std::optional<bioseq::postgres::support::jsonb_value>
 last_alignment_persisted_gpu_operation_stats() {
 	return serialize_alignment_snapshot(
