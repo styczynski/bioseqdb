@@ -18,6 +18,10 @@ import bioseq.postgres.storage.indexing.chunked_storage;
 
 namespace bioseq::postgres::scheduler {
 
+/**
+ * @brief Initializes every shared counter for the latest async build report.
+ * @param[out] stats Newly allocated shared-memory counters.
+ */
 void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats& stats) {
     pg_atomic_init_u64(&stats.generation, 0);
     pg_atomic_init_u64(&stats.backend_pid, 0);
@@ -45,8 +49,12 @@ void initialize_minimizer_sequence_build_stats(pg_minimizer_sequence_build_stats
     pg_atomic_init_u64(&stats.shareable_lazy_workers, 0);
 }
 
+/**
+ * @brief Initializes async-worker PostgreSQL boundary counters and selectors.
+ * @param[out] stats Newly allocated shared-memory boundary state.
+ */
 void initialize_async_minimizer_sequence_worker_boundary_stats(
-        pg_async_minimizer_sequence_worker_boundary_stats& stats) {
+    pg_async_minimizer_sequence_worker_boundary_stats& stats) {
     pg_atomic_init_u64(&stats.relation_leaf_calls, 0);
     pg_atomic_init_u64(&stats.spi_leaf_calls, 0);
     pg_atomic_init_u64(&stats.materialize_interrupt_leaf_calls, 0);
@@ -60,22 +68,34 @@ void initialize_async_minimizer_sequence_worker_boundary_stats(
     pg_atomic_init_u32(&stats.last_failure_point, 0);
     pg_atomic_init_u32(&stats.armed_failure_point, 0);
 }
+
+/** @brief Marks an encoded last-failure value as test-injected. */
 inline constexpr std::uint32_t k_async_minimizer_sequence_worker_injected_failure_flag =
     std::uint32_t{1} << 31u;
 
 #ifdef BIOSEQ_TEST_INDEXES
+/** @brief Tracks which process-local failure originated from injection. */
 inline thread_local async_minimizer_sequence_worker_pg_failure
     g_async_minimizer_sequence_worker_injected_failure =
         async_minimizer_sequence_worker_pg_failure::none;
 #endif
 
+/**
+ * @brief Publishes the last completed worker build into shared atomics.
+ * @param[in] stats Storage-build counters and byte totals.
+ * @param[in] worker_build_ns Total worker build duration in nanoseconds.
+ * @param[in] pipeline_mode Serialized concurrency mode.
+ * @param[in] max_concurrency Effective worker concurrency.
+ * @param[in] index_memory_cap_mb Configured index-memory cap in MiB.
+ * @param[in] has_shareable_lazy_worker Whether the selected source supports parallel reads.
+ */
 void publish_async_minimizer_sequence_build_stats(
-        const bioseq::storage::indexing::last_minimizer_sequence_build_stats& stats,
-        std::uint64_t worker_build_ns,
-        std::uint64_t pipeline_mode,
-        std::uint64_t max_concurrency,
-        std::uint64_t index_memory_cap_mb,
-        bool has_shareable_lazy_worker) noexcept {
+    const bioseq::storage::indexing::last_minimizer_sequence_build_stats& stats,
+    std::uint64_t worker_build_ns,
+    std::uint64_t pipeline_mode,
+    std::uint64_t max_concurrency,
+    std::uint64_t index_memory_cap_mb,
+    bool has_shareable_lazy_worker) noexcept {
     if (g_shared == nullptr) {
         return;
     }
@@ -102,13 +122,16 @@ void publish_async_minimizer_sequence_build_stats(
     pg_atomic_write_u64(&dst.pipeline_mode, pipeline_mode);
     pg_atomic_write_u64(&dst.max_concurrency, max_concurrency);
     pg_atomic_write_u64(&dst.index_memory_cap_mb, index_memory_cap_mb);
-    pg_atomic_write_u64(
-        &dst.shareable_lazy_workers,
-        has_shareable_lazy_worker ? 1u : 0u);
+    pg_atomic_write_u64(&dst.shareable_lazy_workers, has_shareable_lazy_worker ? 1u : 0u);
     pg_atomic_fetch_add_u64(&dst.generation, 1);
 }
 
-[[nodiscard]] async_minimizer_sequence_build_stats_snapshot snapshot_async_minimizer_sequence_build_stats() {
+/**
+ * @brief Copies the last published async-build counters from shared memory.
+ * @return A zero snapshot when shared memory is unavailable.
+ */
+[[nodiscard]] async_minimizer_sequence_build_stats_snapshot
+snapshot_async_minimizer_sequence_build_stats() {
     async_minimizer_sequence_build_stats_snapshot out{};
     if (g_shared == nullptr) {
         return out;
@@ -137,11 +160,14 @@ void publish_async_minimizer_sequence_build_stats(
     out.pipeline_mode = pg_atomic_read_u64(&src.pipeline_mode);
     out.max_concurrency = pg_atomic_read_u64(&src.max_concurrency);
     out.index_memory_cap_mb = pg_atomic_read_u64(&src.index_memory_cap_mb);
-    out.shareable_lazy_workers =
-        pg_atomic_read_u64(&src.shareable_lazy_workers);
+    out.shareable_lazy_workers = pg_atomic_read_u64(&src.shareable_lazy_workers);
     return out;
 }
 
+/**
+ * @brief Copies async-worker boundary counters and selectors from shared memory.
+ * @return A zero snapshot when shared memory is unavailable.
+ */
 [[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
 snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
     async_minimizer_sequence_worker_boundary_stats_snapshot out{};
@@ -150,26 +176,20 @@ snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
     }
     pg_async_minimizer_sequence_worker_boundary_stats& src =
         g_shared->async_minimizer_sequence_worker_boundary_stats;
-    out.relation_leaf_calls =
-        pg_atomic_read_u64(&src.relation_leaf_calls);
+    out.relation_leaf_calls = pg_atomic_read_u64(&src.relation_leaf_calls);
     out.spi_leaf_calls = pg_atomic_read_u64(&src.spi_leaf_calls);
     out.materialize_interrupt_leaf_calls =
         pg_atomic_read_u64(&src.materialize_interrupt_leaf_calls);
     out.materialize_scanner_read_leaf_calls =
         pg_atomic_read_u64(&src.materialize_scanner_read_leaf_calls);
     out.pg_leaf_failures = pg_atomic_read_u64(&src.pg_leaf_failures);
-    out.injected_pg_leaf_failures =
-        pg_atomic_read_u64(&src.injected_pg_leaf_failures);
-    out.materialize_admissions =
-        pg_atomic_read_u64(&src.materialize_admissions);
-    out.materialize_failure_unwinds =
-        pg_atomic_read_u64(&src.materialize_failure_unwinds);
-    out.materialize_admission_restored =
-        pg_atomic_read_u64(&src.materialize_admission_restored);
+    out.injected_pg_leaf_failures = pg_atomic_read_u64(&src.injected_pg_leaf_failures);
+    out.materialize_admissions = pg_atomic_read_u64(&src.materialize_admissions);
+    out.materialize_failure_unwinds = pg_atomic_read_u64(&src.materialize_failure_unwinds);
+    out.materialize_admission_restored = pg_atomic_read_u64(&src.materialize_admission_restored);
     out.materialize_admission_mismatches =
         pg_atomic_read_u64(&src.materialize_admission_mismatches);
-    const std::uint32_t last_failure =
-        pg_atomic_read_u32(&src.last_failure_point);
+    const std::uint32_t last_failure = pg_atomic_read_u32(&src.last_failure_point);
     out.last_failure_point = static_cast<async_minimizer_sequence_worker_pg_failure>(
         last_failure & ~k_async_minimizer_sequence_worker_injected_failure_flag);
     out.last_failure_injected =
@@ -179,12 +199,16 @@ snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
     return out;
 }
 
+/**
+ * @brief Arms one shared async-worker PostgreSQL failure selector.
+ * @param[in] point PostgreSQL leaf that should fail once.
+ * @return True when test instrumentation accepted the selector.
+ */
 [[nodiscard]] bool arm_async_minimizer_sequence_worker_pg_failure(
-        async_minimizer_sequence_worker_pg_failure point) noexcept {
+    async_minimizer_sequence_worker_pg_failure point) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    if (g_shared == nullptr
-        || point == async_minimizer_sequence_worker_pg_failure::none
-        || point > async_minimizer_sequence_worker_pg_failure::materialize_scanner_read) {
+    if (g_shared == nullptr || point == async_minimizer_sequence_worker_pg_failure::none ||
+        point > async_minimizer_sequence_worker_pg_failure::materialize_scanner_read) {
         return false;
     }
     pg_atomic_write_u32(
@@ -197,6 +221,7 @@ snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
 #endif
 }
 
+/** @brief Clears the shared async-worker PostgreSQL failure selector. */
 void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
@@ -208,8 +233,13 @@ void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
 #endif
 }
 
+/**
+ * @brief Maps a worker failure selector to its stable statistics name.
+ * @param[in] point Failure selector.
+ * @return A process-lifetime diagnostic string.
+ */
 [[nodiscard]] const char* async_minimizer_sequence_worker_failure_point_name(
-        async_minimizer_sequence_worker_pg_failure point) noexcept {
+    async_minimizer_sequence_worker_pg_failure point) noexcept {
     switch (point) {
     case async_minimizer_sequence_worker_pg_failure::none:
         return "none";
@@ -237,8 +267,12 @@ void disarm_async_minimizer_sequence_worker_pg_failure() noexcept {
     return "invalid";
 }
 
+/**
+ * @brief Increments the boundary counter for one worker PostgreSQL leaf.
+ * @param[in] point Leaf about to execute.
+ */
 void record_async_minimizer_sequence_worker_pg_leaf_call(
-        async_minimizer_sequence_worker_pg_failure point) noexcept {
+    async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
         return;
     }
@@ -257,12 +291,10 @@ void record_async_minimizer_sequence_worker_pg_leaf_call(
         pg_atomic_fetch_add_u64(&stats.spi_leaf_calls, 1);
         break;
     case async_minimizer_sequence_worker_pg_failure::materialize_interrupt:
-        pg_atomic_fetch_add_u64(
-            &stats.materialize_interrupt_leaf_calls, 1);
+        pg_atomic_fetch_add_u64(&stats.materialize_interrupt_leaf_calls, 1);
         break;
     case async_minimizer_sequence_worker_pg_failure::materialize_scanner_read:
-        pg_atomic_fetch_add_u64(
-            &stats.materialize_scanner_read_leaf_calls, 1);
+        pg_atomic_fetch_add_u64(&stats.materialize_scanner_read_leaf_calls, 1);
         break;
     case async_minimizer_sequence_worker_pg_failure::none:
     case async_minimizer_sequence_worker_pg_failure::materialize_error_log:
@@ -270,8 +302,12 @@ void record_async_minimizer_sequence_worker_pg_leaf_call(
     }
 }
 
+/**
+ * @brief Records a PostgreSQL failure and its injection origin.
+ * @param[in] point Leaf whose error bridge caught the failure.
+ */
 void record_async_minimizer_sequence_worker_pg_leaf_failure(
-        async_minimizer_sequence_worker_pg_failure point) noexcept {
+    async_minimizer_sequence_worker_pg_failure point) noexcept {
     if (g_shared == nullptr) {
         return;
     }
@@ -289,13 +325,16 @@ void record_async_minimizer_sequence_worker_pg_leaf_failure(
     const std::uint32_t encoded_failure =
         static_cast<std::uint32_t>(point) |
         (injected ? k_async_minimizer_sequence_worker_injected_failure_flag : 0u);
-    pg_atomic_write_u32(
-        &stats.last_failure_point, encoded_failure);
+    pg_atomic_write_u32(&stats.last_failure_point, encoded_failure);
 }
 
-/* Must be called from one invoke_pg_as_cpp callback, never from C++ scope. */
+/**
+ * @brief Consumes an armed worker selector and raises PostgreSQL ERROR.
+ * @param[in] point Leaf about to execute inside one PostgreSQL callback.
+ * @pre The caller is inside `invoke_pg_as_cpp` with no live C++ owner below it.
+ */
 void inject_async_minimizer_sequence_worker_pg_failure_leaf(
-        async_minimizer_sequence_worker_pg_failure point) {
+    async_minimizer_sequence_worker_pg_failure point) {
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
         return;
@@ -311,38 +350,38 @@ void inject_async_minimizer_sequence_worker_pg_failure_leaf(
     }
     pg_atomic_fetch_add_u64(&stats.injected_pg_leaf_failures, 1);
     g_async_minimizer_sequence_worker_injected_failure = point;
-    ereport(ERROR,
+    ereport(
+        ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous minimizer-sequence worker PostgreSQL leaf failure"),
-         errdetail("failure_point=%s",
-            async_minimizer_sequence_worker_failure_point_name(point))));
+         errdetail("failure_point=%s", async_minimizer_sequence_worker_failure_point_name(point))));
 #else
     (void)point;
 #endif
 }
 
-
+/** @brief Records a worker-side resident materialization admission. */
 void record_async_minimizer_sequence_materialize_admission() noexcept {
     if (g_shared != nullptr) {
         pg_atomic_fetch_add_u64(
-            &g_shared->async_minimizer_sequence_worker_boundary_stats.materialize_admissions,
-            1);
+            &g_shared->async_minimizer_sequence_worker_boundary_stats.materialize_admissions, 1);
     }
 }
 
-void record_async_minimizer_sequence_materialize_failure_unwind(
-        bool admission_restored) noexcept {
+/**
+ * @brief Records a failed materialization unwind and admission outcome.
+ * @param[in] admission_restored Whether reserved bytes returned to their entry value.
+ */
+void record_async_minimizer_sequence_materialize_failure_unwind(bool admission_restored) noexcept {
     if (g_shared == nullptr) {
         return;
     }
     pg_async_minimizer_sequence_worker_boundary_stats& stats =
         g_shared->async_minimizer_sequence_worker_boundary_stats;
     pg_atomic_fetch_add_u64(&stats.materialize_failure_unwinds, 1);
-    pg_atomic_fetch_add_u64(
-        admission_restored
-            ? &stats.materialize_admission_restored
-            : &stats.materialize_admission_mismatches,
-        1);
+    pg_atomic_fetch_add_u64(admission_restored ? &stats.materialize_admission_restored
+                                               : &stats.materialize_admission_mismatches,
+                            1);
 }
 
-}  // namespace bioseq::postgres::scheduler
+} // namespace bioseq::postgres::scheduler
