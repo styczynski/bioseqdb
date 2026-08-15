@@ -477,9 +477,9 @@ resolve_config(const config_model& model, const std::vector<config_override>& ov
     result.reserve(model.entries.size());
     for (const config_entry& entry : model.entries) {
         const auto found = requested.find(entry.macro_name);
-        const std::string expression =
-            found == requested.end() ? entry.default_expression : found->second;
-        const std::int64_t value = detail::parse_value(entry.kind, expression, false);
+        const std::int64_t value = found == requested.end()
+                                       ? entry.default_value
+                                       : detail::parse_value(entry.kind, found->second, false);
         detail::validate_in_domain(entry, value, "override");
         result.push_back(resolved_entry{
             .entry = entry,

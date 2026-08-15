@@ -339,6 +339,21 @@ inline void verify_fail_closed_overrides() {
         },
         "duplicate overrides are rejected");
 
+    const config_model unsigned_model =
+        collect_config_model("unsigned_override.cppm",
+                             fixture(documented_variable("unsigned int",
+                                                         "bioseq_fixture_count",
+                                                         "BIOSEQ_BUILD_CONFIG_FIXTURE_COUNT",
+                                                         "count",
+                                                         "1..9",
+                                                         "3U")));
+    require_rejected(
+        [&unsigned_model] {
+            static_cast<void>(
+                generate(unsigned_model, {{"BIOSEQ_BUILD_CONFIG_FIXTURE_COUNT", "3U"}}));
+        },
+        "unsigned override suffixes are rejected");
+
     const config_model vacuum_model = collect_config_model(
         "vacuum.cppm",
         fixture(documented_variable(
