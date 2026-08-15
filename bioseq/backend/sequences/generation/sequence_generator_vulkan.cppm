@@ -17,22 +17,22 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::sequences::generation::vulkan {
 
+/// True when packed traits fit the Vulkan generation shader contract.
 template <typename p_traits>
 inline constexpr bool gpu_generatable =
-    p_traits::alphabet_size >= 2 &&
-    p_traits::alphabet_size <= 256 &&
-    p_traits::bits_per_char >= 1 &&
-    p_traits::bits_per_char <= 32 &&
+    p_traits::alphabet_size >= 2 && p_traits::alphabet_size <= 256 &&
+    p_traits::bits_per_char >= 1 && p_traits::bits_per_char <= 32 &&
     (sizeof(typename p_traits::storage_unit) == 4 || sizeof(typename p_traits::storage_unit) == 8);
 
+/// @brief Builds validated push constants for a generation dispatch.
 template <typename p_traits>
 [[nodiscard]] std::optional<bioseq::gpu::vulkan::generate_units_push> make_generate_units_push(
     std::uint64_t symbols_per_seq,
     std::uint64_t seq_count,
     std::uint64_t seed,
     std::uint32_t chunk_units) {
-    constexpr std::uint32_t lpu = p_traits::letters_per_unit;
-    const std::uint64_t units_per_seq = (symbols_per_seq + lpu - 1) / lpu;
+    constexpr std::uint32_t letters_per_unit = p_traits::letters_per_unit;
+    const std::uint64_t units_per_seq = (symbols_per_seq + letters_per_unit - 1) / letters_per_unit;
     const std::uint64_t chunks_per_seq = (units_per_seq + chunk_units - 1) / chunk_units;
     const std::uint64_t total_chunks =
         bioseq::common::saturating_mul(chunks_per_seq, seq_count);
@@ -48,7 +48,7 @@ template <typename p_traits>
     push.units_per_seq = static_cast<std::uint32_t>(units_per_seq);
     push.chunks_per_seq = static_cast<std::uint32_t>(chunks_per_seq);
     push.chunk_units = chunk_units;
-    push.letters_per_unit = lpu;
+    push.letters_per_unit = letters_per_unit;
     push.bits_per_char = p_traits::bits_per_char;
     push.alphabet_size = p_traits::alphabet_size;
     push.total_chunks = static_cast<std::uint32_t>(total_chunks);
@@ -57,6 +57,7 @@ template <typename p_traits>
     return push;
 }
 
+/// @brief Reports whether a hardware Vulkan device can run the requested shape.
 template <typename p_traits>
 [[nodiscard]] bool can_generate_units_vulkan(
     std::uint64_t symbols_per_seq,
@@ -73,13 +74,14 @@ template <typename p_traits>
     }
 }
 
+/// @brief Estimates admitted host and device bytes for one generation roundtrip.
 template <typename p_traits>
 [[nodiscard]] std::uint64_t estimate_generate_units_peak_bytes(
     std::uint64_t out_units,
     std::span<const std::uint32_t> cdf) noexcept {
-    using unit_t = typename p_traits::storage_unit;
+    using storage_unit_type = typename p_traits::storage_unit;
     const std::uint64_t out_bytes = bioseq::common::saturating_mul(
-        out_units, static_cast<std::uint64_t>(sizeof(unit_t)));
+        out_units, static_cast<std::uint64_t>(sizeof(storage_unit_type)));
     return bioseq::common::saturating_add(
         bioseq::common::saturating_mul(out_bytes, 2u),
         bioseq::common::saturating_mul(
@@ -87,6 +89,7 @@ template <typename p_traits>
             static_cast<std::uint64_t>(sizeof(std::uint32_t))));
 }
 
+/// @brief Generates packed units on Vulkan when the complete contract is valid.
 template <typename p_traits>
 [[nodiscard]] bool try_generate_units_vulkan(
     std::span<typename p_traits::storage_unit> out_units,
@@ -96,7 +99,7 @@ template <typename p_traits>
     std::uint64_t seed,
     std::uint32_t chunk_units,
     bool memory_already_admitted = false) {
-    using unit_t = typename p_traits::storage_unit;
+    using storage_unit_type = typename p_traits::storage_unit;
     if constexpr (!gpu_generatable<p_traits>) {
         return false;
     } else {
@@ -105,8 +108,9 @@ template <typename p_traits>
             return false;
         }
 
-        constexpr std::uint32_t lpu = p_traits::letters_per_unit;
-        const std::uint64_t units_per_seq = (symbols_per_seq + lpu - 1) / lpu;
+        constexpr std::uint32_t letters_per_unit = p_traits::letters_per_unit;
+        const std::uint64_t units_per_seq =
+            (symbols_per_seq + letters_per_unit - 1) / letters_per_unit;
         const std::uint64_t total_units =
             bioseq::common::saturating_mul(units_per_seq, seq_count);
         if (total_units != static_cast<std::uint64_t>(out_units.size())) {
@@ -119,9 +123,9 @@ template <typename p_traits>
             return false;
         }
 
-        const std::uint64_t out_bytes = bioseq::common::saturating_mul(
-            static_cast<std::uint64_t>(out_units.size()),
-            static_cast<std::uint64_t>(sizeof(unit_t)));
+        const std::uint64_t out_bytes =
+            bioseq::common::saturating_mul(static_cast<std::uint64_t>(out_units.size()),
+                                           static_cast<std::uint64_t>(sizeof(storage_unit_type)));
         std::optional<bioseq::parallelism::memory_permit> permit;
         if (!memory_already_admitted) {
             permit = bioseq::parallelism::memory_admission_controller::instance().try_reserve(
@@ -133,10 +137,7 @@ template <typename p_traits>
         }
 
         auto buffer = runtime.run_generate_units_roundtrip(
-            static_cast<std::uint32_t>(sizeof(unit_t) * 8),
-            cdf,
-            *push,
-            out_bytes);
+            static_cast<std::uint32_t>(sizeof(storage_unit_type) * 8), cdf, *push, out_bytes);
         runtime.download_slice(buffer, 0, std::as_writable_bytes(out_units));
         return true;
     }

@@ -1482,7 +1482,7 @@ inline p_sequence_header* stdc_convert_from_cstr(
     p_sequence_header* result = nullptr;
     p_sequence_header::supported_storage_unit_byte_widths_type::dispatch(
         target_storage_byte_width,
-        [&]<std::size_t p_storage_byte_width>() {
+        [&result, &length, &input, &allocator]<std::size_t p_storage_byte_width>() {
             // Fixed-width standard types give Highway an accepted lane type
             // on every supported LP64 target. Some least-width integer aliases
             // use a different C++ spelling despite an identical bit width.
@@ -1567,8 +1567,7 @@ inline p_sequence_header* stdc_recode_to(
     p_allocator&& allocator)
 {
     std::string ascii;
-    source.convert_to([&]<class p_instance>(
-                          const compact_sequence_range<p_instance>& view) {
+    source.convert_to([&ascii]<class p_instance>(const compact_sequence_range<p_instance>& view) {
         ascii = decode_sequence_simd<p_instance>(view);
     });
     return stdc_convert_from_cstr<p_sequence_header, p_target_alphabet>(

@@ -296,7 +296,7 @@ template <class... p_entry_types>
     if constexpr (entry_count <= 1) {
         return true;
     } else {
-        return [&]<std::size_t... p_indices>(std::index_sequence<p_indices...>) {
+        return []<std::size_t... p_indices>(std::index_sequence<p_indices...>) {
             return (ith_name_unique<p_indices, p_entry_types...>(
                 std::make_index_sequence<
                     (entry_count > p_indices + 1u
@@ -328,7 +328,7 @@ consteval auto build_valid_names_buffer() noexcept {
     std::array<char, live_size> name_buffer{};
     std::size_t write_offset = 0;
     bool first_entry = true;
-    auto append = [&]<class p_entry_type>() {
+    auto append = [&first_entry, &name_buffer, &write_offset]<class p_entry_type>() {
         if (!first_entry) {
             name_buffer[write_offset++] = ',';
             name_buffer[write_offset++] = ' ';
@@ -453,7 +453,7 @@ struct supported_alphabets {
 
     /// Stateless adapter forwarding `operator()<p_entry_type>` to
     /// `operator()<typename p_entry_type::alphabet_type>` on the wrapped handler.
-    /// No `[&]` capture (the project has been burned by capture-by-reference
+    /// No capture-default (the project has been burned by implicit reference
     /// nested lambdas not inlining): the adapter holds the handler by
     /// reference as a data member and the templated `operator()` is
     /// `[[gnu::always_inline]]`.
@@ -1074,61 +1074,51 @@ struct compact_sequence_range_base {
 
     };
 
-    using derived_range_t = p_derived_range;
+    using derived_range_type = p_derived_range;
 
     template<typename p_iterator_type>
     struct valid_derived_iterator {
         static constexpr bool value = false;
     };
 
-    template<typename p_iterator_type>
-    requires (
-        requires (derived_range_t d, p_iterator_type i) {
+    template <typename p_iterator_type>
+        requires(requires(derived_range_type d, p_iterator_type i) {
             { i = d.begin() };
-        }
-    )
+        })
     struct valid_derived_iterator<p_iterator_type> {
         static constexpr bool value = true;
     };
 
-    inline constexpr derived_range_t const* super() const {
-        return static_cast<derived_range_t const*>(this);
+    inline constexpr derived_range_type const* super() const {
+        return static_cast<derived_range_type const*>(this);
     };
 
     // forward bp iterator
 
     template<iterator_mode p_mode>
     struct packed_iterator_traits {
-        using dereference_t = std::conditional_t<
+        using dereference_type = std::conditional_t<
             p_mode == logical_rank,
             typename traits::storage_unit,
-            std::conditional_t<
-                p_mode == alphabet_symbol,
-                typename traits::alphabet_type,
-                void
-            >
-        >;
+            std::conditional_t<p_mode == alphabet_symbol, typename traits::alphabet_type, void>>;
     };
 
-    template<
-        typename p_base_iterator_type,
-        iterator_mode p_selected_mode
-    >
-    class packed_sequence_iterator : public boost::iterator_adaptor<
-        packed_sequence_iterator<p_base_iterator_type, p_selected_mode>,
-        p_base_iterator_type,
-        typename packed_iterator_traits<p_selected_mode>::dereference_t,
-        boost::use_default,
-        typename packed_iterator_traits<p_selected_mode>::dereference_t
-    > {
-    private:
+    template <typename p_base_iterator_type, iterator_mode p_selected_mode>
+    class packed_sequence_iterator
+        : public boost::iterator_adaptor<
+              packed_sequence_iterator<p_base_iterator_type, p_selected_mode>,
+              p_base_iterator_type,
+              typename packed_iterator_traits<p_selected_mode>::dereference_type,
+              boost::use_default,
+              typename packed_iterator_traits<p_selected_mode>::dereference_type> {
+      private:
         typedef boost::iterator_adaptor<
             packed_sequence_iterator<p_base_iterator_type, p_selected_mode>,
             p_base_iterator_type,
-            typename packed_iterator_traits<p_selected_mode>::dereference_t,
+            typename packed_iterator_traits<p_selected_mode>::dereference_type,
             boost::use_default,
-            typename packed_iterator_traits<p_selected_mode>::dereference_t
-        > super_t;
+            typename packed_iterator_traits<p_selected_mode>::dereference_type>
+            super_t;
 
         static constexpr iterator_mode selected_iterator_mode =
             p_selected_mode;
@@ -1141,7 +1131,7 @@ struct compact_sequence_range_base {
         friend class boost::iterator_core_access;
         friend class compact_sequence_range_base;
 
-        using iterator_t = p_base_iterator_type;
+        using iterator_type = p_base_iterator_type;
 
         packed_sequence_iterator() = default;
 
@@ -1177,9 +1167,8 @@ struct compact_sequence_range_base {
             }
         }
 
-        template<iterator_mode p_dereference_mode>
-        typename packed_iterator_traits<p_dereference_mode>::dereference_t
-        _dereference() const {
+        template <iterator_mode p_dereference_mode>
+        typename packed_iterator_traits<p_dereference_mode>::dereference_type _dereference() const {
             if constexpr (p_dereference_mode == logical_rank) {
                 if constexpr (traits::letters_per_unit == 1) {
                     return *this->base();
@@ -1336,7 +1325,7 @@ struct compact_sequence_range_base {
     }
 
     constexpr size_t byte_size() const {
-        return super()->size() * sizeof(typename traits::storage_unit); //+ sizeof(derived_range_t);
+        return super()->size() * sizeof(typename traits::storage_unit);
     }
 
     /**
@@ -1564,7 +1553,8 @@ struct compact_sequence_range_base {
             // bulk loop. Same idea on the tail.
             size_t produced = 0;
 
-            auto emit_letter = [&](typename traits::storage_unit raw) {
+            auto emit_letter = [&dst, &region_length, &produced](
+                                   typename traits::storage_unit raw) {
                 const auto letter = p_is_reversed
                     ? static_cast<uint8_t>(traits::letter_complement(raw))
                     : static_cast<uint8_t>(raw);
@@ -1657,7 +1647,7 @@ struct compact_sequence_range_base {
                 unit_val >> (bit_no * bpc));
         }
 
-        auto next_letter = [&]() -> typename traits::storage_unit {
+        auto next_letter = [&unit_val, &base_iter, &bit_no]() -> typename traits::storage_unit {
             const typename traits::storage_unit out =
                 static_cast<typename traits::storage_unit>(unit_val & traits::char_mask);
             if constexpr (lpu == 1) {
@@ -1682,15 +1672,16 @@ struct compact_sequence_range_base {
         // Refresh the unit at the *start* of each new storage word; the
         // letters_per_unit == 1 path needs this on every step, the multi
         // path only when bit_no wraps to 0.
-        auto refresh_unit_if_needed = [&](size_t step_idx) {
-            if constexpr (lpu == 1) {
-                unit_val = static_cast<typename traits::storage_unit>(*base_iter);
-            } else {
-                if (bit_no == 0 && step_idx + 1 < region_length) {
+        auto refresh_unit_if_needed =
+            [&unit_val, &base_iter, &bit_no, &region_length](size_t step_idx) {
+                if constexpr (lpu == 1) {
                     unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+                } else {
+                    if (bit_no == 0 && step_idx + 1 < region_length) {
+                        unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+                    }
                 }
-            }
-        };
+            };
 
         if constexpr (!descending_write) {
             for (size_t i = 0; i < region_length; ++i) {
@@ -2060,13 +2051,13 @@ consteval size_t reserved_deficit() {
     return (target - (fixed_bytes % target)) % target;
 }
 
-template<std::size_t p_deficit>
-using alignment_reserved_for_t =
+template <std::size_t p_deficit>
+using alignment_reserved_for_type =
     typename decltype(pick_alignment_reserved_type<p_deficit>())::type;
 
 template<std::size_t p_deficit>
 struct alignment_reserved_holder {
-    alignment_reserved_for_t<p_deficit> reserved;
+    alignment_reserved_for_type<p_deficit> reserved;
 };
 template<>
 struct alignment_reserved_holder<0> { };
@@ -2264,10 +2255,10 @@ public:
         std::uint8_t byte_width,
         p_handler_type&& handler)
     {
-        p_alphabet_set_type::dispatch_alphabet_by_code(alpha_code,
-            [&]<class p_dispatched_alphabet>() {
-                p_storage_width_set_type::dispatch(byte_width,
-                    [&]<size_t p_dispatched_byte_width>() {
+        p_alphabet_set_type::dispatch_alphabet_by_code(
+            alpha_code, [&byte_width, &handler]<class p_dispatched_alphabet>() {
+                p_storage_width_set_type::dispatch(
+                    byte_width, [&handler]<size_t p_dispatched_byte_width>() {
                         handler.template operator()<
                             compact_sequence_stdc_instance<
                                 compact_sequence_stdc,
@@ -2375,10 +2366,8 @@ static_assert(
 namespace compact_sequence_stdc_detail {
 template<class p_alphabet_pack, class p_size_type, class p_header_type>
 struct data_offset_check {
-    using stdc_t = compact_sequence_stdc<
-        p_alphabet_pack, p_size_type, p_header_type>;
-    static constexpr bool aligned =
-        (offsetof(stdc_t, data) % sizeof(std::uint64_t) == 0);
+    using stdc_type = compact_sequence_stdc<p_alphabet_pack, p_size_type, p_header_type>;
+    static constexpr bool aligned = (offsetof(stdc_type, data) % sizeof(std::uint64_t) == 0);
 };
 
 static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
@@ -2586,8 +2575,8 @@ inline void compact_sequence_stdc<
     p_storage_width_set_type>::convert_to(
         p_handler_type&& handler) const
 {
-    dispatch_instance(alphabet_code, storage_unit_byte_width,
-        [&]<class p_instance_type>() {
+    dispatch_instance(
+        alphabet_code, storage_unit_byte_width, [this, &handler]<class p_instance_type>() {
             handler.template operator()<p_instance_type>(
                 compact_sequence_range<p_instance_type>{*this});
         });
@@ -2611,8 +2600,10 @@ inline void compact_sequence_stdc<
     p_storage_width_set_type>::send_to(
         p_send_context_type& send_context, p_sender_type&& sender) const
 {
-    dispatch_instance(alphabet_code, storage_unit_byte_width,
-        [&]<class p_instance_type>() {
+    dispatch_instance(
+        alphabet_code,
+        storage_unit_byte_width,
+        [this, &send_context, &sender]<class p_instance_type>() {
             using storage_unit_type = typename p_instance_type::storage_unit;
             constexpr std::size_t letters_per_unit =
                 compact_sequence_range<p_instance_type>::traits::letters_per_unit;
@@ -2649,8 +2640,8 @@ inline std::size_t compact_sequence_stdc<
     p_storage_width_set_type>::unit_count() const noexcept
 {
     std::size_t result = 0;
-    dispatch_instance(alphabet_code, storage_unit_byte_width,
-        [&]<class p_instance_type>() {
+    dispatch_instance(
+        alphabet_code, storage_unit_byte_width, [this, &result]<class p_instance_type>() {
             constexpr std::size_t letters_per_unit =
                 compact_sequence_range<p_instance_type>::traits::letters_per_unit;
             result = (bp_size == 0) ? std::size_t{0}
@@ -2766,7 +2757,13 @@ compact_sequence_stdc<
     compact_sequence_stdc* result = nullptr;
     p_storage_width_set_type::dispatch(
         target_storage_byte_width,
-        [&]<std::size_t p_storage_byte_width>() {
+        [&in_padding_letters,
+         &in_bp_size,
+         &in_unit_count,
+         &receive_context,
+         &receiver,
+         &allocator,
+         &result]<std::size_t p_storage_byte_width>() {
             using storage_unit_type =
                 typename boost::uint_t<p_storage_byte_width * 8>::least;
             using sequence_configuration = sequence_custom_alphabet<
@@ -2879,11 +2876,14 @@ compact_sequence_stdc<
 
     std::uint16_t new_padding = 0;
     std::size_t   payload_bytes_value = 0;
-    convert_to([&]<class p_instance_type>(
+    convert_to([this,
+                &target_byte_width,
+                &new_padding,
+                &payload_bytes_value]<class p_instance_type>(
                    const compact_sequence_range<p_instance_type>&) {
         p_storage_width_set_type::dispatch(
             target_byte_width,
-            [&]<std::size_t p_target_storage_byte_width>() {
+            [this, &new_padding, &payload_bytes_value]<std::size_t p_target_storage_byte_width>() {
                 constexpr std::size_t target_letters_per_unit =
                     (p_target_storage_byte_width * 8)
                     / p_instance_type::letter_bit_width;

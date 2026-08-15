@@ -1,3 +1,7 @@
+/**
+ * @file minimizer_collector_admission_test.cpp
+ * @brief Memory-admission checks for minimizer collector growth.
+ */
 #include <tests/support/common.hpp>
 
 #include <array>
@@ -16,16 +20,16 @@ using bioseq::minimizers::admitted_sketch_collector;
 
 TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using collector_t = admitted_sketch_collector<
-        minimap_sketch_data, bioseq::parallelism::memory_permit>;
+    using collector_type =
+        admitted_sketch_collector<minimap_sketch_data, bioseq::parallelism::memory_permit>;
     constexpr std::uint64_t factor =
         bioseq::parallelism::k_vector_preallocation_headroom_factor;
     constexpr std::uint64_t record_bytes = sizeof(minimap_sketch_data);
     constexpr std::uint64_t first_peak =
-        collector_t::k_initial_growth_records * record_bytes * factor;
+        collector_type::k_initial_growth_records * record_bytes * factor;
     constexpr std::uint64_t second_peak =
-        collector_t::k_initial_growth_records * record_bytes
-        + 2u * collector_t::k_initial_growth_records * record_bytes * factor;
+        collector_type::k_initial_growth_records * record_bytes +
+        2u * collector_type::k_initial_growth_records * record_bytes * factor;
     const minimap_sketch_data record{1u, 0u, 0u};
 
     SECTION("initial growth is denied one byte short") {
@@ -34,7 +38,7 @@ TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             collector.collect(record);
             REQUIRE_FALSE(collector.is_ok());
             REQUIRE(collector.extract_sketches_data().empty());
@@ -51,7 +55,7 @@ TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             collector.collect(record);
             REQUIRE(collector.is_ok());
             REQUIRE(collector.extract_sketches_data().size() == 1u);
@@ -70,19 +74,18 @@ TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
-            for (std::size_t index = 0u;
-                 index < collector_t::k_initial_growth_records;
+            collector_type collector{std::move(*permit), factor};
+            for (std::size_t index = 0u; index < collector_type::k_initial_growth_records;
                  ++index) {
                 collector.collect(record);
             }
             REQUIRE(collector.is_ok());
             collector.collect(record);
             REQUIRE_FALSE(collector.is_ok());
-            REQUIRE(collector.extract_sketches_data().size()
-                == collector_t::k_initial_growth_records);
-            REQUIRE(collector.extract_sketches_data().capacity()
-                == collector_t::k_initial_growth_records);
+            REQUIRE(collector.extract_sketches_data().size() ==
+                    collector_type::k_initial_growth_records);
+            REQUIRE(collector.extract_sketches_data().capacity() ==
+                    collector_type::k_initial_growth_records);
         }
         REQUIRE(admission.reserved_bytes() == 0u);
     }
@@ -93,15 +96,14 @@ TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
-            for (std::size_t index = 0u;
-                 index <= collector_t::k_initial_growth_records;
+            collector_type collector{std::move(*permit), factor};
+            for (std::size_t index = 0u; index <= collector_type::k_initial_growth_records;
                  ++index) {
                 collector.collect(record);
             }
             REQUIRE(collector.is_ok());
-            REQUIRE(collector.extract_sketches_data().size()
-                == collector_t::k_initial_growth_records + 1u);
+            REQUIRE(collector.extract_sketches_data().size() ==
+                    collector_type::k_initial_growth_records + 1u);
             REQUIRE(collector.admitted_capacity_bytes()
                 == collector.extract_sketches_data().capacity()
                     * record_bytes);
@@ -112,15 +114,15 @@ TEST_CASE("admitted sketch collector reserves every geometric replacement peak",
 
 TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using collector_t = admitted_sketch_collector<
-        minimap_sketch_data, bioseq::parallelism::memory_permit>;
+    using collector_type =
+        admitted_sketch_collector<minimap_sketch_data, bioseq::parallelism::memory_permit>;
     using storage_type = minimap_sketch_data::storage_type;
     constexpr std::uint64_t factor =
         bioseq::parallelism::k_vector_preallocation_headroom_factor;
     constexpr std::uint64_t record_bytes = sizeof(minimap_sketch_data);
     constexpr std::uint64_t first_peak =
-        collector_t::k_initial_growth_records * record_bytes * factor;
-    std::array<storage_type, 2u * collector_t::k_initial_growth_records + 1u> raw{};
+        collector_type::k_initial_growth_records * record_bytes * factor;
+    std::array<storage_type, 2u * collector_type::k_initial_growth_records + 1u> raw{};
     for (std::size_t index = 0u; index < raw.size(); ++index) {
         raw[index] = minimap_sketch_data{
             index + 1u, index, index & 1u}.raw_value();
@@ -132,7 +134,7 @@ TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             REQUIRE_FALSE(collector.append_raw_storage(raw.data(), 1u));
             REQUIRE_FALSE(collector.is_ok());
             REQUIRE(collector.extract_sketches_data().empty());
@@ -149,7 +151,7 @@ TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             REQUIRE(collector.append_raw_storage(raw.data(), 1u));
             REQUIRE(collector.is_ok());
             REQUIRE(collector.extract_sketches_data().size() == 1u);
@@ -170,7 +172,7 @@ TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             const std::array<minimap_sketch_data, 1u> records{
                 minimap_sketch_data{7u, 3u, 1u}};
             REQUIRE(collector.append_records(records));
@@ -191,12 +193,11 @@ TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             REQUIRE(collector.append_raw_storage(raw.data(), 1u));
             const std::size_t existing_capacity =
                 collector.extract_sketches_data().capacity();
-            REQUIRE(existing_capacity
-                <= 2u * collector_t::k_initial_growth_records);
+            REQUIRE(existing_capacity <= 2u * collector_type::k_initial_growth_records);
             REQUIRE(collector.append_raw_storage(
                 raw.data() + 1u, existing_capacity - 1u));
             REQUIRE(collector.extract_sketches_data().size()
@@ -237,10 +238,10 @@ TEST_CASE("admitted Exact SIMD raw append obeys initial and replacement cliffs",
     }
 }
 
-TEST_CASE("coarse exact-p_record_type batch preserves the sequential geometric admission cliff",
+TEST_CASE("coarse exact-record batch preserves the sequential geometric admission cliff",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using collector_t = admitted_sketch_collector<
-        minimap_sketch_data, bioseq::parallelism::memory_permit>;
+    using collector_type =
+        admitted_sketch_collector<minimap_sketch_data, bioseq::parallelism::memory_permit>;
     constexpr std::uint64_t factor =
         bioseq::parallelism::k_vector_preallocation_headroom_factor;
     constexpr std::size_t batch_records = 256u;
@@ -263,7 +264,7 @@ TEST_CASE("coarse exact-p_record_type batch preserves the sequential geometric a
         {
             auto permit = admission.try_reserve(0u);
             REQUIRE(permit.has_value());
-            collector_t collector{std::move(*permit), factor};
+            collector_type collector{std::move(*permit), factor};
             const bool appended = collector.append_records(records);
             REQUIRE(appended == exact_peak);
             REQUIRE(collector.is_ok() == exact_peak);
@@ -292,13 +293,13 @@ TEST_CASE("coarse exact-p_record_type batch preserves the sequential geometric a
 
 TEST_CASE("live admitted collector composes with destination replacement peak",
           "[component:bioseq][layer:unit][feature:minimizer]") {
-    using collector_t = admitted_sketch_collector<
-        minimap_sketch_data, bioseq::parallelism::memory_permit>;
+    using collector_type =
+        admitted_sketch_collector<minimap_sketch_data, bioseq::parallelism::memory_permit>;
     constexpr std::uint64_t factor =
         bioseq::parallelism::k_vector_preallocation_headroom_factor;
     constexpr std::uint64_t record_bytes = sizeof(minimap_sketch_data);
     constexpr std::uint64_t collector_initial_peak =
-        collector_t::k_initial_growth_records * record_bytes * factor;
+        collector_type::k_initial_growth_records * record_bytes * factor;
     constexpr std::uint64_t initial_destination_headroom =
         record_bytes * factor;
     const minimap_sketch_data collector_record{1u, 0u, 0u};
@@ -312,7 +313,7 @@ TEST_CASE("live admitted collector composes with destination replacement peak",
         {
             auto collector_owner = admission.try_reserve(0u);
             REQUIRE(collector_owner.has_value());
-            collector_t collector{std::move(*collector_owner), factor};
+            collector_type collector{std::move(*collector_owner), factor};
             collector.collect(collector_record);
             REQUIRE(collector.is_ok());
             const std::uint64_t collector_bytes =

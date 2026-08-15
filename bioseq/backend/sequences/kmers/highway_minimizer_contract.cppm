@@ -15,7 +15,6 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <ranges>
 #include <span>
 #include <stdexcept>

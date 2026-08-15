@@ -1,7 +1,7 @@
-// Fixed output fixtures for the two-stack SIMD API. The two
-// u32 W10/K15 cases use its already-bound resident route; the u8 W10/K4 wrap
-// case uses a test-private fixed-target probe. Chronological two_stack_nthash output
-// is a distinct contract tested in two_stack_exact_continuation_test.cpp.
+/**
+ * @file two_stack_exact_output_test.cpp
+ * @brief Fixed-output checks for resident and fixed-target two-stack kernels.
+ */
 
 #include <tests/support/common.hpp>
 #include "common/simd/highway_test_probes/contract.h"

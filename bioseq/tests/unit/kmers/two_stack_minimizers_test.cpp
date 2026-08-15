@@ -1,3 +1,7 @@
+/**
+ * @file two_stack_minimizers_test.cpp
+ * @brief Biological and dispatch checks for two-stack minimizer kernels.
+ */
 #include <tests/support/common.hpp>
 
 #include <algorithm>
@@ -454,7 +458,7 @@ template<std::size_t p_kmer_size, std::size_t p_window_size>
                 right_position = position;
             }
         }
-        const auto append = [&](std::size_t position) {
+        const auto append = [&minimum_hash, &kmers, &records](std::size_t position) {
             const minimizer_record record{
                 .hash = minimum_hash,
                 .last_position = position + p_kmer_size - 1u,

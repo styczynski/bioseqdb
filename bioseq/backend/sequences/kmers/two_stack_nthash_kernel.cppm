@@ -65,6 +65,7 @@ using ::bioseq::minimizers::exact_simd_minimizer_representation;
 
 namespace resident_descriptor_detail {
 
+/// @brief Non-owning header for a resident packed sequence descriptor.
 struct borrowed_packed_header {
     const void* data = nullptr;
     bioseq::storage::sequence_size_t bp_size = 0;
@@ -72,6 +73,7 @@ struct borrowed_packed_header {
     std::uint16_t padding_letters = 0;
 };
 
+/// @brief Adapts a borrowed packed header to the compact-sequence protocol.
 template <sequence_alphabet p_alphabet, class p_storage_unit>
 struct borrowed_packed_instance {
     using alphabet_type = p_alphabet;
@@ -85,6 +87,7 @@ struct borrowed_packed_instance {
     static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
 
+/// @brief Invokes a function with a typed non-owning compact range.
 template <sequence_alphabet p_alphabet, class p_storage_unit, class p_function>
 decltype(auto) with_borrowed_compact_range(
         const typename bioseq::storage::lazy_sequence_view<p_alphabet>::
@@ -106,9 +109,7 @@ decltype(auto) with_borrowed_compact_range(
 
 /**
  * Fragment continuation for the nt4-normalized nucleotide two-stack kernel.
- * The stats/status models now live in the target-neutral minimizer contract;
- * the continuation remains target-local because its pending capacity depends
- * on the generated target's Highway lane count.
+ * Pending capacity follows the generated target's Highway lane count.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 struct two_stack_continuation_state {
@@ -133,6 +134,7 @@ struct two_stack_continuation_state {
             ? std::max<std::size_t>(p_window_size - 1, 1)
             : k_max_two_stack_window - 1;
 
+    /// @brief Stores one chronological minimizer candidate.
     struct candidate_state {
         std::uint64_t hash = std::numeric_limits<std::uint64_t>::max();
         std::uint64_t raw = std::numeric_limits<std::uint64_t>::max();
@@ -164,11 +166,13 @@ struct two_stack_continuation_state {
     two_stack_continuation_status status = two_stack_continuation_status::ok;
     two_stack_execution_stats stats{};
 
+    /// @brief Returns the compile-time or runtime window size.
     [[nodiscard]] constexpr std::size_t window_size() const noexcept {
         if constexpr (p_window_size != 0) return p_window_size;
         return runtime_w;
     }
 
+    /// @brief Returns the compile-time or runtime k-mer size.
     [[nodiscard]] constexpr std::size_t kmer_size() const noexcept {
         if constexpr (p_kmer_size != 0) return p_kmer_size;
         return runtime_k;
@@ -178,6 +182,7 @@ struct two_stack_continuation_state {
 
 namespace two_stack_internal {
 
+/// @brief Checks that the current Highway target exposes an admitted lane count.
 [[nodiscard]] inline bool resident_vector_shape_supported() noexcept {
 #if HWY_TARGET == HWY_SCALAR
     return false;
@@ -191,6 +196,7 @@ namespace two_stack_internal {
 #endif
 }
 
+/// @brief Builds a compile-time lane ordinal table.
 template<class p_lane_type, std::size_t p_size>
 [[nodiscard]] consteval std::array<p_lane_type, p_size>
 make_lane_index_table() noexcept
@@ -222,6 +228,7 @@ lane_indices(p_simd_tag d) noexcept
     return hn::LoadU(d, indices.data());
 }
 
+/// @brief Constructs one undefined multi-stream vector value.
 template<
     class p_simd_tag,
     typename p_storage_unit,
@@ -237,6 +244,7 @@ make_undefined_vector_stream(
         simd_tag, ((void)p_index, hn::Undefined(simd_tag))...);
 }
 
+/// @brief Constructs an array of undefined multi-stream vector values.
 template<
     std::size_t p_capacity,
     class p_simd_tag,
@@ -448,18 +456,17 @@ struct sequence_simd_iteration_state {
             // unroll via index_sequence; with runtime-w we use a normal
             // descending for-loop.
             if constexpr (k_has_static_window) {
-                for_each_index<p_static_window_size - 1>([&](auto idx_const) [[gnu::always_inline]] {
-                    constexpr size_t i = p_static_window_size - 1 - decltype(idx_const)::value;
-                    const auto current_slot   = ring_buf_elem[i];
-                    const auto previous_slot  = ring_buf_elem[i - 1];
-                    const auto current_better = less(current_slot, previous_slot);
-                    ring_buf_elem[i - 1] =
-                        if_then_else(current_better, current_slot, previous_slot);
-                    ring_buf_hash_strand[i - 1] =
-                        if_then_else(current_better,
-                            ring_buf_hash_strand[i],
-                            ring_buf_hash_strand[i - 1]);
-                });
+                for_each_index<p_static_window_size - 1>(
+                    [this](auto idx_const) [[gnu::always_inline]] {
+                        constexpr size_t i = p_static_window_size - 1 - decltype(idx_const)::value;
+                        const auto current_slot = ring_buf_elem[i];
+                        const auto previous_slot = ring_buf_elem[i - 1];
+                        const auto current_better = less(current_slot, previous_slot);
+                        ring_buf_elem[i - 1] =
+                            if_then_else(current_better, current_slot, previous_slot);
+                        ring_buf_hash_strand[i - 1] = if_then_else(
+                            current_better, ring_buf_hash_strand[i], ring_buf_hash_strand[i - 1]);
+                    });
             } else {
                 for (size_t i = w - 1; i > 0; --i) {
                     const auto current_slot   = ring_buf_elem[i];
@@ -494,7 +501,7 @@ struct sequence_simd_iteration_state {
             const mask_stream_type emit_seen = not_equal(last_emit_pos, v_max);
             last_emit_pos = if_then_else(
                 emit_seen, subtract(last_emit_pos, v_wrap), last_emit_pos);
-            const auto wrap_one = [&](auto idx_const) [[gnu::always_inline]] {
+            const auto wrap_one = [this](auto idx_const) [[gnu::always_inline]] {
                 constexpr size_t i = decltype(idx_const)::value;
                 const mask_stream_type slot_valid =
                     not_equal(ring_buf_elem[i], v_max);
@@ -534,11 +541,13 @@ struct sequence_simd_iteration_state {
 
             std::array<bool, p_stream_count> per_stream_emits{};
             bool any_stream_emits = false;
-            for_each_index<p_stream_count>([&](auto stream_idx_const) [[gnu::always_inline]] {
-                constexpr size_t s = decltype(stream_idx_const)::value;
-                per_stream_emits[s] = !no_emit_per_stream[s];
-                any_stream_emits = any_stream_emits || per_stream_emits[s];
-            });
+            for_each_index<p_stream_count>(
+                [&per_stream_emits, &no_emit_per_stream, &any_stream_emits](auto stream_idx_const)
+                    [[gnu::always_inline]] {
+                        constexpr size_t s = decltype(stream_idx_const)::value;
+                        per_stream_emits[s] = !no_emit_per_stream[s];
+                        any_stream_emits = any_stream_emits || per_stream_emits[s];
+                    });
 
             if (any_stream_emits) [[likely]] {
                 constexpr size_t max_lanes_per_stream = hn::MaxLanes(simd_tag_type{});
@@ -551,19 +560,29 @@ struct sequence_simd_iteration_state {
                 HWY_ALIGN std::array<
                     std::array<storage_unit, max_lanes_per_stream>,
                     p_stream_count> emit_arr;
-                for_each_index<p_stream_count>([&](auto stream_idx_const) [[gnu::always_inline]] {
-                    constexpr size_t s = decltype(stream_idx_const)::value;
-                    hn::Store(window_pos[s], d, pos_arr[s].data());
-                    hn::Store(window_hs[s],  d, hs_arr[s].data());
-                    hn::Store(hn::VecFromMask(d, real_emit[s]), d, emit_arr[s].data());
-                });
+                for_each_index<p_stream_count>(
+                    [&window_pos, &d, &pos_arr, &window_hs, &hs_arr, &real_emit, &emit_arr](
+                        auto stream_idx_const) [[gnu::always_inline]] {
+                        constexpr size_t s = decltype(stream_idx_const)::value;
+                        hn::Store(window_pos[s], d, pos_arr[s].data());
+                        hn::Store(window_hs[s], d, hs_arr[s].data());
+                        hn::Store(hn::VecFromMask(d, real_emit[s]), d, emit_arr[s].data());
+                    });
 
                 const size_t lc = lanes_per_stream;
-                for_each_index<p_stream_count>([&](auto stream_idx_const) {
+                for_each_index<p_stream_count>([this,
+                                                &per_stream_emits,
+                                                &lc,
+                                                &emit_arr,
+                                                &pos_arr,
+                                                &offsets_in,
+                                                &hs_arr](auto stream_idx_const) {
                     constexpr size_t s = decltype(stream_idx_const)::value;
-                    if (!per_stream_emits[s]) return;
+                    if (!per_stream_emits[s])
+                        return;
                     for (size_t lane = 0; lane < lc; ++lane) {
-                        if (!emit_arr[s][lane]) continue;
+                        if (!emit_arr[s][lane])
+                            continue;
                         const size_t local_pos =
                             static_cast<size_t>(pos_arr[s][lane]) +
                             static_cast<size_t>(pos_wrap_delta);
@@ -665,7 +684,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // packed buffer on every call. (Forwarding-ref binding here is sound:
     // both the `seq` lvalue and the `bit_casted_view` prvalue have
     // lifetimes that span the rest of the function.)
-    auto&& seq_view = ([&]() -> view_type {
+    auto&& seq_view = ([&seq]() -> view_type {
         if constexpr (can_bitcast_to_hash) {
             return seq.template bit_cast_to_storage_unit<p_hash_value>();
         } else {
@@ -850,20 +869,21 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // function; clang's inliner sees a finite parameter list (no opaque
     // capture struct) and remains directly inlineable.
     iterate_sequence_bp_simd<p_stream_count>(
-        seq_view, seq_begin, seq_end, k + w - 1,
-        [&]<bool p_is_full>(
-            std::bool_constant<p_is_full>,
-            auto const&  offsets_in,
-            auto const&  d_in,
-            mask_type       live_mask,
-            vector_stream_type bp_v
-        ) [[gnu::always_inline]] [[gnu::flatten]] {
+        seq_view,
+        seq_begin,
+        seq_end,
+        k + w - 1,
+        [&state]<bool p_is_full>(std::bool_constant<p_is_full>,
+                                 auto const& offsets_in,
+                                 auto const& d_in,
+                                 mask_type live_mask,
+                                 vector_stream_type bp_v) [[gnu::always_inline]] [[gnu::flatten]] {
             state.template step_one_bp_vector_stream<p_is_full>(
                 d_in, offsets_in, live_mask, bp_v);
         },
         // No-op finish_fn — emits are flushed per-step, so the partial-tail
         // exit path has nothing extra to do.
-        [](auto const&, auto const&, auto&){});
+        [](auto const&, auto const&, auto&) {});
 }
 
 
@@ -936,7 +956,9 @@ inline void collect_minimizers_two_stack_nthash_simd(
     // — but use the lane's own counts to avoid surprise on platforms
     // where `Lanes` differs).
     auto dispatch_with_unit =
-        [&]<typename p_hash_unit_type, size_t p_static_window_size, size_t p_static_kmer_size>() {
+        [&seq, &w, &k, &collector, &seq_begin, &seq_end]<typename p_hash_unit_type,
+                                                         size_t p_static_window_size,
+                                                         size_t p_static_kmer_size>() {
             constexpr size_t lpu_unit =
                 sizeof(p_hash_unit_type) * 8 / bpc;
             static_assert(lpu_unit > 0u);
@@ -962,7 +984,7 @@ inline void collect_minimizers_two_stack_nthash_simd(
     // Select the smallest lane that contains the complete forward and reverse
     // k-mer state. Runtime shapes use the supplied k-mer size.
     auto dispatch_with_k_aware_unit =
-        [&]<size_t p_static_window_size, size_t p_static_kmer_size>() {
+        [&k, &w, &dispatch_with_unit]<size_t p_static_window_size, size_t p_static_kmer_size>() {
             if constexpr (p_static_kmer_size > 0) {
                 constexpr size_t kmer_bits_static = p_static_kmer_size * bpc;
                 if constexpr (kmer_bits_static <= base_bits) {
@@ -1287,38 +1309,29 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
  * to these two persisted-compatible layouts rather than silently widening the
  * kernel to arbitrary `p_minimizer_type` encodings.
  */
-template<class p_minimizer_type>
+template <class p_minimizer_type>
 inline constexpr bool exact_k15_w10_b8_representation_v =
-    exact_simd_minimizer_representation<p_minimizer_type>
-    && std::same_as<typename p_minimizer_type::storage_type, std::uint64_t>
-    && p_minimizer_type::k_position_shift == 1u
-    && ((static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask)
-                == 0x3fffffffull
-            && static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask)
-                == 0x1ffffffffull
-            && p_minimizer_type::k_hash_shift == 34u)
-        || (static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask)
-                == 0x7ffffffffull
-            && static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask)
-                == 0x0fffffffull
-            && p_minimizer_type::k_hash_shift == 29u));
+    exact_simd_minimizer_representation<p_minimizer_type> &&
+    std::same_as<typename p_minimizer_type::storage_type, std::uint64_t> &&
+    p_minimizer_type::k_position_shift == 1u &&
+    ((static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask) == 0x3fffffffull &&
+      static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask) == 0x1ffffffffull &&
+      p_minimizer_type::k_hash_shift == 34u) ||
+     (static_cast<std::uint64_t>(p_minimizer_type::k_hash_field_mask) == 0x7ffffffffull &&
+      static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask) == 0x0fffffffull &&
+      p_minimizer_type::k_hash_shift == 29u));
 
 template<class p_minimizer_type, class p_alphabet_traits>
 [[nodiscard]] inline exact_simd_kernel select_exact_simd_kernel_kind(
     std::size_t consumed_bp) noexcept
 {
-    if constexpr (
-        std::same_as<typename p_alphabet_traits::alphabet_type, seq::dna4>
-        && std::same_as<typename p_alphabet_traits::storage_unit, std::uint32_t>
-        && exact_k15_w10_b8_representation_v<p_minimizer_type>) {
+    if constexpr (std::same_as<typename p_alphabet_traits::alphabet_type, seq::dna4> &&
+                  std::same_as<typename p_alphabet_traits::storage_unit, std::uint32_t> &&
+                  exact_k15_w10_b8_representation_v<p_minimizer_type>) {
         const hn::ScalableTag<std::uint32_t> d32;
         const hn::ScalableTag<std::uint64_t> d64;
-        if (!exact_compiled_target_is_scalar
-            && hn::Lanes(d32) == 4
-            && hn::Lanes(d64) == 2
-            && consumed_bp
-                <= static_cast<std::size_t>(
-                    (std::numeric_limits<std::uint32_t>::max)())) {
+        if (!exact_compiled_target_is_scalar && hn::Lanes(d32) == 4 && hn::Lanes(d64) == 2 &&
+            consumed_bp <= static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
             return exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash;
         }
     }
@@ -2621,12 +2634,11 @@ process_chronological_candidate_block(
     using mask_type = hn::Mask<simd_tag_type>;
     simd_tag_type d;
     const std::size_t lanes = hn::Lanes(d);
-    const auto target_status = validate_exact_vector_shape(
-        state,
-        lanes,
-        p_continuation_state::max_vector_lanes,
-        exact_compiled_target_is_scalar,
-        u64_lane_transpose_shape_supported(d));
+    const auto target_status = validate_exact_vector_shape(state,
+                                                           lanes,
+                                                           p_continuation_state::max_vector_lanes,
+                                                           exact_compiled_target_is_scalar,
+                                                           u64_lane_transpose_shape_supported(d));
     if (target_status != two_stack_continuation_status::ok) {
         return target_status;
     }
@@ -3208,8 +3220,7 @@ template<class p_minimizer_type, class p_continuation_state, class p_collector_t
         d, static_cast<std::uint64_t>(p_minimizer_type::k_hash_mask));
     const auto current_valid = hn::Ne(
         hn::And(current_raw, raw_hash_mask), raw_hash_mask);
-    HWY_ALIGN std::array<storage_type, p_continuation_state::max_vector_lanes>
-        final_raw{};
+    HWY_ALIGN std::array<storage_type, p_continuation_state::max_vector_lanes> final_raw{};
     const std::size_t final_count = hn::CompressStore(
         current_raw,
         hn::And(current_valid, hn::FirstN(d, 1)),
@@ -3300,7 +3311,8 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
     const auto target_status = two_stack_internal::validate_exact_vector_shape(
         state,
         lanes,
-        two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::max_vector_lanes,
+        two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
+            max_vector_lanes,
         two_stack_internal::exact_compiled_target_is_scalar,
         two_stack_internal::u64_lane_transpose_shape_supported(d));
     if (target_status != two_stack_continuation_status::ok) {
@@ -3421,20 +3433,16 @@ consume_two_stack_nthash_packed_fragment(
     simd_tag_type d;
     const std::size_t lanes = hn::Lanes(d);
     constexpr bool fast_type_eligible =
-        !two_stack_internal::exact_compiled_target_is_scalar
-        && p_window_size == 10 && p_kmer_size == 15
-        && std::same_as<
-            typename p_alphabet_traits::alphabet_type, seq::dna4>
-        && std::same_as<storage_unit, std::uint32_t>
-        && two_stack_internal::
-            exact_k15_w10_b8_representation_v<p_minimizer_type>;
+        !two_stack_internal::exact_compiled_target_is_scalar && p_window_size == 10 &&
+        p_kmer_size == 15 && std::same_as<typename p_alphabet_traits::alphabet_type, seq::dna4> &&
+        std::same_as<storage_unit, std::uint32_t> &&
+        two_stack_internal::exact_k15_w10_b8_representation_v<p_minimizer_type>;
     const std::size_t pending_limit =
-        fast_type_eligible
-            && state.kernel_kind
-                == exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash
-        ? two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
-            fast_block_candidates
-        : lanes;
+        fast_type_eligible &&
+                state.kernel_kind == exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash
+            ? two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
+                  fast_block_candidates
+            : lanes;
     if (state.code_tail_size > k - 1
         || state.pending_count >= pending_limit) {
         return two_stack_internal::reject_continuation(
@@ -3579,7 +3587,8 @@ consume_two_stack_nthash_packed_fragment(
         }
     } else {
         constexpr std::size_t max_lanes =
-            two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::max_vector_lanes;
+            two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
+                max_vector_lanes;
         HWY_ALIGN std::array<std::uint8_t, max_lanes> decoded_codes{};
         while (local < local_end) {
             const std::size_t take = std::min(lanes, local_end - local);
@@ -3728,20 +3737,16 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
     using simd_tag_type = hn::ScalableTag<std::uint64_t>;
     const std::size_t lanes = hn::Lanes(simd_tag_type{});
     constexpr bool fast_type_eligible =
-        !two_stack_internal::exact_compiled_target_is_scalar
-        && p_window_size == 10 && p_kmer_size == 15
-        && std::same_as<typename p_alphabet_traits::alphabet_type, seq::dna4>
-        && std::same_as<
-            typename p_alphabet_traits::storage_unit, std::uint32_t>
-        && two_stack_internal::
-            exact_k15_w10_b8_representation_v<minimizer_type>;
+        !two_stack_internal::exact_compiled_target_is_scalar && p_window_size == 10 &&
+        p_kmer_size == 15 && std::same_as<typename p_alphabet_traits::alphabet_type, seq::dna4> &&
+        std::same_as<typename p_alphabet_traits::storage_unit, std::uint32_t> &&
+        two_stack_internal::exact_k15_w10_b8_representation_v<minimizer_type>;
     const std::size_t pending_limit =
-        fast_type_eligible
-            && state.kernel_kind
-                == exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash
-        ? two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
-            fast_block_candidates
-        : lanes;
+        fast_type_eligible &&
+                state.kernel_kind == exact_simd_kernel::kmer_15_window_10_byte_8_uint32_hash
+            ? two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>::
+                  fast_block_candidates
+            : lanes;
     if (state.code_tail_size > state.kmer_size() - 1
         || state.pending_count >= pending_limit) {
         const auto status = two_stack_internal::reject_continuation(
@@ -3882,8 +3887,11 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
             }
         }
 
-        auto consume_resident = [&]<class p_resident_range>(
-                const p_resident_range& resident) {
+        auto consume_resident = [&state,
+                                 &collector,
+                                 &consume_begin_bp,
+                                 &consume_end_bp]<class p_resident_range>(
+                                    const p_resident_range& resident) {
             const std::size_t unit_count =
                 static_cast<std::size_t>(resident.size());
             const storage_unit* packed = unit_count == 0

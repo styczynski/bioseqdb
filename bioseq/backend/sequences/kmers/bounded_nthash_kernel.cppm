@@ -41,6 +41,7 @@ using ::bioseq::minimizers::minimizer_kernel_status;
 
 namespace bounded_nthash_internal {
 
+/// Forward ntHash constants for A, C, T, and G ranks.
 inline constexpr std::array<std::uint32_t, 4> k_forward_table{
     0x95c60474u,
     0x62a02b4cu,
@@ -85,33 +86,41 @@ struct bounded_u32_dna4_view {
     std::size_t local_bp_size = 0;
     std::size_t local_view_units = 0;
 
+    /// @brief Creates a local view with explicit logical and packed lengths.
     bounded_u32_dna4_view(
         std::size_t bp_size,
         std::size_t view_units)
         : local_bp_size(bp_size),
           local_view_units(view_units) {}
 
+    /// @brief Returns the local logical symbol count.
     [[nodiscard]] HWY_INLINE std::size_t bp_size() const noexcept {
         return local_bp_size;
     }
+    /// @brief Returns the local packed byte count.
     [[nodiscard]] HWY_INLINE std::size_t byte_size() const noexcept {
         return local_view_units * sizeof(std::uint32_t);
     }
+    /// @brief Returns the local u32 unit count.
     [[nodiscard]] HWY_INLINE std::size_t size() const noexcept {
         return local_view_units;
     }
+    /// @brief Returns logical padding in the final local unit.
     [[nodiscard]] HWY_INLINE std::size_t padding() const noexcept {
         return local_view_units * traits::letters_per_unit - local_bp_size;
     }
+    /// @brief Returns the packed pointer represented by an iterator.
     [[nodiscard]] HWY_INLINE const std::uint32_t* read_cptr(
         const iterator& position) const noexcept {
         return position;
     }
+    /// @brief Advances a packed iterator by local u32 units.
     HWY_INLINE static void advance_iter(
         iterator& position,
         std::size_t view_units) {
         position += view_units;
     }
+    /// @brief Measures a packed iterator interval in u32 units.
     [[nodiscard]] HWY_INLINE static std::size_t view_distance(
         const iterator& first,
         const iterator& last) {
@@ -120,6 +129,7 @@ struct bounded_u32_dna4_view {
 };
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END bounded_u32_dna4_view
 
+/// @brief Looks up ntHash constants for every logical stream.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
     p_simd_tag simd_tag,
@@ -127,7 +137,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& ranks) noexcept
 {
     return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
-        [&](auto stream_constant) [[gnu::always_inline]] {
+        [&simd_tag, &table, &ranks](auto stream_constant) [[gnu::always_inline]] {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
             return bounded_nthash_internal::lookup_hash_table(
@@ -135,6 +145,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
         });
 }
 
+/// @brief Rotates every stream lane left by a compile-time count.
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
@@ -146,6 +157,7 @@ template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
     }
 }
 
+/// @brief Rotates every stream lane left by a runtime count.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream_runtime(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value,
@@ -158,6 +170,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
         shift_right_same(value, 32 - rotation));
 }
 
+/// @brief Rotates every stream lane right by a compile-time count.
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_right_stream(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
@@ -251,7 +264,7 @@ struct minimum_stream {
 /**
  * Data-independent lane-wise minimum merge. Equal hashes preserve only the
  * leftmost and rightmost positions, which is the explicit RC-symmetric policy
- * for the even default p_window_size=10 window.
+ * for the even default window of ten candidates.
  */
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE minimum_stream<p_simd_tag, p_stream_count> combine_minima(
@@ -306,10 +319,9 @@ template<class p_simd_tag, std::size_t p_stream_count>
 }
 
 /**
- * The iterator supplies one tail mask for the whole vector stream. Only the final logical
- * stream actually reaches sequence padding; applying that mask to every
- * stream drops valid bases from all earlier streams. This adapter is the
- * production fork's explicit tail fix.
+ * The iterator supplies one tail mask for the whole vector stream. Only the
+ * final logical stream reaches sequence padding, so earlier streams retain a
+ * full live mask.
  */
 template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto correct_live_stream(
@@ -317,9 +329,8 @@ template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
     hn::Mask<p_simd_tag> iterator_mask) noexcept
 {
     const auto full = hn::FirstN(simd_tag, hn::Lanes(simd_tag));
-    return [&]<std::size_t... p_stream_indices>(
-               std::index_sequence<p_stream_indices...>)
-               [[gnu::always_inline]] {
+    return [&full, &iterator_mask]<std::size_t... p_stream_indices>(
+               std::index_sequence<p_stream_indices...>) [[gnu::always_inline]] {
         return mask_stream<p_simd_tag, p_stream_count>::pack(
             ((p_is_full || p_stream_indices + 1 < p_stream_count)
                 ? full
@@ -327,6 +338,7 @@ template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
     }(std::make_index_sequence<p_stream_count>{});
 }
 
+/// @brief Loads fixed per-stream u32 metadata into one vector bundle.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto load_stream_metadata(
     p_simd_tag simd_tag,
@@ -334,7 +346,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
 {
     const std::size_t lanes = hn::Lanes(simd_tag);
     return make_vector_stream<p_simd_tag, std::uint32_t, p_stream_count>(
-        [&](auto stream_constant) [[gnu::always_inline]] {
+        [&simd_tag, &values, &lanes](auto stream_constant) [[gnu::always_inline]] {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
             return hn::LoadU(
@@ -343,6 +355,7 @@ template<class p_simd_tag, std::size_t p_stream_count>
         });
 }
 
+/// @brief Holds rolling hashes, window minima, and output-boundary state.
 template<
     std::size_t p_kmer_size,
     std::size_t p_window_size,
@@ -358,6 +371,7 @@ struct packed_iteration_state {
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
     using minimum_type = minimum_stream<simd_tag_type, p_stream_count>;
 
+    /// @brief Stores the first deferred event of a logical stream.
     struct buffered_boundary_event {
         std::uint32_t hash = 0;
         std::uint64_t absolute_last_position = 0;
@@ -365,6 +379,7 @@ struct packed_iteration_state {
         bool valid = false;
     };
 
+    /// @brief Counts biological work and collector interactions.
     struct runtime_evidence {
         std::uint64_t emission_mask_store_batches = 0;
         std::uint64_t minimizers_emitted = 0;
@@ -576,10 +591,20 @@ private:
             p_stream_count> strand_lanes;
         HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> emit_lanes;
-        for_each_stream<p_stream_count>([&](auto stream_constant) {
+        for_each_stream<p_stream_count>([&no_emit_per_stream,
+                                         &hash,
+                                         &simd_tag,
+                                         &hash_lanes,
+                                         &position,
+                                         &position_lanes,
+                                         &strand,
+                                         &strand_lanes,
+                                         &emit,
+                                         &emit_lanes](auto stream_constant) {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
-            if (no_emit_per_stream[k_stream_index]) return;
+            if (no_emit_per_stream[k_stream_index])
+                return;
             hn::StoreU(
                 hash[k_stream_index],
                 simd_tag,
@@ -657,7 +682,11 @@ public:
             p_stream_count> position_lanes;
         HWY_ALIGN std::array<std::array<std::uint32_t, k_max_lanes>,
             p_stream_count> strand_lanes;
-        for_each_stream<p_stream_count>([&](auto stream_constant) {
+        for_each_stream<p_stream_count>([this,
+                                         &simd_tag,
+                                         &hash_lanes,
+                                         &position_lanes,
+                                         &strand_lanes](auto stream_constant) {
             constexpr std::size_t k_stream_index =
                 decltype(stream_constant)::value;
             hn::StoreU(
@@ -731,6 +760,7 @@ private:
     }
 };
 
+/// @brief Runs the packed dna4 bounded ntHash traversal.
 template<
     std::size_t p_kmer_size,
     std::size_t p_window_size,
@@ -834,12 +864,11 @@ template<
         begin,
         end,
         k_context_base_pairs,
-        [&]<bool p_is_full>(
-            std::bool_constant<p_is_full>,
-            const auto& iterator_offsets,
-            const auto& iteration_simd_tag,
-            hn::Mask<simd_tag_type> iterator_mask,
-            vector_stream_type ranks) [[gnu::always_inline]] [[gnu::flatten]] {
+        [&state]<bool p_is_full>(std::bool_constant<p_is_full>,
+                                 const auto& iterator_offsets,
+                                 const auto& iteration_simd_tag,
+                                 hn::Mask<simd_tag_type> iterator_mask,
+                                 vector_stream_type ranks) [[gnu::always_inline]] [[gnu::flatten]] {
             state.template step<p_is_full>(
                 iteration_simd_tag,
                 iterator_offsets,
@@ -932,7 +961,7 @@ collect_minimizers_bounded_nthash_simd_checked(
     using range_type = compact_sequence_range<p_sequence_range>;
     using traits = typename range_type::traits;
     bounded_nthash_result result;
-    auto reject = [&](bounded_nthash_status status) {
+    auto reject = [&result](bounded_nthash_status status) {
         result.status = status;
         result.stats.fail_closed_rejections = 1;
         return result;
@@ -1071,6 +1100,7 @@ collect_minimizers_bounded_nthash_simd(
 
 namespace bounded_nthash_kernel_detail {
 
+/// @brief Maps family-specific checked status to the common kernel status.
 [[nodiscard]] constexpr minimizer_kernel_status map_bounded_nthash_status(
     const bounded_nthash_status status) noexcept
 {
@@ -1084,6 +1114,7 @@ namespace bounded_nthash_kernel_detail {
     }
 }
 
+/// @brief Adapts one typed packed descriptor to the bounded ntHash collector.
 template<class p_minimizer_type, class p_storage_unit>
 [[nodiscard]] bool run_bounded_nthash(
     minimizer_kernel_invocation& invocation,
@@ -1131,16 +1162,22 @@ template<class p_minimizer_type, class p_storage_unit>
 
 // Definitions live in generated per-representation owners so each admitted
 // algorithm body is compiled once per target/input-width identity.
+/// @brief Runs the 15-bit layout with u32 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/// @brief Runs the 15-bit layout with u64 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l15_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/// @brief Runs the 28-bit layout with u32 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/// @brief Runs the 28-bit layout with u64 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l28_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/// @brief Runs the 63-bit layout with u32 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_k15_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/// @brief Runs the 63-bit layout with u64 packed input.
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 

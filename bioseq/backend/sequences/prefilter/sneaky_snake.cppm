@@ -251,7 +251,8 @@ template <class p_traversal_type>
         position,
         lower,
         upper,
-        [&](const std::uint32_t candidate) noexcept {
+        [&traversal, &query, &target, &position, &submaze_end, &best](
+            const std::uint32_t candidate) noexcept {
             return improve_diagonal_candidate_with(
                 traversal,
                 query,

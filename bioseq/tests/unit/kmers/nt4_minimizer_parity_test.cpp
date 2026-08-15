@@ -1,9 +1,8 @@
 /**
  * @file nt4_minimizer_parity_test.cpp
- * @brief The scalar minimizer path is dna5-correct after nt4 normalization.
- *        mm_sketch_baseline maps A/C/G/T to 0..3 and N to reset sentinel 4.
- *        The bioseq collector must match its (last_pos, kmer) pairs for dna5
- *        fixtures containing T and N, while dna5 ACGT must equal dna4 ACGT.
+ * @brief Scalar nt4 minimizer parity for dna4 and dna5 sequences.
+ *
+ * A, C, G, and T map to ranks zero through three while N resets rolling state.
  */
 #include <hwy/highway.h>
 #include <tests/support/common.hpp>

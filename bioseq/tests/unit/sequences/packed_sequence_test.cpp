@@ -73,10 +73,10 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
 
             std::string decoded;
             hdr->convert_to(
-                [&]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
+                [&decoded]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
                     decoded = ::bioseq::simd::active_target::decode_sequence_simd<
                         p_sequence>(seq);
-            });
+                });
             REQUIRE(decoded == input);
         }
     }
@@ -94,10 +94,10 @@ TEST_CASE("compact sequence conversion preserves ASCII text",
             REQUIRE(hdr->alphabet_code == 1u);
             std::string decoded;
             hdr->convert_to(
-                [&]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
+                [&decoded]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
                     decoded = ::bioseq::simd::active_target::decode_sequence_simd<
                         p_sequence>(seq);
-            });
+                });
             REQUIRE(decoded == with_n);
         }
     }
@@ -174,11 +174,10 @@ TEST_CASE("storage send and receive preserve packed bytes",
         // Replay through convert_from(recv) using a cursor into wire_units.
         struct cursor { std::size_t idx; };
         cursor cur{0};
-        auto reader =
-            [&]<class p_alphabet, class p_output>(
-                    cursor& c, std::uint8_t /*byte_width*/) -> p_output {
-                return static_cast<p_output>(wire_units[c.idx++]);
-            };
+        auto reader = [&wire_units]<class p_alphabet, class p_output>(
+                          cursor& c, std::uint8_t /*byte_width*/) -> p_output {
+            return static_cast<p_output>(wire_units[c.idx++]);
+        };
         auto* dst = test_stdc_t::convert_from<seq::dna4>(
             bw,
             src->padding_letters,
@@ -232,10 +231,10 @@ TEST_CASE("zero-copy compact sequence views preserve decoded text",
 
         // Compare the dispatched view with the directly encoded input.
         std::string view_str;
-        hdr->convert_to([&]<class p_sequence>(
-                            const compact_sequence_range<p_sequence>& seq) {
-            view_str = seq.to_string();
-        });
+        hdr->convert_to(
+            [&view_str]<class p_sequence>(const compact_sequence_range<p_sequence>& seq) {
+                view_str = seq.to_string();
+            });
         REQUIRE(view_str == input);
     }
 }
@@ -331,9 +330,8 @@ TEST_CASE("supported alphabet packs enforce unique types and names",
 TEST_CASE("alphabet name dispatch selects the matching entry type",
           "[component:bioseq][layer:unit][feature:alphabet]") {
     bool saw_dna4 = false;
-    const bool matched_dna4 = test_supported_alphabets::dispatch_alphabet_by_name(
-        "dna4",
-        [&]<class p_entry>() {
+    const bool matched_dna4 =
+        test_supported_alphabets::dispatch_alphabet_by_name("dna4", [&saw_dna4]<class p_entry>() {
             saw_dna4 = std::is_same_v<typename p_entry::alphabet_type, seq::dna4>;
         });
     REQUIRE(matched_dna4);
@@ -341,8 +339,7 @@ TEST_CASE("alphabet name dispatch selects the matching entry type",
 
     bool saw_unknown = true;
     const bool matched_unknown = test_supported_alphabets::dispatch_alphabet_by_name(
-        "rna7",
-        [&]<class /*p_entry*/>() { saw_unknown = false; });
+        "rna7", [&saw_unknown]<class /*p_entry*/>() { saw_unknown = false; });
     REQUIRE_FALSE(matched_unknown);
     REQUIRE(saw_unknown);  // No-match dispatch leaves the handler untouched.
 }

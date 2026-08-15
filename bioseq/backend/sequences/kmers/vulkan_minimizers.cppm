@@ -8,7 +8,6 @@
  * explicitly and never routed through a silent CPU fallback.
  */
 module;
-#include <cstdio>
 
 #include <libassert/assert.hpp>
 
@@ -2382,7 +2381,17 @@ build_gpu_index_from_upload_on_device(
         gpu_built_index built{};
         const auto materialization = admission.materialize(
             *permit,
-            [&]() -> bioseq::parallelism::memory_materialization_snapshot {
+            [&built,
+             &runtime,
+             &upload,
+             &owned_sequence_staging_bytes,
+             &release_owned_sequence_staging,
+             &rank_lut,
+             &sketch_params,
+             &max_minimizers,
+             &query_gate,
+             &query_gate_identity,
+             &permit]() -> bioseq::parallelism::memory_materialization_snapshot {
                 built = runtime.build_target_index(
                     std::span<const std::byte>{
                         static_cast<const std::byte*>(upload.bytes),
@@ -3574,7 +3583,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 collected_limit);
             owner.windows.swap(windows);
 
-            const auto retained_owner_bytes = [&]() noexcept {
+            const auto retained_owner_bytes = [&owner]() noexcept {
                 std::uint64_t bytes = bioseq::common::saturating_mul(
                     static_cast<std::uint64_t>(owner.windows.capacity()),
                     static_cast<std::uint64_t>(sizeof(gpu_sketch_segment_window)));
@@ -3586,7 +3595,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                     static_cast<std::uint64_t>(
                         sizeof(std::pair<std::uint64_t, std::uint64_t>))));
             };
-            const auto reconcile_owner = [&]() {
+            const auto reconcile_owner = [&retained_owner_bytes, &dispatch_budget, &owner]() {
                 const std::uint64_t exact = retained_owner_bytes();
                 const std::uint64_t live = bioseq::common::saturating_add(exact, dispatch_budget);
                 if (exact == (std::numeric_limits<std::uint64_t>::max)()
@@ -3597,9 +3606,13 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 }
                 owner.permit.shrink_to(live);
             };
-            const auto ensure_owner_capacity = [&]<class p_value>(
-                    std::vector<p_value>& values,
-                    std::size_t required) {
+            const auto ensure_owner_capacity = [&retained_owner_bytes,
+                                                &dispatch_budget,
+                                                &headroom_bytes,
+                                                &owner,
+                                                &reconcile_owner]<class p_value>(
+                                                   std::vector<p_value>& values,
+                                                   std::size_t required) {
                 if (values.capacity() >= required) {
                     return;
                 }

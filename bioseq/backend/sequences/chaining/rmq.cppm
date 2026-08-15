@@ -1,33 +1,28 @@
 /**
  * @file chaining_rmq.cppm
- * @brief avl+rmq tree-based O(n log n) chaining algorithm.
+ * @brief AVL tree with range-minimum augmentation for chaining.
  *
- * Translates minimap2's mg_lchain_rmq() (lchain.c:369-521) and the krmq.h
- * avl tree macros into modern C++.
- *
- * The algorithm maintains avl trees augmented with Range Minimum Query:
- *   - Primary tree: all in-range anchors, queried with [qpos - max_dist, qpos]
- *   - Inner tree (optional): finer-granularity for refinement
+ * The primary tree holds all in-range anchors and an optional inner tree
+ * provides finer-grained refinement. Each subtree caches its minimum-priority
+ * node so insert, erase, and predecessor queries remain logarithmic.
  *
  * Each tree node stores a priority = -(f[j] + 0.5 * gap_penalty * (ref_pos + query_pos)).
  * The subtree_minimum pointer tracks the minimum-priority node in each subtree,
  * enabling O(log n) range-minimum queries.
  *
  * Complexity: O(n log n) — each anchor does O(log n) insert + O(log n) rmq query.
- *
- * Reference: minimap2 lchain.c, krmq.h
  */
 module;
 
-#include <libassert/assert.hpp>
-
-#include <cstdint>
-#include <vector>
-#include <span>
-#include <limits>
 #include <algorithm>
+#include <array>
 #include <bit>
+#include <cstdint>
 #include <cstring>
+#include <libassert/assert.hpp>
+#include <limits>
+#include <span>
+#include <vector>
 
 export module bioseq.chaining.rmq;
 
@@ -39,13 +34,8 @@ import bioseq.instrumentation;
 export {
 namespace bioseq::chaining {
 
-// ============================================================================
-// avl+rmq Tree Node
-// ============================================================================
-
 /// Node in the avl tree with rmq support.
 ///
-/// Equivalent to lc_elem_t in lchain.c:338-343.
 /// Keyed by (query_position, anchor_index) ascending.
 /// The priority field enables rmq: each node tracks the minimum-priority
 /// node in its subtree via subtree_minimum.
@@ -54,20 +44,15 @@ struct rmq_node {
     int64_t anchor_index   = 0;
     double  priority       = 0.0;  ///< -(best_scores[j] + 0.5 * gap_penalty * (ref_pos + query_pos))
 
-    rmq_node* children[2]   = {nullptr, nullptr};
+    std::array<rmq_node*, 2> children{nullptr, nullptr};
     rmq_node* subtree_minimum   = nullptr;
     int8_t   balance       = 0;
     uint32_t subtree_size  = 0;
 };
 
-// ============================================================================
-// avl+rmq Tree
-// ============================================================================
-
 /// Compare two rmq nodes by (query_position, anchor_index) ascending.
 ///
-/// Matches lc_elem_cmp in lchain.c:345: same query_position ties are
-/// broken by anchor index in ascending order (smaller index first).
+/// Equal query positions are ordered by ascending anchor index.
 ///
 /// @return <0 if a < b, 0 if equal, >0 if a > b
 [[nodiscard]] inline int compare_rmq_nodes(
@@ -108,7 +93,6 @@ inline void update_subtree_size(rmq_node* node) {
 
 /// avl+rmq tree for chaining predecessor lookup.
 ///
-/// Translated from krmq.h macro-generated avl tree with rmq augmentation.
 /// Supports insert, erase, find, and range-minimum query operations.
 ///
 /// Uses a pool allocator: nodes are pre-allocated in a vector and recycled
@@ -179,7 +163,7 @@ struct rmq_tree {
 
     /// Insert a node into the tree. Returns the node if it was a duplicate (not inserted).
     ///
-    /// Translated from __krmq_insert in krmq.h.
+    /// Duplicate keys are returned without modifying the tree.
     rmq_node* insert(rmq_node* new_node) {
         new_node->children[0] = new_node->children[1] = nullptr;
         new_node->balance = 0;
@@ -192,8 +176,8 @@ struct rmq_tree {
         }
 
         // Path from root to insertion point
-        rmq_node* path_nodes[64];
-        uint8_t path_dirs[64];
+        std::array<rmq_node*, 64> path_nodes;
+        std::array<std::uint8_t, 64> path_dirs;
         int path_depth = 0;
 
         rmq_node* current = root;
@@ -202,7 +186,7 @@ struct rmq_tree {
             if (comparison == 0) return current;  // Duplicate
             const int direction = (comparison > 0) ? 1 : 0;
             path_nodes[path_depth] = current;
-            path_dirs[path_depth] = static_cast<uint8_t>(direction);
+            path_dirs[path_depth] = static_cast<std::uint8_t>(direction);
             ++path_depth;
             current = current->children[direction];
         }
@@ -297,12 +281,12 @@ struct rmq_tree {
     /// Find and erase a node matching the given key.
     ///
     /// Returns the erased node (caller should release_node it) or nullptr if not found.
-    /// Translated from __krmq_erase in krmq.h.
+    /// Returns the detached node so the caller can recycle it.
     rmq_node* erase(const rmq_node* key) {
         if (root == nullptr) return nullptr;
 
-        rmq_node* path_nodes[64];
-        uint8_t path_dirs[64];
+        std::array<rmq_node*, 64> path_nodes;
+        std::array<std::uint8_t, 64> path_dirs;
         int path_depth = 0;
 
         // Find the node
@@ -312,7 +296,7 @@ struct rmq_tree {
             if (comparison == 0) break;
             const int direction = (comparison > 0) ? 1 : 0;
             path_nodes[path_depth] = current;
-            path_dirs[path_depth] = static_cast<uint8_t>(direction);
+            path_dirs[path_depth] = static_cast<std::uint8_t>(direction);
             ++path_depth;
             current = current->children[direction];
         }
@@ -468,7 +452,7 @@ struct rmq_tree {
 
     /// Find the minimum-priority node in the inclusive key range.
     ///
-    /// Translated from __krmq_rmq in krmq.h.
+    /// Uses cached subtree minima to skip fully covered branches.
     /// Returns nullptr if no node falls within the range.
     [[nodiscard]] const rmq_node* find_minimum_in_range(
         const rmq_node* lower_bound,
@@ -613,7 +597,7 @@ struct rmq_tree {
 
 /// rmq-based chaining.
 ///
-/// Equivalent to mg_lchain_rmq() in lchain.c:369-521.
+/// Uses the same scoring and ordering contract as the scalar chaining route.
 ///
 /// Uses avl trees augmented with Range Minimum Query to find the best
 /// predecessor for each anchor in O(log n) instead of O(max_iter).

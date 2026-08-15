@@ -54,11 +54,7 @@ using bioseq::chaining::simd_chaining_status;
 
 namespace chaining_simd_detail {
 
-// Production attestation needs route stats without turning the O(n*iter)
-// score loop into a stream of writes through a stats pointer. These local
-// counters and flags live in the caller's frame, are updated only at the actual
-// SIMD/control call sites, and are folded into simd_chaining_execution_stats once
-// after the kernels return. Detailed stats mode remains available to tests.
+/// @brief Accumulates route counters outside the candidate-scoring hot loop.
 struct simd_chaining_route_stats {
     bool score_vector_work = false;
     bool global_best_vector_work = false;
@@ -84,6 +80,7 @@ struct simd_chaining_route_stats {
     std::uint64_t global_best_rescue_wins = 0;
 };
 
+/// @brief Adds a counter only for instrumented kernel instantiations.
 template<bool p_collect_stats>
 HWY_INLINE void stats_add(
     simd_chaining_execution_stats* stats,
@@ -99,6 +96,7 @@ HWY_INLINE void stats_add(
     }
 }
 
+/// @brief Records a checked rejection and throws its typed runtime error.
 [[noreturn]] inline void reject(
     simd_chaining_execution_stats* stats,
     simd_chaining_status status,
@@ -113,32 +111,40 @@ HWY_INLINE void stats_add(
     throw simd_chaining_runtime_error(status, detail);
 }
 
+/// @brief Owns arena-backed structure-of-arrays views of anchor coordinates.
 struct soa_anchors {
     std::uint32_t* ref_positions = nullptr;
     std::uint32_t* query_positions = nullptr;
     std::uint32_t* query_spans = nullptr;
     std::size_t count = 0;
 
+    /// @brief Returns mutable packed reference coordinates.
     [[nodiscard]] std::uint32_t* ref_data() noexcept {
         return ref_positions;
     }
+    /// @brief Returns mutable packed query coordinates.
     [[nodiscard]] std::uint32_t* query_data() noexcept {
         return query_positions;
     }
+    /// @brief Returns mutable query spans.
     [[nodiscard]] std::uint32_t* span_data() noexcept {
         return query_spans;
     }
+    /// @brief Returns immutable packed reference coordinates.
     [[nodiscard]] const std::uint32_t* ref_data() const noexcept {
         return ref_positions;
     }
+    /// @brief Returns immutable packed query coordinates.
     [[nodiscard]] const std::uint32_t* query_data() const noexcept {
         return query_positions;
     }
+    /// @brief Returns immutable query spans.
     [[nodiscard]] const std::uint32_t* span_data() const noexcept {
         return query_spans;
     }
 };
 
+/// @brief Converts anchors to aligned packed coordinate arrays.
 template<class p_descriptor_type>
 [[nodiscard]] soa_anchors create_soa_anchors(
     p_descriptor_type,
@@ -166,6 +172,7 @@ template<class p_descriptor_type>
     return result;
 }
 
+/// @brief Scores one full or masked predecessor batch with chaining penalties.
 template<bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type, class p_float_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     p_descriptor_type d,
@@ -217,7 +224,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     }
 
     const auto deviation_f = hn::ConvertTo(df, diagonal_deviation);
-    const auto linear_penalty = [&] {
+    const auto linear_penalty = [&df, &gap_length, &gap_penalty, &deviation_f, &skip_penalty] {
         if constexpr (p_has_skip_penalty) {
             const auto gap_length_f = hn::ConvertTo(df, gap_length);
             // Same source ordering as scalar:
@@ -247,6 +254,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     return hn::Sub(score, penalty_i);
 }
 
+/// @brief Loads predecessor fields and scores one specialized candidate batch.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     p_descriptor_type d,
@@ -270,7 +278,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     const std::int32_t* predecessor_span_ptr =
         reinterpret_cast<const std::int32_t*>(
             soa.span_data() + load_start);
-    const auto predecessor_ref = [&] {
+    const auto predecessor_ref = [&d, &predecessor_ref_ptr, &active_lanes] {
         if constexpr (p_full_batch) {
             return hn::LoadU(d, predecessor_ref_ptr);
         } else {
@@ -278,7 +286,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
                 hn::FirstN(d, active_lanes), d, predecessor_ref_ptr);
         }
     }();
-    const auto predecessor_query = [&] {
+    const auto predecessor_query = [&d, &predecessor_query_ptr, &active_lanes] {
         if constexpr (p_full_batch) {
             return hn::LoadU(d, predecessor_query_ptr);
         } else {
@@ -286,7 +294,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
                 hn::FirstN(d, active_lanes), d, predecessor_query_ptr);
         }
     }();
-    const auto predecessor_span = [&] {
+    const auto predecessor_span = [&d, &predecessor_span_ptr, &active_lanes] {
         if constexpr (p_full_batch) {
             return hn::LoadU(d, predecessor_span_ptr);
         } else {
@@ -322,6 +330,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     return scores;
 }
 
+/// @brief Selects full or masked scoring for one candidate batch.
 template<bool p_collect_stats, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
     p_descriptor_type d,
@@ -360,6 +369,7 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
         stats);
 }
 
+/// @brief Scores a single candidate through the masked vector kernel.
 template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descriptor_type>
 [[nodiscard]] std::int32_t score_one_candidate(
     p_descriptor_type d,
@@ -380,6 +390,7 @@ template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descripto
     return lanes[0];
 }
 
+/// @brief Finds the largest-index maximum score in a bounded interval.
 template<bool p_collect_stats, class p_descriptor_type>
 [[nodiscard]] std::int32_t exact_global_best(
     p_descriptor_type d,
@@ -433,6 +444,7 @@ template<bool p_collect_stats, class p_descriptor_type>
     return hn::GetLane(hn::MaxOfLanes(d, tied_indices));
 }
 
+/// @brief Runs exact visited-set dynamic programming for every anchor.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_exact(
     p_descriptor_type d,
@@ -877,6 +889,7 @@ HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
     return improved;
 }
 
+/// @brief Scores and folds one bounded predecessor batch into lane winners.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
     p_descriptor_type d,
@@ -934,6 +947,7 @@ HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
     }
 }
 
+/// @brief Runs bounded-batch dynamic programming for one penalty specialization.
 template<bool p_collect_stats, bool p_has_skip_penalty, class p_descriptor_type>
 void simd_dp_forward_pass_bounded_impl(
     p_descriptor_type d,
@@ -998,9 +1012,23 @@ void simd_dp_forward_pass_bounded_impl(
         // strictly greater than window_start.
         std::int32_t unscanned_end_exclusive = window_start;
 
-        auto record_batch = [&](hn::Mask<p_descriptor_type> improved,
-                                std::int32_t active_lanes,
-                                std::int32_t load_start) {
+        auto record_batch = [&route_score_vector_batches,
+                             &route_score_vector_lanes,
+                             &route_score_masked_lanes,
+                             &lanes,
+                             &bounded_score_batches,
+                             &stats,
+                             &d,
+                             &bounded_improving_batches,
+                             &consecutive_nonimproving,
+                             &bounded_nonimproving_batches,
+                             &window_start,
+                             &nonimproving_batch_limit,
+                             &unscanned_end_exclusive,
+                             &bounded_cutoff_stops,
+                             &bounded_candidates_skipped](hn::Mask<p_descriptor_type> improved,
+                                                          std::int32_t active_lanes,
+                                                          std::int32_t load_start) {
             ++route_score_vector_batches;
             route_score_vector_lanes +=
                 static_cast<std::uint64_t>(active_lanes);
@@ -1203,6 +1231,7 @@ void simd_dp_forward_pass_bounded_impl(
     }
 }
 
+/// @brief Selects the zero or nonzero skip-penalty bounded kernel.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_bounded(
     p_descriptor_type d,
@@ -1285,12 +1314,14 @@ void simd_dp_forward_pass(
     }
 }
 
+/// @brief Couples a chain score with its source anchor index.
 struct scored_anchor_index {
     std::int32_t score;
     std::int32_t anchor_index;
 };
 static_assert(sizeof(scored_anchor_index) == 8u);
 
+/// @brief Orders scored anchors by score and then source index.
 struct score_ascending {
     [[nodiscard]] bool operator()(
         const scored_anchor_index& lhs,
@@ -1302,6 +1333,7 @@ struct score_ascending {
     }
 };
 
+/// @brief Builds chain paths from SIMD-produced predecessor arrays.
 template<bool p_collect_stats, class p_descriptor_type>
 void backtrack_chains_simd(
     p_descriptor_type d,
@@ -1708,6 +1740,7 @@ void backtrack_chains_simd(
     }
 }
 
+/// @brief Runs policy dispatch, forward scoring, and SIMD backtracking.
 template<bool p_collect_stats, class p_descriptor_type>
 void run_simd_chaining(
     p_descriptor_type d,

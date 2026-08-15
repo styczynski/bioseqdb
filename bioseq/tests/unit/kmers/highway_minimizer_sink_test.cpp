@@ -1,3 +1,7 @@
+/**
+ * @file highway_minimizer_sink_test.cpp
+ * @brief Output-layout and collector checks for Highway minimizer sinks.
+ */
 #include <tests/support/common.hpp>
 
 #include <array>

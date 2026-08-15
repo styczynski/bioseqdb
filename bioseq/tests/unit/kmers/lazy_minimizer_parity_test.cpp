@@ -1,15 +1,9 @@
-// bioseq/tests/unit/kmers/lazy_minimizer_parity_test.cpp
-//
-// Minimizer parity under fragmentation.
-//
-// The fragmented path routes the scalar `collect_minimizers` kernel over a
-// lazy_sequence fragment-streaming iterator. The scalar and SIMD two-stack
-// kernels share the same observable minimizer contract, so:
-//
-//   scalar(all-in-RAM range)  ==  scalar(chunked lazy)  ==  SIMD(all-in-RAM)
-//
-// These cases check the first equality for several sequence lengths and for
-// 32-, 64-, and 1-storage-unit fragments (1024/2048/32 dna4 letters).
+/**
+ * @file lazy_minimizer_parity_test.cpp
+ * @brief Minimizer parity across resident and fragmented sequence views.
+ *
+ * Fixtures cover several sequence lengths and fragment geometries.
+ */
 
 #include <hwy/highway.h>
 #include <tests/support/common.hpp>
@@ -63,8 +57,8 @@ fixed_highway_kernels() noexcept {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_type  = compact_sequence_range<dna4_u64>;
-using facade_t = bioseq::storage::lazy_sequence_view<seq::dna4>;
-using sequence_size_t = bioseq::storage::sequence_size_t;
+using facade_type = bioseq::storage::lazy_sequence_view<seq::dna4>;
+using sequence_size_type = bioseq::storage::sequence_size_t;
 
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
     std::vector<seq::dna4> v(n);
@@ -80,8 +74,8 @@ using sequence_size_t = bioseq::storage::sequence_size_t;
 
 struct source_piece {
     std::size_t source_index{};
-    sequence_size_t from{};
-    sequence_size_t to{};
+    sequence_size_type from{};
+    sequence_size_type to{};
     bool reversed{};
     bool complemented{};
 };
@@ -89,25 +83,23 @@ struct source_piece {
 struct composite_source_state {
     std::vector<std::vector<std::uint8_t>> sources;
     std::vector<source_piece> pieces;
-    sequence_size_t logical_size{};
+    sequence_size_type logical_size{};
     mutable std::size_t callback_count{};
-    mutable sequence_size_t requested_bp{};
+    mutable sequence_size_type requested_bp{};
     mutable std::size_t max_request{};
     bool reject_whole_request{true};
 };
 
-[[nodiscard]] std::uint8_t composite_rank_at(
-        const composite_source_state& state,
-        sequence_size_t logical_position) {
+[[nodiscard]] std::uint8_t composite_rank_at(const composite_source_state& state,
+                                             sequence_size_type logical_position) {
     for (const source_piece& piece : state.pieces) {
-        const sequence_size_t piece_size = piece.to - piece.from;
+        const sequence_size_type piece_size = piece.to - piece.from;
         if (logical_position >= piece_size) {
             logical_position -= piece_size;
             continue;
         }
-        const sequence_size_t source_position = piece.reversed
-            ? piece.to - 1u - logical_position
-            : piece.from + logical_position;
+        const sequence_size_type source_position =
+            piece.reversed ? piece.to - 1u - logical_position : piece.from + logical_position;
         std::uint8_t rank = state.sources[piece.source_index]
             [static_cast<std::size_t>(source_position)];
         if (piece.complemented) {
@@ -119,11 +111,10 @@ struct composite_source_state {
 }
 
 template <bool p_is_reversed, bool p_write_reversed>
-[[nodiscard]] const std::uint8_t* composite_read_at(
-        const void* opaque,
-        sequence_size_t bp_from,
-        std::size_t required_length,
-        std::span<std::uint8_t> scratch) {
+[[nodiscard]] const std::uint8_t* composite_read_at(const void* opaque,
+                                                    sequence_size_type bp_from,
+                                                    std::size_t required_length,
+                                                    std::span<std::uint8_t> scratch) {
     const auto& state = *static_cast<const composite_source_state*>(opaque);
     if (state.reject_whole_request
         && required_length == static_cast<std::size_t>(state.logical_size)) {
@@ -136,9 +127,8 @@ template <bool p_is_reversed, bool p_write_reversed>
     if (required_length == 0u) {
         return scratch.data();
     }
-    const sequence_size_t forward_from = p_is_reversed
-        ? state.logical_size - (bp_from + required_length)
-        : bp_from;
+    const sequence_size_type forward_from =
+        p_is_reversed ? state.logical_size - (bp_from + required_length) : bp_from;
     constexpr bool descending_write =
         (p_is_reversed && !p_write_reversed) || (!p_is_reversed && p_write_reversed);
     for (std::size_t index = 0u; index < required_length; ++index) {
@@ -151,12 +141,14 @@ template <bool p_is_reversed, bool p_write_reversed>
     return scratch.data();
 }
 
-[[nodiscard]] sequence_size_t composite_bp_size(const void* opaque) noexcept {
+[[nodiscard]] sequence_size_type composite_bp_size(const void* opaque) noexcept {
     return static_cast<const composite_source_state*>(opaque)->logical_size;
 }
 
-[[nodiscard]] facade_t::resident_packed_result composite_resident_probe(
-        const void*, sequence_size_t, sequence_size_t, std::uint8_t) noexcept {
+[[nodiscard]] facade_type::resident_packed_result composite_resident_probe(const void*,
+                                                                           sequence_size_type,
+                                                                           sequence_size_type,
+                                                                           std::uint8_t) noexcept {
     return std::nullopt;
 }
 
@@ -164,22 +156,22 @@ template <bool p_is_reversed, bool p_write_reversed>
     return false;
 }
 
-inline const facade_t::backend_ops composite_ops{
+inline const facade_type::backend_ops composite_ops{
     .bp_size = &composite_bp_size,
-    .read_at = {
-        &composite_read_at<false, false>,
-        &composite_read_at<false, true>,
-        &composite_read_at<true, false>,
-        &composite_read_at<true, true>,
-    },
+    .read_at =
+        {
+            &composite_read_at<false, false>,
+            &composite_read_at<false, true>,
+            &composite_read_at<true, false>,
+            &composite_read_at<true, true>,
+        },
     .try_resident_packed = &composite_resident_probe,
     .copy_packed_sequence = nullptr,
     .worker_shareable = &composite_worker_shareable,
 };
 
-[[nodiscard]] facade_t make_composite_source_view(
-        const composite_source_state& state) noexcept {
-    return facade_t{std::addressof(state), std::addressof(composite_ops)};
+[[nodiscard]] facade_type make_composite_source_view(const composite_source_state& state) noexcept {
+    return facade_type{std::addressof(state), std::addressof(composite_ops)};
 }
 
 void reset_source_observation(composite_source_state& state) noexcept {
@@ -191,8 +183,7 @@ void reset_source_observation(composite_source_state& state) noexcept {
 [[nodiscard]] std::vector<seq::dna4> materialize_logical_letters(
         const composite_source_state& state) {
     std::vector<seq::dna4> letters(static_cast<std::size_t>(state.logical_size));
-    for (sequence_size_t position = 0u; position < state.logical_size;
-         ++position) {
+    for (sequence_size_type position = 0u; position < state.logical_size; ++position) {
         letters[static_cast<std::size_t>(position)].assign_rank(
             composite_rank_at(state, position));
     }
@@ -202,8 +193,8 @@ void reset_source_observation(composite_source_state& state) noexcept {
 struct composite_fixture {
     composite_source_state source;
     std::vector<seq::dna4> selected_letters;
-    sequence_size_t selected_from{};
-    sequence_size_t selected_to{};
+    sequence_size_type selected_from{};
+    sequence_size_type selected_to{};
 };
 
 [[nodiscard]] composite_fixture make_composite_fixture() {
@@ -233,8 +224,8 @@ struct composite_fixture {
         source.logical_size += piece.to - piece.from;
     }
     const auto logical = materialize_logical_letters(source);
-    constexpr sequence_size_t selected_from = 2'500u;
-    constexpr sequence_size_t selected_to = 10'500u;
+    constexpr sequence_size_type selected_from = 2'500u;
+    constexpr sequence_size_type selected_to = 10'500u;
     std::vector<seq::dna4> selected(
         logical.begin() + static_cast<std::ptrdiff_t>(selected_from),
         logical.begin() + static_cast<std::ptrdiff_t>(selected_to));
@@ -563,11 +554,10 @@ struct minimizer_run {
     pipe::minimizer_range_execution_stats stats;
 };
 
-[[nodiscard]] minimizer_run run_dispatch(
-        facade_t view,
-        sequence_size_t from,
-        sequence_size_t to,
-        minimizer_sketch_backend backend) {
+[[nodiscard]] minimizer_run run_dispatch(facade_type view,
+                                         sequence_size_type from,
+                                         sequence_size_type to,
+                                         minimizer_sketch_backend backend) {
     sketch_collector collector;
     auto stats = pipe::minimizer_dispatch_range<minimap_sketch_data>(
         collector, view, from, to, 10u, 15u, backend,
@@ -579,9 +569,8 @@ struct minimizer_run {
     };
 }
 
-void require_partial_source_read(
-        const composite_source_state& source,
-        sequence_size_t selected_length) {
+void require_partial_source_read(const composite_source_state& source,
+                                 sequence_size_type selected_length) {
     REQUIRE(source.callback_count > 0u);
     REQUIRE(source.requested_bp >= selected_length);
     REQUIRE(source.requested_bp < source.logical_size);
@@ -926,7 +915,7 @@ TEST_CASE("live packed bounded ntHash rejects reversed and narrow views before b
                 .fail_closed_rejections = 1u});
     REQUIRE(reversed_collector.extract_sketches_data().empty());
 
-    const auto require_narrow_rejection = [&]<class p_storage_unit>() {
+    const auto require_narrow_rejection = [&data]<class p_storage_unit>() {
         const auto rejected = run_bounded_nthash_leaf<p_storage_unit>(data);
         REQUIRE(rejected.result.status
                 == ::bioseq::minimizers::minimizer_kernel_status::
@@ -1034,8 +1023,8 @@ TEST_CASE("Reference SIMD keeps DNA4 topology and scalar-routes DNA5 before look
 TEST_CASE("scalar minimizers stream only a sliced composite source range",
           "[component:bioseq][layer:unit][feature:minimizer]") {
     auto fixture = make_composite_fixture();
-    using packed_t = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
-    compact_sequence_range<packed_t> selected_range(fixture.selected_letters);
+    using packed_type = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    compact_sequence_range<packed_type> selected_range(fixture.selected_letters);
     auto selected_owner = bioseq::storage::make_resident_lazy_sequence(selected_range);
     const auto selected_view =
         bioseq::storage::make_lazy_sequence_view(selected_owner);
@@ -1065,8 +1054,8 @@ TEST_CASE(
     "composite source range",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     auto fixture = make_composite_fixture();
-    using packed_t = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
-    compact_sequence_range<packed_t> selected_range(fixture.selected_letters);
+    using packed_type = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    compact_sequence_range<packed_type> selected_range(fixture.selected_letters);
     auto selected_owner = bioseq::storage::make_resident_lazy_sequence(selected_range);
     const auto selected_view =
         bioseq::storage::make_lazy_sequence_view(selected_owner);
@@ -1074,8 +1063,7 @@ TEST_CASE(
         selected_view, 0u, selected_view.bp_size(),
         minimizer_sketch_backend::scalar);
     const auto source_view = make_composite_source_view(fixture.source);
-    const sequence_size_t selected_length =
-        fixture.selected_to - fixture.selected_from;
+    const sequence_size_type selected_length = fixture.selected_to - fixture.selected_from;
 
     try {
         const auto exact_baseline = run_dispatch(
@@ -1155,8 +1143,8 @@ TEST_CASE("Vulkan staging dispatches a sliced composite source range only",
         return;
     }
 
-    using packed_t = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
-    compact_sequence_range<packed_t> selected_range(fixture.selected_letters);
+    using packed_type = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    compact_sequence_range<packed_type> selected_range(fixture.selected_letters);
     auto selected_owner = bioseq::storage::make_resident_lazy_sequence(selected_range);
     const auto selected_view =
         bioseq::storage::make_lazy_sequence_view(selected_owner);
@@ -1189,12 +1177,12 @@ TEST_CASE("lazy batch sorting never requests whole composite sources",
     low.source.sources[0][100u] = 0u;
     middle.source.sources[0][100u] = 1u;
 
-    const std::array<facade_t, 3> views{
+    const std::array<facade_type, 3> views{
         make_composite_source_view(high.source),
         make_composite_source_view(low.source),
         make_composite_source_view(middle.source),
     };
-    const std::span<const facade_t> batch{views};
+    const std::span<const facade_type> batch{views};
     using processor = bioseq::storage::sequence_batch_sorter<seq::dna4>;
 
     bioseq::storage::sequence_sort_options cpu{};

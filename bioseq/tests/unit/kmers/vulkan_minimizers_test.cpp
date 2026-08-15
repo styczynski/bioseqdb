@@ -1,11 +1,8 @@
 /**
  * @file vulkan_minimizers_test.cpp
- * @brief Vulkan minimizer sketch parity tests.
+ * @brief Vulkan minimizer parity, representation, and admission checks.
  *
- * Tests 1-4: dna4 parity for (15,10)/(7,5)/(27,10), dna5 T/N parity (N resets,
- * T hashes as nt4 code 3), generic-alphabet smoke (no throw), and the
- * 16/32/64/128-bit `minimizer_representation` layouts round-tripping raw fields. All GPU
- * comparisons skip cleanly (SUCCEED) when no hardware Vulkan device exists.
+ * Hardware-dependent comparisons skip when no suitable Vulkan device exists.
  */
 #include <hwy/highway.h>
 #include <tests/support/common.hpp>
@@ -55,8 +52,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 namespace vk = ::bioseq::gpu::vulkan;
 namespace idx = ::bioseq::indexing;
 
-using minimizer_tuple_t =
-    std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
+using minimizer_tuple_type = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
 
 [[nodiscard]] static bool vulkan_ready() {
     return vk::hardware_device_available(vk::runtime::instance());
@@ -204,20 +200,19 @@ vulkan_lifetime_view(const vulkan_lifetime_source_state &state) noexcept {
 
 /// Sorted (last_pos, kmer, strand) tuples of a minimizer vector.
 template <class p_minimizer_type>
-[[nodiscard]] static std::vector<minimizer_tuple_t>
-triples(const std::vector<p_minimizer_type> &minimizers) {
-  std::vector<minimizer_tuple_t> out;
-  out.reserve(minimizers.size());
-  for (const p_minimizer_type &m : minimizers) {
-    out.emplace_back(m.last_pos(), m.kmer(), m.strand());
-  }
-  std::sort(out.begin(), out.end());
-  return out;
+[[nodiscard]] static std::vector<minimizer_tuple_type>
+triples(const std::vector<p_minimizer_type>& minimizers) {
+    std::vector<minimizer_tuple_type> out;
+    out.reserve(minimizers.size());
+    for (const p_minimizer_type& m : minimizers) {
+        out.emplace_back(m.last_pos(), m.kmer(), m.strand());
+    }
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
-[[nodiscard]] static std::string tuple_examples(
-    const std::vector<minimizer_tuple_t>& values,
-    std::size_t limit = 6) {
+[[nodiscard]] static std::string tuple_examples(const std::vector<minimizer_tuple_type>& values,
+                                                std::size_t limit = 6) {
     std::ostringstream out;
     const std::size_t n = std::min(values.size(), limit);
     for (std::size_t i = 0; i < n; ++i) {
@@ -229,18 +224,18 @@ triples(const std::vector<p_minimizer_type> &minimizers) {
     return out.str();
 }
 
-static void require_gpu_triple_superset_with_bounded_extras(
-    std::vector<minimizer_tuple_t> scalar,
-    std::vector<minimizer_tuple_t> gpu,
-    vk::gpu_sketch_tile_plan tile_plan,
-    std::uint32_t k,
-    std::uint32_t window,
-    std::uint64_t bp_offset = 0) {
+static void
+require_gpu_triple_superset_with_bounded_extras(std::vector<minimizer_tuple_type> scalar,
+                                                std::vector<minimizer_tuple_type> gpu,
+                                                vk::gpu_sketch_tile_plan tile_plan,
+                                                std::uint32_t k,
+                                                std::uint32_t window,
+                                                std::uint64_t bp_offset = 0) {
     std::sort(scalar.begin(), scalar.end());
     std::sort(gpu.begin(), gpu.end());
 
-    std::vector<minimizer_tuple_t> missing;
-    std::vector<minimizer_tuple_t> extras;
+    std::vector<minimizer_tuple_type> missing;
+    std::vector<minimizer_tuple_type> extras;
     std::size_t scalar_i = 0;
     std::size_t gpu_i = 0;
     while (scalar_i < scalar.size() && gpu_i < gpu.size()) {
@@ -299,7 +294,7 @@ static void require_gpu_pair_superset_with_bounded_tile_extras(
     std::uint32_t window,
     std::uint64_t bp_offset = 0) {
     auto to_triples = [](const auto& pairs) {
-        std::vector<minimizer_tuple_t> out;
+        std::vector<minimizer_tuple_type> out;
         out.reserve(pairs.size());
         for (const auto& [kmer, encoded_pos] : pairs) {
             out.emplace_back(encoded_pos >> 1u, kmer, encoded_pos & 1u);
@@ -2149,14 +2144,13 @@ TEST_CASE("vulkan minimizer: fragmented facade admission preserves exact index w
         return;
     }
 
-    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    using range_type = compact_sequence_range<config_t>;
+    using configuration_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<configuration_type>;
     using storage_unit = typename range_type::traits::storage_unit;
-    using scanner_t =
-        bioseq::storage::chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+        storage_unit,
+        bioseq::storage::default_fragment_storage_units>;
+    using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
     range_type contiguous{dna4_fixture};
     auto contiguous_owner = bioseq::storage::make_resident_lazy_sequence(contiguous);
@@ -2186,7 +2180,7 @@ TEST_CASE("vulkan minimizer: fragmented facade admission preserves exact index w
         contiguous_built->position_count;
     contiguous_built.reset();
 
-    lazy_t fragmented{scanner_t::from_range(contiguous)};
+    lazy_type fragmented{scanner_type::from_range(contiguous)};
     const auto fragmented_view =
         bioseq::storage::make_lazy_sequence_view(fragmented);
     vk::vulkan_sketch_decline fragmented_decline{};
@@ -2342,35 +2336,28 @@ TEST_CASE(
 
   bool visited_byte_segment = false;
   vk::admitted_sequence_detail::with_canonical_u32_upload_source<seq::dna4>(
-      *window,
-      [&](auto& upload_source) {
-        using source_type = std::remove_cvref_t<decltype(upload_source)>;
-        if constexpr (requires {
-                        source_type::is_byte_addressed_upload_only;
-                      }) {
-          visited_byte_segment = true;
-          const vk::segment_upload_descriptor segment =
-              vk::compute_segment_descriptor(upload_source, 1u, 5u);
-          auto begin = upload_source.cbegin();
-          begin += segment.lo_unit;
-          const auto* base = upload_source.read_cptr(begin);
-          STATIC_REQUIRE(std::same_as<decltype(base), const std::byte*>);
-          const vk::sequence_upload_view upload =
-              vk::make_upload_view_from_window(
-                  upload_source, base, segment);
-          const auto* native_bytes =
-              static_cast<const std::byte*>(native->units);
-          const auto* control_bytes =
-              static_cast<const std::byte*>(control->units);
-          REQUIRE(upload.bytes == native_bytes + sizeof(std::uint32_t));
-          REQUIRE(upload.byte_size == 4u * sizeof(std::uint32_t));
-          REQUIRE(upload.unit_bits == 32u);
-          REQUIRE(upload.bp_size == 64u);
-          REQUIRE(std::memcmp(
-              upload.bytes,
-              control_bytes + sizeof(std::uint32_t),
-              static_cast<std::size_t>(upload.byte_size)) == 0);
-        }
+      *window, [&visited_byte_segment, &native, &control](auto& upload_source) {
+          using source_type = std::remove_cvref_t<decltype(upload_source)>;
+          if constexpr (requires { source_type::is_byte_addressed_upload_only; }) {
+              visited_byte_segment = true;
+              const vk::segment_upload_descriptor segment =
+                  vk::compute_segment_descriptor(upload_source, 1u, 5u);
+              auto begin = upload_source.cbegin();
+              begin += segment.lo_unit;
+              const auto* base = upload_source.read_cptr(begin);
+              STATIC_REQUIRE(std::same_as<decltype(base), const std::byte*>);
+              const vk::sequence_upload_view upload =
+                  vk::make_upload_view_from_window(upload_source, base, segment);
+              const auto* native_bytes = static_cast<const std::byte*>(native->units);
+              const auto* control_bytes = static_cast<const std::byte*>(control->units);
+              REQUIRE(upload.bytes == native_bytes + sizeof(std::uint32_t));
+              REQUIRE(upload.byte_size == 4u * sizeof(std::uint32_t));
+              REQUIRE(upload.unit_bits == 32u);
+              REQUIRE(upload.bp_size == 64u);
+              REQUIRE(std::memcmp(upload.bytes,
+                                  control_bytes + sizeof(std::uint32_t),
+                                  static_cast<std::size_t>(upload.byte_size)) == 0);
+          }
       });
   REQUIRE(visited_byte_segment);
   const auto snapshot = vk::vulkan_admitted_window_test_snapshot();
@@ -2644,15 +2631,15 @@ TEST_CASE(
     return;
   }
 
-  using packed8_t = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
-  using packed64_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+  using packed8_type = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
+  using packed64_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
   for (const std::size_t letter_count :
        std::array<std::size_t, 3>{65u, 69u, 73u}) {
     std::vector<seq::dna4> letters(letter_count);
     for (std::size_t index = 0u; index < letters.size(); ++index) {
       letters[index].assign_rank(static_cast<std::uint8_t>(index & 3u));
     }
-    compact_sequence_range<packed64_t> packed64{letters};
+    compact_sequence_range<packed64_type> packed64{letters};
     auto packed64_owner = bioseq::storage::make_resident_lazy_sequence(packed64);
     const auto packed64_view =
         bioseq::storage::make_lazy_sequence_view(packed64_owner);
@@ -2673,7 +2660,7 @@ TEST_CASE(
     const std::uint32_t expected_position_count = baseline->position_count;
     baseline.reset();
 
-    compact_sequence_range<packed8_t> packed8{letters};
+    compact_sequence_range<packed8_type> packed8{letters};
     const vk::sequence_upload_view upload =
         vk::make_sequence_upload_view(packed8);
     REQUIRE(upload.byte_size % 4u != 0u);
@@ -2718,17 +2705,16 @@ TEST_CASE("vulkan minimizer: truncated query gate fails before target-index disp
 
 TEST_CASE("vulkan minimizer: selected segment preserves typed strict cause",
           "[component:bioseq][layer:unit][feature:seeding]") {
-    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    using range_type = compact_sequence_range<config_t>;
+    using configuration_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<configuration_type>;
     using storage_unit = typename range_type::traits::storage_unit;
-    using scanner_t =
-        bioseq::storage::chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+        storage_unit,
+        bioseq::storage::default_fragment_storage_units>;
+    using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
     range_type range(dna4_fixture);
-    lazy_t fragmented{scanner_t::from_range(range)};
+    lazy_type fragmented{scanner_type::from_range(range)};
     const auto fragmented_view =
         bioseq::storage::make_lazy_sequence_view(fragmented);
     basic_sketch_collector<minimap_sketch_data> collector;
@@ -2788,14 +2774,13 @@ TEST_CASE("vulkan minimizer: software device declines selected paths",
         return;
     }
 
-    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    using range_type = compact_sequence_range<config_t>;
+    using configuration_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<configuration_type>;
     using storage_unit = typename range_type::traits::storage_unit;
-    using scanner_t =
-        bioseq::storage::chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+        storage_unit,
+        bioseq::storage::default_fragment_storage_units>;
+    using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
     range_type range(dna4_fixture);
     auto range_owner = bioseq::storage::make_resident_lazy_sequence(range);
@@ -2805,7 +2790,7 @@ TEST_CASE("vulkan minimizer: software device declines selected paths",
         range_view, 10, 15);
     REQUIRE_FALSE(result.has_value());
 
-    lazy_t fragmented{scanner_t::from_range(range)};
+    lazy_type fragmented{scanner_type::from_range(range)};
     const auto fragmented_view =
         bioseq::storage::make_lazy_sequence_view(fragmented);
     REQUIRE_THROWS_AS(
@@ -2869,14 +2854,13 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
     if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
 
     auto run_case = []<class p_alphabet_type>() {
-        using config_t = sequence_custom_alphabet<p_alphabet_type, std::uint64_t>;
-        using range_type = compact_sequence_range<config_t>;
+        using configuration_type = sequence_custom_alphabet<p_alphabet_type, std::uint64_t>;
+        using range_type = compact_sequence_range<configuration_type>;
         using storage_unit = typename range_type::traits::storage_unit;
-        using scanner_t =
-            bioseq::storage::chunked_span_sequence_scanner<
-                storage_unit,
-                bioseq::storage::default_fragment_storage_units>;
-        using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+        using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+            storage_unit,
+            bioseq::storage::default_fragment_storage_units>;
+        using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
         using p_minimizer_type = minimap_sketch_data;
 
         constexpr std::size_t w = 10;
@@ -2900,17 +2884,17 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
                 ? static_cast<std::uint8_t>(range_type::traits::alphabet_size)
                 : 4u;
         const std::size_t letter_count = range_type::traits::letters_per_unit * 50000u;
-        std::vector<typename config_t::alphabet_type> letters;
+        std::vector<typename configuration_type::alphabet_type> letters;
         letters.reserve(letter_count);
         std::uint64_t lcg = 0x9e3779b97f4a7c15ULL;
         for (std::size_t i = 0; i < letter_count; ++i) {
             lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
-            typename config_t::alphabet_type value{};
+            typename configuration_type::alphabet_type value{};
             value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % k_non_ambiguous_rank_count));
             letters.push_back(value);
         }
         range_type range(letters);
-        lazy_t fragmented{scanner_t::from_range(range)};
+        lazy_type fragmented{scanner_type::from_range(range)};
         const auto fragmented_view =
             bioseq::storage::make_lazy_sequence_view(fragmented);
 
@@ -2997,26 +2981,25 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     if (!vulkan_ready()) { SUCCEED("no hardware Vulkan device; skipped"); return; }
 
     {
-        using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-        using range_type = compact_sequence_range<config_t>;
+        using configuration_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+        using range_type = compact_sequence_range<configuration_type>;
         using storage_unit = typename range_type::traits::storage_unit;
-        using scanner_t =
-            bioseq::storage::chunked_span_sequence_scanner<
-                storage_unit,
-                bioseq::storage::default_fragment_storage_units>;
-        using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+        using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+            storage_unit,
+            bioseq::storage::default_fragment_storage_units>;
+        using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
-        std::vector<typename config_t::alphabet_type> letters;
+        std::vector<typename configuration_type::alphabet_type> letters;
         letters.reserve(1u << 20);
         std::uint64_t lcg = 0x9e3779b97f4a7c15ULL;
         for (std::size_t i = 0; i < (1u << 20); ++i) {
             lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
-            typename config_t::alphabet_type value{};
+            typename configuration_type::alphabet_type value{};
             value.assign_rank(static_cast<std::uint8_t>((lcg >> 33) % 4u));
             letters.push_back(value);
         }
         range_type range(letters);
-        lazy_t fragmented{scanner_t::from_range(range)};
+        lazy_type fragmented{scanner_type::from_range(range)};
         const auto fragmented_view =
             bioseq::storage::make_lazy_sequence_view(fragmented);
 
@@ -3055,16 +3038,15 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         REQUIRE_FALSE(execution_stats.saturated);
     }
 
-    using config_t = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
-    using range_type = compact_sequence_range<config_t>;
+    using configuration_type = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using range_type = compact_sequence_range<configuration_type>;
     using storage_unit = typename range_type::traits::storage_unit;
-    using scanner_t =
-        bioseq::storage::chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+        storage_unit,
+        bioseq::storage::default_fragment_storage_units>;
+    using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
-    std::vector<typename config_t::alphabet_type> letters;
+    std::vector<typename configuration_type::alphabet_type> letters;
     constexpr std::size_t dna5_letter_count = range_type::traits::letters_per_unit * 50000u;
     letters.reserve(dna5_letter_count);
     // Varied LCG ranks ensure that the dna5 sequence has
@@ -3073,13 +3055,13 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     std::uint64_t lcg = 0x2545f4914f6cdd1dULL;
     for (std::size_t i = 0; i < dna5_letter_count; ++i) {
         lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
-        typename config_t::alphabet_type value{};
+        typename configuration_type::alphabet_type value{};
         value.assign_rank(static_cast<std::uint8_t>(
             (lcg >> 33) % range_type::traits::alphabet_size));
         letters.push_back(value);
     }
     range_type range(letters);
-    lazy_t fragmented{scanner_t::from_range(range)};
+    lazy_type fragmented{scanner_type::from_range(range)};
     const auto fragmented_view =
         bioseq::storage::make_lazy_sequence_view(fragmented);
 
@@ -3144,17 +3126,16 @@ TEST_CASE("Vulkan borrowed segment-pair admission covers arena high-water",
     REQUIRE(runtime.reusable_gpu_arena().device_buffer().allocation_bytes
             >= high_water_request);
 
-    using config_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    using range_type = compact_sequence_range<config_t>;
+    using configuration_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<configuration_type>;
     using storage_unit = typename range_type::traits::storage_unit;
-    using scanner_t =
-        bioseq::storage::chunked_span_sequence_scanner<
-            storage_unit,
-            bioseq::storage::default_fragment_storage_units>;
-    using lazy_t = bioseq::storage::lazy_sequence<config_t, scanner_t>;
+    using scanner_type = bioseq::storage::chunked_span_sequence_scanner<
+        storage_unit,
+        bioseq::storage::default_fragment_storage_units>;
+    using lazy_type = bioseq::storage::lazy_sequence<configuration_type, scanner_type>;
 
     range_type range(dna4_fixture);
-    lazy_t fragmented{scanner_t::from_range(range)};
+    lazy_type fragmented{scanner_type::from_range(range)};
     const auto fragmented_view =
         bioseq::storage::make_lazy_sequence_view(fragmented);
     vk::vulkan_segment_pair_execution_stats execution_stats{};

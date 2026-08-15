@@ -1,6 +1,7 @@
-// bioseq/tests/unit/kmers/kmers_test.cpp
-//
-// scalar collect_minimizers equivalence against the verbatim mm_sketch port.
+/**
+ * @file kmers_test.cpp
+ * @brief Scalar and dispatched minimizer parity checks.
+ */
 #include <tests/support/common.hpp>
 
 import bioseq.common.logging;

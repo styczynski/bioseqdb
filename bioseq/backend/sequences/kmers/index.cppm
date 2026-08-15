@@ -109,15 +109,22 @@ inline void collect_minimizers_view(
 	auto iter = sequence.template iter<logical_rank>(sequence_begin);
 	const auto end = sequence.template iter<logical_rank>(sequence_end);
 
-	auto collect_range = [&]<bool p_is_initializing>(
-        std::bool_constant<p_is_initializing>) {
-		for (;
-             iter != end
-                 && (valid_length < window_size + kmer_size
-                     || !p_is_initializing);
+    auto collect_range = [&collector,
+                          &iter,
+                          &end,
+                          &valid_length,
+                          &window_size,
+                          &kmer_size,
+                          &sequence_position,
+                          &buffer,
+                          &hasher,
+                          &current_min,
+                          &current_min_pos]<bool p_is_initializing>(
+                             std::bool_constant<p_is_initializing>) {
+        for (; iter != end && (valid_length < window_size + kmer_size || !p_is_initializing);
              ++iter, ++sequence_position) {
-			const auto nucl = *iter;
-			// The nt4 sentinel marks an ambiguous nucleotide and therefore a
+            const auto nucl = *iter;
+            // The nt4 sentinel marks an ambiguous nucleotide and therefore a
 			// hard rolling-window boundary.
 			std::uint8_t code;
 			bool is_ambiguous;
@@ -228,15 +235,15 @@ inline void collect_minimizers_view(
 					});
 				}
 			}
-		}
-	};
+        }
+    };
 
-	// First kmers. Walk the prefix in INIT mode (until the first window
-	// is fully populated), then the rest in non-INIT mode.
-	collect_range(std::bool_constant<true>{});
-	collect_range(std::bool_constant<false>{});
+    // First kmers. Walk the prefix in INIT mode (until the first window
+    // is fully populated), then the rest in non-INIT mode.
+    collect_range(std::bool_constant<true>{});
+    collect_range(std::bool_constant<false>{});
 
-	if (!current_min.is_max()) {
+    if (!current_min.is_max()) {
 		collector.collect(current_min);
 	}
 }
