@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Mechanically translate the supplied website design into production assets.
 
-``design_source/index.html`` and ``design_source/docs.html`` are the literal
-visual source of truth.  This program copies that source into the website tree,
+``design_source/index.html``, ``design_source/docs.html`` and
+``design_source/benchmarks.html`` are the literal visual source of truth.  This
+program copies that source into the website tree,
 externalises every authored ``style`` / ``style-hover`` declaration without
 normalising its value, removes the Design Component runtime surface, and adds
 only the Jinja seams needed by the static-site generator.
 
 The generated templates and design stylesheets are intentionally checked in so
 reviewers can inspect the exact source-to-production diff.  Run this file again
-after changing either reference export.
+after changing any reference export.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -31,6 +33,10 @@ CANONICAL = DESIGN_SOURCE
 SOURCE_FILES = (
     "index.html",
     "docs.html",
+    "benchmarks.html",
+    "bench-loader.js",
+    "benchmarks-manifest.json",
+    "support.js",
     "assets/bioseq-mark.svg",
     "assets/logos/bytedance.png",
     "assets/logos/ef.png",
@@ -51,6 +57,8 @@ STATIC_COPIES = (
     ("assets/logos/sumo.png", "logos/sumo.png"),
     ("uploads/small_vid.mp4", "media/small_vid.mp4"),
     ("uploads/vials.mp4", "media/vials.mp4"),
+    ("bench-loader.js", "js/bench-loader.js"),
+    ("benchmarks-manifest.json", "benchmarks-manifest.json"),
 )
 
 OBSOLETE_STATIC = (
@@ -68,8 +76,10 @@ def copy_if_changed(source: Path, target: Path) -> None:
 
 
 def sync_sources() -> None:
-    """Copy only files referenced by the two exports; remove stale export junk."""
-    if not (CANONICAL / "index.html").is_file() or not (CANONICAL / "docs.html").is_file():
+    """Copy only files referenced by the three exports; remove stale export junk."""
+    if (not (CANONICAL / "index.html").is_file()
+            or not (CANONICAL / "docs.html").is_file()
+            or not (CANONICAL / "benchmarks.html").is_file()):
         raise RuntimeError(f"canonical website design is missing at {CANONICAL}")
 
     allowed = {Path(relative) for relative in SOURCE_FILES}
@@ -78,8 +88,9 @@ def sync_sources() -> None:
         copy_if_changed(CANONICAL / relative, DESIGN_SOURCE / relative)
 
     # The target is fixed, resolved, and confined to website/design_source.
-    # Unreferenced screenshots, duplicate videos, raw logo uploads and support.js
-    # are prototype artefacts and are deliberately not mirrored.
+    # Unreferenced screenshots, duplicate videos and raw logo uploads are
+    # prototype artefacts and are deliberately not mirrored. support.js remains
+    # as an auditable supplied source but is not published into the static bundle.
     for path in sorted(DESIGN_SOURCE.rglob("*"), reverse=True):
         if path.is_file() and path.relative_to(DESIGN_SOURCE) not in allowed:
             path.unlink()
@@ -178,6 +189,224 @@ def externalize_styles(markup: str, prefix: str, page_class: str) -> tuple[str, 
 
     translated = re.sub(r"<!--.*?-->|</?[^<>]+>", replace_tag, markup, flags=re.S)
     return translated, catalog
+
+
+def externalize_benchmark_styles(markup: str) -> tuple[str, StyleCatalog]:
+    """Externalise the benchmark export while retaining runtime style bindings.
+
+    The supplied component has a small set of style values derived from report
+    state. Static declarations stay byte-for-byte in the generated stylesheet;
+    dynamic declarations move to inert ``data-bench-style`` bindings and the
+    trusted external module applies only those individual CSS properties.
+    """
+    catalog = StyleCatalog("bd-", "benchmarks-design-page", OrderedDict(), OrderedDict())
+
+    def replace_tag(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        if tag.startswith("<!--") or tag.startswith("</") or tag.startswith("<!"):
+            return tag
+        attributes = tag[:-1]
+        closing = ">"
+        if attributes.endswith("/"):
+            attributes = attributes[:-1]
+            closing = "/>"
+
+        style_match = re.search(r'\sstyle="([^"]*)"', attributes)
+        if style_match:
+            declaration = style_match.group(1)
+            static_parts = []
+            dynamic_parts = []
+            for part in declaration.split(";"):
+                if "[[" in part:
+                    dynamic_parts.append(part)
+                elif part:
+                    static_parts.append(part)
+            attributes = re.sub(r'\sstyle="[^"]*"', "", attributes, count=1)
+            if static_parts:
+                static_declaration = ";".join(static_parts)
+                class_name = catalog.styles.setdefault(
+                    static_declaration, f"bd-s{len(catalog.styles) + 1:04d}"
+                )
+                attributes = add_class(attributes, class_name)
+            if dynamic_parts:
+                attributes += f' data-bench-style="{";".join(dynamic_parts)}"'
+
+        hover_match = re.search(r'\sstyle-hover="([^"]*)"', attributes)
+        if hover_match:
+            declaration = hover_match.group(1)
+            class_name = catalog.hovers.setdefault(
+                declaration, f"bd-h{len(catalog.hovers) + 1:03d}"
+            )
+            attributes = re.sub(r'\sstyle-hover="[^"]*"', "", attributes, count=1)
+            attributes = add_class(attributes, class_name)
+        return attributes + closing
+
+    translated = re.sub(r"<!--.*?-->|</?[^<>]+>", replace_tag, markup, flags=re.S)
+    return translated, catalog
+
+
+def unwrap_benchmark_controls(markup: str) -> str:
+    """Move each sc-if/sc-for contract onto its single semantic child.
+
+    Repeating the actual option/tr/tbody/td element keeps the generated source
+    valid in HTML's select and table insertion modes; wrapper custom elements or
+    nested template elements would be foster-parented by a conforming parser.
+    """
+    while "<sc-if" in markup or "<sc-for" in markup:
+        candidates = {
+            "sc-if": markup.rfind("<sc-if"),
+            "sc-for": markup.rfind("<sc-for"),
+        }
+        tag, start = max(candidates.items(), key=lambda item: item[1])
+        if start < 0:
+            break
+        opening_end = markup.find(">", start)
+        closing = f"</{tag}>"
+        closing_start = markup.find(closing, opening_end + 1)
+        if opening_end < 0 or closing_start < 0:
+            raise RuntimeError(f"unbalanced benchmark <{tag}> control")
+        opening = markup[start:opening_end + 1]
+        body = markup[opening_end + 1:closing_start]
+
+        leading = len(body) - len(body.lstrip())
+        root_start = leading
+        root_match = re.match(r"<([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>", body[root_start:])
+        if not root_match:
+            raise RuntimeError(f"benchmark <{tag}> has no semantic root element")
+        root_tag = root_match.group(1)
+        _, root_end = element_span(body, root_start, root_tag)
+        if body[root_end:].strip():
+            raise RuntimeError(f"benchmark <{tag}> must contain one semantic root element")
+
+        if tag == "sc-if":
+            value = re.search(r'value="\[\[\s*([^\]]+?)\s*\]\]"', opening)
+            if not value:
+                raise RuntimeError("benchmark sc-if has no value binding")
+            data_attributes = f' data-bench-if="{value.group(1)}"'
+        else:
+            values = re.search(r'list="\[\[\s*([^\]]+?)\s*\]\]"', opening)
+            alias = re.search(r'as="([^"]+)"', opening)
+            if not values or not alias:
+                raise RuntimeError("benchmark sc-for has no list/alias binding")
+            data_attributes = (
+                f' data-bench-for="{values.group(1)}"'
+                f' data-bench-as="{alias.group(1)}"'
+            )
+
+        root_open_end = body.find(">", root_start)
+        translated_body = (
+            body[:root_open_end]
+            + data_attributes
+            + body[root_open_end:]
+        )
+        markup = (
+            markup[:start]
+            + translated_body
+            + markup[closing_start + len(closing):]
+        )
+    return markup
+
+
+def prepare_benchmark_markup(source: str) -> tuple[str, StyleCatalog]:
+    """Translate the supplied benchmark component shell without redesigning it."""
+    markup = root_markup(source, "BioseqDB benchmarks")
+
+    # Keep Design Component expressions inert for Jinja and resolve them in the
+    # external benchmark runtime after real report JSON has loaded.
+    markup = markup.replace("{{", "[[").replace("}}", "]]")
+
+    route_replacements = {
+        'href="Bioseq.dc.html#': 'href="{{ site.base_path }}#',
+        'href="Bioseq.dc.html"': 'href="{{ site.base_path }}"',
+        'href="Bioseq Docs.dc.html#installation"': 'href="{{ nav.documentation }}"',
+        'href="Bioseq Docs.dc.html#quickstart"': 'href="{{ nav.tutorials }}"',
+        'href="Bioseq Docs.dc.html#api-sql"': 'href="{{ nav.reference }}"',
+        'href="Bioseq Docs.dc.html#api-cpp"': 'href="{{ nav.reference }}"',
+        'href="Bioseq Docs.dc.html"':
+            'href="{{ site.base_path }}{{ site.version }}/"',
+    }
+    for old, new in route_replacements.items():
+        markup = markup.replace(old, new)
+    markup = markup.replace("<main style=", '<main id="benchmark-main" style=', 1)
+    markup = markup.replace(
+        '<a href="#" style="font-size:14px;color:#f2f7fb">Benchmarks</a>',
+        '<a href="{{ site.base_path }}benchmarks/" '
+        'style="font-size:14px;color:#f2f7fb">Benchmarks</a>',
+        1,
+    )
+    markup = re.sub(
+        r'<a aria-disabled="true" title="Under development"([^>]*)>GitHub</a>',
+        r'<a href="{{ site.repository_url }}" rel="noreferrer"\1>GitHub</a>',
+        markup,
+    )
+    markup = markup.replace(
+        '<a href="#" style="font-size:13.5px;color:#063a45;font-weight:500" '
+        'style-hover="color:#00252e">License (MIT)</a>',
+        '<a href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer" '
+        'style="font-size:13.5px;color:#063a45;font-weight:500" '
+        'style-hover="color:#00252e">License (MIT)</a>',
+        1,
+    )
+    markup = markup.replace(
+        '<a href="#" style="font-size:13.5px;color:#063a45;font-weight:500" '
+        'style-hover="color:#00252e">Privacy</a>',
+        '<a href="{{ site.versions_page_url }}" '
+        'style="font-size:13.5px;color:#063a45;font-weight:500" '
+        'style-hover="color:#00252e">Versions</a>',
+        1,
+    )
+    markup = markup.replace(
+        '<span style="font-family:\'IBM Plex Mono\';font-size:12.5px;color:#063540;'
+        'background:rgba(255,255,255,0.28);border-radius:7px;padding:6px 10px;'
+        'width:max-content">Alpha &middot; Aug 2027</span>',
+        '<span style="font-family:\'IBM Plex Mono\';font-size:12.5px;color:#063540;'
+        'background:rgba(255,255,255,0.28);border-radius:7px;padding:6px 10px;'
+        'width:max-content">{{ site.status_label }} &middot; {{ site.version }}</span>',
+        1,
+    )
+    markup = markup.replace(
+        '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;'
+        'font-weight:500">&copy; 2027 BioseqDB &mdash; an independent '
+        'open-source project.</span>',
+        '<span style="font-family:\'IBM Plex Sans\';font-size:13.5px;color:#053039;'
+        'font-weight:500">&copy; {{ site.copyright_year }} '
+        '{{ site.copyright_holder }} &mdash; an independent open-source project.</span>',
+        1,
+    )
+    markup = asset_paths(markup)
+
+    event_names = {
+        "onClick": "click",
+        "onChange": "change",
+        "onMouseEnter": "mouseenter",
+        "onMouseLeave": "mouseleave",
+    }
+    for authored, event in event_names.items():
+        markup = re.sub(
+            rf'\s{authored}="\[\[\s*([^\]]+?)\s*\]\]"',
+            rf' data-bench-{event}="\1"',
+            markup,
+        )
+    markup = markup.replace(
+        'data-bench-click="it.onClick" href="#"',
+        'data-bench-click="it.onClick" href="#benchmark-main"',
+    )
+    markup = markup.replace(
+        'data-bench-click="m.onOpen" href="#"',
+        'data-bench-click="m.onOpen" href="#benchmark-main"',
+    )
+    markup = markup.replace(
+        'data-bench-click="onTop" href="#"',
+        'data-bench-click="onTop" href="#page-top"',
+    )
+
+    markup = unwrap_benchmark_controls(markup)
+    markup, catalog = externalize_benchmark_styles(markup)
+
+    forbidden = ("<sc-if", "<sc-for", " onClick=", " onChange=", " style=")
+    if any(token in markup for token in forbidden):
+        raise RuntimeError("untranslated benchmark Design Component marker")
+    return markup, catalog
 
 
 def asset_paths(markup: str) -> str:
@@ -477,6 +706,10 @@ def prepare_docs_markup(markup: str) -> str:
         r'<a\1href="{{ site.repository_url }}" rel="noreferrer"\2>\3</a>', markup)
     markup = markup.replace('href="Bioseq.dc.html#', 'href="{{ site.base_path }}#')
     markup = markup.replace('href="Bioseq.dc.html"', 'href="{{ site.base_path }}"')
+    markup = markup.replace(
+        'href="Bioseq Benchmarks.dc.html"',
+        'href="{{ site.base_path }}benchmarks/"',
+    )
     return markup
 
 
@@ -506,12 +739,21 @@ def dynamicize_docs_shell(markup: str, catalog: StyleCatalog) -> str:
         markup, count=1, flags=re.S)
 
     menu_start = markup.index('<div id="ver-menu"')
+    current_version_class = catalog.style_class(
+        "display:flex;align-items:center;justify-content:space-between;gap:10px;"
+        "padding:9px 11px;border-radius:8px;font-family:'IBM Plex Mono';"
+        "font-size:13px;color:#eef4f9;background:rgba(70,184,222,0.1)"
+    )
+    all_versions_class = catalog.style_class(
+        "display:block;padding:9px 11px;border-radius:8px;"
+        "font-family:'IBM Plex Mono';font-size:13px;color:#9db1c2"
+    )
     menu_inner = (
         '\n          <a data-ver href="{{ nav.documentation }}" aria-current="page" '
-        f'class="{catalog.style_class("display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 11px;border-radius:8px;font-family:\'IBM Plex Mono\';font-size:13px;color:#eef4f9;background:rgba(70,184,222,0.1)")}">'
+        f'class="{current_version_class}">'
         '{{ site.version }} <span class="docs-version-current">current</span></a>\n'
         '          <a data-ver-all href="{{ site.versions_page_url }}" '
-        f'class="{catalog.style_class("display:block;padding:9px 11px;border-radius:8px;font-family:\'IBM Plex Mono\';font-size:13px;color:#9db1c2")}">All versions</a>\n        '
+        f'class="{all_versions_class}">All versions</a>\n        '
     )
     markup = replace_element_inner(markup, menu_start, menu_inner)
 
@@ -634,6 +876,248 @@ def base_template(markup: str) -> str:
 '''
 
 
+def benchmarks_template(markup: str) -> str:
+    """Wrap the translated benchmark export in its dedicated production frame."""
+    return f'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{{{ page.title }}}}</title>
+<meta name="description" content="{{{{ page.description }}}}">
+<link rel="canonical" href="{{{{ page.canonical }}}}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self' https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="{{{{ page.title }}}}">
+<meta property="og:description" content="{{{{ page.description }}}}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{{{ page.canonical }}}}">
+<meta property="og:image" content="{{{{ site.social_image_url }}}}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{{{ page.title }}}}">
+<meta name="twitter:description" content="{{{{ page.description }}}}">
+<meta name="twitter:image" content="{{{{ site.social_image_url }}}}">
+<link rel="icon" href="{{{{ site.favicon_url }}}}">
+<link rel="stylesheet" href="{{{{ site.css_url }}}}">
+<link rel="stylesheet" href="{{{{ site.assets_base_url }}}}css/benchmarks-design.css">
+</head>
+<body id="page-top" class="benchmarks-design-page">
+<a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
+<div id="benchmarks-app"
+     data-loader-url="{{{{ site.assets_base_url }}}}js/bench-loader.js"
+     data-manifest-url="{{{{ site.assets_base_url }}}}benchmarks-manifest.json"></div>
+<template id="benchmarks-app-template">
+{markup}
+</template>
+{{% if page.jsonld %}}<script type="application/ld+json">{{{{ page.jsonld }}}}</script>{{% endif %}}
+<script type="module" src="{{{{ site.assets_base_url }}}}js/benchmarks-design.mjs"></script>
+</body>
+</html>
+'''
+
+
+def benchmark_component_source(source: str) -> str:
+    """Extract the supplied component logic and change only its asset seam."""
+    match = re.search(
+        r'<script type="text/x-dc"[^>]*>\s*'
+        r'(class Component extends DCLogic \{.*?\n\})\s*</script>',
+        source,
+        re.S,
+    )
+    if not match:
+        raise RuntimeError("canonical benchmark design has no Component logic")
+    component = match.group(1)
+    old_import = "this.lib = await import(new URL('bench-loader.js', location.href).href);"
+    if component.count(old_import) != 1:
+        raise RuntimeError("benchmark loader import seam changed")
+    return component.replace(
+        old_import,
+        "this.lib = await import(this.props.loaderUrl);",
+    )
+
+
+def validate_benchmark_manifest(source: str) -> None:
+    """Require real report/config HTTP endpoints and reject GitHub HTML pages."""
+    document = json.loads(source)
+    sources = document.get("sources") if isinstance(document, dict) else None
+    if not isinstance(sources, list) or not sources:
+        raise RuntimeError("benchmark manifest must contain a non-empty sources array")
+    allowed_prefixes = (
+        "https://raw.githubusercontent.com/",
+        "https://api.github.com/",
+    )
+    for url in sources:
+        if not isinstance(url, str) or not url.startswith(allowed_prefixes):
+            raise RuntimeError(f"benchmark source is not a raw/API HTTPS URL: {url!r}")
+        if "/blob/" in url:
+            raise RuntimeError(f"benchmark source is a GitHub blob HTML URL: {url}")
+
+
+BENCHMARK_RUNTIME_PREFIX = r'''/**
+ * Production runtime for the supplied BioseqDB benchmark design.
+ *
+ * The Component class below is copied from design_source/benchmarks.html. This
+ * small adapter replaces only the prototype renderer: it expands the copied
+ * sc-if/sc-for surface, binds events without inline handlers, and writes text
+ * through DOM text nodes so report JSON never becomes executable markup.
+ */
+
+const bindingPattern = /\[\[\s*([^\]]+?)\s*\]\]/g;
+const allowedStyleProperties = new Set([
+  "background", "border", "border-color", "border-left", "box-shadow", "color",
+  "height", "left", "opacity", "top", "transform",
+]);
+
+function valueAt(scope, expression) {
+  const path = expression.trim();
+  if (path === "true") return true;
+  if (path === "false") return false;
+  let value = scope;
+  for (const part of path.split(".")) {
+    if (value == null || !Object.prototype.hasOwnProperty.call(value, part)) {
+      return undefined;
+    }
+    value = value[part];
+  }
+  return value;
+}
+
+function interpolate(value, scope) {
+  return value.replace(bindingPattern, (_match, expression) => {
+    const resolved = valueAt(scope, expression);
+    return resolved == null ? "" : String(resolved);
+  });
+}
+
+function applyDynamicStyles(element, template, scope) {
+  for (const declaration of template.split(";")) {
+    if (!declaration) continue;
+    const separator = declaration.indexOf(":");
+    if (separator <= 0) continue;
+    const property = declaration.slice(0, separator).trim();
+    const value = interpolate(declaration.slice(separator + 1), scope).trim();
+    if (!allowedStyleProperties.has(property)) {
+      throw new Error(`unsupported benchmark style binding: ${property}`);
+    }
+    if (/[;{}]|url\s*\(|expression\s*\(/i.test(value)) {
+      throw new Error(`unsafe benchmark style value for ${property}`);
+    }
+    element.style.setProperty(property, value);
+  }
+}
+
+function bindNode(node, scope) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    node.nodeValue = interpolate(node.nodeValue || "", scope);
+    return;
+  }
+  if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
+    for (const child of [...node.childNodes]) bindNode(child, scope);
+    return;
+  }
+  if (!(node instanceof Element)) return;
+
+  if (node.dataset.benchIf) {
+    if (!valueAt(scope, node.dataset.benchIf)) {
+      node.remove();
+      return;
+    }
+    node.removeAttribute("data-bench-if");
+  }
+  if (node.dataset.benchFor) {
+    const fragment = document.createDocumentFragment();
+    const values = valueAt(scope, node.dataset.benchFor);
+    for (const item of Array.isArray(values) ? values : []) {
+      const clone = node.cloneNode(true);
+      clone.removeAttribute("data-bench-for");
+      clone.removeAttribute("data-bench-as");
+      bindNode(clone, { ...scope, [node.dataset.benchAs]: item });
+      fragment.append(clone);
+    }
+    node.replaceWith(fragment);
+    return;
+  }
+
+  let boundValue;
+  for (const attribute of [...node.attributes]) {
+    if (attribute.name.startsWith("data-bench-")
+        && ["click", "change", "mouseenter", "mouseleave"]
+          .includes(attribute.name.slice("data-bench-".length))) {
+      const eventName = attribute.name.slice("data-bench-".length);
+      const handler = valueAt(scope, attribute.value);
+      if (typeof handler === "function") node.addEventListener(eventName, handler);
+      node.removeAttribute(attribute.name);
+    } else if (attribute.name === "data-bench-style") {
+      applyDynamicStyles(node, attribute.value, scope);
+      node.removeAttribute(attribute.name);
+    } else if (attribute.value.includes("[[")) {
+      const value = interpolate(attribute.value, scope);
+      node.setAttribute(attribute.name, value);
+      if (attribute.name === "value") boundValue = value;
+    }
+  }
+  for (const child of [...node.childNodes]) bindNode(child, scope);
+  if (boundValue !== undefined && "value" in node) node.value = boundValue;
+}
+
+class DCLogic {
+  props = {};
+
+  setState(update) {
+    const patch = typeof update === "function" ? update(this.state) : update;
+    this.state = { ...this.state, ...patch };
+    this.render();
+  }
+
+  mount(root, template, props) {
+    this.root = root;
+    this.template = template;
+    this.props = props;
+    this.render();
+  }
+
+  render() {
+    if (!this.root || !this.template) return;
+    const fragment = this.template.content.cloneNode(true);
+    bindNode(fragment, this.renderVals());
+    this.root.replaceChildren(fragment);
+  }
+}
+'''
+
+
+BENCHMARK_RUNTIME_SUFFIX = r'''
+
+const root = document.querySelector("#benchmarks-app");
+const template = document.querySelector("#benchmarks-app-template");
+if (!(root instanceof HTMLElement) || !(template instanceof HTMLTemplateElement)) {
+  throw new Error("benchmark application shell is missing");
+}
+const component = new Component();
+component.mount(root, template, {
+  loaderUrl: root.dataset.loaderUrl,
+  manifestUrl: root.dataset.manifestUrl,
+  defaultStat: "P50",
+});
+component.componentDidMount().catch((error) => {
+  root.replaceChildren();
+  const message = document.createElement("p");
+  message.className = "benchmark-runtime-error";
+  message.textContent = `Benchmark data could not be loaded: ${error.message || error}`;
+  root.append(message);
+});
+'''
+
+
+def benchmark_runtime(source: str) -> str:
+    return (
+        BENCHMARK_RUNTIME_PREFIX.rstrip()
+        + "\n\n"
+        + benchmark_component_source(source).rstrip()
+        + "\n"
+        + BENCHMARK_RUNTIME_SUFFIX.lstrip()
+    )
+
+
 PRISM_CSS = r'''
 /* Exact syntax palette copied from the design's authored token spans. */
 code[class*="language-"],pre[class*="language-"]{color:#cbd8e4;background:transparent;text-shadow:none;font-family:'IBM Plex Mono'}
@@ -646,6 +1130,14 @@ code[class*="language-"],pre[class*="language-"]{color:#cbd8e4;background:transp
 .token.macro,.token.directive,.token.property{color:#c99bd6}
 .token.number,.token.boolean{color:#e0b04a}
 .token.operator,.token.punctuation{color:#cbd8e4}
+'''.strip()
+
+
+BENCHMARK_RUNTIME_CSS = r'''
+.benchmarks-design-page{font-size:16px;line-height:normal}
+.benchmarks-design-page .benchmark-skip-link{position:fixed;left:12px;top:-80px;z-index:260;padding:10px 14px;border-radius:8px;background:#f26522;color:#071320;font-family:'IBM Plex Mono';transition:top .15s}
+.benchmarks-design-page .benchmark-skip-link:focus{top:10px}
+.benchmarks-design-page .benchmark-runtime-error{max-width:620px;margin:40px auto;padding:22px;border:1px solid rgba(242,101,34,.3);border-radius:13px;background:rgba(242,101,34,.07);color:#ffd0b4;font-family:'IBM Plex Mono'}
 '''.strip()
 
 LANDING_RUNTIME_CSS = r'''
@@ -714,10 +1206,16 @@ def write_generated() -> None:
     docs, docs_catalog = externalize_styles(docs, "dd-", "docs-design-page")
     docs = dynamicize_docs_shell(asset_paths(docs), docs_catalog)
 
-    if re.search(r'\s(?:style|style-hover|onClick)=', landing + docs):
+    benchmark_source = (DESIGN_SOURCE / "benchmarks.html").read_text(encoding="utf-8")
+    validate_benchmark_manifest(
+        (DESIGN_SOURCE / "benchmarks-manifest.json").read_text(encoding="utf-8")
+    )
+    benchmarks, benchmark_catalog = prepare_benchmark_markup(benchmark_source)
+
+    if re.search(r'\s(?:style|style-hover|onClick)=', landing + docs + benchmarks):
         raise RuntimeError("inline design attribute survived externalisation")
     forbidden = ("support.js", "x-dc", "data-dc-script", "React", "sc-if")
-    if any(token in landing + docs for token in forbidden):
+    if any(token in landing + docs + benchmarks for token in forbidden):
         raise RuntimeError("prototype runtime token survived translation")
 
     (WEBSITE / "templates" / "landing.html.j2").write_text(
@@ -726,6 +1224,9 @@ def write_generated() -> None:
     (WEBSITE / "templates" / "base.html.j2").write_text(
         re.sub(r"[ \t]+(?=\n)", "", base_template(docs)).rstrip() + "\n",
         encoding="utf-8")
+    (WEBSITE / "templates" / "benchmarks.html.j2").write_text(
+        re.sub(r"[ \t]+(?=\n)", "", benchmarks_template(benchmarks)).rstrip() + "\n",
+        encoding="utf-8")
     (WEBSITE / "static" / "css" / "landing-design.css").write_text(
         global_css(landing_source) + "\n\n" + landing_catalog.css() + "\n\n"
         + LANDING_RUNTIME_CSS + "\n\n" + PRISM_CSS + "\n",
@@ -733,6 +1234,13 @@ def write_generated() -> None:
     (WEBSITE / "static" / "css" / "docs-design.css").write_text(
         global_css(docs_source) + "\n\n" + docs_catalog.css() + "\n\n"
         + DOCS_RUNTIME_CSS + "\n\n" + PRISM_CSS + "\n",
+        encoding="utf-8")
+    (WEBSITE / "static" / "css" / "benchmarks-design.css").write_text(
+        global_css(benchmark_source) + "\n\n" + benchmark_catalog.css() + "\n\n"
+        + BENCHMARK_RUNTIME_CSS + "\n",
+        encoding="utf-8")
+    (WEBSITE / "static" / "js" / "benchmarks-design.mjs").write_text(
+        benchmark_runtime(benchmark_source).rstrip() + "\n",
         encoding="utf-8")
 
     # Literal declaration equality: every unique authored HTML style value and
@@ -753,12 +1261,32 @@ def write_generated() -> None:
         if missing:
             raise RuntimeError(f"{name}: {len(missing)} authored declarations were not preserved")
 
+    # Benchmark declarations with runtime placeholders retain their complete
+    # static projection in CSS and their complete dynamic projection in the
+    # inert binding attribute; neither half is normalized or re-authored.
+    benchmark_markup = root_markup(benchmark_source, "BioseqDB benchmarks")
+    for declaration in re.findall(r'\sstyle="([^"]*)"', benchmark_markup):
+        converted = declaration.replace("{{", "[[").replace("}}", "]]")
+        static_projection = ";".join(
+            part for part in converted.split(";") if part and "[[" not in part
+        )
+        dynamic_projection = ";".join(
+            part for part in converted.split(";") if "[[" in part
+        )
+        if static_projection and static_projection not in benchmark_catalog.styles:
+            raise RuntimeError("benchmarks.html: static style projection was not preserved")
+        if dynamic_projection and f'data-bench-style="{dynamic_projection}"' not in benchmarks:
+            raise RuntimeError("benchmarks.html: dynamic style projection was not preserved")
+
 
 GENERATED_PATHS = (
     "templates/base.html.j2",
+    "templates/benchmarks.html.j2",
     "templates/landing.html.j2",
+    "static/css/benchmarks-design.css",
     "static/css/docs-design.css",
     "static/css/landing-design.css",
+    "static/js/benchmarks-design.mjs",
 )
 
 

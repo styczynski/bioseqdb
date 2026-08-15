@@ -366,22 +366,33 @@ find_package(Python3 3.12 COMPONENTS Interpreter REQUIRED)
 set(_design_reference_dir "${_source_dir}/design_source")
 set(_design_translator "${_source_dir}/tools/translate_reference_design.py")
 if(NOT EXISTS "${_design_reference_dir}/index.html"
-   OR NOT EXISTS "${_design_reference_dir}/docs.html")
+   OR NOT EXISTS "${_design_reference_dir}/docs.html"
+   OR NOT EXISTS "${_design_reference_dir}/benchmarks.html"
+   OR NOT EXISTS "${_design_reference_dir}/bench-loader.js"
+   OR NOT EXISTS "${_design_reference_dir}/benchmarks-manifest.json"
+   OR NOT EXISTS "${_design_reference_dir}/support.js")
   message(FATAL_ERROR
-    "website: supplied design_source/index.html and design_source/docs.html "
+    "website: supplied landing, docs, benchmark HTML/JS/manifest design sources "
     "are required for design-translation parity")
 endif()
 file(GLOB_RECURSE _design_reference_files CONFIGURE_DEPENDS
   "${_design_reference_dir}/*")
 set(_design_translation_outputs
   "${_source_dir}/templates/base.html.j2"
+  "${_source_dir}/templates/benchmarks.html.j2"
   "${_source_dir}/templates/landing.html.j2"
+  "${_source_dir}/static/css/benchmarks-design.css"
   "${_source_dir}/static/css/docs-design.css"
-  "${_source_dir}/static/css/landing-design.css")
+  "${_source_dir}/static/css/landing-design.css"
+  "${_source_dir}/static/js/benchmarks-design.mjs")
 set(_design_translation_inputs)
 foreach(_relative
     index.html
     docs.html
+    benchmarks.html
+    bench-loader.js
+    benchmarks-manifest.json
+    support.js
     assets/bioseq-mark.svg
     assets/logos/bytedance.png
     assets/logos/ef.png
@@ -404,7 +415,9 @@ foreach(_relative
     logos/google.png
     logos/sumo.png
     media/small_vid.mp4
-    media/vials.mp4)
+    media/vials.mp4
+    js/bench-loader.js
+    benchmarks-manifest.json)
   list(APPEND _design_translation_outputs "${_source_dir}/static/${_relative}")
 endforeach()
 set(_design_translation_stamp "${_output_root}/design-translation-check.stamp")

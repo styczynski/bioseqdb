@@ -1,0 +1,12 @@
+{
+  "_comment": "Real bench_framework artifacts fetched over raw HTTP. CI may update these raw paths when a newer sign-off report is published; never replace them with GitHub blob-page URLs.",
+  "sources": [
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bench/bench_v10_configuration.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bench/bench_e2e_configuration.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bioseq/io/io_bench_v10_configuration.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench/report_138.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench_e2e/report_159.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench_e2e/report_154.json",
+    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_io_bench/report_7.json"
+  ]
+}

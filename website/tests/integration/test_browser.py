@@ -14,8 +14,11 @@ harness:
     response;
   * launches pinned headless Chromium and aborts any non-loopback request so a
     generated page cannot depend on the network;
-  * loads the landing, a tutorial, and a reference page at the CONFIGURED mount
-    (e.g. /bioseqdb/v0.1/...);
+  * loads the landing, benchmark explorer, tutorials, and reference pages at the
+    CONFIGURED mount (e.g. /bioseqdb/v0.1/...);
+  * intercepts the benchmark explorer's production raw/API JSON requests with
+    supplied real bench artifacts, then exercises loading, rendered, reload,
+    responsive, tooltip, filtering/navigation, and failure states;
   * asserts the response carries the security-headers.txt contract (CSP incl.
     frame-ancestors, X-Content-Type-Options, Referrer-Policy, Permissions-Policy);
   * asserts the meta Content-Security-Policy is present and there is exactly one
@@ -91,6 +94,17 @@ _DESIGN_PALETTE = {
     "macro": "#c99bd6",
     "operator": "#cbd8e4",
 }
+_BENCHMARK_FIXTURES = _TESTS_ROOT / "fixtures" / "benchmark_artifacts"
+_BENCHMARK_FIXTURE_NAMES = (
+    "bench_v10_configuration.json",
+    "bench_e2e_configuration.json",
+    "io_bench_v10_configuration.json",
+    "report_138.json",
+    "report_159.json",
+    "report_154.json",
+    "report_7.json",
+)
+_BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com", "api.github.com"}
 
 
 class AssertionFail(Exception):
@@ -141,6 +155,7 @@ class _DesignParser(HTMLParser):
         for name in (
             "data-screen-label", "data-bodygrid", "data-search-wrap",
             "data-search-box", "data-rightrail", "data-term", "data-code",
+            "data-bgrid", "data-bnav", "data-ctrls", "data-footcols",
         ):
             if name in values:
                 suffix = values[name] if values[name] else "first"
@@ -192,7 +207,11 @@ class _DesignParser(HTMLParser):
 
 
 def _read_design_contract(design_source: Path) -> dict[str, dict[str, dict[str, str]]]:
-    files = {"landing": design_source / "index.html", "docs": design_source / "docs.html"}
+    files = {
+        "landing": design_source / "index.html",
+        "docs": design_source / "docs.html",
+        "benchmarks": design_source / "benchmarks.html",
+    }
     contract: dict[str, dict[str, dict[str, str]]] = {}
     for label, path in files.items():
         _check(path.is_file(), f"supplied {label} design is missing: {path}")
@@ -214,6 +233,11 @@ def _read_design_contract(design_source: Path) -> dict[str, dict[str, dict[str, 
             "id:doc-search", "id:search-dd", "data-bodygrid:first",
             "data-search-wrap:first", "data-search-box:first", "data-rightrail:first",
             "data-term:first", "data-code:first",
+        ),
+        "benchmarks": (
+            "data-screen-label:BioseqDB benchmarks", "id:bhead",
+            "data-bgrid:first", "data-bnav:first", "data-ctrls:first",
+            "data-footcols:first",
         ),
     }
     for label, keys in required.items():
@@ -419,6 +443,66 @@ def _assert_authored_content_contract(version: str) -> None:
     landing = landing_path.read_text(encoding="utf-8")
     _check(not re.search(r"temporary|placeholder|lorem|symbol_count", landing, re.I),
            "landing examples contain disabled or prototype content")
+
+
+def _load_benchmark_fixture_contract(site: Path) -> dict:
+    """Bind browser interception to the supplied, genuine bench artifacts."""
+    fixture_paths = {
+        name: _BENCHMARK_FIXTURES / name for name in _BENCHMARK_FIXTURE_NAMES
+    }
+    for path in fixture_paths.values():
+        _check(path.is_file(), f"benchmark browser fixture is missing: {path}")
+    artifacts = {name: path.read_bytes() for name, path in fixture_paths.items()}
+    documents = {name: json.loads(body) for name, body in artifacts.items()}
+    for name in _BENCHMARK_FIXTURE_NAMES[:3]:
+        config = documents[name]
+        _check("params" in config and "test_cases" in config,
+               f"benchmark fixture {name} is not a real bench configuration")
+    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
+        _check(isinstance(documents[name].get("benchmarks"), dict)
+               and bool(documents[name]["benchmarks"]),
+               f"benchmark fixture {name} has no real benchmark results")
+    model_keys = {
+        key
+        for name in _BENCHMARK_FIXTURE_NAMES[:3]
+        for key, value in documents[name].items()
+        if isinstance(value, dict) and isinstance(value.get("matrix"), dict)
+    }
+    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
+        model_keys.update(documents[name]["benchmarks"])
+    report = documents["report_154.json"]
+    benchmarks = report.get("benchmarks", {})
+    benchmark_key, benchmark = next(iter(benchmarks.items()))
+    _check(bool(benchmark.get("execution_tuples")),
+           f"benchmark report fixture {benchmark_key} has no execution tuples")
+
+    manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
+    _check(len(manifest_paths) == 1,
+           f"expected one published benchmarks-manifest.json, got {manifest_paths}")
+    manifest = json.loads(manifest_paths[0].read_text(encoding="utf-8"))
+    sources = manifest if isinstance(manifest, list) else manifest.get("sources", [])
+    _check(isinstance(sources, list) and bool(sources),
+           "published benchmark manifest has no production JSON sources")
+    production_names: list[str] = []
+    for source in sources:
+        value = source if isinstance(source, str) else source.get("url", "")
+        parsed = urlsplit(value)
+        _check(parsed.scheme == "https" and parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
+               f"benchmark manifest source is not a production raw/API URL: {value}")
+        _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
+               f"benchmark manifest uses a GitHub HTML blob URL: {value}")
+        production_names.append(Path(parsed.path).name)
+    _check(tuple(production_names) == _BENCHMARK_FIXTURE_NAMES,
+           f"benchmark manifest sources {production_names} do not match the supplied "
+           f"artifact set {list(_BENCHMARK_FIXTURE_NAMES)}")
+
+    return {
+        "artifacts": artifacts,
+        "key": benchmark_key,
+        "title": benchmark.get("title") or benchmark_key,
+        "benchmark_count": len(model_keys),
+        "sources": sources,
+    }
 
 
 def _load_static_contract(site: Path, base_path: str, version: str,
@@ -628,6 +712,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
 
     design = _read_design_contract(design_source)
     _assert_translator_declaration_parity(site, design_source)
+    benchmarks = _load_benchmark_fixture_contract(site)
     return {
         "model": model,
         "tutorials": by_slug,
@@ -637,6 +722,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
             base_path, f"{version}/{tooltip_paths[0].name}"),
         "tooltip_records": tooltip_records,
         "design": design,
+        "benchmarks": benchmarks,
     }
 
 
@@ -682,6 +768,7 @@ def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
             f"{base}/{version}/tutorials/highway_runtime_dispatch/",
         "reference": f"{base}/{version}/reference/",
         "entity": _discover_entity_route(site, base, version),
+        "benchmarks": f"{base}/benchmarks/",
         "error": f"{base}/error.html",
     }
 
@@ -1237,16 +1324,28 @@ def _assert_tutorial_sidebar(page, base_path: str, version: str) -> None:
 def _assert_literal_design_structure(page, label: str, design: dict) -> None:
     if label == "landing":
         source = design["landing"]
-        prefix = "ld-s"
+        prefixes = ("ld-s",)
         pairs = (
             ("data-screen-label:BioseqDB landing",
              '[data-screen-label="BioseqDB landing"]'),
             ("id:nav", "#nav"), ("id:annotate", "#annotate"),
             ("id:workflow", "#workflow"), ("id:cta", "#cta"),
         )
+    elif label == "benchmarks":
+        source = design["benchmarks"]
+        prefixes = ("bd-s", "bm-s", "bench-")
+        pairs = (
+            ("data-screen-label:BioseqDB benchmarks",
+             '[data-screen-label="BioseqDB benchmarks"]'),
+            ("id:bhead", "#bhead"),
+            ("data-bgrid:first", "[data-bgrid]"),
+            ("data-bnav:first", "[data-bnav]"),
+            ("data-ctrls:first", "[data-ctrls]"),
+            ("data-footcols:first", "[data-footcols]"),
+        )
     else:
         source = design["docs"]
-        prefix = "dd-s"
+        prefixes = ("dd-s",)
         pairs = (
             ("data-screen-label:BioseqDB documentation",
              '[data-screen-label="BioseqDB documentation"]'),
@@ -1264,7 +1363,7 @@ def _assert_literal_design_structure(page, label: str, design: dict) -> None:
                f"{label}: {selector} tag {tag} differs from supplied design "
                f"{source[source_key]['tag']}")
         classes = node.get_attribute("class") or ""
-        _check(any(name.startswith(prefix) for name in classes.split()),
+        _check(any(name.startswith(prefixes) for name in classes.split()),
                f"{label}: {selector} is not backed by translated design declarations")
 
 
@@ -1341,6 +1440,29 @@ def _exercise_design_style_parity(page, label: str, design: dict) -> None:
             ("color", "paddingTop", "paddingBottom", "borderTopWidth",
              "borderTopColor"),
             "landing live hero result accent cell")
+        return
+
+    if label == "benchmarks":
+        records = design["benchmarks"]
+        _compare_design_style(
+            page, "#bhead", records["id:bhead"],
+            ("position", "top", "zIndex", "backgroundColor",
+             "borderBottomWidth", "borderBottomColor", "backdropFilter"),
+            "benchmark header")
+        _compare_design_style(
+            page, "[data-bgrid]", records["data-bgrid:first"],
+            ("display", "alignItems"), "benchmark body grid")
+        _compare_design_style(
+            page, "[data-bnav]", records["data-bnav:first"],
+            ("position", "top", "height", "overflowY", "paddingTop",
+             "paddingRight", "paddingBottom", "paddingLeft",
+             "borderRightWidth", "borderRightColor"),
+            "benchmark navigation rail")
+        _compare_design_style(
+            page, "[data-ctrls]", records["data-ctrls:first"],
+            ("display", "gap", "marginTop", "paddingTop", "paddingRight",
+             "paddingBottom", "paddingLeft", "borderTopWidth", "borderRadius"),
+            "benchmark filter grid")
         return
 
     records = design["docs"]
@@ -1618,13 +1740,181 @@ def _exercise_reduced_motion(page) -> None:
     page.reload(wait_until="networkidle")
 
 
+def _wait_for_benchmark_fetch_gate(page) -> None:
+    pending = 0
+    for _ in range(120):
+        pending = page.evaluate(
+            "() => window.__bioseqBenchmarkFetchGate?.pending.length || 0")
+        if pending:
+            return
+        page.wait_for_timeout(25)
+    raise AssertionFail(
+        "benchmark loader never requested a production raw/API JSON artifact")
+
+
+def _release_benchmark_fetches(page) -> None:
+    page.evaluate("() => window.__releaseBioseqBenchmarkFetches()")
+    try:
+        page.locator('[data-screen-label="BioseqDB benchmarks"] h1').wait_for(
+            state="visible", timeout=5000)
+    except Exception as error:  # noqa: BLE001
+        raise AssertionFail(f"benchmark real-data model did not render: {error}")
+
+
+def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
+                         base_path: str, version: str) -> None:
+    """Exercise the copied benchmark shell against intercepted real artifacts."""
+    benchmark = contract["benchmarks"]
+    _check((page.locator("h1").inner_text()).strip() == benchmark["title"],
+           "benchmark heading is not derived from the supplied report artifact")
+    _check(benchmark["key"] in page.locator("main").inner_text(),
+           f"rendered benchmark model is missing real key {benchmark['key']}")
+    _check(f"{benchmark['benchmark_count']} benchmarks" in
+           page.locator("#bhead").inner_text(),
+           "benchmark status does not reflect the complete supplied artifact model")
+    _check(page.locator("[data-bnav]").count() == 1,
+           "benchmark model has no copied navigation rail")
+    _check(page.locator("[data-bnav]", has_text=benchmark["key"]).count() == 1,
+           "benchmark navigation was not populated from the real artifacts")
+    expected_header_routes = {
+        "Docs": _public_route(base_path, f"{version}/"),
+        "Product": _public_route(base_path, ""),
+        "Benchmarks": _public_route(base_path, "benchmarks/"),
+    }
+    for text_value, expected_route in expected_header_routes.items():
+        link = page.locator("#bhead nav a", has_text=text_value)
+        _check(link.count() == 1
+               and urlsplit(link.get_attribute("href") or "").path == expected_route,
+               f"benchmark {text_value} navigation does not preserve mount "
+               f"{expected_route}")
+
+    controls = page.locator("[data-ctrls] select")
+    _check(controls.count() == 4,
+           f"benchmark comparison requires four filters, got {controls.count()}")
+    for index in range(controls.count()):
+        _check(controls.nth(index).locator("option").count() >= 1,
+               f"benchmark filter {index} has no model-derived options")
+    metric = controls.nth(0)
+    _check(metric.locator("option").count() > 1,
+           "real benchmark report did not populate multiple metric filters")
+    metric_value = metric.locator("option").nth(1).get_attribute("value") or ""
+    metric.select_option(metric_value)
+    page.wait_for_function(
+        "metric => document.body.textContent.includes(metric)", metric_value)
+    _check(metric.input_value() == metric_value,
+           "benchmark metric filter did not retain its selected value")
+    statistic = controls.nth(1)
+    _check(statistic.locator("option[value='P01']").count() == 1,
+           "benchmark statistic filter lost the P01 option")
+    statistic.select_option("P01")
+    page.wait_for_function(
+        "() => document.body.textContent.includes('P01 of')")
+    _check("P01 of" in page.locator("main").inner_text(),
+           "benchmark statistic filter did not update the rendered table note")
+    baseline = controls.nth(3)
+    if baseline.locator("option").count() > 1:
+        baseline_value = baseline.locator("option").nth(1).get_attribute("value") or ""
+        baseline.select_option(baseline_value)
+        page.wait_for_function(
+            "value => document.body.textContent.includes('baseline ' + value)",
+            baseline_value)
+        _check(baseline.input_value() == baseline_value,
+               "benchmark baseline filter did not retain its selected value")
+    direction = page.get_by_role("button", name="↑ higher is better")
+    _check(direction.count() == 1, "benchmark direction filter is missing")
+    direction.click()
+
+    test_cases = page.locator("[data-bnav] a", has_text="Test cases").first
+    _check(test_cases.count() == 1, "benchmark Test cases navigation is missing")
+    test_cases.click()
+    _check("Test cases" in page.locator("main").inner_text(),
+           "benchmark sidebar navigation did not render the Test cases view")
+    comparison = page.locator("[data-bnav] a", has_text="Comparison").first
+    comparison.click()
+    _check(page.locator("[data-ctrls]").count() == 1,
+           "benchmark sidebar navigation did not restore the Comparison view")
+
+    # The first tbody cell can be the optional group-heading colspan cell. Pick
+    # a measured result cell, which is the surface carrying the distribution
+    # tooltip contract from the supplied component.
+    hover_target = page.locator("main table tbody tr td:nth-child(2)").first
+    _check(hover_target.count() == 1,
+           "benchmark comparison table has no model-derived cell to inspect")
+    hover_target.hover()
+    tooltip_texts: list[str] = []
+    for _ in range(120):
+        tooltip_texts = page.evaluate(
+            """() => [...document.body.querySelectorAll('*')]
+              .filter((node) => {
+                const style = getComputedStyle(node);
+                return style.position === 'fixed' &&
+                  style.pointerEvents === 'none' && Number(style.opacity) > 0;
+              })
+              .map((node) => (node.textContent || '').trim())
+              .filter(Boolean)""")
+        if tooltip_texts:
+            break
+        page.wait_for_timeout(25)
+    _check(bool(tooltip_texts),
+           "hovering a real benchmark cell did not expose its distribution tooltip")
+
+    page.evaluate("() => window.__closeBioseqBenchmarkFetchGate()")
+    page.get_by_role("button", name="Reload").click()
+    loading = page.get_by_text("Fetching benchmark artifacts…", exact=True)
+    try:
+        loading.wait_for(state="visible", timeout=3000)
+    except Exception as error:  # noqa: BLE001
+        raise AssertionFail(f"benchmark Reload did not restore loading state: {error}")
+    _wait_for_benchmark_fetch_gate(page)
+    _release_benchmark_fetches(page)
+
+    remote = [url for url in request_urls
+              if (urlsplit(url).hostname or "") not in _LOOPBACK_HOSTS]
+    benchmark_json = [url for url in remote
+                      if urlsplit(url).hostname in _BENCHMARK_REMOTE_HOSTS]
+    _check(bool(benchmark_json),
+           "benchmark browser run made no production raw/API JSON requests")
+    blob_requests = [url for url in remote
+                     if urlsplit(url).hostname == "github.com"
+                     and "/blob/" in urlsplit(url).path]
+    _check(not blob_requests,
+           f"benchmark loader requested GitHub HTML blob pages: {blob_requests}")
+    requested_names = {Path(urlsplit(url).path).name for url in benchmark_json}
+    _check(requested_names == set(_BENCHMARK_FIXTURE_NAMES),
+           f"benchmark loader requested {sorted(requested_names)}, expected the full "
+           f"production artifact set {list(_BENCHMARK_FIXTURE_NAMES)}")
+    for url in benchmark_json:
+        parsed = urlsplit(url)
+        _check(parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
+               f"benchmark JSON request used an unexpected host: {url}")
+        _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
+               f"benchmark JSON request used a GitHub HTML blob page: {url}")
+
+
+def _exercise_benchmark_failure(page, remote_state: dict[str, bool]) -> None:
+    """Reload with valid HTTP JSON that has no recognised artifact shape."""
+    remote_state["failure"] = True
+    page.evaluate("() => window.__closeBioseqBenchmarkFetchGate()")
+    page.get_by_role("button", name="Reload").click()
+    _wait_for_benchmark_fetch_gate(page)
+    page.evaluate("() => window.__releaseBioseqBenchmarkFetches()")
+    failure = page.get_by_text("No benchmark data reachable", exact=True)
+    try:
+        failure.wait_for(state="visible", timeout=5000)
+    except Exception as error:  # noqa: BLE001
+        raise AssertionFail(f"benchmark failure state did not render: {error}")
+    _check(page.locator('[data-screen-label="BioseqDB benchmarks"] h1').count() == 0,
+           "benchmark failure state retained a stale rendered model")
+    remote_state["failure"] = False
+
+
 def _exercise_responsive(page, label: str) -> None:
     """Responsive layout (§15.3/§20): no horizontal overflow and the key landmarks
     are present at each required visual width."""
     for width in (360, 768, 1024, 1440):
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(120)
-        if width == 360 and label != "landing":
+        if width == 360 and label not in ("landing", "benchmarks"):
             menu = page.locator("[data-menu]")
             backdrop = page.locator("[data-backdrop]")
             _check(menu.count() == 1 and menu.is_visible()
@@ -1638,16 +1928,37 @@ def _exercise_responsive(page, label: str) -> None:
             _check(menu.get_attribute("aria-expanded") == "false"
                    and not backdrop.is_visible(),
                    f"{label}: Escape did not close the docs drawer")
+        if label == "benchmarks":
+            columns = page.locator("[data-bgrid]").evaluate(
+                "node => getComputedStyle(node).gridTemplateColumns")
+            nav_position = page.locator("[data-bnav]").evaluate(
+                "node => getComputedStyle(node).position")
+            control_columns = page.locator("[data-ctrls]").evaluate(
+                "node => getComputedStyle(node).gridTemplateColumns")
+            if width <= 1080:
+                _check(nav_position == "static" and " " not in columns.strip(),
+                       f"benchmarks: shell did not collapse at width {width}: "
+                       f"nav={nav_position}, columns={columns}")
+            else:
+                _check(nav_position == "sticky" and " " in columns.strip(),
+                       f"benchmarks: desktop shell lost its navigation rail at {width}")
+            expected_control_columns = 1 if width <= 640 else (2 if width <= 760 else 4)
+            _check(len(control_columns.split()) == expected_control_columns,
+                   f"benchmarks: expected {expected_control_columns} filter columns at "
+                   f"{width}, got {control_columns}")
         overflow = page.evaluate(
             "() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
         _check(overflow <= 1, f"{label}: {overflow}px horizontal overflow at width {width}")
-    _check(page.locator("header.site-header, header#nav, header#dnav").count() == 1,
+    _check(page.locator("header.site-header, header#nav, header#dnav, header#bhead").count() == 1,
            f"{label}: missing header landmark")
-    _check(page.locator("main#main, main#doc-main").count() == 1,
+    _check(page.locator(
+        "main#main, main#doc-main, "
+        "[data-screen-label='BioseqDB benchmarks'] main").count() == 1,
            f"{label}: missing main landmark")
     _check(page.locator(
         "footer.site-footer, main#main footer, "
-        "footer[data-screen-label='Docs · Footer']").count() == 1,
+        "footer[data-screen-label='Docs · Footer'], "
+        "[data-screen-label='BioseqDB benchmarks'] > footer").count() == 1,
            f"{label}: missing footer landmark")
     page.set_viewport_size({"width": 1280, "height": 900})
 
@@ -1662,19 +1973,69 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
     with api.sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         context = browser.new_context()
+        remote_state = {"failure": False}
 
-        # Enforce offline: abort any non-loopback request.
+        # Enforce offline except for production benchmark JSON endpoints. Those
+        # are intercepted with supplied real-artifact bytes so the acceptance
+        # run proves the production URL contract without depending on GitHub.
         def _guard(route):
-            host = urlsplit(route.request.url).hostname or ""
+            parsed = urlsplit(route.request.url)
+            host = parsed.hostname or ""
             if host in _LOOPBACK_HOSTS or host == server._host:
                 route.continue_()
+            elif host in _BENCHMARK_REMOTE_HOSTS:
+                if "/blob/" in parsed.path:
+                    route.abort()
+                    return
+                if remote_state["failure"]:
+                    body = b"{}"
+                else:
+                    name = Path(parsed.path).name
+                    body = contract["benchmarks"]["artifacts"].get(name)
+                    if body is None:
+                        route.abort()
+                        return
+                route.fulfill(
+                    status=200,
+                    body=body,
+                    headers={
+                        "access-control-allow-origin": "*",
+                        "cache-control": "no-store",
+                        "content-type": "application/json; charset=utf-8",
+                    },
+                )
             else:
                 route.abort()
 
         context.route("**/*", _guard)
+        context.add_init_script(
+            """(() => {
+              const nativeFetch = window.fetch.bind(window);
+              const gate = {open: false, pending: []};
+              window.__bioseqBenchmarkFetchGate = gate;
+              window.fetch = (input, init) => {
+                const raw = input instanceof Request ? input.url : String(input);
+                let url;
+                try { url = new URL(raw, location.href); } catch (_) {
+                  return nativeFetch(input, init);
+                }
+                const remote = url.hostname === 'raw.githubusercontent.com' ||
+                  url.hostname === 'api.github.com';
+                if (!remote || gate.open) return nativeFetch(input, init);
+                return new Promise((resolve, reject) => {
+                  gate.pending.push(() => nativeFetch(input, init).then(resolve, reject));
+                });
+              };
+              window.__releaseBioseqBenchmarkFetches = () => {
+                gate.open = true;
+                const queued = gate.pending.splice(0);
+                queued.forEach((start) => start());
+              };
+              window.__closeBioseqBenchmarkFetchGate = () => { gate.open = false; };
+            })();""")
         page = context.new_page()
         request_urls: list[str] = []
-        page.on("requestfinished", lambda request: request_urls.append(request.url))
+        page.on("request", lambda request: request_urls.append(request.url))
 
         console_errors: list[str] = []
         page.on("console", lambda msg: console_errors.append(f"{msg.type}: {msg.text}")
@@ -1685,10 +2046,22 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
             url = server.url_for(route)
             if verbose:
                 print(f"  navigating {label}: {url}")
-            response = page.goto(url, wait_until="networkidle")
+            wait_until = "domcontentloaded" if label == "benchmarks" else "networkidle"
+            response = page.goto(url, wait_until=wait_until)
             _check(response is not None, f"{label}: no response from {url}")
             _check(response.ok, f"{label}: HTTP {response.status} for {url}")
             _assert_headers(response, expected_headers)
+
+            if label == "benchmarks":
+                loading = page.get_by_text("Fetching benchmark artifacts…", exact=True)
+                try:
+                    loading.wait_for(state="visible", timeout=3000)
+                except Exception as error:  # noqa: BLE001
+                    raise AssertionFail(
+                        f"benchmark loading state was never observable: {error}")
+                _wait_for_benchmark_fetch_gate(page)
+                _release_benchmark_fetches(page)
+                page.wait_for_load_state("networkidle")
 
             meta = page.locator('meta[http-equiv="Content-Security-Policy"]')
             _check(meta.count() == 1, f"{label}: expected exactly one meta CSP")
@@ -1781,9 +2154,16 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_entity(page)
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=False)
+            if label == "benchmarks":
+                _assert_literal_design_structure(page, label, contract["design"])
+                _exercise_design_style_parity(page, label, contract["design"])
+                _exercise_benchmarks(
+                    page, request_urls, contract, base_path, version)
             _exercise_responsive(page, label)
             if label == "tutorial_similarity":
                 _exercise_prism_pixel_contract(page, contract["design"], artifact_dir)
+            if label == "benchmarks":
+                _exercise_benchmark_failure(page, remote_state)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))
@@ -1899,7 +2279,11 @@ def main(argv: list[str] | None = None) -> int:
                     "model_sha256": hashlib.sha256(args.model.read_bytes()).hexdigest(),
                     "design_sha256": {
                         name: hashlib.sha256((args.design_source / name).read_bytes()).hexdigest()
-                        for name in ("index.html", "docs.html")
+                        for name in (
+                            "index.html", "docs.html", "benchmarks.html",
+                            "bench-loader.js", "benchmarks-manifest.json",
+                            "support.js",
+                        )
                     },
                 },
                 indent=2,

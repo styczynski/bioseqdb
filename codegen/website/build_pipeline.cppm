@@ -3922,6 +3922,18 @@ void decorate_code_entity_ranges(
                + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
            "examples", landing_examples_json);
 
+    // Root benchmark explorer. Its shell and UI logic are mechanically derived
+    // from the supplied benchmark design; the external runtime fetches only the
+    // allowlisted raw/API JSON sources carried by the immutable static manifest.
+    render("benchmarks/index.html", "benchmarks.html.j2",
+           "{\"title\":" + json_text(config.title + " Benchmarks")
+               + ",\"description\":"
+               + json_text("Explore BioseqDB benchmark configurations and measured CI reports")
+               + ",\"canonical\":"
+               + json_text(canonical("benchmarks/index.html"))
+               + ",\"page_type\":" + json_text("benchmarks") + "}",
+           "", "");
+
     // Host-served not-found page. Version-agnostic root artifact.
     render("error.html", "error.html.j2",
            "{\"title\":" + json_text("Page not found")
@@ -4266,6 +4278,8 @@ void decorate_code_entity_ranges(
     };
     add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
                    config.short_description);
+    add_page_entry("page:benchmarks", "Benchmarks", "benchmarks/",
+                   "Interactive BioseqDB benchmark configurations and measured CI reports");
     add_page_entry("page:" + version + ":reference", "API Reference", version + "/reference/",
                    "Bioseq C++ and SQL API reference");
     add_page_entry("page:" + version + ":reference-cpp", "C++ Reference",
@@ -4294,7 +4308,8 @@ void decorate_code_entity_ranges(
     writer.emit(route("security-headers.txt"),
                 "Content-Security-Policy: default-src 'self'; script-src 'self'; "
                 "style-src 'self'; font-src 'self'; img-src 'self' data:; "
-                "media-src 'self'; connect-src 'self'; object-src 'none'; "
+                "media-src 'self'; connect-src 'self' https://raw.githubusercontent.com "
+                "https://api.github.com; object-src 'none'; "
                 "base-uri 'self'; form-action 'none'; frame-ancestors 'none'\n"
                 "X-Content-Type-Options: nosniff\n"
                 "Referrer-Policy: strict-origin-when-cross-origin\n"
