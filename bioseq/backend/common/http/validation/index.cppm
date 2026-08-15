@@ -1,3 +1,7 @@
+/**
+ * @file index.cppm
+ * @brief Allocation-free validation for HTTP field names, values, hosts, and targets.
+ */
 module;
 
 #include <algorithm>
@@ -44,7 +48,7 @@ is_invalid_request_target_byte(char character) noexcept {
 is_valid_header_value(std::string_view value) noexcept {
   return std::ranges::all_of(value, [](char character) {
     const auto byte = static_cast<unsigned char>(character);
-    return byte >= 0x20 && byte != 0x7f || character == '\t';
+    return (byte >= 0x20 && byte != 0x7f) || character == '\t';
   });
 }
 

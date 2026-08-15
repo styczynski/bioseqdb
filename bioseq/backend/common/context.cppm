@@ -283,6 +283,8 @@ public:
      * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the alignment scope unwinds.
+     * @throws std::bad_array_new_length When the requested byte count overflows.
+     * @warning The returned storage is uninitialized; the caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_align_array(std::size_t count) {
@@ -297,6 +299,8 @@ public:
      * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the chain scope unwinds.
+     * @throws std::bad_array_new_length When the requested byte count overflows.
+     * @warning The returned storage is uninitialized; the caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_chain_array(std::size_t count) {
@@ -311,6 +315,8 @@ public:
      * @tparam p_alignment Requested byte alignment, clamped to the element alignment.
      * @param[in] count Number of elements to allocate.
      * @return Span owned by the arena until the scratch scope unwinds.
+     * @throws std::bad_array_new_length When the requested byte count overflows.
+     * @warning The returned storage is uninitialized; the caller owns object initialization.
      */
     template <class p_value_type, std::size_t p_alignment = alignof(p_value_type)>
     [[nodiscard]] std::span<p_value_type> alloc_scratch_array(std::size_t count) {
@@ -514,6 +520,8 @@ private:
      * @param[in] count Number of elements to allocate.
      * @return Span over uninitialized context-owned storage.
      * @throws std::bad_array_new_length When `count * sizeof(p_value_type)` overflows.
+     * @warning Failure of an oversize aligned allocation logs and aborts; failure to
+     *          extend the heap tracker releases the new block and propagates.
      */
     template <class p_value_type, std::size_t p_alignment, class p_arena_type>
     [[nodiscard]] std::span<p_value_type> allocate_array(

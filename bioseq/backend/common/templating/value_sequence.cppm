@@ -23,7 +23,10 @@ struct value_sequence {
     /// Type shared by every value in the sequence.
     using value_type = p_element_type;
 
-    /// Returns the number of compile-time values.
+    /**
+     * @brief Returns the number of compile-time values.
+     * @return Size of `p_values`.
+     */
     [[nodiscard]] static constexpr std::size_t size() noexcept {
         return sizeof...(p_values);
     }

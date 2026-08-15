@@ -37,6 +37,10 @@ concept chain_arguments_are_references =
 
 /**
  * @brief Adapts an integral-constant dispatch callback to a chain continuation.
+ * @tparam p_result_type Result returned by the leaf.
+ * @tparam p_parameter_type Shared runtime-parameter type.
+ * @tparam p_continuation_type Remaining chain stage.
+ * @tparam p_target_type Type of the value selected by this step.
  */
 template <class p_result_type,
           class p_parameter_type,
@@ -46,7 +50,14 @@ struct continuation_adapter {
     /// Next stage in the dispatch chain.
     p_continuation_type continuation;
 
-    /** Forwards one selected compile-time value into the continuation. */
+    /**
+     * @brief Forwards one selected compile-time value into the continuation.
+     * @tparam p_value Selected compile-time value.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
+     * @param[in] parameters Shared runtime parameters.
+     * @param[in,out] arguments Reference arguments forwarded without ownership transfer.
+     * @return Result produced by the remaining chain and leaf.
+     */
     template <p_target_type p_value, class... p_argument_types>
     BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
     p_result_type operator()(
@@ -83,8 +94,10 @@ struct dispatch_chain<p_result_type, p_leaf_type, p_parameter_type> {
     /**
      * @brief Invokes the leaf with all previously selected values.
      * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param arguments Reference arguments forwarded to the leaf.
+     * @return Result produced by the leaf.
      */
     template <auto... p_pinned_values, class... p_argument_types>
         requires detail_dispatch_chain::chain_arguments_are_references<
@@ -112,10 +125,20 @@ struct dispatch_chain<
     p_parameter_type,
     p_head_step,
     p_remaining_steps...> {
-    /** Carries previously selected values into the remainder of the chain. */
+    /**
+     * @brief Carries previously selected values into the remainder of the chain.
+     * @tparam p_pinned_values Values selected by preceding steps.
+     */
     template <auto... p_pinned_values>
     struct continuation {
-        /** Selects one value and resumes the remaining steps. */
+        /**
+         * @brief Selects one value and resumes the remaining steps.
+         * @tparam p_value Value selected by the current step.
+         * @tparam p_argument_types Reference argument types forwarded to the leaf.
+         * @param[in] parameters Shared runtime parameters.
+         * @param[in,out] arguments Reference arguments forwarded without ownership transfer.
+         * @return Result produced by the remaining chain and leaf.
+         */
         template <auto p_value, class... p_argument_types>
         BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
         p_result_type run(
@@ -137,8 +160,10 @@ struct dispatch_chain<
     /**
      * @brief Selects the head-step value and resumes the chain.
      * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param arguments Reference arguments forwarded through every step.
+     * @return Result produced by the remaining chain and leaf.
      */
     template <auto... p_pinned_values, class... p_argument_types>
         requires detail_dispatch_chain::chain_arguments_are_references<
@@ -191,9 +216,15 @@ struct enum_step {
 
     /**
      * @brief Dispatches the runtime field and resumes the chain.
+     * @tparam p_result_type Result returned by the leaf.
+     * @tparam p_parameter_type Shared runtime-parameter type.
+     * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_continuation_type Remaining chain stage.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param continuation Next chain stage.
      * @param arguments Reference arguments forwarded through the chain.
+     * @return Result produced by the remaining chain and leaf.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -206,12 +237,12 @@ struct enum_step {
         p_continuation_type continuation,
         p_argument_types&&... arguments)
     {
-        using adapter_type = detail_dispatch_chain::continuation_adapter<
+        using continuation_adapter_type = detail_dispatch_chain::continuation_adapter<
             p_result_type,
             p_parameter_type,
             p_continuation_type,
             target_t>;
-        adapter_type adapter{continuation};
+        continuation_adapter_type adapter{continuation};
         if constexpr (std::is_same_v<p_result_type, void>) {
             dispatch_exact_value_or_default_void<target_t, default_value>(
                 typename p_registry_type::value_list{},
@@ -254,9 +285,15 @@ struct bucket_step {
 
     /**
      * @brief Dispatches the runtime field and resumes the chain.
+     * @tparam p_result_type Result returned by the leaf.
+     * @tparam p_parameter_type Shared runtime-parameter type.
+     * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_continuation_type Remaining chain stage.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param continuation Next chain stage.
      * @param arguments Reference arguments forwarded through the chain.
+     * @return Result produced by the remaining chain and leaf.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -269,12 +306,12 @@ struct bucket_step {
         p_continuation_type continuation,
         p_argument_types&&... arguments)
     {
-        using adapter_type = detail_dispatch_chain::continuation_adapter<
+        using continuation_adapter_type = detail_dispatch_chain::continuation_adapter<
             p_result_type,
             p_parameter_type,
             p_continuation_type,
             target_t>;
-        adapter_type adapter{continuation};
+        continuation_adapter_type adapter{continuation};
         return dispatch_smallest_not_less<p_result_type, target_t>(
             typename p_registry_type::value_list{},
             p_registry_type::read_field(parameters, arguments...),
@@ -307,9 +344,15 @@ struct dependent_bucket_step {
 
     /**
      * @brief Dispatches against the bucket set for prior selected values.
+     * @tparam p_result_type Result returned by the leaf.
+     * @tparam p_parameter_type Shared runtime-parameter type.
+     * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_continuation_type Remaining chain stage.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param continuation Next chain stage.
      * @param arguments Reference arguments forwarded through the chain.
+     * @return Result produced by the remaining chain and leaf.
      */
     template <class p_result_type,
               class p_parameter_type,
@@ -322,12 +365,12 @@ struct dependent_bucket_step {
         p_continuation_type continuation,
         p_argument_types&&... arguments)
     {
-        using adapter_type = detail_dispatch_chain::continuation_adapter<
+        using continuation_adapter_type = detail_dispatch_chain::continuation_adapter<
             p_result_type,
             p_parameter_type,
             p_continuation_type,
             target_t>;
-        adapter_type adapter{continuation};
+        continuation_adapter_type adapter{continuation};
         return dispatch_smallest_not_less<p_result_type, target_t>(
             typename p_registry_type::template value_list_for<
                 p_pinned_values...>{},
@@ -359,9 +402,15 @@ struct guarded_step {
 
     /**
      * @brief Delegates active dispatch to the wrapped step.
+     * @tparam p_result_type Result returned by the leaf.
+     * @tparam p_parameter_type Shared runtime-parameter type.
+     * @tparam p_pinned_values Values selected by preceding steps.
+     * @tparam p_continuation_type Remaining chain stage.
+     * @tparam p_argument_types Reference argument types forwarded to the leaf.
      * @param parameters Shared runtime parameters.
      * @param continuation Next chain stage.
      * @param arguments Reference arguments forwarded through the chain.
+     * @return Result produced by the wrapped step, remaining chain, and leaf.
      */
     template <class p_result_type,
               class p_parameter_type,

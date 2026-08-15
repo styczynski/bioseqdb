@@ -44,7 +44,17 @@ struct type_list {
 
 namespace detail_runtime_dispatch {
 
-/** Walks a non-empty type pack and invokes the handler for the first match. */
+/**
+ * @brief Walks a non-empty type pack and invokes the handler for the first match.
+ * @tparam p_index_type Cursor type supplied to the probe.
+ * @tparam p_handler_type Templated handler type.
+ * @tparam p_probe_type Probe type exposing `matches` and `on_no_match`.
+ * @tparam p_head_type Type tested at the current cursor.
+ * @tparam p_remaining_types Types tested recursively after the head.
+ * @param[in,out] handler Handler invoked for the first matching type.
+ * @param[in,out] probe Match policy and no-match observer.
+ * @param[in] cursor Zero-based index of `p_head_type`.
+ */
 template <class p_index_type, class p_handler_type, class p_probe_type,
           class p_head_type, class... p_remaining_types>
 BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
@@ -71,7 +81,17 @@ constexpr void dispatch_first_matching_type_impl(
     }
 }
 
-/** Walks a non-empty type pack and returns the first extracted value. */
+/**
+ * @brief Walks a non-empty type pack and returns the first extracted value.
+ * @tparam p_index_type Cursor type supplied to the probe.
+ * @tparam p_result_type Extracted value type.
+ * @tparam p_probe_type Probe type exposing `extract`.
+ * @tparam p_head_type Type tested at the current cursor.
+ * @tparam p_remaining_types Types tested recursively after the head.
+ * @param[in,out] probe Extraction policy.
+ * @param[in] cursor Zero-based index of `p_head_type`.
+ * @return First extracted value, or `std::nullopt` when no type matches.
+ */
 template <class p_index_type, class p_result_type, class p_probe_type,
           class p_head_type, class... p_remaining_types>
 BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
@@ -96,7 +116,20 @@ constexpr std::optional<p_result_type> find_first_matching_type_impl(
     }
 }
 
-/** Selects an exact value or a declared default from a non-empty value pack. */
+/**
+ * @brief Selects an exact value or a declared default from a non-empty value pack.
+ * @tparam p_result_type Callable result type.
+ * @tparam p_value_type Dispatched value type.
+ * @tparam p_default_value Value selected after the final candidate misses.
+ * @tparam p_head_value Candidate tested by this recursion step.
+ * @tparam p_remaining_values Candidates tested after the head.
+ * @tparam p_function_type Callable receiving the selected integral constant.
+ * @tparam p_argument_types Additional forwarded argument types.
+ * @param[in] runtime_value Runtime value to match.
+ * @param[in,out] function Callable shared by every recursion step.
+ * @param[in,out] arguments Arguments forwarded to the callable.
+ * @return Callable result for the exact match or declared default.
+ */
 template <class p_result_type, class p_value_type,
           p_value_type p_default_value,
           p_value_type p_head_value,
@@ -130,7 +163,19 @@ p_result_type dispatch_exact_value_or_default_impl(
     }
 }
 
-/** Selects the first value not less than the input from an ordered value pack. */
+/**
+ * @brief Selects the first value not less than the input from an ordered value pack.
+ * @tparam p_result_type Callable result type.
+ * @tparam p_value_type Dispatched value type.
+ * @tparam p_head_value Candidate tested by this recursion step.
+ * @tparam p_remaining_values Candidates tested after the head.
+ * @tparam p_function_type Callable receiving the selected integral constant.
+ * @tparam p_argument_types Additional forwarded argument types.
+ * @param[in] runtime_value Runtime lower bound.
+ * @param[in,out] function Callable shared by every recursion step.
+ * @param[in,out] arguments Arguments forwarded to the callable.
+ * @return Callable result for the selected bucket.
+ */
 template <class p_result_type, class p_value_type,
           p_value_type p_head_value,
           p_value_type... p_remaining_values,
@@ -170,8 +215,8 @@ p_result_type dispatch_smallest_not_less_impl(
  * @tparam p_type_pack `type_list` specialization in search order.
  * @tparam p_handler_type Templated handler type.
  * @tparam p_probe_type Probe type exposing `matches` and `on_no_match`.
- * @param handler Handler invoked as `operator()<matched_type>()`.
- * @param probe Match policy receiving the zero-based cursor.
+ * @param[in,out] handler Handler invoked as `operator()<matched_type>()`.
+ * @param[in,out] probe Match policy receiving the zero-based cursor.
  */
 template <class p_index_type, class p_type_pack,
           class p_handler_type, class p_probe_type>
@@ -204,7 +249,7 @@ constexpr void dispatch_first_matching_type(
  * @tparam p_result_type Extracted value type.
  * @tparam p_type_pack `type_list` specialization in search order.
  * @tparam p_probe_type Probe type exposing `extract`.
- * @param probe Extraction policy receiving the zero-based cursor.
+ * @param[in,out] probe Extraction policy receiving the zero-based cursor.
  * @return The first extracted value, or `std::nullopt` when none matches.
  */
 template <class p_index_type, class p_result_type,
@@ -236,9 +281,12 @@ constexpr std::optional<p_result_type> find_first_matching_type(
  * @tparam p_value_type Dispatched value type.
  * @tparam p_default_value Fallback value, which must occur in `p_values`.
  * @tparam p_values Candidate values in probe order.
- * @param runtime_value Runtime value to match.
- * @param function Callable receiving the selected integral constant.
- * @param arguments Additional arguments forwarded to the callable.
+ * @tparam p_function_type Callable type.
+ * @tparam p_argument_types Additional forwarded argument types.
+ * @param[in] values Candidate sequence used for compile-time selection.
+ * @param[in] runtime_value Runtime value to match.
+ * @param[in,out] function Callable receiving the selected integral constant.
+ * @param[in,out] arguments Additional arguments forwarded to the callable.
  * @return Callable result for the selected value.
  */
 template <class p_result_type, class p_value_type,
@@ -248,11 +296,12 @@ template <class p_result_type, class p_value_type,
           class... p_argument_types>
 BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR
 p_result_type dispatch_exact_value_or_default(
-    value_sequence<p_value_type, p_values...>,
+    value_sequence<p_value_type, p_values...> values,
     p_value_type runtime_value,
     p_function_type&& function,
     p_argument_types&&... arguments)
 {
+    static_cast<void>(values);
     static_assert(
         sizeof...(p_values) > 0u,
         "dispatch_exact_value_or_default: empty value pack");
@@ -274,9 +323,12 @@ p_result_type dispatch_exact_value_or_default(
  * @tparam p_value_type Dispatched value type.
  * @tparam p_default_value Fallback value, which must occur in `p_values`.
  * @tparam p_values Candidate values in probe order.
- * @param runtime_value Runtime value to match.
- * @param function Callable receiving the selected integral constant.
- * @param arguments Additional arguments forwarded to the callable.
+ * @tparam p_function_type Callable type.
+ * @tparam p_argument_types Additional forwarded argument types.
+ * @param[in] values Candidate sequence used for compile-time selection.
+ * @param[in] runtime_value Runtime value to match.
+ * @param[in,out] function Callable receiving the selected integral constant.
+ * @param[in,out] arguments Additional arguments forwarded to the callable.
  */
 template <class p_value_type,
           p_value_type p_default_value,
@@ -285,11 +337,12 @@ template <class p_value_type,
           class... p_argument_types>
 BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 void dispatch_exact_value_or_default_void(
-    value_sequence<p_value_type, p_values...>,
+    value_sequence<p_value_type, p_values...> values,
     p_value_type runtime_value,
     p_function_type&& function,
     p_argument_types&&... arguments)
 {
+    static_cast<void>(values);
     static_assert(
         sizeof...(p_values) > 0u,
         "dispatch_exact_value_or_default_void: empty value pack");
@@ -311,9 +364,12 @@ void dispatch_exact_value_or_default_void(
  * @tparam p_result_type Callable result type.
  * @tparam p_value_type Dispatched value type.
  * @tparam p_values Ordered candidate values.
- * @param runtime_value Runtime lower bound.
- * @param function Callable receiving the selected integral constant.
- * @param arguments Additional arguments forwarded to the callable.
+ * @tparam p_function_type Callable type.
+ * @tparam p_argument_types Additional forwarded argument types.
+ * @param[in] values Ordered candidate sequence used for compile-time selection.
+ * @param[in] runtime_value Runtime lower bound.
+ * @param[in,out] function Callable receiving the selected integral constant.
+ * @param[in,out] arguments Additional arguments forwarded to the callable.
  * @return Callable result for the selected value. Inputs above the final value
  *         dispatch to that final value.
  */
@@ -323,11 +379,12 @@ template <class p_result_type, class p_value_type,
           class... p_argument_types>
 BIOSEQ_TEMPLATE_DISPATCH_NODISCARD_INLINE_ATTR
 p_result_type dispatch_smallest_not_less(
-    value_sequence<p_value_type, p_values...>,
+    value_sequence<p_value_type, p_values...> values,
     p_value_type runtime_value,
     p_function_type&& function,
     p_argument_types&&... arguments)
 {
+    static_cast<void>(values);
     static_assert(
         sizeof...(p_values) > 0u,
         "dispatch_smallest_not_less: empty value pack");

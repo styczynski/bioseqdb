@@ -17,6 +17,7 @@ export namespace bioseq::common::templating {
  * @brief Reports whether a type occurs in a type pack.
  * @tparam p_needle_type Type to find.
  * @tparam p_haystack_types Types to search.
+ * @return `true` when `p_needle_type` occurs at least once.
  */
 template <class p_needle_type, class... p_haystack_types>
 [[nodiscard]] consteval bool contains_type_pack() noexcept {
@@ -31,13 +32,17 @@ template <class p_needle_type, class... p_haystack_types>
 template <class p_needle_type, class p_tuple_type>
 struct contains_type_in_tuple : std::false_type {};
 
-/// Specialization of `contains_type_in_tuple` for `std::tuple`.
+/**
+ * @brief Specializes tuple membership for an explicit element pack.
+ * @tparam p_needle_type Type to find.
+ * @tparam p_element_types Tuple element types to search.
+ */
 template <class p_needle_type, class... p_element_types>
 struct contains_type_in_tuple<
     p_needle_type,
     std::tuple<p_element_types...>>
     : std::bool_constant<
-          (std::is_same_v<p_needle_type, p_element_types> || ...)> {};
+          contains_type_pack<p_needle_type, p_element_types...>()> {};
 
 /**
  * @brief Value form of `contains_type_in_tuple`.
@@ -87,7 +92,11 @@ template <class p_needle_type, class... p_haystack_types>
 template <class p_needle_type, class p_tuple_type>
 struct index_of_type_in_tuple;
 
-/// Specialization of `index_of_type_in_tuple` for `std::tuple`.
+/**
+ * @brief Specializes checked tuple indexing for an explicit element pack.
+ * @tparam p_needle_type Type to find.
+ * @tparam p_element_types Tuple element types to search.
+ */
 template <class p_needle_type, class... p_element_types>
 struct index_of_type_in_tuple<
     p_needle_type,
@@ -110,6 +119,7 @@ inline constexpr std::size_t index_of_type_v =
  * @brief Reports whether a structural value occurs in a value pack.
  * @tparam p_needle_value Value to find.
  * @tparam p_haystack_values Values to search.
+ * @return `true` when `p_needle_value` occurs at least once.
  */
 template <auto p_needle_value, auto... p_haystack_values>
 [[nodiscard]] consteval bool contains_value_pack() noexcept {
@@ -138,12 +148,20 @@ template <auto p_needle_value, auto... p_haystack_values>
 
 namespace detail_pack_search {
 
-/** Reports whether one tuple element differs from every following element. */
+/**
+ * @brief Reports whether one tuple element differs from every following element.
+ * @tparam p_element_index Index of the element being compared.
+ * @tparam p_tuple_type Tuple whose element types are inspected.
+ * @tparam p_following_offsets Zero-based offsets after `p_element_index`.
+ * @param[in] following_offsets Compile-time sequence selecting following elements.
+ * @return `true` when the selected element type occurs nowhere later in the tuple.
+ */
 template <std::size_t p_element_index, class p_tuple_type,
           std::size_t... p_following_offsets>
 [[nodiscard]] consteval bool element_differs_from_following(
-    std::index_sequence<p_following_offsets...>) noexcept
+    std::index_sequence<p_following_offsets...> following_offsets) noexcept
 {
+    static_cast<void>(following_offsets);
     using element_type =
         std::tuple_element_t<p_element_index, p_tuple_type>;
     return ((!std::is_same_v<
@@ -153,11 +171,18 @@ template <std::size_t p_element_index, class p_tuple_type,
             p_tuple_type>>) && ...);
 }
 
-/** Reports whether all tuple elements have distinct types. */
+/**
+ * @brief Reports whether all selected tuple elements have distinct types.
+ * @tparam p_tuple_type Tuple whose element types are inspected.
+ * @tparam p_element_indices Tuple indices to use as first-occurrence candidates.
+ * @param[in] element_indices Compile-time sequence selecting tuple elements.
+ * @return `true` when no selected element type occurs later in the tuple.
+ */
 template <class p_tuple_type, std::size_t... p_element_indices>
 [[nodiscard]] consteval bool unique_types_in_tuple_impl(
-    std::index_sequence<p_element_indices...>) noexcept
+    std::index_sequence<p_element_indices...> element_indices) noexcept
 {
+    static_cast<void>(element_indices);
     constexpr std::size_t tuple_size = std::tuple_size_v<p_tuple_type>;
     return (element_differs_from_following<
         p_element_indices,
@@ -182,6 +207,7 @@ inline constexpr bool unique_types_in_tuple_v =
 /**
  * @brief Reports whether every value in a pack is distinct.
  * @tparam p_values Structural values to inspect.
+ * @return `true` when every pack position holds a distinct value.
  */
 template <auto... p_values>
 [[nodiscard]] consteval bool unique_values_pack() noexcept {
