@@ -287,6 +287,8 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/execution_stats.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_dp.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_minimizers.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
@@ -894,6 +896,7 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # Highway target. Keep this explicit ownership list out of ordinary module globs.
 set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream_operations.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/highway_sequence_ops.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm"
@@ -903,7 +906,11 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_primitives.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_dp.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_traceback.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm"
@@ -2094,7 +2101,8 @@ bioseq_add_highway_codegen(
   PCM_ROOT "${BIOSEQ_HIGHWAY_GENERATED_ROOT}/pcm"
   SOURCE_RECORDS
     "simd_utils|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_utils.cppm|bioseq.highway.sources.simd_utils|simd_utils|simd_utils|"
-    "vector_stream|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm|bioseq.highway.sources.vector_stream|vector_stream|vector_stream|simd_utils"
+    "vector_stream_operations|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream_operations.cppm|bioseq.highway.sources.vector_stream_operations|vector_stream_operations|vector_stream|"
+    "vector_stream|${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/highway_vector_stream.cppm|bioseq.highway.sources.vector_stream|vector_stream|vector_stream|simd_utils,vector_stream_operations"
     "sequence_ops|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/highway_sequence_ops.cppm|bioseq.highway.sources.sequence_ops|sequence_ops|sequence_ops|simd_utils,vector_stream"
     "hasher_base|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_base_kernel.cppm|bioseq.highway.sources.hasher_base|hasher_base|hasher_base|sequence_ops,simd_utils"
     "hasher_lexic|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/highway_lexic_kernel.cppm|bioseq.highway.sources.hasher_lexic|hasher_lexic|hasher_lexic|hasher_base,simd_utils"
@@ -2103,8 +2111,12 @@ bioseq_add_highway_codegen(
     "minimizer_two_stack_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm|bioseq.highway.sources.minimizer_two_stack_nthash|minimizer_two_stack_nthash|minimizers|sequence_ops,hasher_base,hasher_lexic,hasher_minimap_int,simd_utils,vector_stream"
     "minimizer_bounded_nthash|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/bounded_nthash_kernel.cppm|bioseq.highway.sources.minimizer_bounded_nthash|minimizer_bounded_nthash|minimizers|sequence_ops,hasher_base,simd_utils,vector_stream"
     "alignment_utils|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils_kernel.cppm|bioseq.highway.sources.alignment_utils|alignment_utils|alignment|"
-    "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils"
-    "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|simd_utils,alignment_utils"
+    "ksw2_primitives|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_primitives.cppm|bioseq.highway.sources.ksw2_primitives|ksw2_primitives|alignment|"
+    "ksw2|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm|bioseq.highway.sources.ksw2|ksw2|alignment|alignment_utils,ksw2_primitives"
+    "block_aligner_dp|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_dp.cppm|bioseq.highway.sources.block_aligner_dp|block_aligner_dp|alignment|alignment_utils,simd_utils"
+    "block_aligner_traceback|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_traceback.cppm|bioseq.highway.sources.block_aligner_traceback|block_aligner_traceback|alignment|block_aligner_dp"
+    "block_aligner_certificates|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_certificates.cppm|bioseq.highway.sources.block_aligner_certificates|block_aligner_certificates|alignment|alignment_utils,block_aligner_dp"
+    "block_aligner|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm|bioseq.highway.sources.block_aligner|block_aligner|alignment|alignment_utils,block_aligner_certificates,block_aligner_dp,block_aligner_traceback"
     "ksw2_batched|${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm|bioseq.highway.sources.ksw2_batched|ksw2_batched|alignment|ksw2,alignment_utils"
     "prefilter|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm|bioseq.highway.sources.sneaky_snake|prefilter|common|simd_utils"
     "chaining|${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm|bioseq.highway.sources.chaining|chaining|chaining|simd_utils"
