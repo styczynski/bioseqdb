@@ -9,6 +9,28 @@ option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
   "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
 option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
   "Run the maintainer SQL negative/provenance fixture suite during the build" ON)
+option(BIOSEQ_TEST_INDEXES
+  "Compile the test-only indexing descriptors into the extension + test execs"
+  OFF)
+set(BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS "50" CACHE STRING
+  "Retry interval in milliseconds for a conditional vacuum truncate lock")
+set(BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS "4500" CACHE STRING
+  "Total timeout in milliseconds for a conditional vacuum truncate lock")
+foreach(_bioseq_vacuum_lock_value IN ITEMS
+    BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS
+    BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS)
+  if(NOT "${${_bioseq_vacuum_lock_value}}" MATCHES "^[1-9][0-9]*$"
+      OR ${${_bioseq_vacuum_lock_value}} GREATER 2147483647)
+    message(FATAL_ERROR
+      "${_bioseq_vacuum_lock_value} must be an integer from 1 through 2147483647")
+  endif()
+endforeach()
+if(BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS GREATER
+    BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS)
+  message(FATAL_ERROR
+    "BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS cannot exceed "
+    "BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS")
+endif()
 set(BIOSEQ_PG_BUILD_PROFILE_HEADER
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include/bioseq/pg_build_profile.h")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -142,6 +164,33 @@ file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 list(REMOVE_ITEM SRC_MOD_FILES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")
+_bioseq_build_config_bool(
+  "${BIOSEQ_TEST_INDEXES}" _bioseq_build_config_test_indexes)
+_bioseq_build_config_bool(
+  "${BIOSEQ_BUILD_EXTERNAL_API_CLIENTS}"
+  _bioseq_build_config_external_api_clients)
+_bioseq_build_config_cache_testing(
+  "${BIOSEQ_BUILD_CACHE}" "${BIOSEQ_CACHE_TESTING}"
+  _bioseq_build_config_cache_testing)
+bioseq_add_build_config_module(
+  TARGET bioseq_build_config
+  SOURCE "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm"
+  OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/generated/build_config"
+  PROFILE "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
+  TEST_INDEXES "${_bioseq_build_config_test_indexes}"
+  CACHE_TESTING "${_bioseq_build_config_cache_testing}"
+  EXTERNAL_API_CLIENTS "${_bioseq_build_config_external_api_clients}"
+  VACUUM_WAIT_MILLISECONDS
+    "${BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS}"
+  VACUUM_TIMEOUT_MILLISECONDS
+    "${BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS}"
+  OUT_MODULE BIOSEQ_BUILD_CONFIG_GENERATED_MODULE
+  OUT_COMPILE_CONTRACT BIOSEQ_BUILD_CONFIG_GENERATED_COMPILE_CONTRACT
+  OUT_MANIFEST BIOSEQ_BUILD_CONFIG_GENERATED_MANIFEST
+  OUT_STAMP BIOSEQ_BUILD_CONFIG_GENERATED_STAMP
+  OUT_SCHEDULER_UNIT_COUNT BIOSEQ_BUILD_CONFIG_SCHEDULER_UNIT_COUNT)
+list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS}
   ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
 
@@ -196,25 +245,7 @@ set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
 # the representation-erasure boundary.  Keep this list explicit: a new test is
 # not implicitly exempt merely because its filename ends in `_test.cpp`.
 set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer/replay_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_index_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_checked_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_minimizers_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_aligner_parity_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_sequence_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_pipeline_parity_test.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp)
 file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp
@@ -1492,6 +1523,8 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/fmtlog_backend.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/fmtlog_backend/core.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/fmtlog_backend/runtime.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/formatters.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
@@ -1733,6 +1766,7 @@ elseif(EXISTS "/usr/local/include/MoltenVK/mvk_private_api.h")
 endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
+  bioseq_build_config
   bioseq_memory_budget
   bioseq_runtime_core
   bioseq_sink_control_core
@@ -2409,6 +2443,7 @@ target_sources(bioseq_testing_support
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES
       "${CMAKE_CURRENT_LIST_DIR}/tests/support/indexing_storage_fakes.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/test_support.cppm"
@@ -2462,6 +2497,8 @@ set(BIOSEQ_UNIT_TEST_SUPPORT_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/support/test_event_listener.cpp")
 set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner/traceback_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner/routing_stats_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/edit_distance_accounting_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/chaining/simd_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/chaining/vulkan_test.cpp"
@@ -2525,7 +2562,10 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/parallelism/pool_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/error_admission_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/statistics_receipts_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/statistics_receipts/execution_receipts_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/statistics_receipts/aggregation_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/plan_geometry_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/plan_geometry/dispatch_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/segmented_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/vulkan_test.cpp"
@@ -2745,13 +2785,8 @@ if(NOT "${BIOSEQ_TYPED_PROBED_ENABLED_SOURCES}" STREQUAL
   message(FATAL_ERROR
     "Template-flatten probe and generator disagree on enabled scheduler units")
 endif()
-if(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "dna4_uint64")
-  set(_bioseq_typed_expected_count 7)
-elseif(BIOSEQ_TEMPLATE_FLATTEN_PROFILE STREQUAL "all_alphabets_uint64")
-  set(_bioseq_typed_expected_count 14)
-else()
-  set(_bioseq_typed_expected_count 56)
-endif()
+set(_bioseq_typed_expected_count
+  "${BIOSEQ_BUILD_CONFIG_SCHEDULER_UNIT_COUNT}")
 list(LENGTH BIOSEQ_TYPED_IMPLEMENTATION_UNITS
   BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT)
 if(NOT BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT EQUAL
@@ -3064,9 +3099,6 @@ set_target_properties(bioseq_sql_annotation_probe PROPERTIES
 
 # The collector receives the configured backend module closure and ignores
 # modules without bioseq_sql annotations.
-option(BIOSEQ_TEST_INDEXES
-  "Compile the test-only indexing descriptors into the extension + test execs"
-  OFF)
 set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/support/row_codec_runtime_test_support.cppm")
 set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULES
@@ -4989,6 +5021,7 @@ bioseq_add_postgresql_extension(
 # and restore the cross-target COMDAT/interposition hazard this boundary
 # removes.
 target_link_libraries(postgresql_bioseq PRIVATE
+  bioseq_build_config
   bioseq_pipeline_dispatch_owners)
 get_target_property(_bioseq_postgresql_direct_links
   postgresql_bioseq LINK_LIBRARIES)

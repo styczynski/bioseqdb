@@ -737,6 +737,7 @@ endif()
 # the returned bioseq_codegen / bioseq_codegen_project targets and never create
 # another ExternalProject.
 include(bioseq_codegen)
+include(bioseq_build_config_codegen)
 include(bioseq_highway_codegen)
 include(bioseq_template_flatten_codegen)
 if(BIOSEQ_BUILD_CORE)
@@ -770,6 +771,13 @@ if(BIOSEQ_BUILD_CORE)
     USES_TERMINAL)
 endif()
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
+  add_test(
+    NAME bioseq_build_config_mapping_contract
+    COMMAND "${CMAKE_COMMAND}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/build_config_mapping_test.cmake")
+  set_tests_properties(
+    bioseq_build_config_mapping_contract
+    PROPERTIES LABELS "core;unit;cmake;build_config")
   add_test(
     NAME bioseq_highway_header_closure_contract
     COMMAND "${CMAKE_COMMAND}"
@@ -807,7 +815,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
 endif()
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
-  list(APPEND _bioseq_codegen_components sql)
+  list(APPEND _bioseq_codegen_components sql build_config)
 endif()
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(APPEND _bioseq_codegen_components external)

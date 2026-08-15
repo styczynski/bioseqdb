@@ -18,6 +18,7 @@ module;
 #include <vector>
 export module bioseq.postgres.table:access_method_maintenance;
 
+import bioseq.build_config;
 import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.compression;
 import bioseq.common.logging;
@@ -75,13 +76,6 @@ struct pending_speculative_terminal_quarantine {
 
 static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
     std::declval<pending_speculative_source_map&>())));
-
-namespace {
-/** Retry interval for an opportunistic vacuum truncation lock. */
-constexpr int vacuum_truncate_lock_wait_interval_ms = 50;
-/** Total wait budget for an opportunistic vacuum truncation lock. */
-constexpr int vacuum_truncate_lock_timeout_ms = 4500;
-} // namespace
 
 static bool try_lock_relation_until_timeout(
     Relation rel, LOCKMODE lock_mode, int timeout, int retry_interval, bool acquire);
@@ -835,11 +829,12 @@ static void truncate_column_storage_tail(Relation rel, int elevel) {
      * Acquires AccessExclusiveLock conditionally so truncation cannot block or
      * deadlock behind the weaker lock already held by the caller.
      */
-    if (!try_lock_relation_until_timeout(rel,
-                                         AccessExclusiveLock,
-                                         vacuum_truncate_lock_timeout_ms,
-                                         vacuum_truncate_lock_wait_interval_ms,
-                                         false)) {
+    if (!try_lock_relation_until_timeout(
+            rel,
+            AccessExclusiveLock,
+            bioseq::build_config::bioseq_vacuum_truncate_lock_timeout_milliseconds,
+            bioseq::build_config::bioseq_vacuum_truncate_lock_wait_interval_milliseconds,
+            false)) {
         /*
          * We failed to establish the lock in the specified number of
          * retries. This means we give up truncating.

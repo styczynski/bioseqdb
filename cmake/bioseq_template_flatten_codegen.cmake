@@ -1,7 +1,16 @@
 include_guard(GLOBAL)
+include("${CMAKE_CURRENT_LIST_DIR}/bioseq_build_config_codegen.cmake")
 
 function(_bioseq_template_flatten_fail message_text)
   message(FATAL_ERROR "Bioseq template-flatten codegen: ${message_text}")
+endfunction()
+
+function(_bioseq_template_flatten_scheduler_count_error profile expected actual
+    output_variable)
+  string(CONCAT _message
+    "scheduler profile ${profile} must enable exactly "
+    "${expected} heavy units; got ${actual}")
+  set(${output_variable} "${_message}" PARENT_SCOPE)
 endfunction()
 
 function(_bioseq_template_flatten_json_quote value output_variable)
@@ -255,19 +264,14 @@ function(bioseq_template_flatten_probe)
     _bioseq_template_flatten_fail(
       "invalid primary OUTPUT_MODULE '${ARG_OUTPUT_MODULE}'")
   endif()
-  set(_bioseq_template_flatten_profiles
-    dna4_uint64
-    all_alphabets_uint64
-    all_coordinates
-    all_coordinates_adaptive_lengths
-    extended_kmer_coordinates
-    full_specialization)
-  list(FIND _bioseq_template_flatten_profiles "${ARG_PROFILE}"
-    _bioseq_template_flatten_profile_index)
-  if(_bioseq_template_flatten_profile_index EQUAL -1)
-    _bioseq_template_flatten_fail(
-      "unsupported semantic PROFILE '${ARG_PROFILE}'")
-  endif()
+  _bioseq_build_config_profile("${ARG_PROFILE}"
+    _bioseq_template_flatten_profile_index
+    _bioseq_template_flatten_all_alphabets
+    _bioseq_template_flatten_all_coordinates
+    _bioseq_template_flatten_adaptive_lengths
+    _bioseq_template_flatten_extended_coordinates
+    _bioseq_template_flatten_full_specialization
+    _bioseq_template_flatten_expected_scheduler_units)
 
   _bioseq_template_flatten_canonical_source(
     "${ARG_SOURCE}" SOURCE _source_path)
@@ -509,19 +513,14 @@ function(bioseq_template_flatten_probe)
   if(ARG_NAME STREQUAL "dispatch_processor_typed" AND
       _emission_policy STREQUAL "selector_api")
     list(LENGTH _enabled_ordinals _enabled_count)
-    if(ARG_PROFILE STREQUAL "dna4_uint64"
-        AND NOT _enabled_count EQUAL 7)
-      _bioseq_template_flatten_fail(
-        "scheduler profile dna4_uint64 must enable exactly 7 heavy units; got ${_enabled_count}")
-    elseif(ARG_PROFILE STREQUAL "all_alphabets_uint64"
-        AND NOT _enabled_count EQUAL 14)
-      _bioseq_template_flatten_fail(
-        "scheduler profile all_alphabets_uint64 must enable exactly 14 heavy units; got ${_enabled_count}")
-    elseif(NOT ARG_PROFILE STREQUAL "dna4_uint64"
-        AND NOT ARG_PROFILE STREQUAL "all_alphabets_uint64"
-        AND NOT _enabled_count EQUAL 56)
-      _bioseq_template_flatten_fail(
-        "scheduler profile ${ARG_PROFILE} must enable exactly 56 heavy units; got ${_enabled_count}")
+    if(NOT _enabled_count EQUAL
+        _bioseq_template_flatten_expected_scheduler_units)
+      _bioseq_template_flatten_scheduler_count_error(
+        "${ARG_PROFILE}"
+        "${_bioseq_template_flatten_expected_scheduler_units}"
+        "${_enabled_count}"
+        _scheduler_count_error)
+      _bioseq_template_flatten_fail("${_scheduler_count_error}")
     endif()
   endif()
 
