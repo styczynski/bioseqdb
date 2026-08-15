@@ -6,9 +6,14 @@ if(NOT TARGET bioseq_cache_test_context)
     "${CMAKE_CURRENT_BINARY_DIR}/support")
 endif()
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_BIOSEQ_LARGE_INPUT_E2E_TEST_SOURCES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 1)
 add_executable(bioseq_cache_bioseq_large_input_e2e_tests
   "${CMAKE_CURRENT_LIST_DIR}/../../support/cache_catch_runner.cpp"
-  bioseq_2gbp_cache_test.cpp)
+  ${BIOSEQ_CACHE_BIOSEQ_LARGE_INPUT_E2E_TEST_SOURCES})
 set_target_properties(
   bioseq_cache_bioseq_large_input_e2e_tests PROPERTIES
   CXX_STANDARD 26

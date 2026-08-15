@@ -6,30 +6,14 @@ if(NOT TARGET bioseq_cache_test_context)
     "${CMAKE_CURRENT_BINARY_DIR}/support")
 endif()
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_INTEGRATION_TEST_SOURCES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 22)
 add_executable(bioseq_cache_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/cache_catch_runner.cpp"
-  backend_recovery_test.cpp
-  bootstrap_recovery_test.cpp
-  concurrency_test.cpp
-  cross_database_test.cpp
-  exact_cache_test.cpp
-  install_security_test.cpp
-  isolation_failures_test.cpp
-  isolation_provider_validity_test.cpp
-  isolation_visibility_test.cpp
-  isolation_waiters_test.cpp
-  libpq_wire_observer_test.cpp
-  owner_liveness_test.cpp
-  planner_test.cpp
-  provider_reuse_faults_test.cpp
-  provider_test.cpp
-  security_policy_test.cpp
-  storage_lifecycle_test.cpp
-  transaction_and_dml_test.cpp
-  transactions_test.cpp
-  two_phase_commit_test.cpp
-  types_test.cpp
-  upper_plan_nodes_test.cpp)
+  ${BIOSEQ_CACHE_INTEGRATION_TEST_SOURCES})
 set_target_properties(bioseq_cache_integration_tests PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON

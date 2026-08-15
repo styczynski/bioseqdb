@@ -16,25 +16,14 @@ target_link_libraries(bioseq_cache_core
     bioseq_checked_arithmetic_core
     bioseq_memory_budget)
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_CORE_MODULES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  INCLUDE_PATTERNS "*.cppm"
+  EXPECTED_COUNT 16)
 target_sources(bioseq_cache_core
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}/.."
-    FILES
-      "${CMAKE_CURRENT_LIST_DIR}/index.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/wire.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/checked_math.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/state_machine.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/coverage.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/ttl.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/admission.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/readiness.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/provider_validation.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/column_format.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/reusable_registry.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/reusable_planning.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/write_observation.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/object_definition_dependencies.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/transition_ledger.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/dependency_directory.cppm")
+    FILES ${BIOSEQ_CACHE_CORE_MODULES})
 
 add_library(bioseq::cache_core ALIAS bioseq_cache_core)
