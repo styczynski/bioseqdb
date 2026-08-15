@@ -1,3 +1,7 @@
+/**
+ * @file sql_entities.cppm
+ * @brief SQL entity declarations for chunked generation storage.
+ */
 module;
 
 #include <cstdint>
