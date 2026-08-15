@@ -1645,6 +1645,28 @@ class PackageOptimizationContractTests(unittest.TestCase):
 
 
 class BuildAndStageContractTests(unittest.TestCase):
+    def test_cppast_overlay_receives_pinned_llvm_config(self) -> None:
+        build_script = (
+            PACKAGING_ROOT / "scripts" / "build_and_stage.sh"
+        ).read_text(encoding="utf-8")
+        cppast_port = (
+            REPOSITORY_ROOT / "overlays" / "cppast" / "portfile.cmake"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'export LLVM_CONFIG_BINARY="${llvm_root}/bin/llvm-config"',
+            build_script,
+        )
+        self.assertIn("DEFINED ENV{LLVM_CONFIG_BINARY}", cppast_port)
+        self.assertIn(
+            'EXISTS "$ENV{LLVM_CONFIG_BINARY}"',
+            cppast_port,
+        )
+        self.assertIn(
+            'set(_cppast_llvm_config "$ENV{LLVM_CONFIG_BINARY}")',
+            cppast_port,
+        )
+
     def test_build_revalidates_complete_package_cmake_profile(self) -> None:
         build_script = (
             PACKAGING_ROOT / "scripts" / "build_and_stage.sh"

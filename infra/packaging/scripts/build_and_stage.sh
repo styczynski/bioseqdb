@@ -106,6 +106,7 @@ export CMAKE_NAMED_ENV_TYPE=AWS_MACHINE_LINUX_CLANG22
 export BIOSEQ_LLVM_ROOT="${llvm_root}"
 export BIOSEQ_LIBCXX_MODULES_JSON="${libcxx_modules}"
 export BIOSEQ_CODEGEN_LLVM_CONFIG="${llvm_root}/bin/llvm-config"
+export LLVM_CONFIG_BINARY="${llvm_root}/bin/llvm-config"
 export BIOSEQ_CODEGEN_CLANG_BINARY="${llvm_root}/bin/clang++"
 export BIOSEQ_COMPILER_LAUNCHER="${compiler_launcher}"
 export BIOSEQ_COMPILER_RT_PRIORITY=1
