@@ -197,7 +197,7 @@ set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
 # not implicitly exempt merely because its filename ends in `_test.cpp`.
 set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
@@ -276,10 +276,21 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/stage_graph.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_execution.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_request_admission.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_scalar_highway.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_vulkan.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_projection.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution_plan_context.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution_scalar_highway.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution_vulkan.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution_results.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/shape_dispatch.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/entry_points.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented_planning.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented_finalization.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented_execution.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port_parts/results.cppm
@@ -2400,7 +2411,8 @@ target_sources(bioseq_testing_support
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/compact_hash32_direct_index/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/test_support.cppm"
       "${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/compact_direct/test_support.cppm"
-      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm")
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/test_support.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/support.cppm")
 target_link_libraries(bioseq_testing_support
   PUBLIC
     bioseq_modules_nopg
@@ -2487,7 +2499,12 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/parallelism/pool_test.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/error_admission_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/statistics_receipts_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/plan_geometry_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/segmented_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/gatekeeper_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/sneaky_snake_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/seeding/vulkan_test.cpp"
