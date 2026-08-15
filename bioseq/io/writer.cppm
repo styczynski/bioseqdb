@@ -1,52 +1,19 @@
 /**
  * @file writer.cppm
- * @brief Public entry point for the IO writer.
+ * @brief Concurrent FASTA and FASTQ writer.
  *
- * Holds the user-visible `sequence_writer` and `write_sequences_file`
- * interfaces plus the per-thread chunk pipeline.
- *
- * **Threading model.** Each producer thread owns a `producer_state`
- * (chunk buffer + scratch) keyed by thread ID. `write_record` /
- * `write_batch` decode + format directly into the thread-local chunk
- * with no synchronisation. When a chunk crosses the flush threshold
- * the producer reserves a disjoint output range via
- * `posix_pwrite_sink::reserve_offset` (atomic fetch-add — lock-free)
- * and pwrites the chunk into it without contention. POSIX `pwrite(2)`
- * with disjoint offset ranges does not interleave at the page-cache
- * level, so the resulting file is well-defined regardless of issue
- * order.
- *
- * **Decoder pipeline.** The dna4 fast path pulls 32-letter packed
- * uint64 words and emits 32 ASCII bytes per word via the
- * `bioseq::simd::HWY_NAMESPACE::decode_dna4_words_to_ascii` Highway
- * kernel; the dna5+uint8 path takes the symmetric
- * `decode_dna5_uint8_words_to_ascii`; other shapes use the scalar
- * `decode_words_to_ascii_scalar` path.
- *
- * **Line wrapping.** FASTA bodies can be wrapped at a configurable
- * width. Width zero leaves each body on one line. Wrapping is folded
- * into the decoder via the `_wrapped` variant: the SIMD path decodes
- * to a per-thread scratch then memcpys with newline injection; the
- * scalar path inlines the wrap directly.
- *
- * **Record ordering.** The writer does not preserve input record
- * order across producer threads (one thread's records land
- * contiguously inside its chunk, but two threads' chunks are ordered
- * by their `reserve_offset` issue order — i.e. roughly by who flushed
- * first). FASTA / FASTQ formats don't carry positional semantics so
- * this matches the parallel-reader contract. Single-threaded writers
- * preserve issue order trivially.
+ * Each producer formats records in private reusable storage and reserves a
+ * disjoint output range when flushing. Record order is preserved within one
+ * producer but not across concurrent producers.
  */
 module;
-
-#include <hwy/highway.h>
-
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <hwy/highway.h>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -82,7 +49,8 @@ struct writer_byte_buffer {
 
     /// Ensure capacity for `cap` bytes while preserving the live prefix.
     void reserve(std::size_t cap) {
-        if (cap <= capacity) return;
+        if (cap <= capacity)
+            return;
         auto new_data = std::make_unique_for_overwrite<std::uint8_t[]>(cap);
         if (size > 0) {
             std::memcpy(new_data.get(), data.get(), size);
@@ -92,7 +60,7 @@ struct writer_byte_buffer {
     }
 
     /// Reserve `bytes` bytes at the end and return a pointer to the
-    /// first new byte. Bytes are uninitialised; caller MUST overwrite
+    /// first new byte. Bytes are uninitialised and the caller must overwrite
     /// them before the next `extend` / `clear` / `pwrite` cycle.
     [[nodiscard]] std::uint8_t* extend(std::size_t bytes) {
         if (size + bytes > capacity) {
@@ -119,16 +87,20 @@ struct writer_byte_buffer {
     }
 
     /// Discard the live bytes without releasing the allocation.
-    void clear() noexcept { size = 0; }
+    void clear() noexcept {
+        size = 0;
+    }
 
     /// Return whether the buffer contains no live bytes.
-    [[nodiscard]] bool empty() const noexcept { return size == 0; }
+    [[nodiscard]] bool empty() const noexcept {
+        return size == 0;
+    }
 };
 
 /// Per-producer-thread state. Each thread fills its own `chunk` then
 /// flushes via `pwrite` at a sink-reserved offset. The state is
 /// allocated on first use per (writer, thread) and pinned for the
-/// writer's lifetime; the writer's destructor drains every active
+/// writer's lifetime. The writer's destructor drains every active
 /// producer.
 struct writer_producer_state {
     writer_byte_buffer chunk;          ///< current output bytes (not yet flushed)
@@ -136,12 +108,9 @@ struct writer_producer_state {
 };
 
 /// Thread-safe FASTA / FASTQ writer.
-template <sequence_alphabet p_alphabet,
-          sequence_file_format p_file_format>
-class sequence_writer {
-public:
-    using alphabet_config =
-        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> class sequence_writer {
+  public:
+    using alphabet_config = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
     using sequence_view = compact_sequence_view<alphabet_config>;
     using traits = typename compact_sequence_range<alphabet_config>::traits;
@@ -151,11 +120,10 @@ public:
     using sink_variant = std::variant<posix_pwrite_sink, mmap_pwrite_sink>;
 
     /// Open `path` for writing. When `options.output_capacity_hint`
-    /// is zero, uses the pwrite-based sink; otherwise pre-allocates
+    /// is zero it uses the pwrite-based sink, otherwise it pre-allocates
     /// the file to the hint and writes through a shared mapping.
     [[nodiscard]] static std::expected<sequence_writer, std::string>
-    open(std::string_view path,
-         const writer_options& options = default_writer_options) {
+    open(std::string_view path, const writer_options& options = default_writer_options) {
         sequence_writer writer;
         writer._options = options;
         if (options.output_capacity_hint == 0) {
@@ -163,26 +131,21 @@ public:
             if (!sink_or_err) {
                 return std::unexpected(std::move(sink_or_err.error()));
             }
-            writer._sink = std::make_unique<sink_variant>(
-                std::move(*sink_or_err));
+            writer._sink = std::make_unique<sink_variant>(std::move(*sink_or_err));
         } else {
-            auto sink_or_err = mmap_pwrite_sink::try_open(
-                path, options.output_capacity_hint);
+            auto sink_or_err = mmap_pwrite_sink::try_open(path, options.output_capacity_hint);
             if (!sink_or_err) {
                 return std::unexpected(std::move(sink_or_err.error()));
             }
-            writer._sink = std::make_unique<sink_variant>(
-                std::move(*sink_or_err));
+            writer._sink = std::make_unique<sink_variant>(std::move(*sink_or_err));
         }
         return writer;
     }
 
     sequence_writer() = default;
     sequence_writer(sequence_writer&& other) noexcept
-        : _sink(std::move(other._sink)),
-          _options(other._options),
-          _producers_mutex(std::make_unique<std::mutex>()),
-          _producers(std::move(other._producers)),
+        : _sink(std::move(other._sink)), _options(other._options),
+          _producers_mutex(std::make_unique<std::mutex>()), _producers(std::move(other._producers)),
           _failed(other._failed.load(std::memory_order_relaxed)),
           _error_mutex(std::make_unique<std::mutex>()),
           _first_error_message(std::move(other._first_error_message)) {
@@ -193,9 +156,7 @@ public:
             _sink = std::move(other._sink);
             _options = other._options;
             _producers = std::move(other._producers);
-            _failed.store(
-                other._failed.load(std::memory_order_relaxed),
-                std::memory_order_relaxed);
+            _failed.store(other._failed.load(std::memory_order_relaxed), std::memory_order_relaxed);
             _first_error_message = std::move(other._first_error_message);
             other._failed.store(false, std::memory_order_relaxed);
         }
@@ -206,7 +167,7 @@ public:
 
     ~sequence_writer() {
         // Drain every active producer's residual chunk. close() may
-        // have been called already; if so, _sink is null and this is
+        // have been called already. If so, _sink is null and this is
         // a no-op.
         if (_sink) {
             (void)close();
@@ -216,23 +177,22 @@ public:
     /// Append one record to the output. Thread-safe: many producers
     /// may call concurrently. Returns false if a previous flush
     /// errored.
-    [[nodiscard]] bool write_record(
-        std::string_view header,
-        const sequence_view& seq,
-        std::span<const std::uint8_t> quality = {}) {
-        if (_failed.load(std::memory_order_relaxed)) return false;
+    [[nodiscard]] bool write_record(std::string_view header,
+                                    const sequence_view& seq,
+                                    std::span<const std::uint8_t> quality = {}) {
+        if (_failed.load(std::memory_order_relaxed))
+            return false;
 
         auto& producer = acquire_producer_state();
-        const std::size_t total_letters =
-            seq.size() * letters_per_unit - seq.padding();
+        const std::size_t total_letters = seq.size() * letters_per_unit - seq.padding();
 
         if constexpr (p_file_format == sequence_file_format::fastq) {
-            if (_options.strict_fastq_quality_length &&
-                quality.size() != total_letters) {
-                stamp_error(fmt::format(
-                    "FASTQ quality length {} does not match sequence "
-                    "length {} for header '{}'",
-                    quality.size(), total_letters, header));
+            if (_options.strict_fastq_quality_length && quality.size() != total_letters) {
+                stamp_error(fmt::format("FASTQ quality length {} does not match sequence "
+                                        "length {} for header '{}'",
+                                        quality.size(),
+                                        total_letters,
+                                        header));
                 return false;
             }
         }
@@ -241,12 +201,13 @@ public:
         // chunk ends at a record boundary — never mid-header, mid-body,
         // or between header and body. With multi-thread writers, chunks
         // from different producers interleave on disk via pwrite at
-        // disjoint offsets; any non-record-aligned chunk would leave a
+        // disjoint offsets. Any non-record-aligned chunk would leave a
         // record split across threads' chunks, producing malformed
         // FASTQ on disk. Pre-record flushing keeps every produced byte
         // sequence valid.
         if (producer.chunk.size >= _options.flush_threshold_bytes) {
-            if (!flush_producer(producer)) return false;
+            if (!flush_producer(producer))
+                return false;
         }
 
         emit_header(producer.chunk, header);
@@ -264,8 +225,7 @@ public:
             dst[2] = static_cast<std::uint8_t>('\n');
             std::memcpy(dst + 3, quality.data(), qsize);
             if (pad_count > 0) {
-                std::memset(dst + 3 + qsize,
-                            static_cast<int>('!'), pad_count);
+                std::memset(dst + 3 + qsize, static_cast<int>('!'), pad_count);
             }
             dst[3 + total_qual_bytes] = static_cast<std::uint8_t>('\n');
         } else {
@@ -283,36 +243,33 @@ public:
     /// between slices so RSS never exceeds ~one slice + the chunk capacity.
     /// It flushes mid-record, so one producer must own the record until the
     /// call returns. Returns false on a prior or current flush error.
-    [[nodiscard]] bool write_record_streamed(
-        std::string_view header,
-        const sequence_view& seq,
-        std::size_t max_body_bp) {
-        if (_failed.load(std::memory_order_relaxed)) return false;
+    [[nodiscard]] bool write_record_streamed(std::string_view header,
+                                             const sequence_view& seq,
+                                             std::size_t max_body_bp) {
+        if (_failed.load(std::memory_order_relaxed))
+            return false;
 
         auto& producer = acquire_producer_state();
-        const std::size_t total_letters =
-            seq.size() * letters_per_unit - seq.padding();
+        const std::size_t total_letters = seq.size() * letters_per_unit - seq.padding();
 
         // Flush any pending bytes so the header begins a clean chunk (keeps
         // every flushed chunk record-aligned at the boundary).
         if (!producer.chunk.empty()) {
-            if (!flush_producer(producer)) return false;
+            if (!flush_producer(producer))
+                return false;
         }
         emit_header(producer.chunk, header);
 
         const std::size_t wrap_width =
-            (p_file_format == sequence_file_format::fasta)
-                ? _options.fasta_line_width
-                : 0;
+            (p_file_format == sequence_file_format::fasta) ? _options.fasta_line_width : 0;
         const std::size_t units_per_slice =
             std::max<std::size_t>(std::size_t{1}, max_body_bp / letters_per_unit);
         const std::size_t total_words = seq.size();
-        std::size_t line_position = 0;  // carried FASTA line-wrap state
+        std::size_t line_position = 0; // carried FASTA line-wrap state
 
         for (std::size_t word_cursor = 0; word_cursor < total_words;
              word_cursor += units_per_slice) {
-            const std::size_t slice_words =
-                std::min(units_per_slice, total_words - word_cursor);
+            const std::size_t slice_words = std::min(units_per_slice, total_words - word_cursor);
             const bool is_final = (word_cursor + slice_words == total_words);
             const std::size_t slice_letters =
                 slice_words * letters_per_unit - (is_final ? seq.padding() : 0);
@@ -320,34 +277,32 @@ public:
 
             if (wrap_width == 0) {
                 std::uint8_t* dst = producer.chunk.extend(slice_letters);
-                bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
-                    p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
-                        words_ptr, dst, slice_letters);
+                bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<p_alphabet,
+                                                                   storage_unit,
+                                                                   bits_per_char,
+                                                                   letters_per_unit>(
+                    words_ptr, dst, slice_letters);
             } else {
                 // Exact byte count the wrapped kernel writes for this slice:
                 // slice_letters + one '\n' per completed line.
-                const std::size_t newline_count =
-                    (line_position + slice_letters) / wrap_width;
+                const std::size_t newline_count = (line_position + slice_letters) / wrap_width;
                 producer.decode_scratch.clear();
-                std::uint8_t* scratch =
-                    producer.decode_scratch.extend(slice_letters);
-                std::uint8_t* dst =
-                    producer.chunk.extend(slice_letters + newline_count);
-                line_position = bioseq::simd::HWY_NAMESPACE::
-                    decode_words_to_ascii_wrapped<
-                        p_alphabet,
-                        storage_unit,
-                        bits_per_char,
-                        letters_per_unit>(
-                            words_ptr, slice_letters, wrap_width, line_position,
-                            scratch, dst);
+                std::uint8_t* scratch = producer.decode_scratch.extend(slice_letters);
+                std::uint8_t* dst = producer.chunk.extend(slice_letters + newline_count);
+                line_position =
+                    bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<p_alphabet,
+                                                                               storage_unit,
+                                                                               bits_per_char,
+                                                                               letters_per_unit>(
+                        words_ptr, slice_letters, wrap_width, line_position, scratch, dst);
             }
             // Flush this slice to disk before decoding the next — bounded RSS.
-            if (!flush_producer(producer)) return false;
+            if (!flush_producer(producer))
+                return false;
         }
 
         if constexpr (p_file_format == sequence_file_format::fastq) {
-            // No quality is supplied on the streamed path; emit a Phred-0
+            // No quality is supplied on the streamed path. Emit a Phred-0
             // ('!') quality of matching length in bounded chunks. (Quality is
             // dropped on bioseq.load anyway.) Layout: '\n' '+' '\n' <qual> '\n'.
             std::uint8_t* sep = producer.chunk.extend(3);
@@ -355,75 +310,67 @@ public:
             sep[1] = static_cast<std::uint8_t>('+');
             sep[2] = static_cast<std::uint8_t>('\n');
             std::size_t remaining = total_letters;
-            const std::size_t qual_chunk =
-                std::max<std::size_t>(std::size_t{1}, max_body_bp);
+            const std::size_t qual_chunk = std::max<std::size_t>(std::size_t{1}, max_body_bp);
             while (remaining > 0) {
                 const std::size_t take = std::min(qual_chunk, remaining);
                 std::uint8_t* q = producer.chunk.extend(take);
                 std::memset(q, static_cast<int>('!'), take);
                 remaining -= take;
-                if (!flush_producer(producer)) return false;
+                if (!flush_producer(producer))
+                    return false;
             }
             producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
         } else {
             producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
         }
-        if (!flush_producer(producer)) return false;
+        if (!flush_producer(producer))
+            return false;
         return true;
     }
 
     /// Append a whole batch while retaining decoder state across records.
     [[nodiscard]] bool write_batch(const batch_t& batch) {
-        if (_failed.load(std::memory_order_relaxed)) return false;
+        if (_failed.load(std::memory_order_relaxed))
+            return false;
 
         auto& producer = acquire_producer_state();
         const std::size_t record_count = batch.size();
-        for (std::size_t record_index = 0; record_index < record_count;
-             ++record_index) {
+        for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
             const auto seq_view = batch.sequence(record_index);
             const auto header_view = batch.header(record_index);
             const std::size_t total_letters =
                 seq_view.size() * letters_per_unit - seq_view.padding();
 
-            // Pre-record flush: drains the chunk if it crossed the
-            // flush threshold during the previous record. Doing it
-            // BEFORE writing this record's header means every flushed
-            // chunk ends at a record boundary. The previous design
-            // checked AFTER writing the record, then again INSIDE
-            // emit_body; with multi-thread writers, the latter could
-            // flush a chunk that ended just after the new record's
-            // header (with its body still pending), leaving on-disk
-            // chunks where one thread's @hdr line is followed by a
-            // different thread's records — producing malformed FASTQ.
+            // Flush before the next header so each chunk ends at a record
+            // boundary. Flushing from body emission could separate one
+            // producer's header from its body.
             if (producer.chunk.size >= _options.flush_threshold_bytes) {
-                if (!flush_producer(producer)) return false;
+                if (!flush_producer(producer))
+                    return false;
             }
 
             if constexpr (p_file_format == sequence_file_format::fastq) {
                 const auto quality_view = batch.quality(record_index);
-                if (_options.strict_fastq_quality_length &&
-                    quality_view.size() != total_letters) {
-                    stamp_error(fmt::format(
-                        "FASTQ quality length {} does not match "
-                        "sequence length {} for header '{}'",
-                        quality_view.size(), total_letters, header_view));
+                if (_options.strict_fastq_quality_length && quality_view.size() != total_letters) {
+                    stamp_error(fmt::format("FASTQ quality length {} does not match "
+                                            "sequence length {} for header '{}'",
+                                            quality_view.size(),
+                                            total_letters,
+                                            header_view));
                     return false;
                 }
                 emit_header(producer.chunk, header_view);
                 emit_body(producer, seq_view, total_letters);
-                const std::size_t qsize = std::min(quality_view.size(),
-                                                    total_letters);
+                const std::size_t qsize = std::min(quality_view.size(), total_letters);
                 const std::size_t pad_count = total_letters - qsize;
                 const std::size_t total_qual_bytes = qsize + pad_count;
-                std::uint8_t* dst = producer.chunk.extend(
-                    3 + total_qual_bytes + 1);
+                std::uint8_t* dst = producer.chunk.extend(3 + total_qual_bytes + 1);
                 dst[0] = static_cast<std::uint8_t>('\n');
                 dst[1] = static_cast<std::uint8_t>('+');
                 dst[2] = static_cast<std::uint8_t>('\n');
                 std::memcpy(dst + 3, quality_view.data(), qsize);
                 if (pad_count > 0) {
-                    std::memset(dst + 3 + qsize,
-                                static_cast<int>('!'), pad_count);
+                    std::memset(dst + 3 + qsize, static_cast<int>('!'), pad_count);
                 }
                 dst[3 + total_qual_bytes] = static_cast<std::uint8_t>('\n');
             } else {
@@ -443,24 +390,26 @@ public:
     /// while iterating but does NOT serialise against producers
     /// already past the mutex inside an in-flight write.
     [[nodiscard]] bool flush() {
-        if (_failed.load(std::memory_order_relaxed)) return false;
+        if (_failed.load(std::memory_order_relaxed))
+            return false;
         std::lock_guard guard{*_producers_mutex};
         for (auto& entry : _producers) {
             auto& producer = *entry.second;
-            if (!flush_producer(producer)) return false;
+            if (!flush_producer(producer))
+                return false;
         }
         return true;
     }
 
     /// Flush + close the underlying file. Idempotent.
     [[nodiscard]] std::expected<void, std::string> close() {
-        if (!_sink) return {};
+        if (!_sink)
+            return {};
         if (!flush()) {
             std::lock_guard guard{*_error_mutex};
             return std::unexpected(_first_error_message);
         }
-        auto close_outcome = std::visit(
-            [](auto& sink) { return sink.close(); }, *_sink);
+        auto close_outcome = std::visit([](auto& sink) { return sink.close(); }, *_sink);
         _sink.reset();
         return close_outcome;
     }
@@ -468,15 +417,14 @@ public:
     /// Total bytes reserved through the sink so far. After all
     /// flushes complete this matches the on-disk file size.
     [[nodiscard]] std::uint64_t bytes_reserved() const noexcept {
-        if (!_sink) return 0;
-        return std::visit(
-            [](const auto& sink) { return sink.reserved_byte_count(); },
-            *_sink);
+        if (!_sink)
+            return 0;
+        return std::visit([](const auto& sink) { return sink.reserved_byte_count(); }, *_sink);
     }
 
-private:
+  private:
     /// Fetch (or lazily create) this thread's producer state. The
-    /// producer state lives in the writer's `_producers` map; the
+    /// producer state lives in the writer's `_producers` map. The
     /// only contention is on the map's mutex on each access (a single
     /// hash lookup — bounded cost).
     ///
@@ -502,12 +450,10 @@ private:
 
     /// Append the FASTA `>` / FASTQ `@` sigil + header + newline to
     /// `chunk`. Single bulk extend to amortise the size update.
-    inline void emit_header(writer_byte_buffer& chunk,
-                             std::string_view header) {
-        constexpr std::uint8_t sigil =
-            (p_file_format == sequence_file_format::fasta)
-                ? static_cast<std::uint8_t>('>')
-                : static_cast<std::uint8_t>('@');
+    inline void emit_header(writer_byte_buffer& chunk, std::string_view header) {
+        constexpr std::uint8_t sigil = (p_file_format == sequence_file_format::fasta)
+                                           ? static_cast<std::uint8_t>('>')
+                                           : static_cast<std::uint8_t>('@');
         std::uint8_t* dst = chunk.extend(1 + header.size() + 1);
         dst[0] = sigil;
         std::memcpy(dst + 1, header.data(), header.size());
@@ -529,17 +475,16 @@ private:
     /// the chunk is empty (or contains only complete records) before
     /// each new record begins.
     inline void emit_body(writer_producer_state& producer,
-                           const sequence_view& seq,
-                           std::size_t total_letters) {
-        if (total_letters == 0) return;
+                          const sequence_view& seq,
+                          std::size_t total_letters) {
+        if (total_letters == 0)
+            return;
         const std::size_t wrap_width =
-            (p_file_format == sequence_file_format::fasta)
-                ? _options.fasta_line_width
-                : 0;
+            (p_file_format == sequence_file_format::fasta) ? _options.fasta_line_width : 0;
         if (wrap_width == 0) {
             std::uint8_t* dst = producer.chunk.extend(total_letters);
-            bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
-                p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
+            bioseq::simd::HWY_NAMESPACE::
+                decode_words_to_ascii<p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
                     seq.data(), dst, total_letters);
             return;
         }
@@ -550,34 +495,34 @@ private:
         producer.decode_scratch.clear();
         std::uint8_t* scratch = producer.decode_scratch.extend(total_letters);
         std::uint8_t* dst = producer.chunk.extend(output_size);
-        (void)bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<
-            p_alphabet, storage_unit, bits_per_char, letters_per_unit>(
-                seq.data(),
-                total_letters,
-                wrap_width,
-                /*letters_in_current_line=*/0,
-                scratch,
-                dst);
+        (void)bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<p_alphabet,
+                                                                         storage_unit,
+                                                                         bits_per_char,
+                                                                         letters_per_unit>(
+            seq.data(),
+            total_letters,
+            wrap_width,
+            /*letters_in_current_line=*/0,
+            scratch,
+            dst);
     }
 
     /// Drain a producer's chunk to the sink at a sink-reserved
     /// offset. The producer's chunk is reset on success.
     [[nodiscard]] bool flush_producer(writer_producer_state& producer) {
-        if (producer.chunk.empty()) return true;
+        if (producer.chunk.empty())
+            return true;
         const std::size_t bytes_to_write = producer.chunk.size;
         const std::uint64_t base_offset = std::visit(
-            [bytes_to_write](auto& sink) {
-                return sink.reserve_offset(bytes_to_write);
-            }, *_sink);
+            [bytes_to_write](auto& sink) { return sink.reserve_offset(bytes_to_write); }, *_sink);
         const auto outcome = std::visit(
             [&producer, bytes_to_write, base_offset](auto& sink) {
-                return sink.write_at(
-                    producer.chunk.data.get(), bytes_to_write, base_offset);
-            }, *_sink);
+                return sink.write_at(producer.chunk.data.get(), bytes_to_write, base_offset);
+            },
+            *_sink);
         if (outcome.has_error) {
-            stamp_error(std::visit([](const auto& sink) {
-                return sink.last_error_message();
-            }, *_sink));
+            stamp_error(
+                std::visit([](const auto& sink) { return sink.last_error_message(); }, *_sink));
             return false;
         }
         producer.chunk.clear();
@@ -590,47 +535,43 @@ private:
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = std::move(msg);
-            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}",
+                                             _first_error_message);
         }
     }
     void stamp_error(const std::string& msg) {
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = msg;
-            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<logging_level::error>("[bioseq_io.writer] write failed: {}",
+                                             _first_error_message);
         }
     }
 
     std::unique_ptr<sink_variant> _sink;
     writer_options _options{};
-    std::unique_ptr<std::mutex> _producers_mutex =
-        std::make_unique<std::mutex>();
-    std::unordered_map<std::thread::id,
-                        std::unique_ptr<writer_producer_state>> _producers;
+    std::unique_ptr<std::mutex> _producers_mutex = std::make_unique<std::mutex>();
+    std::unordered_map<std::thread::id, std::unique_ptr<writer_producer_state>> _producers;
     std::atomic<bool> _failed{false};
-    std::unique_ptr<std::mutex> _error_mutex =
-        std::make_unique<std::mutex>();
+    std::unique_ptr<std::mutex> _error_mutex = std::make_unique<std::mutex>();
     std::string _first_error_message;
 };
 
-/// One-shot convenience: open a writer, push every batch from
-/// `batches` into it, close. Returns the count of records written or
-/// the first error.
+/// Open a writer, write every batch, close it, and return the record count.
+/// Returns the first error without replacing its diagnostic.
 template <sequence_alphabet p_alphabet,
           sequence_file_format p_file_format,
           typename p_path,
           typename p_batch_range>
-[[nodiscard]] std::expected<std::size_t, std::string> write_sequences_file(
-    p_path&& path,
-    p_batch_range&& batches,
-    const writer_options& options = default_writer_options) {
+[[nodiscard]] std::expected<std::size_t, std::string>
+write_sequences_file(p_path&& path,
+                     p_batch_range&& batches,
+                     const writer_options& options = default_writer_options) {
     static_assert(std::convertible_to<p_path, std::string_view>,
                   "path must be convertible to std::string_view");
-    const std::string_view path_view = std::string_view{
-        std::forward<p_path>(path)};
+    const std::string_view path_view = std::string_view{std::forward<p_path>(path)};
 
-    auto writer_or_err = sequence_writer<p_alphabet, p_file_format>::open(
-        path_view, options);
+    auto writer_or_err = sequence_writer<p_alphabet, p_file_format>::open(path_view, options);
     if (!writer_or_err) {
         return std::unexpected(std::move(writer_or_err.error()));
     }
@@ -643,8 +584,7 @@ template <sequence_alphabet p_alphabet,
             if (!close_result) {
                 return std::unexpected(std::move(close_result.error()));
             }
-            return std::unexpected(
-                std::string{"write_batch failed (see writer log)"});
+            return std::unexpected(std::string{"write_batch failed (see writer log)"});
         }
         records_written += batch.size();
     }
@@ -655,4 +595,4 @@ template <sequence_alphabet p_alphabet,
     return records_written;
 }
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

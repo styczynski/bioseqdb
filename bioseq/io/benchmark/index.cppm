@@ -1,13 +1,12 @@
 /**
  * @file index.cppm
- * @brief Public orchestration for the seven sequence IO benchmark blocks.
+ * @brief Orchestrates the configured sequence I/O benchmark blocks.
  */
 module;
 
-#include <simdjson.h>
-
 #include <functional>
 #include <map>
+#include <simdjson.h>
 #include <string>
 #include <string_view>
 
@@ -45,69 +44,62 @@ int run(int argc, char** argv) {
 
     using bioseq::bench::framework::create_benchmark;
 
-    using resource_estimator = std::function<run_constraints(std::string_view,
-                                                    std::string_view,
-                                                    simdjson::dom::element)>;
-    using reader_builder = std::function<reader_input(std::string_view,
-                                                    std::string_view,
-                                                    simdjson::dom::element,
-                                                    const run_constraints&)>;
-    using reader_runner = std::function<io_measurement(std::string_view,
-                                                const parameter_map&,
-                                                const reader_input&)>;
+    using resource_estimator =
+        std::function<run_constraints(std::string_view, std::string_view, simdjson::dom::element)>;
+    using reader_builder = std::function<reader_input(
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
+    using reader_runner =
+        std::function<io_measurement(std::string_view, const parameter_map&, const reader_input&)>;
     using reader_evaluator = std::function<std::map<std::string, double>(
-        std::string_view, const parameter_map&,
-        const reader_input&, const io_measurement&)>;
-    using reader_cleanup = std::function<void(std::string_view,
-                                                std::string_view,
-                                                simdjson::dom::element,
-                                                const reader_input&)>;
+        std::string_view, const parameter_map&, const reader_input&, const io_measurement&)>;
+    using reader_cleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element, const reader_input&)>;
 
-    using writer_builder = std::function<writer_input(std::string_view,
-                                                    std::string_view,
-                                                    simdjson::dom::element,
-                                                    const run_constraints&)>;
-    using writer_runner = std::function<io_measurement(std::string_view,
-                                                const parameter_map&,
-                                                const writer_input&)>;
+    using writer_builder = std::function<writer_input(
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
+    using writer_runner =
+        std::function<io_measurement(std::string_view, const parameter_map&, const writer_input&)>;
     using writer_evaluator = std::function<std::map<std::string, double>(
-        std::string_view, const parameter_map&,
-        const writer_input&, const io_measurement&)>;
-    using writer_cleanup = std::function<void(std::string_view,
-                                                std::string_view,
-                                                simdjson::dom::element,
-                                                const writer_input&)>;
+        std::string_view, const parameter_map&, const writer_input&, const io_measurement&)>;
+    using writer_cleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element, const writer_input&)>;
 
     // Identifier-parser overhead benchmark function types.
     using identifier_builder = std::function<identifier_benchmark_input(
-        std::string_view, std::string_view, simdjson::dom::element,
-        const run_constraints&)>;
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
     using identifier_runner = std::function<identifier_benchmark_measurement(
         std::string_view, const parameter_map&, const identifier_benchmark_input&)>;
-    using identifier_evaluator = std::function<std::map<std::string, double>(
-        std::string_view, const parameter_map&,
-        const identifier_benchmark_input&, const identifier_benchmark_measurement&)>;
-    using identifier_cleanup = std::function<void(
-        std::string_view, std::string_view, simdjson::dom::element,
-        const identifier_benchmark_input&)>;
+    using identifier_evaluator =
+        std::function<std::map<std::string, double>(std::string_view,
+                                                    const parameter_map&,
+                                                    const identifier_benchmark_input&,
+                                                    const identifier_benchmark_measurement&)>;
+    using identifier_cleanup = std::function<void(std::string_view,
+                                                  std::string_view,
+                                                  simdjson::dom::element,
+                                                  const identifier_benchmark_input&)>;
 
     using lazy_expression_builder = std::function<lazy_expression_input(
-        std::string_view, std::string_view, simdjson::dom::element,
-        const run_constraints&)>;
+        std::string_view, std::string_view, simdjson::dom::element, const run_constraints&)>;
     using lazy_expression_runner = std::function<lazy_expression_measurement(
         std::string_view, const parameter_map&, const lazy_expression_input&)>;
-    using lazy_expression_evaluator = std::function<std::map<std::string, double>(
-        std::string_view, const parameter_map&,
-        const lazy_expression_input&, const lazy_expression_measurement&)>;
+    using lazy_expression_evaluator =
+        std::function<std::map<std::string, double>(std::string_view,
+                                                    const parameter_map&,
+                                                    const lazy_expression_input&,
+                                                    const lazy_expression_measurement&)>;
     using lazy_expression_cleanup = std::function<void(
-        std::string_view, std::string_view, simdjson::dom::element,
-        const lazy_expression_input&)>;
+        std::string_view, std::string_view, simdjson::dom::element, const lazy_expression_input&)>;
 
     return bioseq::bench::framework::run(
-        argc, argv, report_dir, data_dir,
+        argc,
+        argv,
+        report_dir,
+        data_dir,
         create_benchmark<reader_input, io_measurement>(
             "IO readers — FASTA (plain / async / mmap)",
-            "bench_io_readers_fasta", config_path,
+            "bench_io_readers_fasta",
+            config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
@@ -115,7 +107,8 @@ int run(int argc, char** argv) {
             reader_cleanup{cleanup_reader}),
         create_benchmark<reader_input, io_measurement>(
             "IO readers — FASTQ (plain / async / mmap)",
-            "bench_io_readers_fastq", config_path,
+            "bench_io_readers_fastq",
+            config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
@@ -123,7 +116,8 @@ int run(int argc, char** argv) {
             reader_cleanup{cleanup_reader}),
         create_benchmark<reader_input, io_measurement>(
             "IO readers — gzipped paths",
-            "bench_io_readers_gz", config_path,
+            "bench_io_readers_gz",
+            config_path,
             resource_estimator{estimate_reader_resources},
             reader_builder{build_reader_input},
             reader_runner{run_reader},
@@ -131,7 +125,8 @@ int run(int argc, char** argv) {
             reader_cleanup{cleanup_reader}),
         create_benchmark<writer_input, io_measurement>(
             "IO writers — FASTA (sync / parallel)",
-            "bench_io_writers_fasta", config_path,
+            "bench_io_writers_fasta",
+            config_path,
             resource_estimator{estimate_writer_resources},
             writer_builder{build_writer_input},
             writer_runner{run_writer},
@@ -139,7 +134,8 @@ int run(int argc, char** argv) {
             writer_cleanup{cleanup_writer}),
         create_benchmark<writer_input, io_measurement>(
             "IO writers — FASTQ (sync / parallel)",
-            "bench_io_writers_fastq", config_path,
+            "bench_io_writers_fastq",
+            config_path,
             resource_estimator{estimate_writer_resources},
             writer_builder{build_writer_input},
             writer_runner{run_writer},
@@ -147,7 +143,8 @@ int run(int argc, char** argv) {
             writer_cleanup{cleanup_writer}),
         create_benchmark<identifier_benchmark_input, identifier_benchmark_measurement>(
             "IO identifier parser — UniProt header overhead",
-            "bench_io_identifier_parser", config_path,
+            "bench_io_identifier_parser",
+            config_path,
             resource_estimator{estimate_reader_resources},
             identifier_builder{build_identifier_input},
             identifier_runner{run_identifier_bench},
@@ -155,7 +152,8 @@ int run(int argc, char** argv) {
             identifier_cleanup{cleanup_identifier_bench}),
         create_benchmark<lazy_expression_input, lazy_expression_measurement>(
             "Lazy sequence expression — eager versus deferred materialization",
-            "bench_io_lazy_sequence_expression", config_path,
+            "bench_io_lazy_sequence_expression",
+            config_path,
             resource_estimator{estimate_lazy_expression_resources},
             lazy_expression_builder{build_lazy_expression_input},
             lazy_expression_runner{run_lazy_expression},
@@ -163,4 +161,4 @@ int run(int argc, char** argv) {
             lazy_expression_cleanup{cleanup_lazy_expression}));
 }
 
-}  // namespace bioseq::io::benchmark
+} // namespace bioseq::io::benchmark

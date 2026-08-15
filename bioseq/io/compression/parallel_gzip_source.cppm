@@ -1,6 +1,6 @@
 /**
  * @file parallel_gzip_source.cppm
- * @brief `io_source`-conforming adapter on top of `parallel_gzip_decoder`.
+ * @brief Byte source backed by the parallel gzip decoder.
  *
  * The owned implementation keeps the mapping alive for every compressed view
  * held by the decoder.
@@ -30,7 +30,7 @@ export namespace bioseq::io {
 /// The source owns the mapping and decoder together so the compressed span
 /// remains valid until destruction.
 class parallel_gzip_source {
-public:
+  public:
     /// Construct an empty source that reports an error if read.
     parallel_gzip_source() = default;
 

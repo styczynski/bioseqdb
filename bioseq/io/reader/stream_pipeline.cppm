@@ -1,6 +1,6 @@
 /**
  * @file stream_pipeline.cppm
- * @brief Bounded record streaming and shared source selection.
+ * @brief Bounded record streaming and source selection.
  */
 module;
 
@@ -29,20 +29,13 @@ import bioseq.io.sources;
 
 namespace bioseq::io::detail {
 
-/// single-threaded streaming read loop. Mirrors
-/// `run_sync_pipeline`'s slab/refill/FSM cycle, but instead of accumulating a
-/// whole `sequence_batch` it drives the per-record FSM with bounded scratch
-/// buffers and emits `packed_sequence_chunk<p_storage_unit>` values to the
-/// caller's `sink`. The FSM is storage-unit-parametric, so the chunk words are
-/// already in the caller's native column layout (no re-pack). Peak memory is
-/// one slab + one record header + one bounded packed window — never a whole
-/// record, so a 6 Gbp FASTA record streams within bounded RSS.
+/// Stream records through bounded scratch storage on the calling thread.
 ///
-/// Sink protocol per complete record: `sink.begin_record(header)` once, then
+/// For each record the sink receives `begin_record(header)` once, then
 /// `sink.chunk(...)` for each packed window (non-final windows are full units
-/// with `logical_length == words.size()*letters_per_unit`; the final window has
+/// with `logical_length == words.size()*letters_per_unit`. The final window has
 /// `end_of_record == true` and `logical_length` ≤ that), then `sink.end_record()`
-/// once. The `words` span is valid ONLY during the `chunk` call.
+/// once. The `words` span remains valid only during the `chunk` call.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           sequence_file_format p_file_format,
@@ -72,7 +65,7 @@ template <sequence_alphabet p_alphabet,
     };
 
     // Per-record bounded scratch — never a whole record. The FSM appends the
-    // header to `header_scratch` and the packed words to `seq_scratch`; the
+    // header to `header_scratch` and the packed words to `seq_scratch`. The
     // streaming logic drains and clears `seq_scratch` between FSM calls so its
     // size stays within ~one slab of body. `record_start_offset` in the
     // encoder stays 0 because every record starts (and every mid-record drain
@@ -284,20 +277,26 @@ template <sequence_alphabet p_alphabet,
             bool need_refill = false;
             while (!aborted) {
                 parser_state.attach_to_batch(header_scratch, seq_scratch, quality_scratch);
-                const auto step = parse_one_fastq_record<
-                    p_alphabet,
-                    p_storage_unit>(
-                    parser_state, slab.raw(), slab.fill_size, slab.is_eof,
-                    slab.parse_cursor, global_offset_base + slab.parse_cursor,
-                    options.encoder.strict_fastq, emit_fastq, failure_capture);
+                const auto step = parse_one_fastq_record<p_alphabet, p_storage_unit>(
+                    parser_state,
+                    slab.raw(),
+                    slab.fill_size,
+                    slab.is_eof,
+                    slab.parse_cursor,
+                    global_offset_base + slab.parse_cursor,
+                    options.encoder.strict_fastq,
+                    emit_fastq,
+                    failure_capture);
                 slab.parse_cursor = step.cursor;
                 if (step.outcome == parse_outcome::complete) {
                     complete_record();
                     continue;
                 }
                 if (step.outcome == parse_outcome::at_end_of_file) {
-                    if (record_open) complete_record();
-                    if (aborted) return std::unexpected(captured_error);
+                    if (record_open)
+                        complete_record();
+                    if (aborted)
+                        return std::unexpected(captured_error);
                     return records_emitted;
                 }
                 if (step.outcome == parse_outcome::abort) {
@@ -307,10 +306,13 @@ template <sequence_alphabet p_alphabet,
                 need_refill = true;
                 break;
             }
-            if (!need_refill) continue;
+            if (!need_refill)
+                continue;
             if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
-                if (record_open) complete_record();
-                if (aborted) return std::unexpected(captured_error);
+                if (record_open)
+                    complete_record();
+                if (aborted)
+                    return std::unexpected(captured_error);
                 return records_emitted;
             }
             global_offset_base += slab.parse_cursor;
@@ -322,18 +324,18 @@ template <sequence_alphabet p_alphabet,
 
 /// the single source-selection dispatch shared by
 /// `stream_sequences_file` and `read_decompressed_prefix`: with `prefer_mmap`,
-/// magic-sniff for gzip (gzip_source if gzipped, else mmap_source); else with
-/// `gzip_auto_detect`, gzip_source; else posix_read_source. The chosen source is
-/// handed to `on_source(source)`, which returns the same expected result type;
+/// magic-sniff for gzip, choosing gzip_source or mmap_source. With
+/// `gzip_auto_detect` it uses gzip_source, otherwise posix_read_source. The chosen source is
+/// passed to `on_source(source)`, which returns the same expected result type.
 /// open failures are reported via `failure_fn` and returned as that same error
 /// type. Factored out so the 3-way selection lives in exactly one place.
 template <typename p_failure, typename p_on_source>
-[[nodiscard]] auto with_selected_source(
-    std::string_view path_view, const reader_options& options,
-    p_failure&& failure_fn, p_on_source&& on_source)
+[[nodiscard]] auto with_selected_source(std::string_view path_view,
+                                        const reader_options& options,
+                                        p_failure&& failure_fn,
+                                        p_on_source&& on_source)
     -> std::invoke_result_t<p_on_source&, posix_read_source&&> {
-    using result_type =
-        std::invoke_result_t<p_on_source&, posix_read_source&&>;
+    using result_type = std::invoke_result_t<p_on_source&, posix_read_source&&>;
     if (options.io.prefer_mmap) {
         auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
         if (mmap_or_err) {
@@ -341,16 +343,16 @@ template <typename p_failure, typename p_on_source>
                 auto gz_or_err = gzip_source::try_open(path_view);
                 if (!gz_or_err) {
                     failure_fn(std::string{gz_or_err.error()});
-                    return result_type{
-                        std::unexpect,
-                        std::string{gz_or_err.error()}};
+                    return result_type{std::unexpect, std::string{gz_or_err.error()}};
                 }
                 return on_source(std::move(*gz_or_err));
             }
             return on_source(std::move(mmap_or_err->source));
         }
         bioseq_log<logging_level::debug>("[bioseq_io] select: mmap unavailable for '{}': {}; "
-                "falling back to posix_read_source", path_view, mmap_or_err.error());
+                                         "falling back to posix_read_source",
+                                         path_view,
+                                         mmap_or_err.error());
     }
     if (options.io.gzip_auto_detect) {
         auto gz_or_err = gzip_source::try_open(path_view);
@@ -368,5 +370,4 @@ template <typename p_failure, typename p_on_source>
     return on_source(std::move(*posix_or_err));
 }
 
-
-}  // namespace bioseq::io::detail
+} // namespace bioseq::io::detail

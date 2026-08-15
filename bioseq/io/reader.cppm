@@ -1,6 +1,6 @@
 /**
  * @file reader.cppm
- * @brief Public sequence-reader entry points.
+ * @brief Public sequence reader entry points.
  *
  * Re-exports the batch and view types from `:types` while keeping batch
  * execution and bounded streaming behind private module partitions.
@@ -58,15 +58,9 @@ read_sequences_file(p_path&& file_path,
     };
     record_backend(reader_backend::unknown);
 
-    // Backend dispatch:
-    //   1. If `prefer_mmap` is set: open with magic-byte sniff.
-    //      - Gzipped + parallel + size>=min → parallel_gzip_source.
-    //      - Gzipped, fallback path → gzip_source.
-    //      - Plain → existing mmap pipeline.
-    //   2. mmap failed / large file → posix_read_source.
-    //   3. `gzip_auto_detect=true` without prefer_mmap →
-    //      gzip_source (covers the "user explicitly asked for gzip
-    //      auto-detect on a non-mmap'd reader" path).
+    // Prefer a mapped source, selecting the parallel or zlib gzip backend after
+    // magic-byte detection. Fall back to POSIX reads when mapping is unavailable.
+    // Explicit gzip detection without mapping uses the zlib backend.
     if (options.io.prefer_mmap) {
         auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
         if (mmap_or_err) {
@@ -93,7 +87,7 @@ read_sequences_file(p_path&& file_path,
                                                      pgz_or_err.error());
                 }
                 // Construction-time fallback. Mid-stream errors are
-                // TERMINAL — never restart from byte 0; that would
+                // TERMINAL — never restart from byte 0. That would
                 // re-emit records.
                 auto gz_or_err = gzip_source::try_open(path_view);
                 if (!gz_or_err) {
@@ -152,7 +146,7 @@ read_sequences_file(p_path&& file_path,
 /// emits bounded `packed_sequence_chunk<p_storage_unit>` values to `sink`, so a
 /// >MaxAllocSize record (e.g. a 6 Gbp reference) is never materialised as one
 /// buffer. Always single-threaded (the columnar write state + seq_caches are
-/// single-backend); gzip is still magic-byte sniffed by the source. Returns the
+/// single-backend). The source still detects gzip by its magic bytes. Returns the
 /// record count, or the first terminal diagnostic.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
@@ -170,9 +164,8 @@ stream_sequences_file(const char* path,
     options.concurrency.parser_count = 1;
     const std::string_view path_view{path};
 
-    // The source selection is shared with
-    // `read_decompressed_prefix` via `detail::with_selected_source`; the chosen
-    // (concrete) source is streamed through `run_sync_stream`.
+    // Share source selection with `read_decompressed_prefix`, then stream the
+    // selected concrete source through `run_sync_stream`.
     return detail::with_selected_source(
         path_view, options, failure_fn, [&failure_fn, &options, &sink](auto&& src) {
             using source_type = std::remove_reference_t<decltype(src)>;
@@ -184,7 +177,7 @@ stream_sequences_file(const char* path,
 /// Read at most `max_bytes` of decompressed bytes from the start
 /// of `path`, using the same source selection as
 /// `stream_sequences_file` (`detail::with_selected_source`). Used by auto-mode
-/// header sampling; gzip is transparently decompressed by `gzip_source`.
+/// header sampling. `gzip_source` transparently decompresses gzip input.
 [[nodiscard]] inline std::expected<std::string, std::string>
 read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_options& options) {
     const std::string_view path_view{path};
@@ -216,12 +209,10 @@ read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_o
         });
 }
 
-/// sample up to `max_headers` header strings (no leading
-/// '>' / '@', carriage returns stripped) from the decompressed prefix of `path`. The FASTQ
-/// path mirrors the loader's logical record rule (sequence lines end at the `+`
-/// line; quality lines end after the same non-newline byte count) so multiline
-/// FASTQ never mistakes a `@` inside a quality line for a header (HIGH-03). Line
-/// ends are found via the existing SIMD `scan_first_byte('\n', …)` kernel.
+/// Sample up to `max_headers` headers from the decompressed prefix of `path`.
+///
+/// Leading record sigils and carriage returns are omitted. FASTQ sampling tracks
+/// sequence and quality lengths so `@` inside multiline quality data is ignored.
 [[nodiscard]] inline std::expected<std::vector<std::string>, std::string>
 sample_sequence_headers(const char* path,
                         sequence_file_format file_type,
@@ -233,7 +224,7 @@ sample_sequence_headers(const char* path,
         return std::unexpected(prefix_or.error());
     const std::string& prefix = *prefix_or;
     const auto* base = reinterpret_cast<const std::uint8_t*>(prefix.data());
-    const std::size_t n = prefix.size();
+    const std::size_t prefix_size = prefix.size();
 
     std::vector<std::string> headers;
     headers.reserve(max_headers);
@@ -242,13 +233,13 @@ sample_sequence_headers(const char* path,
             s.remove_suffix(1);
         return s;
     };
-    auto line_end_at = [&base, &n](std::size_t cursor) {
-        return cursor + simd::scan_first_byte('\n', base + cursor, n - cursor);
+    auto line_end_at = [&base, &prefix_size](std::size_t cursor) {
+        return cursor + simd::scan_first_byte('\n', base + cursor, prefix_size - cursor);
     };
 
     std::size_t cursor = 0;
     if (file_type == sequence_file_format::fasta) {
-        while (headers.size() < max_headers && cursor < n) {
+        while (headers.size() < max_headers && cursor < prefix_size) {
             if ((cursor == 0 || prefix[cursor - 1] == '\n') && prefix[cursor] == '>') {
                 const std::size_t le = line_end_at(cursor);
                 headers.emplace_back(rstrip_cr(std::string_view{prefix}.substr(
@@ -256,73 +247,70 @@ sample_sequence_headers(const char* path,
                 cursor = le + 1;
             } else {
                 const std::size_t le = line_end_at(cursor);
-                if (le >= n)
+                if (le >= prefix_size)
                     break;
                 cursor = le + 1;
             }
         }
     } else { // FASTQ: records may have multiline sequence / quality sections.
-        while (headers.size() < max_headers && cursor < n) {
+        while (headers.size() < max_headers && cursor < prefix_size) {
             if (prefix[cursor] != '@')
                 break; // truncated/garbled prefix
             const std::size_t he = line_end_at(cursor);
-            headers.emplace_back(rstrip_cr(
-                std::string_view{prefix}.substr(
-                    cursor + 1, he > cursor + 1 ? he - (cursor + 1) : 0)));
+            headers.emplace_back(rstrip_cr(std::string_view{prefix}.substr(
+                cursor + 1, he > cursor + 1 ? he - (cursor + 1) : 0)));
             cursor = he + 1;
 
             std::size_t seq_bytes = 0;
-            while (cursor < n && prefix[cursor] != '+') {
+            while (cursor < prefix_size && prefix[cursor] != '+') {
                 const std::size_t le = line_end_at(cursor);
-                for (std::size_t i = cursor; i < le && i < n; ++i)
-                    if (prefix[i] != '\r') ++seq_bytes;
+                for (std::size_t i = cursor; i < le && i < prefix_size; ++i)
+                    if (prefix[i] != '\r')
+                        ++seq_bytes;
                 cursor = le + 1;
             }
-            if (cursor >= n || prefix[cursor] != '+') break;
-            cursor = line_end_at(cursor) + 1;  // skip the '+' line
+            if (cursor >= prefix_size || prefix[cursor] != '+')
+                break;
+            cursor = line_end_at(cursor) + 1; // skip the '+' line
 
             std::size_t qual_bytes = 0;
-            while (cursor < n && qual_bytes < seq_bytes) {
+            while (cursor < prefix_size && qual_bytes < seq_bytes) {
                 const std::size_t le = line_end_at(cursor);
-                for (std::size_t i = cursor; i < le && i < n; ++i)
-                    if (prefix[i] != '\r') ++qual_bytes;
+                for (std::size_t i = cursor; i < le && i < prefix_size; ++i)
+                    if (prefix[i] != '\r')
+                        ++qual_bytes;
                 cursor = le + 1;
             }
-            if (qual_bytes < seq_bytes) break;   // prefix ended mid-record
+            if (qual_bytes < seq_bytes)
+                break; // prefix ended mid-record
         }
     }
     return headers;
 }
 
-/// Plural-API convenience: read a sequence of files in declaration
-/// order, accumulating record counts. The handler / failure
-/// callbacks are shared across files. Each file is fully drained before
-/// the next is opened, preserving declaration order.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    typename p_path,
-    typename p_handler,
-    typename p_failure>
-[[nodiscard]] std::expected<std::size_t, std::string> read_sequences_files(
-    std::span<const p_path> file_paths,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options = default_reader_options) {
+/// Read files in declaration order and return their combined record count.
+///
+/// Handler and failure callbacks are shared. Each file is drained before the
+/// next file is opened.
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          typename p_path,
+          typename p_handler,
+          typename p_failure>
+[[nodiscard]] std::expected<std::size_t, std::string>
+read_sequences_files(std::span<const p_path> file_paths,
+                     p_handler&& handler_fn,
+                     p_failure&& failure_fn,
+                     const reader_options& options = default_reader_options) {
     std::size_t total_records = 0;
     for (const auto& file_path : file_paths) {
-        auto outcome = read_sequences_file<
-            p_alphabet,
-            p_file_format,
-            const p_path&>(
-            file_path,
-            handler_fn,
-            failure_fn,
-            options);
-        if (!outcome) return outcome;
+        auto outcome = read_sequences_file<p_alphabet, p_file_format, const p_path&>(
+            file_path, handler_fn, failure_fn, options);
+        if (!outcome)
+            return outcome;
         total_records += *outcome;
     }
     return total_records;
 }
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

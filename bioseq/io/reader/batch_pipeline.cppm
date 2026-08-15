@@ -1,6 +1,6 @@
 /**
  * @file batch_pipeline.cppm
- * @brief Batch parsing, mapped-file sharding, boundary discovery, and asynchronous dispatch.
+ * @brief Batch parsing, mapped-file sharding, and dispatch.
  */
 module;
 
@@ -33,7 +33,6 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 
 namespace bioseq::io::detail {
-
 
 /// Run the synchronous read loop with a concrete source. Single-thread
 /// path: the same thread reads bytes, parses records, and invokes the
@@ -78,8 +77,8 @@ run_sync_pipeline(p_source source,
     constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
     auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
         batch.prepare(flush_record_threshold, is_fastq_format);
-        // Generous up-front reservations sized for ~256 bp records.
-        // Larger corpora simply grow geometrically beyond the hint.
+        // Reserve for approximately 256 bases per record. Larger batches grow
+        // geometrically beyond the hint.
         batch.reserve_storage(
             /*header_bytes*/ flush_record_threshold * 32,
             /*seq_words*/ flush_record_threshold * 8,
@@ -108,10 +107,8 @@ run_sync_pipeline(p_source source,
                                      std::size_t padding) {
             (void)header_size;
             (void)seq_word_count;
-            // The header bytes were already appended into `_header_storage` by
-            // the FSM as it copied them out of the slab; sequence words were
-            // pushed into `_sequence_storage` by the encoder. We just record the
-            // offsets and padding for this record.
+            // Header and sequence storage are already populated. Record their
+            // offsets and padding.
             batch.header_offsets().push_back(batch.header_storage().size());
             batch.sequence_offsets().push_back(batch.sequence_storage().size());
             batch.sequence_paddings().push_back(padding);
@@ -146,7 +143,7 @@ run_sync_pipeline(p_source source,
             bool need_refill = false;
             while (!aborted) {
                 // The FSM updates `parser_state` and the batch storage
-                // directly; the emit_record callback only needs to record
+                // directly. The emit_record callback only needs to record
                 // the (header_offset, seq_offset, padding) triple.
                 parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
                 const auto step = parse_one_fasta_record<p_alphabet, std::uint64_t>(
@@ -232,12 +229,9 @@ run_sync_pipeline(p_source source,
             }
             bool need_refill = false;
             while (!aborted) {
-                parser_state.attach_to_batch(batch.header_storage(),
-                                             batch.sequence_storage(),
-                                             batch.quality_storage());
-                const auto step = parse_one_fastq_record<
-                    p_alphabet,
-                    std::uint64_t>(
+                parser_state.attach_to_batch(
+                    batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
+                const auto step = parse_one_fastq_record<p_alphabet, std::uint64_t>(
                     parser_state,
                     slab.raw(),
                     slab.fill_size,
@@ -248,7 +242,8 @@ run_sync_pipeline(p_source source,
                     emit_fastq_record,
                     failure_capture);
                 slab.parse_cursor = step.cursor;
-                if (step.outcome == parse_outcome::complete) continue;
+                if (step.outcome == parse_outcome::complete)
+                    continue;
                 if (step.outcome == parse_outcome::at_end_of_file) {
                     flush_batch();
                     if (aborted) {
@@ -262,7 +257,8 @@ run_sync_pipeline(p_source source,
                 need_refill = true;
                 break;
             }
-            if (!need_refill) continue;
+            if (!need_refill)
+                continue;
             if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
                 flush_batch();
                 if (aborted) {
@@ -278,7 +274,7 @@ run_sync_pipeline(p_source source,
 }
 
 /// Synchronous pipeline specialised for `mmap_source`. The whole file
-/// is already in contiguous virtual memory; we hand the parser a
+/// is already in contiguous virtual memory. The parser receives a
 /// single span over the mapped region instead of cycling 64 KiB slabs
 /// through `read(2)` + `memmove`. Wins:
 ///
@@ -301,17 +297,15 @@ run_sync_pipeline(p_source source,
 /// words bound the storage requirement. Pre-reserving this avoids
 /// the ~9 geometric reallocs that would otherwise fire while encoding
 /// a 234 MiB body.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    typename p_handler,
-    typename p_failure>
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          typename p_handler,
+          typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string>
-run_sync_pipeline_mmap_direct(
-    mmap_source source,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options) {
+run_sync_pipeline_mmap_direct(mmap_source source,
+                              p_handler&& handler_fn,
+                              p_failure&& failure_fn,
+                              const reader_options& options) {
 
     using alphabet_config_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_type = sequence_batch<alphabet_config_type>;
@@ -342,7 +336,7 @@ run_sync_pipeline_mmap_direct(
 
     // Reservation: dna4 packs 4 letters per byte, so each input byte
     // produces ~1/16 of a 64-bit word. For the bench's 234 MiB human
-    // case this is ~58 M words / 464 MiB; pre-reserving avoids the 9
+    // case this is ~58 M words / 464 MiB. Pre-reserving avoids the 9
     // geometric reallocations during encoding.
     const std::size_t sequence_words_hint =
         std::max<std::size_t>(file_size / 16, flush_record_threshold * 8);
@@ -450,15 +444,18 @@ run_sync_pipeline_mmap_direct(
                                                                   emit_fastq_record,
                                                                   failure_capture);
             cursor = step.cursor;
-            if (step.outcome == parse_outcome::complete) continue;
-            if (step.outcome == parse_outcome::at_end_of_file) break;
+            if (step.outcome == parse_outcome::complete)
+                continue;
+            if (step.outcome == parse_outcome::at_end_of_file)
+                break;
             if (step.outcome == parse_outcome::abort) {
                 return std::unexpected(captured_error);
             }
             break;
         }
         flush_batch();
-        if (aborted) return std::unexpected(captured_error);
+        if (aborted)
+            return std::unexpected(captured_error);
         return records_emitted;
     }
 }
@@ -472,22 +469,27 @@ run_sync_pipeline_mmap_direct(
 ///
 /// SIMD-accelerated: reuses `simd::scan_first_byte('\n', ...)` to skip
 /// long body lines in one pass, then peeks the byte after each newline.
-[[nodiscard]] inline std::size_t find_fasta_record_boundary(
-    const std::uint8_t* base, std::size_t view_size, std::size_t target) noexcept {
-    if (target == 0) return 0;
-    if (target >= view_size) return view_size;
+[[nodiscard]] inline std::size_t find_fasta_record_boundary(const std::uint8_t* base,
+                                                            std::size_t view_size,
+                                                            std::size_t target) noexcept {
+    if (target == 0)
+        return 0;
+    if (target >= view_size)
+        return view_size;
     std::size_t cursor = target;
     // Greedy: scan to next '\n', check if next byte is '>'. If not,
     // advance past the newline and continue. simd::scan_first_byte is
     // 4×-unrolled NEON so this loop runs at near-memory bandwidth.
     while (cursor < view_size) {
         const std::size_t remaining = view_size - cursor;
-        const std::size_t newline_offset =
-            simd::scan_first_byte('\n', base + cursor, remaining);
-        if (newline_offset >= remaining) return view_size;
+        const std::size_t newline_offset = simd::scan_first_byte('\n', base + cursor, remaining);
+        if (newline_offset >= remaining)
+            return view_size;
         const std::size_t after_newline = cursor + newline_offset + 1;
-        if (after_newline >= view_size) return view_size;
-        if (base[after_newline] == '>') return after_newline;
+        if (after_newline >= view_size)
+            return view_size;
+        if (base[after_newline] == '>')
+            return after_newline;
         cursor = after_newline;
     }
     return view_size;
@@ -506,22 +508,26 @@ run_sync_pipeline_mmap_direct(
 ///      possible.
 ///
 /// On verification failure, advance past the candidate and retry. For
-/// canonical FASTQ this converges within 1-2 candidates; for FASTQ
+/// canonical FASTQ this converges within 1-2 candidates. For FASTQ
 /// with `@`-rich quality strings it may take a few tries but the SIMD
 /// scan keeps the per-candidate cost low.
-[[nodiscard]] inline std::size_t find_fastq_record_boundary(
-    const std::uint8_t* base, std::size_t view_size, std::size_t target) noexcept {
-    if (target == 0) return 0;
-    if (target >= view_size) return view_size;
+[[nodiscard]] inline std::size_t find_fastq_record_boundary(const std::uint8_t* base,
+                                                            std::size_t view_size,
+                                                            std::size_t target) noexcept {
+    if (target == 0)
+        return 0;
+    if (target >= view_size)
+        return view_size;
     std::size_t cursor = target;
     while (cursor < view_size) {
         // Find next '\n' (a candidate record boundary lies just after).
         const std::size_t remaining = view_size - cursor;
-        const std::size_t newline_offset =
-            simd::scan_first_byte('\n', base + cursor, remaining);
-        if (newline_offset >= remaining) return view_size;
+        const std::size_t newline_offset = simd::scan_first_byte('\n', base + cursor, remaining);
+        if (newline_offset >= remaining)
+            return view_size;
         const std::size_t at_header = cursor + newline_offset + 1;
-        if (at_header >= view_size) return view_size;
+        if (at_header >= view_size)
+            return view_size;
         if (base[at_header] != '@') {
             cursor = at_header;
             continue;
@@ -532,15 +538,18 @@ run_sync_pipeline_mmap_direct(
         const std::size_t hdr_remaining = view_size - at_header;
         const std::size_t hdr_newline =
             simd::scan_first_byte('\n', base + at_header, hdr_remaining);
-        if (hdr_newline >= hdr_remaining) return view_size;
+        if (hdr_newline >= hdr_remaining)
+            return view_size;
         const std::size_t at_seq = at_header + hdr_newline + 1;
-        if (at_seq >= view_size) return view_size;
+        if (at_seq >= view_size)
+            return view_size;
         const std::size_t seq_remaining = view_size - at_seq;
-        const std::size_t seq_newline =
-            simd::scan_first_byte('\n', base + at_seq, seq_remaining);
-        if (seq_newline >= seq_remaining) return view_size;
+        const std::size_t seq_newline = simd::scan_first_byte('\n', base + at_seq, seq_remaining);
+        if (seq_newline >= seq_remaining)
+            return view_size;
         const std::size_t at_sep = at_seq + seq_newline + 1;
-        if (at_sep >= view_size) return view_size;
+        if (at_sep >= view_size)
+            return view_size;
         if (base[at_sep] == '+') {
             return at_header;
         }
@@ -552,7 +561,7 @@ run_sync_pipeline_mmap_direct(
 }
 
 /// Run a parallel sharded mmap pipeline. The mapped region is split
-/// into N shards; each shard finds its actual start by walking forward
+/// into N shards. Each shard finds its actual start by walking forward
 /// to the next record boundary, then parses its region with a private
 /// per-shard batch. Batches are emitted to the user handler via a
 /// mutex-guarded callback (the lock is on the cold path — one
@@ -563,43 +572,36 @@ run_sync_pipeline_mmap_direct(
 ///     per 16 bytes) saturates a single core's NEON ports. N cores in
 ///     parallel scale near-linearly until memory bandwidth bites.
 ///   * **Page-fault parallelism** — the OS demand-zeroes 117 MiB of
-///     `_sequence_storage` on the human-genome cell; spreading those faults
+///     `_sequence_storage` on the human-genome cell. Spreading those faults
 ///     across N cores cuts the demand-zero latency by N.
 ///   * **OS prefetcher win** — N concurrent sequential readers trip
 ///     the kernel page-cache prefetcher in N regions instead of 1.
 ///
 /// Correctness: shard boundaries are at record starts, so each shard
 /// parses complete records with `is_eof = true` (the FSM emits the
-/// trailing record cleanly). Shard 0 starts at byte 0; shard N-1 ends
-/// at file end. Records are emitted in within-shard order; across
+/// trailing record cleanly). Shard 0 starts at byte 0. Shard N-1 ends
+/// at file end. Records are emitted in within-shard order. Across
 /// shards order is not strictly preserved. The bench's accumulator
 /// uses atomic counters so order doesn't matter for the metric, and
 /// real handlers (alignment, indexing) consume per-batch with no
 /// cross-batch ordering requirement.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    typename p_handler,
-    typename p_failure>
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          typename p_handler,
+          typename p_failure>
 [[nodiscard]] std::expected<std::size_t, std::string>
-run_sync_pipeline_mmap_parallel(
-    mmap_source source,
-    std::size_t shard_count,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options) {
+run_sync_pipeline_mmap_parallel(mmap_source source,
+                                std::size_t shard_count,
+                                p_handler&& handler_fn,
+                                p_failure&& failure_fn,
+                                const reader_options& options) {
 
-    using alphabet_config_type =
-        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    using alphabet_config_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_type = sequence_batch<alphabet_config_type>;
-    using sequence_traits_type =
-        typename compact_sequence_range<alphabet_config_type>::traits;
-    constexpr std::size_t bits_per_char =
-        sequence_traits_type::bits_per_char;
-    constexpr std::size_t letters_per_unit =
-        sequence_traits_type::letters_per_unit;
-    constexpr bool is_fastq_format =
-        p_file_format == sequence_file_format::fastq;
+    using sequence_traits_type = typename compact_sequence_range<alphabet_config_type>::traits;
+    constexpr std::size_t bits_per_char = sequence_traits_type::bits_per_char;
+    constexpr std::size_t letters_per_unit = sequence_traits_type::letters_per_unit;
+    constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
 
     auto [base_ptr, view_size] = source.direct_view();
     auto& pool = bioseq::parallelism::global_pool::instance();
@@ -613,8 +615,7 @@ run_sync_pipeline_mmap_parallel(
             .mode = bioseq::parallelism::pipeline_concurrency_mode::dispatch_parallel,
         });
     }
-    shard_count = std::min<std::size_t>(
-        shard_count, pool.maximum_concurrency());
+    shard_count = std::min<std::size_t>(shard_count, pool.maximum_concurrency());
     if (view_size == 0 || shard_count <= 1) {
         // Fall back to the sequential direct path.
         return run_sync_pipeline_mmap_direct<p_alphabet, p_file_format>(
@@ -629,31 +630,23 @@ run_sync_pipeline_mmap_parallel(
     boundaries.reserve(shard_count + 1);
     boundaries.push_back(0);
     for (std::size_t shard_index = 1; shard_index < shard_count; ++shard_index) {
-        const std::size_t target =
-            (view_size * shard_index) / shard_count;
-        std::size_t actual =
-            p_file_format == sequence_file_format::fasta
-            ? find_fasta_record_boundary(base_ptr, view_size, target)
-            : find_fastq_record_boundary(base_ptr, view_size, target);
+        const std::size_t target = (view_size * shard_index) / shard_count;
+        std::size_t actual = p_file_format == sequence_file_format::fasta
+                                 ? find_fasta_record_boundary(base_ptr, view_size, target)
+                                 : find_fastq_record_boundary(base_ptr, view_size, target);
         // Monotonicity: if a shard's adjusted start lands past the
-        // previous shard's start, keep it; otherwise this shard is
+        // previous shard's start, keep it. Otherwise this shard is
         // empty (huge single-record file or skewed records).
-        if (actual < boundaries.back()) actual = boundaries.back();
-        if (actual > view_size) actual = view_size;
+        if (actual < boundaries.back())
+            actual = boundaries.back();
+        if (actual > view_size)
+            actual = view_size;
         boundaries.push_back(actual);
     }
     boundaries.push_back(view_size);
 
-    // Per-shard reservation hints. Keep them DELIBERATELY small —
-    // macOS's `vm_map` lock serializes anonymous-mmap page faults
-    // across threads, so eight shards each pre-reserving (and
-    // demand-zeroing) 100+ MB up front costs more wall-clock than the
-    // geometric grow-on-demand pattern. We leave just enough headroom
-    // for one batch's worth of records without an immediate realloc;
-    // beyond that the per-shard vector grows on its own and
-    // amortises across the rest of the shard. The growth memcpy is
-    // bandwidth-bound and parallelises across shards; the demand-zero
-    // is kernel-serialised and does not.
+    // Small per-shard hints avoid serial page faults from large anonymous
+    // mappings on macOS. Each vector grows geometrically after one batch.
     const std::size_t flush_record_threshold = (options.concurrency.batch_target_record_count > 0)
                                                    ? options.concurrency.batch_target_record_count
                                                    : 4096;
@@ -701,7 +694,7 @@ run_sync_pipeline_mmap_parallel(
         // dna4 packs 32 letters / uint64, so seq words = body bytes
         // / 32. We use /16 (= 2× the precise factor) to leave headroom
         // for header bytes that don't pack. FASTQ qual is one byte
-        // per BP, ~46 % of the shard size for canonical 200-bp reads;
+        // per BP, ~46 % of the shard size for canonical 200-bp reads.
         // /4 = 256 MiB per 1 GiB shard is a safe upper bound.
         //
         // The `flush_record_threshold * X` floors handle the SHORT
@@ -839,12 +832,14 @@ run_sync_pipeline_mmap_parallel(
         total_records.fetch_add(shard_records, std::memory_order_relaxed);
     };
 
-    pool.parallel_for(0, shard_count, 1, bioseq::parallelism::range_body{
-        [&run_shard](std::size_t lo, std::size_t hi) {
-            for (std::size_t shard_index = lo; shard_index < hi; ++shard_index) {
-                run_shard(shard_index);
-            }
-        }});
+    pool.parallel_for(0,
+                      shard_count,
+                      1,
+                      bioseq::parallelism::range_body{[&run_shard](std::size_t lo, std::size_t hi) {
+                          for (std::size_t shard_index = lo; shard_index < hi; ++shard_index) {
+                              run_shard(shard_index);
+                          }
+                      }});
 
     if (aborted.load(std::memory_order_acquire)) {
         return std::unexpected(captured_error);
@@ -855,50 +850,42 @@ run_sync_pipeline_mmap_parallel(
 /// Mode-aware dispatcher. Routes to the sync pipeline when no workers
 /// are configured, otherwise to the async pipeline. mmap source goes
 /// through the zero-copy direct path when sync.
-template <
-    sequence_alphabet p_alphabet,
-    sequence_file_format p_file_format,
-    io_source p_source,
-    typename p_handler,
-    typename p_failure>
-[[nodiscard]] std::expected<std::size_t, std::string> run_pipeline_for_source(
-    p_source source,
-    p_handler&& handler_fn,
-    p_failure&& failure_fn,
-    const reader_options& options) {
-    using alphabet_config_type =
-        sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+template <sequence_alphabet p_alphabet,
+          sequence_file_format p_file_format,
+          io_source p_source,
+          typename p_handler,
+          typename p_failure>
+[[nodiscard]] std::expected<std::size_t, std::string>
+run_pipeline_for_source(p_source source,
+                        p_handler&& handler_fn,
+                        p_failure&& failure_fn,
+                        const reader_options& options) {
+    using alphabet_config_type = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
     using batch_type = sequence_batch<alphabet_config_type>;
     if (options.concurrency.worker_count == 0) {
         if constexpr (std::is_same_v<p_source, mmap_source>) {
             if (options.io.mmap_zero_copy) {
                 // Pick shard count: explicit option wins, else
                 // hardware_concurrency capped at mmap_parallel_max_shards.
-                std::size_t requested_shards =
-                    options.concurrency.parser_count;
+                std::size_t requested_shards = options.concurrency.parser_count;
                 if (requested_shards == 0) {
                     auto& pool = bioseq::parallelism::global_pool::instance();
-                    const unsigned worker_slots = pool.is_active()
-                        ? pool.maximum_concurrency()
-                        : bioseq::parallelism::default_concurrency_limit();
+                    const unsigned worker_slots =
+                        pool.is_active() ? pool.maximum_concurrency()
+                                         : bioseq::parallelism::default_concurrency_limit();
                     requested_shards = std::min<std::size_t>(
-                        worker_slots,
-                        options.concurrency.mmap_parallel_max_shards);
+                        worker_slots, options.concurrency.mmap_parallel_max_shards);
                 }
                 if (requested_shards > 1 &&
-                    source.mapped_size() >=
-                        options.concurrency.mmap_parallel_min_bytes) {
-                    return run_sync_pipeline_mmap_parallel<
-                        p_alphabet, p_file_format>(
+                    source.mapped_size() >= options.concurrency.mmap_parallel_min_bytes) {
+                    return run_sync_pipeline_mmap_parallel<p_alphabet, p_file_format>(
                         std::move(source),
                         requested_shards,
                         std::forward<p_handler>(handler_fn),
                         std::forward<p_failure>(failure_fn),
                         options);
                 }
-                return run_sync_pipeline_mmap_direct<
-                    p_alphabet,
-                    p_file_format>(
+                return run_sync_pipeline_mmap_direct<p_alphabet, p_file_format>(
                     std::move(source),
                     std::forward<p_handler>(handler_fn),
                     std::forward<p_failure>(failure_fn),
@@ -911,16 +898,11 @@ template <
             std::forward<p_failure>(failure_fn),
             options);
     }
-    return run_async_pipeline<
-        p_alphabet,
-        p_file_format,
-        p_source,
-        batch_type>(
+    return run_async_pipeline<p_alphabet, p_file_format, p_source, batch_type>(
         std::move(source),
         std::forward<p_handler>(handler_fn),
         std::forward<p_failure>(failure_fn),
         options);
 }
 
-
-}  // namespace bioseq::io::detail
+} // namespace bioseq::io::detail

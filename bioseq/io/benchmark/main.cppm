@@ -1,5 +1,5 @@
 /**
- * @file io/benchmark/main.cppm
+ * @file main.cppm
  * @brief Process launcher for the Bioseq IO benchmark.
  */
 

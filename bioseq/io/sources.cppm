@@ -1,15 +1,8 @@
 /**
  * @file sources.cppm
- * @brief POSIX, memory-mapped, and zlib-backed byte sources.
+ * @brief POSIX, memory-mapped, and gzip byte sources.
  */
 module;
-
-
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <zlib.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -18,18 +11,21 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <fcntl.h>
 #include <string>
 #include <string_view>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
+#include <zlib.h>
 
 export module bioseq.io.sources;
 
 import bioseq.common.logging;
 import bioseq.io.options;
 
-// source_read_result + the io_source concept now live in the lightweight
-// bioseq.io.source module; re-export them so every
-// existing importer of bioseq.io.sources sees them unchanged.
+// Re-export the source protocol with its concrete implementations.
 export import bioseq.io.source;
 
 export namespace bioseq::io {
@@ -48,13 +44,11 @@ export namespace bioseq::io {
 /// POSIX `read(2)`-backed source. Construct via `try_open` to surface
 /// open-time errors via `std::expected`.
 class posix_read_source {
-public:
+  public:
     posix_read_source() = default;
 
     posix_read_source(posix_read_source&& other) noexcept
-        : _fd(other._fd),
-          _global_offset(other._global_offset),
-          _bom_consumed(other._bom_consumed),
+        : _fd(other._fd), _global_offset(other._global_offset), _bom_consumed(other._bom_consumed),
           _last_error_message(std::move(other._last_error_message)) {
         other._fd = -1;
     }
@@ -74,20 +68,21 @@ public:
     posix_read_source(const posix_read_source&) = delete;
     posix_read_source& operator=(const posix_read_source&) = delete;
 
-    ~posix_read_source() { close_fd(); }
+    ~posix_read_source() {
+        close_fd();
+    }
 
     /// Open `path` as a sequential read-only byte source.
-    [[nodiscard]] static std::expected<posix_read_source, std::string> try_open(
-        std::string_view path) {
+    [[nodiscard]] static std::expected<posix_read_source, std::string>
+    try_open(std::string_view path) {
         const std::string path_str(path);
         const int fd = ::open(path_str.c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
-            return std::unexpected(fmt::format(
-                "cannot open '{}': {}", path, std::strerror(errno)));
+            return std::unexpected(fmt::format("cannot open '{}': {}", path, std::strerror(errno)));
         }
-        #ifndef __APPLE__
-            ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-        #endif
+#ifndef __APPLE__
+        ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
         posix_read_source source;
         source._fd = fd;
         return source;
@@ -102,11 +97,12 @@ public:
         ssize_t bytes_read = 0;
         for (;;) {
             bytes_read = ::read(_fd, dst, cap);
-            if (bytes_read >= 0) break;
-            if (errno == EINTR) continue;
+            if (bytes_read >= 0)
+                break;
+            if (errno == EINTR)
+                continue;
             _last_error_message = fmt::format(
-                "read error at file position {}: {}",
-                _global_offset, std::strerror(errno));
+                "read error at file position {}: {}", _global_offset, std::strerror(errno));
             return source_read_result{0, false, true};
         }
         if (bytes_read == 0) {
@@ -126,12 +122,16 @@ public:
     }
 
     /// Return the most recent read diagnostic.
-    [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
+    [[nodiscard]] std::string last_error_message() const {
+        return _last_error_message;
+    }
 
     /// Return the number of source bytes consumed, including any BOM.
-    [[nodiscard]] std::size_t global_offset() const noexcept { return _global_offset; }
+    [[nodiscard]] std::size_t global_offset() const noexcept {
+        return _global_offset;
+    }
 
-private:
+  private:
     void close_fd() noexcept {
         if (_fd >= 0) {
             ::close(_fd);
@@ -157,14 +157,11 @@ struct mmap_source_with_magic;
 /// `direct_view` exposes the mapped bytes to the synchronous direct path.
 /// Compressed input is copied through its decompressor.
 class mmap_source {
-public:
+  public:
     mmap_source() = default;
 
     mmap_source(mmap_source&& other) noexcept
-        : _addr(other._addr),
-          _size(other._size),
-          _cursor(other._cursor),
-          _fd(other._fd),
+        : _addr(other._addr), _size(other._size), _cursor(other._cursor), _fd(other._fd),
           _bom_consumed(other._bom_consumed),
           _last_error_message(std::move(other._last_error_message)) {
         other._addr = nullptr;
@@ -189,11 +186,11 @@ public:
     mmap_source(const mmap_source&) = delete;
     mmap_source& operator=(const mmap_source&) = delete;
 
-    ~mmap_source() { release(); }
+    ~mmap_source() {
+        release();
+    }
 
-    /// Plain open. The dispatcher uses `try_open_with_magic` to also
-    /// learn whether the file is gzipped; this is the convenience
-    /// shim for callers that only want the source.
+    /// Open a mapped source without returning gzip detection metadata.
     [[nodiscard]] static std::expected<mmap_source, std::string>
     try_open(std::string_view path, const reader_options& options);
 
@@ -227,31 +224,33 @@ public:
     }
 
     /// Return the most recent mapping or read diagnostic.
-    [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
+    [[nodiscard]] std::string last_error_message() const {
+        return _last_error_message;
+    }
 
     /// Direct view of the mapped region. Used by the zero-copy mmap
     /// batch pipeline to
     /// hand the parser the whole file in one contiguous span without
     /// the slab refill / `make_room` memmove overhead. The leading
     /// UTF-8 BOM is stripped from the returned `(ptr, size)` pair.
-    [[nodiscard]] std::pair<const std::uint8_t*, std::size_t>
-    direct_view() noexcept {
+    [[nodiscard]] std::pair<const std::uint8_t*, std::size_t> direct_view() noexcept {
         const std::uint8_t* base = static_cast<const std::uint8_t*>(_addr);
         std::size_t total = _size;
-        if (!_bom_consumed && total >= 3 &&
-            base[0] == 0xEF && base[1] == 0xBB && base[2] == 0xBF) {
+        if (!_bom_consumed && total >= 3 && base[0] == 0xEF && base[1] == 0xBB && base[2] == 0xBF) {
             base += 3;
             total -= 3;
         }
         _bom_consumed = true;
-        _cursor = _size;  // mark fully consumed
+        _cursor = _size; // mark fully consumed
         return {base, total};
     }
 
     /// Total mapped size, for reservation-hint purposes.
-    [[nodiscard]] std::size_t mapped_size() const noexcept { return _size; }
+    [[nodiscard]] std::size_t mapped_size() const noexcept {
+        return _size;
+    }
 
-private:
+  private:
     void release() noexcept {
         if (_addr != nullptr) {
             ::munmap(_addr, _size);
@@ -276,8 +275,8 @@ private:
 /// `std::expected` can move-construct it from designated-init.
 struct mmap_source_with_magic {
     mmap_source source;
-    bool        is_gzipped = false;
-    std::size_t file_size  = 0;
+    bool is_gzipped = false;
+    std::size_t file_size = 0;
 };
 
 [[nodiscard]] inline std::expected<mmap_source, std::string>
@@ -290,49 +289,41 @@ mmap_source::try_open(std::string_view path, const reader_options& options) {
 }
 
 [[nodiscard]] inline std::expected<mmap_source_with_magic, std::string>
-mmap_source::try_open_with_magic(
-    std::string_view path,
-    const reader_options& options) {
+mmap_source::try_open_with_magic(std::string_view path, const reader_options& options) {
     const std::string path_str(path);
     const int fd = ::open(path_str.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        return std::unexpected(fmt::format(
-            "cannot open '{}': {}", path, std::strerror(errno)));
+        return std::unexpected(fmt::format("cannot open '{}': {}", path, std::strerror(errno)));
     }
     struct stat st{};
     if (::fstat(fd, &st) != 0) {
         const int saved = errno;
         ::close(fd);
-        return std::unexpected(fmt::format(
-            "fstat failed on '{}': {}", path, std::strerror(saved)));
+        return std::unexpected(fmt::format("fstat failed on '{}': {}", path, std::strerror(saved)));
     }
-    if (st.st_size <= 0 ||
-        static_cast<std::size_t>(st.st_size) > options.io.max_mmap_bytes) {
+    if (st.st_size <= 0 || static_cast<std::size_t>(st.st_size) > options.io.max_mmap_bytes) {
         ::close(fd);
-        return std::unexpected(std::string{
-            "file outside mmap range; caller should use posix_read_source"});
+        return std::unexpected(
+            std::string{"file outside mmap range; caller should use posix_read_source"});
     }
 
     std::array<std::uint8_t, 2> magic_bytes{};
     if (st.st_size >= 2) {
-        const ssize_t n = ::pread(fd, magic_bytes.data(), 2, 0);
-        if (n < 0) {
+        const ssize_t read_count = ::pread(fd, magic_bytes.data(), 2, 0);
+        if (read_count < 0) {
             const int saved = errno;
             ::close(fd);
-            return std::unexpected(fmt::format(
-                "magic-byte pread failed on '{}': {}", path,
-                std::strerror(saved)));
+            return std::unexpected(
+                fmt::format("magic-byte pread failed on '{}': {}", path, std::strerror(saved)));
         }
     }
 
     const std::size_t mapped_size = static_cast<std::size_t>(st.st_size);
-    void* const addr = ::mmap(nullptr, mapped_size,
-                              PROT_READ, MAP_PRIVATE | MAP_FILE, fd, 0);
+    void* const addr = ::mmap(nullptr, mapped_size, PROT_READ, MAP_PRIVATE | MAP_FILE, fd, 0);
     if (addr == MAP_FAILED) {
         const int saved = errno;
         ::close(fd);
-        return std::unexpected(fmt::format(
-            "mmap failed for '{}': {}", path, std::strerror(saved)));
+        return std::unexpected(fmt::format("mmap failed for '{}': {}", path, std::strerror(saved)));
     }
     if (options.io.stream_madvise) {
         ::madvise(addr, mapped_size, MADV_SEQUENTIAL);
@@ -343,10 +334,9 @@ mmap_source::try_open_with_magic(
     source._fd = fd;
 
     mmap_source_with_magic out;
-    out.source     = std::move(source);
-    out.is_gzipped = (st.st_size >= 2 &&
-                      magic_bytes[0] == 0x1F && magic_bytes[1] == 0x8B);
-    out.file_size  = mapped_size;
+    out.source = std::move(source);
+    out.is_gzipped = (st.st_size >= 2 && magic_bytes[0] == 0x1F && magic_bytes[1] == 0x8B);
+    out.file_size = mapped_size;
     return out;
 }
 
@@ -354,12 +344,11 @@ mmap_source::try_open_with_magic(
 /// handles plain (non-gzipped) files too, so this source doubles as a
 /// "POSIX with auto-decompression".
 class gzip_source {
-public:
+  public:
     gzip_source() = default;
 
     gzip_source(gzip_source&& other) noexcept
-        : _file(other._file),
-          _global_offset(other._global_offset),
+        : _file(other._file), _global_offset(other._global_offset),
           _bom_consumed(other._bom_consumed),
           _last_error_message(std::move(other._last_error_message)) {
         other._file = nullptr;
@@ -380,17 +369,17 @@ public:
     gzip_source(const gzip_source&) = delete;
     gzip_source& operator=(const gzip_source&) = delete;
 
-    ~gzip_source() { release(); }
+    ~gzip_source() {
+        release();
+    }
 
     /// Open `path` through zlib's transparent gzip reader.
-    [[nodiscard]] static std::expected<gzip_source, std::string> try_open(
-        std::string_view path) {
+    [[nodiscard]] static std::expected<gzip_source, std::string> try_open(std::string_view path) {
         const std::string path_str(path);
         gzFile handle = ::gzopen(path_str.c_str(), "rb");
         if (handle == nullptr) {
-            return std::unexpected(fmt::format(
-                "cannot open gzip file '{}': {}", path,
-                std::strerror(errno)));
+            return std::unexpected(
+                fmt::format("cannot open gzip file '{}': {}", path, std::strerror(errno)));
         }
         gzip_source source;
         source._file = handle;
@@ -403,31 +392,29 @@ public:
             _last_error_message = "gzip_source: file handle closed";
             return source_read_result{0, false, true};
         }
-        const unsigned to_read = static_cast<unsigned>(
-            std::min<std::size_t>(cap, static_cast<std::size_t>(UINT_MAX)));
-        const int n = ::gzread(_file, dst, to_read);
-        if (n < 0) {
+        const unsigned to_read =
+            static_cast<unsigned>(std::min<std::size_t>(cap, static_cast<std::size_t>(UINT_MAX)));
+        const int read_count = ::gzread(_file, dst, to_read);
+        if (read_count < 0) {
             int errnum = 0;
             const char* message = ::gzerror(_file, &errnum);
-            _last_error_message = fmt::format(
-                "gzip error at file position {}: {} (errno={})",
-                _global_offset,
-                (message != nullptr ? message : "<null>"),
-                errnum);
+            _last_error_message = fmt::format("gzip error at file position {}: {} (errno={})",
+                                              _global_offset,
+                                              (message != nullptr ? message : "<null>"),
+                                              errnum);
             return source_read_result{0, false, true};
         }
-        if (n == 0) {
+        if (read_count == 0) {
             int errnum = 0;
             ::gzerror(_file, &errnum);
             if (errnum != Z_OK && errnum != Z_STREAM_END) {
                 _last_error_message = fmt::format(
-                    "gzip stream error at file position {}: errno={}",
-                    _global_offset, errnum);
+                    "gzip stream error at file position {}: errno={}", _global_offset, errnum);
                 return source_read_result{0, false, true};
             }
             return source_read_result{0, true, false};
         }
-        std::size_t scaled = static_cast<std::size_t>(n);
+        std::size_t scaled = static_cast<std::size_t>(read_count);
         if (!_bom_consumed && _global_offset == 0) {
             const std::size_t bom_advance = strip_leading_bom(dst, scaled);
             if (bom_advance > 0 && bom_advance <= scaled) {
@@ -436,14 +423,16 @@ public:
             }
             _bom_consumed = true;
         }
-        _global_offset += static_cast<std::size_t>(n);
+        _global_offset += static_cast<std::size_t>(read_count);
         return source_read_result{scaled, false, false};
     }
 
     /// Return the most recent zlib diagnostic.
-    [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
+    [[nodiscard]] std::string last_error_message() const {
+        return _last_error_message;
+    }
 
-private:
+  private:
     void release() noexcept {
         if (_file != nullptr) {
             ::gzclose(_file);
@@ -457,4 +446,4 @@ private:
     std::string _last_error_message;
 };
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

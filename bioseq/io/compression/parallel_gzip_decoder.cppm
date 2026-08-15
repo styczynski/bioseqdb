@@ -1,6 +1,6 @@
 /**
  * @file parallel_gzip_decoder.cppm
- * @brief Ordered chunk drain with optional gzip member checksum tracking.
+ * @brief Drains decoded gzip chunks with optional checksum verification.
  */
 module;
 
@@ -126,7 +126,7 @@ class parallel_gzip_decoder {
                 if (was_member_final) {
                     // Reset the member CRC/ISIZE accumulators for the
                     // next member. zlib auto-handles multi-member
-                    // streams under our backend; we reset our own
+                    // streams under this backend. Reset our own
                     // tracking.
                     _current_member = gzip_member_checksum_state{};
                 }

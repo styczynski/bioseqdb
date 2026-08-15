@@ -1,9 +1,11 @@
-// Unit coverage for identifier header definitions and name normalization.
-#include <tests/support/common.hpp>
-
+/**
+ * @file formats_test.cpp
+ * @brief Verifies header format definitions and name normalization.
+ */
 #include <array>
 #include <string>
 #include <string_view>
+#include <tests/support/common.hpp>
 
 import bioseq.common.logging;
 import bioseq.io.identifier_parser.formats;

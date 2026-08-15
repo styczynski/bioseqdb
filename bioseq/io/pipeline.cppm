@@ -1,14 +1,9 @@
 /**
  * @file pipeline.cppm
- * @brief Producer/parser plus task-pool dispatch for the IO reader.
+ * @brief Asynchronous batch dispatch for sequence input.
  *
- * The calling thread owns source reads, slab refill, and record parsing.
- * Completed batches are moved into task bodies submitted to the shared
- * parallelism pool. The task group is drained before return, so every
- * accepted batch has reached the handler when this function completes.
- *
- * Worker tasks handle completed batches while the calling thread continues
- * parsing input records.
+ * The calling thread reads and parses records while worker tasks handle
+ * completed batches. All submitted tasks finish before return.
  */
 module;
 
