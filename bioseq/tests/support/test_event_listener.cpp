@@ -10,19 +10,26 @@ import bioseq.common.logging;
 
 namespace bioseq::test_support {
 
-/// @brief Configures logging and assertion rendering when a Catch2 run starts.
-class test_event_listener : public Catch::EventListenerBase {
-public:
+/**
+ * @brief Configure Bioseq diagnostics for the lifetime of a Catch2 test run.
+ *
+ * Catch2 owns the listener and invokes its externally named callbacks. The
+ * listener has no per-case state and is registered exactly once below.
+ */
+class test_event_listener final : public Catch::EventListenerBase {
+  public:
     /// @brief Inherits Catch2's listener constructors.
     using Catch::EventListenerBase::EventListenerBase;
 
     /**
-     * @brief Enables test-mode logging and highlighted assertion differences.
+     * @brief Enable test-mode logging and highlighted assertion differences.
      *
      * @param[in] test_run_info Catch2 metadata for the run being started.
+     *
+     * @note `testRunStarting` uses Catch2's externally mandated callback
+     * spelling and runs once before the first test case is dispatched.
      */
-    void testRunStarting(
-        [[maybe_unused]] const Catch::TestRunInfo& test_run_info) override {
+    void testRunStarting([[maybe_unused]] const Catch::TestRunInfo& test_run_info) override {
         ::configure_logging(true);
         libassert::set_diff_highlighting(true);
     }
