@@ -182,7 +182,7 @@ TEST_CASE("budgeted_sketch_vector transfers and destroys host capacity before ad
 
     using owned_type = ::bioseq::simd::
         budgeted_sketch_vector<budgeted_sketch_lifetime_probe>;
-    const auto make_owned = [&](bool& observed) {
+    const auto make_owned = [&admission, baseline](bool& observed) {
         constexpr std::size_t count = 4u;
         const std::uint64_t headroom =
             count * sizeof(budgeted_sketch_lifetime_probe)
@@ -5223,7 +5223,7 @@ TEST_CASE("algorithm_enum_values registry round-trips through algorithm_traits",
 namespace dispatch_test_support {
 
 /// Probe leaf for the BAA × CA × MA chain order test.  Three NTTPs are
-/// pinned; the leaf's `call` writes the (BAA, CA, MA) triple into a
+/// pinned. The leaf's `call` writes the (BAA, CA, MA) triple into a
 /// caller-provided slot reachable through the trailing args.
 template <auto p_baa_pin, auto p_ca_pin, auto p_ma_pin>
 struct bca_probe_leaf {
@@ -6803,8 +6803,8 @@ void check_fragmented_bounded_nthash_range_materialization() {
     REQUIRE(range.size() > 12u);
     REQUIRE(range.padding() != 0u);
     using sequence_size_type = bioseq::storage::sequence_size_t;
-    const auto check_slice = [&](sequence_size_type lo_unit,
-                                 sequence_size_type hi_unit) {
+    const auto check_slice = [&range, &resident_view](sequence_size_type lo_unit,
+                                                      sequence_size_type hi_unit) {
         CAPTURE(lo_unit, hi_unit, sizeof(p_storage_unit));
         constexpr sequence_size_type letters_per_unit =
             range_type::traits::letters_per_unit;
@@ -7423,10 +7423,11 @@ TEST_CASE("persisted grouped-SoA GPU preparation admits zero-based supported alp
     params.compute_mapq = false;
     params.max_occ = 500;
 
-    const auto admitted = [&](const std::uint8_t alphabet_code,
-                              const std::uint8_t byte_width,
-                              const minimizer_sketch_backend backend =
-                                  minimizer_sketch_backend::vulkan_segment) {
+    const auto admitted = [supported_alphabet_count,
+                           &params](const std::uint8_t alphabet_code,
+                                    const std::uint8_t byte_width,
+                                    const minimizer_sketch_backend backend =
+                                        minimizer_sketch_backend::vulkan_segment) {
         return is_persisted_grouped_soa_gpu_preparation_tuple_valid(
             alphabet_code, supported_alphabet_count, byte_width,
             backend, params);

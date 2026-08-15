@@ -23,10 +23,13 @@ namespace bioseq::prefilter {
 
 /// Algorithm resolved for one completed prefilter batch.
 enum class resolved_prefilter_algorithm : std::uint8_t {
+    /// SneakySnake edit-distance filtering.
     sneaky_snake = 0u,
+    /// GateKeeper bit-mask filtering with exact rejection guards.
     gatekeeper = 1u,
 };
 
+/** Return the stable name of a resolved prefilter algorithm. */
 [[nodiscard]] constexpr const char* prefilter_algorithm_name(
     resolved_prefilter_algorithm algorithm) noexcept
 {
@@ -45,27 +48,46 @@ enum class resolved_prefilter_algorithm : std::uint8_t {
 /// to benchmark and SQL callers that must distinguish requested policy from
 /// real maze execution.
 struct prefilter_execution_stats {
+    /// Completed prefilter batches.
     std::uint64_t dispatches = 0;
+    /// Completed SneakySnake batches.
     std::uint64_t sneaky_snake_dispatches = 0;
+    /// Completed GateKeeper batches.
     std::uint64_t gatekeeper_dispatches = 0;
+    /// Batches completed on the scalar backend.
     std::uint64_t scalar_dispatches = 0;
+    /// Batches completed on a Highway backend.
     std::uint64_t simd_dispatches = 0;
+    /// Batches completed on the Vulkan backend.
     std::uint64_t vulkan_dispatches = 0;
+    /// Jobs presented to completed batches.
     std::uint64_t jobs = 0;
+    /// Jobs evaluated by the selected algorithm.
     std::uint64_t evaluated_jobs = 0;
     /// Supported equal-length 64-symbol jobs that returned success.
     std::uint64_t length_64_jobs = 0;
+    /// Jobs bypassed because query and target lengths differ.
     std::uint64_t length_difference_jobs = 0;
+    /// Jobs outside the selected algorithm's supported shape.
     std::uint64_t unsupported_jobs = 0;
+    /// Jobs rejected by the prefilter.
     std::uint64_t rejected_jobs = 0;
+    /// Alignment regions rejected after job aggregation.
     std::uint64_t rejected_regions = 0;
+    /// Alignment regions retained after job aggregation.
     std::uint64_t surviving_regions = 0;
+    /// GateKeeper masks eligible for exact rejection checks.
     std::uint64_t mask_rejection_candidates = 0;
+    /// Exact rejection checks executed after mask filtering.
     std::uint64_t exact_guard_activations = 0;
+    /// Exact checks that confirmed a rejection.
     std::uint64_t guard_confirmed_rejections = 0;
+    /// Rejections confirmed by exact Hamming distance.
     std::uint64_t hamming_exact_rejections = 0;
+    /// Counter overflow or an invalid accounting transition was observed.
     bool is_saturated = false;
 
+    /** Add one counter with saturation recorded in the supplied flag. */
     static constexpr void add(
             std::uint64_t& destination,
             const std::uint64_t increment,
@@ -79,6 +101,7 @@ struct prefilter_execution_stats {
         destination += increment;
     }
 
+    /** Record one completed batch and validate its accounting relationships. */
     constexpr void record_batch(
             const resolved_prefilter_algorithm algorithm,
             const prefilter_backend backend,
@@ -95,7 +118,9 @@ struct prefilter_execution_stats {
             const std::uint64_t hamming_exact_rejection_count = 0u,
             const std::uint64_t length_64_count = 0u) noexcept {
         add(dispatches, 1u, is_saturated);
-        if (length_64_count > evaluated_count) is_saturated = true;
+        if (length_64_count > evaluated_count) {
+            is_saturated = true;
+        }
         switch (algorithm) {
             case resolved_prefilter_algorithm::sneaky_snake:
                 add(sneaky_snake_dispatches, 1u, is_saturated);
@@ -154,6 +179,7 @@ struct prefilter_execution_stats {
             hamming_exact_rejection_count, is_saturated);
     }
 
+    /** Merge a completed batch or statement aggregate into this value. */
     constexpr void merge(
             const prefilter_execution_stats& other) noexcept {
         // A caller that marks a stats present is attesting a complete batch
@@ -224,11 +250,14 @@ struct prefilter_execution_stats {
             || (forbid_unsupported_jobs && unsupported_jobs != 0u));
     }
 
+    /** Validate accounting and require every dispatch to use one backend. */
     [[nodiscard]] constexpr bool is_backend_consistent(
             const prefilter_backend expected_backend,
             const bool require_evaluated_jobs = false,
             const bool forbid_unsupported_jobs = false) const noexcept {
-        if (!is_internally_consistent(require_evaluated_jobs, forbid_unsupported_jobs)) return false;
+        if (!is_internally_consistent(require_evaluated_jobs, forbid_unsupported_jobs)) {
+            return false;
+        }
         switch (expected_backend) {
             case prefilter_backend::scalar:
                 return scalar_dispatches == dispatches
@@ -250,21 +279,36 @@ struct prefilter_execution_stats {
 
     /// Return the operation-proven algorithm identity of this aggregate.
     [[nodiscard]] constexpr const char* resolved_algorithm_name() const noexcept {
-        if (!is_internally_consistent()) return "invalid";
-        if (gatekeeper_dispatches == dispatches) return "gatekeeper";
-        if (sneaky_snake_dispatches == dispatches) return "sneaky_snake";
+        if (!is_internally_consistent()) {
+            return "invalid";
+        }
+        if (gatekeeper_dispatches == dispatches) {
+            return "gatekeeper";
+        }
+        if (sneaky_snake_dispatches == dispatches) {
+            return "sneaky_snake";
+        }
         return "mixed";
     }
 
     /// Return the operation-proven backend identity of this aggregate.
     [[nodiscard]] constexpr const char* resolved_backend_name() const noexcept {
-        if (!is_internally_consistent()) return "invalid";
-        if (scalar_dispatches == dispatches) return "scalar";
-        if (simd_dispatches == dispatches) return "highway_simd";
-        if (vulkan_dispatches == dispatches) return "vulkan";
+        if (!is_internally_consistent()) {
+            return "invalid";
+        }
+        if (scalar_dispatches == dispatches) {
+            return "scalar";
+        }
+        if (simd_dispatches == dispatches) {
+            return "highway_simd";
+        }
+        if (vulkan_dispatches == dispatches) {
+            return "vulkan";
+        }
         return "mixed";
     }
 
+    /// Compare every execution counter and validation flag.
     constexpr bool operator==(
         const prefilter_execution_stats&) const noexcept = default;
 };

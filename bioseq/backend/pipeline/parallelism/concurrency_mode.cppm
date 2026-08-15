@@ -13,8 +13,11 @@ export namespace bioseq::parallelism {
 
 /// Scheduler concurrency policy selected for one pipeline invocation.
 enum class pipeline_concurrency_mode : std::uint8_t {
+    /// Execute every dispatch and coarse region on the caller thread.
     single_thread = 0,
+    /// Allow dispatch-level work to use the shared pool.
     dispatch_parallel = 1,
+    /// Allow dispatch-level work and coarse regions to use the shared pool.
     task_parallel = 2,
 };
 

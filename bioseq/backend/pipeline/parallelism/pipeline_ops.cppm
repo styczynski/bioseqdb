@@ -16,10 +16,15 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::parallelism {
 
+/// Coarse pipeline region categories protected from nested task dispatch.
 enum class task_parallel_region : std::uint8_t {
+    /// Independent queries in one caller-owned batch.
     query_batch,
+    /// Independent alignment regions within one query.
     align_regions,
+    /// Independent target segments reconstructed under a memory budget.
     segment_recompute,
+    /// Independent fragments built for a persistent index.
     fragment_build,
 };
 
@@ -34,23 +39,27 @@ struct task_parallel_minimums {
 /// Non-nesting guard for coarse pipeline parallel regions.
 class task_parallel_scope {
 public:
-    explicit task_parallel_scope(task_parallel_region) noexcept {
-        unsigned expected = 0;
-        is_acquired_ = active_regions_.compare_exchange_strong(
-            expected, 1, std::memory_order_acq_rel, std::memory_order_relaxed);
-    }
+  /// Attempt to acquire the process-wide coarse-region guard.
+  explicit task_parallel_scope(task_parallel_region) noexcept {
+      unsigned expected = 0;
+      is_acquired_ = active_regions_.compare_exchange_strong(
+          expected, 1, std::memory_order_acq_rel, std::memory_order_relaxed);
+  }
     task_parallel_scope(const task_parallel_scope&) = delete;
     task_parallel_scope& operator=(const task_parallel_scope&) = delete;
+    /// Release the guard when this scope acquired it.
     ~task_parallel_scope() {
         if (is_acquired_) {
             active_regions_.store(0, std::memory_order_release);
         }
     }
 
+    /// Return whether this scope acquired the coarse-region guard.
     [[nodiscard]] bool is_acquired() const noexcept {
         return is_acquired_;
     }
 
+    /// Return whether any coarse parallel region currently owns the guard.
     [[nodiscard]] static bool is_active() noexcept {
         return active_regions_.load(std::memory_order_acquire) != 0;
     }
@@ -60,6 +69,11 @@ private:
     bool is_acquired_ = false;
 };
 
+/**
+ * Execute a half-open range in the shared pool when task parallelism applies.
+ *
+ * @tparam p_body Callable accepting the selected half-open subrange.
+ */
 template <class p_body>
 inline void parallel_for_pipeline(
         std::size_t begin,
@@ -92,6 +106,13 @@ inline void parallel_for_pipeline(
         }});
 }
 
+/**
+ * Execute bounded parallel waves and use the supplied serial fallback when
+ * memory admission or coarse-region acquisition declines parallel work.
+ *
+ * @tparam p_body Callable for admitted half-open waves.
+ * @tparam p_serial_fallback Callable for non-admitted half-open waves.
+ */
 template <class p_body, class p_serial_fallback>
 inline void parallel_for_pipeline_budgeted(
         std::size_t begin,

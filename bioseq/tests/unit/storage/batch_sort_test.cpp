@@ -110,10 +110,14 @@ std::vector<std::vector<std::uint8_t>> make_shapes(std::mt19937_64& rng,
                                                    std::uint32_t alphabet_size,
                                                    std::size_t lpu) {
     std::vector<std::vector<std::uint8_t>> out;
-    auto rank = [&]() { return static_cast<std::uint8_t>(rng() % alphabet_size); };
-    auto rand_seq = [&](std::size_t len) {
+    auto rank = [&rng, alphabet_size]() {
+        return static_cast<std::uint8_t>(rng() % alphabet_size);
+    };
+    auto rand_seq = [&rank](std::size_t len) {
         std::vector<std::uint8_t> v(len);
-        for (auto& x : v) x = rank();
+        for (auto& x : v) {
+            x = rank();
+        }
         return v;
     };
 
@@ -121,10 +125,14 @@ std::vector<std::vector<std::uint8_t>> make_shapes(std::mt19937_64& rng,
     const std::size_t prefix_len = lpu * 3 + 5;   // spans >1 unit + partial
     std::vector<std::uint8_t> shared_prefix = rand_seq(prefix_len);
 
-    if (count == 0) return out;
+    if (count == 0) {
+        return out;
+    }
 
-    auto add = [&](std::vector<std::uint8_t> v) {
-        if (out.size() < count) out.push_back(std::move(v));
+    auto add = [&out, count](std::vector<std::uint8_t> v) {
+        if (out.size() < count) {
+            out.push_back(std::move(v));
+        }
     };
 
     // Deterministic shape seeds first, then random filler to reach `count`.

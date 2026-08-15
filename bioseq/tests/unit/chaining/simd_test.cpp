@@ -27,6 +27,7 @@ using ch::simd_chaining_execution_stats;
 using ch::simd_chaining_runtime_error;
 using ch::simd_chaining_status;
 
+/// Return the generated fixed-target chaining entry used by Highway tests.
 [[nodiscard]] ch::chain_anchors_simd_kernel fixed_chaining_kernel()
 {
     const auto kernel = ::bioseq::simd_dispatch::highway_test_kernel_table()
@@ -69,15 +70,14 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     REQUIRE(ctx.chain_heap_fallback_bytes() == 0);
 }
 
-[[nodiscard]] ch::anchor make_anchor(
-    std::uint64_t ref,
-    std::uint64_t query,
-    std::uint8_t span = 15,
-    std::uint32_t reverse = 0)
-{
+/// Construct one canonical chaining anchor for fixture generation.
+[[nodiscard]] ch::anchor make_anchor(std::uint64_t reference_position,
+                                     std::uint64_t query_position,
+                                     std::uint8_t span = 15,
+                                     std::uint32_t reverse = 0) {
     return ch::anchor{
-        .ref_position = ref,
-        .query_position = query,
+        .ref_position = reference_position,
+        .query_position = query_position,
         .is_reverse = reverse,
         .query_span = span,
         .flags = 0,
@@ -85,6 +85,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     };
 }
 
+/// Generate a deterministic irregular diagonal anchor stream.
 [[nodiscard]] std::vector<ch::anchor> irregular_fixture(
     std::size_t count,
     std::uint64_t seed = 0xA57D1E5ULL)
@@ -109,6 +110,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
+/// Generate a uniformly spaced diagonal anchor stream.
 [[nodiscard]] std::vector<ch::anchor> diagonal_fixture(
     std::size_t count)
 {
@@ -123,6 +125,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
+/// Generate an earlier exact winner followed by off-diagonal distractors.
 [[nodiscard]] std::vector<ch::anchor> earlier_winner_fixture(
     std::size_t main_count,
     std::size_t distractor_count)
@@ -161,6 +164,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
+/// Generate duplicate anchors that exercise equal-score predecessor ties.
 [[nodiscard]] std::vector<ch::anchor> equal_score_tie_fixture(
     std::size_t group_count)
 {
@@ -179,6 +183,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
+/// Return permissive exact-SIMD chaining parameters for fixtures.
 [[nodiscard]] ch::chaining_parameters exact_params() {
     ch::chaining_parameters params;
     params.max_gap = 1000;
@@ -194,6 +199,7 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return params;
 }
 
+/// Return bounded-batch chaining parameters derived from the exact fixture.
 [[nodiscard]] ch::chaining_parameters bounded_params() {
     auto params = exact_params();
     params.max_chain_skip = 25;
@@ -231,12 +237,14 @@ TEST_CASE("ArenaSlab geometric growth is amortized and chain scopes release heap
     return anchors;
 }
 
+/// Owned chains, reordered anchors, and execution stats from one fixture run.
 struct chain_outputs {
     std::vector<ch::chain> chains;
     std::vector<ch::anchor> anchors;
     simd_chaining_execution_stats stats{};
 };
 
+/// Run the scalar correctness oracle inside a fresh chaining arena.
 [[nodiscard]] chain_outputs run_scalar(
     std::span<const ch::anchor> anchors,
     const ch::chaining_parameters& params)
@@ -256,6 +264,7 @@ struct chain_outputs {
     return result;
 }
 
+/// Run the fixed-target SIMD route inside a fresh chaining arena.
 [[nodiscard]] chain_outputs run_simd(
     std::span<const ch::anchor> anchors,
     const ch::chaining_parameters& params,
@@ -283,6 +292,7 @@ struct chain_outputs {
     return result;
 }
 
+/// Require exact chain and reordered-anchor parity between two runs.
 void require_same_outputs(
     const chain_outputs& actual,
     const chain_outputs& expected,
@@ -314,6 +324,7 @@ void require_same_outputs(
     }
 }
 
+/// Require that a selected SIMD route did not execute scalar fallback work.
 void require_no_forbidden_scalar_work(
     const simd_chaining_execution_stats& stats)
 {
@@ -323,6 +334,7 @@ void require_no_forbidden_scalar_work(
     REQUIRE(stats.fail_closed_rejections == 0);
 }
 
+/// Require coherent execution statistics for the selected SIMD policy.
 void require_selected_policy(
     const simd_chaining_execution_stats& stats,
     ch::simd_chaining_policy selected,
@@ -344,6 +356,7 @@ void require_selected_policy(
     }
 }
 
+/// Return whether two runs differ in chain or reordered-anchor identity.
 [[nodiscard]] bool outputs_differ(
     const chain_outputs& lhs,
     const chain_outputs& rhs)

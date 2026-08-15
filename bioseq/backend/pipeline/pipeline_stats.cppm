@@ -86,6 +86,7 @@ enum class simd_alignment_algorithm_identity : std::uint8_t {
     return "mixed_invalid";
 }
 
+/// Return the stable report name of a SIMD alignment identity.
 [[nodiscard]] constexpr std::string_view simd_alignment_algorithm_identity_name(
     simd_alignment_algorithm_identity algorithm) noexcept
 {
@@ -229,7 +230,7 @@ inline constexpr std::uint32_t k_sql_integer_value_max =
 
 /// Merge a SQL-bound count/time/byte value with the project's shared
 /// saturating arithmetic. PostgreSQL bigint is signed, so values clamp at
-/// INT64_MAX; an exact sum of INT64_MAX is representable and is not saturation.
+/// INT64_MAX. An exact sum of INT64_MAX is representable and is not saturation.
 [[nodiscard]] inline bool merge_counter(
     std::uint64_t& destination,
     std::uint64_t increment) noexcept {
@@ -247,7 +248,7 @@ inline constexpr std::uint32_t k_sql_integer_value_max =
 
 /// Target-independent projection of the operation-local Block Aligner stats.
 /// Every field is copied at the dispatch boundary from
-/// block_aligner_execution_stats; stage coverage and generic SIMD counters are
+/// block_aligner_execution_stats. Stage coverage and generic SIMD counters are
 /// never used to manufacture these statistics.
 struct block_aligner_stage_stats {
     bool is_available = false;
@@ -264,8 +265,8 @@ struct block_aligner_stage_stats {
     [[nodiscard]] constexpr bool operator==(
         const block_aligner_stage_stats&) const noexcept = default;
 
-    /// Merge independently captured operation statistics.  `is_accepted` means every
-    /// is_available operand was is_accepted; SQL-bound counter overflow revokes it.
+    /// Merge independently captured operation statistics. Every available
+    /// operand must be accepted and SQL-bound counter overflow revokes it.
     [[nodiscard]] bool merge(
         const block_aligner_stage_stats& rhs) noexcept {
         if (!rhs.is_available) {
@@ -312,7 +313,9 @@ struct block_aligner_stage_stats {
             rhs.forbidden_scalar_biological_fallbacks)
             || overflow;
         is_saturated = overflow;
-        if (is_saturated) is_accepted = false;
+        if (is_saturated) {
+            is_accepted = false;
+        }
         return is_saturated;
     }
 };
@@ -338,7 +341,7 @@ struct stage_coverage {
     [[nodiscard]] constexpr bool operator==(
         const stage_coverage&) const noexcept = default;
 
-    /// Saturating merge; true means at least one SQL-bound count overflowed.
+    /// Saturating merge. True means at least one SQL-bound count overflowed.
     [[nodiscard]] bool merge(const stage_coverage& rhs) noexcept {
         bool is_saturated = merge_counter(eligible_jobs, rhs.eligible_jobs);
         for (std::size_t i = 0; i < executed_jobs.size(); ++i) {
@@ -396,7 +399,7 @@ inline void merge_report_once_identity(
 }
 
 /// Hash-major cold-reader identities and counters for operational aggregation.
-/// Identity fields are merged only when identical; counters use the same
+/// Identity fields are merged only when identical. Counters use the same
 /// saturating arithmetic as the rest of the operational snapshot.
 struct hash_major_index_reader_stats {
     std::uint64_t layout_revision = 0;
@@ -589,7 +592,7 @@ static_assert(static_cast<std::uint64_t>(
 
 /// Provider, mapped-image and lifecycle statistics appended by the exact
 /// Grouped-SoA provider stats. Counter producers build operation-local
-/// deltas through record_counter(); aggregation remains checked and clamps at
+/// deltas through record_counter(). Aggregation remains checked and clamps at
 /// SQL bigint max. Stable codes use explicit presence bits because provider
 /// Code zero identifies the validated relation-backed storage provider.
 struct grouped_soa_provider_stats {
@@ -1054,18 +1057,18 @@ struct pipeline_operational_stats {
     std::uint64_t full_segment_hydrations = 0;
     std::uint64_t backend_declines = 0;
     std::uint64_t backend_fallbacks = 0;
-	// Cold grouped-SoA source/route stats. The conversion counters name only
-	// pair-index transformation work; segment-local direct-reader validation is
-	// tracked independently.
-	std::uint64_t persisted_source_parent_rows_read = 0;
-	std::uint64_t persisted_source_catalog_rows_read = 0;
-	std::uint64_t persisted_source_catalog_index_scans = 0;
-	std::uint64_t persisted_source_fragment_rows_read = 0;
-	std::uint64_t persisted_source_decoded_bp = 0;
-	std::uint64_t persisted_pair_index_conversion_calls = 0;
-	std::uint64_t persisted_segment_rebase_calls = 0;
-    // runtime-only stats that the selected fixed-target grouped_soa validator
-    // was actually entered.  Plan construction cannot know the persisted wire
+    // Cold grouped-SoA source/route stats. The conversion counters name only
+    // pair-index transformation work while segment-local direct-reader
+    // validation is tracked independently.
+    std::uint64_t persisted_source_parent_rows_read = 0;
+    std::uint64_t persisted_source_catalog_rows_read = 0;
+    std::uint64_t persisted_source_catalog_index_scans = 0;
+    std::uint64_t persisted_source_fragment_rows_read = 0;
+    std::uint64_t persisted_source_decoded_bp = 0;
+    std::uint64_t persisted_pair_index_conversion_calls = 0;
+    std::uint64_t persisted_segment_rebase_calls = 0;
+    // Runtime-only stats recording that the selected fixed-target grouped-SoA
+    // validator executes. Plan construction cannot know the persisted wire
     // format selected for a row, so this counter is populated only from the
     // completed prepared grouped-SoA query-reader route stats.
     std::uint64_t indexing_grouped_soa_validate_calls = 0;
@@ -1150,7 +1153,7 @@ struct pipeline_operational_stats {
     }
 
     /// Merge one completed operation-local prefilter stats. The authoritative
-    /// stats type owns all counter arithmetic and invariants; the statement
+    /// stats type owns all counter arithmetic and invariants. The statement
     /// aggregate only retains its presence and propagates invalidity into the
     /// existing fail-closed operational saturation signal.
     void record_prefilter_execution_stats(
@@ -1771,7 +1774,7 @@ public:
     }
 
     /// Record the registry plan and the binding returned by the sole runtime
-    /// dispatch. Plan-mask drift is an environment invariant failure; target
+    /// dispatch. Plan-mask drift is an environment invariant failure. Target
     /// drift is represented explicitly so aggregation never reports a false
     /// singular architecture.
     void record_highway_target(
@@ -1853,7 +1856,7 @@ struct pipeline_job_execution_stats {
         || source == target_index_source::persisted;
 }
 
-/// Merge backend identities; any concrete disagreement becomes mixed-invalid.
+/// Merge backend identities. Any concrete disagreement becomes mixed-invalid.
 [[nodiscard]] constexpr executed_backend merge_backend_identity(
     executed_backend lhs,
     executed_backend rhs) noexcept {
@@ -1863,7 +1866,7 @@ struct pipeline_job_execution_stats {
     return executed_backend::mixed_invalid;
 }
 
-/// Merge index-source identities; any concrete disagreement becomes mixed-invalid.
+/// Merge index-source identities. Any concrete disagreement becomes mixed-invalid.
 [[nodiscard]] constexpr target_index_source merge_target_index_identity(
     target_index_source lhs,
     target_index_source rhs) noexcept {
@@ -1881,7 +1884,7 @@ struct pipeline_job_execution_stats {
             == simd_chaining_policy_identity::bounded_batch_approximate;
 }
 
-/// Merge policy identities; a concrete disagreement remains visible and
+/// Merge policy identities. A concrete disagreement remains visible and
 /// revokes aggregate attestation instead of silently choosing either policy.
 [[nodiscard]] constexpr simd_chaining_policy_identity
 merge_simd_chaining_policy_identity(
@@ -2464,7 +2467,7 @@ struct pipeline_execution_stats {
 
     /// Validate the exact per-stage aggregate implied by a concrete
     /// backend/source and the number of attempted logical jobs. Optional,
-    /// data-dependent stages may cover any subset; unconditional front-end
+    /// data-dependent stages may cover any subset. Unconditional front-end
     /// stages must cover every job. No forbidden engine or fallback lane may
     /// carry work.
     [[nodiscard]] static constexpr bool is_aggregate_stage_coverage_valid(
@@ -3741,7 +3744,7 @@ make_persisted_grouped_soa_gpu_cache_metrics_delta(
 
 /// The runtime's sealed stats exposes an immutable environment preview before
 /// it commits report-once cache bits.  Final authority must reproduce every
-/// fixed field exactly; descriptive equivalence is not enough.
+/// fixed field exactly. Descriptive equivalence is not enough.
 [[nodiscard]] inline bool
 is_persisted_grouped_soa_gpu_environment_consistent(
     const ::bioseq::gpu::vulkan::runtime_gpu_execution_environment_snapshot& actual,

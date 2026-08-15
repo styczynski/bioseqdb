@@ -13,9 +13,13 @@ export namespace bioseq::simd_dispatch {
 
 /// Target-neutral masks selected by the single registered Highway dispatcher.
 struct highway_dispatch_plan final {
+    /// Highway targets present in the linked runtime.
     std::int64_t compiled_targets = 0;
+    /// Compiled targets supported by the current CPU.
     std::int64_t cpu_supported_targets = 0;
+    /// Supported targets admitted by the runtime contract.
     std::int64_t runnable_targets = 0;
+    /// Single target selected for this dispatch plan.
     std::int64_t planned_target = 0;
 };
 
@@ -28,9 +32,13 @@ export namespace bioseq::prefilter {
 
 /// Backend that executed a completed prefilter batch.
 enum class prefilter_backend : std::uint8_t {
+    /// Resolve the backend from the active execution policy.
     automatic = 0,
+    /// Execute the scalar rank prefilter.
     scalar = 1,
+    /// Execute the selected Highway rank prefilter.
     simd = 2,
+    /// Execute the Vulkan rank prefilter.
     vulkan = 3,
 };
 
@@ -40,18 +48,22 @@ export namespace bioseq::simd {
 
 /// Seed-chaining implementation selected for one alignment operation.
 enum class chaining_algorithm : std::uint8_t {
+    /// Minimap2 dynamic programming on the scalar CPU route.
     scalar_minimap2 = 0,
+    /// Minimap2 dynamic programming through the selected Highway target.
     simd_minimap2 = 1,
+    /// Range-minimum-query chaining on the CPU route.
     range_minimum_query = 2,
     /// Tiled dynamic-programming score generation on Vulkan.
     vulkan_tiled_dynamic_programming = 3,
 };
 
-/// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
-/// vs Highway-vectorised block aligner (single-affine). Values MUST match
-/// bioseq.aligner.base_alignment.algorithm ordinals.
+/// Base-level alignment algorithm selected for one alignment operation.
+/// Ordinals match `bioseq.aligner.base_alignment.algorithm`.
 enum class base_alignment_algorithm : std::uint8_t {
+    /// KSW2 dual-affine dynamic programming.
     ksw2 = 0,
+    /// Highway-vectorised single-affine block alignment.
     block_aligner = 1,
     /// Inter-region batched KSW2. Packs many small KSW2
     /// gap-fills across regions into SIMD lanes and runs an inter-sequence
@@ -60,7 +72,7 @@ enum class base_alignment_algorithm : std::uint8_t {
     ksw2_batched = 2,
 };
 
-/// Minimizer-extraction algorithm. Selected at runtime; the
+/// Minimizer-extraction algorithm. Selected at runtime. The
 /// `minimap_port` entry point dispatches on this enum with a runtime
 /// branch (cannot use constexpr-if because both paths instantiate the
 /// same templates, just with the simd_hash vs scalar_hash inner type,

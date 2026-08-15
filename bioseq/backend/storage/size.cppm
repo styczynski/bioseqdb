@@ -13,7 +13,7 @@ export namespace bioseq::storage {
 /**
  * Unsigned type for logical sequence positions and lengths.
  *
- * SQL and storage boundaries must validate narrowing explicitly; this module
+ * SQL and storage boundaries must validate narrowing explicitly. This module
  * deliberately provides no unchecked signed conversion helper.
  */
 using sequence_size_t = std::uint64_t;

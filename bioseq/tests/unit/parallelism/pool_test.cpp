@@ -23,6 +23,7 @@ namespace {
 std::array<std::uint64_t, 4> materialization_observations{};
 std::atomic<std::size_t> materialization_observation_index{0u};
 
+/// Return the next deterministic process-footprint observation.
 [[nodiscard]] std::uint64_t deterministic_footprint_observation() noexcept {
     const std::size_t index = materialization_observation_index.fetch_add(
         1u, std::memory_order_relaxed);
@@ -30,12 +31,14 @@ std::atomic<std::size_t> materialization_observation_index{0u};
         std::min(index, materialization_observations.size() - 1u)];
 }
 
+/// Reset the deterministic footprint sequence for one materialization test.
 void set_materialization_observations(std::uint64_t before,
                                       std::uint64_t after) noexcept {
   materialization_observations = {before, after, after, after};
   materialization_observation_index.store(0u, std::memory_order_relaxed);
 }
 
+/// Scheduler state modeled by the tracked-pool unit fixture.
 enum class fake_tracked_state : std::uint8_t {
   unused = 0u,
   enrolled,
@@ -43,6 +46,7 @@ enum class fake_tracked_state : std::uint8_t {
   finished,
 };
 
+/// Generation-checked state for one fake scheduler slot.
 struct fake_tracked_slot_state {
   std::uint64_t generation = 0u;
   fake_tracked_state state = fake_tracked_state::unused;
@@ -50,6 +54,7 @@ struct fake_tracked_slot_state {
   bool failed = false;
 };
 
+/// Complete fake scheduler owner used by observer callbacks.
 struct fake_tracked_owner {
   std::array<fake_tracked_slot_state, 2> slots{};
   std::uint32_t live = 0u;
@@ -61,6 +66,7 @@ struct fake_tracked_owner {
   std::atomic<std::uint32_t> peak_active_workers{0u};
 };
 
+/// Enroll a tracked task in the first unused fake scheduler slot.
 [[nodiscard]] bool
 fake_tracked_enroll(void *argument,
                     bioseq::parallelism::tracked_job_resources resources,
@@ -89,6 +95,7 @@ fake_tracked_enroll(void *argument,
   return false;
 }
 
+/// Resolve a fake scheduler handle after validating its generation.
 [[nodiscard]] fake_tracked_slot_state *
 fake_tracked_slot(fake_tracked_owner *owner,
                   bioseq::parallelism::tracked_job_handle handle) noexcept {
@@ -99,6 +106,7 @@ fake_tracked_slot(fake_tracked_owner *owner,
   return slot.generation == handle.generation ? std::addressof(slot) : nullptr;
 }
 
+/// Apply the enrolled-to-scheduled fixture transition.
 [[nodiscard]] bool fake_tracked_mark_scheduled(
     void *argument, bioseq::parallelism::tracked_job_handle handle) noexcept {
   auto *slot =
@@ -110,6 +118,7 @@ fake_tracked_slot(fake_tracked_owner *owner,
   return true;
 }
 
+/// Apply the scheduled-to-finished fixture transition.
 [[nodiscard]] bool fake_tracked_mark_finished(
     void *argument, bioseq::parallelism::tracked_job_handle handle) noexcept {
   auto *slot =
@@ -121,6 +130,7 @@ fake_tracked_slot(fake_tracked_owner *owner,
   return true;
 }
 
+/// Drain callbacks and recycle one fake scheduler slot.
 [[nodiscard]] bool
 fake_tracked_drain(void *argument,
                    bioseq::parallelism::tracked_job_handle handle,
@@ -155,6 +165,7 @@ fake_tracked_drain(void *argument,
   return true;
 }
 
+/// Mark the addressed fake slot as failed.
 void fake_tracked_handoff_error(void *argument,
                                 bioseq::parallelism::tracked_job_handle handle,
                                 std::uint32_t, char const *, bool) noexcept {
@@ -165,6 +176,7 @@ void fake_tracked_handoff_error(void *argument,
   }
 }
 
+/// Record entry into a fake scheduler worker scope.
 void fake_tracked_worker_enter(
     void *argument, bioseq::parallelism::tracked_job_handle,
     bioseq::parallelism::tracked_worker_scope_storage *) noexcept {
@@ -180,6 +192,7 @@ void fake_tracked_worker_enter(
   }
 }
 
+/// Record exit from a fake scheduler worker scope.
 void fake_tracked_worker_leave(
     void *argument, bioseq::parallelism::tracked_job_handle,
     bioseq::parallelism::tracked_worker_scope_storage *) noexcept {
@@ -187,6 +200,7 @@ void fake_tracked_worker_leave(
   owner->active_workers.fetch_sub(1u, std::memory_order_acq_rel);
 }
 
+/// Build the observer callback table for one fake scheduler owner.
 [[nodiscard]] bioseq::parallelism::tracked_job_observer
 make_fake_tracked_observer(fake_tracked_owner *owner) noexcept {
   return {
@@ -201,11 +215,13 @@ make_fake_tracked_observer(fake_tracked_owner *owner) noexcept {
   };
 }
 
+/// Task fixture that waits for an explicit release signal.
 struct delayed_tracked_task {
   std::atomic<bool> *release = nullptr;
   std::atomic<std::uint32_t> *executions = nullptr;
 };
 
+/// Execute one delayed task fixture through its opaque task reference.
 void run_delayed_tracked_task(void *argument) {
   auto *task = static_cast<delayed_tracked_task *>(argument);
   bool released = task->release->load(std::memory_order_acquire);
@@ -567,7 +583,7 @@ TEST_CASE("admitted vector capacity is destroyed before its reservation is relea
         bioseq::parallelism::memory_permit permit;
         std::vector<std::uint64_t> values;
     } old_runs, next_runs;
-    const auto admit = [&](owned_u64_vector& owned, std::size_t units) {
+    const auto admit = [&admission](owned_u64_vector& owned, std::size_t units) {
         const std::uint64_t logical = units * sizeof(std::uint64_t);
         const std::uint64_t peak = logical
             * bioseq::parallelism::k_vector_preallocation_headroom_factor;
@@ -607,9 +623,9 @@ TEST_CASE("memory materialization releases reservation after reflected ownership
     admission.set_index_memory_cap_bytes(4096u);
     REQUIRE(admission.reserved_bytes() == 0u);
 
-    const auto run = [&](std::uint64_t before,
-                         std::uint64_t after,
-                         memory_materialization_snapshot snapshot) {
+    const auto run = [&admission](std::uint64_t before,
+                                  std::uint64_t after,
+                                  memory_materialization_snapshot snapshot) {
         set_materialization_observations(before, after);
         auto permit = admission.try_reserve(512u);
         REQUIRE(permit.has_value());
@@ -686,7 +702,7 @@ TEST_CASE("memory materialization grow transfer, throw safety, and serialization
     REQUIRE(grown.has_value());
     const auto grown_commit = admission.materialize(
         *grown,
-        [&]() {
+        [&grown, &admission]() {
             REQUIRE(grown->grow_to(768u));
             REQUIRE(admission.reserved_bytes() == 768u);
             return memory_materialization_snapshot{
@@ -722,7 +738,7 @@ TEST_CASE("memory materialization grow transfer, throw safety, and serialization
     std::atomic<unsigned> active{0u};
     std::atomic<unsigned> max_active{0u};
     std::atomic<bool> worker_failed{false};
-    auto worker = [&]() {
+    auto worker = [&admission, &ready, &go, &active, &max_active, &worker_failed]() {
         auto permit = admission.try_reserve(128u);
         if (!permit) {
             worker_failed.store(true, std::memory_order_release);
@@ -735,13 +751,13 @@ TEST_CASE("memory materialization grow transfer, throw safety, and serialization
         }
         (void)admission.materialize(
             *permit,
-            [&]() noexcept {
+            [&active, &max_active]() noexcept {
                 const unsigned now = active.fetch_add(
                     1u, std::memory_order_acq_rel) + 1u;
                 unsigned observed = max_active.load(std::memory_order_relaxed);
-                while (observed < now
-                    && !max_active.compare_exchange_weak(
-                        observed, now, std::memory_order_relaxed)) {}
+                while (observed < now && !max_active.compare_exchange_weak(
+                                             observed, now, std::memory_order_relaxed)) {
+                }
                 for (unsigned spin = 0; spin < 100'000u; ++spin) {
                     std::atomic_signal_fence(std::memory_order_seq_cst);
                 }

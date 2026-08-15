@@ -120,17 +120,16 @@ TEST_CASE("KSW2 alignment is bit-identical under fragmentation",
             qn, tn, scoring);
 
         // Fragmented: three chunk sizes (1 / 2 / 32 storage units per fragment).
-        const auto require_chunked_parity = [&](auto fragment_units) {
-            constexpr std::size_t units = decltype(fragment_units)::value;
-            bioseq::storage::with_chunked_lazy_sequence<units>(
-                q_range, t_range,
-                [&](auto query, auto target) {
-                    const auto observed = run_ksw2(
-                        query, target, qn, tn, scoring);
-                    REQUIRE(observed.score == baseline.score);
-                    REQUIRE(observed.cigar == baseline.cigar);
-                });
-        };
+        const auto require_chunked_parity =
+            [&q_range, &t_range, qn, tn, &scoring, &baseline](auto fragment_units) {
+                constexpr std::size_t units = decltype(fragment_units)::value;
+                bioseq::storage::with_chunked_lazy_sequence<units>(
+                    q_range, t_range, [qn, tn, &scoring, &baseline](auto query, auto target) {
+                        const auto observed = run_ksw2(query, target, qn, tn, scoring);
+                        REQUIRE(observed.score == baseline.score);
+                        REQUIRE(observed.cigar == baseline.cigar);
+                    });
+            };
         require_chunked_parity(std::integral_constant<std::size_t, 1u>{});
         require_chunked_parity(std::integral_constant<std::size_t, 2u>{});
         require_chunked_parity(std::integral_constant<std::size_t, 32u>{});

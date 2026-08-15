@@ -269,6 +269,12 @@ unset(_bioseq_lazy_concrete_pattern)
 # hatches named by the specification.
 set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/stage_graph.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/minimizer_execution.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/execution.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/shape_dispatch.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/entry_points.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_parts/segmented.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe_owners_template.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_kernel.cppm

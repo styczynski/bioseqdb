@@ -5,7 +5,7 @@
  * Resident owners remain pointer-sized. Fragmented owners retain a bounded
  * number of scanner fragments and rank windows, so memory use depends on the
  * configured fragment size rather than the logical sequence length. Every
- * coordinate is a logical-rank coordinate; unsupported ranges fail before
+ * coordinate is a logical-rank coordinate. Unsupported ranges fail before
  * pointer or allocation arithmetic.
  */
 module;
@@ -73,7 +73,7 @@ struct sequence_payload_allocation_event {
 /**
  * Allocation-boundary observation without a PostgreSQL dependency.  The two
  * opaque correlations are copied from the planning/executor owner before a
- * task is submitted; the callback interprets them and is required to remain
+ * task is submitted. The callback interprets them and is required to remain
  * alive until that task has joined/drained.  A null callback is the ordinary
  * non-traced route and costs only the allocation-path null check.
  */
@@ -1799,7 +1799,7 @@ template <class p_sequence_range>
 
 /**
  * Invoke a callback through a synthetic fragmented scanner. The concrete
- * scanner and lazy owner remain inside the storage module; callers receive
+ * scanner and lazy owner remain inside the storage module. Callers receive
  * only the canonical facade by value and cannot accidentally flatten the
  * access route.
  */
@@ -2490,7 +2490,7 @@ struct sequence_access_plan {
 ///
 /// The returned descriptor does not change the effective type of the source
 /// allocation.  Its `units` member may be copied/read only through
-/// character/byte access (for example a Vulkan buffer upload); dereferencing
+/// character/byte access (for example a Vulkan buffer upload). Dereferencing
 /// it as `uint32_t*` would violate the C++ effective-type/aliasing rules.
 /** @brief Borrow a byte-only u32 representation from compatible resident u64 storage. */
 template <sequence_alphabet p_alphabet>
