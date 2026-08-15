@@ -88,9 +88,9 @@ import :inspection_policy;
 
 export namespace bioseq::storage::indexing {
 
-/// result_type of the test seam that instantiates the production coordinator
+/// Result type of the test path that instantiates the grouped-SoA coordinator
 /// against a real PostgreSQL-backed lazy sequence. The head and manifest are
-/// independently reopened after publication; the route receipt is the
+/// independently reopened after publication. The route receipt is the
 /// producer-originated execution result returned by the coordinator itself.
 struct ready_minimizer_generation_coordinator_fixture_result {
     std::string table_name;
@@ -316,10 +316,10 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
 #endif
 }
 
-/// Integration-only direct execution of the production grouped-SoA coordinator.
-/// This deliberately bypasses the ordinary update route and does not touch
+/// Integration-only direct execution of the grouped-SoA coordinator.
+/// This bypasses the ordinary update route and does not touch
 /// metadata_age_log. The caller selects the biological backend
-/// explicitly; an unavailable SIMD/GPU route fails instead of falling back.
+/// explicitly. An unavailable SIMD/GPU route fails instead of falling back.
 [[nodiscard]] inline ready_minimizer_generation_coordinator_fixture_result
 build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                                           std::string_view index_name,
@@ -705,7 +705,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
 }
 
 /// Live PostgreSQL fixture result for the grouped-SoA storage contract. This
-/// is used only by the integration SQL seam below; production readers never
+/// is used only by the integration SQL path. Other readers never
 /// call it, and only the current grouped-SoA layout is accepted.
 struct minimizer_generation_integration_fixture_result {
     std::string table_name;
@@ -743,8 +743,8 @@ struct minimizer_generation_integration_fixture_result {
 
 /// Deterministic replayable producer used by the live PG fixture. Its declared
 /// scheme is the caller-requested backend identity. The Vulkan-labelled
-/// storage fixture deliberately emits up to 32768 events with small valid
-/// cores to exercise multi-entry/multi-segment scanning; other fixtures use a
+/// storage fixture emits up to 32768 events with small valid
+/// cores to exercise multi-entry/multi-segment scanning. Other fixtures use a
 /// 4096-event bound. No path retains biological source bytes.
 struct minimizer_generation_fixture_producer {
     std::uint64_t target_length = 0;
@@ -802,7 +802,7 @@ struct minimizer_generation_fixture_producer {
 static_assert(bioseq::indexing::grouped_soa_event_producer<minimizer_generation_fixture_producer>);
 
 /// Build and publish one exact live grouped-SoA generation. Every write
-/// goes through the production row sink; this half deliberately opens no read
+/// goes through the row sink. The write path opens no read
 /// session so a later SQL statement/backend can validate an independently
 /// reopened reader without inheriting session-owned state.
 [[nodiscard]] inline minimizer_generation_integration_fixture_result

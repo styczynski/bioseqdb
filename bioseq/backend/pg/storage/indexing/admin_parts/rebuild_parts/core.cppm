@@ -280,9 +280,9 @@ inline void with_promoted_pg_sequence_view(Datum promoted_datum,
     }
 }
 
-/// Opt-in locator-backed minimizer hash-major publication bridge. The existing
-/// persistence GUC selects this production branch without introducing another
-/// feature flag; grouped-SoA generations remain readable.
+/// Opt-in locator-backed minimizer hash-major publication path. The persistence
+/// GUC selects this branch without introducing another
+/// feature flag. Grouped-SoA generations remain readable.
 template <class p_sequence_range>
 inline void build_and_verify_hash_major_minimizer_generation_pg(
     Oid user_relid,
@@ -332,8 +332,8 @@ inline void build_and_verify_grouped_soa_minimizer_generation_pg(
 
 /// Fail before the destructive index clear if the grouped-SoA rebuild
 /// cannot use one homogeneous PostgreSQL-locator source domain. The table AM
-/// normally guarantees locator stubs; this scan makes that prerequisite an
-/// enforced storage contract rather than an assumption about current writes.
+/// normally guarantees locator stubs. This scan makes that prerequisite an
+/// enforced storage contract.
 inline void
 verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
                                                 std::span<const std::int16_t> seq_attnos,

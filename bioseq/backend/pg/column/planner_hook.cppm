@@ -69,7 +69,7 @@ struct plan_tree_mutator_context
  *
  * BioseqScan removes its executor-owned mmsearch from Plan.qual and stores
  * the expression in custom_exprs[3].  Aggregate eligibility must inspect that
- * private expression slot as well as the ordinary targetlist/qual trees;
+ * private expression slot as well as the ordinary targetlist/qual trees.
  * VectorAgg cannot consume the scalar, per-match rows published by this scan. */
 [[nodiscard]] static inline bool bioseq_scan_owns_mmsearch(
 		const CustomScan* custom_scan) {

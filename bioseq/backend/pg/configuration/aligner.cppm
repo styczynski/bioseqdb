@@ -83,7 +83,7 @@ struct settings final {
         })]]
         static inline int maximum_gap = 5'000;
 
-        /** @brief Overrides the reference gap limit; negative one uses maximum_gap.
+        /** @brief Overrides the reference gap limit. Negative one uses maximum_gap.
          */
         [[bioseq_sql::guc({
             .minimum = -1,
@@ -100,7 +100,7 @@ struct settings final {
         })]]
         static inline int bandwidth = 500;
 
-        /** @brief Sets the long-join bandwidth; zero disables long joins. */
+        /** @brief Sets the long-join bandwidth. Zero disables long joins. */
         [[bioseq_sql::guc({
             .minimum = 0,
             .maximum = 1 << 20,
@@ -263,7 +263,7 @@ struct settings final {
         })]]
         static inline int ambiguous_base_penalty = 1;
 
-        /** @brief Sets the Z-drop threshold; negative one disables it. */
+        /** @brief Sets the Z-drop threshold. Negative one disables it. */
         [[bioseq_sql::guc({
             .minimum = -1,
             .maximum = 1 << 20,
@@ -271,7 +271,7 @@ struct settings final {
         })]]
         static inline int z_drop_threshold = 400;
 
-        /** @brief Sets the sequence-end bonus; negative one disables it. */
+        /** @brief Sets the sequence-end bonus. Negative one disables it. */
         [[bioseq_sql::guc({
             .minimum = -1,
             .maximum = 1 << 20,

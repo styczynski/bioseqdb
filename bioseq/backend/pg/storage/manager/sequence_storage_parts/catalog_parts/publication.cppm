@@ -101,7 +101,7 @@ export namespace bioseq::storage {
 class pending_sequence_source;
 
 /// PostgreSQL catalog operations for immutable source epochs. Every lookup
-/// accepts the caller's snapshot; no backend-global or SnapshotSelf read is
+/// accepts the caller's snapshot. No backend-global or SnapshotSelf read is
 /// allowed in a validated reader.
 struct sequence_source_version_manager {
     /// Allocate the next positive immutable source epoch.
@@ -472,7 +472,7 @@ struct sequence_storage_manager;
 struct sequence_stream_writer;
 
 /// Move-only publication authority. Fragment/catalog creation returns this
-/// token in unpublished state; only the caller that has appended the parent
+/// token in unpublished state. Only the caller that has appended the parent
 /// row may consume it to publish the ready state.
 class pending_sequence_source {
   private:

@@ -226,8 +226,8 @@ struct sequence_source_version_row {
 };
 
 /// Optional observational counters for one immutable source-catalog lookup.
-/// The lookup owns the only truthful view of its relation/index open sites;
-/// callers that do not request telemetry retain the exact previous path.
+/// The lookup owns the authoritative view of its relation/index open sites.
+/// Callers that do not request telemetry retain the same path.
 struct sequence_source_lookup_telemetry {
     std::uint64_t heap_opens = 0;
     std::uint64_t index_opens = 0;

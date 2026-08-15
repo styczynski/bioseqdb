@@ -49,10 +49,10 @@ namespace bioseq::simd::cpu_preparation_detail {
  * later consumed by alignment.  This removes the typed row path's second
  * sketch without introducing a Q-sized conversion owner.
  *
- * The collector deliberately exposes the same small surface used by the
+ * The collector exposes the same small surface used by the
  * scalar and two_stack_nthash kernels.  Capacity remains charged to the prepared
  * target's aggregate permits, including vector reallocation overlap.  Retained
- * per-query growth is best-effort; canonical collection remains fail-closed.
+ * per-query growth is best-effort. Canonical collection remains fail-closed.
  */
 class admitted_canonical_u32_query_collector {
 public:

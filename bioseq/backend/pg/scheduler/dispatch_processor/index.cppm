@@ -1174,31 +1174,19 @@ public:
 	/**
 	 * @brief Runs the minimap2 pipeline across a fixed scheduler batch.
 	 *
-	 * Per target
-	     * row, the loop ASSEMBLES the table's active per-sequence minimizer index
-     * from its chunked storage (gated by read_index_active + per-row presence)
-     * or RECOMPUTES it; the two are mixed freely within one batch.
-     *
-     * Production dispatch posture:
-     *
-     * The PostgreSQL facade adapter is wired into the dispatch
-     * loop. `scanner_pg_ctx` carries the per-batch identity (db/spc/relfilenode/
-     * attno/seq_caches/parent_mctx) plus the per-row optional locator the
-     * caller decoded at submit_scan time. When `scanner_pg_ctx` is non-null
-     * AND the user has not forced the in-memory baseline via
-     * `bioseq.testing.in_memory_scanner.enabled = on`, the loop dispatches:
-     *   - target through a source-backed facade when a locator is present,
-     *     or an in-memory facade for an inline value;
-     *   - query through an in-memory facade over the batch literal.
-     * Consumer algorithms see only the alphabet-specialized erased view.
-     *
-     * NOTE on parameter passing: `target_hdrs` and `query_ids` are full-size
-	     * `dispatch_batch_capacity`-element arrays passed by const-ref so the call
-	     * does not copy them. The result map is RVO'd / moved on return.
+	 * For each target row, the loop assembles the table's active per-sequence
+	 * minimizer index from chunked storage when enabled and present. Otherwise it
+	 * recomputes the index. Both strategies can be mixed within one batch.
 	 *
-	     * The implementation lives in dispatch_processor/implementation.cppm so this module
-	     * interface does not instantiate the full pgseq_supported_alphabets ×
-	     * storage-width minimap pipeline whenever tuple-buffer/admin code changes.
+	 * `scanner_pg_ctx` carries the batch identity and the optional locator decoded
+	 * at submit_scan time. Unless the in-memory scanner is forced, targets with a
+	 * locator use a source-backed facade and inline targets use an in-memory
+	 * facade. Queries use an in-memory facade over the batch literal. Algorithms
+	 * see only the alphabet-specialized erased view.
+	 *
+	 * `target_hdrs` and `query_ids` are full-size
+	 * `dispatch_batch_capacity`-element arrays passed by const reference. The call
+	 * does not copy them. The result map is returned by value.
 	 *
 	 * @return Match rows grouped by scheduler query identifier.
 	 */

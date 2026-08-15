@@ -19,7 +19,7 @@ export namespace bioseq::storage::catalog_rows {
 
 /**
  * @brief Immutable relation-backed minimizer generation descriptor. The
- * serialized provider discriminator is fixed at 0; state 1 is live and state
+ * serialized provider discriminator is fixed at 0. State 1 is live and state
  * 2 is retired.
  */
 struct [[bioseq_sql::table({
@@ -190,7 +190,9 @@ struct [[bioseq_sql::table({
 };
 
 /**
- * @brief PostgreSQL-owned MVCC source epoch and insertion-time content checksum for one immutable sequence locator range; state 0=UNPUBLISHED, 1=READY, 2=terminal INVALID.
+ * @brief PostgreSQL-owned MVCC source epoch and insertion-time content checksum
+ * for one immutable sequence locator range. State 0=UNPUBLISHED, 1=READY, and
+ * 2=terminal INVALID.
  */
 struct [[bioseq_sql::table({
             .schema =

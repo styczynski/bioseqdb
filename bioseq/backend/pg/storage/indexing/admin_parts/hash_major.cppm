@@ -85,9 +85,9 @@ export namespace bioseq::storage::indexing {
 
 // ---- SQL helper implementations ------------------------------------------
 
-/// Read-only setup/post-measurement inspection returned by the narrow SQL admin
-/// bridge. The authoritative source locator is derived from the visible
-/// Bioseq row; callers never supply a source identity or storage-contract
+/// Read-only setup and post-measurement inspection returned by the SQL admin
+/// path. The authoritative source locator is derived from the visible
+/// Bioseq row. Callers never supply a source identity or storage-contract
 /// digest.
 struct ready_minimizer_generation_inspection {
     ready_minimizer_generation_identity identity{};
@@ -100,7 +100,7 @@ struct ready_minimizer_generation_inspection {
 };
 
 /// One fully authenticated hash-major logical-stream receipt.  The descriptor
-/// fields are publication authority; the exact_catalog_* fields are recomputed
+/// fields are publication authority. The exact_catalog_* fields are recomputed
 /// by a bounded, row-aligned reread under the same registered MVCC snapshot.
 struct hash_major_minimizer_generation_stream_inspection {
     bioseq::indexing::hash_major_minimizer_stream_kind kind =
@@ -381,10 +381,10 @@ struct hash_major_minimizer_count_record {
 static_assert(sizeof(hash_major_minimizer_count_record) == 16u);
 
 /// PG BufFile scratch for hash-major's count-before-postings contract.  A first
-/// replay writes one fixed record per distinct hash; the second replay reads
+/// replay writes one fixed record per distinct hash. The second replay reads
 /// records in lockstep while postings stream directly into the logical encoder.
 /// PostgreSQL's ResourceOwner owns a file after any ERROR.  Success closes it
-/// explicitly; exception paths only abandon the C++ handle.
+/// explicitly. Exception paths only abandon the C++ handle.
 class hash_major_minimizer_count_scratch {
 private:
     static constexpr std::size_t k_records_per_io = 4'096u;
@@ -746,7 +746,7 @@ struct ready_hash_major_minimizer_publication {
 
 /// Build and atomically publish one sequence-wide hash-major minimizer generation
 /// from a fragmented PostgreSQL source. Native minimizers are collected into
-/// PostgreSQL-owned sorted spill runs; two bounded replays then satisfy the
+/// PostgreSQL-owned sorted spill runs. Two bounded replays then satisfy the
 /// encoder's exact-count-before-postings contract. Fragment indexes are
 /// intentionally excluded: their physical indexes must never cross this merge seam.
 template <class p_sequence_range>

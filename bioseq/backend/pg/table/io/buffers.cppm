@@ -53,7 +53,7 @@ allocate_chunk_data(std::uint32_t column_count, const bool* column_mask, std::ui
 
 /**
  * @brief Release decoded value buffers that are not owned by the shared cache.
- * @param data Chunk metadata; null is accepted.
+ * @param data Chunk metadata. Null is accepted.
  */
 export void free_chunk_value_buffers(chunk_data* data) noexcept {
     if (data == nullptr) {
@@ -71,7 +71,7 @@ export void free_chunk_value_buffers(chunk_data* data) noexcept {
 
 /**
  * @brief Release existence/value arrays and the chunk metadata container.
- * @param data Chunk metadata; null is accepted.
+ * @param data Chunk metadata. Null is accepted.
  *
  * Call `free_chunk_value_buffers()` first when uncached serialized buffers
  * must also be released.

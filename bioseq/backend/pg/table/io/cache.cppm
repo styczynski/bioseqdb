@@ -23,7 +23,7 @@ std::uint64_t allocated_bytes = 0;
 List* chunk_groups_in_use = NIL;
 column_cache_statistics cache_statistics{};
 
-/** Intrusive cache entry; `list_node` must remain the first member. */
+/** Intrusive cache entry. `list_node` must remain the first member. */
 struct column_cache_entry {
     dlist_node list_node{};
     std::uint64_t relation_id = 0;
@@ -206,7 +206,7 @@ export void mark_chunk_group_in_use(
 
 /**
  * @brief Add or replace a decompressed chunk buffer.
- * @param storage Owned `StringInfo`; ownership transfers to the cache.
+ * @param storage Owned `StringInfo`. Ownership transfers to the cache.
  */
 export void add_column_cache_entry(
         std::uint64_t relation_id,

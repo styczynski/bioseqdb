@@ -278,7 +278,7 @@ using namespace ::bioseq::simd::typed_dispatch::typed_support_detail;
 
 [[bioseq::template_flatten_when("shape", "root")]]
 /// Attach the retained query-sketch stats after a worker has joined. The
-/// prebuilt-minimizer entry point must not publish its own query stats; this
+/// prebuilt-minimizer entry point must not publish its own query stats. This
 /// check makes duplicate attachment fail closed on the PostgreSQL thread.
 inline void attach_retained_hash_major_query_stats(
         match_result_collection& collection,
@@ -290,7 +290,7 @@ inline void attach_retained_hash_major_query_stats(
 /**
  * Promote one decoded sequence locator through the statement's exact source
  * provider, then expose only the canonical lazy facade to the algorithm.
- * The provider remains scan-owned; the read session owns the facade adapter
+ * The provider remains scan-owned. The read session owns the facade adapter
  * and is closed only after the callback has joined/drained all algorithm work.
  */
 template <class p_alphabet, class p_function>

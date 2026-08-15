@@ -219,7 +219,7 @@ struct default_col {
 
 /// Copy `[data,len)` into a per-tuple-palloc'd NUL-terminated cstring. For a
 /// range/multirange column with exactly one `..`, rewrite `lo..hi` to the
-/// canonical inclusive `[lo,hi]` (multirange: `{[lo,hi]}`); otherwise the trimmed
+/// canonical inclusive `[lo,hi]` (multirange: `{[lo,hi]}`). Otherwise the trimmed
 /// text is passed straight to `<type>range_in`/`<type>multirange_in`.
 [[nodiscard]] char*
 make_cstr(const char* data, int len, const dest_coercion& dc, MemoryContext mctx) {

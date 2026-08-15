@@ -132,7 +132,7 @@ void inject_sorted_run_pg_leaf_failure(sorted_run_failure_injection point) {
 }
 #endif
 
-/** Error/unwind cleanup: drop only the C++ handle; ResourceOwner owns file. */
+/** Error/unwind cleanup drops only the C++ handle. ResourceOwner owns the file. */
 void abandon_buffile_noexcept(BufFile*& file) noexcept {
     file = nullptr;
 }

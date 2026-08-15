@@ -3,7 +3,7 @@
  * @brief Declares typed owners for annotated PostgreSQL SQL routines.
  * @defgroup bioseq_sql_public_api Bioseq SQL public API
  *
- * Generated FMGR modules provide the C ABI wrappers; implementation units
+ * Generated FMGR modules provide the C ABI wrappers. Implementation units
  * own routine bodies and extension lifecycle state.
  */
 module;

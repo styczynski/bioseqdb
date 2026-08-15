@@ -512,7 +512,7 @@ void flush_seq_cache_write_states(seq_caches* caches,
 /// retains only the final partial fragment until `finish`, and returns the
 /// current `sequence_locator`. Peak extra memory is one ≤8 KiB fragment buffer + one
 /// `bioseq::pg_types::seq` fragment row, so a >MaxAllocSize record never materialises as one
-/// buffer. Writes to ONE shard; a single sequence exceeding the sub-table cap
+/// buffer. Writes to one shard. A single sequence exceeding the sub-table cap
 /// raises ERROR (transaction rollback cleans the partial rows).
 struct sequence_stream_writer {
     /// Initialize one writer and reserve its immutable source epoch.

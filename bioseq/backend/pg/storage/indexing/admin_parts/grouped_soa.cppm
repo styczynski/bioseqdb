@@ -90,11 +90,11 @@ export namespace bioseq::storage::indexing {
 ///
 /// Ordinary update_index uses this route for PostgreSQL-backed
 /// alphabet/parameter profiles not registered by hash-major. Grouped-SoA fixtures
-/// and readers use this route; DNA4/15/10 production publication uses the
-/// hash-major coordinator above.
+/// and readers use this route. DNA4/15/10 publication uses the hash-major
+/// coordinator.
 /// The caller retains both the registered source snapshot and metadata-age
 /// ownership. `storage.begin_generation_write()` creates a missing canonical
-/// sidecar or reuses an exact one; noncanonical same-name relations require
+/// sidecar or reuses an exact one. Noncanonical same-name relations require
 /// an explicit lifecycle clear before this route. Publication remains
 /// impossible until the sink has returned its private complete-reread token.
 template <class p_sequence_range>
@@ -698,9 +698,9 @@ build_and_publish_grouped_soa_minimizer_generation_pg(
         result.minimizer_sequence_spill_resources_released};
 }
 
-/// Seal the production update_index result at the caller boundary. The
+/// Seal the update_index result at the caller boundary. The
 /// coordinator already validates the producer-originated execution receipt before
-/// publication; this bridge additionally validates that the returned alternative,
+/// publication. This function also validates that the returned alternative,
 /// backend, and immutable publication binding still match the requested normal
 /// rebuild route. There is no scalar/Exact fallback on any selected backend.
 template <class p_sequence_range>

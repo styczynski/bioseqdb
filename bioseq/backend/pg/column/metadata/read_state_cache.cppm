@@ -7,7 +7,7 @@
  * SPI/executor calls we need to reuse the prior read state instead of
  * building a new one, because read-state setup is not shared between calls.
  *
- * The underlying hash table lives in a TopTransactionContext child;
+ * The underlying hash table lives in a TopTransactionContext child.
  * transaction_scoped_hash_table installs the reset callback that clears it at
  * transaction end.
  */
@@ -62,7 +62,7 @@ static bioseq::postgres::support::transaction_scoped_hash_table<
 /** @brief Acquires the read-state slot for a relation and subtransaction.
  *
  * The caller writes a newly constructed column_read_state through the returned
- * slot; subsequent lookups retrieve that same owned pointer.
+ * slot. Subsequent lookups retrieve that same owned pointer.
  */
 export column_read_state**
 acquire_column_read_state_slot(Relation relation, SubTransactionId current_sub_xid)

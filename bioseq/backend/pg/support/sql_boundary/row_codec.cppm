@@ -126,7 +126,7 @@ struct by_reference_datum_copy_policy final {
  *
  * The input bytes remain owned by the caller.  Only raw pointer, length, and
  * MemoryContext values cross the PostgreSQL ERROR bridge.  On success there is
- * exactly one allocation, already owned by result_context; on ERROR the bridge
+ * exactly one allocation, already owned by result_context. On ERROR the bridge
  * restores the caller's memory context before throwing postgres_error.
  */
 [[nodiscard]] inline Datum encode_text_to_memory_context(

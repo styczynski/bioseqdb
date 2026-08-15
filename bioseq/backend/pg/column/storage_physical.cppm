@@ -721,7 +721,7 @@ reserve_column_row_numbers(Relation rel, uint64_t nrows)
 
 /**
  * @brief Atomically reserves the next stripe identity.
- * @return Reserved stripe identity; row numbers are reserved separately.
+ * @return Reserved stripe identity. Row numbers are reserved separately.
  */
 export uint64_t
 reserve_column_stripe_id(Relation rel)

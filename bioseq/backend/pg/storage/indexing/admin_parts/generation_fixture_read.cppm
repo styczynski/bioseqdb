@@ -100,7 +100,7 @@ struct minimizer_generation_full_payload_fixture_result {
 
 /// Reopen and consume the active fixture generation under one independently
 /// registered MVCC snapshot. The selected wire format chooses the qualified
-/// host reader only; this integration seam does not participate in mmsearch.
+/// host reader only. This path does not participate in mmsearch.
 [[nodiscard]] inline minimizer_generation_integration_fixture_result
 read_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,

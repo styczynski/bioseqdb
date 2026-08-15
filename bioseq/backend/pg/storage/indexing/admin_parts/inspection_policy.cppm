@@ -350,8 +350,8 @@ inspect_hash_major_minimizer_generation(Oid rel_oid,
 }
 
 /// Test-only process-parallel storage probe. Unlike the administrative
-/// inspector above, this path does not serially audit all three streams before
-/// the timed scan; it validates READY metadata/source authority once, then
+/// inspector, this path does not serially audit all three streams before
+/// the timed scan. It validates READY metadata/source authority once, then
 /// delegates the exact row transport experiment to chunked_storage.
 [[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
 hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
@@ -450,8 +450,8 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
 /// Resolve and fully validate one READY grouped-SoA generation under one
 /// registered MVCC snapshot. This setup-only bridge reads no payload extents
 /// and never enables ordinal 2. A preliminary metadata pass obtains and
-/// validates the generation geometry against the active k/w and fixed ABI;
-/// the existing inspector then independently revalidates the source row and
+/// validates the generation geometry against the active k/w and fixed ABI.
+/// The inspector then independently revalidates the source row and
 /// complete metadata directory.
 [[nodiscard]] inline ready_minimizer_generation_inspection inspect_ready_minimizer_generation_impl(
     Oid rel_oid, std::string_view index_name, std::uint64_t sequence_rowno) {

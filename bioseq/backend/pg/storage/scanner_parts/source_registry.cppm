@@ -129,8 +129,8 @@ static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
  *
  * A PostgreSQL self join has independent registries even when every binding
  * names the same physical relation. The provider generation is therefore the
- * route key; relation_oid supplies the physical-relation axis. Two routes stay inline
- * for the common binary-join case; larger legal plans grow in the executor's
+ * route key. `relation_oid` supplies the physical-relation axis. Two routes stay inline
+ * for the common binary-join case. Larger legal plans grow in the executor's
  * query MemoryContext, before any new lease is retained.
  */
 struct pg_sequence_source_route_set {

@@ -63,9 +63,9 @@ export namespace bioseq::scheduler {
 
 constexpr size_t dispatch_batch_capacity = 8192;
 
-/// Merge one PostgreSQL-local cold-index delta through the existing
+/// Merge one PostgreSQL-local cold-index delta through the
 /// pipeline_operational_stats saturating path. This function performs only a
-/// field mapping; it cannot change backend/source/fallback stats.
+/// field mapping. It cannot change backend/source/fallback stats.
 inline void merge_cold_index_preparation_stats(
     ::bioseq::pipeline_stats::pipeline_operational_stats& destination,
     const bioseq::storage::indexing::cold_index_preparation_stats& source) noexcept {

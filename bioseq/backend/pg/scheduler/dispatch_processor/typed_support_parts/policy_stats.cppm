@@ -886,8 +886,8 @@ make_persisted_gpu_operation_stats(
 
 /// Conservative admission envelope for the N-job capacities that coexist
 /// between persisted grouped-SoA execution and atomic SQL publication.  The
-/// returned reservation covers transient stats/staging overlap; the result map
-/// that leaves process_sequences_typed() remains part of the pre-existing
+/// returned reservation covers transient stats/staging overlap. The result map
+/// that leaves process_sequences_typed() remains part of the
 /// caller-owned output contract.
 [[nodiscard]] inline std::uint64_t
 persisted_grouped_soa_publication_staging_bytes(const std::uint64_t job_count) noexcept {

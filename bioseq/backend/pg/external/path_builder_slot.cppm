@@ -29,8 +29,8 @@ void register_path_builder(path_builder_callback builder);
 
 /**
  * @brief Invokes the registered path builder when one is available.
- * @return `false` when external scanning is not installed; otherwise the
- * builder's result.
+ * @return The builder's result, or `false` when external scanning is not
+ * installed.
  */
 [[nodiscard]] bool try_add_scan_paths(
 	PlannerInfo *root, RelOptInfo *relation_info,

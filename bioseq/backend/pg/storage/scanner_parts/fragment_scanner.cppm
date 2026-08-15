@@ -73,7 +73,7 @@ inline void arm_scanner_pg_leaf_failure(scanner_leaf_failure point) noexcept {
     g_scanner_pg_leaf_failure = point;
 }
 
-/** Test cleanup hook; safe even when the selected leaf was never reached. */
+/** Test cleanup hook. Safe even when the selected leaf was never reached. */
 inline void disarm_scanner_pg_leaf_failure() noexcept {
     g_scanner_pg_leaf_failure = scanner_leaf_failure::none;
 }

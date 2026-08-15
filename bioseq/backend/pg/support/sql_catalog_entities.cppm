@@ -3,7 +3,7 @@
  * @brief Provides stateless typed handles for PostgreSQL catalog entities.
  *
  * Generated owner facets instantiate these handles from collected SQL
- * declarations; ordinary consumers use only those generated variables.
+ * declarations. Ordinary consumers use only those generated variables.
  */
 module;
 
@@ -231,7 +231,7 @@ class relation_entity_handle final {
     }
 
 public:
-    /** @brief Constructs a stateless handle; all identity is template-owned. */
+    /** @brief Constructs a stateless handle. All identity is template-owned. */
     constexpr relation_entity_handle() noexcept = default;
 
     /** @return The unqualified catalog object name. */

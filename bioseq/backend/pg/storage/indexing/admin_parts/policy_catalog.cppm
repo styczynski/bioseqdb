@@ -364,8 +364,8 @@ inline void require_selected_minimizer_kernels(
 /**
  * Bind the process-local table for one PostgreSQL maintenance operation.
  *
- * The cold plan chooses one runnable target once at the owning operation root;
- * the generated exact-target lookup is a direct table rebind, not a nested
+ * The cold plan chooses one runnable target once at the owning operation root.
+ * The generated exact-target lookup is a direct table rebind, not a nested
  * Highway dispatch. scalar and Vulkan producers do not require this table.
  */
 [[nodiscard]] inline const bioseq::minimizers::minimizer_kernels*
@@ -392,7 +392,7 @@ selected_minimizer_kernels_for_operation(
 /// Persisting bounded ntHash into that fragment layout would let a later
 /// Exact reader (or the reverse) accept conflicting hashes under the same
 /// index name. PostgreSQL-locator rebuilds use the scheme-tagged grouped-SoA
-/// generation route below; only an inline scheme-untagged source reaches this
+/// generation route. Only an inline scheme-untagged source reaches this
 /// guard from update_index. The INSERT hook uses the same fragment layout and
 /// keeps the guard until it can source a published PostgreSQL locator.
 /// Silently substituting scalar or Exact is never permitted.
