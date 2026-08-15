@@ -210,8 +210,10 @@ concept concrete_lazy_sequence = requires {
     requires sequence_scanner<typename p_view::scanner_type>;
 };
 
+/** @brief Marks views that satisfy the logical lazy-sequence slice contract. */
 struct lazy_sequence_slice_tag {};
 
+/** @brief Contiguity guarantee required by a sequence consumer. */
 enum class sequence_access_requirement : std::uint8_t {
     sequential_symbols,
     bounded_random_window,

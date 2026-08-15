@@ -52,12 +52,14 @@ static_assert(__cplusplus >= 202302L);
 
 export namespace bioseq::storage {
 
+/** @brief Storage category reported by a traced sequence-payload allocation. */
 enum class sequence_payload_allocation_kind : std::uint8_t {
     admitted_packed_sequence = 0u,
     flat_sequence,
     backing_copy,
 };
 
+/** @brief Immutable accounting record emitted after a payload allocation succeeds. */
 struct sequence_payload_allocation_event {
     std::uint64_t allocation_id{};
     std::uint64_t input_symbols{};
@@ -101,6 +103,7 @@ inline std::atomic<std::uint64_t> next_allocation_id{1u};
 
 } // namespace allocation_observer_detail
 
+/** @brief Publish one allocation event and return its nonzero trace identifier. */
 [[nodiscard]] inline std::uint64_t publish_sequence_allocation(
         sequence_payload_allocation_observer const* observer,
         sequence_payload_allocation_kind kind,
@@ -133,6 +136,7 @@ inline std::atomic<std::uint64_t> next_allocation_id{1u};
     return allocation_id;
 }
 
+/** @brief Exposes facade packing traits for one alphabet without a concrete owner. */
 template <sequence_alphabet p_alphabet>
 struct lazy_sequence_traits {
     using alphabet_type = p_alphabet;
@@ -180,6 +184,7 @@ struct lazy_sequence_traits {
         / bits_per_symbol;
 }
 
+/** @brief Type-erased, non-owning logical-rank view over a lazy sequence owner. */
 template <sequence_alphabet p_alphabet>
 class lazy_sequence_view {
 public:
@@ -190,10 +195,12 @@ public:
     using read_at_fn = std::uint8_t const* (*)(
         void const*, sequence_size_t, std::size_t, std::span<std::uint8_t>);
 
+    /** @brief Bit order used by resident packed descriptors. */
     enum class packed_symbol_order : std::uint8_t {
         least_significant_symbol_first,
     };
 
+    /** @brief Borrowed packed region whose backing owner outlives this descriptor. */
     struct resident_packed_sequence {
         void const* units{};
         std::size_t unit_count{};
@@ -212,6 +219,7 @@ public:
     using copy_packed_sequence_fn = bool (*)(
         void const*, void*, std::size_t, std::uint8_t);
 
+    /** @brief Complete callback table implementing one erased sequence backend. */
     struct backend_ops {
         sequence_size_t (*bp_size)(void const*) noexcept;
         std::array<read_at_fn, 4> read_at;
@@ -551,6 +559,7 @@ private:
     sequence_payload_allocation_observer const* payload_observer_{};
 };
 
+/** @brief Return whether a view can safely enter a worker task. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline bool is_worker_shareable(
         lazy_sequence_view<p_alphabet> value) noexcept {
@@ -562,6 +571,7 @@ static_assert(lazy_sequence_slice<
 static_assert(resident_packed_sequence_view<
               lazy_sequence_view<seq::dna4>>);
 
+/** @brief Owns one adopted backing retain together with its lazy view. */
 template <sequence_alphabet p_alphabet>
 class retained_lazy_sequence_view {
 public:
@@ -1409,6 +1419,7 @@ inline void with_resident_lazy_sequence(
     std::forward<p_callback>(callback)(lazy_sequence_owner);
 }
 
+/** @brief Return whether an owner has complete resident bytes for a fast path. */
 template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool has_resident_sequence_bytes(
         const lazy_sequence<p_sequence_range, p_scanner>& sequence) noexcept {
@@ -1425,6 +1436,7 @@ template <class p_sequence_range, class p_scanner>
     }
 }
 
+/** @brief Return whether an owner can safely outlive asynchronous worker use. */
 template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline bool is_worker_shareable(
         const lazy_sequence<p_sequence_range, p_scanner>&) noexcept {
@@ -1765,6 +1777,7 @@ struct compact_range_adapter {
 
 }  // namespace lazy_sequence_detail
 
+/** @brief Erase a concrete lazy owner into its alphabet-specialized facade. */
 template <class p_sequence_range, class p_scanner>
 [[nodiscard]] inline auto make_lazy_sequence_view(
         const lazy_sequence<p_sequence_range, p_scanner>& owner) noexcept {
@@ -1774,6 +1787,7 @@ template <class p_sequence_range, class p_scanner>
         std::addressof(owner), std::addressof(adapter_type::k_ops)};
 }
 
+/** @brief Erase an already-resident compact range into the canonical facade. */
 template <class p_sequence_range>
 [[nodiscard]] inline auto make_lazy_sequence_view(
         const compact_sequence_range<p_sequence_range>& owner) noexcept {
@@ -1835,6 +1849,7 @@ inline void with_chunked_lazy_sequence(
         });
 }
 
+/** @brief Stream a logical subrange in the requested orientation without flattening it. */
 template <sequence_transform p_transform,
           sequence_alphabet p_alphabet,
           class p_output_writer>
@@ -1917,6 +1932,7 @@ void stream_transformed_ranks(
     }
 }
 
+/** @brief Lexicographically compare two logical-rank sequences. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] int compare_lazy_sequences(
         lazy_sequence_view<p_alphabet> left,
@@ -2286,6 +2302,7 @@ template <sequence_alphabet p_alphabet, class p_storage_unit>
 template <sequence_alphabet p_alphabet>
 class admitted_packed_sequence;
 
+/** @brief Return the retained-byte budget required for packed materialization. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::uint64_t packed_sequence_admission_bytes(
     sequence_size_t logical_length,
@@ -2299,6 +2316,7 @@ template <sequence_alphabet p_alphabet>
     std::uint8_t requested_width,
     bioseq::parallelism::memory_permit&& permit);
 
+/** @brief Move-only owner of an admission-accounted aligned packed sequence. */
 template <sequence_alphabet p_alphabet>
 class admitted_packed_sequence {
 public:
@@ -2419,6 +2437,7 @@ template <sequence_alphabet p_alphabet>
     return *admitted_bytes;
 }
 
+/** @brief Physical route selected for a consumer's sequence-access requirement. */
 enum class sequence_access_route : std::uint8_t {
     stream_symbols,
     borrow_resident,
@@ -2444,6 +2463,7 @@ enum class sequence_resident_borrow_kind : std::uint8_t {
     reinterpreted_bytes,
 };
 
+/** @brief Resolved access route, resident descriptor, and admission requirement. */
 template <sequence_alphabet p_alphabet>
 struct sequence_access_plan {
     using descriptor_type = typename lazy_sequence_view<p_alphabet>::
@@ -2472,6 +2492,7 @@ struct sequence_access_plan {
 /// allocation.  Its `units` member may be copied/read only through
 /// character/byte access (for example a Vulkan buffer upload); dereferencing
 /// it as `uint32_t*` would violate the C++ effective-type/aliasing rules.
+/** @brief Borrow a byte-only u32 representation from compatible resident u64 storage. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::optional<
     typename lazy_sequence_view<p_alphabet>::resident_packed_sequence>
@@ -2591,6 +2612,7 @@ try_borrow_reinterpreted_packed_bytes(
     }
 }
 
+/** @brief Plan streaming, borrowing, or admission-backed materialization for a region. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] sequence_access_plan<p_alphabet> plan_sequence_access(
         lazy_sequence_view<p_alphabet> view,
@@ -2650,6 +2672,7 @@ template <sequence_alphabet p_alphabet>
     return plan;
 }
 
+/** @brief Materialize a planned region into permit-backed packed storage. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] admitted_packed_sequence<p_alphabet> materialize_packed_sequence(
         lazy_sequence_view<p_alphabet> view,
