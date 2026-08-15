@@ -714,7 +714,22 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("Threads::Threads", cmake)
         self.assertIn(
             "bioseq_cache_benchmark_report_contract_tests", cmake)
-        self.assertIn("cache_benchmark_report_test.cpp", cmake)
+        self.assertRegex(
+            cmake,
+            r"bioseq_collect_authored_sources\(\s+"
+            r"BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES\s+"
+            r"BASE_DIRECTORY\s+"
+            r'"\$\{CMAKE_CURRENT_SOURCE_DIR\}/\.\./tests/contract/'
+            r'benchmark"\s+'
+            r'INCLUDE_PATTERNS "\*_test\.cpp"\s+'
+            r"EXPECTED_COUNT 1\s*\)",
+        )
+        self.assertRegex(
+            cmake,
+            r"add_executable\(\s+"
+            r"bioseq_cache_benchmark_report_contract_tests\s+"
+            r"\$\{BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES\}\s*\)",
+        )
         self.assertNotIn("run_private_cluster_bench.py", cmake)
         cache_unit = build_presets.MODES["cache-unit"]
         self.assertIn(
