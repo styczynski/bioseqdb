@@ -1402,7 +1402,11 @@ file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_DIR}/io/*.cppm")
 list(REMOVE_ITEM BIOSEQ_IO_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/main.cppm")
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/main.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/common.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/lazy_expression.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/readers.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/writers.cppm")
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 

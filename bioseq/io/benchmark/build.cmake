@@ -7,7 +7,11 @@ set(BENCH_FRAMEWORK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../bench_framework")
 # Shared reader modules come from bioseq_modules_nopg. The benchmark target
 # privately owns only its named logic module and the benchmark-framework BMI.
 set(IO_BENCH_MODULE_FILES
-  "${IO_BENCH_DIR}/index.cppm")
+  "${IO_BENCH_DIR}/index.cppm"
+  "${IO_BENCH_DIR}/common.cppm"
+  "${IO_BENCH_DIR}/lazy_expression.cppm"
+  "${IO_BENCH_DIR}/readers.cppm"
+  "${IO_BENCH_DIR}/writers.cppm")
 
 bioseq_add_postgresql_extension(
   bioseq_io_benchmark
