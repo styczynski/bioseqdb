@@ -1,21 +1,21 @@
 /**
  * @file highway_indexing_kernels.cppm
- * @brief Preserves the target-generated Highway indexing source family.
+ * @brief Declares the authenticated Highway indexing source boundary.
  *
- * The current indexing algorithms have no target-specific callable in this
- * source family. Keeping the annotated namespace preserves the authenticated
- * source-record key and generated target cardinality without retaining the
- * grouped-position storage-contract validator.
+ * @details The annotated namespace is an authored generator input even while it contains no
+ * fixed-target callables. Each configured Highway target therefore materializes the same indexing
+ * source-record identity and target cardinality.
  */
 module;
 
 export module bioseq.highway.sources.indexing;
 
+/**
+ * @brief Exposes the fixed-target indexing generator boundary.
+ *
+ * The namespace is intentionally empty until indexing owns a target-specific callable. Its
+ * annotation remains the generator contract.
+ */
 export namespace bioseq::indexing {
-namespace [[bioseq::simd]] target {
-
-// Intentionally empty until an active indexing algorithm owns a fixed-target
-// callable. The generator still authenticates and materializes this source.
-
-}  // namespace target
-}  // namespace bioseq::indexing
+namespace [[bioseq::simd]] target {} // namespace target
+} // namespace bioseq::indexing
