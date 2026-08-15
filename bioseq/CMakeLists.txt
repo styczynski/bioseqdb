@@ -1408,6 +1408,8 @@ set_source_files_properties(
 set(BIOSEQ_RUNTIME_CORE_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/hashing/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/fmtlog_backend.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/logging/formatters.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
