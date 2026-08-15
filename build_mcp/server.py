@@ -131,6 +131,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--lint-paths",
+        default="[]",
+        metavar="JSON",
+        help=(
+            "(internal) JSON array of normalized compile units accepted only "
+            "by the focused clang-tidy build mode."
+        ),
+    )
+    parser.add_argument(
         "--benchmark-e2e-config",
         default="",
         help=(
@@ -163,12 +172,16 @@ def main() -> int:
             test_flags = json.loads(args.test_flags)
             if not isinstance(test_flags, list) or not all(isinstance(x, str) for x in test_flags):
                 raise ValueError("--test-flags must be a JSON array of strings")
+            lint_paths = json.loads(args.lint_paths)
+            if not isinstance(lint_paths, list) or not all(isinstance(x, str) for x in lint_paths):
+                raise ValueError("--lint-paths must be a JSON array of strings")
         except (ValueError, json.JSONDecodeError) as e:
             _log(f"runtime flags invalid: {e}")
             return 2
         return _run_build_worker(args.run_build, build_only=build_only,
                                  debug=debug, bench_flags=bench_flags,
                                  test_flags=test_flags,
+                                 lint_paths=lint_paths,
                                  bench_e2e_config=(
                                      args.benchmark_e2e_config or None),
                                  fresh=fresh,
@@ -186,8 +199,14 @@ def main() -> int:
             test_flags = json.loads(args.test_flags)
             if not isinstance(test_flags, list) or not all(isinstance(x, str) for x in test_flags):
                 raise ValueError("--test-flags must be a JSON array of strings")
+            lint_paths = json.loads(args.lint_paths)
+            if not isinstance(lint_paths, list) or not all(isinstance(x, str) for x in lint_paths):
+                raise ValueError("--lint-paths must be a JSON array of strings")
         except (ValueError, json.JSONDecodeError) as e:
             _log(f"runtime flags invalid: {e}")
+            return 2
+        if lint_paths:
+            _log("--run-build-sync does not accept --lint-paths")
             return 2
         return _run_build_inline(args.run_build_sync, build_only=build_only,
                                  debug=debug, bench_flags=bench_flags,

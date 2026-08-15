@@ -111,11 +111,14 @@ clang_version() {
 llvm_root_meets_min() {
   local root="$1"
   local clang="$root/bin/clang++"
-  local have
-  [ -x "$clang" ] || return 1
-  have="$(clang_version "$clang")"
-  [ -n "$have" ] || return 1
-  dpkg --compare-versions "$have" ge "$LLVM_MIN_VERSION"
+  local clang_tidy="$root/bin/clang-tidy"
+  local clang_have clang_tidy_have
+  [ -x "$clang" ] && [ -x "$clang_tidy" ] || return 1
+  clang_have="$(clang_version "$clang")"
+  clang_tidy_have="$(clang_version "$clang_tidy")"
+  [ -n "$clang_have" ] && [ -n "$clang_tidy_have" ] || return 1
+  [ "${clang_have%%.*}" = "${clang_tidy_have%%.*}" ] || return 1
+  dpkg --compare-versions "$clang_have" ge "$LLVM_MIN_VERSION"
 }
 
 install_llvm() {
@@ -129,6 +132,7 @@ install_llvm() {
     /tmp/llvm.sh "$LLVM_VERSION" all || true
     apt-get install -y \
       "clang-$LLVM_VERSION" "lld-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
+      "clang-tidy-$LLVM_VERSION" "clang-tools-$LLVM_VERSION" \
       "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" "libunwind-$LLVM_VERSION-dev" || true
     if llvm_root_meets_min "/usr/lib/llvm-$LLVM_VERSION"; then
       LLVM_ROOT="/usr/lib/llvm-$LLVM_VERSION"
@@ -156,11 +160,17 @@ install_llvm() {
   return 1
 }
 install_llvm || fail "llvm install (apt + tarball both failed)"
-CLANG_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang")"
-[ -n "$CLANG_ACTUAL_VERSION" ] || fail "clang version not parseable at $LLVM_ROOT/bin/clang"
+CLANG_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang++")"
+CLANG_TIDY_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang-tidy")"
+[ -n "$CLANG_ACTUAL_VERSION" ] || fail "clang version not parseable at $LLVM_ROOT/bin/clang++"
+[ -n "$CLANG_TIDY_ACTUAL_VERSION" ] \
+  || fail "clang-tidy missing or version not parseable at $LLVM_ROOT/bin/clang-tidy"
 dpkg --compare-versions "$CLANG_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
   || fail "clang $CLANG_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
-"$LLVM_ROOT/bin/clang" --version | head -1 || fail "clang not runnable"
+[ "${CLANG_ACTUAL_VERSION%%.*}" = "${CLANG_TIDY_ACTUAL_VERSION%%.*}" ] \
+  || fail "clang-tidy major $CLANG_TIDY_ACTUAL_VERSION does not match clang $CLANG_ACTUAL_VERSION"
+"$LLVM_ROOT/bin/clang++" --version | head -1 || fail "clang++ not runnable"
+"$LLVM_ROOT/bin/clang-tidy" --version | head -1 || fail "clang-tidy not runnable"
 
 # --- 4. CMake (pinned: its import-std UUID is hardcoded in CMakeLists.txt) ----
 echo "[bootstrap] CMake $CMAKE_VERSION"

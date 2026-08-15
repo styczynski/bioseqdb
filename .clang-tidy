@@ -1,0 +1,80 @@
+---
+# The broad families are intentional. Per-source exceptions are applied by
+# build_mcp/clang_tidy.py so PostgreSQL ABI code, generated Highway target
+# namespaces, zero-cost hot paths, and the exact embedded fmtlog compatibility
+# unit do not weaken checks for ordinary code.
+# The fmtlog unit keeps its imported implementation byte-compatible, so only
+# its path loses mechanical naming, array, pointer, and ownership rewrites.
+# bugprone-argument-comment is the sole toolchain crash exclusion: Clang 22.1.6
+# crashes while traversing an imported module before line filtering diagnostics.
+# Unsupported platform analyzer suites are excluded. Padding and public-member
+# advice conflicts with stable layouts and aggregate models. noexcept, trailing
+# returns, std::print, and restricted includes require separate style, ABI,
+# output, or allowlist work.
+Checks: >-
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-argument-comment,
+  -clang-analyzer-fuchsia.*,
+  -clang-analyzer-optin.mpi.*,
+  -clang-analyzer-optin.osx.*,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-webkit.*,
+  -clang-analyzer-optin.performance.Padding,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -modernize-use-noexcept,
+  -modernize-use-std-print,
+  -modernize-use-trailing-return-type,
+  -portability-restrict-system-includes
+WarningsAsErrors: '*'
+InheritParentConfig: false
+HeaderFilterRegex: ''
+ExcludeHeaderFilterRegex: ''
+SystemHeaders: false
+UseColor: false
+FormatStyle: file
+CheckOptions:
+  bugprone-easily-swappable-parameters.MinimumLength: '3'
+  bugprone-narrowing-conversions.WarnOnIntegerNarrowingConversion: 'true'
+  performance-for-range-copy.WarnOnAllAutoCopies: 'true'
+  readability-function-cognitive-complexity.Threshold: '30'
+  readability-function-size.LineThreshold: '250'
+  readability-function-size.ParameterThreshold: '8'
+  readability-function-size.StatementThreshold: '150'
+  readability-identifier-length.MinimumVariableNameLength: '2'
+  readability-identifier-naming.AggressiveDependentMemberLookup: 'true'
+  readability-identifier-naming.CheckAnonFieldInParent: 'true'
+  readability-identifier-naming.IgnoreMainLikeFunctions: 'true'
+  readability-identifier-naming.ClassCase: lower_case
+  readability-identifier-naming.ConceptCase: lower_case
+  readability-identifier-naming.EnumCase: lower_case
+  readability-identifier-naming.EnumConstantCase: lower_case
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.GlobalConstantCase: lower_case
+  readability-identifier-naming.LocalConstantCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.MethodCase: lower_case
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: _
+  readability-identifier-naming.StaticConstantCase: lower_case
+  readability-identifier-naming.StructCase: lower_case
+  readability-identifier-naming.TemplateTemplateParameterCase: lower_case
+  readability-identifier-naming.TemplateTemplateParameterPrefix: p_
+  readability-identifier-naming.TypeAliasCase: lower_case
+  readability-identifier-naming.TypeTemplateParameterCase: lower_case
+  readability-identifier-naming.TypeTemplateParameterPrefix: p_
+  readability-identifier-naming.UnionCase: lower_case
+  readability-identifier-naming.ValueTemplateParameterCase: lower_case
+  readability-identifier-naming.ValueTemplateParameterPrefix: p_
+  readability-identifier-naming.VariableCase: lower_case
+...

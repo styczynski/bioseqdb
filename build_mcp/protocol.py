@@ -36,11 +36,16 @@ from build_presets import (
     BENCH_CLI_MODES,
     CATCH_FILTER_MODES,
     FIXED_BUILD_ONLY_MODES,
+    LINT_FOCUSED_MODE,
+    LINT_FULL_MODE,
+    LINT_MODES,
     POSTGRES_ERROR_SAFETY_MODE,
     REMOTE_RUN_BUILD_MODES,
     VALID_MODES,
     _MAX_CATCH2_TEST_SPECS,
     _MAX_CATCH2_TEST_SPEC_LENGTH,
+    _MAX_LINT_PATHS,
+    _MAX_LINT_PATH_LENGTH,
     get_modes_short_documentation,
 )
 from build_worker import (
@@ -124,10 +129,15 @@ TOOL_DEFINITIONS = [
             f"expressions in filter.tags. They are OR-combined and applied to "
             f"every executable in the mode; a binary with no matching test is "
             f"allowed so tags local to one executable work as intended."
+            f"\n\nFocused lint: {LINT_FOCUSED_MODE} requires filter.paths "
+            "with exact repository-relative authored units or build-relative "
+            "generated units. Generated diagnostics include authored Ninja "
+            "owner candidates. lint-full accepts no filter."
             f"\nGuarded build-only calls may set fresh=true and "
             f"build_timeout_sec up to {MAX_BUILD_PHASE_TIMEOUT_SEC}; "
             "TERM begins one minute before that hard cutoff. Runtime-only "
-            "calls require a matching successful build receipt."
+            "calls require a matching successful build receipt. Lint modes "
+            "use their mode-wide analysis deadline and reject build_timeout_sec."
         ),
         "inputSchema": {
             "type": "object",
@@ -165,7 +175,8 @@ TOOL_DEFINITIONS = [
                         "Build-only configure/generate/compile/link cutoff. "
                         "At one minute before the cutoff the exact worker "
                         "descendant groups receive TERM; validated survivors "
-                        "receive KILL by the cutoff."
+                        "receive KILL by the cutoff. Lint modes reject this "
+                        "build-phase-only control."
                     ),
                 },
                 "run_only": {
@@ -210,7 +221,8 @@ TOOL_DEFINITIONS = [
                         "OR-combined and applied to every executable in the mode. For CLI "
                         f"benchmark modes ({', '.join(BENCH_CLI_MODES)}), tags/benchmarks/cases "
                         "map to repeatable --filter flags; arrays are OR-sets and axes AND "
-                        "together. Other modes do not accept filter. Omit it for the full run."
+                        f"together. {LINT_FOCUSED_MODE} accepts only paths. Other modes do "
+                        "not accept filter. Omit it for the full run."
                     ),
                     "properties": {
                         "tags":       {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
@@ -218,7 +230,28 @@ TOOL_DEFINITIONS = [
                         "cases":      {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
                                        "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names)."},
                         "benchmarks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
-                                       "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)"}
+                                       "description": (
+                                           "Run only these benchmark keys. (Maps to the "
+                                           "bench CLI's singular `benchmark=`.)"
+                                       )},
+                        "paths": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": _MAX_LINT_PATHS,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": _MAX_LINT_PATH_LENGTH,
+                                "pattern": (
+                                    "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))"
+                                    "(?!.*//)(?!.*\\\\).+\\.(?:c|cc|cpp|cppm|cxx)$"
+                                ),
+                            },
+                            "description": (
+                                "lint-focused only. Exact normalized source-root-relative "
+                                "authored units or build-root-relative generated units."
+                            ),
+                        },
                     }
                 },
                 "bench_e2e_config": {
@@ -244,6 +277,71 @@ TOOL_DEFINITIONS = [
                 }
             },
             "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": LINT_FOCUSED_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "required": ["filter"],
+                        "properties": {
+                            "filter": {
+                                "required": ["paths"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["tags"]},
+                                        {"required": ["benchmarks"]},
+                                        {"required": ["cases"]},
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                    "else": {
+                        "properties": {
+                            "filter": {
+                                "not": {"required": ["paths"]},
+                            },
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"enum": sorted(LINT_MODES)},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "required": ["build_only"],
+                        "properties": {
+                            "build_only": {"const": True},
+                        },
+                        "not": {
+                            "anyOf": [
+                                {"required": ["debug"]},
+                                {"required": ["debug_report"]},
+                                {"required": ["bench_e2e_config"]},
+                                {"required": ["build_timeout_sec"]},
+                                {"required": ["run_only"]},
+                                {"required": ["reuse_build_receipt"]},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": LINT_FULL_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "not": {"required": ["filter"]},
+                    },
+                },
                 {
                     "if": {
                         "properties": {"run_only": {"const": True}},

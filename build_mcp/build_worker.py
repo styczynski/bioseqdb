@@ -37,6 +37,9 @@ from build_presets import (
     CATCH_FILTER_MODES,
     CMAKE_PRESETS_FILE,
     DEFAULT_BUILD_DIR,
+    LINT_FOCUSED_MODE,
+    LINT_FULL_MODE,
+    LINT_MODES,
     MODES,
     PACKAGE_LINUX_MODE,
     POSTGRES_ERROR_SAFETY_MODE,
@@ -60,6 +63,7 @@ from build_presets import (
     _unit_test_filter_to_cli_args,
     build_dir_for,
     build_dirs_for,
+    lint_filter_to_paths,
     post_build_targets_for,
     preset_for,
     supports_bench_cli_options,
@@ -871,6 +875,96 @@ def _cmake_build_argv(
         "cmake", "--build", str(build_dir), "--target", *target_group,
         "--parallel", str(CMAKE_PARALLEL_JOBS),
     ]
+
+
+def _clang_tidy_scope(mode: str) -> str:
+    """Return the script scope owned by one closed lint build mode."""
+
+    if mode == LINT_FOCUSED_MODE:
+        return "focused"
+    if mode == LINT_FULL_MODE:
+        return "full"
+    raise ValueError(f"mode {mode!r} does not own clang-tidy analysis")
+
+
+def _clang_tidy_report_path(build_dir: Path, mode: str) -> Path:
+    """Return the build-tree report path for a lint mode."""
+
+    return build_dir / "bioseq-clang-tidy" / f"{_clang_tidy_scope(mode)}.json"
+
+
+def _clang_tidy_command(
+        build_dir: Path, mode: str, lint_paths: list[str]) -> list[str]:
+    """Construct the non-mutating clang-tidy runner command."""
+
+    command = [
+        sys.executable,
+        str(REPOSITORY_ROOT / "build_mcp" / "clang_tidy.py"),
+        "--source-root", str(REPOSITORY_ROOT),
+        "--build-dir", str(build_dir),
+        "--scope", _clang_tidy_scope(mode),
+        "--report", str(_clang_tidy_report_path(build_dir, mode)),
+    ]
+    for lint_path in lint_paths:
+        command.extend(("--path", lint_path))
+    return command
+
+
+def _clang_tidy_report_summary(
+    report_path: Path,
+    *,
+    expected_scope: str | None = None,
+) -> dict[str, object]:
+    """Validate a lint report and return its bounded status summary."""
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"clang-tidy did not create its report: {report_path}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"clang-tidy report is invalid JSON: {error}") from error
+    if not isinstance(report, dict) or report.get("schema_version") != 1:
+        raise RuntimeError("clang-tidy report has an unsupported schema")
+    required_integer_fields = (
+        "selected_count",
+        "authored_count",
+        "generated_count",
+        "diagnostic_count",
+        "failure_count",
+    )
+    for field_name in required_integer_fields:
+        value = report.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RuntimeError(
+                f"clang-tidy report field {field_name!r} must be a nonnegative integer")
+    compile_databases = report.get("compile_databases")
+    if not isinstance(compile_databases, list) or not compile_databases:
+        raise RuntimeError(
+            "clang-tidy report must identify at least one compile database")
+    report_scope = report.get("scope")
+    if report_scope not in {"focused", "full"}:
+        raise RuntimeError("clang-tidy report has an invalid scope")
+    if expected_scope is not None and report_scope != expected_scope:
+        raise RuntimeError(
+            "clang-tidy report scope does not match the scheduled mode: "
+            f"expected={expected_scope} observed={report_scope}"
+        )
+    if (
+        report["authored_count"] + report["generated_count"]
+        != report["selected_count"]
+    ):
+        raise RuntimeError("clang-tidy report unit counts are inconsistent")
+    if report["failure_count"] > report["selected_count"]:
+        raise RuntimeError("clang-tidy report failure count exceeds selected units")
+    return {
+        "scope": report_scope,
+        **{field_name: report[field_name] for field_name in required_integer_fields},
+        "compile_database_count": len(compile_databases),
+        "policy_sha256": report.get("policy_sha256"),
+        "toolchain": report.get("toolchain"),
+    }
 
 _BUILD_SOURCE_FINGERPRINT_PATHS = tuple(
     path
@@ -2342,7 +2436,12 @@ _RUN_ONLY_RECEIPT_MODES = {
 def _build_receipt_required(mode: str, build_only: bool) -> bool:
     # The specialized two-tree PostgreSQL error-safety worker owns separate
     # qualification receipts and bypasses the ordinary single-tree sealer.
-    return build_only and mode != POSTGRES_ERROR_SAFETY_MODE
+    # Lint modes produce analysis reports rather than reusable runtime trees.
+    return (
+        build_only
+        and mode != POSTGRES_ERROR_SAFETY_MODE
+        and mode not in LINT_MODES
+    )
 
 def _run_only_from_build_receipt(
         *,
@@ -2493,7 +2592,8 @@ def _postgres_safety_services() -> dict[str, object]:
 
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
-                      test_flags=None, bench_e2e_config=None,
+                      test_flags=None, lint_paths=None,
+                      bench_e2e_config=None,
                       run_only: bool = False,
                       reuse_build_receipt: str | None = None,
                       build_timeout_sec: int | None = None,
@@ -2515,6 +2615,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     validated Catch2 argument list appended identically to every executable in
     a Catch correctness mode for a focused test run.
 
+    `lint_paths` contains exact normalized compile units and is accepted only
+    by the focused lint mode.
+
     `bench_e2e_config` is an absolute, server-validated path inside this
     repository and is exposed to the benchmark-e2e executable.
     """
@@ -2529,6 +2632,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         return 1
     bench_flags = bench_flags or []
     test_flags = test_flags or []
+    lint_paths = lint_paths or []
     if build_timeout_sec is not None and (
         not isinstance(build_timeout_sec, int)
         or isinstance(build_timeout_sec, bool)
@@ -2565,6 +2669,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         "run_only": run_only,
         "build_timeout_sec": build_timeout_sec,
         "reuse_build_receipt": reuse_build_receipt,
+        "lint_paths": lint_paths,
     }
     for field_name, observed_value in reserved_arguments.items():
         if field_name in entry and entry.get(field_name) != observed_value:
@@ -2574,9 +2679,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 f"worker={observed_value!r}")
             return 1
     mode_details = MODES[mode]
+    if mode == LINT_FOCUSED_MODE:
+        normalized_lint_paths, lint_error = lint_filter_to_paths(
+            {"paths": lint_paths}
+        )
+        if lint_error is not None or normalized_lint_paths != lint_paths:
+            _log(
+                f"{mode} worker received invalid lint paths: "
+                f"{lint_error or 'paths are not normalized and unique'}"
+            )
+            return 1
+    elif mode == LINT_FULL_MODE:
+        if lint_paths:
+            _log(f"{mode} worker does not accept focused lint paths")
+            return 1
+    elif lint_paths:
+        _log(f"{mode} worker does not accept lint paths")
+        return 1
     if mode_details.requires_build_only and (
         not build_only
         or run_only
+        or (mode in LINT_MODES and build_timeout_sec is not None)
         or debug
         or bench_flags
         or test_flags
@@ -2584,14 +2707,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
     ):
         _log(
             f"{mode} worker requires build_only=true and rejects every "
-            "runtime-selection input")
+            "unsupported runtime-selection input")
         return 1
     if mode == PACKAGE_LINUX_MODE:
         if (
             build_only or run_only or fresh or build_timeout_sec is not None
             or reuse_build_receipt is not None
             or debug or bench_flags or test_flags
-            or bench_e2e_config
+            or lint_paths or bench_e2e_config
         ):
             _log("package-linux worker received forbidden variable inputs")
             return 1
@@ -2664,6 +2787,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# build_hard_timeout_at={build_hard_deadline}\n"
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
+        f"# lint_paths={json.dumps(lint_paths, ensure_ascii=True)}\n"
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
         f"# hard_timeout_min={mode_timeout_sec / 60.0}\n"
@@ -3245,6 +3369,50 @@ def _run_build_worker(mode: str, build_only: bool = False,
             except OSError:
                 pass
 
+        lint_report_files: list[Path] = []
+        lint_summary: dict[str, object] | None = None
+        if mode in LINT_MODES:
+            lint_report_path = _clang_tidy_report_path(active_build_dir, mode)
+            lint_report_path.unlink(missing_ok=True)
+            _update_entry(
+                mode,
+                step=f"running clang-tidy ({_clang_tidy_scope(mode)})",
+                lint_paths=list(lint_paths),
+            )
+            lint_command = _clang_tidy_command(
+                active_build_dir,
+                mode,
+                list(lint_paths),
+            )
+            rc = _stream_subprocess(
+                lint_command,
+                log_handle,
+                build_soft_deadline,
+                cwd=REPOSITORY_ROOT,
+                env=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                phase=f"clang-tidy:{_clang_tidy_scope(mode)}",
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
+            )
+            if lint_report_path.is_file():
+                lint_report_files = [lint_report_path]
+                lint_summary = _clang_tidy_report_summary(
+                    lint_report_path,
+                    expected_scope=_clang_tidy_scope(mode),
+                )
+                _update_entry(
+                    mode,
+                    report_files=[str(lint_report_path)],
+                    clang_tidy=lint_summary,
+                )
+            if rc != 0:
+                raise RuntimeError(
+                    f"clang-tidy {_clang_tidy_scope(mode)} analysis exited "
+                    f"with code {rc}; report={lint_report_path}"
+                )
+
         if build_only:
             receipt_entry = dict(_load_state().get(mode) or entry)
             receipt = (
@@ -3264,9 +3432,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 step="completed",
                 completed_at=completed_at,
                 exit_code=0,
-                report_files=[],
+                report_files=[str(path) for path in lint_report_files],
                 build_only=True,
                 debug=debug,
+                clang_tidy=lint_summary,
                 build_receipt_id=(
                     receipt["build_receipt_id"] if receipt else None),
                 configuration=(receipt["configuration"] if receipt else None),
@@ -3809,19 +3978,30 @@ def tool_start_build(mode: str, build_only: bool = False,
                 "build_timeout_sec requires fresh=true so detached-process "
                 "ownership is isolated to one MCP build directory")
     mode_details = MODES[mode]
+    focused_lint_filter = (
+        mode == LINT_FOCUSED_MODE
+        and filter_supplied
+        and bench_filter is not None
+    )
     if mode_details.requires_build_only and (
         not build_only
         or run_only
         or reuse_build_receipt is not None
+        or (mode in LINT_MODES and build_timeout_sec is not None)
         or debug_supplied or debug
-        or filter_supplied or bench_filter is not None
+        or (
+            (filter_supplied or bench_filter is not None)
+            and not focused_lint_filter
+        )
         or debug_report_supplied or debug_report
         or bench_e2e_config is not None
     ):
         return (
             f"{mode} is a fixed local compile gate: it requires "
-            "build_only=true and accepts no debug, filter, debug_report, "
-            "bench_e2e_config inputs.")
+            "build_only=true and accepts no unsupported debug, filter, "
+            "debug_report, build_timeout_sec, or bench_e2e_config inputs.")
+    if mode == LINT_FOCUSED_MODE and not focused_lint_filter:
+        return "lint-focused requires a nonempty filter.paths selection"
     if mode == PACKAGE_LINUX_MODE and (
         build_only
         or run_only or fresh or build_timeout_sec is not None
@@ -3916,7 +4096,17 @@ def tool_start_build(mode: str, build_only: bool = False,
     # expressions and forwarded identically to every executable in the mode.
     bench_flags: list[str] = []
     test_flags: list[str] = []
-    if mode in CATCH_FILTER_MODES:
+    lint_paths: list[str] = []
+    if mode in LINT_MODES:
+        if debug_report_supplied or debug_report:
+            return "lint modes do not accept debug_report"
+        if mode == LINT_FOCUSED_MODE:
+            lint_paths, lint_error = lint_filter_to_paths(bench_filter)
+            if lint_error is not None:
+                return f"Invalid focused lint filter: {lint_error}"
+        elif filter_supplied or bench_filter is not None:
+            return "lint-full does not accept filter; it always lints the full owned database"
+    elif mode in CATCH_FILTER_MODES:
         if debug_report_supplied or debug_report:
             return ("`debug_report` is bench-only and is not accepted for "
                     f"Catch correctness mode {mode!r}.")
@@ -4047,9 +4237,14 @@ def tool_start_build(mode: str, build_only: bool = False,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
             "bench_e2e_config": worker_e2e_config,
+            "lint_paths": list(lint_paths),
             "rt_priority": configured_rt_priority,
             "effective_run_args":
-                test_flags if mode in CATCH_FILTER_MODES else bench_flags,
+                (
+                    lint_paths
+                    if mode in LINT_MODES
+                    else (test_flags if mode in CATCH_FILTER_MODES else bench_flags)
+                ),
         }
         _save_state(state)
 
@@ -4074,6 +4269,7 @@ def tool_start_build(mode: str, build_only: bool = False,
                      "--reuse-build-receipt", reuse_build_receipt or "",
                      "--bench-flags", json.dumps(bench_flags),
                      "--test-flags", json.dumps(test_flags),
+                     "--lint-paths", json.dumps(lint_paths),
                      "--benchmark-e2e-config", worker_e2e_config or ""],
                     stdin=subprocess.DEVNULL,
                     stdout=bootstrap_log,
@@ -4131,6 +4327,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"rt_priority={configured_rt_priority} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
+             f"lint_paths={lint_paths} "
              f"bench_e2e_config={resolved_e2e_config} "
              f"log={log_path}")
 
@@ -4152,6 +4349,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + (f" with focused Catch2 args {shlex.join(test_flags)}"
                if test_flags else "")
+            + (f" with focused lint paths {shlex.join(lint_paths)}"
+               if lint_paths else "")
             + (f" with E2E config {resolved_e2e_config}"
                if resolved_e2e_config else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
@@ -4175,6 +4374,11 @@ def _run_build_inline(mode: str, build_only: bool = False,
     bench_flags = list(bench_flags or [])
     test_flags = list(test_flags or [])
     mode_details = MODES[mode]
+    if mode == LINT_FOCUSED_MODE:
+        _log(
+            "--run-build-sync: lint-focused requires public MCP filter.paths "
+            "and is not an inline remote mode")
+        return 2
     if mode_details.requires_build_only and (
         not build_only or debug or bench_flags or test_flags
         or bench_e2e_config
@@ -4271,10 +4475,13 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "uses_private_cluster": mode_details.uses_private_cluster,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
+            "lint_paths": [],
             "bench_e2e_config": resolved_e2e_config,
             "rt_priority": configured_rt_priority,
             "effective_run_args": (
-                test_flags if mode in CATCH_FILTER_MODES else bench_flags
+                []
+                if mode in LINT_MODES
+                else (test_flags if mode in CATCH_FILTER_MODES else bench_flags)
             ),
         }
         _save_state(state)
@@ -4291,6 +4498,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
         debug=debug,
         bench_flags=bench_flags,
         test_flags=test_flags,
+        lint_paths=[],
         bench_e2e_config=resolved_e2e_config,
     )
 
@@ -4634,6 +4842,12 @@ def tool_status(mode: str | None = None) -> str:
         if isinstance(artifact_counts, dict)
         else ""
     )
+    clang_tidy_summary = entry.get("clang_tidy")
+    clang_tidy_suffix = (
+        ". Clang-tidy: " + json.dumps(clang_tidy_summary, sort_keys=True)
+        if isinstance(clang_tidy_summary, dict)
+        else ""
+    )
     guard_suffix = ""
     if entry.get("build_timeout_sec") is not None:
         guard_suffix = (
@@ -4666,7 +4880,8 @@ def tool_status(mode: str | None = None) -> str:
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
-                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}")
+                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -4690,6 +4905,7 @@ def tool_status(mode: str | None = None) -> str:
         msg += receipt_suffix
         msg += guard_suffix
         msg += artifact_suffix
+        msg += clang_tidy_suffix
         return msg
 
     if status == "killed_timeout":
@@ -4697,7 +4913,8 @@ def tool_status(mode: str | None = None) -> str:
                 f"{focus_suffix} "
                 f"Logs for inspection are available here: "
                 f"{log_path}{report_suffix}{qualification_suffix}"
-                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}. "
+                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}. "
                 "Termination evidence: "
                 f"{json.dumps(entry.get('termination_evidence'), sort_keys=True)}")
 
@@ -4714,6 +4931,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"Log: {log_path}{report_suffix}{qualification_suffix}."
                 f"{private_note}{bootstrap_suffix}{guard_suffix}"
                 f"{artifact_suffix}"
+                f"{clang_tidy_suffix}"
                 f"{termination_suffix}")
 
     if status == "aborted":
@@ -4722,6 +4940,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
                 f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}"
                 f"{termination_suffix}")
 
     return (f"{mode_details.label} status: {status}."

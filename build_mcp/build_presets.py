@@ -131,6 +131,10 @@ POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
 
 PACKAGE_LINUX_MODE = package_linux.MODE
 
+LINT_FOCUSED_MODE = "lint-focused"
+
+LINT_FULL_MODE = "lint-full"
+
 POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET = (
     "postgres-error-safety-production")
 
@@ -447,6 +451,36 @@ MODES: Dict[str, ModeDefinition] = {
         preset_override=PACKAGE_LINUX_MODE,
         reporting_subdir_name=package_linux.REPORTING_SUBDIR,
         hard_timeout_min=240.0,
+    ),
+    LINT_FOCUSED_MODE: ModeDefinition(
+        lock_group="lint",
+        expected_duration_min=30.0,
+        build_only_expected_duration_min=30.0,
+        label="Focused Clang-Tidy analysis",
+        docs=(
+            "Build the production extension module graph, then lint only the "
+            "explicit repository- or build-relative compile units in filter.paths"
+        ),
+        is_verb_plular=False,
+        targets=["postgresql_bioseq"],
+        commands=[],
+        requires_build_only=True,
+    ),
+    LINT_FULL_MODE: ModeDefinition(
+        lock_group="lint",
+        expected_duration_min=220.0,
+        build_only_expected_duration_min=220.0,
+        label="Full Clang-Tidy analysis",
+        docs=(
+            "Build the isolated test preset's complete default target graph, "
+            "then lint every authored and generated first-party compile unit"
+        ),
+        is_verb_plular=False,
+        targets=["all"],
+        commands=[],
+        preset_family="test",
+        hard_timeout_min=240.0,
+        requires_build_only=True,
     ),
     "unit-integration": ModeDefinition(
         lock_group="tests",
@@ -858,6 +892,8 @@ MODES: Dict[str, ModeDefinition] = {
 
 VALID_MODES: Set[str] = set(MODES.keys())
 
+LINT_MODES: frozenset[str] = frozenset({LINT_FOCUSED_MODE, LINT_FULL_MODE})
+
 # Catch2-focused correctness modes share one closed filter contract.  Every
 # executable in a selected mode receives the same OR-combined test spec and
 # permits zero local matches so a tag owned by a sibling executable remains a
@@ -942,6 +978,55 @@ _MAX_CATCH2_TEST_SPECS = 32
 _MAX_CATCH2_TEST_SPEC_LENGTH = 512
 
 _MAX_CATCH2_COMBINED_TEST_SPEC_LENGTH = 4096
+
+_MAX_LINT_PATHS = 64
+
+_MAX_LINT_PATH_LENGTH = 512
+
+
+def lint_filter_to_paths(lint_filter: object) -> tuple[list[str], str | None]:
+    """Validate the focused lint filter and return normalized relative paths.
+
+    @param lint_filter Closed object containing only a nonempty ``paths`` array.
+    @return Normalized paths and no error, or an empty list and a diagnostic.
+    """
+
+    if not isinstance(lint_filter, dict):
+        return [], "filter must be an object containing paths"
+    unknown = sorted(set(lint_filter) - {"paths"})
+    if unknown:
+        return [], "focused lint filter rejects keys: " + ", ".join(unknown)
+    raw_paths = lint_filter.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        return [], "filter.paths must be a nonempty array"
+    if len(raw_paths) > _MAX_LINT_PATHS:
+        return [], f"filter.paths accepts at most {_MAX_LINT_PATHS} entries"
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str) or not raw_path:
+            return [], "every filter.paths entry must be a nonempty string"
+        if len(raw_path) > _MAX_LINT_PATH_LENGTH:
+            return [], (
+                "filter.paths entries may contain at most "
+                f"{_MAX_LINT_PATH_LENGTH} characters"
+            )
+        if (
+            raw_path.startswith("/")
+            or "\\" in raw_path
+            or any(ord(character) < 32 for character in raw_path)
+        ):
+            return [], f"filter.paths entry is not a safe relative path: {raw_path!r}"
+        components = raw_path.split("/")
+        if any(component in {"", ".", ".."} for component in components):
+            return [], f"filter.paths entry is not normalized: {raw_path!r}"
+        if not raw_path.endswith((".c", ".cc", ".cpp", ".cppm", ".cxx")):
+            return [], f"filter.paths entry is not a C/C++ compile unit: {raw_path!r}"
+        if raw_path not in seen:
+            normalized.append(raw_path)
+            seen.add(raw_path)
+    return normalized, None
 
 def _filter_to_cli_args(bench_filter):
     """Translate the structured `filter` object into bench CLI tokens.
