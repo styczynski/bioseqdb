@@ -2303,6 +2303,11 @@ def main(argv: list[str] | None = None) -> int:
                             "support.js",
                         )
                     },
+                    "benchmark_fixture_sha256": {
+                        name: hashlib.sha256(
+                            (_BENCHMARK_FIXTURES / name).read_bytes()).hexdigest()
+                        for name in _BENCHMARK_FIXTURE_NAMES
+                    },
                 },
                 indent=2,
             ) + "\n",
