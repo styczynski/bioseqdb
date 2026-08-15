@@ -1,9 +1,8 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file sequence_storage.cppm
+ * @brief Length-bucketed PostgreSQL shard storage for compact sequences.
  *
- * storage/sequence_storage.cppm
- *
- * Length-bucketed sub-table sharding for sequence
- * storage. Owns:
+ * Owns:
  *   - the locator stub format (a fixed-size bioseq::pg_types::seq-shaped varlena that
  *     the main columnar relation stores in place of the full sequence);
  *   - the consteval bucket-threshold builder and the per-call
@@ -15,8 +14,6 @@
  *   - the bioseq_default_storage_manager =
  *     sequence_storage_manager<sequence_size_t, 8, 42> alias used by the
  *     TAM and dispatch buffer.
- *
- *-------------------------------------------------------------------------
  */
 module;
 
@@ -2088,33 +2085,35 @@ export namespace bioseq::storage {
 // bioseq_internal.seq_sub_table catalog table.
 // ---------------------------------------------------------------------------
 
+/// Compact-sequence type parameters resolved from one parent column typmod.
 struct sequence_column_type_parameters {
     std::string alphabet_name;
     int storage_unit_bit_width = 0;
 };
 
+/// Resolve and validate the compact-sequence typmod at one attribute number.
 [[nodiscard]] sequence_column_type_parameters
 column_typmod_at(TupleDesc parent_tupdesc, std::int16_t column_attno);
 
+/// Return the relation-persistence keyword inherited by a sequence shard.
 [[nodiscard]] const char*
 persistence_keyword_for_relfilenode(Oid main_database_oid,
                                     Oid main_tablespace_oid,
                                     Oid main_relfilenode);
 
+/// Format the canonical physical sequence-shard relation name.
 [[nodiscard]] std::string
 format_sub_table_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                       std::int16_t column_attno, std::int16_t bucket_idx,
                       std::int32_t shard_idx);
 
+/// Format the canonical sidecar relation name paired with a sequence shard.
 [[nodiscard]] std::string
 format_sidecar_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                     std::int16_t column_attno, std::int16_t bucket_idx,
                     std::int32_t shard_idx);
 
-// ---------------------------------------------------------------------------
-// sequence_storage_manager template.
-// ---------------------------------------------------------------------------
-
+/// Stateless shard manager for one sequence-length bucket geometry.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -2425,7 +2424,8 @@ void seq_caches::close_all(bool commit) noexcept {
 
                 if (side == access_side::write) {
                     if (commit && e.pending_bytes_delta != 0) {
-                        (void) bioseq::postgres::support::invoke_pg_as_cpp([&] {
+                        (void) bioseq::postgres::support::invoke_pg_as_cpp(
+                            [this, column_attno, bucket_idx, shard_idx, &e] {
                             return sequence_sub_table_manager::update_shard_bytes_written(
                                 main_database_oid, main_tablespace_oid,
                                 main_relfilenode, column_attno, bucket_idx,
@@ -2698,7 +2698,9 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
             pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
     });
 
-    if (auto rechecked = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    if (auto rechecked = bioseq::postgres::support::invoke_pg_as_cpp(
+            [db_oid, spc_oid, main_relfilenode, column_attno,
+             bucket_idx] {
             return sequence_sub_table_manager::lookup_active_shard(
                 db_oid, spc_oid, main_relfilenode,
                 column_attno, bucket_idx);
@@ -2737,7 +2739,8 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     // bioseq_relation_set_new_filenode + drop_sub_tables_for_main); the
     // ALTER EXTENSION ADD TABLE was a pg_dump convenience that we trade
     // for correctness — pg_dump still round-trips data through SELECT/COPY.
-    StringInfo ddl = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    StringInfo ddl = bioseq::postgres::support::invoke_pg_as_cpp(
+        [persistence_kw, &sub_name, &tm, &sidecar_name] {
         StringInfo result = makeStringInfo();
         appendStringInfo(result,
             "CREATE %s TABLE IF NOT EXISTS bioseq_internal.%s "
@@ -2761,7 +2764,10 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
         ddl, sub_name.c_str(), sidecar_name.c_str(),
         new_sub_relid, new_sidecar_relid);
 
-    sequence_sub_table_row row = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    sequence_sub_table_row row =
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx,
+             starting_shard_idx, new_sub_relid, new_sidecar_relid] {
         return sequence_sub_table_manager::insert_shard(
             db_oid, spc_oid, main_relfilenode,
             column_attno, bucket_idx, starting_shard_idx,
@@ -2771,7 +2777,8 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     if (row.sub_table_relid != new_sub_relid) {
         // Another backend won the race; we DROP what we just made.
         // Reaper is the long-tail safety net.
-        StringInfo drop = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        StringInfo drop = bioseq::postgres::support::invoke_pg_as_cpp(
+            [&sub_name, &sidecar_name] {
             StringInfo result = makeStringInfo();
             appendStringInfo(result,
                 "DROP TABLE bioseq_internal.%s; "
@@ -2819,7 +2826,9 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                      std::int16_t bucket_idx,
                      LOCKMODE lock_mode, seq_caches* cache)
 {
-    if (auto active = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    if (auto active = bioseq::postgres::support::invoke_pg_as_cpp(
+            [db_oid, spc_oid, main_relfilenode, column_attno,
+             bucket_idx] {
             return sequence_sub_table_manager::lookup_active_shard(
                 db_oid, spc_oid, main_relfilenode,
                 column_attno, bucket_idx);
@@ -2837,7 +2846,8 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     // catalog PK ("duplicate key violates seq_sub_table_pkey"). Allocate the
     // next index after the highest existing shard for this (column, bucket).
     std::int32_t next_shard_idx = 0;
-    const auto shards = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    const auto shards = bioseq::postgres::support::invoke_pg_as_cpp(
+        [db_oid, spc_oid, main_relfilenode] {
         return sequence_sub_table_manager::list_shards_for_main(
             db_oid, spc_oid, main_relfilenode);
     });

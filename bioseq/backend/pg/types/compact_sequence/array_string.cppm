@@ -1,4 +1,7 @@
-/* Explicit string and array materialization/concat bridges for bioseq.seq. */
+/**
+ * @file array_string.cppm
+ * @brief String and array materialization bridges for compact sequences.
+ */
 module;
 
 #include <algorithm>

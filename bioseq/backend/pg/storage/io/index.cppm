@@ -1,7 +1,7 @@
-// bioseq/backend/pg/storage/io/index.cppm
-//
-// Streams FASTA/FASTQ records through the PostgreSQL-independent IO reader
-// into a Bioseq table without materializing whole sequences.
+/**
+ * @file index.cppm
+ * @brief Stream FASTA and FASTQ records into PostgreSQL without whole-sequence materialization.
+ */
 module;
 // Highway and PostgreSQL declarations precede the module unit because this
 // owner imports Highway-bearing module graphs.
@@ -460,7 +460,8 @@ void write_parent_row(load_context& ctx, pg_identifier_writer& tuple_writer,
                 ERRCODE_PROGRAM_LIMIT_EXCEEDED,
                 "FASTA/FASTQ header exceeds INT_MAX");
         }
-        text* htext = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        text* htext = bioseq::postgres::support::invoke_pg_as_cpp(
+            [&ctx, header] {
             const MemoryContext old = MemoryContextSwitchTo(
                 get_column_write_per_tuple_context(ctx.write_state));
             text* result = cstring_to_text_with_len(
@@ -1016,7 +1017,8 @@ parse_column_mapping_array(ArrayType* arr) {
     std::vector<idp::user_column_mapping> maps;
     const Oid mapping_type_oid = ARR_ELEMTYPE(arr);
     Datum* elems = nullptr; bool* nulls = nullptr; int nelems = 0;
-    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    bioseq::postgres::support::invoke_pg_as_cpp(
+        [arr, mapping_type_oid, &elems, &nulls, &nelems] {
         deconstruct_array(
             arr, mapping_type_oid, -1, false, 'd',
             &elems, &nulls, &nelems);

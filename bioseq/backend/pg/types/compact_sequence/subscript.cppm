@@ -1,4 +1,7 @@
-/* PostgreSQL 17 custom subscript handler for zero-based half-open seq access. */
+/**
+ * @file subscript.cppm
+ * @brief PostgreSQL subscript handling for zero-based half-open sequence access.
+ */
 module;
 
 #include <cstdint>

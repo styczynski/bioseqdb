@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * column/metadata-row-mask.cppm
- *
- * Narrow storage_metadata partition for row-mask metadata access.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file row_mask.cppm
+ * @brief Row-mask catalog operations exposed by the metadata module.
  */
 export module bioseq.postgres.storage.metadata:row_mask;
 

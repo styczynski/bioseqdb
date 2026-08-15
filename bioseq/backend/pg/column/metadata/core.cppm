@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * core.cppm
+/**
+ * @file core.cppm
+ * @brief Transactional catalog operations for columnar relation metadata.
  *
  * Manages metadata for columnar relations in separate, shared metadata
  * tables in the "bioseq" catalog schema.
@@ -17,7 +17,6 @@
  * scans (systable_beginscan_ordered) so they're transactional and
  * MVCC-safe.
  *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>

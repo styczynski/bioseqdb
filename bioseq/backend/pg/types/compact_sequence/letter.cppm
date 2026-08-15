@@ -1,4 +1,7 @@
-/* Fixed-width self-describing bioseq.letter Datum and its SQL semantics. */
+/**
+ * @file letter.cppm
+ * @brief Fixed-width self-describing letter Datum and its SQL semantics.
+ */
 module;
 
 #include <array>

@@ -355,7 +355,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
     auto ctx = fresh_context({k_substring_self_table});
     seed_self_alignment_table(ctx, k_substring_self_table);
 
-    auto canonical_query = [&](std::string_view sql_template) {
+    auto canonical_query = [&ctx](std::string_view sql_template) {
         return query_rows(
             ctx,
             fmt::format(
@@ -380,7 +380,7 @@ TEST_CASE("Five self-alignment flavors return the same coordinates and CIGAR",
         " ORDER BY t1.pk;");
 
     // Flavor 3: same column on a single relation
-    auto canonical_single = [&](std::string_view sql_template) {
+    auto canonical_single = [&ctx](std::string_view sql_template) {
         return query_rows(
             ctx,
             fmt::format(fmt::runtime(sql_template), k_substring_self_table));

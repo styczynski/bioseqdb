@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file tuple_ops.cppm
+ * @brief Tuple modification helpers for columnar metadata catalogs.
  *
- * tuple_ops.cppm
- *
- * Tuple modification helpers shared by storage_metadata catalog code.
+ * Shared by storage_metadata catalog code.
  * Keeping executor-state setup and tuple insert/delete plumbing in this leaf
  * partition keeps metadata-core focused on catalog semantics.
- *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>

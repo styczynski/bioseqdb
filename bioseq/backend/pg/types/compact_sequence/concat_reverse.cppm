@@ -1,4 +1,7 @@
-/* scalar concat and O(1) logical transform SQL adapters. */
+/**
+ * @file concat_reverse.cppm
+ * @brief Concatenation and constant-time logical transform SQL adapters.
+ */
 module;
 
 #include <cstddef>

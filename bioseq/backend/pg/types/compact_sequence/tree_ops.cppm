@@ -1,5 +1,7 @@
-/* Persistent immutable piece-tree construction, splitting, joining, binding,
- * and nonrecursive arena release. */
+/**
+ * @file tree_ops.cppm
+ * @brief Persistent piece-tree construction, transformation, binding, and release.
+ */
 module;
 
 #include <algorithm>
@@ -36,6 +38,7 @@ piece_tree_failure_storage_noexcept() noexcept
     return storage;
 }
 
+/// First invariant category that forced a piece-tree arena quarantine.
 export enum class piece_tree_quarantine_reason : std::uint8_t {
     none,
     arena_refcount,
@@ -45,6 +48,7 @@ export enum class piece_tree_quarantine_reason : std::uint8_t {
     retired_join_root,
 };
 
+/// Backend-local diagnostic state for no-throw piece-tree cleanup failures.
 export struct piece_tree_quarantine_snapshot {
     std::uint64_t invariant_failures;
     std::uint64_t quarantined_arenas;

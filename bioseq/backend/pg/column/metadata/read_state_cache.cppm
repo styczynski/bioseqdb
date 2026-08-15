@@ -1,8 +1,8 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file read_state_cache.cppm
+ * @brief Transaction-scoped cache for reusable column read states.
  *
- * read_state_cache.cppm
- *
- * Transaction-scoped cache of column_read_state pointers keyed by relation
+ * Caches column_read_state pointers keyed by relation
  * file number. When tuple_fetch_row_version is invoked across separate
  * SPI/executor calls we need to reuse the prior read state instead of
  * building a new one, because read-state setup is not shared between calls.
@@ -10,8 +10,6 @@
  * The underlying hash table lives in a TopTransactionContext child;
  * transaction_scoped_hash_table installs the reset callback that clears it at
  * transaction end.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

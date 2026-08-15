@@ -486,12 +486,16 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
             bioseq::storage::make_lazy_sequence_view(lazy);
         std::map<std::string_view, fragment_index_storage> fcache;
         std::map<std::string_view, sequence_index_storage> qcache;
-        auto open_frag = [&](std::string_view name) -> fragment_index_storage& {
+        auto open_frag =
+            [&fcache, rid, attno, user_relid, loc, rowno, mctx](
+                    std::string_view name) -> fragment_index_storage& {
             if (auto it = fcache.find(name); it != fcache.end()) return it->second;
             acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
             return fcache.emplace(name, open_fragment_storage(user_relid, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
                                      attno, name, loc, rowno, nullptr, mctx)).first->second; };
-        auto open_inl = [&](std::string_view name) -> sequence_index_storage& {
+        auto open_inl =
+            [&qcache, rid, attno, user_relid, loc, rowno, mctx](
+                    std::string_view name) -> sequence_index_storage& {
             if (auto it = qcache.find(name); it != qcache.end()) return it->second;
             acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
             return qcache.emplace(name, open_sequence_storage(user_relid, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
@@ -574,14 +578,17 @@ inline const auto& letter_rank_table() { static const auto t = build_letter_rank
 }  // namespace detail
 [[nodiscard]] inline int letter_to_rank(std::uint8_t alphabet_code, char letter) {
     if (alphabet_code >= detail::k_num_alphabets) return -1;
-    return (int)detail::letter_rank_table()[alphabet_code][(std::uint8_t)letter];
+    return static_cast<int>(detail::letter_rank_table()[alphabet_code][
+        static_cast<std::uint8_t>(letter)]);
 }
 
 // ---- per-row index-present probe -----------------------------------------
 [[nodiscard]] inline bool index_present(Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno,
                                         std::string_view index_name, const sequence_locator& loc, std::int64_t row_key,
                                         seq_caches* caches, MemoryContext mctx) {
-    auto s = open_fragment_storage(user_relid, db, spc, relfn, attno, index_name, loc, (std::uint64_t)row_key, caches, mctx);
+    auto s = open_fragment_storage(
+        user_relid, db, spc, relfn, attno, index_name, loc,
+        static_cast<std::uint64_t>(row_key), caches, mctx);
     // both layouts gate on the k_directory_sub_key witness written LAST.
     try {
         const bool present = s.number_of_chunks(k_directory_sub_key) >= 1;
@@ -1403,7 +1410,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     const auto lazy_view =
                         bioseq::storage::make_lazy_sequence_view(lazy);
                     sequence_locator loc{}; loc.logical_length = rng.bp_size();
-                    loc.bucket_index = (std::uint8_t)bioseq::storage::sequence_bucket_index<bioseq::storage::sequence_size_t,8,42>(loc.logical_length);
+                    loc.bucket_index = static_cast<std::uint8_t>(
+                        bioseq::storage::sequence_bucket_index<
+                            bioseq::storage::sequence_size_t, 8, 42>(
+                                loc.logical_length));
                     loc.shard_index = 0;
                     if (layout == sequence_index_layout::sequence_inline) {
                         auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -5975,7 +5985,8 @@ inline void remove_sequence_fragment_impl(
         state->fragment_caches->main_tablespace_oid = rid.tablespace_oid;
         state->fragment_caches->main_relfilenode = rid.relfilenode;
         [[maybe_unused]] Relation fragment_relation =
-            bioseq::postgres::support::invoke_pg_as_cpp([&] {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [rid, seq_attno, &source, state] {
                 return open_sub_table_for_locator(
                     rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno,
                     source.locator, RowExclusiveLock,
@@ -6459,8 +6470,9 @@ exercise_minimizer_generation_storage_state_impl(
         fragment_index_storage& storage = *state->storage;
         state->table_name = storage.this_table_name();
         const Oid internal_namespace = bioseq_internal_ns();
-        const auto resolve_table_oid = [&] {
-            return bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        const auto resolve_table_oid = [state, internal_namespace] {
+            return bioseq::postgres::support::invoke_pg_as_cpp(
+                [state, internal_namespace] {
                 return get_relname_relid(
                     state->table_name.c_str(), internal_namespace);
             });
@@ -6494,7 +6506,7 @@ exercise_minimizer_generation_storage_state_impl(
             }
         } else if (!probe_residency && !clear_generation_absent) {
             Relation noncanonical_relation =
-                bioseq::postgres::support::invoke_pg_as_cpp([&] {
+                bioseq::postgres::support::invoke_pg_as_cpp([&storage] {
                 return storage.open_index_relation_(
                     false, AccessShareLock);
             });
@@ -6692,7 +6704,8 @@ exercise_minimizer_generation_storage_state_impl(
             bioseq::postgres::support::invoke_pg_as_cpp(
                 [] { CommandCounterIncrement(); });
             result.after_oid = storage.resolve_relid_(false);
-            Relation restored = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+            Relation restored =
+                bioseq::postgres::support::invoke_pg_as_cpp([&storage] {
                 return storage.open_index_relation_(
                     false, AccessShareLock);
             });
@@ -7812,8 +7825,10 @@ inline void drop_all_index_tables_impl() {
         "JOIN pg_namespace n ON t.typnamespace=n.oid WHERE a.attrelid={}::oid AND t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') "
         "AND a.attnum>0 AND NOT a.attisdropped "
         "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) DO UPDATE SET update_on_insert=EXCLUDED.update_on_insert, enabled=true",
-        (unsigned)rel_oid, (unsigned)rid.relfilenode, quote_literal_cstr(std::string(name).c_str()),
-        update_on_insert ? "true" : "false", (unsigned)rel_oid);
+        static_cast<unsigned>(rel_oid),
+        static_cast<unsigned>(rid.relfilenode),
+        quote_literal_cstr(std::string(name).c_str()),
+        update_on_insert ? "true" : "false", static_cast<unsigned>(rel_oid));
     SPI_execute(sql.c_str(), false, 0);
     SPI_finish();
     return 0;
@@ -7826,7 +7841,8 @@ inline void drop_all_index_tables_impl() {
     if (SPI_connect() != SPI_OK_CONNECT) return 0;
     std::string clear = fmt::format(
         "UPDATE bioseq_internal.index_policy SET is_active_read=false WHERE user_relid={}::oid AND main_relfilenode={}::oid",
-        (unsigned)rel_oid, (unsigned)rid.relfilenode);
+        static_cast<unsigned>(rel_oid),
+        static_cast<unsigned>(rid.relfilenode));
     SPI_execute(clear.c_str(), false, 0);
     std::string set_ = fmt::format(
         "INSERT INTO bioseq_internal.index_policy (user_relid, main_relfilenode, column_attno, index_name, enabled, is_active_read) "
@@ -7834,7 +7850,10 @@ inline void drop_all_index_tables_impl() {
         "JOIN pg_namespace n ON t.typnamespace=n.oid WHERE a.attrelid={}::oid AND t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') "
         "AND a.attnum>0 AND NOT a.attisdropped "
         "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) DO UPDATE SET is_active_read=true, enabled=true",
-        (unsigned)rel_oid, (unsigned)rid.relfilenode, quote_literal_cstr(std::string(name).c_str()), (unsigned)rel_oid);
+        static_cast<unsigned>(rel_oid),
+        static_cast<unsigned>(rid.relfilenode),
+        quote_literal_cstr(std::string(name).c_str()),
+        static_cast<unsigned>(rel_oid));
     SPI_execute(set_.c_str(), false, 0);
     SPI_finish();
     return 0;

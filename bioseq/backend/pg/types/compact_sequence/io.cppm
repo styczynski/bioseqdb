@@ -1,4 +1,7 @@
-/* Text/binary/typmod I/O and the exhaustive seq self-cast matrix. */
+/**
+ * @file io.cppm
+ * @brief Text, binary, typmod, and self-cast operations for compact sequences.
+ */
 module;
 
 #include <algorithm>

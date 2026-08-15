@@ -1,14 +1,12 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file write_state_interface.cppm
+ * @brief Unified transaction-lifecycle dispatch for column and row-mask writes.
  *
- * write_state_interface.cppm
- *
- * Top-level dispatcher that forwards transaction-lifecycle events
+ * Forwards transaction-lifecycle events
  * (flush/discard on subtransaction commit or abort, relation-file drop,
  * pending-write checks) to both the columnar write-state module and the
  * row-mask write-state module. Exists so higher layers only have to call
  * one function per event.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file types.cppm
+ * @brief Shared columnar metadata data types and ABI guards.
  *
- * types.cppm
- *
- * Shared storage-metadata data model and ABI guards. Table I/O, transaction
+ * Table I/O, transaction
  * state, and catalog operations depend on this leaf partition without pulling
  * in catalog implementation details.
- *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>

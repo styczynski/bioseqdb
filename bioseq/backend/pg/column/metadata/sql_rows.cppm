@@ -1,3 +1,7 @@
+/**
+ * @file sql_rows.cppm
+ * @brief Fixed SQL catalog-row layouts for columnar metadata.
+ */
 module;
 
 #include <bioseq/pg_compat.h>

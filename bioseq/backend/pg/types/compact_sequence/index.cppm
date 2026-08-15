@@ -1,4 +1,7 @@
-/* Primary module surface for the split bioseq.seq PostgreSQL type. */
+/**
+ * @file index.cppm
+ * @brief Primary module interface for the partitioned PostgreSQL compact-sequence type.
+ */
 export module bioseq.postgres.types.compact_sequence;
 
 export import :flat_abi;

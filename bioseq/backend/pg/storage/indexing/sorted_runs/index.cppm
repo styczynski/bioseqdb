@@ -248,7 +248,7 @@ void write_buffile_as_cpp(
         BufFile* file,
         const void* data,
         std::size_t bytes) {
-    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    bioseq::postgres::support::invoke_pg_as_cpp([file, data, bytes] {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_sorted_run_pg_leaf_failure(
             sorted_run_failure_injection::write_before);
@@ -265,7 +265,7 @@ void read_buffile_exact_as_cpp(
         BufFile* file,
         void* data,
         std::size_t bytes) {
-    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    bioseq::postgres::support::invoke_pg_as_cpp([file, data, bytes] {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_sorted_run_pg_leaf_failure(
             sorted_run_failure_injection::read_before);
@@ -283,7 +283,8 @@ void read_buffile_exact_as_cpp(
         int fileno,
         off_t offset,
         int whence) {
-    return bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    return bioseq::postgres::support::invoke_pg_as_cpp(
+        [file, fileno, offset, whence] {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_sorted_run_pg_leaf_failure(
             sorted_run_failure_injection::seek_before);
@@ -298,7 +299,7 @@ void read_buffile_exact_as_cpp(
 }
 
 [[nodiscard]] int64 size_buffile_as_cpp(BufFile* file) {
-    return bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    return bioseq::postgres::support::invoke_pg_as_cpp([file] {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_sorted_run_pg_leaf_failure(
             sorted_run_failure_injection::size_before);
@@ -332,7 +333,7 @@ void close_buffile_checked_as_cpp(BufFile*& file) {
     if (closing == nullptr) {
         return;
     }
-    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    bioseq::postgres::support::invoke_pg_as_cpp([closing] {
 #ifdef BIOSEQ_TEST_INDEXES
         inject_sorted_run_pg_leaf_failure(
             sorted_run_failure_injection::close_before);
@@ -1379,7 +1380,7 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(
         merge_sorted_file_runs_to_writer_(
             std::span<buffer_file_run>(file_runs_.data() + lo, hi - lo),
             *resources,
-            [&](sorted_pair_wire pair) {
+            [out_file, &out](sorted_pair_wire pair) {
                 write_buffile_as_cpp(out_file, &pair, sizeof(pair));
                 ++out.pair_count;
                 out.byte_count += sizeof(pair);

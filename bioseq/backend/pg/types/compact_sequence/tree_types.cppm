@@ -1,4 +1,7 @@
-/* Immutable arena-qualified piece-tree and expanded-object POD types. */
+/**
+ * @file tree_types.cppm
+ * @brief Arena-qualified piece-tree and expanded-object data types.
+ */
 module;
 
 #include <array>

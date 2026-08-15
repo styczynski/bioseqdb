@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * planner_hook.cppm
+/**
+ * @file planner_hook.cppm
+ * @brief Planner and utility hooks for columnar scans and writes.
  *
  * Top-level planner_hook and ProcessUtility_hook used to splice the
  * bioseq custom scan into query plans. Responsibilities:
@@ -9,8 +9,6 @@
  *   - Rewrite IndexScan nodes to the bioseq IndexScan custom node.
  *   - Detect CREATE TABLE AS queries and disable parallel insert so they
  *     work with the columnar writer.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

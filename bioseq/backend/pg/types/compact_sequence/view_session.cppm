@@ -1,5 +1,7 @@
-/* Datum classification plus the one callback-scoped facade/session adapter
- * used by content operations and the algorithm pipeline. */
+/**
+ * @file view_session.cppm
+ * @brief Datum classification and callback-scoped compact-sequence view sessions.
+ */
 module;
 
 #include <algorithm>

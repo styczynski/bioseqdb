@@ -37,7 +37,7 @@ TEST_CASE("minimizers_per_sequence: multi-run merge + active-read routing",
     REQUIRE(last_index_merge_run_count(ctx) >= 2);          // the multi-cursor k-way merge ran
 
     // The per-fragment recompute baseline (default active index, before set_active_read_index).
-    const auto recomputed = [&] {
+    const auto recomputed = [&ctx] {
         guc_scope off(ctx, "bioseq.index.sequence_read.enabled", "off");
         return mmsearch_set(ctx, "minimizer_sequence_merge");
     }();

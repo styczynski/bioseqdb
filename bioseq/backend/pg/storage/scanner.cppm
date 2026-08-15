@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * storage/scanner.cppm
+/**
+ * @file scanner.cppm
+ * @brief Fragmented PostgreSQL sequence scanning and source-session ownership.
  *
  * `postgres_sequence_scanner<p_sequence_instance>` is the production PostgreSQL-
  * backed implementation of the `fragmented_sequence_scanner` concept.
@@ -15,8 +15,6 @@
  * RSS per scanner is bounded at `fragments_buffer_capacity *
  * fragment_storage_units * sizeof(storage_unit)` (~16 × 8 KiB = 128 KiB on
  * dna4/uint64) irrespective of sequence length.
- *
- *-------------------------------------------------------------------------
  */
 module;
 
@@ -131,21 +129,9 @@ void scanner_pg_run_fragment_reads_with_error_cleanup(
     }
 }
 
-// Production fragment-streaming scanner. Two construction modes:
-//
-//   1. PG-backed (production target path): constructed from a locator + seq_caches.
-//      Reads one fragment per sub-table row via `seq_caches` +
-//      `read_column_row_by_number`, memcpys the bytes into a slot in a per-scanner
-//      MemoryContext, and exposes them through `load_fragment(n)`.
-//      `release_fragment` pfrees the slot.
-//
-//   2. In-memory (query / inline target path): constructed from a span over an
-//      existing `compact_sequence_range<p_sequence_config>`'s packed storage
-//      units. `load_fragment(n)`
-//      returns a subspan with NO allocation, NO MemoryContext. `release_fragment`
-//      is a no-op (caller owns the bytes). This lets a query literal (always inline)
-//      share the same scanner type as a PG-backed target without doubling the
-//      dispatch_buffer template tree.
+/// Fragment-streaming scanner for either PostgreSQL shard rows or borrowed
+/// in-memory packed units. PostgreSQL mode owns a bounded fragment cache in a
+/// caller-selected MemoryContext, while in-memory mode never allocates.
 template <class p_sequence_instance>
 struct postgres_sequence_scanner final {
     using storage_unit   = typename p_sequence_instance::storage_unit;
@@ -508,7 +494,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     // publication; an interrupted read therefore cannot be reused.
     poisoned_ = true;
     if (fragment_no >= fragment_count_) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp([this, fragment_no] {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "postgres_sequence_scanner: load_fragment({}) >= fragment_count_({})",
                 fragment_no, fragment_count_);
@@ -519,7 +505,8 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     if (is_in_memory_mode()) {
         const std::size_t start = fragment_no * fragment_storage_units;
         if (start >= in_memory_data_.size()) {
-            bioseq::postgres::support::invoke_pg_as_cpp([&] {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [this, fragment_no, start] {
                 bioseq_log<logging_level::error, logging_target::postgres>(
                     "postgres_sequence_scanner in-memory: fragment {} starts at unit {} but "
                     "backing span only has {} units", fragment_no, start,
@@ -576,7 +563,7 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     // cached column reader.  invoke_pg_as_cpp restores the caller's context
     // and ResourceOwner at the checked leaf boundary.
     Relation shard = bioseq::postgres::support::invoke_pg_as_cpp(
-        [&, payload_mctx, read_resource_owner] {
+        [this, payload_mctx, read_resource_owner] {
         MemoryContextSwitchTo(payload_mctx);
         if (read_resource_owner != nullptr) {
             CurrentResourceOwner = read_resource_owner;
@@ -673,7 +660,8 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         return result;
     });
     if (!row_visible) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [this, row_no, fragment_no] {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "postgres_sequence_scanner: sub-table row {} missing (db={}, spc={}, "
                 "relfilenode={}, attno={}, bucket={}, shard={}, fragment={}/{})",
@@ -687,7 +675,8 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
         });
     }
     if (nulls[0]) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [this, row_no, fragment_no] {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "postgres_sequence_scanner: sub-table row {} is NULL (fragment {} of {})",
                 row_no, fragment_no, fragment_count_);
@@ -768,7 +757,8 @@ inline auto postgres_sequence_scanner<p_sequence_instance>::load_fragment(
     if (dst == nullptr) {
         // palloc0 so the wrapper observes zeroes in the trailing region of the
         // last fragment.
-        dst = bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        dst = bioseq::postgres::support::invoke_pg_as_cpp(
+            [this, bytes_to_copy] {
             MemoryContext previous = MemoryContextSwitchTo(mctx_);
 #ifdef BIOSEQ_TEST_INDEXES
             inject_scanner_pg_leaf_failure(
@@ -801,7 +791,8 @@ inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
 {
     const std::size_t required_units = static_cast<std::size_t>(storage_unit_count());
     if (destination.size() != required_units) {
-        bioseq::postgres::support::invoke_pg_as_cpp([&] {
+        bioseq::postgres::support::invoke_pg_as_cpp(
+            [destination, required_units] {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "postgres_sequence_scanner: resident destination has {} packed units, "
                 "expected {}",
@@ -815,7 +806,8 @@ inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
     std::fill(destination.begin(), destination.end(), storage_unit{});
     if (is_in_memory_mode()) {
         if (in_memory_data_.size() < destination.size()) {
-            bioseq::postgres::support::invoke_pg_as_cpp([&] {
+            bioseq::postgres::support::invoke_pg_as_cpp(
+                [this, destination] {
                 bioseq_log<logging_level::error, logging_target::postgres>(
                     "postgres_sequence_scanner in-memory: backing span has {} packed "
                     "units, expected at least {}",
@@ -1050,7 +1042,7 @@ inline void postgres_sequence_scanner<p_sequence_instance>::finish_pg_resources_
         slot.bytes = nullptr;
     }
     poisoned_ = true;
-    bioseq::postgres::support::invoke_pg_as_cpp([&] {
+    bioseq::postgres::support::invoke_pg_as_cpp([context] {
         MemoryContext active = CurrentMemoryContext;
         MemoryContext walker = active;
         bool inside = false;

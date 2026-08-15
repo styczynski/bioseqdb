@@ -1,14 +1,12 @@
-/*-------------------------------------------------------------------------
- *
- * compression.cppm
+/**
+ * @file compression.cppm
+ * @brief Compression dispatch for columnar payload buffers.
  *
  * Compression / decompression dispatch over the configured compression
  * algorithms (none, pglz, optional lz4, optional zstd). The pglz path
  * also serialises a small header (raw size + varlena) at the start of
  * the compressed buffer so the decompressor can size the output without
  * a separate sidecar.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

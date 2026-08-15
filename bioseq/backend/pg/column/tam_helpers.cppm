@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * tam_helpers.cppm
+/**
+ * @file tam_helpers.cppm
+ * @brief Cycle-free table-access-method identity helpers.
  *
  * Leaf module for the small Bioseq table-AM helper functions that several
  * modules (the scheduler dispatch buffer, the *_pg storage-indexing
@@ -11,8 +11,6 @@
  * The TableAmRoutine identity used by relation_oid_uses_column_table_access_method is supplied
  * by the table-AM initializer. Comparing the registered routine pointer keeps
  * this leaf independent from the full table-access implementation.
- *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>

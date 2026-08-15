@@ -1,16 +1,14 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file write_state.cppm
+ * @brief Transaction-scoped ownership of column write states.
  *
- * write_state.cppm
- *
- * Transaction-scoped management of column_write_state objects. Keyed by
+ * Manages column_write_state objects keyed by
  * relation file number, one entry holds a stack of per-subtransaction write states
  * so that nested subtransactions can commit / abort their writes
  * independently before the enclosing transaction sees them.
  *
  * Backing storage is a transaction_scoped_hash_table, which owns lazy HTAB
  * creation, its MemoryContext, and the transaction-end reset callback.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

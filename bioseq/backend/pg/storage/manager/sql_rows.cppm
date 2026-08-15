@@ -1,3 +1,7 @@
+/**
+ * @file sql_rows.cppm
+ * @brief Fixed catalog-row layouts for sequence and generation storage.
+ */
 module;
 
 #include <bioseq/pg_compat.h>

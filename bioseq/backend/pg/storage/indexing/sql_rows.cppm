@@ -1,3 +1,7 @@
+/**
+ * @file sql_rows.cppm
+ * @brief Fixed catalog-row layouts for PostgreSQL index administration.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -11,7 +15,7 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage::indexing::catalog_rows {
 
-// Per-column index policy persisted by the extension.
+/// Per-column index policy persisted by the extension.
 struct [[bioseq_sql::table({
             .schema =
                 bioseq::sql::fixed_schema<"bioseq_internal">,

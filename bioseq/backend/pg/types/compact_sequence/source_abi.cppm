@@ -1,6 +1,7 @@
-/* Opaque source-domain ABI and callback-scoped read-session shell.  Concrete
- * PostgreSQL scanners/domains live in postgres_sequence_scanner and import this
- * partition; this partition never imports them. */
+/**
+ * @file source_abi.cppm
+ * @brief Opaque source-domain ABI and callback-scoped sequence read sessions.
+ */
 module;
 
 #include <cstdint>

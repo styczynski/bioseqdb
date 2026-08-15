@@ -47,7 +47,7 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
     insert_pair(ctx, "mixed_index_rows", 4, 44);    // NOT indexed
 
     // Index-table row counts reflect only indexed rows.
-    auto rowno_of = [&](int pk) {
+    auto rowno_of = [&ctx](int pk) {
         return query_scalar_int(ctx, fmt::format(
             "SELECT bioseq.column_row_number('mixed_index_rows'::regclass, ctid) FROM mixed_index_rows WHERE pk={}", pk));
     };
@@ -58,7 +58,7 @@ TEST_CASE("mixed indexed + unindexed rows in one scan",
 
     // With sequence-index reads enabled, mmsearch returns matches for both
     // indexed (assemble) and unindexed (recompute) rows.
-    auto found_pks = [&](const char* sequence_read_value) {
+    auto found_pks = [&ctx](const char* sequence_read_value) {
         guc_scope sequence_read_scope(
             ctx, "bioseq.index.sequence_read.enabled", sequence_read_value);
         auto rows = query_rows(ctx,

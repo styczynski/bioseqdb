@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * column/metadata-stripe.cppm
- *
- * Narrow storage_metadata partition for storage-id, stripe, chunk-group,
- * and skip-list metadata access.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file stripe.cppm
+ * @brief Storage-id, stripe, chunk-group, and skip-list metadata operations.
  */
 export module bioseq.postgres.storage.metadata:stripe;
 

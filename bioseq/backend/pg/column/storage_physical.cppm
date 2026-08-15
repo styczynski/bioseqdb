@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * storage_physical.cppm
+/**
+ * @file storage_physical.cppm
+ * @brief Physical page, WAL, and metapage operations for columnar storage.
  *
  * Low-level storage layer for the bioseq columnar table format.
  *   - Translates columnar read/write operations on logical offsets into
@@ -26,7 +26,6 @@
  * so callers only need an ordinary lock on the relation. Initializing
  * the metapage or truncating the relation requires AccessExclusiveLock.
  *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>

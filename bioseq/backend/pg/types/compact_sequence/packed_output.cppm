@@ -1,4 +1,7 @@
-/* Expanded-object ownership and the sole bioseq::pg_types::seq flattening boundary. */
+/**
+ * @file packed_output.cppm
+ * @brief Expanded-object ownership and the sole compact-sequence flattening boundary.
+ */
 module;
 
 #include <algorithm>
@@ -38,9 +41,7 @@ import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.layout;
 
-/* Fixed, allocation-free materialization tracing and provenance accounting.
- * This belongs to the sole packed-output/materialization boundary; the tree
- * POD partition carries only a pointer-only forward declaration. */
+/// Mechanism that produced one compact-sequence materialization.
 export enum class materialization_mechanism : std::uint8_t {
     backing_copy = 0u,
     packed_full,
@@ -50,6 +51,7 @@ export enum class materialization_mechanism : std::uint8_t {
     letter_array,
 };
 
+/// Consumer boundary that required a compact-sequence materialization.
 export enum class materialization_reason : std::uint8_t {
     executor_copy = 0u,
     heap_tuple,
@@ -68,11 +70,13 @@ export enum class materialization_reason : std::uint8_t {
  * expression adoption, while the publication deltas isolate the shallow
  * SliceProject slot-copy block.  Backend-local storage is intentional; the
  * SQL probe is used only around one query on one integration-test connection. */
+/// Backend-local allocation totals captured around one slice publication.
 export struct slice_payload_allocation_test_snapshot {
     std::uint64_t packed_full{};
     std::uint64_t executor_copy{};
 };
 
+/// Mutable allocation counters backing the integration-test snapshot.
 struct slice_payload_allocation_test_counters {
     std::uint64_t packed_full{};
     std::uint64_t executor_copy{};

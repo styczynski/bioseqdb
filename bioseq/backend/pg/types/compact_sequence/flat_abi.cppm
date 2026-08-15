@@ -1,5 +1,7 @@
-/* PostgreSQL-facing flat ABI for bioseq.seq.  This partition is the narrow
- * shared surface consumed by the table/storage modules. */
+/**
+ * @file flat_abi.cppm
+ * @brief PostgreSQL flat ABI shared by compact-sequence storage consumers.
+ */
 module;
 
 #include <cstddef>

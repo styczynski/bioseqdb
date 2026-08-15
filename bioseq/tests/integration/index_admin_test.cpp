@@ -880,14 +880,15 @@ TEST_CASE("relation descriptor publication replaces and rolls back atomically",
         "INSERT INTO {} VALUES "
         "(1,repeat('ACGT',4099)::bioseq.seq('dna4',64));", table);
     const auto rowno = only_column_row_number(ctx, table);
-    const auto build = [&] {
+    const auto build = [&ctx, table, rowno] {
         return query_one(ctx, fmt::format(
             "SELECT * FROM "
             "bioseq_internal.build_ready_minimizer_fragment_generation("
             "'{}'::regclass,'minimizers_per_fragment',{},'scalar');",
             table, rowno));
     };
-    const auto descriptors = [&](const std::string& sidecar) {
+    const auto descriptors =
+        [&ctx, table, rowno](const std::string& sidecar) {
         return query_rows(ctx, fmt::format(
             "SELECT generation_id::text,state::text,"
             "(retire_full_xid IS NOT NULL)::int::text,provider::text,"
@@ -2033,14 +2034,14 @@ TEST_CASE("PostgreSQL full-generation reader rejects same-scheme producer relabe
 		"(1, (repeat('ACGT', 16391) || 'A')::bioseq.seq('dna4', 64));",
 		table);
 	const auto rowno = only_column_row_number(ctx, table);
-	const auto build = [&](std::string_view backend) {
+	const auto build = [&ctx, table, rowno](std::string_view backend) {
 		return query_one(ctx, fmt::format(
 			"SELECT * FROM "
 			"bioseq_internal.build_ready_minimizer_fragment_generation("
 			"'{}'::regclass, 'minimizers_per_fragment', {}, '{}');",
 			table, rowno, backend));
 	};
-	const auto read = [&](std::string_view backend) {
+	const auto read = [table, rowno](std::string_view backend) {
 		return fmt::format(
 			"SELECT * FROM "
 			"bioseq_internal.scan_grouped_soa_minimizer_generation_test("
@@ -2048,7 +2049,8 @@ TEST_CASE("PostgreSQL full-generation reader rejects same-scheme producer relabe
 			"15::smallint, 10::smallint, 5::smallint, '{}');",
 			table, rowno, backend);
 	};
-	const auto expect_producer_rejection = [&](std::string_view backend) {
+	const auto expect_producer_rejection =
+		[&ctx, &read](std::string_view backend) {
 		const auto error = sql_error(ctx, read(backend));
 		REQUIRE(error.contains(
 			"READY generation minimizer storage contract disagrees"));
@@ -2601,7 +2603,7 @@ TEST_CASE("hash-major replacement reuses its sidecar and retains the replaced ge
         table);
     const auto rowno = only_column_row_number(ctx, table);
 
-    const auto rebuild = [&] {
+    const auto rebuild = [&ctx, table, rowno] {
         REQUIRE(query_scalar_int(ctx, fmt::format(
             "SELECT bioseq.update_index('{}'::regclass, "
             "'minimizers_per_sequence');",
@@ -3164,7 +3166,7 @@ TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-i
     seed_small_bioseq_column(ctx, k_table);
 
     // Helper: read the current update_policy of one index from list_metadata.
-    auto policy_of = [&](std::string_view index_name) {
+    auto policy_of = [&ctx](std::string_view index_name) {
         return query_scalar(
             ctx,
             fmt::format("SELECT update_policy FROM bioseq.list_metadata() "

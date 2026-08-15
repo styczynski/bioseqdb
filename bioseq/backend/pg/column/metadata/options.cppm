@@ -1,10 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * column/metadata/options.cppm
- *
- * Narrow storage_metadata partition for bioseq column table options.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file options.cppm
+ * @brief Column-table option operations exposed by the metadata module.
  */
 export module bioseq.postgres.storage.metadata:options;
 

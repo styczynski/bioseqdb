@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file seq_sub_table.cppm
+ * @brief Sequence sub-table catalog rows and manager operations.
  *
- * column/metadata/seq_sub_table.cppm
- *
- * Narrow storage_metadata partition for sequence sub-table catalog rows.
+ * The
  * The row owns tuple decoding and the manager owns catalog operations; this
  * partition exposes only those two semantic interfaces.
- *
- *-------------------------------------------------------------------------
  */
 export module bioseq.postgres.storage.metadata:seq_sub_table;
 

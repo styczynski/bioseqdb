@@ -1,3 +1,7 @@
+/**
+ * @file sql_entities.cppm
+ * @brief SQL sequence entities used by columnar metadata catalogs.
+ */
 module;
 
 #include <cstdint>
