@@ -431,6 +431,9 @@ ORDER BY provider, accession, start0;
 
 The local relation now uses the normal search predicate:
 
+The `$1` value below is a bound application parameter supplied through a
+prepared statement or PostgreSQL's extended query protocol.
+
 ```sql
 SELECT provider,
        accession,

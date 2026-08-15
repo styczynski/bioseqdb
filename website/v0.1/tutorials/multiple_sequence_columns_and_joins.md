@@ -371,6 +371,18 @@ expresses the application rule clearly and produces the intended custom plan.
 Two searches are supported when each belongs to a separate join frontier. A
 three-table chain makes that separation explicit:
 
+Create the second target relation with the same sequence type:
+
+```sql
+CREATE TABLE second_search_targets (
+    target_id integer PRIMARY KEY,
+    cohort text NOT NULL,
+    sequence bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+```
+
+Load and index it under the same write rules used for `search_targets`.
+
 ```sql
 SELECT first_stage.query_id,
        middle_targets.target_id AS middle_target_id,

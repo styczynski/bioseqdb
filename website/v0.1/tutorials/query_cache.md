@@ -274,6 +274,9 @@ complete.
 Start with a related query family, for example searches over the same relation
 and sequence predicate with different metadata coverage:
 
+The `$1` values below are application parameters supplied through a prepared
+statement or PostgreSQL's extended query protocol.
+
 ```sql
 SET bioseq_cache.query_cache.mode = 'reusable_fragments';
 ```

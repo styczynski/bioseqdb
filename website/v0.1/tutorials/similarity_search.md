@@ -139,6 +139,10 @@ parameter containing N fails for `dna4` with SQLSTATE `22P02`.
 Do not concatenate a query sequence into SQL text. A typed parameter separates
 data from the statement and gives the server one explicit validation point.
 
+In the remaining application-query snippets, `$1`, `$2`, and `$3` denote bound
+parameters supplied through a prepared statement or PostgreSQL's extended query
+protocol.
+
 ## Combine metadata filters with sequence search
 
 Keep selective ordinary predicates beside `mmsearch`:

@@ -25,6 +25,10 @@ nodes:
 It also explains the nested pipeline, Highway, execution, prefilter, column
 cache, and materialization sections shared by several nodes.
 
+The `$1` values in query examples denote bound parameters supplied through a
+prepared statement or PostgreSQL's extended query protocol. Replace them with
+typed literals when running the examples directly in `psql`.
+
 ## Begin with the right EXPLAIN form
 
 Use plain text for a quick human read:
