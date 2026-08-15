@@ -8,14 +8,22 @@ export module bioseq.common.http.validation;
 
 export namespace bioseq::common::http::validation {
 
-/// @brief Checks whether a byte is forbidden in an origin-form request target.
+/**
+ * @brief Checks whether a byte is forbidden in an origin-form request target.
+ * @param[in] character Byte interpreted as unsigned ASCII.
+ * @return `true` for controls, spaces, non-ASCII bytes, and backslashes.
+ */
 [[nodiscard]] inline bool
 is_invalid_request_target_byte(char character) noexcept {
   const auto value = static_cast<unsigned char>(character);
   return value <= 0x20 || value >= 0x7f || character == '\\';
 }
 
-/// @brief Validates an RFC 9110 field-name token.
+/**
+ * @brief Validates an RFC 9110 field-name token.
+ * @param[in] name Candidate header name.
+ * @return `true` when the name is nonempty and contains only token bytes.
+ */
 [[nodiscard]] inline bool is_valid_header_name(std::string_view name) noexcept {
   if (name.empty())
     return false;
@@ -27,7 +35,11 @@ is_invalid_request_target_byte(char character) noexcept {
   });
 }
 
-/// @brief Checks a field value for prohibited control bytes.
+/**
+ * @brief Checks a field value for prohibited control bytes.
+ * @param[in] value Candidate header value.
+ * @return `true` when every byte is visible ASCII or a horizontal tab.
+ */
 [[nodiscard]] inline bool
 is_valid_header_value(std::string_view value) noexcept {
   return std::ranges::all_of(value, [](char character) {
@@ -36,7 +48,11 @@ is_valid_header_value(std::string_view value) noexcept {
   });
 }
 
-/// @brief Validates the ASCII DNS-name subset used by TLS hostname checking.
+/**
+ * @brief Validates the ASCII DNS-name subset used by TLS hostname checking.
+ * @param[in] host Candidate host with an optional trailing root dot.
+ * @return `true` for a bounded, nonnumeric DNS name with valid labels.
+ */
 [[nodiscard]] inline bool is_valid_dns_host(std::string_view host) noexcept {
   if (host.empty())
     return false;
@@ -72,7 +88,11 @@ is_valid_header_value(std::string_view value) noexcept {
   return !looks_like_ipv4;
 }
 
-/// @brief Validates raw bytes in an origin-form request target.
+/**
+ * @brief Validates raw bytes in an origin-form request target.
+ * @param[in] target Candidate target without URI-fragment decoding.
+ * @return `true` when the target has no fragment or forbidden byte.
+ */
 [[nodiscard]] inline bool
 is_valid_request_target(std::string_view target) noexcept {
   return !target.contains('#') &&

@@ -1,5 +1,6 @@
 #include <tests/support/common.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -224,10 +225,10 @@ struct fallback_file_guard {
     std::fseek(file, 0, SEEK_SET);
 
     std::string out;
-    char buffer[4096];
+    std::array<char, 4096> buffer;
     while (const std::size_t read =
-               std::fread(buffer, 1, sizeof(buffer), file)) {
-      out.append(buffer, read);
+               std::fread(buffer.data(), 1, buffer.size(), file)) {
+      out.append(buffer.data(), read);
     }
     std::fseek(file, 0, SEEK_END);
     return out;
@@ -324,7 +325,7 @@ TEST_CASE("logging byte-packed arguments decode odd-offset scalars safely",
   // both the u32 immediately after it and the u64 after the bool start at
   // deliberately unaligned queue offsets.
   const char odd_prefix[] = "odd!";
-  const auto emit_packed = [&](std::uint32_t scalar32, bool flag,
+  const auto emit_packed = [&odd_prefix](std::uint32_t scalar32, bool flag,
                                std::uint64_t scalar64) {
     bioseq_log<logging_level::info>("packed {} {:08x} {} {:016x}", odd_prefix,
                                     scalar32, flag, scalar64);
@@ -349,7 +350,8 @@ TEST_CASE("logging aligns retained custom arguments after packed strings",
     const char odd_prefix[] = "odd!";
     const logging_tracked_argument first{17};
     const logging_tracked_argument second{29};
-    const auto emit_custom = [&](const logging_tracked_argument &argument) {
+    const auto emit_custom = [&odd_prefix](
+                                 const logging_tracked_argument &argument) {
       bioseq_log<logging_level::info>("custom {} {}", odd_prefix, argument);
     };
 
@@ -396,15 +398,15 @@ TEST_CASE("logging checked argument sizing enforces queue record bounds",
     // padding and storage consume the argument budget exactly.
     std::string prefix(
         fmtlog::MAX_ARGUMENT_STORAGE_SIZE - tracked_storage_bound - 1, 'x');
-    std::size_t cstring_sizes[1]{};
+    std::array<std::size_t, 1> cstring_sizes{};
     std::size_t remaining = fmtlog::MAX_ARGUMENT_STORAGE_SIZE;
-    CHECK(fmtlog::getArgSizes<0>(cstring_sizes, remaining,
+    CHECK(fmtlog::getArgSizes<0>(cstring_sizes.data(), remaining,
                                  std::string_view(prefix), tracked));
     CHECK(remaining == 0);
 
     prefix.push_back('x');
     remaining = fmtlog::MAX_ARGUMENT_STORAGE_SIZE;
-    CHECK_FALSE(fmtlog::getArgSizes<0>(cstring_sizes, remaining,
+    CHECK_FALSE(fmtlog::getArgSizes<0>(cstring_sizes.data(), remaining,
                                        std::string_view(prefix), tracked));
 
     // Exercise the noexcept public enqueue path as well: sizing rejects

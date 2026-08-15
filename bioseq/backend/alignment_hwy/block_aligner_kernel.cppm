@@ -1592,7 +1592,15 @@ template <bool p_should_compute_edit_distance>
     return result;
 }
 
-/** Return whether the score matrix has the generated diagonal layout. */
+/**
+ * @brief Checks whether a score matrix has the generated diagonal layout.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
+ * @param[in] scoring_matrix Matrix inspected for uniform biological scores.
+ * @param[out] match_score Uniform biological diagonal score.
+ * @param[out] mismatch_score Uniform biological off-diagonal score.
+ * @return `true` when every matrix entry matches the generated layout.
+ */
 template<sequence_alphabet p_alphabet,
          size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u>
 [[nodiscard]] bool has_generated_diagonal_score_layout(
@@ -1622,7 +1630,11 @@ template<sequence_alphabet p_alphabet,
     return true;
 }
 
-/** Return a low-bit mask for up to 32 packed two-bit DNA4 symbols. */
+/**
+ * @brief Returns a low-bit mask for up to 32 packed two-bit DNA4 symbols.
+ * @param[in] symbol_count Number of two-bit symbols represented by the mask.
+ * @return Low `2 * symbol_count` bits set.
+ */
 [[nodiscard]] constexpr std::uint64_t low_dna4_symbol_mask(
         size_t symbol_count) noexcept {
     return symbol_count == 32u
@@ -1630,9 +1642,16 @@ template<sequence_alphabet p_alphabet,
         : (std::uint64_t{1} << (symbol_count * 2u)) - 1u;
 }
 
-/// Load up to 32 LSB-first DNA4 ranks from an arbitrary base coordinate.
-/// The second storage unit is touched only when the requested window crosses
-/// the first unit boundary, so the final partial unit is never over-read.
+/**
+ * @brief Loads up to 32 LSB-first DNA4 ranks from an arbitrary coordinate.
+ * @param[in] packed_units Contiguous packed DNA4 storage.
+ * @param[in] base_position Logical start coordinate.
+ * @param[in] symbol_count Number of ranks to load.
+ * @return Requested ranks in the low two-bit groups.
+ *
+ * The second storage unit is touched only when the window crosses the first
+ * unit boundary, so the final partial unit is never over-read.
+ */
 [[nodiscard]] HWY_INLINE std::uint64_t load_forward_dna4_window(
         const std::uint64_t* packed_units,
         size_t base_position,
@@ -1649,8 +1668,13 @@ template<sequence_alphabet p_alphabet,
     return packed & low_dna4_symbol_mask(symbol_count);
 }
 
-/// Reverse the order of 32 two-bit groups while retaining the bit order
-/// within each rank.  DNA4 complement is a subsequent XOR with 0b11/rank.
+/**
+ * @brief Reverses 32 two-bit groups while retaining each rank's bit order.
+ * @param[in] packed LSB-first DNA4 ranks.
+ * @return Ranks in reverse group order.
+ *
+ * DNA4 complementation is a subsequent XOR with two set bits per rank.
+ */
 [[nodiscard]] constexpr std::uint64_t reverse_dna4_groups(
         std::uint64_t packed) noexcept {
     packed = ((packed & 0x0303030303030303ULL) << 6u)
@@ -1660,7 +1684,15 @@ template<sequence_alphabet p_alphabet,
     return std::byteswap(packed);
 }
 
-/** Load one forward or reverse-complement packed DNA4 window. */
+/**
+ * @brief Loads one forward or reverse-complement packed DNA4 window.
+ * @tparam p_is_reversed Whether to read reverse-complement orientation.
+ * @param[in] packed_units Contiguous packed DNA4 storage.
+ * @param[in] total_symbols Total symbols represented by the storage view.
+ * @param[in] logical_start Start coordinate in the requested orientation.
+ * @param[in] symbol_count Number of ranks to load.
+ * @return Requested oriented ranks in the low two-bit groups.
+ */
 template<bool p_is_reversed>
 [[nodiscard]] HWY_INLINE std::uint64_t load_oriented_dna4_window(
         const std::uint64_t* packed_units,
@@ -1682,18 +1714,26 @@ template<bool p_is_reversed>
     }
 }
 
-/// Prove that an equal-length global alignment's coordinate diagonal is its
-/// unique optimum.  This is deliberately a byte-and-score certificate, not a
-/// seed/hash shortcut: the scan consumes the exact encoded bytes that the DP
-/// would consume.
-///
-/// Let `sequence_length` be the common length, `diagonal_score` the coordinate
-/// diagonal score, `maximum_substitution_score` the largest matrix entry, and
-/// q/e the positive affine penalties. Any different path contains at least one
-/// insertion and one deletion, which yields a strict alternative-score bound.
-///
-/// A diagonal score above that bound proves both optimality and CIGAR
-/// uniqueness; equality is insufficient because traceback ties are observable.
+/**
+ * @brief Certifies a unique coordinate-diagonal global alignment.
+ * @tparam p_is_reversed Whether query ranks use reverse orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
+ * @param[in] query_seq Query sequence facade.
+ * @param[in] target_seq Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] parameters Alignment contract.
+ * @return Certificate with score, edit distance, and SIMD work counts.
+ *
+ * The scan consumes the same encoded ranks as dynamic programming. For equal
+ * lengths, any different path contains an insertion and a deletion. A
+ * diagonal score above that alternative-score bound establishes a unique
+ * observable CIGAR, while equality remains ineligible because ties are visible.
+ */
 template<
     bool p_is_reversed,
     sequence_alphabet p_alphabet,
@@ -1819,14 +1859,24 @@ try_global_diagonal_certificate(
     return result;
 }
 
-/// Attempt the resident packed DNA4/u64 certificate without materializing
-/// byte ranks. The three-way result is important to the caller:
-///
-///  * not_eligible: no packed content scan ran; use the byte-rank path.
-///  * rejected: the exact packed content scan ran but could not prove the
-///    diagonal; enter DP without repeating the byte certificate scan.
-///  * certified: caller may commit the exact score/endpoints/M run and record
-///    one logical adaptive-block execution.
+/**
+ * @brief Attempts resident packed DNA4 certification without byte ranks.
+ * @tparam p_is_reversed Whether query ranks use reverse orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] query_seq Query sequence facade.
+ * @param[in] target_seq Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] plan Prepared matrix and alignment contract.
+ * @return Three-way attempt result with SIMD work counts.
+ *
+ * `not_eligible` means no packed scan ran and the byte-rank path remains
+ * available. `rejected` means the packed scan ran but did not certify the
+ * diagonal, so dynamic programming starts without repeating that scan.
+ * `certified` carries the exact score, endpoints, edit distance, and match run.
+ */
 template<
     bool p_is_reversed,
     sequence_alphabet p_alphabet>
@@ -1979,7 +2029,14 @@ try_packed_global_gap_certificate(
     }
 }
 
-/** Record an admitted call before any zero-work or SIMD fast path executes. */
+/**
+ * @brief Records an admitted call before zero-work or SIMD path selection.
+ * @param[in,out] stats Aggregate execution counters.
+ * @param[in] parameters Alignment contract for the call.
+ * @param[in] query_length Admitted query extent.
+ * @param[in] target_length Admitted target extent.
+ * @param[in] configuration_identity Stable scoring and parameter identity.
+ */
 inline void record_block_aligner_eligibility(
         block_aligner_execution_stats& stats,
         const block_aligner_parameters& parameters,
@@ -2008,7 +2065,15 @@ inline void record_block_aligner_eligibility(
     stats.configuration_identity_sum += configuration_identity;
 }
 
-/** Record the executed path and exact SIMD work for one admitted call. */
+/**
+ * @brief Records the executed path and exact SIMD work for one admitted call.
+ * @param[in,out] stats Aggregate execution counters.
+ * @param[in] parameters Alignment contract for the call.
+ * @param[in] lane_count Active signed-16-bit Highway lanes.
+ * @param[in] is_zero_work Whether an empty input bypassed biological work.
+ * @param[in] core_stats Exact recurrence or certificate counters.
+ * @param[in] configuration_identity Stable scoring and parameter identity.
+ */
 inline void record_block_aligner_execution(
         block_aligner_execution_stats& stats,
         const block_aligner_parameters& parameters,
@@ -2069,7 +2134,10 @@ inline void record_block_aligner_execution(
     stats.executed_configuration_identity_sum += configuration_identity;
 }
 
-/** Abort a forbidden attempt to execute biological work with scalar DP. */
+/**
+ * @brief Aborts a forbidden attempt to execute biological work with scalar DP.
+ * @param[in,out] stats Aggregate execution counters.
+ */
 [[noreturn]] inline void abort_forbidden_scalar_biological_fallback(
         block_aligner_execution_stats& stats) {
     stats.add(stats.forbidden_scalar_biological_fallbacks);
@@ -2085,7 +2153,14 @@ inline void record_block_aligner_execution(
 /** Fixed-target adaptive-block implementation used by generated callables. */
 class highway_block_aligner {
 public:
-    /** Precompute invariant contract and matrix checks for packed gaps. */
+    /**
+     * @brief Precomputes invariant contract and matrix checks for packed gaps.
+     * @tparam p_alphabet Logical sequence alphabet.
+     * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
+     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+     * @param[in] parameters Alignment contract retained by the plan.
+     * @return Prepared contract, scoring identity, and target lane count.
+     */
     template<
         sequence_alphabet p_alphabet,
         size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u>
@@ -2108,7 +2183,19 @@ public:
         return plan;
     }
 
-    /** Attempt packed resident certification for one oriented gap. */
+    /**
+     * @brief Attempts packed resident certification for one oriented gap.
+     * @tparam p_is_reversed Whether query ranks use reverse orientation.
+     * @tparam p_alphabet Logical sequence alphabet.
+     * @param[in] query_seq Query sequence facade.
+     * @param[in] target_seq Target sequence facade.
+     * @param[in] query_start Inclusive query coordinate.
+     * @param[in] query_end Exclusive query coordinate.
+     * @param[in] target_start Inclusive target coordinate.
+     * @param[in] target_end Exclusive target coordinate.
+     * @param[in] plan Prepared matrix and alignment contract.
+     * @return Three-way packed certificate attempt.
+     */
     template<
         bool p_is_reversed,
         sequence_alphabet p_alphabet>
@@ -2126,14 +2213,27 @@ public:
             query_start, query_end, target_start, target_end, plan);
     }
 
-    /// Run block aligner on a sub-region of the given sequences.
-    /// Returns ksw_alignment_result as the pipeline's shared result storage ABI.
-    ///
-    /// Gap convention: gap_open/gap_extend are the positive minimap q/e
-    /// encoding only; this does not request KSW recurrence semantics. They are
-    /// converted to the reference's negative penalties:
-    ///   internal_open   = -(gap_open + gap_extend)
-    ///   internal_extend = -gap_extend
+    /**
+     * @brief Aligns one admitted pair of sequence subregions.
+     * @tparam p_is_reversed Whether query ranks use reverse orientation.
+     * @tparam p_is_diagonal_certificate_enabled Whether the byte certificate may run.
+     * @tparam p_alphabet Logical sequence alphabet.
+     * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
+     * @param[in] query_seq Query sequence facade.
+     * @param[in] target_seq Target sequence facade.
+     * @param[in] query_start Inclusive query coordinate.
+     * @param[in] query_end Exclusive query coordinate.
+     * @param[in] target_start Inclusive target coordinate.
+     * @param[in] target_end Exclusive target coordinate.
+     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+     * @param[in] parameters Alignment contract.
+     * @param[in,out] execution_stats Optional aggregate execution counters.
+     * @param[in,out] construction_stats Optional scratch-allocation counters.
+     * @return Pipeline alignment result with score, endpoints, and optional CIGAR.
+     *
+     * Gap open and extension use positive minimap q/e encoding. The adaptive
+     * recurrence receives `-(gap_open + gap_extend)` and `-gap_extend`.
+     */
     template<
         bool p_is_reversed,
         bool p_is_diagonal_certificate_enabled = true,
@@ -2340,7 +2440,22 @@ public:
         size_t output_query_position = 0, output_reference_position = 0;
 
         const bool is_x_drop_enabled = parameters.mode == block_alignment_mode::x_drop;
-        const auto run_core = [&]<
+        const auto run_core =
+            [&parameters,
+             &execution_stats,
+             &simd_tag,
+             &score,
+             &output_query_position,
+             &output_reference_position,
+             &scratch,
+             &scoring_matrix,
+             &negative_gap_open,
+             &negative_gap_extension,
+             &query_padded,
+             &target_padded,
+             &minimum_block_size,
+             &maximum_block_size,
+             &core_stats]<
                 bool p_is_trace_enabled,
                 bool p_is_x_drop_enabled>(
                 std::bool_constant<p_is_trace_enabled>,
@@ -2429,7 +2544,13 @@ public:
     }
 };
 
-/** Prepare invariant packed-gap certificate state for the active target. */
+/**
+ * @brief Prepares invariant packed-gap certificate state for the active target.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] parameters Alignment contract retained by the plan.
+ * @return Prepared contract, scoring identity, and target lane count.
+ */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_global_gap_certificate_plan prepare_block_global_gap_certificate(
     const scoring_matrix<p_alphabet>& scoring_matrix,
@@ -2439,7 +2560,19 @@ template<sequence_alphabet p_alphabet>
         scoring_matrix, parameters);
 }
 
-/** Attempt packed certification for one gap in the requested orientation. */
+/**
+ * @brief Attempts packed certification for one gap in the requested orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] is_reversed Whether query ranks use reverse orientation.
+ * @param[in] query_sequence Query sequence facade.
+ * @param[in] target_sequence Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] plan Prepared matrix and alignment contract.
+ * @return Three-way packed certificate attempt.
+ */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] block_packed_certificate_attempt try_block_certified_gap(
     bool is_reversed,
@@ -2460,7 +2593,23 @@ template<sequence_alphabet p_alphabet>
             target_start, target_end, plan);
 }
 
-/** Align one sequence region with the active fixed-target block kernel. */
+/**
+ * @brief Aligns one sequence region with the active fixed-target block kernel.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] is_reversed Whether query ranks use reverse orientation.
+ * @param[in] is_diagonal_certificate_enabled Whether the byte certificate may run.
+ * @param[in] query_sequence Query sequence facade.
+ * @param[in] target_sequence Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] parameters Alignment contract.
+ * @param[in,out] execution_stats Optional aggregate execution counters.
+ * @param[in,out] construction_stats Optional scratch-allocation counters.
+ * @return Pipeline alignment result with score, endpoints, and optional CIGAR.
+ */
 template<sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_block(
     bool is_reversed,

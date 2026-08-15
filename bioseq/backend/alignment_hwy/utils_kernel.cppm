@@ -23,7 +23,15 @@ namespace [[bioseq::simd]] target {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** Load the SIMD shuffle tables for one scoring-matrix row. */
+/**
+ * @brief Loads SIMD shuffle tables for one scoring-matrix row.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
+ * @param[in] matrix Canonical score matrix.
+ * @param[in] simd_tag Active score descriptor.
+ * @param[in] rank Zero-based score-matrix row.
+ * @return Fixed-size array of target-native byte lookup vectors.
+ */
 template <sequence_alphabet p_alphabet, class p_simd_tag>
 HWY_INLINE auto load_score_lookup_tables(
     const scoring_matrix<p_alphabet>& matrix,
@@ -55,13 +63,23 @@ HWY_INLINE auto load_score_lookup_tables(
     return lookup_tables;
 }
 
-/** Look up per-lane scores from already loaded shuffle tables. */
+/**
+ * @brief Looks up per-lane scores from already loaded shuffle tables.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
+ * @tparam p_lookup_tables Fixed lookup-table collection type.
+ * @param[in] matrix Matrix whose alphabet determines lookup semantics.
+ * @param[in] simd_tag Active score descriptor.
+ * @param[in] lookup_tables Loaded byte shuffle tables.
+ * @param[in] query_pointer Readable query ranks for every active lane.
+ * @return Signed 16-bit score vector for the query ranks.
+ */
 template <
     sequence_alphabet p_alphabet,
     class p_simd_tag,
     class p_lookup_tables>
 HWY_INLINE hn::Vec<p_simd_tag> get_scores_with_lookup_tables(
-    const scoring_matrix<p_alphabet>&,
+    [[maybe_unused]] const scoring_matrix<p_alphabet>& matrix,
     p_simd_tag simd_tag,
     const p_lookup_tables& lookup_tables,
     const std::uint8_t* query_pointer) {
@@ -103,7 +121,16 @@ HWY_INLINE hn::Vec<p_simd_tag> get_scores_with_lookup_tables(
         hn::BitCast(signed_byte_tag, unsigned_scores));
 }
 
-/** Load one scoring row and return scores for the query ranks. */
+/**
+ * @brief Loads one scoring row and returns scores for the query ranks.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_simd_tag Highway descriptor for signed 16-bit score lanes.
+ * @param[in] matrix Canonical score matrix.
+ * @param[in] simd_tag Active score descriptor.
+ * @param[in] rank Zero-based score-matrix row.
+ * @param[in] query_pointer Readable query ranks for every active lane.
+ * @return Signed 16-bit score vector for the query ranks.
+ */
 template <sequence_alphabet p_alphabet, class p_simd_tag>
 HWY_INLINE hn::Vec<p_simd_tag> get_scores(
     const scoring_matrix<p_alphabet>& matrix,

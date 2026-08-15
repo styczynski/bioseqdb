@@ -485,7 +485,7 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     params.gap_open = 4;
     params.gap_extend = 2;
 
-    const auto compare_dna4 = [&](
+    const auto compare_dna4 = [&scoring, &params](
             std::string_view query,
             std::string_view reference,
             bool expect_certificate) {
@@ -734,7 +734,7 @@ TEST_CASE("Packed DNA4 gap certificate handles unaligned forward and reverse win
     REQUIRE(plan.is_generated_matrix_supported);
 
     constexpr std::string_view cycle = "ACGT";
-    const auto patterned = [&](std::size_t length, std::size_t offset) {
+    const auto patterned = [&cycle](std::size_t length, std::size_t offset) {
         std::string result(length, 'A');
         for (std::size_t i = 0; i < length; ++i) {
             result[i] = cycle[(i * 3u + i / 7u + offset) % cycle.size()];
@@ -1705,7 +1705,13 @@ TEST_CASE("Block production stats reduction is deterministic in parallel",
     params.block_max_size = 32;
     params.do_cigar = true;
 
-    auto run = [&](bioseq::parallelism::pipeline_concurrency_mode mode) {
+    auto run = [
+                   &fixture_regions,
+                   &anchors,
+                   &query_view,
+                   &target_view,
+                   &scoring,
+                   &params](bioseq::parallelism::pipeline_concurrency_mode mode) {
         auto& pool = bioseq::parallelism::global_pool::instance();
         pool.restart(bioseq::parallelism::pool_config{
             .maximum_concurrency = mode

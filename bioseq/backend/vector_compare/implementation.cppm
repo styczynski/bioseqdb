@@ -15,42 +15,45 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::column::vec::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-/** Intersect two byte-addressable Boolean masks for the active target. */
-HWY_INLINE void mask_and_impl(
-    bool* left,
-    const bool* right,
-    std::uint32_t element_count) {
-    const hn::ScalableTag<std::uint8_t> simd_tag;
-    const std::size_t active_lanes = hn::Lanes(simd_tag);
-    auto* HWY_RESTRICT left_bytes = reinterpret_cast<std::uint8_t*>(left);
-    const auto* HWY_RESTRICT right_bytes =
-        reinterpret_cast<const std::uint8_t*>(right);
-    std::size_t index = 0;
-    for (; index + active_lanes <= element_count; index += active_lanes) {
-        hn::StoreU(
-            hn::And(
-                hn::LoadU(simd_tag, left_bytes + index),
-                hn::LoadU(simd_tag, right_bytes + index)),
-            simd_tag,
-            left_bytes + index);
-    }
-    if (index < element_count) {
-        const std::size_t remainder = element_count - index;
-        hn::StoreN(
-            hn::And(
-                hn::LoadN(simd_tag, left_bytes + index, remainder),
-                hn::LoadN(simd_tag, right_bytes + index, remainder)),
-            simd_tag,
-            left_bytes + index,
-            remainder);
+/** Boolean operation applied lane-wise to two mask byte vectors. */
+enum class mask_composition_operation : std::uint8_t {
+    intersection,  ///< Applies a lane-wise Boolean AND.
+    union_,        ///< Applies a lane-wise Boolean OR.
+};
+
+/**
+ * @brief Applies one Boolean mask operation without a runtime operation branch.
+ *
+ * @tparam p_operation Boolean operation selected at compile time.
+ * @tparam p_vector_type Highway byte-vector type.
+ * @param[in] left Left mask bytes.
+ * @param[in] right Right mask bytes.
+ * @return Composed mask bytes.
+ */
+template <mask_composition_operation p_operation, class p_vector_type>
+[[nodiscard]] HWY_INLINE p_vector_type compose_mask_vectors(
+    p_vector_type left,
+    p_vector_type right) noexcept {
+    if constexpr (p_operation == mask_composition_operation::intersection) {
+        return hn::And(left, right);
+    } else {
+        return hn::Or(left, right);
     }
 }
 
-/** Union two byte-addressable Boolean masks for the active target. */
-HWY_INLINE void mask_or_impl(
+/**
+ * @brief Composes two byte-addressable Boolean masks for the active target.
+ *
+ * @tparam p_operation Boolean operation selected at compile time.
+ * @param[in,out] left Left mask and destination.
+ * @param[in] right Right mask.
+ * @param[in] element_count Number of mask elements.
+ */
+template <mask_composition_operation p_operation>
+HWY_INLINE void compose_mask_impl(
     bool* left,
     const bool* right,
-    std::uint32_t element_count) {
+    std::uint32_t element_count) noexcept {
     const hn::ScalableTag<std::uint8_t> simd_tag;
     const std::size_t active_lanes = hn::Lanes(simd_tag);
     auto* HWY_RESTRICT left_bytes = reinterpret_cast<std::uint8_t*>(left);
@@ -59,7 +62,7 @@ HWY_INLINE void mask_or_impl(
     std::size_t index = 0;
     for (; index + active_lanes <= element_count; index += active_lanes) {
         hn::StoreU(
-            hn::Or(
+            compose_mask_vectors<p_operation>(
                 hn::LoadU(simd_tag, left_bytes + index),
                 hn::LoadU(simd_tag, right_bytes + index)),
             simd_tag,
@@ -68,7 +71,7 @@ HWY_INLINE void mask_or_impl(
     if (index < element_count) {
         const std::size_t remainder = element_count - index;
         hn::StoreN(
-            hn::Or(
+            compose_mask_vectors<p_operation>(
                 hn::LoadN(simd_tag, left_bytes + index, remainder),
                 hn::LoadN(simd_tag, right_bytes + index, remainder)),
             simd_tag,
@@ -87,7 +90,8 @@ void mask_and(
     bool* left,
     const bool* right,
     std::uint32_t element_count) noexcept {
-    bioseq::column::vec::HWY_NAMESPACE::mask_and_impl(
+    bioseq::column::vec::HWY_NAMESPACE::compose_mask_impl<
+        bioseq::column::vec::HWY_NAMESPACE::mask_composition_operation::intersection>(
         left,
         right,
         element_count);
@@ -98,7 +102,8 @@ void mask_or(
     bool* left,
     const bool* right,
     std::uint32_t element_count) noexcept {
-    bioseq::column::vec::HWY_NAMESPACE::mask_or_impl(
+    bioseq::column::vec::HWY_NAMESPACE::compose_mask_impl<
+        bioseq::column::vec::HWY_NAMESPACE::mask_composition_operation::union_>(
         left,
         right,
         element_count);

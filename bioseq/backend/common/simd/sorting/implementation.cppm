@@ -104,14 +104,27 @@ inline void insertion_sort_unsigned_128(
 
 #if HWY_TARGET != HWY_SCALAR || HWY_IDE
 
-/** Vector-stream representation of independent 128-bit keys. */
+/**
+ * @brief Represents independent 128-bit keys across vector-stream slots.
+ * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
+ * @tparam p_stream_width Number of vectors forming each logical key stream.
+ */
 template <class p_descriptor_type, std::size_t p_stream_width>
 using unsigned_128_vector_stream = vector_stream_target::vector_stream<
     p_descriptor_type,
     std::uint64_t,
     p_stream_width>;
 
-/** Compares each pair of 128-bit vector-stream keys in the requested order. */
+/**
+ * @brief Compares each pair of 128-bit vector-stream keys in the requested order.
+ * @tparam p_ascending Whether smaller keys precede larger keys.
+ * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
+ * @tparam p_stream_width Number of vectors forming each logical key stream.
+ * @param[in] descriptor Active 64-bit Highway descriptor.
+ * @param[in] left Left logical key stream.
+ * @param[in] right Right logical key stream.
+ * @return One comparison mask per stream slot.
+ */
 template <bool p_ascending,
           class p_descriptor_type,
           std::size_t p_stream_width>
@@ -121,7 +134,7 @@ auto unsigned_128_stream_precedes(
     unsigned_128_vector_stream<p_descriptor_type, p_stream_width> left,
     unsigned_128_vector_stream<p_descriptor_type, p_stream_width> right) noexcept
 {
-    return [&]<std::size_t... p_stream_indices>(
+    return [&descriptor, &left, &right]<std::size_t... p_stream_indices>(
         std::index_sequence<p_stream_indices...> p_stream_index_sequence)
         [[gnu::always_inline]] {
         (void)p_stream_index_sequence;
@@ -145,7 +158,14 @@ auto unsigned_128_stream_precedes(
     }(std::make_index_sequence<p_stream_width>{});
 }
 
-/** Broadcasts one 128-bit key across every slot in a vector stream. */
+/**
+ * @brief Broadcasts one 128-bit key across every slot in a vector stream.
+ * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
+ * @tparam p_stream_width Number of vectors forming the result stream.
+ * @param[in] descriptor Active 64-bit Highway descriptor.
+ * @param[in] key Scalar 128-bit key.
+ * @return Stream whose slots all contain the requested key.
+ */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto broadcast_unsigned_128_stream(
@@ -157,13 +177,21 @@ auto broadcast_unsigned_128_stream(
         p_descriptor_type,
         std::uint64_t,
         p_stream_width>(
-            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
+            [&vector](auto p_stream_index_constant) [[gnu::always_inline]] {
                 (void)p_stream_index_constant;
                 return vector;
             });
 }
 
-/** Loads consecutive 128-bit keys into a forward vector stream. */
+/**
+ * @brief Loads consecutive 128-bit keys into a forward vector stream.
+ * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
+ * @tparam p_stream_width Number of vectors forming the result stream.
+ * @param[in] descriptor Active 64-bit Highway descriptor.
+ * @param[in] keys Readable key array.
+ * @param[in] base_index Index loaded into the first stream slot.
+ * @return Forward-ordered stream of keys.
+ */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128_forward_stream(
@@ -175,7 +203,8 @@ auto load_unsigned_128_forward_stream(
         p_descriptor_type,
         std::uint64_t,
         p_stream_width>(
-            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
+            [&descriptor, &keys, &base_index](auto p_stream_index_constant)
+                [[gnu::always_inline]] {
                 constexpr std::size_t stream_index =
                     decltype(p_stream_index_constant)::value;
                 return load_unsigned_128(
@@ -184,7 +213,15 @@ auto load_unsigned_128_forward_stream(
             });
 }
 
-/** Loads consecutive 128-bit keys in reverse into a vector stream. */
+/**
+ * @brief Loads consecutive 128-bit keys in reverse into a vector stream.
+ * @tparam p_descriptor_type Highway descriptor type for 64-bit halves.
+ * @tparam p_stream_width Number of vectors forming the result stream.
+ * @param[in] descriptor Active 64-bit Highway descriptor.
+ * @param[in] keys Readable key array.
+ * @param[in] base_index Index loaded into the first stream slot.
+ * @return Reverse-ordered stream of keys.
+ */
 template <class p_descriptor_type, std::size_t p_stream_width>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128_reverse_stream(
@@ -196,7 +233,8 @@ auto load_unsigned_128_reverse_stream(
         p_descriptor_type,
         std::uint64_t,
         p_stream_width>(
-            [&](auto p_stream_index_constant) [[gnu::always_inline]] {
+            [&descriptor, &keys, &base_index](auto p_stream_index_constant)
+                [[gnu::always_inline]] {
                 constexpr std::size_t stream_index =
                     decltype(p_stream_index_constant)::value;
                 const auto offset =
@@ -207,7 +245,15 @@ auto load_unsigned_128_reverse_stream(
             });
 }
 
-/** Returns the first stream slot whose mask has no set lanes. */
+/**
+ * @brief Returns the first stream slot whose mask has no set lanes.
+ * @tparam p_descriptor_type Highway descriptor type for the masks.
+ * @tparam p_stream_width Number of masks in the stream.
+ * @tparam p_mask_stream_type Target-local mask-stream type.
+ * @param[in] descriptor Active Highway descriptor.
+ * @param[in] masks Mask stream to scan.
+ * @return First all-false slot, or `p_stream_width` when none exists.
+ */
 template <class p_descriptor_type,
           std::size_t p_stream_width,
           class p_mask_stream_type>
@@ -218,7 +264,8 @@ std::size_t first_all_false_mask_slot(
 {
     std::size_t first_false_slot = p_stream_width;
     vector_stream_target::for_each_stream<p_stream_width>(
-        [&](auto p_stream_index_constant) [[gnu::always_inline]] {
+        [&first_false_slot, &descriptor, &masks](auto p_stream_index_constant)
+            [[gnu::always_inline]] {
             constexpr std::size_t stream_index =
                 decltype(p_stream_index_constant)::value;
             if (

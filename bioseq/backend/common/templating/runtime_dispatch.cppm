@@ -180,7 +180,7 @@ constexpr void dispatch_first_matching_type(
     p_handler_type&& handler,
     p_probe_type&& probe)
 {
-    [&]<class... p_element_types>(type_list<p_element_types...>)
+    [&handler, &probe]<class... p_element_types>(type_list<p_element_types...>)
         BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
     {
         if constexpr (sizeof...(p_element_types) > 0u) {
@@ -213,7 +213,7 @@ BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR
 constexpr std::optional<p_result_type> find_first_matching_type(
     p_probe_type&& probe)
 {
-    return [&]<class... p_element_types>(type_list<p_element_types...>)
+    return [&probe]<class... p_element_types>(type_list<p_element_types...>)
         BIOSEQ_TEMPLATE_DISPATCH_INLINE_ATTR -> std::optional<p_result_type>
     {
         if constexpr (sizeof...(p_element_types) > 0u) {

@@ -15,22 +15,25 @@ export module bioseq.column.vector_compare;
 
 export namespace bioseq::column::vec {
 
-/** Comparison operation applied to a column value and a scalar operand. */
+/** @brief Comparison operation applied to a column value and a scalar operand. */
 enum class comparison_operation : std::uint8_t {
-    equal,
-    not_equal,
-    greater,
-    less,
-    less_equal,
-    greater_equal,
+    equal,          ///< Tests equality.
+    not_equal,      ///< Tests inequality.
+    greater,        ///< Tests whether the column value is greater.
+    less,           ///< Tests whether the column value is less.
+    less_equal,     ///< Tests whether the column value is not greater.
+    greater_equal,  ///< Tests whether the column value is not less.
 };
 
 /**
- * Apply a comparison after the usual arithmetic conversions.
+ * @brief Applies a comparison after the usual arithmetic conversions.
  *
  * @tparam p_operation Comparison selected at compile time.
  * @tparam p_left_type Column element type.
  * @tparam p_right_type Scalar operand type.
+ * @param[in] left Column value.
+ * @param[in] right Scalar comparison operand.
+ * @return Result of the selected comparison.
  */
 template <
     comparison_operation p_operation,
@@ -55,10 +58,12 @@ template <
 }
 
 /**
- * Writable result sink accepted by the comparison kernel.
+ * @brief Accepts writable result sinks used by the comparison kernel.
  *
  * Plain pointers intentionally cross the module boundary: allocation is
  * performed once per batch and the kernel writes both value and null masks.
+ *
+ * @tparam p_sink Candidate sink type.
  */
 template <class p_sink>
 concept compare_result_sink = requires(
@@ -70,12 +75,17 @@ concept compare_result_sink = requires(
 };
 
 /**
- * Compare each non-null column value with a scalar operand.
+ * @brief Compares each non-null column value with a scalar operand.
  *
  * @tparam p_operation Comparison selected at compile time.
  * @tparam p_value_type Column element type.
  * @tparam p_constant_type Scalar operand type.
  * @tparam p_sink Writable mask sink.
+ * @param[in] values Column values containing `element_count` entries.
+ * @param[in] nulls Null flags parallel to `values`.
+ * @param[in] element_count Number of values and null flags.
+ * @param[in] constant Scalar compared with every non-null value.
+ * @param[out] sink Receives value and null masks for the complete batch.
  */
 template <
     comparison_operation p_operation,
@@ -100,13 +110,25 @@ void compare_column(
     }
 }
 
-/** Intersect a Boolean mask with another mask in place. */
+/**
+ * @brief Intersects a Boolean mask with another mask in place.
+ *
+ * @param[in,out] left Left mask and destination.
+ * @param[in] right Right mask.
+ * @param[in] element_count Number of elements in both masks.
+ */
 void mask_and(
     bool* left,
     const bool* right,
     std::uint32_t element_count) noexcept;
 
-/** Union a Boolean mask with another mask in place. */
+/**
+ * @brief Unions a Boolean mask with another mask in place.
+ *
+ * @param[in,out] left Left mask and destination.
+ * @param[in] right Right mask.
+ * @param[in] element_count Number of elements in both masks.
+ */
 void mask_or(
     bool* left,
     const bool* right,

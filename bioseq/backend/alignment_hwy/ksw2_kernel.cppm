@@ -634,6 +634,31 @@ template <
 // align_ksw2_core — unified single/dual-affine banded extension alignment
 // =============================================================================
 
+/**
+ * @brief Executes the banded KSW2 recurrence for one sequence pair.
+ * @tparam p_mode Single- or dual-affine recurrence mode.
+ * @tparam p_is_reversed Whether query ranks use reverse orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @tparam p_alphabet_dimension Matrix dimension including the sentinel rank.
+ * @tparam p_partial_score_type Narrow difference-score lane type.
+ * @tparam p_full_score_type Exact accumulated-score lane type.
+ * @param[in] query_seq Query sequence facade.
+ * @param[in] target_seq Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] gap_open Short-gap open penalty.
+ * @param[in] gap_extend Short-gap extension penalty.
+ * @param[in] gap_open_long Long-gap open penalty.
+ * @param[in] gap_extend_long Long-gap extension penalty.
+ * @param[in] configured_band_width Configured maximum band width.
+ * @param[in] z_drop Z-drop threshold.
+ * @param[in] end_bonus Query-end bonus.
+ * @param[in] flags Traceback and extension-mode flags.
+ * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ */
 template<
     ksw_aligner_mode p_mode,
     bool p_is_reversed,
@@ -641,7 +666,6 @@ template<
     size_t p_alphabet_dimension = seqan3::alphabet_size<p_alphabet> + 1u,
     class p_partial_score_type = int8_t,
     class p_full_score_type = int32_t>
-/** Execute the banded KSW2 recurrence for one sequence pair. */
 [[nodiscard]] ksw_alignment_result align_ksw2_core(
     bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
@@ -654,7 +678,7 @@ template<
     int8_t gap_extend,
     int8_t gap_open_long,
     int8_t gap_extend_long,
-    int band_width_param,
+    int configured_band_width,
     int z_drop,
     int end_bonus,
     ksw_flags flags)
@@ -736,8 +760,8 @@ template<
     const auto bt_f2_cont = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x40));
 
     // --- Band width --------------------------------------------------------
-    const int band_width = band_width_param < 0
-        ? std::max(tlen, qlen) : band_width_param;
+    const int band_width = configured_band_width < 0
+        ? std::max(tlen, qlen) : configured_band_width;
     const int left_band  = band_width;
     const int right_band = band_width;
 
@@ -1208,62 +1232,118 @@ template<
                 }
                 anti_diag_max_target_pos = band_end_raw;
 
-                auto max_sv = hn::Set(full_score_tag, anti_diag_max_score);
-                auto max_pv = hn::Set(full_score_tag, static_cast<p_full_score_type>(anti_diag_max_target_pos));
-                [[maybe_unused]] auto goe_vec = hn::Set(full_score_tag,
+                auto maximum_score_vector =
+                    hn::Set(full_score_tag, anti_diag_max_score);
+                auto maximum_position_vector = hn::Set(
+                    full_score_tag,
+                    static_cast<p_full_score_type>(
+                        anti_diag_max_target_pos));
+                [[maybe_unused]] auto gap_open_extend_vector = hn::Set(full_score_tag,
                     static_cast<p_full_score_type>(gap_open_plus_extend));
 
                 const int block_end = band_start_raw
                     + (band_end_raw - band_start_raw) / static_cast<int>(score_lane_count)
                       * static_cast<int>(score_lane_count);
-                int tp = band_start_raw;
-                for (; tp < block_end; tp += static_cast<int>(score_lane_count)) {
-                    auto es = hn::LoadU(full_score_tag, &exact_score_row[tp]);
-                    HWY_ALIGN p_full_score_type dl_buf[k_maximum_score_lanes] = {};
-                    for (size_t li = 0; li < score_lane_count; ++li) {
+                int target_position = band_start_raw;
+                for (;
+                     target_position < block_end;
+                     target_position += static_cast<int>(score_lane_count)) {
+                    auto exact_scores = hn::LoadU(
+                        full_score_tag,
+                        &exact_score_row[target_position]);
+                    HWY_ALIGN std::array<
+                        p_full_score_type,
+                        k_maximum_score_lanes> left_difference_values{};
+                    for (size_t lane_index = 0;
+                         lane_index < score_lane_count;
+                         ++lane_index) {
                         if constexpr (!k_is_dual_affine)
-                            dl_buf[li] = static_cast<p_full_score_type>(
-                                reinterpret_cast<const uint8_t*>(state.diff_left_base)[tp + li]);
+                            left_difference_values[lane_index] =
+                                static_cast<p_full_score_type>(
+                                    reinterpret_cast<const uint8_t*>(
+                                        state.diff_left_base)[
+                                        target_position + lane_index]);
                         else
-                            dl_buf[li] = static_cast<p_full_score_type>(
-                                state.diff_left_base[tp + li]);
+                            left_difference_values[lane_index] =
+                                static_cast<p_full_score_type>(
+                                    state.diff_left_base[
+                                        target_position + lane_index]);
                     }
-                    auto dlv = hn::Load(full_score_tag, dl_buf);
-                    es = hn::Add(es, dlv);
+                    const auto left_difference_vector = hn::Load(
+                        full_score_tag,
+                        left_difference_values.data());
+                    exact_scores = hn::Add(
+                        exact_scores,
+                        left_difference_vector);
                     if constexpr (!k_is_dual_affine) {
-                        es = hn::Sub(es, goe_vec);
+                        exact_scores = hn::Sub(
+                            exact_scores,
+                            gap_open_extend_vector);
                     }
-                    hn::StoreU(es, full_score_tag, &exact_score_row[tp]);
+                    hn::StoreU(
+                        exact_scores,
+                        full_score_tag,
+                        &exact_score_row[target_position]);
 
-                    auto tpv = hn::Set(full_score_tag, static_cast<p_full_score_type>(tp));
-                    auto gm = hn::Gt(es, max_sv);
-                    max_sv = hn::IfThenElse(gm, es, max_sv);
-                    max_pv = hn::IfThenElse(gm, tpv, max_pv);
+                    const auto target_position_vector = hn::Set(
+                        full_score_tag,
+                        static_cast<p_full_score_type>(target_position));
+                    const auto is_new_maximum = hn::Gt(
+                        exact_scores,
+                        maximum_score_vector);
+                    maximum_score_vector = hn::IfThenElse(
+                        is_new_maximum,
+                        exact_scores,
+                        maximum_score_vector);
+                    maximum_position_vector = hn::IfThenElse(
+                        is_new_maximum,
+                        target_position_vector,
+                        maximum_position_vector);
                 }
 
-                HWY_ALIGN p_full_score_type sb[k_maximum_score_lanes];
-                HWY_ALIGN p_full_score_type pb[k_maximum_score_lanes];
-                hn::Store(max_sv, full_score_tag, sb);
-                hn::Store(max_pv, full_score_tag, pb);
-                for (size_t li = 0; li < score_lane_count; ++li) {
-                    if (anti_diag_max_score < sb[li]) {
-                        anti_diag_max_score = sb[li];
-                        anti_diag_max_target_pos = static_cast<int>(pb[li])
-                            + static_cast<int>(li);
+                // Highway stores every active lane before either array is read.
+                HWY_ALIGN std::array<
+                    p_full_score_type,
+                    k_maximum_score_lanes> maximum_scores;
+                HWY_ALIGN std::array<
+                    p_full_score_type,
+                    k_maximum_score_lanes> maximum_positions;
+                hn::Store(
+                    maximum_score_vector,
+                    full_score_tag,
+                    maximum_scores.data());
+                hn::Store(
+                    maximum_position_vector,
+                    full_score_tag,
+                    maximum_positions.data());
+                for (size_t lane_index = 0;
+                     lane_index < score_lane_count;
+                     ++lane_index) {
+                    if (anti_diag_max_score < maximum_scores[lane_index]) {
+                        anti_diag_max_score = maximum_scores[lane_index];
+                        anti_diag_max_target_pos =
+                            static_cast<int>(maximum_positions[lane_index])
+                            + static_cast<int>(lane_index);
                     }
                 }
-                for (; tp < band_end_raw; ++tp) {
+                for (;
+                     target_position < band_end_raw;
+                     ++target_position) {
                     if constexpr (!k_is_dual_affine) {
-                        exact_score_row[tp] += static_cast<p_full_score_type>(
-                            reinterpret_cast<const uint8_t*>(state.diff_left_base)[tp])
+                        exact_score_row[target_position] +=
+                            static_cast<p_full_score_type>(
+                                reinterpret_cast<const uint8_t*>(
+                                    state.diff_left_base)[target_position])
                             - gap_open_plus_extend;
                     } else {
-                        exact_score_row[tp] += static_cast<p_full_score_type>(
-                            state.diff_left_base[tp]);
+                        exact_score_row[target_position] +=
+                            static_cast<p_full_score_type>(
+                                state.diff_left_base[target_position]);
                     }
-                    if (exact_score_row[tp] > anti_diag_max_score) {
-                        anti_diag_max_score = exact_score_row[tp];
-                        anti_diag_max_target_pos = tp;
+                    if (exact_score_row[target_position]
+                        > anti_diag_max_score) {
+                        anti_diag_max_score = exact_score_row[target_position];
+                        anti_diag_max_target_pos = target_position;
                     }
                 }
             } else {
@@ -1415,99 +1495,159 @@ template<
 /** Fixed-target facade for the single- and dual-affine KSW2 callables. */
 class highway_ksw2_aligner {
 public:
+    /**
+     * @brief Aligns with the single-affine recurrence.
+     * @tparam p_is_reversed Whether query ranks use reverse orientation.
+     * @tparam p_alphabet Logical sequence alphabet.
+     * @param[in] query_sequence Query sequence facade.
+     * @param[in] target_sequence Target sequence facade.
+     * @param[in] query_start Inclusive query coordinate.
+     * @param[in] query_end Exclusive query coordinate.
+     * @param[in] target_start Inclusive target coordinate.
+     * @param[in] target_end Exclusive target coordinate.
+     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+     * @param[in] parameters Single-affine KSW2 contract.
+     * @return Alignment score, endpoints, termination state, and optional CIGAR.
+     */
     template<
         bool p_is_reversed,
         sequence_alphabet p_alphabet>
-    /** Align with the single-affine recurrence. */
     [[nodiscard]] static ksw_alignment_result align_single_affine(
-        bioseq::storage::lazy_sequence_view<p_alphabet> query,
-        bioseq::storage::lazy_sequence_view<p_alphabet> target,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
         const scoring_matrix<p_alphabet>& scoring_matrix,
-        const ksw_single_affine_parameters& params)
+        const ksw_single_affine_parameters& parameters)
     {
         return align_ksw2_core<ksw_aligner_mode::single_affine, p_is_reversed>(
-            query, target, query_start, query_end, target_start, target_end,
+            query_sequence, target_sequence,
+            query_start, query_end, target_start, target_end,
             scoring_matrix,
-            params.gap_open, params.gap_extend,
-            params.gap_open, params.gap_extend,
-            params.band_width, params.z_drop, params.end_bonus, params.flags);
+            parameters.gap_open, parameters.gap_extend,
+            parameters.gap_open, parameters.gap_extend,
+            parameters.band_width, parameters.z_drop,
+            parameters.end_bonus, parameters.flags);
     }
 
+    /**
+     * @brief Aligns with the dual-affine recurrence.
+     * @tparam p_is_reversed Whether query ranks use reverse orientation.
+     * @tparam p_alphabet Logical sequence alphabet.
+     * @param[in] query_sequence Query sequence facade.
+     * @param[in] target_sequence Target sequence facade.
+     * @param[in] query_start Inclusive query coordinate.
+     * @param[in] query_end Exclusive query coordinate.
+     * @param[in] target_start Inclusive target coordinate.
+     * @param[in] target_end Exclusive target coordinate.
+     * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+     * @param[in] parameters Dual-affine KSW2 contract.
+     * @return Alignment score, endpoints, termination state, and optional CIGAR.
+     */
     template<
         bool p_is_reversed,
         sequence_alphabet p_alphabet>
-    /** Align with the dual-affine recurrence. */
     [[nodiscard]] static ksw_alignment_result align_dual_affine(
-        bioseq::storage::lazy_sequence_view<p_alphabet> query,
-        bioseq::storage::lazy_sequence_view<p_alphabet> target,
+        bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
+        bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
         const scoring_matrix<p_alphabet>& scoring_matrix,
-        ksw_dual_affine_parameters params)
+        ksw_dual_affine_parameters parameters)
     {
-        if (params.gap_open_long + params.gap_extend_long
-            < params.gap_open_short + params.gap_extend_short)
+        if (parameters.gap_open_long + parameters.gap_extend_long
+            < parameters.gap_open_short + parameters.gap_extend_short)
         {
-            std::swap(params.gap_open_short, params.gap_open_long);
-            std::swap(params.gap_extend_short, params.gap_extend_long);
+            std::swap(
+                parameters.gap_open_short,
+                parameters.gap_open_long);
+            std::swap(
+                parameters.gap_extend_short,
+                parameters.gap_extend_long);
         }
         return align_ksw2_core<ksw_aligner_mode::dual_affine, p_is_reversed>(
-            query, target, query_start, query_end, target_start, target_end,
+            query_sequence, target_sequence,
+            query_start, query_end, target_start, target_end,
             scoring_matrix,
-            params.gap_open_short, params.gap_extend_short,
-            params.gap_open_long, params.gap_extend_long,
-            params.band_width, params.z_drop, params.end_bonus, params.flags);
+            parameters.gap_open_short, parameters.gap_extend_short,
+            parameters.gap_open_long, parameters.gap_extend_long,
+            parameters.band_width, parameters.z_drop,
+            parameters.end_bonus, parameters.flags);
     }
 };
 
-/** Dispatch the single-affine callable for the requested orientation. */
+/**
+ * @brief Dispatches the single-affine callable for the requested orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] is_reversed Whether query ranks use reverse orientation.
+ * @param[in] query_sequence Query sequence facade.
+ * @param[in] target_sequence Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] parameters Single-affine KSW2 contract.
+ * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_ksw2_single_affine(
     bool is_reversed,
-    bioseq::storage::lazy_sequence_view<p_alphabet> query,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
     const scoring_matrix<p_alphabet>& scoring_matrix,
-    const ksw_single_affine_parameters& params)
+    const ksw_single_affine_parameters& parameters)
 {
     return is_reversed
         ? highway_ksw2_aligner::align_single_affine<true>(
-            query, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, params)
+            query_sequence, target_sequence, query_start, query_end,
+            target_start, target_end, scoring_matrix, parameters)
         : highway_ksw2_aligner::align_single_affine<false>(
-            query, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, params);
+            query_sequence, target_sequence, query_start, query_end,
+            target_start, target_end, scoring_matrix, parameters);
 }
 
-/** Dispatch the dual-affine callable for the requested orientation. */
+/**
+ * @brief Dispatches the dual-affine callable for the requested orientation.
+ * @tparam p_alphabet Logical sequence alphabet.
+ * @param[in] is_reversed Whether query ranks use reverse orientation.
+ * @param[in] query_sequence Query sequence facade.
+ * @param[in] target_sequence Target sequence facade.
+ * @param[in] query_start Inclusive query coordinate.
+ * @param[in] query_end Exclusive query coordinate.
+ * @param[in] target_start Inclusive target coordinate.
+ * @param[in] target_end Exclusive target coordinate.
+ * @param[in] scoring_matrix Canonical scalar and shuffle score matrix.
+ * @param[in] parameters Dual-affine KSW2 contract.
+ * @return Alignment score, endpoints, termination state, and optional CIGAR.
+ */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result align_ksw2_dual_affine(
     bool is_reversed,
-    bioseq::storage::lazy_sequence_view<p_alphabet> query,
+    bioseq::storage::lazy_sequence_view<p_alphabet> query_sequence,
     bioseq::storage::lazy_sequence_view<p_alphabet> target_sequence,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
     const scoring_matrix<p_alphabet>& scoring_matrix,
-    ksw_dual_affine_parameters params)
+    ksw_dual_affine_parameters parameters)
 {
     return is_reversed
         ? highway_ksw2_aligner::align_dual_affine<true>(
-            query, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, params)
+            query_sequence, target_sequence, query_start, query_end,
+            target_start, target_end, scoring_matrix, parameters)
         : highway_ksw2_aligner::align_dual_affine<false>(
-            query, target_sequence, query_start, query_end,
-            target_start, target_end, scoring_matrix, params);
+            query_sequence, target_sequence, query_start, query_end,
+            target_start, target_end, scoring_matrix, parameters);
 }
 
 }  // namespace target

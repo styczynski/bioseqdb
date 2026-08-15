@@ -1,3 +1,8 @@
+/**
+ * @file
+ * @brief Generates fixed-target SIMD matrix utility probes.
+ */
+
 #ifndef BIOSEQ_TEST_INDEXES
 #error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
 #endif
@@ -14,24 +19,24 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 namespace hn = hwy::HWY_NAMESPACE;
 
 template<class p_element>
-[[nodiscard]] bool matrix_equal(
+[[nodiscard]] auto matrix_equal(
     const std::vector<std::vector<p_element>>& actual,
-    const std::vector<std::vector<p_element>>& expected) {
+    const std::vector<std::vector<p_element>>& expected) -> bool {
     return actual == expected;
 }
 
 template<class p_element>
-[[nodiscard]] std::vector<p_element> increasing(
+[[nodiscard]] auto increasing(
     const std::size_t size,
-    p_element value = p_element{}) {
+    p_element value = p_element{}) -> std::vector<p_element> {
     std::vector<p_element> result(size);
     for (p_element& element : result) element = value++;
     return result;
 }
 
 template<class p_element>
-[[nodiscard]] std::vector<std::vector<p_element>> square_increasing(
-    const std::size_t lanes) {
+[[nodiscard]] auto square_increasing(const std::size_t lanes)
+    -> std::vector<std::vector<p_element>> {
     std::vector<std::vector<p_element>> result(
         lanes, std::vector<p_element>(lanes));
     p_element value{};
@@ -42,8 +47,9 @@ template<class p_element>
 }
 
 template<class p_element>
-[[nodiscard]] std::vector<p_element> flatten(
-    const std::vector<std::vector<p_element>>& matrix) {
+[[nodiscard]] auto flatten(
+    const std::vector<std::vector<p_element>>& matrix)
+    -> std::vector<p_element> {
     std::vector<p_element> result;
     for (const auto& row : matrix) {
         result.insert(result.end(), row.begin(), row.end());
@@ -51,33 +57,56 @@ template<class p_element>
     return result;
 }
 
+/**
+ * @brief Computes source offsets for overlapping matrix rows.
+ * @tparam p_row_count Compile-time row capacity.
+ * @param[in] lanes Active matrix width.
+ * @param[in] row_context Overlap retained between adjacent rows.
+ * @return Offset for each potential row.
+ */
 template<std::size_t p_row_count>
-[[nodiscard]] std::array<std::size_t, p_row_count> matrix_row_offsets(
+[[nodiscard]] auto matrix_row_offsets(
     const std::size_t lanes,
-    const std::size_t row_context) {
+    const std::size_t row_context)
+    -> std::array<std::size_t, p_row_count> {
     std::array<std::size_t, p_row_count> offsets{};
     const std::size_t row_stride = lanes - row_context;
-    for (std::size_t row = 0u; row < p_row_count; ++row) {
+    for (std::size_t row = 0U; row < p_row_count; ++row) {
         offsets[row] = row * row_stride;
     }
     return offsets;
 }
 
+/**
+ * @brief Materializes target-local matrix rows as scalar vectors.
+ * @tparam p_element Scalar lane type.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_row_count Compile-time row capacity.
+ * @param[in] simd_tag Active descriptor.
+ * @param[in] storage Target-native row vectors.
+ * @return Active square matrix in row-major vectors.
+ */
 template<class p_element, class p_simd_tag, std::size_t p_row_count>
-[[nodiscard]] std::vector<std::vector<p_element>> materialize_matrix_rows(
+[[nodiscard]] auto materialize_matrix_rows(
     const p_simd_tag& simd_tag,
-    const std::array<hn::Vec<p_simd_tag>, p_row_count>& storage) {
+    const std::array<hn::Vec<p_simd_tag>, p_row_count>& storage)
+    -> std::vector<std::vector<p_element>> {
     const std::size_t lanes = hn::Lanes(simd_tag);
     std::vector<std::vector<p_element>> result(
         lanes, std::vector<p_element>(lanes));
-    for (std::size_t row = 0u; row < lanes; ++row) {
+    for (std::size_t row = 0U; row < lanes; ++row) {
         hn::StoreU(storage[row], simd_tag, result[row].data());
     }
     return result;
 }
 
+/**
+ * @brief Checks full-width row loading for one lane type.
+ * @tparam p_element Scalar lane type.
+ * @return `true` when every loaded lane matches the source matrix.
+ */
 template<class p_element>
-[[nodiscard]] bool check_load_rows() {
+[[nodiscard]] auto check_load_rows() -> bool {
     using simd_tag_type = hn::ScalableTag<p_element>;
     using vector_type = hn::Vec<simd_tag_type>;
     simd_tag_type simd_tag;
@@ -88,57 +117,68 @@ template<class p_element>
     const auto input = flatten(expected);
     HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
     square_lane_matrix<simd_tag_type> matrix{buffer.data()};
-    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0u);
+    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0U);
     matrix.load_rows_at_offsets(simd_tag, offsets, input.data());
     return matrix_equal(
         materialize_matrix_rows<p_element>(simd_tag, buffer), expected);
 }
 
+/**
+ * @brief Checks one in-place square-matrix transpose.
+ * @tparam p_element Scalar lane type.
+ * @return `true` when rows and columns are exchanged exactly.
+ */
 template<class p_element>
-[[nodiscard]] bool check_transpose_in_place() {
+[[nodiscard]] auto check_transpose_in_place() -> bool {
     using simd_tag_type = hn::ScalableTag<p_element>;
     using vector_type = hn::Vec<simd_tag_type>;
     simd_tag_type simd_tag;
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
     const std::size_t lanes = hn::Lanes(simd_tag);
-    if (lanes != 1u && lanes != 2u && lanes != 4u && lanes != 8u
-        && lanes != 16u) {
+    if (lanes != 1U && lanes != 2U && lanes != 4U && lanes != 8U
+        && lanes != 16U) {
         return false;
     }
     const auto source = square_increasing<p_element>(lanes);
     const auto input = flatten(source);
     std::vector<std::vector<p_element>> expected(
         lanes, std::vector<p_element>(lanes));
-    for (std::size_t row = 0u; row < lanes; ++row) {
-        for (std::size_t column = 0u; column < lanes; ++column) {
+    for (std::size_t row = 0U; row < lanes; ++row) {
+        for (std::size_t column = 0U; column < lanes; ++column) {
             expected[row][column] = source[column][row];
         }
     }
     HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
     square_lane_matrix<simd_tag_type> matrix{buffer.data()};
-    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0u);
+    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0U);
     matrix.load_rows_at_offsets(simd_tag, offsets, input.data());
     matrix.transpose_in_place(simd_tag);
     return matrix_equal(
         materialize_matrix_rows<p_element>(simd_tag, buffer), expected);
 }
 
+/**
+ * @brief Checks bounded row loading at every supported boundary shape.
+ * @tparam p_element Scalar lane type.
+ * @param[in,out] cases Number of boundary shapes exercised.
+ * @return `true` when bounded loads match their scalar projection.
+ */
 template<class p_element>
-[[nodiscard]] bool check_load_bounded_rows(std::uint32_t& cases) {
+[[nodiscard]] auto check_load_bounded_rows(std::uint32_t& cases) -> bool {
     using simd_tag_type = hn::ScalableTag<p_element>;
     using vector_type = hn::Vec<simd_tag_type>;
     simd_tag_type simd_tag;
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
     const std::size_t lanes = hn::Lanes(simd_tag);
-    const std::size_t storage_size = lanes * lanes * 4u;
+    const std::size_t storage_size = lanes * lanes * 4U;
     const auto data = increasing<p_element>(storage_size, p_element{1});
-    for (const std::size_t context : {0u, 1u, 3u}) {
+    for (const std::size_t context : {0U, 1U, 3U}) {
         if (context > lanes) continue;
         const std::size_t row_offset = lanes - context;
         const std::size_t available = std::min(
-            storage_size, lanes + (lanes - 1u) * row_offset);
+            storage_size, lanes + (lanes - 1U) * row_offset);
         for (const bool full : {false, true}) {
             HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
             square_lane_matrix<simd_tag_type> matrix{buffer.data()};
@@ -153,8 +193,8 @@ template<class p_element>
             }
             std::vector<std::vector<p_element>> expected(
                 lanes, std::vector<p_element>(lanes));
-            for (std::size_t row = 0u; row < lanes; ++row) {
-                for (std::size_t column = 0u; column < lanes; ++column) {
+            for (std::size_t row = 0U; row < lanes; ++row) {
+                for (std::size_t column = 0U; column < lanes; ++column) {
                     const std::size_t source = row * row_offset + column;
                     expected[row][column] = full || source < available
                         ? data[source]
@@ -172,8 +212,13 @@ template<class p_element>
     return true;
 }
 
+/**
+ * @brief Checks row loading from explicit nonuniform offsets.
+ * @tparam p_element Scalar lane type.
+ * @return `true` when each row begins at its requested source offset.
+ */
 template<class p_element>
-[[nodiscard]] bool check_load_rows_at_explicit_offsets() {
+[[nodiscard]] auto check_load_rows_at_explicit_offsets() -> bool {
     using simd_tag_type = hn::ScalableTag<p_element>;
     using vector_type = hn::Vec<simd_tag_type>;
     simd_tag_type simd_tag;
@@ -183,7 +228,7 @@ template<class p_element>
     const auto expected = square_increasing<p_element>(lanes);
     const auto input = flatten(expected);
     std::array<std::size_t, k_maximum_lanes> offsets{};
-    for (std::size_t lane = 0u; lane < lanes; ++lane) {
+    for (std::size_t lane = 0U; lane < lanes; ++lane) {
         offsets[lane] = lane * lanes;
     }
     HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
@@ -194,8 +239,13 @@ template<class p_element>
             materialize_matrix_rows<p_element>(simd_tag, buffer), expected);
 }
 
-[[nodiscard]] bool check_load_bounded_rows_at_explicit_offsets(
-    std::uint32_t& cases) {
+/**
+ * @brief Checks bounded row loading from explicit nonuniform offsets.
+ * @param[in,out] cases Number of boundary shapes exercised.
+ * @return `true` when active lanes match the bounded source spans.
+ */
+[[nodiscard]] auto check_load_bounded_rows_at_explicit_offsets(
+    std::uint32_t& cases) -> bool {
     using element_type = std::uint8_t;
     using simd_tag_type = hn::ScalableTag<element_type>;
     using vector_type = hn::Vec<simd_tag_type>;
@@ -203,7 +253,7 @@ template<class p_element>
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
     const std::size_t lanes = hn::Lanes(simd_tag);
-    const std::size_t storage_size = lanes * lanes * 4u;
+    const std::size_t storage_size = lanes * lanes * 4U;
     const auto data = increasing<element_type>(
         storage_size, element_type{1});
     for (const std::int32_t fake_context : {0, -1, -3, 1, 3, 5}) {
@@ -213,16 +263,16 @@ template<class p_element>
         const std::size_t equal_offset =
             static_cast<std::size_t>(signed_offset);
         std::array<std::size_t, k_maximum_lanes> offsets{};
-        for (std::size_t lane = 0u; lane < lanes; ++lane) {
+        for (std::size_t lane = 0U; lane < lanes; ++lane) {
             offsets[lane] = equal_offset * lane;
         }
         const std::size_t available = std::min(
-            storage_size, lanes + (lanes - 1u) * equal_offset);
+            storage_size, lanes + (lanes - 1U) * equal_offset);
         for (const bool full : {false, true}) {
             HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
             square_lane_matrix<simd_tag_type> matrix{buffer.data()};
             std::size_t loaded_full = lanes;
-            std::size_t loaded_partial = 0u;
+            std::size_t loaded_partial = 0U;
             if (full) {
                 if (matrix.load_rows_at_offsets(
                         simd_tag, offsets, data.data())
@@ -236,18 +286,18 @@ template<class p_element>
             }
             std::vector<std::vector<element_type>> expected(
                 lanes, std::vector<element_type>(lanes));
-            std::size_t expected_full = 0u;
-            std::size_t expected_partial = 0u;
-            for (std::size_t row = 0u; row < lanes; ++row) {
-                std::size_t missing = 0u;
-                for (std::size_t column = 0u; column < lanes; ++column) {
+            std::size_t expected_full = 0U;
+            std::size_t expected_partial = 0U;
+            for (std::size_t row = 0U; row < lanes; ++row) {
+                std::size_t missing = 0U;
+                for (std::size_t column = 0U; column < lanes; ++column) {
                     const std::size_t source = row * equal_offset + column;
                     const bool present = full || source < available;
                     expected[row][column] =
                         present ? data[source] : element_type{};
                     if (!present) ++missing;
                 }
-                if (missing == 0u) {
+                if (missing == 0U) {
                     ++expected_full;
                 } else if (missing != lanes) {
                     expected_partial = lanes - missing;
@@ -267,23 +317,28 @@ template<class p_element>
     return true;
 }
 
+/**
+ * @brief Checks that applying the in-place transpose twice restores input.
+ * @tparam p_element Scalar lane type.
+ * @return `true` when the second transpose recovers the source matrix.
+ */
 template<class p_element>
-[[nodiscard]] bool check_double_transpose_in_place() {
+[[nodiscard]] auto check_double_transpose_in_place() -> bool {
     using simd_tag_type = hn::ScalableTag<p_element>;
     using vector_type = hn::Vec<simd_tag_type>;
     simd_tag_type simd_tag;
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
     const std::size_t lanes = hn::Lanes(simd_tag);
-    if (lanes != 1u && lanes != 2u && lanes != 4u && lanes != 8u
-        && lanes != 16u) {
+    if (lanes != 1U && lanes != 2U && lanes != 4U && lanes != 8U
+        && lanes != 16U) {
         return false;
     }
     const auto expected = square_increasing<p_element>(lanes);
     const auto input = flatten(expected);
     HWY_ALIGN std::array<vector_type, k_maximum_lanes> buffer{};
     square_lane_matrix<simd_tag_type> matrix{buffer.data()};
-    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0u);
+    const auto offsets = matrix_row_offsets<k_maximum_lanes>(lanes, 0U);
     matrix.load_rows_at_offsets(simd_tag, offsets, input.data());
     matrix.transpose_in_place(simd_tag);
     matrix.transpose_in_place(simd_tag);
@@ -291,12 +346,19 @@ template<class p_element>
         materialize_matrix_rows<p_element>(simd_tag, buffer), expected);
 }
 
+/**
+ * @brief Runs a typed check for every supported unsigned lane width.
+ * @tparam p_function Templated nullary check type.
+ * @param[in] function Check invoked for each lane type.
+ * @param[in,out] cases Number of typed checks attempted.
+ * @return `true` when every typed check passes.
+ */
 template<class p_function>
-[[nodiscard]] bool run_for_widths(
+[[nodiscard]] auto run_for_widths(
     p_function&& function,
-    std::uint32_t& cases) {
+    std::uint32_t& cases) -> bool {
     bool result = true;
-    const auto run = [&]<class p_element>() {
+    const auto run = [&cases, &result, &function]<class p_element>() -> void {
         ++cases;
         result = result && function.template operator()<p_element>();
     };
@@ -309,28 +371,32 @@ template<class p_function>
 
 }  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
 
-extern "C" bool bioseq_highway_run_simd_utils_probe(
-    bioseq_highway_simd_utils_probe_receipt* receipt) noexcept {
+/** @copydoc bioseq_highway_run_simd_utils_probe */
+extern "C" auto bioseq_highway_run_simd_utils_probe(
+    bioseq_highway_simd_utils_probe_receipt* receipt) noexcept -> bool {
     if (receipt == nullptr) return false;
     *receipt = {};
     receipt->target = static_cast<std::int64_t>(HWY_TARGET);
     namespace probe =
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
     try {
-        const auto record = [&] (const std::uint64_t bit, const bool passed) {
+        const auto record = [&receipt](
+                                const std::uint64_t bit,
+                                const bool passed) -> void {
             if (passed) receipt->passed_properties |= bit;
         };
-        std::uint32_t cases = 0u;
-        record(1u << 0u, probe::run_for_widths(
-            []<class p_element> {
+        std::uint32_t cases = 0U;
+        record(1U << 0U, probe::run_for_widths(
+            []<class p_element>() -> bool {
                 return probe::check_load_rows<p_element>();
             }, cases));
-        record(1u << 1u, probe::run_for_widths(
-            []<class p_element> {
+        record(1U << 1U, probe::run_for_widths(
+            []<class p_element>() -> bool {
                 return probe::check_transpose_in_place<p_element>();
             }, cases));
         bool partial = true;
-        const auto partial_width = [&]<class p_element>() {
+        const auto partial_width =
+            [&partial, &cases]<class p_element>() -> void {
             partial = partial
                 && probe::check_load_bounded_rows<p_element>(cases);
         };
@@ -338,24 +404,24 @@ extern "C" bool bioseq_highway_run_simd_utils_probe(
         partial_width.template operator()<std::uint16_t>();
         partial_width.template operator()<std::uint32_t>();
         partial_width.template operator()<std::uint64_t>();
-        record(1u << 2u, partial);
-        record(1u << 3u, probe::run_for_widths(
-            []<class p_element> {
+        record(1U << 2U, partial);
+        record(1U << 3U, probe::run_for_widths(
+            []<class p_element>() -> bool {
                 return probe::check_load_rows_at_explicit_offsets<p_element>();
             },
             cases));
         record(
-            1u << 4u,
+            1U << 4U,
             probe::check_load_bounded_rows_at_explicit_offsets(cases));
-        record(1u << 5u, probe::run_for_widths(
-            []<class p_element> {
+        record(1U << 5U, probe::run_for_widths(
+            []<class p_element>() -> bool {
                 return probe::check_double_transpose_in_place<p_element>();
             },
             cases));
         receipt->cases_run = cases;
-        receipt->cases_passed = receipt->passed_properties == 0x3fu
+        receipt->cases_passed = receipt->passed_properties == 0x3fU
             ? cases
-            : 0u;
+            : 0U;
         receipt->u8_lanes = static_cast<std::uint32_t>(
             hwy::HWY_NAMESPACE::Lanes(
                 hwy::HWY_NAMESPACE::ScalableTag<std::uint8_t>{}));
@@ -368,7 +434,7 @@ extern "C" bool bioseq_highway_run_simd_utils_probe(
         receipt->u64_lanes = static_cast<std::uint32_t>(
             hwy::HWY_NAMESPACE::Lanes(
                 hwy::HWY_NAMESPACE::ScalableTag<std::uint64_t>{}));
-        return receipt->passed_properties == 0x3fu;
+        return receipt->passed_properties == 0x3fU;
     } catch (...) {
         return false;
     }
