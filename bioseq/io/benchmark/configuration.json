@@ -25,7 +25,7 @@
     "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}},
 
     "bioseq_dumb_header_fasta":             {"_": {"type": "integer", "default": 0}},
-    "bioseq_identifier_parse_uniprot_fasta":{"_": {"type": "integer", "default": 0}},
+    "bioseq_identifier_parse_uniprot_fasta": {"_": {"type": "integer", "default": 0}},
 
     "bioseq_lazy_expr_eager_each_step": {"_": {"type": "integer", "default": 0}},
     "bioseq_lazy_expr_deferred":        {"_": {"type": "integer", "default": 0}}

@@ -1,5 +1,6 @@
 include_guard(GLOBAL)
 
+# Registers one generated client module and its integration-test source.
 function(bioseq_register_generated_api_client)
   cmake_parse_arguments(PARSE_ARGV 0 _client "" "CLIENT_NAME;CLIENT_ROOT" "")
   if(NOT _client_CLIENT_NAME OR NOT _client_CLIENT_ROOT)
