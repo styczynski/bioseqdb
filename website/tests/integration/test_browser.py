@@ -470,11 +470,29 @@ def _load_benchmark_fixture_contract(site: Path) -> dict:
     }
     for name in _BENCHMARK_FIXTURE_NAMES[3:]:
         model_keys.update(documents[name]["benchmarks"])
-    report = documents["report_154.json"]
-    benchmarks = report.get("benchmarks", {})
-    benchmark_key, benchmark = next(iter(benchmarks.items()))
-    _check(bool(benchmark.get("execution_tuples")),
-           f"benchmark report fixture {benchmark_key} has no execution tuples")
+    # Mirror the supplied Component's initial-selection rule: each report run is
+    # scored by execution tuples x distinct test cases, with the alphabetically
+    # first benchmark winning a tie after buildModel sorts measured keys.
+    candidates: list[tuple[int, str, dict]] = []
+    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
+        for key, benchmark in documents[name]["benchmarks"].items():
+            tuples = [
+                item for item in benchmark.get("execution_tuples", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("tuple"), dict)
+                and bool(item["tuple"])
+            ]
+            cases = {
+                case
+                for item in tuples
+                for case in (item.get("test_cases") or {})
+            }
+            candidates.append((len(tuples) * max(1, len(cases)), key, benchmark))
+    _check(bool(candidates), "benchmark report fixtures have no execution tuples")
+    benchmark_score, benchmark_key, benchmark = sorted(
+        candidates, key=lambda candidate: (-candidate[0], candidate[1]))[0]
+    _check(benchmark_score > 0,
+           f"richest benchmark fixture {benchmark_key} has no measured tuples")
 
     manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
     _check(len(manifest_paths) == 1,
