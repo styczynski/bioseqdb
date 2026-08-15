@@ -396,7 +396,7 @@ inline constexpr event_alias profile_events[4] = {
     if (state.is_initialized.load(std::memory_order_acquire)) return true;
     if (state.has_failed.load(std::memory_order_acquire))      return false;
 
-    std::call_once(detail::initialization_once(), [&] {
+    std::call_once(detail::initialization_once(), [&state] {
         if (detail::initialize_process_unlocked()) {
             state.is_initialized.store(true, std::memory_order_release);
         } else {

@@ -45,6 +45,7 @@ import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 
+/** @brief Canonical named counter with one accumulator per writer thread. */
 struct named_counter {
     const region_descriptor* descriptor = nullptr;
     /// Per-thread accumulator. Keyed by `std::this_thread::get_id()`;
@@ -55,7 +56,10 @@ struct named_counter {
     mutable std::mutex mutex;
     std::unordered_map<std::thread::id, std::int64_t> values_by_thread{};
 
+    /** @brief Construct an unregistered zero-valued counter. */
     named_counter() = default;
+
+    /** @brief Construct a zero-valued counter for a registered descriptor. */
     explicit named_counter(const region_descriptor* metric_descriptor) noexcept
         : descriptor(metric_descriptor) {}
 
@@ -69,11 +73,13 @@ struct named_counter {
 
 namespace bioseq::instrumentation::detail {
 
+/** @brief Owns canonical counters indexed by metric name. */
 struct counter_registry {
     std::mutex mutex;
     std::unordered_map<std::string, named_counter*> by_name;
 };
 
+/** @brief Return the process-wide counter registry. */
 [[nodiscard]] inline counter_registry& get_counter_registry() noexcept {
     static counter_registry registry;
     return registry;

@@ -16,6 +16,7 @@ export namespace bioseq::instrumentation::summary {
 /// ran in this process.
 void write_summary_to_log() noexcept;
 
+/** @brief Reset metrics in the persistent production profiler state. */
 void reset_metrics() noexcept;
 
 }  // namespace bioseq::instrumentation::summary

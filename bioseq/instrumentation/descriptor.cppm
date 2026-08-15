@@ -67,27 +67,31 @@ static_assert(sizeof(loop_descriptor) == 128);
 /// site makes the first call run this; subsequent calls return the cached
 /// pointer.
 [[nodiscard, gnu::cold]]
-const region_descriptor* register_static_region(
+inline const region_descriptor* register_static_region(
     std::string_view name,
     std::source_location loc = std::source_location::current()) noexcept;
 
+/** @brief Register or find a counter descriptor for one source location. */
 [[nodiscard, gnu::cold]]
-const region_descriptor* register_static_counter(
+inline const region_descriptor* register_static_counter(
     std::string_view name,
     std::source_location loc = std::source_location::current()) noexcept;
 
+/** @brief Register or find a gauge descriptor for one source location. */
 [[nodiscard, gnu::cold]]
-const region_descriptor* register_static_gauge(
+inline const region_descriptor* register_static_gauge(
     std::string_view name,
     std::source_location loc = std::source_location::current()) noexcept;
 
+/** @brief Register or find a scalar loop descriptor. */
 [[nodiscard, gnu::cold]]
-const loop_descriptor* register_static_loop(
+inline const loop_descriptor* register_static_loop(
     std::string_view name,
     std::source_location loc = std::source_location::current()) noexcept;
 
+/** @brief Register or find a loop descriptor for a SIMD target and lane count. */
 [[nodiscard, gnu::cold]]
-const loop_descriptor* register_static_simd_loop(
+inline const loop_descriptor* register_static_simd_loop(
     std::string_view base_name,
     std::string_view target_name,
     std::uint16_t lanes,
@@ -95,10 +99,10 @@ const loop_descriptor* register_static_simd_loop(
 
 /// Lookup by id. Used by the summary writer to walk every registered
 /// descriptor.
-[[nodiscard]] const region_descriptor* find_descriptor(std::uint32_t id) noexcept;
+[[nodiscard]] inline const region_descriptor* find_descriptor(std::uint32_t id) noexcept;
 
 /// Number of descriptors registered so far.
-[[nodiscard]] std::uint32_t registered_descriptor_count() noexcept;
+[[nodiscard]] inline std::uint32_t registered_descriptor_count() noexcept;
 
 }  // namespace bioseq::instrumentation
 

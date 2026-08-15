@@ -20,10 +20,12 @@ import bioseq.instrumentation.profiler_state;
 
 export namespace bioseq::instrumentation {
 
+/** @brief Temporarily attribute allocations to one arena category. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] arena_scope {
     arena_kind previous_arena = arena_kind::none;
 
+    /** @brief Install an arena category and retain the previous category. */
     [[gnu::always_inline]]
     explicit arena_scope(arena_kind kind) noexcept {
         if constexpr (p_configuration_type::enable_arena_tracking) {
@@ -36,6 +38,7 @@ struct [[nodiscard]] arena_scope {
         }
     }
 
+    /** @brief Restore the arena category active before this scope. */
     [[gnu::always_inline]] ~arena_scope() noexcept {
         if constexpr (p_configuration_type::enable_arena_tracking) {
             auto* profiler = active_thread_profiler<p_configuration_type>;
@@ -50,6 +53,7 @@ struct [[nodiscard]] arena_scope {
     arena_scope& operator=(arena_scope&&) = delete;
 };
 
+/** @brief Create an allocation-attribution scope for an arena category. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
 inline arena_scope<p_configuration_type> arena(arena_kind kind) noexcept {
@@ -62,6 +66,7 @@ inline arena_scope<p_configuration_type> arena(arena_kind kind) noexcept {
 /// arena_kind on the per-thread profiler block.
 template<profiling_configuration p_configuration_type>
 struct profile_tracker {
+    /** @brief Attribute one node allocation to the active arena. */
     [[gnu::always_inline]]
     void on_node_allocation(void*, std::size_t bytes, std::size_t) noexcept {
         if constexpr (!p_configuration_type::enable_arena_tracking) return;
@@ -78,6 +83,7 @@ struct profile_tracker {
         }
     }
 
+    /** @brief Remove one node allocation from the active arena's live bytes. */
     [[gnu::always_inline]]
     void on_node_deallocation(void*, std::size_t bytes, std::size_t) noexcept {
         if constexpr (!p_configuration_type::enable_arena_tracking) return;
@@ -90,12 +96,14 @@ struct profile_tracker {
         else counter.bytes_live = 0;
     }
 
+    /** @brief Attribute an array allocation using its total byte count. */
     [[gnu::always_inline]]
     void on_array_allocation(void* ptr, std::size_t count,
                              std::size_t size, std::size_t align) noexcept {
         on_node_allocation(ptr, count * size, align);
     }
 
+    /** @brief Remove an array allocation using its total byte count. */
     [[gnu::always_inline]]
     void on_array_deallocation(void* ptr, std::size_t count,
                                std::size_t size, std::size_t align) noexcept {

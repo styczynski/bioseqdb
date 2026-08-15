@@ -28,17 +28,21 @@ import bioseq.instrumentation.profiler_state;
 
 namespace bioseq::instrumentation::detail {
 
+/// Process-wide gate checked by profiling-enabled scope constructors.
 inline std::atomic<bool> runtime_enabled_flag{true};
 
 }  // namespace bioseq::instrumentation::detail
 
 export namespace bioseq::instrumentation {
 
+/** @brief Return whether runtime instrumentation is currently enabled. */
+[[nodiscard]]
 [[gnu::always_inline]]
 inline bool is_runtime_enabled() noexcept {
     return detail::runtime_enabled_flag.load(std::memory_order_relaxed);
 }
 
+/** @brief Enable or pause instrumentation without changing compiled features. */
 inline void set_runtime_enabled(bool enabled) noexcept {
     detail::runtime_enabled_flag.store(enabled, std::memory_order_relaxed);
 }
