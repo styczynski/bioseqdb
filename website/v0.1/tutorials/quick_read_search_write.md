@@ -490,11 +490,15 @@ CREATE TABLE quick_reads (
     sample_id text NOT NULL,
     sequence bioseq.seq('dna4', 32) NOT NULL
 ) USING bioseq;
+-- bioseq:visible
 INSERT INTO quick_reads VALUES
     (1, 'alpha', 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
     (2, 'alpha', 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA'),
-    (3, 'beta', 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA');
--- bioseq:visible
+    (3, 'beta', 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA')
+RETURNING read_id,
+          sample_id,
+          bioseq.len(sequence) AS bases;
+
 SELECT read_id,
        sample_id,
        bioseq.len(sequence) AS bases,
@@ -511,6 +515,10 @@ DROP TABLE quick_reads;
 RESET bioseq.vectorization.enabled;
 RESET bioseq.index.insert_maintenance.enabled;
 ```
+
+The first result confirms the three rows written and reports each stored length.
+The second result is the indexed search, including the match coordinates needed
+to locate each alignment in its stored target.
 
 ## What to carry into an application
 
