@@ -14,6 +14,8 @@ import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
+import bioseq.highway.sources.minimizer_two_stack_nthash_resident_stream;
+import bioseq.highway.sources.hasher_base;
 import bioseq.highway.sources.hasher_minimap_int;
 
 export namespace bioseq::simd {
