@@ -89,13 +89,6 @@ struct metal_archive_qualification_receipt {
     operator==(const metal_archive_qualification_receipt&) const noexcept = default;
 };
 
-/// @brief Matches an archive receipt to the once-qualified process helper.
-/// @param[in] receipt Archive qualification receipt.
-/// @return Success or a helper identity diagnostic.
-[[nodiscard]] inline std::expected<void, std::string>
-validate_metal_archive_receipt_against_process_helper(
-    const metal_archive_qualification_receipt& receipt);
-
 /// @brief Validates every required Metal archive and qualification receipt.
 /// @param[in] cache_dir Shader-cache directory.
 /// @param[in] key Shader variant identity.

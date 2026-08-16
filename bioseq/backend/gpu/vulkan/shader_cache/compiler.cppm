@@ -240,8 +240,9 @@ spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, ms
                                                         expected.z));
         }
         return result;
-    } catch (const std::exception& e) {
-        return std::unexpected(shader_cache_message("SPIR-V to MSL failed: ", e.what()));
+    } catch (const std::exception& exception) {
+        return std::unexpected(
+            shader_cache_message("SPIR-V to MSL failed: ", exception.what()));
     }
 }
 
@@ -314,8 +315,8 @@ compile_variant_to_cache(const std::filesystem::path& cache_dir,
     std::vector<std::uint32_t> spirv;
     try {
         spirv = compile_shader_spirv(key.to_request());
-    } catch (const std::exception& e) {
-        return std::unexpected(shader_cache_message("glslang failed: ", e.what()));
+    } catch (const std::exception& exception) {
+        return std::unexpected(shader_cache_message("glslang failed: ", exception.what()));
     }
     if (auto valid = validate_spirv_layout(key, spirv); !valid) {
         return valid;
