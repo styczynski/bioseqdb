@@ -35,6 +35,7 @@ import :types;
 import :tuple_ops;
 import :core;
 
+/// @brief Lists stripe metadata for one relation in the requested scan order.
 export List* list_stripes_for_relation(RelFileLocator relfilelocator,
                                        ScanDirection scan_direction) {
     uint64_t storage_id = lookup_storage_id(relfilelocator);
@@ -783,6 +784,11 @@ export stripe_metadata* rewrite_stripe_metadata(Relation rel,
 // bioseq_internal.seq_sub_table access uses the systable API so MVCC and
 // transactional semantics match the other metadata catalogs.
 
+/** @brief One seq_sub_table catalog row for a sequence-column shard.
+ *
+ * Maps a (database, tablespace, main relation, column, bucket, shard) key to
+ * the physical sub-table and sidecar relations and tracks write progress.
+ */
 export struct sequence_sub_table_row {
     Oid database_oid = InvalidOid;
     Oid tablespace_oid = InvalidOid;
@@ -796,8 +802,10 @@ export struct sequence_sub_table_row {
     bool is_full = false;
     std::uint64_t total_payload_bytes = 0;
 
+    /// @brief Default-constructs a row with invalid OIDs and zero byte counters.
     sequence_sub_table_row() = default;
 
+    /// @brief Decodes field values from one seq_sub_table heap tuple.
     sequence_sub_table_row(HeapTuple heap_tuple, TupleDesc tuple_descriptor) {
         const seq_sub_table_row row =
             seq_sub_table_codec::deform(heap_tuple, tuple_descriptor, CurrentMemoryContext);
@@ -815,19 +823,32 @@ export struct sequence_sub_table_row {
     }
 };
 
+/** @brief Catalog operations for bioseq_internal.seq_sub_table shard routing.
+ *
+ * Access uses the systable API so MVCC and transactional semantics match other
+ * metadata catalogs.
+ */
 export struct sequence_sub_table_manager {
     // Relation-id resolvers (trivial, hot) — drop the redundant SubTableMetadata
     // prefix; it is obvious these resolve seq_sub_table relations.
+    /// @brief Returns the OID of bioseq_internal.seq_sub_table, resolved per call.
     [[gnu::always_inline]] static inline Oid relid() {
         return get_relname_relid("seq_sub_table", column_namespace_oid());
     }
+    /// @brief Returns the OID of seq_sub_table_pkey.
     [[gnu::always_inline]] static inline Oid pkey_index_relid() {
         return get_relname_relid("seq_sub_table_pkey", column_namespace_oid());
     }
+    /// @brief Returns the OID of seq_sub_table_active_shard_idx.
     [[gnu::always_inline]] static inline Oid active_shard_index_relid() {
         return get_relname_relid("seq_sub_table_active_shard_idx", column_namespace_oid());
     }
 
+    /** @brief Returns the active non-full shard row for one bucket, if any.
+     *
+     * Uses the active-shard partial index. Returns empty when the catalog is
+     * missing or every matching shard is full.
+     */
     [[nodiscard]] static std::optional<sequence_sub_table_row>
     lookup_active_shard(Oid database_oid,
                         Oid tablespace_oid,
@@ -868,6 +889,10 @@ export struct sequence_sub_table_manager {
         return result;
     }
 
+    /** @brief Returns the shard row for an exact bucket and shard index.
+     *
+     * Uses the primary-key index. Returns empty when the catalog or row is missing.
+     */
     [[nodiscard]] static std::optional<sequence_sub_table_row> lookup_shard(Oid database_oid,
                                                                             Oid tablespace_oid,
                                                                             Oid main_relfilenode,
@@ -905,6 +930,11 @@ export struct sequence_sub_table_manager {
         return result;
     }
 
+    /** @brief Inserts a new shard catalog row or returns an existing active shard.
+     *
+     * If another non-full shard already owns the bucket, returns that row instead
+     * of inserting a duplicate. Raises when the catalog is missing.
+     */
     [[nodiscard]] static sequence_sub_table_row insert_shard(Oid database_oid,
                                                              Oid tablespace_oid,
                                                              Oid main_relfilenode,
@@ -974,6 +1004,11 @@ export struct sequence_sub_table_manager {
         return row;
     }
 
+    /** @brief Adds write bytes to one shard and may mark it full against a cap.
+     *
+     * A zero cap_bytes does not mark the shard full here. That rollover path is
+     * handled by insert_payload. Raises when the catalog or target row is missing.
+     */
     static sequence_sub_table_row update_shard_bytes_written(Oid database_oid,
                                                              Oid tablespace_oid,
                                                              Oid main_relfilenode,
@@ -1059,6 +1094,11 @@ export struct sequence_sub_table_manager {
         return current;
     }
 
+    /** @brief Lists every shard row for one main relation across columns and buckets.
+     *
+     * Performs a sequential scan filtered by database, tablespace, and relfilenode.
+     * Returns an empty vector when the catalog is missing.
+     */
     [[nodiscard]] static std::vector<sequence_sub_table_row>
     list_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
         std::vector<sequence_sub_table_row> shards;
@@ -1116,6 +1156,7 @@ export struct sequence_sub_table_manager {
         return shards;
     }
 
+    /// @brief Deletes every shard row for one main relation. No-op when the catalog is missing.
     static void delete_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
         const Oid rel_oid = relid();
         if (!OidIsValid(rel_oid)) {

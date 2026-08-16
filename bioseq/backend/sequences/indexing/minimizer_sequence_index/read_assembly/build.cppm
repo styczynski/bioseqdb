@@ -56,6 +56,15 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
+/** Builds a persisted direct minimizer bucket index for one sequence.
+ *  Pass 0 collects globalised (kmer, encoded position) pairs and spills sorted runs.
+ *  Pass 1 k-way merges runs into bucket images and writes the directory last.
+ *  @param storage Chunked spill storage for external runs and bucket blobs.
+ *  @param seq Lazy view of the indexed sequence bases.
+ *  @param backend Sketch route used during minimizer collection.
+ *  @param kernels SIMD or Vulkan minimizer kernels when the backend requires them.
+ *  @param scalar_build_stats_out Optional per-build counters for scalar collection paths.
+ *  @param alphabet_code Packed alphabet code forwarded to generation collection. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -102,6 +111,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
     using pair_t = detail::sorted_pair_t;
     using detail::admitted_pair_run;
+    /** Maps a core base interval to the generation collection range for that span. */
     const auto make_core_range = [&seq](sequence_size_t core_lo, sequence_size_t core_hi) {
         auto range = make_generation_collection_range(seq, core_lo, core_hi, window_span);
         if (!range) {
@@ -109,6 +119,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
         return *range;
     };
+    /** Per-window worker payload: spilled pair runs, deferred ranges, stats, and errors. */
     struct worker_range_result {
         detail::admitted_vector_run<admitted_pair_run> runs;
         detail::admitted_vector_run<segment_unit_range> deferred_for_backend_spill;
@@ -117,6 +128,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         segment_unit_range error_range{};
     };
 
+    /** Releases admitted vector capacity before permit teardown on unwind paths. */
     auto release_untransferred_results_noexcept =
         [](std::vector<worker_range_result>& results) noexcept {
             for (worker_range_result& result : results) {
@@ -132,6 +144,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     // window's minimizers on-device; the globalised (kmer, encoded_pos)
     // pairs are sorted on the HOST, so there is no CPU minimizer COLLECT on
     // this path. The scalar branch is unchanged.
+    /** Collects globalised minimizer pairs for one core interval through generation. */
     auto collect_core_range_pairs =
         [&seq, backend, kernels, alphabet_code](sequence_size_t core_lo,
                                                 sequence_size_t core_hi,
@@ -157,6 +170,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
             }
         };
 
+    /** Admits scratch for a deferred segment, collects pairs, sorts, and spills one run. */
     auto collect_sort_and_spill_backend_scratch =
         [&backend,
          &storage,
@@ -289,6 +303,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         scratch.release_capacity_before_permit();
     };
 
+    /** Drains worker results into storage and replays deferred backend spill ranges. */
     auto transfer_result_runs = [&capture_scalar_build_stats,
                                  &scalar_build_stats,
                                  &storage,
@@ -345,6 +360,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         release_untransferred_results_noexcept(results);
     };
 
+    /** Memory-admitted collection for one window range, splitting or deferring on pressure. */
     auto collect_range_admitted =
         [&backend,
          &storage,
@@ -541,6 +557,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
         }
     }
 
+    /** Collects every window range on the calling thread and transfers each result immediately. */
     auto collect_serial = [&window_ranges, &collect_range_admitted, &transfer_result_runs]() {
         detail::admitted_vector_run<worker_range_result> admitted_results;
         if (!detail::ensure_admitted_vector_run_capacity(admitted_results, 1u)) {
@@ -608,6 +625,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     index_sub_key_t next_bucket_id = 0;
     std::uint64_t total_distinct = 0, total_positions = 0;
 
+    /** Serializes the open bucket accumulator to storage and appends one directory entry. */
     auto flush_bucket = [&next_bucket_id,
                          &ob_body_bytes,
                          &storage,
@@ -794,6 +812,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     }
 }
 
+/** Builds without scalar build stats. Delegates to the full build overload. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -806,6 +825,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
 }
 
 // scalar-default overload delegates to the explicit backend.
+/** Builds with the scalar sketch backend and default alphabet binding. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::build(
@@ -813,6 +833,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
     build(storage, seq, minimizer_sketch_backend::scalar, nullptr);
 }
 
+/** Clears persisted index chunks for the entity then runs a full build. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::rebuild(
@@ -835,6 +856,7 @@ inline void direct_minimizer_bucket_index<p_storage>::rebuild(
     build(storage, seq, backend, kernels, nullptr, alphabet_code);
 }
 
+/** Rebuilds with the scalar sketch backend and default alphabet binding. */
 template <class p_storage>
 template <sequence_alphabet p_alphabet>
 inline void direct_minimizer_bucket_index<p_storage>::rebuild(

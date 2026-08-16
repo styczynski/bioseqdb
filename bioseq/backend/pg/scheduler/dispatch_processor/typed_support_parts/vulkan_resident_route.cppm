@@ -144,6 +144,7 @@ void process_vulkan_resident_route(
     auto& query_sidecars = state.query_sidecars;
     auto& row_to_query_index = state.row_to_query_index;
     auto& query_gate = state.query_gate;
+    /** Returns monotonic time in nanoseconds for GPU batch stage accounting. */
     const auto gpu_batch_now_ns = []() -> std::uint64_t {
         return static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
     };
@@ -154,12 +155,14 @@ void process_vulkan_resident_route(
     std::vector<std::uint32_t> row_to_target_index(batch_size,
                                                    std::numeric_limits<std::uint32_t>::max());
     targets.reserve(batch_size);
+    /** Exposes packed target storage bytes for equality checks and fingerprinting. */
     const auto target_storage_bytes = [](const bioseq::pg_types::seq* hdr) -> std::string_view {
         compact_sequence_range<p_sequence> seq{*hdr};
         using storage_unit_type = typename compact_sequence_range<p_sequence>::traits::storage_unit;
         const auto* bytes = reinterpret_cast<const char*>(seq.cbegin());
         return std::string_view{bytes, seq.size() * sizeof(storage_unit_type)};
     };
+    /** Hashes alphabet, width, length, and payload bytes to identify duplicate flat targets. */
     const auto target_fingerprint =
         [target_storage_bytes](const bioseq::pg_types::seq* hdr) -> std::uint64_t {
         std::uint64_t hash = 14695981039346656037ull;
@@ -263,6 +266,7 @@ void process_vulkan_resident_route(
         row_to_target_index[row_index] = target_index;
     }
     const auto requested_source = requested_target_index_source(scanner_pg_ctx);
+    /** Records unattested jobs and target-index outcomes for admitted batch rows. */
     const auto record_gpu_batch_outcomes = [batch_size,
                                             broadcast_query_ordinal,
                                             per_row_query_mode,
@@ -325,6 +329,7 @@ void process_vulkan_resident_route(
     for (std::size_t target_index = 0; target_index < targets.size(); ++target_index) {
         target_sidecar_type& target = targets[target_index];
         std::optional<compact_sequence_range<p_sequence>> flat_target_sequence;
+        /** Resolves a GPU row view from a recipe or a materialized flat header. */
         const gpu_row_view target_view = [&target, &flat_target_sequence] {
             if (target.recipe_view.has_value()) {
                 return *target.recipe_view;
@@ -546,6 +551,7 @@ void process_vulkan_resident_route(
                             stats.operational.gpu_coordinate_vote_dispatches,
                             coord_run.stats.coordinate_vote_dispatches);
 
+    /** Pairs a dispatch query id with a coordinate match awaiting GPU CIGAR merge. */
     struct gpu_cigar_pending_match {
         int32_t query_id = 0;
         match_result match{};
@@ -559,6 +565,7 @@ void process_vulkan_resident_route(
     std::uint32_t traceback_word_capacity = 0;
     pending_cigar_matches.reserve(coord_run.results.size());
     cigar_jobs.reserve(coord_run.results.size());
+    /** Returns monotonic time in nanoseconds for CIGAR job preparation timing. */
     const auto gpu_cigar_now_ns = []() -> std::uint64_t {
         return static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
     };
@@ -593,6 +600,7 @@ void process_vulkan_resident_route(
         }
         std::optional<compact_sequence_range<p_sequence>> flat_query_sequence;
         std::optional<compact_sequence_range<p_sequence>> flat_target_sequence;
+        /** Resolves the query sequence view used to pack GPU alignment symbols. */
         const gpu_row_view row_query_seq = [recipe_query,
                                             &gpu_query_recipe_views,
                                             owner_row_index = owner.row_index,
@@ -604,6 +612,7 @@ void process_vulkan_resident_route(
             flat_query_sequence.emplace(*row_query_hdr);
             return bioseq::storage::make_lazy_sequence_view(*flat_query_sequence);
         }();
+        /** Resolves the target sequence view used to pack GPU alignment symbols. */
         const gpu_row_view target_seq = [recipe_target, &target, &flat_target_sequence] {
             if (recipe_target) {
                 return *target.recipe_view;
@@ -628,6 +637,7 @@ void process_vulkan_resident_route(
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "GPU CIGAR extension received empty coordinate span");
         }
+        /** Converts a value to uint32 or throws when it exceeds the wire limit. */
         const auto checked_u32 = [](std::uint64_t value,
                                     std::string_view field_name) -> std::uint32_t {
             if (value > std::numeric_limits<std::uint32_t>::max()) {

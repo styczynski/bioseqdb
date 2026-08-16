@@ -67,6 +67,10 @@ import :toast_faults;
 
 namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
+/**
+ * @brief Builds a fully populated @c bioseq_aligner_options row for codec exercise.
+ * @return Aligner options with distinct probe values in every field.
+ */
 [[nodiscard]] table_rows::bioseq_aligner_options full_aligner_options() {
     return {
         .kmer_size = 1,
@@ -108,6 +112,10 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
     };
 }
 
+/**
+ * @brief Exercises the generated @c index_table_shard codec including external TOAST text.
+ * @return Runtime receipt for the indexing shard catalog row.
+ */
 [[nodiscard]] runtime_receipt_entry exercise_index_table_shard() {
     using row = indexing_rows::index_table_shard;
     using codec = indexing_codecs::index_table_shard_codec;
@@ -173,6 +181,10 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
         });
 }
 
+/**
+ * @brief Exercises all fourteen generated row codecs and runs the reaper TOAST fault probe.
+ * @return One runtime receipt per codec in exercise order.
+ */
 [[nodiscard]] std::vector<runtime_receipt_entry> exercise_all_codecs() {
     advance_probe_invocation();
     std::vector<runtime_receipt_entry> receipts;
