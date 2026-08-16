@@ -501,7 +501,7 @@ durable_write_file(const std::filesystem::path& final_path, std::span<const std:
         return std::unexpected(
             shader_cache_message("close ", temporary_path.string(), " failed: errno ", errno));
     }
-    if (::rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+    if (std::rename(temporary_path.c_str(), final_path.c_str()) != 0) {
         return std::unexpected(shader_cache_message("rename ",
                                                     temporary_path.string(),
                                                     " -> ",
@@ -531,7 +531,7 @@ durable_rename_existing(const std::filesystem::path& temporary_path,
             shader_cache_message("fsync ", temporary_path.string(), " failed: errno ", saved));
     }
     ::close(fd);
-    if (::rename(temporary_path.c_str(), final_path.c_str()) != 0) {
+    if (std::rename(temporary_path.c_str(), final_path.c_str()) != 0) {
         return std::unexpected(shader_cache_message("rename ",
                                                     temporary_path.string(),
                                                     " -> ",
