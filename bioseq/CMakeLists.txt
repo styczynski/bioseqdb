@@ -3920,6 +3920,76 @@ bioseq_register_sql_owner(
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS table_access_hooks)
+
+# Compact-sequence implementation partitions remain ordinary target-owned
+# modules. SQL annotations stay on the two public owner partitions below, so
+# admitting these implementation-only units to the SQL registry would invent a
+# second annotation authority for the same ABI.
+file(GLOB _bioseq_compact_sequence_annotation_free_partitions
+  CONFIGURE_DEPENDS LIST_DIRECTORIES FALSE
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/types/compact_sequence/packed_output_parts/*.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/types/compact_sequence/tree_ops_parts/*.cppm")
+list(SORT _bioseq_compact_sequence_annotation_free_partitions)
+set(_bioseq_compact_sequence_unique_annotation_free_partitions
+  ${_bioseq_compact_sequence_annotation_free_partitions})
+list(REMOVE_DUPLICATES
+  _bioseq_compact_sequence_unique_annotation_free_partitions)
+list(LENGTH _bioseq_compact_sequence_annotation_free_partitions
+  _bioseq_compact_sequence_annotation_free_partition_count)
+list(LENGTH _bioseq_compact_sequence_unique_annotation_free_partitions
+  _bioseq_compact_sequence_unique_annotation_free_partition_count)
+if(NOT _bioseq_compact_sequence_annotation_free_partition_count EQUAL
+    _bioseq_compact_sequence_unique_annotation_free_partition_count)
+  message(FATAL_ERROR
+    "Compact-sequence annotation-free partition inventory contains duplicates")
+endif()
+if(NOT _bioseq_compact_sequence_annotation_free_partition_count EQUAL 8)
+  message(FATAL_ERROR
+    "Compact-sequence annotation-free partition inventory must contain "
+    "exactly 8 sources; got "
+    "${_bioseq_compact_sequence_annotation_free_partition_count}")
+endif()
+foreach(_bioseq_compact_sequence_annotation_free_partition IN LISTS
+    _bioseq_compact_sequence_annotation_free_partitions)
+  if(NOT EXISTS
+      "${_bioseq_compact_sequence_annotation_free_partition}")
+    message(FATAL_ERROR
+      "Compact-sequence annotation-free partition does not exist: "
+      "${_bioseq_compact_sequence_annotation_free_partition}")
+  endif()
+  file(READ "${_bioseq_compact_sequence_annotation_free_partition}"
+    _bioseq_compact_sequence_annotation_free_partition_text)
+  if(_bioseq_compact_sequence_annotation_free_partition_text MATCHES
+      "bioseq_sql::")
+    message(FATAL_ERROR
+      "Compact-sequence implementation partition gained SQL authority and "
+      "must be reviewed for explicit registry ownership: "
+      "${_bioseq_compact_sequence_annotation_free_partition}")
+  endif()
+  set(_bioseq_compact_sequence_partition_target_owner_count 0)
+  foreach(_bioseq_compact_sequence_target_source IN LISTS SRC_MOD_FILES)
+    if(_bioseq_compact_sequence_target_source STREQUAL
+        _bioseq_compact_sequence_annotation_free_partition)
+      math(EXPR _bioseq_compact_sequence_partition_target_owner_count
+        "${_bioseq_compact_sequence_partition_target_owner_count} + 1")
+    endif()
+  endforeach()
+  if(NOT _bioseq_compact_sequence_partition_target_owner_count EQUAL 1)
+    message(FATAL_ERROR
+      "Compact-sequence annotation-free partition must remain target-owned "
+      "exactly once: ${_bioseq_compact_sequence_annotation_free_partition} "
+      "has ${_bioseq_compact_sequence_partition_target_owner_count} owners")
+  endif()
+endforeach()
+unset(_bioseq_compact_sequence_target_source)
+unset(_bioseq_compact_sequence_partition_target_owner_count)
+unset(_bioseq_compact_sequence_annotation_free_partition_text)
+unset(_bioseq_compact_sequence_annotation_free_partition)
+unset(_bioseq_compact_sequence_unique_annotation_free_partition_count)
+unset(_bioseq_compact_sequence_annotation_free_partition_count)
+unset(_bioseq_compact_sequence_unique_annotation_free_partitions)
+unset(_bioseq_compact_sequence_annotation_free_partitions)
+
 bioseq_register_sql_owner(
   OWNER_KEY postgres_types_compact_sequence
   MODULE bioseq.postgres.types.compact_sequence
@@ -3931,17 +4001,9 @@ bioseq_register_sql_owner(
     backend/pg/types/compact_sequence/io.cppm
     backend/pg/types/compact_sequence/letter.cppm
     backend/pg/types/compact_sequence/packed_output.cppm
-    backend/pg/types/compact_sequence/packed_output_parts/materialization_trace.cppm
-    backend/pg/types/compact_sequence/packed_output_parts/async_ownership.cppm
-    backend/pg/types/compact_sequence/packed_output_parts/packing.cppm
-    backend/pg/types/compact_sequence/packed_output_parts/test_contracts.cppm
     backend/pg/types/compact_sequence/sql_catalog.cppm
     backend/pg/types/compact_sequence/subscript.cppm
     backend/pg/types/compact_sequence/tree_ops.cppm
-    backend/pg/types/compact_sequence/tree_ops_parts/ownership.cppm
-    backend/pg/types/compact_sequence/tree_ops_parts/transforms.cppm
-    backend/pg/types/compact_sequence/tree_ops_parts/validation.cppm
-    backend/pg/types/compact_sequence/tree_ops_parts/failure_contracts.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS postgres_types_compact_sequence)
