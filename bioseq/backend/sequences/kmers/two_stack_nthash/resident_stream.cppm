@@ -11,6 +11,7 @@ export module bioseq.highway.sources.minimizer_two_stack_nthash_resident_stream;
 
 import std;
 import bioseq.common.logging;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.instrumentation;
 import bioseq.storage.lazy_sequence;
