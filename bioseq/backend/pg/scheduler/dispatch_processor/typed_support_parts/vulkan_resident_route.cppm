@@ -575,10 +575,10 @@ void process_vulkan_resident_route(
         }
         const std::uint32_t query_index = row_to_query_index[owner.row_index];
         const target_sidecar_type& target = targets[owner.target_index];
-        match_result result = pipe::gpu_coordinate_to_match_result(
+        match_result coordinate_match = pipe::gpu_coordinate_to_match_result(
             coord, query_sidecars[query_index].query_len, target.target_len);
         if (!dispatch_params.do_cigar) {
-            results[query_ids[owner.row_index]].push_back(std::move(result));
+            results[query_ids[owner.row_index]].push_back(std::move(coordinate_match));
             continue;
         }
 
@@ -613,22 +613,26 @@ void process_vulkan_resident_route(
         }();
         const sequence_size_t query_len_bp = row_query_seq.bp_size();
         const sequence_size_t target_len_bp = target_seq.bp_size();
-        if (result.query_start > query_len_bp || result.target_start > target_len_bp) {
+        if (coordinate_match.query_start > query_len_bp ||
+            coordinate_match.target_start > target_len_bp) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "GPU CIGAR extension coordinate start exceeds sequence length");
         }
-        result.query_end = std::min(result.query_end, query_len_bp);
-        result.target_end = std::min(result.target_end, target_len_bp);
-        const sequence_size_t query_span = result.query_end - result.query_start;
-        const sequence_size_t target_span = result.target_end - result.target_start;
+        coordinate_match.query_end = std::min(coordinate_match.query_end, query_len_bp);
+        coordinate_match.target_end = std::min(coordinate_match.target_end, target_len_bp);
+        const sequence_size_t query_span =
+            coordinate_match.query_end - coordinate_match.query_start;
+        const sequence_size_t target_span =
+            coordinate_match.target_end - coordinate_match.target_start;
         if (query_span == 0 || target_span == 0) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "GPU CIGAR extension received empty coordinate span");
         }
-        const auto checked_u32 = [](std::uint64_t value, std::string_view what) -> std::uint32_t {
+        const auto checked_u32 = [](std::uint64_t value,
+                                    std::string_view field_name) -> std::uint32_t {
             if (value > std::numeric_limits<std::uint32_t>::max()) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
-                    fmt::format("{} exceeds uint32", what));
+                    fmt::format("{} exceeds uint32", field_name));
             }
             return static_cast<std::uint32_t>(value);
         };
@@ -648,8 +652,8 @@ void process_vulkan_resident_route(
             append_gpu_alignment_symbols(cigar_query_symbols,
                                          cigar_symbol_scratch,
                                          row_query_seq,
-                                         result.query_start,
-                                         result.query_end,
+                                         coordinate_match.query_start,
+                                         coordinate_match.query_end,
                                          false);
         const std::uint32_t target_symbol_offset =
             checked_u32(cigar_target_symbols.size(), "GPU CIGAR target symbol offset");
@@ -657,9 +661,9 @@ void process_vulkan_resident_route(
             append_gpu_alignment_symbols(cigar_target_symbols,
                                          cigar_symbol_scratch,
                                          target_seq,
-                                         result.target_start,
-                                         result.target_end,
-                                         result.is_reverse);
+                                         coordinate_match.target_start,
+                                         coordinate_match.target_end,
+                                         coordinate_match.is_reverse);
         add_operational_counter(stats, stats.operational.host_query_symbol_packing_calls);
         add_operational_counter(stats, stats.operational.host_target_symbol_packing_calls);
 
@@ -691,9 +695,10 @@ void process_vulkan_resident_route(
             .target_symbol_offset = target_symbol_offset,
             .query_len = query_len,
             .target_len = target_len,
-            .query_global_start = checked_u32(result.query_start, "GPU CIGAR query global start"),
+            .query_global_start =
+                checked_u32(coordinate_match.query_start, "GPU CIGAR query global start"),
             .target_global_start =
-                checked_u32(result.target_start, "GPU CIGAR target global start"),
+                checked_u32(coordinate_match.target_start, "GPU CIGAR target global start"),
             .band_width = std::min<std::uint32_t>(
                 bioseq::gpu::vulkan::k_gpu_alignment_extension_max_band_width,
                 std::max(query_len, target_len)),
@@ -711,7 +716,7 @@ void process_vulkan_resident_route(
                         "GPU CIGAR traceback capacity total");
         pending_cigar_matches.push_back(gpu_cigar_pending_match{
             .query_id = query_ids[owner.row_index],
-            .match = std::move(result),
+            .match = std::move(coordinate_match),
         });
     }
     add_stage_host_time(stats,

@@ -107,15 +107,15 @@ inline constexpr sequence_size_t opportunistic_index_minimum_bp = 4096;
         return std::nullopt;
     }
 
-    std::string value;
+    std::string copied_value;
     try {
-        value.assign(raw_value);
+        copied_value.assign(raw_value);
     } catch (...) {
         bioseq::postgres::support::invoke_pg_as_cpp([raw_value] { pfree(raw_value); });
         throw;
     }
     bioseq::postgres::support::invoke_pg_as_cpp([raw_value] { pfree(raw_value); });
-    return value;
+    return copied_value;
 }
 
 [[nodiscard]] inline bool
@@ -739,7 +739,7 @@ copy_persisted_gpu_stats_text(std::array<char, p_capacity>& destination,
 [[nodiscard]] inline ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result
 make_persisted_gpu_cache_validation_stats(
     const bioseq::gpu::vulkan::runtime_metal_archive_process_qualification& source) noexcept {
-    ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result result{
+    ::bioseq::pipeline_stats::persisted_gpu_cache_validation_result validation_stats{
         .qualification_wire_revision = source.wire_revision,
         .identity = source.identity,
         .archive_count = source.archive_set.archive_count,
@@ -769,11 +769,11 @@ make_persisted_gpu_cache_validation_stats(
         .manifest_checksum = source.manifest_checksum,
         .is_saturated = source.saturated,
     };
-    result.helper_build_identity_size =
-        copy_persisted_gpu_stats_text(result.helper_build_identity, source.helper_build_identity);
-    result.helper_source_size =
-        copy_persisted_gpu_stats_text(result.helper_source, source.helper_source);
-    return result;
+    validation_stats.helper_build_identity_size = copy_persisted_gpu_stats_text(
+        validation_stats.helper_build_identity, source.helper_build_identity);
+    validation_stats.helper_source_size =
+        copy_persisted_gpu_stats_text(validation_stats.helper_source, source.helper_source);
+    return validation_stats;
 }
 
 /// Copy one full-stage runtime job preview into the admitted ledger slot.
@@ -788,7 +788,7 @@ make_persisted_gpu_cache_validation_stats(
         audit.sort_range_submit_wait_identity,
         audit.chain_coordinate_submit_wait_identity,
     };
-    ::bioseq::pipeline_stats::persisted_gpu_job_stats result{
+    ::bioseq::pipeline_stats::persisted_gpu_job_stats job_stats{
         .logical_target_row = audit.logical_target_row,
         .logical_query_ordinal = audit.logical_query_ordinal,
         .query_index = audit.query_index,
@@ -832,15 +832,15 @@ make_persisted_gpu_cache_validation_stats(
                 .is_valid = coordinate.is_valid != 0u,
             },
     };
-    for (std::size_t submission_index = 0u; submission_index < result.submissions.size();
+    for (std::size_t submission_index = 0u; submission_index < job_stats.submissions.size();
          ++submission_index) {
-        result.submissions[submission_index] = {
+        job_stats.submissions[submission_index] = {
             .operation_identity = source.shape_pipeline_operation_identity,
             .ordinal = source.shape_submission_ordinals[submission_index],
             .submit_wait_identity = submit_wait_identities[submission_index],
         };
     }
-    return result;
+    return job_stats;
 }
 
 /// Populate the fixed operation envelope from the pre-finalizer runtime view.
