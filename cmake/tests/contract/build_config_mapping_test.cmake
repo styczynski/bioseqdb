@@ -175,12 +175,71 @@ if("${_authored_config_source}" MATCHES "(^|\n)[ \t]*#")
   message(FATAL_ERROR
     "Canonical authored build config contains a preprocessor directive")
 endif()
-_require_contains("${_authored_config_source}"
-  "inline constexpr bool bioseq_cache_testing_enabled"
-  "canonical cache-testing declaration")
-_require_contains("${_authored_config_source}"
-  "BIOSEQ_BUILD_CONFIG_CACHE_TESTING_ENABLED"
-  "canonical cache-testing override macro")
+
+set(_canonical_build_config_entries
+  "bioseq_template_flatten_profile^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE^unsigned int^profile_ordinal^0..5^0U"
+  "bioseq_template_flatten_has_all_alphabets_uint64^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64^bool^boolean^false|true^false"
+  "bioseq_template_flatten_has_all_coordinates^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES^bool^boolean^false|true^false"
+  "bioseq_template_flatten_has_adaptive_lengths^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_ADAPTIVE_LENGTHS^bool^boolean^false|true^false"
+  "bioseq_template_flatten_has_extended_kmer_coordinates^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES^bool^boolean^false|true^false"
+  "bioseq_template_flatten_has_full_specialization^BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION^bool^boolean^false|true^false"
+  "bioseq_scheduler_typed_heavy_unit_count^BIOSEQ_BUILD_CONFIG_SCHEDULER_TYPED_HEAVY_UNIT_COUNT^unsigned int^count^7|14|56^7U"
+  "bioseq_test_indexes_enabled^BIOSEQ_BUILD_CONFIG_TEST_INDEXES_ENABLED^bool^boolean^false|true^false"
+  "bioseq_cache_testing_enabled^BIOSEQ_BUILD_CONFIG_CACHE_TESTING_ENABLED^bool^boolean^false|true^false"
+  "bioseq_external_api_clients_enabled^BIOSEQ_BUILD_CONFIG_EXTERNAL_API_CLIENTS_ENABLED^bool^boolean^false|true^false"
+  "bioseq_vacuum_truncate_lock_wait_interval_milliseconds^BIOSEQ_BUILD_CONFIG_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS^int^milliseconds^1..2147483647^50"
+  "bioseq_vacuum_truncate_lock_timeout_milliseconds^BIOSEQ_BUILD_CONFIG_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS^int^milliseconds^1..2147483647^4500")
+list(LENGTH _canonical_build_config_entries _canonical_build_config_entry_count)
+_require_equal("${_canonical_build_config_entry_count}" 12
+  "canonical build-config inventory size")
+
+string(REGEX REPLACE "[ \t\r\n]+" "" _authored_config_compact
+  "${_authored_config_source}")
+file(READ
+  "${_repository_root}/cmake/bioseq_build_config_codegen.cmake"
+  _build_config_generator_source)
+_require_occurrence_count("${_build_config_generator_source}" "--override" 12
+  "canonical build-config override count")
+string(REGEX MATCHALL "BIOSEQ_BUILD_CONFIG_[A-Z0-9_]+"
+  _build_config_generator_macro_uses "${_build_config_generator_source}")
+list(LENGTH _build_config_generator_macro_uses
+  _build_config_generator_macro_use_count)
+_require_equal("${_build_config_generator_macro_use_count}" 12
+  "canonical build-config generator macro count")
+
+foreach(_canonical_build_config_entry IN LISTS _canonical_build_config_entries)
+  string(REPLACE "^" ";" _canonical_build_config_fields
+    "${_canonical_build_config_entry}")
+  list(LENGTH _canonical_build_config_fields
+    _canonical_build_config_field_count)
+  _require_equal("${_canonical_build_config_field_count}" 6
+    "canonical build-config inventory field count")
+  list(GET _canonical_build_config_fields 0 _canonical_build_config_name)
+  list(GET _canonical_build_config_fields 1 _canonical_build_config_macro)
+  list(GET _canonical_build_config_fields 2 _canonical_build_config_type)
+  list(GET _canonical_build_config_fields 3 _canonical_build_config_unit)
+  list(GET _canonical_build_config_fields 4 _canonical_build_config_domain)
+  list(GET _canonical_build_config_fields 5 _canonical_build_config_default)
+  string(REGEX REPLACE "[ \t\r\n]+" ""
+    _canonical_build_config_compact_type
+    "${_canonical_build_config_type}")
+  string(CONCAT _canonical_build_config_declaration
+    "inlineconstexpr${_canonical_build_config_compact_type}"
+    "${_canonical_build_config_name}"
+    "[[bioseq::build_config(\"${_canonical_build_config_macro}\","
+    "\"${_canonical_build_config_unit}\","
+    "\"${_canonical_build_config_domain}\")]]="
+    "${_canonical_build_config_default};")
+  _require_occurrence_count("${_authored_config_compact}"
+    "${_canonical_build_config_declaration}" 1
+    "canonical declaration ${_canonical_build_config_name}")
+  _require_occurrence_count("${_authored_config_source}"
+    "${_canonical_build_config_macro}" 1
+    "canonical authored macro ${_canonical_build_config_macro}")
+  _require_occurrence_count("${_build_config_generator_source}"
+    "${_canonical_build_config_macro}" 1
+    "canonical generator override ${_canonical_build_config_macro}")
+endforeach()
 
 file(READ "${_repository_root}/bioseq/CMakeLists.txt" _bioseq_cmake_source)
 _require_contains("${_bioseq_cmake_source}"
@@ -205,6 +264,18 @@ _require_contains("${_bioseq_cmake_source}"
 _require_contains("${_bioseq_cmake_source}"
   "set(BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS \"4500\""
   "vacuum timeout default")
+file(READ
+  "${_repository_root}/bioseq/backend/pg/table/access_method_parts/maintenance.cppm"
+  _vacuum_maintenance_source)
+_require_occurrence_count("${_vacuum_maintenance_source}"
+  "import bioseq.build_config;" 1
+  "vacuum build-config module import")
+_require_occurrence_count("${_vacuum_maintenance_source}"
+  "bioseq::build_config::bioseq_vacuum_truncate_lock_wait_interval_milliseconds"
+  1 "vacuum retry constexpr consumer")
+_require_occurrence_count("${_vacuum_maintenance_source}"
+  "bioseq::build_config::bioseq_vacuum_truncate_lock_timeout_milliseconds"
+  1 "vacuum timeout constexpr consumer")
 string(FIND "${_bioseq_cmake_source}"
   [=[set(_bioseq_build_config_authored_input
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")]=]
