@@ -2,7 +2,7 @@
 title: Searching sequences with mmsearch
 slug: similarity_search
 description: Run an index-backed sequence search and inspect its real alignment coordinates.
-order: 30
+order: 60
 keywords: [mmsearch, BioseqScan, similarity search, alignment, CIGAR]
 draft: false
 ---
@@ -11,6 +11,9 @@ draft: false
 `WHERE` clause over a `USING bioseq` table and Bioseq plans a sequence-aware
 custom scan. Its first argument is the stored target column. Its second argument
 is a [[sql:bioseq.seq]] query value with the same alphabet.
+
+Prerequisite: [Index lifecycle, choices, and metadata](../index_lifecycle_and_metadata/)
+explains how to prepare and verify the persisted target form used here.
 
 Keep insert-time index maintenance enabled before loading rows:
 
@@ -198,6 +201,41 @@ PostgreSQL and Bioseq can assign the metadata and sequence work to their
 appropriate paths. Explain the final statement with representative parameter
 types and table statistics because selectivity affects plan choice.
 
+## Refresh planner statistics after a load
+
+Run PostgreSQL `ANALYZE` after a representative bulk load or a material change
+in row count and scalar distributions:
+
+```sql
+ANALYZE tutorial_mmsearch;
+```
+
+This updates PostgreSQL's relation and column statistics. It helps estimate
+ordinary predicates such as `organism`, dates, numeric ranges, joins, and
+scalar PostgreSQL indexes on a Bioseq table. It does not build a minimizer or
+symbol-count index. Use `bioseq.update_index` for those persisted sequence
+forms.
+
+Compare estimated and actual rows on the final combined query:
+
+```sql
+EXPLAIN (ANALYZE, VERBOSE)
+SELECT pk
+FROM tutorial_mmsearch
+WHERE organism = 'Homo sapiens'
+  AND public.mmsearch(
+      seq0,
+      'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)
+  );
+```
+
+An alignment predicate can return more than one match for a target row, so a
+base-table row estimate and the final alignment-row count answer different
+questions. Read the ordinary filter estimate, the custom search node, and the
+actual output together. When the scalar estimate is poor, refresh statistics
+or tune PostgreSQL statistics for that scalar column. Rebuilding a sequence
+index does not repair stale scalar statistics.
+
 Project only what the caller needs. A key-only endpoint can omit CIGAR and
 coordinates:
 
@@ -256,6 +294,79 @@ LIMIT 100;
 
 Choose a stable ordering before paginating. Without `ORDER BY`, PostgreSQL does
 not promise result order.
+
+## Tune thresholds and scoring deliberately
+
+`aligner_options` can override one call without changing the session defaults.
+Its user-facing groups are:
+
+- sketch shape with `kmer_size`, `window_size`, `max_occ`, and `mid_occ`
+- chaining thresholds and geometry with `min_seed_count`, `min_chain_score`,
+  gap limits, bandwidths, mask values, and `pri_ratio`
+- alignment scoring with `match_score`, `mismatch_pen`, two gap-open and
+  gap-extension pairs, `zdrop`, and `end_bonus`
+- result breadth with `best_n`
+- named algorithm selectors and Vulkan booleans
+- persisted-target policy with `index_read_requirement`
+
+Change one group at a time and keep the complete option record with any saved
+alignment. The score is meaningful only under the scoring and search parameters
+that produced it.
+
+For example, a higher minimum chain score can reject weak candidate chains
+before base alignment:
+
+```sql
+SELECT pk,
+       bioseq.chain_score(pk) AS chain_score,
+       bioseq.dp_score(pk) AS dp_score,
+       bioseq.edit(pk) AS edits,
+       bioseq.mapq(pk) AS mapq,
+       bioseq.is_primary(pk) AS is_primary
+FROM tutorial_mmsearch
+WHERE public.mmsearch(
+    seq0,
+    $1::bioseq.seq('dna4', 32),
+    aligner_options(
+        min_chain_score => 30,
+        best_n => 2
+    )
+)
+ORDER BY pk, is_primary DESC, chain_score DESC;
+```
+
+`chain_score` describes the seed chain. `dp_score` describes base alignment.
+`edit` counts edit operations under the selected final alignment. `mapq` is the
+mapping-quality projection. These values answer different questions and should
+not be substituted for one another as a generic similarity percentage.
+
+Changing `kmer_size` or `window_size` also changes persisted-index
+compatibility. Allow mode can recompute when the current persisted generation
+does not fit. Strict persisted mode fails instead. Rebuild the selected index
+with the intended recipe before using strict mode as a readiness gate.
+
+Bioseq has one recognized edit-distance prefilter shape:
+
+```sql
+SELECT pk
+FROM tutorial_mmsearch
+WHERE public.mmsearch(
+        seq0,
+        $1::bioseq.seq('dna4', 32)
+      )
+  AND bioseq.edit(pk) < 5;
+```
+
+The bound must be an integer constant and the comparison must remain visible to
+the owner scan. The prefilter rejects candidates that cannot pass the bound.
+An accepted candidate still goes through the authoritative alignment and exact
+filter. Read the prefilter stage and counters in `EXPLAIN ANALYZE` rather than
+assuming that every edit predicate selected it.
+
+Traceback and CIGAR construction are projection-driven. A key-only query can
+avoid that work. Adding [[sql:bioseq.cigar]] requests the alignment path needed
+to return the CIGAR, so explain the same projection list that the application
+will use.
 
 ## Convert coordinates to spans
 
@@ -525,3 +636,6 @@ Use `EXPLAIN (FORMAT JSON)` when a search does not select `BioseqScan`. Check
 that the table uses `USING bioseq`, the query alphabet matches the target
 column, index maintenance or `update_index` has run, and `mmsearch` is a
 top-level predicate in the `WHERE` clause.
+
+Next: learn the exact coordinate and materialization rules for
+[Slice, concatenate, reverse, and measure sequences](../slice_concat_reverse/).

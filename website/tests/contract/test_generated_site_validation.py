@@ -77,6 +77,10 @@ _H1 = re.compile(r"<h1[\s>]", re.IGNORECASE)
 _EXPECTED_TUTORIAL_IDS = {
     "tutorial:quick_read_search_write",
     "tutorial:sequence_column_type",
+    "tutorial:columnar_storage_and_vectorized_aggregates",
+    "tutorial:sequence_generation",
+    "tutorial:fasta_fastq_gzip_and_io",
+    "tutorial:index_lifecycle_and_metadata",
     "tutorial:slice_concat_reverse",
     "tutorial:similarity_search",
     "tutorial:multiple_sequence_columns_and_joins",
@@ -690,7 +694,7 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         if tutorial_ids != _EXPECTED_TUTORIAL_IDS:
             problems.append(_fail(
                 search_path,
-                "tutorial search inventory is not the exact current nine-page set",
+                "tutorial search inventory is not the exact current tutorial set",
             ))
         for record in records:
             route = record.get("route")
@@ -699,8 +703,60 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 problems.append(_fail(search_path,
                                       f"record {record.get('id')!r} route {route} does not resolve"))
         tutorial_root = search_path.parent / "tutorials"
+        for tutorial_page in tutorial_root.glob("*/index.html"):
+            tutorial_text = tutorial_page.read_text(encoding="utf-8")
+            for forbidden in (
+                "Test-build-only", "DSM Test Fixture",
+                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
+                "Bioseq Owned RestrictInfo Path Copies",
+                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+                "Bioseq Requirement Executable", "bioseq_internal.",
+                "inspect_ready_minimizer_generation",
+                "inspect_ready_hash_major_minimizer_generation",
+            ):
+                if forbidden in tutorial_text:
+                    problems.append(_fail(
+                        tutorial_page,
+                        f"public tutorial exposes non-user field {forbidden!r}",
+                    ))
+        columnar_page = (
+            tutorial_root / "columnar_storage_and_vectorized_aggregates" / "index.html"
+        )
+        index_page = tutorial_root / "index_lifecycle_and_metadata" / "index.html"
         cache_page = tutorial_root / "query_cache" / "index.html"
         highway_page = tutorial_root / "highway_runtime_dispatch" / "index.html"
+        explain_page = tutorial_root / "reading_bioseq_explain" / "index.html"
+        if not columnar_page.is_file():
+            problems.append(_fail(
+                columnar_page, "current columnar/vector aggregate tutorial is missing"))
+        else:
+            columnar_text = columnar_page.read_text(encoding="utf-8")
+            for token in (
+                "VectorAggNode", "BioseqScan", "bioseq.list_seq_storage_shards",
+                "alter_bioseq_table_set", "alter_bioseq_table_reset",
+                "bioseq.column_cache.capacity_mb", "bioseq.vacuum_seq_storage",
+                "columnar_vector_aggregate",
+            ):
+                if token not in columnar_text:
+                    problems.append(_fail(
+                        columnar_page,
+                        f"columnar tutorial contract token {token!r} is missing",
+                    ))
+        if not index_page.is_file():
+            problems.append(_fail(index_page, "current index lifecycle tutorial is missing"))
+        else:
+            index_text = index_page.read_text(encoding="utf-8")
+            for token in (
+                "minimizers_per_fragment", "minimizers_per_sequence",
+                "symbol_counts", "require_compatible_persisted",
+                "Bioseq Fetched From Meta", "Actual Target Index Source",
+                "index_lifecycle_metadata",
+            ):
+                if token not in index_text:
+                    problems.append(_fail(
+                        index_page,
+                        f"index lifecycle tutorial contract token {token!r} is missing",
+                    ))
         if not cache_page.is_file():
             problems.append(_fail(cache_page, "current cache tutorial is missing"))
         else:
@@ -726,6 +782,22 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 if label not in highway_text:
                     problems.append(_fail(
                         highway_page, f"Highway EXPLAIN label {label!r} is missing"))
+        if not explain_page.is_file():
+            problems.append(_fail(explain_page, "current EXPLAIN tutorial is missing"))
+        else:
+            explain_text = explain_page.read_text(encoding="utf-8")
+            for forbidden in (
+                "Test-build-only DSM diagnostics", "DSM Test Fixture",
+                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
+                "Bioseq Owned RestrictInfo Path Copies",
+                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+                "Bioseq Requirement Executable",
+            ):
+                if forbidden in explain_text:
+                    problems.append(_fail(
+                        explain_page,
+                        f"public EXPLAIN tutorial exposes non-user field {forbidden!r}",
+                    ))
     for entities_path in site.rglob("entities.*.json"):
         for entity_id, entity in json.loads(
                 entities_path.read_text(encoding="utf-8")).get("entities", {}).items():

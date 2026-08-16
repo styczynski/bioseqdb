@@ -2,7 +2,7 @@
 title: Search multiple sequence columns and join by sequence
 slug: multiple_sequence_columns_and_joins
 description: Model paired sequences, search one column, use another as a query, and run one or two sequence joins.
-order: 40
+order: 80
 keywords: [multiple sequence columns, self join, BioseqBatchJoin, lateral, mmsearch]
 draft: false
 ---
@@ -24,6 +24,10 @@ This tutorial covers four shapes:
 
 It ends with the unsupported stacked-search shape so an application can fail
 early instead of building ambiguous SQL.
+
+Prerequisite: complete
+[Slice, concatenate, reverse, and measure sequences](../slice_concat_reverse/)
+and be comfortable with PostgreSQL aliases and joins.
 
 ## Create a table with two sequence columns
 
@@ -337,9 +341,7 @@ For a `BioseqBatchJoin`, the join-specific properties answer these questions:
 | --- | --- |
 | `Bioseq Query Batch Capacity` | How many query rows can be prepared in a batch |
 | `Bioseq Residual Mmsearch Qual` | Whether an unowned search predicate remains |
-| `Bioseq Batch ABI Version` | Which internal batch contract the node uses |
-| `Bioseq Match Placeholder Sites` | How many projected match-result sites were rewritten |
-| `Bioseq Requirement Executable` | Whether the owned search requirement can execute |
+| `Bioseq Index Read Requirement` | Which persisted-target policy the join captured |
 | `Bioseq Query Planner Width` | What width PostgreSQL estimated for query rows |
 | `Bioseq Distinct Targets` | How many target identities execution observed |
 | `Bioseq Query Batches` | How many query batches execution processed |
@@ -579,8 +581,8 @@ ORDER BY target_pk, probe_pk, stored_target_start;
 ```
 
 Project the match helpers as plain columns in the search level. Perform
-coordinate arithmetic in the outer level. This gives the custom node clear
-placeholder sites and keeps coordinate conversion ordinary SQL.
+coordinate arithmetic in the outer level. This lets the custom node associate
+each helper with its owned search and keeps coordinate conversion ordinary SQL.
 
 Only apply a fixed offset when the lower slice bound is fixed and nonnegative.
 For negative or row-dependent bounds, compute the resolved origin explicitly.
@@ -659,3 +661,6 @@ DROP TABLE IF EXISTS second_search_targets;
 ```sql
 DROP TABLE IF EXISTS paired_reads;
 ```
+
+Next: inspect which CPU or GPU execution route those workloads actually use in
+[Highway runtime dispatch](../highway_runtime_dispatch/).

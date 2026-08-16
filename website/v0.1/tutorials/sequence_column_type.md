@@ -12,6 +12,10 @@ Bioseq stores biological sequences in a compact PostgreSQL value called
 alphabet and the width of each packed storage unit. It does not impose a maximum
 sequence length.
 
+Prerequisite: complete
+[Read, search, and write sequences quickly](../quick_read_search_write/), or be
+comfortable creating and querying a `USING bioseq` table.
+
 Install the extension once in each database that stores Bioseq columns:
 
 ```sql
@@ -140,8 +144,8 @@ SELECT bioseq.len(
        ) AS packed_units;
 ```
 
-[[sql:bioseq.len]] returns biological symbols. `bioseq.unit_len` returns packed
-storage units. Both return `bigint`.
+[[sql:bioseq.len]] returns biological symbols. `bioseq.unit_len` returns
+packed storage units. Both return `bigint`.
 
 Do not label `unit_len` as bases. Do not label `len` as bytes. Names such as
 `sequence_symbols` and `packed_units` keep the result meaningful when width or
@@ -298,8 +302,9 @@ WHERE provider = 'ucsc'
 ```
 
 Alphabet-dependent operations need a bound alphabet. Indexing one letter,
-turning a sequence into `bioseq.letter[]`, and reverse complement cannot infer
-an alphabet from a bare typmodless SQL declaration.
+turning a sequence into `bioseq.letter[]`, and
+`bioseq.reverse_complement` cannot infer an alphabet from a bare
+typmodless SQL declaration.
 
 At a trusted boundary, bind through validated text:
 
@@ -440,8 +445,7 @@ function returns the number of loaded records.
 ```sql runnable id=sequence_load timeout=20s
 -- bioseq:setup
 CREATE TABLE tutorial_loaded_reads (
-  row_no bigserial PRIMARY KEY,
-  accession text NOT NULL,
+  accession text PRIMARY KEY,
   seq bioseq.seq('dna4', 64)
 ) USING bioseq;
 
@@ -470,10 +474,16 @@ RESET bioseq.index.insert_maintenance.enabled;
 The file path is resolved by the PostgreSQL server. The database role needs
 permission to read the file.
 
-Choose the destination alphabet before loading. `bioseq.load` writes through
-the destination column type, so a file containing N fails for a `dna4` column.
-Use a staging and validation workflow if the source alphabet is not already
-known.
+Choose the destination alphabet before loading. The file reader currently
+drops source bytes that are absent from that alphabet. Loading N into a `dna4`
+column can therefore shorten the value and shift later coordinates. Use
+`dna5`, or a staging and validation workflow, when unknown bases must remain.
+
+The loader accepts one bound sequence destination. It rejects identity and
+generated columns. An unmapped `NOT NULL` scalar column must have a default.
+The dedicated FASTA/FASTQ tutorial covers header dialects, gzip, transactions,
+and the distinction between the SQL streaming reader and the separate C++
+batch reader.
 
 For a large file, decide whether insert maintenance stays on during the load or
 whether one `bioseq.update_index` runs afterward. The fast read, search, and
@@ -568,3 +578,7 @@ Drop a tutorial table when you no longer need it:
 ```sql
 DROP TABLE tutorial_reads;
 ```
+
+Next: connect the logical type to physical layout and exact accelerated
+aggregate shapes in
+[Columnar storage and vectorized aggregates](../columnar_storage_and_vectorized_aggregates/).

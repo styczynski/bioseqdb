@@ -83,17 +83,25 @@ _REPOSITORY_URL = "https://github.com/styczynski/bioseqdb"
 _EXPECTED_TUTORIALS = (
     "quick_read_search_write",
     "sequence_column_type",
-    "slice_concat_reverse",
+    "columnar_storage_and_vectorized_aggregates",
+    "sequence_generation",
+    "fasta_fastq_gzip_and_io",
+    "index_lifecycle_and_metadata",
     "similarity_search",
+    "slice_concat_reverse",
     "multiple_sequence_columns_and_joins",
-    "remote_provider_to_search",
-    "query_cache",
     "highway_runtime_dispatch",
     "reading_bioseq_explain",
+    "query_cache",
+    "remote_provider_to_search",
 )
 _EXPECTED_RUNNABLE_COUNTS = {
     "quick_read_search_write": 1,
     "sequence_column_type": 2,
+    "columnar_storage_and_vectorized_aggregates": 1,
+    "sequence_generation": 1,
+    "fasta_fastq_gzip_and_io": 1,
+    "index_lifecycle_and_metadata": 1,
     "slice_concat_reverse": 1,
     "similarity_search": 1,
     "multiple_sequence_columns_and_joins": 1,
@@ -479,6 +487,19 @@ def _assert_authored_content_contract(version: str) -> None:
     highway_path = (
         _WEBSITE_ROOT / version / "tutorials" / "highway_runtime_dispatch.md"
     )
+    columnar_path = (
+        _WEBSITE_ROOT / version / "tutorials"
+        / "columnar_storage_and_vectorized_aggregates.md"
+    )
+    generation_path = (
+        _WEBSITE_ROOT / version / "tutorials" / "sequence_generation.md"
+    )
+    io_path = (
+        _WEBSITE_ROOT / version / "tutorials" / "fasta_fastq_gzip_and_io.md"
+    )
+    index_path = (
+        _WEBSITE_ROOT / version / "tutorials" / "index_lifecycle_and_metadata.md"
+    )
     landing_path = _WEBSITE_ROOT / version / "landing_examples.md"
     common_path = (
         _REPOSITORY_ROOT
@@ -490,6 +511,7 @@ def _assert_authored_content_contract(version: str) -> None:
     )
     for path in (
         tutorial_path, sequence_path, cache_path, highway_path,
+        columnar_path, generation_path, io_path, index_path,
         landing_path, common_path,
     ):
         _check(path.is_file(), f"acceptance source is missing: {path}")
@@ -507,9 +529,32 @@ def _assert_authored_content_contract(version: str) -> None:
         _check(bool(links), f"{slug} has no SQL reference links")
         _check("[[sql:" not in re.sub(r"\[\[sql:[^\]|]+\]\]", "", source),
                f"{slug} has a malformed or labelled SQL reference link")
+        runnable_bodies = re.findall(
+            r"```sql runnable[^\n]*\n(.*?)\n```", source, re.DOTALL)
+        for body in runnable_bodies:
+            _check("bioseq_internal." not in body
+                   and "inspect_ready_minimizer_generation" not in body,
+                   f"{slug} runnable SQL exposes a private or revoked interface")
         all_runnable_ids.extend(runnable_ids)
     _check(len(all_runnable_ids) == len(set(all_runnable_ids)),
            "runnable ids must be unique across every tutorial")
+    authored_tutorials = "\n".join(
+        (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text(
+            encoding="utf-8")
+        for slug in _EXPECTED_TUTORIALS
+    )
+    for forbidden in (
+        "Test-build-only", "DSM Test Fixture", "Fully Attested Alignment Jobs",
+        "Bioseq Batch ABI Version", "Bioseq Owned RestrictInfo Path Copies",
+        "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+        "Bioseq Requirement Executable", "bioseq_internal.",
+        "inspect_ready_minimizer_generation",
+        "inspect_ready_hash_major_minimizer_generation",
+    ):
+        _check(forbidden not in authored_tutorials,
+               f"public tutorial corpus exposes non-user field {forbidden}")
+    _check(re.search(r"\breport_[0-9]+\.json\b", authored_tutorials) is None,
+           "tutorials must not hard-code numbered benchmark report filenames")
 
     common = common_path.read_text(encoding="utf-8")
     fixture_match = re.search(
@@ -552,7 +597,7 @@ def _assert_authored_content_contract(version: str) -> None:
            "sequence tutorial contains disabled or prototype content")
     cache = cache_path.read_text(encoding="utf-8")
     for spelling in (
-        "order: 60", "bioseq_cache.query_cache.mode = 'exact_query'",
+        "order: 110", "bioseq_cache.query_cache.mode = 'exact_query'",
         "bioseq_cache.query_cache.mode = 'reusable_fragments'",
         "minimizers_per_sequence", "minimizers_per_fragment",
         "bioseq_cache.stats()", "bioseq_cache.entries()",
@@ -562,12 +607,60 @@ def _assert_authored_content_contract(version: str) -> None:
         _check(spelling in cache, f"cache tutorial is missing {spelling}")
     highway = highway_path.read_text(encoding="utf-8")
     for spelling in (
-        "order: 70", "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)",
+        "order: 90", "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)",
         "Highway Compiled Targets", "CPU-Supported Targets",
         "Runnable Targets", "Planned Architecture",
         "Executed Architecture",
     ):
         _check(spelling in highway, f"Highway tutorial is missing {spelling}")
+    explain_path = (
+        _WEBSITE_ROOT / version / "tutorials" / "reading_bioseq_explain.md"
+    )
+    explain_source = explain_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "Test-build-only DSM diagnostics", "DSM Test Fixture",
+        "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
+        "Bioseq Owned RestrictInfo Path Copies",
+    ):
+        _check(forbidden not in explain_source,
+               f"public EXPLAIN tutorial exposes non-user field {forbidden}")
+    columnar = columnar_path.read_text(encoding="utf-8")
+    for spelling in (
+        "order: 20", "id=columnar_vector_aggregate", "VectorAggNode",
+        "count(*)", "sum", "avg", "min", "max",
+        "bioseq.list_seq_storage_shards", "alter_bioseq_table_set",
+        "alter_bioseq_table_reset", "bioseq.column_cache.capacity_mb",
+        "bioseq.vacuum_seq_storage", "NULL and empty inputs",
+    ):
+        _check(spelling in columnar,
+               f"columnar/vector tutorial is missing {spelling}")
+    generation = generation_path.read_text(encoding="utf-8")
+    for spelling in (
+        "order: 30", "id=deterministic_sequence_generation",
+        "bioseq.create_sample_table", "bioseq.create_query_target_sample_table",
+        "same_seed_same_sequence", "rejects any other alphabet",
+    ):
+        _check(spelling in generation,
+               f"sequence-generation tutorial is missing {spelling}")
+    io_tutorial = io_path.read_text(encoding="utf-8")
+    for spelling in (
+        "order: 40", "id=local_fasta_load_index_search", "bioseq.load",
+        ".fastq", ".bgzf", "regular zlib-backed", "parallel_gzip",
+        "does not provide random range access", "no current SQL function",
+    ):
+        _check(spelling in io_tutorial,
+               f"FASTA/FASTQ tutorial is missing {spelling}")
+    index_tutorial = index_path.read_text(encoding="utf-8")
+    for spelling in (
+        "order: 50", "id=index_lifecycle_metadata",
+        "minimizers_per_fragment", "minimizers_per_sequence", "symbol_counts",
+        "UPDATE_ON_INSERT", "UPDATE_MANUALLY", "bioseq.list_metadata()",
+        "Bioseq Fetched From Meta", "index_read_requirement => 2",
+        "Actual Target Index Source",
+        "bioseq.last_alignment_execution_stats()",
+    ):
+        _check(spelling in index_tutorial,
+               f"index-lifecycle tutorial is missing {spelling}")
     landing = landing_path.read_text(encoding="utf-8")
     _check(not re.search(r"temporary|placeholder|lorem|symbol_count", landing, re.I),
            "landing examples contain disabled or prototype content")
@@ -1038,6 +1131,64 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     _check(annotation_titles == ["Alphabet", "Storage-unit width"],
            f"unexpected anatomy annotation titles: {annotation_titles}")
 
+    columnar_example = by_slug[
+        "columnar_storage_and_vectorized_aggregates"
+    ]["sql_examples"][0]
+    _check("EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)"
+           in columnar_example["visible_sql"]
+           and "bioseq.list_seq_storage_shards" in columnar_example["visible_sql"],
+           "columnar tutorial lost its analyzed aggregate or shard inspection")
+    columnar_results = "\n".join(
+        cell
+        for table in _result_tables(by_slug[
+            "columnar_storage_and_vectorized_aggregates"].get("content", []))
+        for row in table
+        for cell in row
+    )
+    _check("Custom Scan (VectorAggNode)" in columnar_results
+           and "Custom Scan (BioseqScan)" in columnar_results,
+           "columnar aggregate example did not capture VectorAggNode over BioseqScan")
+
+    generation_example = by_slug["sequence_generation"]["sql_examples"][0]
+    for spelling in (
+        "bioseq.create_sample_table", "bioseq.create_query_target_sample_table",
+        "same_seed_same_sequence", "truth_target_start", "effective_error_rate",
+    ):
+        _check(spelling in generation_example["visible_sql"],
+               f"generation example visible SQL is missing {spelling}")
+
+    io_example = by_slug["fasta_fastq_gzip_and_io"]["sql_examples"][0]
+    for spelling in (
+        "bioseq.load", "landing_reads.fasta",
+        "bioseq.update_index", "minimizers_per_fragment",
+        "symbol_counts", "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF)",
+    ):
+        _check(spelling in io_example["visible_sql"],
+               f"local-I/O example visible SQL is missing {spelling}")
+
+    index_example = by_slug[
+        "index_lifecycle_and_metadata"
+    ]["sql_examples"][0]
+    for spelling in (
+        "bioseq.list_metadata()", "bioseq.update_index",
+        "bioseq.set_active_read_index", "index_read_requirement => 2",
+        "bioseq.last_alignment_execution_stats()", "stage = 'query_sketch'",
+    ):
+        _check(spelling in index_example["visible_sql"],
+               f"index-lifecycle example visible SQL is missing {spelling}")
+    index_results = "\n".join(
+        cell
+        for table in _result_tables(by_slug[
+            "index_lifecycle_and_metadata"].get("content", []))
+        for row in table
+        for cell in row
+    )
+    _check("Actual Target Index Source" in index_results
+           and "Bioseq Fetched From Meta" in index_results
+           and "persisted" in index_results
+           and "persisted_generation_id" in index_results,
+           "index lifecycle did not capture public persisted-route evidence")
+
     similarity_sql = by_slug["similarity_search"]["sql_examples"][0]["visible_sql"]
     required_sql = (
         "public.mmsearch", "bioseq.query_start", "bioseq.query_end",
@@ -1192,7 +1343,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     tutorial_records = [record for record in records if record.get("group") == "Tutorials"]
     _check({record.get("id") for record in tutorial_records}
            == {f"tutorial:{slug}" for slug in _EXPECTED_TUTORIALS},
-           "search index must contain all nine direct tutorial records")
+           "search index must contain every direct tutorial record")
     forbidden_route = _public_route(base_path, f"{version}/tutorials/")
     _check(not any(record.get("route") == forbidden_route for record in records),
            f"search index still contains forbidden tutorial-list route {forbidden_route}")
@@ -1290,6 +1441,14 @@ def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
             f"{base}/{version}/tutorials/quick_read_search_write/",
         "tutorial_sequence":
             f"{base}/{version}/tutorials/sequence_column_type/",
+        "tutorial_columnar":
+            f"{base}/{version}/tutorials/columnar_storage_and_vectorized_aggregates/",
+        "tutorial_generation":
+            f"{base}/{version}/tutorials/sequence_generation/",
+        "tutorial_io":
+            f"{base}/{version}/tutorials/fasta_fastq_gzip_and_io/",
+        "tutorial_index":
+            f"{base}/{version}/tutorials/index_lifecycle_and_metadata/",
         "tutorial_slice":
             f"{base}/{version}/tutorials/slice_concat_reverse/",
         "tutorial_similarity":
@@ -1786,12 +1945,10 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
            f"{tutorial['slug']}: rendered {tables.count()} result tables, "
            f"model contains {len(expected)}")
     actual = [_table_matrix(tables.nth(index)) for index in range(tables.count())]
-    comparison_expected = expected
-    if tutorial["slug"] == "reading_bioseq_explain":
-        comparison_expected = [
-            [[cell.strip() for cell in row] for row in table]
-            for table in expected
-        ]
+    comparison_expected = [
+        [[cell.strip() for cell in row] for row in table]
+        for table in expected
+    ]
     _check(actual == comparison_expected,
            f"{tutorial['slug']}: rendered SQL cells differ from real PostgreSQL model")
     for index, expected_table in enumerate(expected):
@@ -1806,22 +1963,23 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
     _check(body_text.count("Executed against Bioseq extension")
            == len(tutorial.get("sql_examples", [])),
            f"{tutorial['slug']}: every runnable result must carry backend provenance")
-    if tutorial["slug"] == "reading_bioseq_explain":
-        _check(tables.count() == 1
-               and (tables.first.locator("thead th").first.text_content() or "")
-                   .startswith("QUERY PLAN"),
-               "EXPLAIN tutorial did not render the PostgreSQL plan table")
-        plan_cells = tables.first.locator("tbody td")
-        expected_plan_cells = [row[0] for row in expected[0][1:]]
+    plan_table_indexes = [
+        index for index, table in enumerate(expected)
+        if table and table[0] and table[0][0].startswith("QUERY PLAN")
+    ]
+    for index in plan_table_indexes:
+        plan_cells = tables.nth(index).locator("tbody td")
+        expected_plan_cells = [row[0] for row in expected[index][1:]]
         _check(plan_cells.count() == len(expected_plan_cells)
                and plan_cells.all_text_contents() == expected_plan_cells,
-               "EXPLAIN browser cells did not preserve model whitespace")
-        _check(any(cell != cell.lstrip() for cell in expected_plan_cells),
-               "EXPLAIN model has no indentation for the browser to preserve")
+               f"{tutorial['slug']}: EXPLAIN cells did not preserve model whitespace")
+        if len(expected_plan_cells) > 1:
+            _check(any(cell != cell.lstrip() for cell in expected_plan_cells),
+                   f"{tutorial['slug']}: text EXPLAIN model has no indentation to preserve")
         _check(plan_cells.evaluate_all(
                    "cells => cells.every((cell) => "
                    "getComputedStyle(cell).whiteSpace === 'pre-wrap')"),
-               "EXPLAIN plan rows lost indentation-preserving table rendering")
+               f"{tutorial['slug']}: EXPLAIN rows lost pre-wrap rendering")
 
 
 def _exercise_markdown_callouts(page, slug: str) -> None:
@@ -2793,19 +2951,51 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=True)
             if label in {
-                "tutorial_quick", "tutorial_slice", "tutorial_columns",
-                "tutorial_remote", "tutorial_explain",
+                "tutorial_quick", "tutorial_columnar", "tutorial_generation",
+                "tutorial_io", "tutorial_index", "tutorial_slice",
+                "tutorial_columns", "tutorial_remote", "tutorial_explain",
             }:
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])
                 _assert_tutorial_sidebar(page, base_path, version)
                 tutorial_slug = {
                     "tutorial_quick": "quick_read_search_write",
+                    "tutorial_columnar": "columnar_storage_and_vectorized_aggregates",
+                    "tutorial_generation": "sequence_generation",
+                    "tutorial_io": "fasta_fastq_gzip_and_io",
+                    "tutorial_index": "index_lifecycle_and_metadata",
                     "tutorial_slice": "slice_concat_reverse",
                     "tutorial_columns": "multiple_sequence_columns_and_joins",
                     "tutorial_remote": "remote_provider_to_search",
                     "tutorial_explain": "reading_bioseq_explain",
                 }[label]
+                expected_code_entities = {
+                    "tutorial_columnar": {
+                        "sql:type:bioseq.seq",
+                        "sql:function:bioseq.len(bioseq.seq)",
+                    },
+                    "tutorial_generation": {
+                        "sql:type:bioseq.seq",
+                        "sql:function:bioseq.len(bioseq.seq)",
+                        "sql:function:bioseq.symbol_count(bioseq.seq,text)",
+                    },
+                    "tutorial_io": {
+                        "sql:type:bioseq.seq",
+                        "sql:function:bioseq.len(bioseq.seq)",
+                        "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
+                        "sql:function:bioseq.target_start(anyelement)",
+                        "sql:function:bioseq.target_end(anyelement)",
+                    },
+                    "tutorial_index": {
+                        "sql:type:bioseq.seq",
+                        "sql:function:$extension.mmsearch("
+                        "bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
+                        "sql:function:bioseq.target_start(anyelement)",
+                        "sql:function:bioseq.target_end(anyelement)",
+                    },
+                }.get(label)
+                if expected_code_entities is not None:
+                    _exercise_code_entities(page, expected_code_entities)
                 _exercise_tutorial_results(page, contract["tutorials"][tutorial_slug])
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=True)

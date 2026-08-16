@@ -2,7 +2,7 @@
 title: Caching sequence-search results
 slug: query_cache
 description: Reuse exact Bioseq searches, inspect cache health, and invalidate safely.
-order: 60
+order: 110
 keywords: [query cache, reusable fragments, statistics, invalidation, BioseqScan]
 draft: false
 ---
@@ -20,6 +20,9 @@ CREATE EXTENSION bioseq;
 Creating the SQL extension and reading the mode are not enough to prove that
 shared cache state exists. On a server that did not preload the library, the
 mode setting can still be visible while cache planning is inactive.
+
+Prerequisite: [Read every Bioseq EXPLAIN section](../reading_bioseq_explain/)
+explains the cache node and the difference between planned and actual fields.
 
 Put the libraries in this order in `postgresql.conf`:
 
@@ -82,8 +85,8 @@ write.
 
 Start with [[sql:bioseq_cache.version]], then use
 [[sql:bioseq_cache.stats]] and
-[[sql:bioseq_cache.entries]] to observe decisions. These
-diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
+[[sql:bioseq_cache.entries]] to observe decisions. These monitoring views
+require membership in PostgreSQL's `pg_read_all_stats` role.
 
 ## Exact-query hits
 
@@ -183,7 +186,7 @@ ORDER BY created_at;
 ```
 
 During the overlap, one entry can show one producer and one or more waiters.
-Producer SQL and PID visibility depends on diagnostic permissions.
+Producer SQL and PID visibility depends on monitoring permissions.
 
 After both statements finish, read the counters:
 
@@ -584,10 +587,10 @@ DROP TABLE cache_stats_before;
 Keep the test session otherwise idle. The counters are server-wide, so traffic
 from other sessions can still contribute to the delta.
 
-## Diagnostic permissions
+## Monitoring permissions
 
 `stats()` and `entries()` require membership in PostgreSQL's
-`pg_read_all_stats` role for diagnostic access:
+`pg_read_all_stats` role for monitoring access:
 
 ```sql
 GRANT pg_read_all_stats TO cache_observer;
@@ -597,7 +600,7 @@ Grant it deliberately. Entry SQL, producer identity, dependencies, and sizes
 can expose operational details that an ordinary application role does not need.
 
 The application executing a cached query does not need permission to call the
-diagnostic functions simply to benefit from caching.
+monitoring functions simply to benefit from caching.
 
 ## Invalidation and privilege errors
 
@@ -653,3 +656,7 @@ Before enabling the cache for a production query family:
 Disable caching for one-off result sets that are unlikely to be read before
 expiry or invalidation. Cache space is most useful when a real repeated workload
 consumes it.
+
+Next: stage administrator-enabled remote nucleotide data and apply the local
+storage, indexing, search, and cache workflow in
+[Query remote providers, stage sequences, and search them](../remote_provider_to_search/).

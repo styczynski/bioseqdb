@@ -2,7 +2,7 @@
 title: Highway runtime dispatch
 slug: highway_runtime_dispatch
 description: Read Bioseq's compiled, runnable, planned, and executed SIMD targets, plus the related Vulkan sort counters.
-order: 70
+order: 90
 keywords: [Highway, SIMD, runtime dispatch, EXPLAIN, architecture, Vulkan, GPU sort]
 draft: false
 ---
@@ -21,6 +21,9 @@ This page separates three questions that are easy to conflate:
 
 The first two are planning facts. The third is a runtime result, so it needs
 `EXPLAIN ANALYZE`.
+
+Prerequisite: [Search multiple sequence columns and join by sequence](../multiple_sequence_columns_and_joins/)
+introduces the single-search and batch shapes used here.
 
 ## SIMD controls and a reproducible dispatch query
 
@@ -117,7 +120,7 @@ plan, not a record of completed execution.
 `EXPLAIN ANALYZE` adds `* Executed Architecture` in text output. For the
 normal one-plan, one-bind path it must equal `Planned Architecture`. The value
 `mixed` means that the aggregated workers reported different executed targets.
-Treat `mixed` as a diagnostic result. It does not say one requested target ran.
+Treat `mixed` as a summary result. It does not say one requested target ran.
 
 Structured output has two useful levels. `Highway SIMD Dispatch` contains the
 five dispatch fields. `Planned Highway Functions` lists the top-level planned
@@ -136,7 +139,7 @@ The following checks are more useful than comparing host-specific names:
 4. Preserve the complete dispatch object with a performance report, because a
    later build or host may have a different compiled or supported inventory.
 
-## Vulkan controls are capability requests, not execution receipts
+## Confirm actual Vulkan execution
 
 `bioseq.aligner.vulkan.enabled` is the top-level Vulkan switch used by both
 alignment routing and the sequence batch-sort executor. Enabling it permits an
@@ -168,7 +171,7 @@ For a supported `mmsearch` all-GPU tuple, the additional public controls are
 `bioseq.aligner.vulkan.fused_frontend.enabled`,
 `bioseq.aligner.vulkan.index_build.enabled`, and
 `bioseq.aligner.vulkan.alignment_extension.enabled`. The Vulkan-specific
-algorithm choices exercised by the integration suite are
+algorithm choices for this route are
 `bioseq.aligner.minimizer.algorithm = 'vulkan_minimap_integer'` and
 `bioseq.aligner.chaining.algorithm = 'vulkan_tiled_dynamic_programming'`.
 These controls describe a supported alignment route. They do not change the
@@ -325,9 +328,12 @@ The two dispatch systems have intentionally different failure behavior.
   `stdc_compare backend source` when that fallback was the reason the CPU path
   was used.
 - A requested supported all-GPU alignment tuple is stricter than the sort
-  preference. Its routing checks reject incomplete or unauthenticated GPU
-  prerequisites rather than silently claiming a GPU execution path.
+  preference. Its routing checks reject an incomplete GPU route rather than
+  silently claiming GPU execution.
 
 Use the five Highway fields for CPU SIMD selection and the batch-sort execution
 properties for the GPU-sort result. Keep planning labels and execution fields
 together when investigating a fallback or comparing performance across hosts.
+
+Next: place the dispatch fields in their complete plan context with
+[Read every Bioseq EXPLAIN section](../reading_bioseq_explain/).

@@ -2,7 +2,7 @@
 title: Slice, concatenate, reverse, and measure sequences
 slug: slice_concat_reverse
 description: Work with sequence regions and transforms while keeping Bioseq values typed and compact.
-order: 20
+order: 70
 keywords: [slice, concat, reverse, reverse complement, length, lazy sequence]
 draft: false
 ---
@@ -15,6 +15,9 @@ complement, and ask [[sql:bioseq.len]] for its biological length or
 
 This tutorial starts with exact slice rules, then combines the operations into
 queries that remain useful for long stored values.
+
+Prerequisite: [Searching sequences with mmsearch](../similarity_search/)
+introduces the coordinate helpers used to select an aligned region.
 
 ## Create a small table to explore
 
@@ -669,3 +672,6 @@ Drop the scratch table when you finish:
 ```sql
 DROP TABLE slice_reads;
 ```
+
+Next: apply typed sequence expressions to paired reads and parameterized joins
+in [Search multiple sequence columns and join by sequence](../multiple_sequence_columns_and_joins/).

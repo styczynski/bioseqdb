@@ -1,8 +1,8 @@
 ---
 title: Read every Bioseq EXPLAIN section
 slug: reading_bioseq_explain
-description: Interpret Bioseq scan, pipeline, SIMD, GPU, slice, join, cache, sort, index, and external-provider plan sections.
-order: 90
+description: Interpret Bioseq scan, vector aggregate, pipeline, SIMD, GPU, slice, join, cache, sort, index, and external-provider plan sections.
+order: 100
 keywords: [EXPLAIN, BioseqScan, pipeline, cache, slice, join, GPU, external provider]
 draft: false
 ---
@@ -11,10 +11,11 @@ Bioseq adds custom nodes and properties to PostgreSQL `EXPLAIN`. The plan tells
 you which sequence path PostgreSQL selected. `EXPLAIN ANALYZE` adds what the
 executor actually did.
 
-This page covers every production Bioseq section currently emitted by these
+This page covers every user-facing Bioseq section currently emitted by these
 nodes:
 
 - `BioseqScan`
+- `VectorAggNode`
 - `BioseqIndexScan`
 - `BioseqSliceProject`
 - `BioseqBatchJoin` and its per-row recipe form
@@ -29,6 +30,9 @@ The `$1` values in query examples denote bound parameters supplied through a
 prepared statement or PostgreSQL's extended query protocol. The examples pass
 them to [[sql:bioseq.mmsearch]] as [[sql:bioseq.seq]] values. Replace them with
 typed literals when running the examples directly in `psql`.
+
+Prerequisite: [Highway runtime dispatch](../highway_runtime_dispatch/)
+introduces the difference between planned availability and an executed route.
 
 ## Begin with the right EXPLAIN form
 
@@ -68,7 +72,6 @@ SET bioseq.index.insert_maintenance.enabled = on;
 SET bioseq.index.sequence_read.enabled = off;
 SET bioseq.vectorization.enabled = on;
 SET bioseq.aligner.vulkan.enabled = off;
-SET bioseq.aligner.profiling.enabled = on;
 CREATE TABLE tutorial_explain_reads (
     pk integer PRIMARY KEY,
     seq0 bioseq.seq('dna4', 32) NOT NULL
@@ -91,7 +94,6 @@ WHERE public.mmsearch(
 ORDER BY pk, target_start;
 -- bioseq:teardown
 DROP TABLE tutorial_explain_reads;
-RESET bioseq.aligner.profiling.enabled;
 RESET bioseq.aligner.vulkan.enabled;
 RESET bioseq.vectorization.enabled;
 RESET bioseq.index.sequence_read.enabled;
@@ -174,6 +176,7 @@ The provider name tells you which section of this guide applies.
 | Provider | Main job |
 | --- | --- |
 | `BioseqScan` | Scan a local `USING bioseq` relation and optionally run `mmsearch` |
+| `VectorAggNode` | Evaluate one eligible plain aggregate over Bioseq column batches |
 | `BioseqIndexScan` | Wrap a PostgreSQL index scan while using Bioseq tuple fetch |
 | `BioseqSliceProject` | Evaluate lazy slice and transform expressions |
 | `BioseqBatchJoin` | Own a sequence join or a post-join per-row search recipe |
@@ -272,7 +275,7 @@ state, concurrency mode, current and maximum workers, scheduled and processed
 batches, waiting work, query rates, asynchronous persistence work, and reserved
 index memory.
 
-Read it as a point-in-time diagnostic. It is not a per-query timing breakdown.
+Read it as a point-in-time snapshot. It is not a per-query timing breakdown.
 The pipeline and execution-statistics sections carry the query's own work.
 
 ## Bioseq Pipeline
@@ -365,13 +368,6 @@ Text output ends the pipeline tree with `Submit results`. After execution, that
 line can include target, persisted-index, and recomputed counts. Structured
 output puts the same observed work in `Bioseq Execution Statistics`.
 
-When `bioseq.aligner.profiling.enabled` is on, text output also adds a `Runtime`
-block. It says profiling is enabled and can print a batch summary with target
-rows, persisted-index rows, recomputed rows, attempted jobs, and unattested
-jobs. Detailed per-stage profiling remains in Bioseq debug logging. The Runtime
-block does not replace PostgreSQL node timing or the structured execution
-statistics below.
-
 ## Bioseq Execution Statistics
 
 Structured `EXPLAIN ANALYZE` groups actual search work under `Bioseq Execution
@@ -390,29 +386,6 @@ prefilter lines.
 Compare requested and actual values before drawing conclusions from a setting.
 A difference can be a declared decline or fallback. The counters below show how
 often that happened.
-
-### Alignment job identity fields
-
-| Field | Meaning |
-| --- | --- |
-| `Attempted Alignment Jobs` | Jobs sent into alignment processing |
-| `Fully Attested Alignment Jobs` | Jobs with complete recorded route identity |
-| `Unattested Alignment Jobs` | Jobs missing that complete record |
-| `First Unattested Target Row` | First target row associated with an unattested job |
-| `First Unattested Query Ordinal` | First query ordinal associated with one |
-
-The two first-unattested fields appear only when the unattested count is
-nonzero.
-
-These Boolean diagnostics describe aggregation health:
-
-- `Environment Mixed Invalid`
-- `Mixed Persisted Identity`
-- `Operational Identity Conflict`
-- `Stats Saturated`
-
-A true value deserves investigation before using the remaining counters in a
-performance claim.
 
 ### Target-index outcome fields
 
@@ -471,7 +444,7 @@ Start with availability and route:
 | `Prefilter Resolved Algorithm` | Algorithm chosen after route resolution |
 | `Prefilter Resolved Backend` | Backend chosen for the prefilter |
 | `Prefilter Stats Saturated` | Whether a counter reached its representable limit |
-| `Prefilter Stats Consistent` | Whether internal counter relationships are valid |
+| `Prefilter Stats Consistent` | Whether the reported prefilter counts agree |
 
 Then read dispatch counts:
 
@@ -627,14 +600,7 @@ A batch sequence join emits these plan and execution properties:
 | --- | --- |
 | `Bioseq Query Batch Capacity` | Fixed runtime query buffer capacity |
 | `Bioseq Residual Mmsearch Qual` | Whether a raw search predicate remains |
-| `Bioseq Batch ABI Version` | Batch plan contract version |
-| `Bioseq Honest Startup Cost` | Startup cost retained by the custom path |
-| `Bioseq Honest Total Cost` | Total cost retained by the custom path |
-| `Bioseq Incumbent Cost Floor` | Cost floor of the replaced candidate path |
-| `Bioseq Match Placeholder Sites` | Rewritten match-result projection sites |
 | `Bioseq Index Read Requirement` | Target-index source requirement |
-| `Bioseq Requirement Executable` | Whether the frozen requirement is executable |
-| `Bioseq CPU Prepared Target` | Description of the retained CPU target route |
 | `Bioseq Query Planner Rows` | PostgreSQL's query-side row estimate |
 | `Bioseq Query Planner Width` | PostgreSQL's estimated row width in bytes |
 | `Bioseq Query Planner Admission` | Planned query materialization bytes |
@@ -642,8 +608,8 @@ A batch sequence join emits these plan and execution properties:
 | `Bioseq Distinct Targets` | Distinct target identities observed |
 | `Bioseq Query Batches` | Query batches executed |
 
-The first three can appear before runtime initialization. Runtime-dependent
-cost, placeholder, admission, and actual fields require an initialized node.
+The route and planner estimates can appear before runtime initialization.
+Actual materialization, distinct-target, and batch counts need `ANALYZE`.
 
 The batch join also emits the shared Highway and `Bioseq Execution Statistics`
 sections. Read those per custom join node when a statement has two searches.
@@ -662,13 +628,8 @@ Bioseq Mmsearch Ownership: per-row recipe
 Bioseq Reconstructed Join: child plan
 ```
 
-Its ownership diagnostics are:
+Its useful route properties are:
 
-- `Bioseq Owned RestrictInfo Path Copies`
-- `Bioseq Executable Mmsearch Qual Copies`
-- `Bioseq Vector Mmsearch Qual Copies`
-- `Bioseq Storage Mmsearch Qual Copies`
-- `Bioseq Descendant Mmsearch Owner Copies`
 - `Bioseq Residual Mmsearch Qual`
 - `Bioseq Batch Capacity`
 - `Bioseq Index Read Requirement`
@@ -676,12 +637,11 @@ Its ownership diagnostics are:
 The transformed-target path reports an absent index requirement because it
 cannot reuse the stored index for an arbitrary logical view.
 
-After runtime initialization it adds the honest cost fields, `Bioseq Match
-Placeholder Sites`, Highway dispatch, and execution statistics.
+After runtime initialization it adds Highway dispatch and execution statistics.
 
-The copy counters are planner ownership checks. A raw executable `mmsearch`
-copy in the wrong descendant or a residual predicate is not a performance knob.
-It indicates a query shape that did not reach the intended owner.
+A residual `mmsearch` predicate indicates that the transformed query shape did
+not reach the intended owner. Compare the result and simplify the target
+expression before treating the batch recipe as active.
 
 ## BioseqBatchSortScan
 
@@ -744,7 +704,7 @@ Actual actions include:
 - `[Produce] exact final result`
 - `[Bypass] retained child`
 
-The rest of the exact-cache diagnostics describe readiness and ownership:
+The rest of the exact-cache fields describe readiness and ownership:
 
 | Field | Meaning |
 | --- | --- |
@@ -753,8 +713,8 @@ The rest of the exact-cache diagnostics describe readiness and ownership:
 | `Cache Storage Ownership` | Readers, pending reservations, registry references, and planner pins |
 | `Cache Janitor` | Background janitor lifecycle |
 
-These storage strings contain several named values. Treat them as human
-diagnostics. Use `bioseq_cache.stats()` and `bioseq_cache.entries()` for tabular
+These storage strings contain several named values. Treat them as human-readable
+status. Use `bioseq_cache.stats()` and `bioseq_cache.entries()` for tabular
 monitoring.
 
 ## Reusable BioseqCacheScan
@@ -776,7 +736,7 @@ top-level fields are:
 When a current generation snapshot is available, the node can also report:
 
 - `State`
-- `Producer PID` when the viewer has diagnostic permission
+- `Producer PID` when the viewer has monitoring permission
 - `Age`
 - `Effective TTL`
 - `Rows`
@@ -839,22 +799,31 @@ Interpret the conditions and row counters as you would for a PostgreSQL index
 scan. The custom node changes tuple fetch for a Bioseq relation. It does not
 turn an unrelated metadata index into a sequence-alignment index.
 
-## Test-build-only DSM diagnostics
+## VectorAggNode
 
-A build compiled with Bioseq test indexes can add slice DSM fixture fields under
-an analyzed `BioseqSliceProject`:
+An eligible scalar aggregate can appear as:
 
-- `DSM Test Fixture`
-- `DSM Fixture Validated`
-- `DSM Async Lifecycle Validated`
-- `DSM Fixture Checks`
-- `DSM Fixture Slot Headers Read`
-- `DSM Fixture Counter Records Read`
-- `DSM Async Cleanup Callbacks`
+```text
+Custom Scan (VectorAggNode)
+  ->  Custom Scan (BioseqScan)
+```
 
-These fields exercise test fixtures for parallel trace handling. They are not
-application settings or production tuning controls. Their absence from a
-production plan is normal.
+The parent node owns aggregate transitions over column batches. The child owns
+the Bioseq table scan. Read the child's projected-column, pruning, and filter
+properties in the same way as any other `BioseqScan`.
+
+The current route is deliberately narrow. It covers a plain aggregate directly
+above one Bioseq scan. Its generated registry includes `count(*)`, direct-column
+`count`, integer `sum`, `avg`, `min`, and `max`, plus date `min` and `max`.
+Grouped aggregates, joins, `DISTINCT`, aggregate `FILTER` clauses, slice
+projections, and an aggregate over an owned search remain on PostgreSQL's
+ordinary aggregate path.
+
+`bioseq.vectorization.enabled = on` permits this node. It does not prove that a
+query is eligible. In `EXPLAIN ANALYZE`, confirm both `VectorAggNode` and its
+`BioseqScan` child, then compare the returned aggregate value with the query's
+NULL and empty-input requirements. The columnar-storage tutorial provides a
+deterministic non-NULL example and the exact current registry boundary.
 
 ## A complete reading order for a literal search
 
@@ -886,14 +855,14 @@ For a join, use this order:
 1. Identify each `BioseqBatchJoin` node separately
 2. Confirm which alias supplies the stored target
 3. Confirm `Bioseq Residual Mmsearch Qual` is absent
-4. Read the index requirement and CPU prepared-target description
+4. Read the persisted-index requirement captured by the join
 5. Compare planned query rows and bytes with actual materialization
 6. Read query batch count and distinct target count
 7. Read the Highway and execution sections for that node
 8. Repeat for a second custom join node before combining totals
 
 For a per-row recipe, first confirm `Bioseq Mmsearch Ownership: per-row recipe`
-and inspect the copy counters.
+and then check its residual-predicate and index-requirement fields.
 
 ## A complete reading order for cache reuse
 
@@ -983,10 +952,10 @@ Seeing a planned Highway architecture does not mean it executed. Use
 Alignment helpers such as `bioseq.target_start(pk)` should appear as plain
 projections at the search level. If the application needs to add a slice or
 provider offset, materialize those projected aliases and do arithmetic in an
-outer query. This keeps `Bioseq Match Placeholder Sites` visible and avoids
-mistaking an unrewritten helper value for a coordinate.
+outer query. This keeps the coordinate projection attached to the owned search
+and avoids mistaking an unavailable helper value for a coordinate.
 
-An ordinary predicate written beside a sequence join is not proof that it
+An ordinary predicate written beside a sequence join does not show that it
 reduced query or target admission. Read both child plans, planned and actual
 query rows, distinct targets, and the final result boundary. Stage filtered
 input in Bioseq relations or filter materialized match rows when the boundary
@@ -995,3 +964,6 @@ must be explicit.
 Finally, do not read a custom node in isolation from its PostgreSQL parents and
 children. A parent sort, aggregate, materialization, or nested loop can dominate
 the statement even when the Bioseq node is working as intended.
+
+Next: use those plan-reading skills to distinguish production, reuse, waits,
+and invalidation in [Caching sequence-search results](../query_cache/).

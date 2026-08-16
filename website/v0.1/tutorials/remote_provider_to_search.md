@@ -2,7 +2,7 @@
 title: Query remote providers, stage sequences, and search them
 slug: remote_provider_to_search
 description: Use the external SQL relations for NCBI, UCSC, UniProt, and EBI, then move nucleotide records into a searchable Bioseq table.
-order: 50
+order: 120
 keywords: [remote providers, NCBI, UCSC, UniProt, EBI, external tables, mmsearch]
 draft: false
 ---
@@ -22,6 +22,9 @@ parts:
 The boundary is useful. Remote queries deal with provider availability, network
 latency, provider filters, and access policy. Local queries get normal Bioseq
 storage, index maintenance, joins, query caching, and repeatable search latency.
+
+Prerequisite: [Caching sequence-search results](../query_cache/) completes the
+local operational path that this tutorial applies to staged provider data.
 
 ## Check that external-provider support is installed
 
@@ -225,6 +228,34 @@ When the session is finished with the prepared statement:
 ```sql
 DEALLOCATE external_metadata;
 ```
+
+## Match the provider to the operation
+
+The provider name is not interchangeable. The current adapters have these
+useful public boundaries:
+
+| Provider | Current SQL-visible role |
+| --- | --- |
+| `ncbi` | Taxonomy, catalog and location metadata, plus nucleotide records and ordered sequence chunks |
+| `ucsc` | Genome catalog discovery and bounded nucleotide regions selected by genome, chromosome, and half-open coordinates |
+| `uniprot` | Protein catalog metadata and record-gene expansion, without protein sequence materialization |
+| `ebi` | Taxonomy or catalog discovery through EBI Search, without sequence retrieval |
+
+An unsupported provider and entity combination raises a feature error. It does
+not silently switch to another provider. In particular, UniProt protein and EBI
+sequence requests currently raise SQLSTATE `0A000`.
+
+An `IN` or `= ANY(array)` predicate is expanded into equality requests because
+provider APIs often expose keyed operations rather than SQL array filters. The
+cross-product is capped at 64 request combinations. If it is larger, PostgreSQL
+emits a warning and some combinations are not queried. Split a larger list into
+explicit batches and record which batch completed.
+
+When a bounded multi-provider request is used, Bioseq unions the successful
+rows and removes duplicate catalog, taxonomy, and sequence identities. A
+provider error is raised only when the whole union produced no rows. A partial
+union can therefore contain useful data while one selected provider failed.
+Query providers separately when complete all-provider coverage is the contract.
 
 ## Expand genes and genomic locations
 
@@ -624,9 +655,9 @@ ORDER BY provider, accession, provider_start0;
 ```
 
 Keep the alignment helpers as plain projections inside the search level. Do
-arithmetic on their aliases outside it. This gives the custom scan clear match
-placeholder sites and avoids treating a missing placeholder value as a real
-coordinate.
+arithmetic on their aliases outside it. This lets the custom scan associate
+each helper with its owned search and avoids treating an unavailable helper
+value as a real coordinate.
 
 This calculation is valid for a forward region stored without an additional
 orientation transform. If you reverse-complement before staging, record that
@@ -715,6 +746,14 @@ transport errors, malformed responses, unsupported fields, or cancellation.
 Run it in a staging workflow that can be retried without changing the active
 local table.
 
+The NCBI streaming and assembly-package paths can retry a transient download up
+to five attempts. A sequence stream retries only while it has emitted no rows.
+After the first emitted row, a transport or decoding failure is terminal so a
+restart cannot duplicate an earlier prefix. The assembly ZIP path finishes its
+bounded download before extraction, then treats extraction and row emission as
+terminal work. Application retries should therefore restart the staging
+transaction, not append blindly to a partly accepted target.
+
 A local `mmsearch` failure has different checks. Inspect the local table access
 method, alphabet, index maintenance, search shape, and custom plan.
 
@@ -737,3 +776,8 @@ DROP TABLE IF EXISTS imported_provider_targets;
 ```sql
 DROP TABLE IF EXISTS imported_provider_targets_with_provenance;
 ```
+
+Next steps: revisit [Index lifecycle, choices, and metadata](../index_lifecycle_and_metadata/)
+when the staged corpus changes often, or
+[Caching sequence-search results](../query_cache/) when consumers repeat stable
+searches.

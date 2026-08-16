@@ -18,6 +18,8 @@ The examples use DNA with the four symbols A, C, G, and T. The later tutorials
 show the `dna5` alphabet, packed storage widths, slicing, joins, remote
 providers, caching, CPU dispatch, and GPU controls in more detail.
 
+Prerequisite: ordinary PostgreSQL table, `INSERT`, and `SELECT` basics.
+
 ## Install the extension
 
 Install Bioseq once in each database where you want to use it:
@@ -213,9 +215,9 @@ WHERE passed_qc
 ORDER BY read_id;
 ```
 
-`bioseq.len` returns the number of symbols. It does not return bytes or packed
-units. `bioseq.symbol_count` counts the requested symbol under the column's
-alphabet.
+[[sql:bioseq.len]] returns the number of symbols. It does not return bytes or
+packed units. [[sql:bioseq.symbol_count]] counts the requested symbol under the
+column's alphabet.
 
 When you are studying packing rather than biology, ask for both symbol length
 and packed-unit length:
@@ -539,3 +541,6 @@ coordinate functions when callers need the actual aligned span.
 
 Finally, inspect the real application statement with `EXPLAIN`. A short plan
 check catches the common mistakes earlier than a performance investigation.
+
+Next: learn how alphabets and packed widths work in
+[The bioseq.seq column type](../sequence_column_type/).
