@@ -641,10 +641,14 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                 const std::size_t to_copy = std::min(available_ranks, required_length - gathered);
                 for (std::size_t rank_index = 0; rank_index < to_copy; ++rank_index) {
                     const p_stored_type raw_rank = slot.bytes[in_frag + rank_index];
-                    const p_stored_type letter =
-                        p_is_reversed ? static_cast<p_stored_type>(traits::letter_complement(
-                                            static_cast<storage_unit>(raw_rank)))
-                                      : raw_rank;
+                    p_stored_type letter = raw_rank;
+                    if constexpr (p_is_reversed) {
+                        static_assert(
+                            lazy_sequence_detail::complementable_sequence_alphabet<
+                                typename traits::alphabet_type>);
+                        letter = static_cast<p_stored_type>(traits::letter_complement(
+                            static_cast<storage_unit>(raw_rank)));
+                    }
                     const std::size_t output_index = gathered + rank_index;
                     scratch[k_is_descending_write ? (required_length - 1 - output_index)
                                                   : output_index] = letter;
