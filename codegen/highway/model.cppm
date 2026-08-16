@@ -15,7 +15,6 @@ export namespace bioseq::codegen::highway {
 inline constexpr std::uint32_t policy_evidence_schema_revision = 1;
 inline constexpr std::string_view publication_policy = "highway";
 inline constexpr std::string_view publication_name = "highway";
-inline constexpr std::size_t highway_source_record_count = 16u;
 
 struct target_spec {
     std::string platform;

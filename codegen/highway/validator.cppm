@@ -926,11 +926,53 @@ inline void validate_inventories(
         || sources.contract_module == sources.dispatch_module) {
         throw std::runtime_error("invalid Highway contract or dispatch module name");
     }
+
+    struct required_source_record final {
+        std::string_view key;
+        std::string_view family;
+    };
+    static constexpr std::array required_source_records{
+        required_source_record{"alignment_utils", "alignment"},
+        required_source_record{"block_aligner", "alignment"},
+        required_source_record{"block_aligner_certificates", "alignment"},
+        required_source_record{"block_aligner_dp", "alignment"},
+        required_source_record{"block_aligner_traceback", "alignment"},
+        required_source_record{"chaining", "chaining"},
+        required_source_record{"hasher_base", "hasher_base"},
+        required_source_record{"hasher_lexic", "hasher_lexic"},
+        required_source_record{"hasher_minimap_int", "hasher_minimap_int"},
+        required_source_record{"indexing", "indexing"},
+        required_source_record{"ksw2", "alignment"},
+        required_source_record{"ksw2_batched", "alignment"},
+        required_source_record{"ksw2_primitives", "alignment"},
+        required_source_record{"minimizer_bounded_nthash", "minimizers"},
+        required_source_record{
+            "minimizer_minimap2_reference", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_continuation", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_drivers", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_vectors", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_resident_stream", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_state", "minimizers"},
+        required_source_record{"prefilter", "common"},
+        required_source_record{"sequence_ops", "sequence_ops"},
+        required_source_record{"simd_utils", "simd_utils"},
+        required_source_record{"vector_stream", "vector_stream"},
+        required_source_record{
+            "vector_stream_operations", "vector_stream"},
+    };
     if (sources.require_complete_table
-        && sources.sources.size() != highway_source_record_count) {
+        && sources.sources.size() != required_source_records.size()) {
         throw std::runtime_error(
-            "complete Highway generation requires exactly 16 registered "
-            "source records");
+            "complete Highway generation requires exactly "
+            + std::to_string(required_source_records.size())
+            + " registered source records");
     }
 
     std::map<std::string, const source_spec*, std::less<>> by_key;
@@ -973,34 +1015,6 @@ inline void validate_inventories(
         }
     }
     if (sources.require_complete_table) {
-        struct required_source_record final {
-            std::string_view key;
-            std::string_view family;
-        };
-        static constexpr std::array<
-            required_source_record,
-            highway_source_record_count> required_source_records{
-                required_source_record{"alignment_utils", "alignment"},
-                required_source_record{"block_aligner", "alignment"},
-                required_source_record{"chaining", "chaining"},
-                required_source_record{"hasher_base", "hasher_base"},
-                required_source_record{"hasher_lexic", "hasher_lexic"},
-                required_source_record{
-                    "hasher_minimap_int", "hasher_minimap_int"},
-                required_source_record{"indexing", "indexing"},
-                required_source_record{"ksw2", "alignment"},
-                required_source_record{"ksw2_batched", "alignment"},
-                required_source_record{
-                    "minimizer_bounded_nthash", "minimizers"},
-                required_source_record{
-                    "minimizer_minimap2_reference", "minimizers"},
-                required_source_record{
-                    "minimizer_two_stack_nthash", "minimizers"},
-                required_source_record{"prefilter", "common"},
-                required_source_record{"sequence_ops", "sequence_ops"},
-                required_source_record{"simd_utils", "simd_utils"},
-                required_source_record{"vector_stream", "vector_stream"},
-            };
         for (const required_source_record& expected
              : required_source_records) {
             const auto source = by_key.find(expected.key);
