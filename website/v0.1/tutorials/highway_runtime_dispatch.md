@@ -30,17 +30,17 @@ Highway chooses from the compiled targets that are runnable on the backend's
 current host. Do not hard-code a target name in an application check because
 the target inventory can differ by build, CPU, and operating-system support.
 
-The following query selects the deterministic SIMD algorithms used by the
-integration examples. Vulkan is disabled so the resulting fields describe
-the CPU Highway dispatch rather than a GPU alignment route. It runs
-[[sql:bioseq.mmsearch]] over a [[sql:bioseq.seq]] column.
+The following block selects the deterministic SIMD algorithms used by the
+examples. Vulkan is disabled so the resulting fields describe the CPU Highway
+dispatch rather than a GPU alignment route. It runs [[sql:bioseq.mmsearch]] over
+a [[sql:bioseq.seq]] column once with vectorization enabled and once with it
+disabled, so both plans come from the current host.
 
 ```sql runnable id=highway_dispatch_explain timeout=30s
 -- bioseq:setup
 SET max_parallel_workers_per_gather = 0;
 SET bioseq.index.insert_maintenance.enabled = on;
 SET bioseq.index.sequence_read.enabled = off;
-SET bioseq.vectorization.enabled = on;
 SET bioseq.aligner.vulkan.enabled = off;
 SET bioseq.aligner.minimizer.algorithm = 'two_stack_nthash';
 SET bioseq.aligner.chaining.algorithm = 'simd_minimap2';
@@ -54,6 +54,16 @@ INSERT INTO highway_dispatch_reads VALUES
   (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA'),
   (3, 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA');
 -- bioseq:visible
+SET bioseq.vectorization.enabled = on;
+EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)
+SELECT pk
+FROM highway_dispatch_reads
+WHERE public.mmsearch(
+  seq0,
+  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+ORDER BY pk;
+
+SET bioseq.vectorization.enabled = off;
 EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)
 SELECT pk
 FROM highway_dispatch_reads
@@ -182,13 +192,13 @@ packed layout, valid bounded sizes, memory admission, and a successful device
 round trip. DNA4 and DNA5 have dedicated kernel kinds. Other supported sequence
 alphabets use the generic kernel kind.
 
-This query is a portable control experiment. It selects the custom sort plan
-and makes the CPU fallback easy to read by explicitly disabling Vulkan.
+This block is a portable control experiment. It reports the runtime capability,
+then analyzes the same custom sort first with Vulkan disabled and then enabled.
+The enabled run records either a device execution or the real CPU fallback.
 
 ```sql runnable id=highway_dispatch_batch_sort timeout=30s
 -- bioseq:setup
 SET bioseq.planner.sequence_sort_scan.enabled = on;
-SET bioseq.aligner.vulkan.enabled = off;
 CREATE TABLE highway_dispatch_sort_reads (
   pk integer PRIMARY KEY,
   seq0 bioseq.seq('dna4', 32)
@@ -199,6 +209,19 @@ INSERT INTO highway_dispatch_sort_reads VALUES
   (3, 'CCCC'),
   (4, 'GGGG');
 -- bioseq:visible
+SELECT is_available,
+       device_name,
+       is_software_device,
+       initialization_error
+FROM bioseq.vulkan_runtime_status();
+
+SET bioseq.aligner.vulkan.enabled = off;
+EXPLAIN (ANALYZE, VERBOSE)
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+
+SET bioseq.aligner.vulkan.enabled = on;
 EXPLAIN (ANALYZE, VERBOSE)
 SELECT pk
 FROM highway_dispatch_sort_reads
@@ -225,12 +248,12 @@ scan after it runs:
 | `Bioseq Source Admission Fallbacks` | Count of source-admission failures that reverted to the original source views |
 | `Bioseq Source Routes Acquired` | Whether the custom scan acquired source routes |
 
-With the control query above, `Bioseq Sort Accelerator` is `stdc_compare` and
-the three GPU dispatch counters are zero. When Vulkan is enabled on a suitable
-host, `Bioseq Sort Accelerator: vulkan` and a nonzero `Bioseq GPU Sort
-Dispatches` show that a GPU sort actually occurred. A
-`BioseqBatchSortScan` node alone does not say the GPU ran. Likewise,
-enabling `bioseq.aligner.vulkan.enabled` alone does not say the GPU ran.
+In the first plan, `Bioseq Sort Accelerator` is `stdc_compare` and the three GPU
+dispatch counters are zero. In the second plan, an available and admitted device
+reports `Bioseq Sort Accelerator: vulkan` and a nonzero `Bioseq GPU Sort
+Dispatches`. A machine without that route reports the CPU fallback instead. A
+`BioseqBatchSortScan` node alone does not say the GPU ran. Likewise, enabling
+`bioseq.aligner.vulkan.enabled` alone does not say the GPU ran.
 
 Use this plan-shape table before investigating device counters:
 

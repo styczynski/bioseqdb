@@ -88,8 +88,8 @@ diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
 ## Exact-query hits
 
 `exact_query` stores the final result for one complete statement. The visible
-block below runs the same `BioseqScan` twice, then shows the counters after the
-first run and the repeated run.
+block below runs the same `BioseqScan` twice, then shows the counter changes
+caused by those two statements.
 
 ```sql runnable id=cache_exact_query timeout=30s entity="sql:function:bioseq_cache.stats()"
 -- bioseq:setup
@@ -102,6 +102,9 @@ CREATE TABLE cache_exact_reads (
 INSERT INTO cache_exact_reads VALUES
   (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
   (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA');
+CREATE TEMP TABLE cache_exact_stats_before AS
+SELECT produced, completed_hits, reuse_hits, fallbacks, invalidations
+FROM bioseq_cache.stats();
 -- bioseq:visible
 SELECT count(*) FROM cache_exact_reads
 WHERE public.mmsearch(
@@ -111,9 +114,15 @@ SELECT count(*) FROM cache_exact_reads
 WHERE public.mmsearch(
   seq0,
   'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
-SELECT produced, completed_hits, reuse_hits, fallbacks, invalidations
-FROM bioseq_cache.stats();
+SELECT s.produced - b.produced AS produced,
+       s.completed_hits - b.completed_hits AS completed_hits,
+       s.reuse_hits - b.reuse_hits AS reuse_hits,
+       s.fallbacks - b.fallbacks AS fallbacks,
+       s.invalidations - b.invalidations AS invalidations
+FROM bioseq_cache.stats() AS s
+CROSS JOIN cache_exact_stats_before AS b;
 -- bioseq:teardown
+DROP TABLE cache_exact_stats_before;
 DROP TABLE cache_exact_reads;
 RESET bioseq_cache.query_cache.mode;
 RESET bioseq.index.insert_maintenance.enabled;
@@ -267,6 +276,9 @@ CREATE TABLE cache_reusable_reads (
 INSERT INTO cache_reusable_reads VALUES
   (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
   (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA');
+CREATE TEMP TABLE cache_reusable_stats_before AS
+SELECT produced, completed_hits, reuse_hits, fallbacks
+FROM bioseq_cache.stats();
 -- bioseq:visible
 SELECT count(*) FROM cache_reusable_reads
 WHERE public.mmsearch(
@@ -276,11 +288,16 @@ SELECT count(*) FROM cache_reusable_reads
 WHERE public.mmsearch(
   seq0,
   'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
-SELECT s.produced, s.completed_hits, s.reuse_hits, s.fallbacks,
+SELECT s.produced - b.produced AS produced,
+       s.completed_hits - b.completed_hits AS completed_hits,
+       s.reuse_hits - b.reuse_hits AS reuse_hits,
+       s.fallbacks - b.fallbacks AS fallbacks,
        (SELECT count(*) FROM bioseq_cache.entries()
         WHERE state = 'COMPLETE') AS complete_entries
-FROM bioseq_cache.stats() AS s;
+FROM bioseq_cache.stats() AS s
+CROSS JOIN cache_reusable_stats_before AS b;
 -- bioseq:teardown
+DROP TABLE cache_reusable_stats_before;
 DROP TABLE cache_reusable_reads;
 RESET bioseq_cache.query_cache.mode;
 RESET bioseq.index.insert_maintenance.enabled;
