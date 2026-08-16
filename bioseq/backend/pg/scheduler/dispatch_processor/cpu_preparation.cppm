@@ -723,11 +723,11 @@ void append_cpu_prepared_query_recipe_sketch(
     std::vector<batch_processor::cpu_prepared_query_sketch>* retained_queries,
     bioseq::parallelism::memory_permit* retained_query_permit,
     std::uint64_t* retained_query_bytes) {
-    auto* owner = bioseq::postgres::support::invoke_pg_as_cpp([&session, recipe, descriptor] {
+    auto* query_owner = bioseq::postgres::support::invoke_pg_as_cpp([&session, recipe, descriptor] {
         return ::make_pg_sequence_call_owner<p_alphabet>(session, recipe, descriptor);
     });
     append_cpu_prepared_query_sketch_view<p_alphabet, p_destination_value>(
-        owner->view().with_payload_allocation_observer(payload_observer),
+        query_owner->view().with_payload_allocation_observer(payload_observer),
         query_ordinal,
         kmer_size,
         window_size,
