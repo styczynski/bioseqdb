@@ -664,7 +664,7 @@ process_inmemory_chunked_segmented_row(
 
 [[bioseq::template_flatten_when("shape", "root")]]
 [[bioseq::template_flatten_entry("root")]]
-[[nodiscard]] auto process_sequences(
+[[nodiscard]] std::map<int32_t, std::vector<match_result>> process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
@@ -677,7 +677,6 @@ process_inmemory_chunked_segmented_row(
     const std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
     batch_processor::scanner_pg_context* scanner_pg_ctx)
-    -> std::map<int32_t, std::vector<match_result>>
 {
     using sequence_type = compact_sequence_stdc_instance<
         bioseq::pg_types::seq,
