@@ -5,7 +5,6 @@
 module;
 
 #include <array>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -139,14 +138,15 @@ struct scoring_matrix_storage {
             for (std::size_t column = p_alphabet_dimension;
                  column < k_simd_columns;
                  ++column) {
-                if (simd_scores[row * k_simd_columns + column] != INT8_MIN) {
+                if (simd_scores[row * k_simd_columns + column]
+                    != std::numeric_limits<std::int8_t>::min()) {
                     return false;
                 }
             }
         }
         for (std::size_t column = 0; column < k_simd_columns; ++column) {
             if (simd_scores[p_alphabet_dimension * k_simd_columns + column]
-                != INT8_MIN) {
+                != std::numeric_limits<std::int8_t>::min()) {
                 return false;
             }
         }
@@ -211,7 +211,7 @@ struct scoring_matrix_storage {
         }
 
         for (auto& score : matrix.simd_scores) {
-            score = INT8_MIN;
+            score = std::numeric_limits<std::int8_t>::min();
         }
         for (int row = 0; row < k_dimension; ++row) {
             for (int column = 0; column < k_dimension; ++column) {
