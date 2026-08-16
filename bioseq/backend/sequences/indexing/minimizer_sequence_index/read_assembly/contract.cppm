@@ -160,16 +160,16 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     };
 
     template <sequence_alphabet p_alphabet>
-    [[nodiscard]] static inline std::expected<segment_unit_range,
-                                              minimizer_generation_encoding_error>
+    [[nodiscard]] static std::expected<segment_unit_range,
+                                       minimizer_generation_encoding_error>
     make_generation_collection_range(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
                                      std::uint64_t core_lo,
                                      std::uint64_t core_hi,
                                      std::uint64_t halo_bp = 10u + 15u - 2u) noexcept;
 
     template <sequence_alphabet p_alphabet>
-    [[nodiscard]] static inline std::expected<exact_simd_index_execution_stats,
-                                              minimizer_generation_encoding_error>
+    [[nodiscard]] static std::expected<exact_simd_index_execution_stats,
+                                       minimizer_generation_encoding_error>
     collect_generation_core_run(
         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
         std::uint8_t alphabet_code,
@@ -186,8 +186,8 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     /// collected and spilled before the next is allocated. The returned direct minimizer-bucket
     /// producer reopens these same external runs for both encoder passes.
     template <sequence_alphabet p_alphabet>
-    [[nodiscard]] static inline std::expected<generation_spill_result,
-                                              minimizer_generation_encoding_error>
+    [[nodiscard]] static std::expected<generation_spill_result,
+                                       minimizer_generation_encoding_error>
     spill_generation_replay_runs_serial(
         p_storage& storage,
         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
@@ -198,7 +198,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr,
         std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code);
 
-    [[nodiscard]] static inline auto make_generation_replay_producer(
+    [[nodiscard]] static auto make_generation_replay_producer(
         p_storage& storage,
         std::uint64_t target_length,
         generation_spill_result&& spill,
@@ -207,8 +207,8 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     /// Encode grouped-SoA rows from a sealed direct minimizer-bucket spill. The layout
     /// consumes the sealed direct minimizer-bucket spill without conversion.
     template <minimizer_generation_row_sink p_sink>
-    [[nodiscard]] static inline std::expected<encoded_grouped_soa_generation,
-                                              minimizer_generation_encoding_error>
+    [[nodiscard]] static std::expected<encoded_grouped_soa_generation,
+                                       minimizer_generation_encoding_error>
     encode_persisted_generation(
         p_storage& storage,
         p_sink& sink,
@@ -218,7 +218,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr);
 
     template <sequence_alphabet p_alphabet>
-    static inline void
+    static void
     build(p_storage& storage,
           bioseq::storage::lazy_sequence_view<p_alphabet> seq,
           minimizer_sketch_backend backend,
@@ -227,19 +227,19 @@ template <class p_storage> struct direct_minimizer_bucket_index {
           std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code);
 
     template <sequence_alphabet p_alphabet>
-    static inline void build(p_storage& storage,
-                             bioseq::storage::lazy_sequence_view<p_alphabet> seq,
-                             minimizer_sketch_backend backend,
-                             const bioseq::minimizers::minimizer_kernels* kernels,
-                             const std::uint8_t alphabet_code);
+    static void build(p_storage& storage,
+                      bioseq::storage::lazy_sequence_view<p_alphabet> seq,
+                      minimizer_sketch_backend backend,
+                      const bioseq::minimizers::minimizer_kernels* kernels,
+                      const std::uint8_t alphabet_code);
 
     // scalar-default overload delegates to the explicit backend.
     template <sequence_alphabet p_alphabet>
-    static inline void build(p_storage& storage,
-                             bioseq::storage::lazy_sequence_view<p_alphabet> seq);
+    static void build(p_storage& storage,
+                      bioseq::storage::lazy_sequence_view<p_alphabet> seq);
 
     template <sequence_alphabet p_alphabet>
-    static inline void
+    static void
     rebuild(p_storage& storage,
             bioseq::storage::lazy_sequence_view<p_alphabet> seq,
             minimizer_sketch_backend backend,
@@ -247,11 +247,11 @@ template <class p_storage> struct direct_minimizer_bucket_index {
             std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code);
 
     template <sequence_alphabet p_alphabet>
-    static inline void rebuild(p_storage& storage,
-                               bioseq::storage::lazy_sequence_view<p_alphabet> seq);
+    static void rebuild(p_storage& storage,
+                        bioseq::storage::lazy_sequence_view<p_alphabet> seq);
 
     /// query-time: load ONLY the buckets containing any query kmer (§10.5).
-    static inline minimizer_hashmap_fragment_index
+    static minimizer_hashmap_fragment_index
     assemble_for_query(p_storage& storage,
                        std::span<const minimap_sketch_data> query_minimizers,
                        sequence_size_t target_len,
@@ -260,7 +260,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
 
     /// query-time: load query-touched buckets but keep only positions in one
     /// target collection range. Occurrence filtering remains global.
-    static inline minimizer_hashmap_fragment_index
+    static minimizer_hashmap_fragment_index
     assemble_for_query_segment(p_storage& storage,
                                std::span<const minimap_sketch_data> query_minimizers,
                                sequence_size_t target_len,
