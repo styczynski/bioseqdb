@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Implements SIMD sorting networks.
-
 // Per-target
 #if defined(HIGHWAY_HWY_CONTRIB_SORT_SORTING_NETWORKS_TOGGLE) == \
     defined(HWY_TARGET_TOGGLE)

@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Defines SIMD sorting traits for 128-bit vectors.
-
 // Per-target
 #if defined(HIGHWAY_HWY_CONTRIB_SORT_TRAITS128_TOGGLE) == \
     defined(HWY_TARGET_TOGGLE)

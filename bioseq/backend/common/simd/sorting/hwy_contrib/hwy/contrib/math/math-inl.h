@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Provides SIMD mathematical operations.
-
 // Include guard (still compiled once per target)
 #if defined(HIGHWAY_HWY_CONTRIB_MATH_MATH_INL_H_) == \
     defined(HWY_TARGET_TOGGLE)  // NOLINT

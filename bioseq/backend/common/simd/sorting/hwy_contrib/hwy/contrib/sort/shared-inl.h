@@ -15,9 +15,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Defines helpers shared by SIMD sorting implementations.
-
 // Definitions shared between vqsort-inl and sorting_networks-inl.
 
 // Normal include guard for target-independent parts

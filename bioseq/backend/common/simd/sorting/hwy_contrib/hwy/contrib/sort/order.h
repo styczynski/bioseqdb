@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Defines tags for ascending and descending sort order.
-
 // Tag arguments that determine the sort order. Used by both vqsort.h and the
 // VQSortStatic in vqsort-inl.h. Moved to a separate header so that the latter
 // can be used without pulling in the dllimport statements in vqsort.h.

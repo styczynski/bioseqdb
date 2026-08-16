@@ -13,9 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// @file
-/// Provides SIMD copy operations.
-
 // Per-target include guard
 #if defined(HIGHWAY_HWY_CONTRIB_ALGO_COPY_INL_H_) == \
     defined(HWY_TARGET_TOGGLE)  // NOLINT
