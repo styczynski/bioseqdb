@@ -80,7 +80,8 @@ concept fragmented_sequence_scanner = sequence_scanner<p_scanner>
         { scanner.load_fragment(fragment_index) }
             -> std::same_as<typename p_scanner::base_container>;
         { scanner.trailing_padding() } -> std::convertible_to<std::size_t>;
-        { scanner.release_fragment(fragment_index) } -> std::same_as<void>;
+        { scanner.release_fragment(fragment_index) } noexcept
+            -> std::same_as<void>;
     };
 
 /** Stateless scanner tag for an already-resident compact sequence. */
