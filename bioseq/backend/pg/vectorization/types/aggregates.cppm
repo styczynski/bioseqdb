@@ -85,9 +85,9 @@ fold_vector(std::optional<p_state> state, const std::optional<p_column>& input, 
     if (!state.has_value() || !input.has_value()) {
         return state;
     }
-    for (std::size_t lane = 0; lane < input->size(); ++lane) {
-        if (!input->is_null(lane)) {
-            std::invoke(fold, *state, input->value(lane));
+    for (std::size_t lane_index = 0; lane_index < input->size(); ++lane_index) {
+        if (!input->is_null(lane_index)) {
+            std::invoke(fold, *state, input->value(lane_index));
         }
     }
     return state;
@@ -104,10 +104,10 @@ accumulate_integer_average_state(
         return state;
     }
     int64_aggregate_state_storage& accumulator = state->value();
-    for (std::size_t lane = 0; lane < input->size(); ++lane) {
-        if (!input->is_null(lane)) {
+    for (std::size_t lane_index = 0; lane_index < input->size(); ++lane_index) {
+        if (!input->is_null(lane_index)) {
             ++accumulator.count;
-            accumulator.sum += static_cast<std::int64_t>(input->value(lane));
+            accumulator.sum += static_cast<std::int64_t>(input->value(lane_index));
         }
     }
     return state;
@@ -120,10 +120,11 @@ accumulate_integer_average_state(
         bioseq::postgres::support::invoke_pg_as_cpp([count] { return int64_to_numeric(count); });
     Numeric sum_numeric =
         bioseq::postgres::support::invoke_pg_as_cpp([sum] { return int64_to_numeric(sum); });
-    Numeric result = bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
-        return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
-    });
-    return bioseq::postgres::support::numeric_result::from_numeric(result);
+    Numeric quotient_numeric =
+        bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
+            return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
+        });
+    return bioseq::postgres::support::numeric_result::from_numeric(quotient_numeric);
 }
 
 /** Divides an int128 aggregate sum by its count as PostgreSQL Numeric. */
@@ -133,10 +134,11 @@ numeric_average(const int128_aggregate_state_storage& state) {
         [sum = state.sum] { return int128_to_numeric(sum); });
     Numeric count_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
         [count = state.count] { return int128_to_numeric(count); });
-    Numeric result = bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
-        return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
-    });
-    return bioseq::postgres::support::numeric_result::from_numeric(result);
+    Numeric quotient_numeric =
+        bioseq::postgres::support::invoke_pg_as_cpp([sum_numeric, count_numeric] {
+            return numeric_div_opt_error(sum_numeric, count_numeric, nullptr);
+        });
+    return bioseq::postgres::support::numeric_result::from_numeric(quotient_numeric);
 }
 
 } // namespace
@@ -358,19 +360,19 @@ export namespace bioseq::vector::aggregate_sql_routines {
     }
     if (!state.has_value()) {
         const MemoryContext aggregate_context = context.aggregate_memory_context();
-        int128_aggregate_state_storage* const allocated =
+        int128_aggregate_state_storage* const allocated_state =
             bioseq::postgres::support::invoke_pg_as_cpp([aggregate_context] {
                 return static_cast<int128_aggregate_state_storage*>(MemoryContextAllocZero(
                     aggregate_context, sizeof(int128_aggregate_state_storage)));
             });
-        allocated->calculate_sum_of_squares = false;
-        state = bioseq::postgres::support::int128_aggregate_state::from_new(allocated);
+        allocated_state->calculate_sum_of_squares = false;
+        state = bioseq::postgres::support::int128_aggregate_state::from_new(allocated_state);
     }
-    int128_aggregate_state_storage& value = state->value();
-    for (std::size_t lane = 0; lane < input->size(); ++lane) {
-        if (!input->is_null(lane)) {
-            ++value.count;
-            value.sum += static_cast<int128>(input->value(lane));
+    int128_aggregate_state_storage& accumulator = state->value();
+    for (std::size_t lane_index = 0; lane_index < input->size(); ++lane_index) {
+        if (!input->is_null(lane_index)) {
+            ++accumulator.count;
+            accumulator.sum += static_cast<int128>(input->value(lane_index));
         }
     }
     return state;
@@ -390,9 +392,9 @@ export namespace bioseq::vector::aggregate_sql_routines {
     if (!state.has_value() || state->value().count == 0) {
         return std::nullopt;
     }
-    Numeric numeric = bioseq::postgres::support::invoke_pg_as_cpp(
+    Numeric sum_numeric = bioseq::postgres::support::invoke_pg_as_cpp(
         [sum = state->value().sum] { return int128_to_numeric(sum); });
-    return bioseq::postgres::support::numeric_result::from_numeric(numeric);
+    return bioseq::postgres::support::numeric_result::from_numeric(sum_numeric);
 }
 
 /** Finalizes a BIGINT average as Numeric. */
@@ -501,7 +503,7 @@ void reset_runtime_owner_visits() noexcept {
 
 /** Requires every generated aggregate owner to have executed at least once. */
 void validate_runtime_owner_visits() {
-    static constexpr std::array<std::string_view, 18> names{
+    static constexpr std::array<std::string_view, 18> owner_names{
         "vemptycount",
         "vanycount",
         "vint2sum",
@@ -521,17 +523,17 @@ void validate_runtime_owner_visits() {
         "vdatelarger",
         "vdatesmaller",
     };
-    static_assert(names.size() == aggregate_owner_runtime_visits.size());
-    std::string missing;
-    for (std::size_t index = 0; index != names.size(); ++index) {
+    static_assert(owner_names.size() == aggregate_owner_runtime_visits.size());
+    std::string missing_owner_names;
+    for (std::size_t index = 0; index != owner_names.size(); ++index) {
         if (aggregate_owner_runtime_visits[index] != 0)
             continue;
-        if (!missing.empty())
-            missing.append(", ");
-        missing.append(names[index]);
+        if (!missing_owner_names.empty())
+            missing_owner_names.append(", ");
+        missing_owner_names.append(owner_names[index]);
     }
-    if (!missing.empty()) {
-        throw std::runtime_error{"aggregate owners were not executed: " + missing};
+    if (!missing_owner_names.empty()) {
+        throw std::runtime_error{"aggregate owners were not executed: " + missing_owner_names};
     }
 }
 
@@ -552,58 +554,64 @@ void validate_int8_serial_roundtrip() {
     source.count = 3;
     source.sum = (static_cast<int128>(1) << 80) + static_cast<int128>(388);
 
-    const Datum serialized = bioseq::postgres::support::invoke_pg_as_cpp([&aggregate_context,
-                                                                          &source] {
-        FmgrInfo function{};
-        fmgr_info(F_INT8_AVG_SERIALIZE, &function);
-        LOCAL_FCINFO(call, 1);
-        InitFunctionCallInfoData(
-            *call, &function, 1, InvalidOid, reinterpret_cast<Node*>(&aggregate_context), nullptr);
-        call->args[0].value = PointerGetDatum(&source);
-        call->args[0].isnull = false;
-        const Datum result = FunctionCallInvoke(call);
-        if (call->isnull) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATA_EXCEPTION),
-                     errmsg_internal("int8_avg_serialize returned "
-                                     "NULL")));
-        }
-        return result;
-    });
-    int128_aggregate_state_storage* const decoded =
-        bioseq::postgres::support::invoke_pg_as_cpp([&aggregate_context, serialized] {
-            FmgrInfo function{};
-            fmgr_info(F_INT8_AVG_DESERIALIZE, &function);
-            LOCAL_FCINFO(call, 2);
-            InitFunctionCallInfoData(*call,
-                                     &function,
+    const Datum serialized_state_datum =
+        bioseq::postgres::support::invoke_pg_as_cpp([&aggregate_context, &source] {
+            FmgrInfo serialization_function_info{};
+            fmgr_info(F_INT8_AVG_SERIALIZE, &serialization_function_info);
+            LOCAL_FCINFO(serialization_call, 1);
+            InitFunctionCallInfoData(*serialization_call,
+                                     &serialization_function_info,
+                                     1,
+                                     InvalidOid,
+                                     reinterpret_cast<Node*>(&aggregate_context),
+                                     nullptr);
+            serialization_call->args[0].value = PointerGetDatum(&source);
+            serialization_call->args[0].isnull = false;
+            const Datum serialized_result = FunctionCallInvoke(serialization_call);
+            if (serialization_call->isnull) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_EXCEPTION),
+                         errmsg_internal("int8_avg_serialize returned "
+                                         "NULL")));
+            }
+            return serialized_result;
+        });
+    int128_aggregate_state_storage* const decoded_state =
+        bioseq::postgres::support::invoke_pg_as_cpp([&aggregate_context, serialized_state_datum] {
+            FmgrInfo deserialization_function_info{};
+            fmgr_info(F_INT8_AVG_DESERIALIZE, &deserialization_function_info);
+            LOCAL_FCINFO(deserialization_call, 2);
+            InitFunctionCallInfoData(*deserialization_call,
+                                     &deserialization_function_info,
                                      2,
                                      InvalidOid,
                                      reinterpret_cast<Node*>(&aggregate_context),
                                      nullptr);
-            call->args[0].value = serialized;
-            call->args[0].isnull = false;
-            call->args[1].value = PointerGetDatum(nullptr);
-            call->args[1].isnull = true;
-            const Datum result = FunctionCallInvoke(call);
-            if (call->isnull) {
+            deserialization_call->args[0].value = serialized_state_datum;
+            deserialization_call->args[0].isnull = false;
+            deserialization_call->args[1].value = PointerGetDatum(nullptr);
+            deserialization_call->args[1].isnull = true;
+            const Datum deserialized_result = FunctionCallInvoke(deserialization_call);
+            if (deserialization_call->isnull) {
                 ereport(ERROR,
                         (errcode(ERRCODE_DATA_EXCEPTION),
                          errmsg_internal("int8_avg_deserialize returned "
                                          "NULL")));
             }
-            return reinterpret_cast<int128_aggregate_state_storage*>(DatumGetPointer(result));
+            return reinterpret_cast<int128_aggregate_state_storage*>(
+                DatumGetPointer(deserialized_result));
         });
 
-    const bool matches = decoded != nullptr &&
-                         decoded->calculate_sum_of_squares == source.calculate_sum_of_squares &&
-                         decoded->count == source.count && decoded->sum == source.sum;
-    bioseq::postgres::support::invoke_pg_as_cpp([serialized, decoded] {
-        if (decoded != nullptr)
-            pfree(decoded);
-        pfree(DatumGetPointer(serialized));
+    const bool roundtrip_matches =
+        decoded_state != nullptr &&
+        decoded_state->calculate_sum_of_squares == source.calculate_sum_of_squares &&
+        decoded_state->count == source.count && decoded_state->sum == source.sum;
+    bioseq::postgres::support::invoke_pg_as_cpp([serialized_state_datum, decoded_state] {
+        if (decoded_state != nullptr)
+            pfree(decoded_state);
+        pfree(DatumGetPointer(serialized_state_datum));
     });
-    if (!matches) {
+    if (!roundtrip_matches) {
         throw std::runtime_error{"int8 aggregate serialization state changed"};
     }
 }
