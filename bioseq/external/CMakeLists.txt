@@ -8,6 +8,7 @@ get_filename_component(BIOSEQ_REPOSITORY_ROOT
   "${CMAKE_SOURCE_DIR}" ABSOLUTE)
 get_filename_component(_bioseq_external_source_root
   "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+include("${BIOSEQ_REPOSITORY_ROOT}/cmake/bioseq_source_inventory.cmake")
 
 if(NOT DEFINED BIOSEQ_EXTERNAL_GENERATED_ROOT)
   set(BIOSEQ_EXTERNAL_GENERATED_ROOT
@@ -251,8 +252,11 @@ endforeach()
 # Owns bioseq.external.provider.* and links only the runtime/leaf/templating
 # cores so metadata provider clients never schedule the sequence graph.
 # ---------------------------------------------------------------------------
-file(GLOB _bioseq_provider_core_modules CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/provider/*.cppm")
+bioseq_collect_authored_sources(
+  _bioseq_provider_core_modules
+  BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/provider"
+  INCLUDE_PATTERNS "*.cppm"
+  EXPECTED_COUNT 14)
 add_library(bioseq_external_provider_core STATIC)
 set_target_properties(bioseq_external_provider_core PROPERTIES
   CXX_STANDARD 26
@@ -280,8 +284,11 @@ target_sources(bioseq_external_provider_core
 # PostgreSQL, alphabet, or transfer edge.
 # ---------------------------------------------------------------------------
 find_package(simdjson CONFIG REQUIRED)
-file(GLOB _bioseq_provider_adapter_modules CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/providers/*.cppm")
+bioseq_collect_authored_sources(
+  _bioseq_provider_adapter_modules
+  BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/providers"
+  INCLUDE_PATTERNS "*.cppm"
+  EXPECTED_COUNT 6)
 if(_bioseq_provider_adapter_modules)
   add_library(bioseq_external_provider_adapters STATIC)
   set_target_properties(bioseq_external_provider_adapters PROPERTIES
@@ -401,20 +408,14 @@ if(TARGET bioseq_external_api_integration_tests)
   target_compile_definitions(bioseq_external_api_integration_tests PRIVATE
     BIOSEQ_PG_PACK_DENYLIST_ENABLED=1)
 
-  set(_bioseq_provider_test_sources
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/archive_source_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/fasta_stream_benchmark_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/gzip_decode_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/lazy_adapter_no_pg_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/sequence_stream_live_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/io/streaming_live_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/core_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/rate_limit_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/run_live_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/provider/ucsc_live_test.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/tests/transport/transfer_service_test.cpp")
+  bioseq_collect_authored_sources(
+    _bioseq_external_integration_test_sources
+    RECURSE
+    BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+    INCLUDE_PATTERNS "*_test.cpp"
+    EXPECTED_COUNT 11)
   target_sources(bioseq_external_api_integration_tests PRIVATE
-    ${_bioseq_provider_test_sources})
+    ${_bioseq_external_integration_test_sources})
   target_link_libraries(bioseq_external_api_integration_tests PRIVATE
     bioseq_external_provider_core
     bioseq_external_io)
