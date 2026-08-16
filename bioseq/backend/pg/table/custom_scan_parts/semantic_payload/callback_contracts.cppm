@@ -107,10 +107,6 @@ export {
     };
 
     /* functions to cost paths in-place */
-    void cost_bioseq_column_index_path(PlannerInfo* root,
-                                       RelOptInfo* rel,
-                                       Oid relation_id,
-                                       IndexPath* index_path);
     void adjust_bioseq_column_parallel_scan_cost(Path* path);
     void cost_bioseq_column_scan(PlannerInfo* root,
                                  RelOptInfo* rel,
@@ -126,10 +122,6 @@ export {
                                       Relids required_relids);
 
     /* helper functions to be used when costing paths or altering them */
-    Cost bioseq_column_index_scan_additional_cost(PlannerInfo* root,
-                                                  RelOptInfo* rel,
-                                                  Oid relation_id,
-                                                  IndexPath* index_path);
     Cost bioseq_column_per_stripe_scan_cost(RelOptInfo* rel,
                                             Oid relation_id,
                                             int number_of_columns_read);

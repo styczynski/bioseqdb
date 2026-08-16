@@ -166,77 +166,6 @@ export {
     }
 
     /*
-     * CostBioseqColumnPaths re-costs paths of given RelOptInfo for
-     * columnar table with relationId.
-     */
-    void cost_bioseq_column_paths(PlannerInfo* root, RelOptInfo* rel, Oid relation_id) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
-        for (auto path : postgres_list<Path>(rel->pathlist)) {
-            if (pg_node_view{to_pg_node(path)}.is_type<IndexPath>()) {
-                /*
-                 * Since we don't provide implementations for scan_bitmap_next_block
-                 * & scan_bitmap_next_tuple, postgres doesn't generate bitmap index
-                 * scan paths for columnar tables already (see related comments in
-                 * TableAmRoutine). For this reason, we only consider IndexPath's
-                 * here.
-                 */
-                cost_bioseq_column_index_path(
-                    root, rel, relation_id, reinterpret_cast<IndexPath*>(path));
-            } else if (path->pathtype == T_SeqScan) {
-                cost_bioseq_column_seq_path(rel, relation_id, path);
-            }
-        }
-    }
-
-    /*
-     * CostBioseqColumnIndexPath re-costs given index path for columnar table with
-     * relationId.
-     */
-    void cost_bioseq_column_index_path(PlannerInfo* root,
-                                       RelOptInfo* rel,
-                                       Oid relation_id,
-                                       IndexPath* index_path) {
-        if (!enable_indexscan) {
-            bioseq_log<logging_level::debug>(
-                "[bioseq] pg: CostBioseqColumnIndexPath() skipped (enable_indexscan=false)");
-            /* costs are already set to disable_cost, don't adjust them */
-            return;
-        }
-
-        bioseq_log_pg(DEBUG4,
-                      "columnar table index scan costs estimated by "
-                      "indexAM: startup cost = {:.10f}, total cost = "
-                      "{:.10f}",
-                      index_path->path.startup_cost,
-                      index_path->path.total_cost);
-
-        /*
-         * We estimate the cost for columnar table read during index scan. Also,
-         * instead of overwriting total cost, we "add" ours to the cost estimated
-         * by indexAM since we should consider index traversal related costs too.
-         */
-
-        if (!bioseq::settings::planner::index_scan::enabled) {
-            bioseq_log<logging_level::debug>(
-                "[bioseq] pg: CostBioseqColumnIndexPath() "
-                "bioseq::settings::planner::index_scan::enabled disabled, adding columnar cost");
-            Cost bioseq_column_index_scan_cost =
-                bioseq_column_index_scan_additional_cost(root, rel, relation_id, index_path);
-            index_path->path.total_cost += bioseq_column_index_scan_cost;
-        }
-
-        bioseq_log<logging_level::debug>(
-            "[bioseq] pg: CostBioseqColumnIndexPath() cost computation complete");
-
-        bioseq_log_pg(DEBUG4,
-                      "columnar table index scan costs re-estimated "
-                      "by columnarAM (including indexAM costs): "
-                      "startup cost = {:.10f}, total cost = {:.10f}",
-                      index_path->path.startup_cost,
-                      index_path->path.total_cost);
-    }
-
-    /*
      * BioseqColumnIndexScanAdditionalCost returns additional cost estimated for
      * index scan described by IndexPath for columnar table with relationId.
      */
@@ -333,6 +262,77 @@ export {
                       scan_cost);
 
         return scan_cost;
+    }
+
+    /*
+     * CostBioseqColumnIndexPath re-costs given index path for columnar table with
+     * relationId.
+     */
+    void cost_bioseq_column_index_path(PlannerInfo* root,
+                                       RelOptInfo* rel,
+                                       Oid relation_id,
+                                       IndexPath* index_path) {
+        if (!enable_indexscan) {
+            bioseq_log<logging_level::debug>(
+                "[bioseq] pg: CostBioseqColumnIndexPath() skipped (enable_indexscan=false)");
+            /* costs are already set to disable_cost, don't adjust them */
+            return;
+        }
+
+        bioseq_log_pg(DEBUG4,
+                      "columnar table index scan costs estimated by "
+                      "indexAM: startup cost = {:.10f}, total cost = "
+                      "{:.10f}",
+                      index_path->path.startup_cost,
+                      index_path->path.total_cost);
+
+        /*
+         * We estimate the cost for columnar table read during index scan. Also,
+         * instead of overwriting total cost, we "add" ours to the cost estimated
+         * by indexAM since we should consider index traversal related costs too.
+         */
+
+        if (!bioseq::settings::planner::index_scan::enabled) {
+            bioseq_log<logging_level::debug>(
+                "[bioseq] pg: CostBioseqColumnIndexPath() "
+                "bioseq::settings::planner::index_scan::enabled disabled, adding columnar cost");
+            Cost bioseq_column_index_scan_cost =
+                bioseq_column_index_scan_additional_cost(root, rel, relation_id, index_path);
+            index_path->path.total_cost += bioseq_column_index_scan_cost;
+        }
+
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: CostBioseqColumnIndexPath() cost computation complete");
+
+        bioseq_log_pg(DEBUG4,
+                      "columnar table index scan costs re-estimated "
+                      "by columnarAM (including indexAM costs): "
+                      "startup cost = {:.10f}, total cost = {:.10f}",
+                      index_path->path.startup_cost,
+                      index_path->path.total_cost);
+    }
+
+    /*
+     * CostBioseqColumnPaths re-costs paths of given RelOptInfo for
+     * columnar table with relationId.
+     */
+    void cost_bioseq_column_paths(PlannerInfo* root, RelOptInfo* rel, Oid relation_id) {
+        bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
+        for (auto path : postgres_list<Path>(rel->pathlist)) {
+            if (pg_node_view{to_pg_node(path)}.is_type<IndexPath>()) {
+                /*
+                 * Since we don't provide implementations for scan_bitmap_next_block
+                 * & scan_bitmap_next_tuple, postgres doesn't generate bitmap index
+                 * scan paths for columnar tables already (see related comments in
+                 * TableAmRoutine). For this reason, we only consider IndexPath's
+                 * here.
+                 */
+                cost_bioseq_column_index_path(
+                    root, rel, relation_id, reinterpret_cast<IndexPath*>(path));
+            } else if (path->pathtype == T_SeqScan) {
+                cost_bioseq_column_seq_path(rel, relation_id, path);
+            }
+        }
     }
 
     /*
