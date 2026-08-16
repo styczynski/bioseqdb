@@ -29,7 +29,9 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
+/// Fixed shader-kind counter capacity in each per-job audit.
 inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
+/// Maximum distinct prepared pipeline identities retained by one token.
 inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 11u;
 
 /// @brief Exact 8-bit radix pass count for the persisted grouped-SoA Anchor ref_bits
@@ -57,9 +59,9 @@ runtime_grouped_soa_radix_pass_count(std::uint64_t target_position_offset,
 
 /// @brief Semantic operation families tracked by pipeline-use receipts.
 enum class runtime_pipeline_operation_kind : std::uint8_t {
-    invalid,
-    query_sketch,
-    grouped_soa_coordinate,
+    invalid,                ///< Unissued or moved-from operation.
+    query_sketch,           ///< Query sketch count, scan, and emit operation.
+    grouped_soa_coordinate, ///< Direct persisted seed-to-coordinate operation.
 };
 
 /// @brief Exact cache load and pipeline-creation metrics for one operation.
@@ -306,8 +308,8 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_gpu_cache_metrics_del
 
 /// @brief Accepted immutable pipeline-cache policy for GPU operations.
 enum class runtime_pipeline_cache_policy : std::uint8_t {
-    invalid,
-    immutable_preseed_all_hit,
+    invalid,                   ///< No accepted cache policy.
+    immutable_preseed_all_hit, ///< Every pipeline came from the sealed preseed set.
 };
 
 /// @brief Immutable GPU environment identity attached to accepted operations.
@@ -730,6 +732,7 @@ class runtime_pipeline_use_collector {
     }
 
   private:
+    /// @brief Dispatch and workgroup deltas recorded before one submission commits.
     struct pending_job {
         std::array<std::uint64_t, k_runtime_pipeline_kind_slots> dispatches{};
         std::array<std::uint64_t, k_runtime_pipeline_kind_slots> workgroups{};
@@ -1217,14 +1220,17 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         if (!receipts[i].is_valid())
             return false;
     }
+    // Creates stable non-null command identities without allocating Vulkan objects.
     const auto command = [](std::uintptr_t identity) {
         return reinterpret_cast<VkCommandBuffer>(identity);
     };
+    // Registers the three pipelines required by query sketching.
     const auto prepare_query = [&keys, &receipts](runtime_pipeline_use_collector& collector) {
         for (std::size_t i = 0u; i < 3u; ++i) {
             collector.prepare(keys[i], &receipts[i]);
         }
     };
+    // Builds a fully committed two-submission query token.
     const auto query_golden = [&keys, &prepare_query, &receipts, command]() {
         auto collector = runtime_pipeline_use_collector::create(
             runtime_pipeline_operation_kind::query_sketch, 1u, 101u);
@@ -1273,6 +1279,7 @@ inline bool runtime_pipeline_operation_token::self_test_causal_collector_contrac
         return false;
     }
 
+    // Builds one malformed collector state selected by `mode` for rejection checks.
     const auto rejected_query = [&keys, &prepare_query, &receipts, command](std::uint64_t identity,
                                                                             int mode) {
         auto collector = runtime_pipeline_use_collector::create(

@@ -169,6 +169,7 @@ struct spirv_layout_scan {
 
     if (spirv.size() < 5 || spirv[0] != k_spirv_magic) return scan;
 
+    // Accumulates object-level descriptor and array-stride decorations by SPIR-V id.
     struct decoration_record {
         std::uint32_t id = 0;
         std::uint32_t binding = k_spirv_layout_unknown;
@@ -178,23 +179,28 @@ struct spirv_layout_scan {
         bool has_descriptor_set = false;
         bool has_array_stride = false;
     };
+    // Accumulates member offsets for one reflected structure type.
     struct member_decoration_record {
         std::uint32_t struct_id = 0;
         std::vector<std::uint32_t> offsets;
     };
+    // Retains the member type ids of one OpTypeStruct declaration.
     struct struct_type_record {
         std::uint32_t id = 0;
         std::vector<std::uint32_t> member_types;
     };
+    // Binds an array type id to its element type for descriptor traversal.
     struct array_type_record {
         std::uint32_t id = 0;
         std::uint32_t element_type = 0;
     };
+    // Records the pointee and storage class of one pointer type.
     struct pointer_type_record {
         std::uint32_t id = 0;
         std::uint32_t storage_class = 0;
         std::uint32_t pointee_type = 0;
     };
+    // Connects one variable id to its pointer type and storage class.
     struct variable_record {
         std::uint32_t id = 0;
         std::uint32_t result_type = 0;
@@ -208,6 +214,7 @@ struct spirv_layout_scan {
     std::vector<pointer_type_record> pointer_types;
     std::vector<variable_record> variables;
 
+    // Finds or creates the mutable decoration aggregate for an object id.
     const auto decoration_for = [&decorations](std::uint32_t id)
         -> decoration_record& {
         for (auto& candidate : decorations) {
@@ -217,6 +224,7 @@ struct spirv_layout_scan {
         decorations.back().id = id;
         return decorations.back();
     };
+    // Finds or creates the mutable member-offset aggregate for a structure id.
     const auto member_decoration_for = [&member_decorations](std::uint32_t id)
         -> member_decoration_record& {
         for (auto& candidate : member_decorations) {
@@ -287,6 +295,7 @@ struct spirv_layout_scan {
         word_index += word_count;
     }
 
+    // Resolves object-level decorations without extending the parsed inventory.
     const auto find_decoration = [&decorations](std::uint32_t id)
         -> const decoration_record* {
         for (const auto& candidate : decorations) {
@@ -294,6 +303,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
+    // Resolves the ordered member offsets recorded for a structure id.
     const auto find_member_offsets = [&member_decorations](std::uint32_t id)
         -> const std::vector<std::uint32_t>* {
         for (const auto& candidate : member_decorations) {
@@ -301,6 +311,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
+    // Resolves a parsed structure declaration by id.
     const auto find_struct = [&struct_types](std::uint32_t id)
         -> const struct_type_record* {
         for (const auto& candidate : struct_types) {
@@ -308,6 +319,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
+    // Resolves a parsed array declaration by id.
     const auto find_array = [&array_types](std::uint32_t id)
         -> const array_type_record* {
         for (const auto& candidate : array_types) {
@@ -315,6 +327,7 @@ struct spirv_layout_scan {
         }
         return nullptr;
     };
+    // Resolves a parsed pointer declaration by id.
     const auto find_pointer = [&pointer_types](std::uint32_t id)
         -> const pointer_type_record* {
         for (const auto& candidate : pointer_types) {

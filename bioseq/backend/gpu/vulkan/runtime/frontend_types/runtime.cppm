@@ -109,6 +109,11 @@ class runtime {
     /// @return Physical device-memory requirement in bytes.
     [[nodiscard]] std::uint64_t gpu_arena_allocation_requirement(std::uint64_t requested_bytes);
     /// @brief Computes complete arena and output admission requirements for a sketch batch.
+    /// @param[in] packed_sequence_bytes Logical packed-sequence bytes for the batch.
+    /// @param[in] tile_count Number of sketch tiles in the batch.
+    /// @param[in] minimizer_word_kind Minimizer word encoding kind for output sizing.
+    /// @param[in] minimizer_words32 `uint32_t` words per minimizer record.
+    /// @param[in] max_minimizers Caller pessimistic minimizer cap for output admission.
     /// @return Validated arena, output, and peak allocation requirements.
     [[nodiscard]] gpu_sketch_batch_allocation_requirements
     sketch_batch_allocation_requirements(std::uint64_t packed_sequence_bytes,
@@ -430,12 +435,12 @@ class runtime {
     };
 
     struct owned_pipeline_handles {
-        VkDevice device = VK_NULL_HANDLE;
-        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
-        VkShaderModule module = VK_NULL_HANDLE;
-        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkDevice device = VK_NULL_HANDLE;                 ///< Vulkan device owning every handle below.
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE; ///< Descriptor set layout for the pipeline.
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE; ///< Pipeline layout binding descriptors and push constants.
+        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE; ///< Descriptor pool for reusable sets.
+        VkShaderModule module = VK_NULL_HANDLE;            ///< Shader module compiled for the pipeline.
+        VkPipeline pipeline = VK_NULL_HANDLE;                ///< Compute pipeline handle.
 
         /// @brief Constructs an empty handle owner.
         owned_pipeline_handles() = default;
@@ -478,11 +483,11 @@ class runtime {
 
     /// @brief One cached compute pipeline plus its shader module, keyed by tile/local.
     struct pipeline_entry {
-        chaining_pipeline_key key{};
-        owned_pipeline_handles handles{};
-        std::string entry_name = "main";
-        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{};
-        std::uint64_t pipeline_create_ns = 0u;
+        chaining_pipeline_key key{}; ///< Tile and local-size identity for tiled chaining.
+        owned_pipeline_handles handles{}; ///< Owned Vulkan handles for the cached pipeline.
+        std::string entry_name = "main"; ///< Shader entry point recorded at creation.
+        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{}; ///< Optional Metal archive receipt.
+        std::uint64_t pipeline_create_ns = 0u; ///< Nanoseconds spent creating the pipeline.
 
         /// @brief Constructs an empty cached pipeline entry.
         pipeline_entry() = default;
@@ -497,9 +502,9 @@ class runtime {
     };
 
     struct chaining_pipeline {
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        shader_variant_key shader_key{};
-        const runtime_metal_archive_pipeline_receipt* metal_archive_receipt = nullptr;
+        VkPipeline pipeline = VK_NULL_HANDLE; ///< Borrowed compute pipeline for one chaining dispatch.
+        shader_variant_key shader_key{};      ///< Shader identity used to create the pipeline.
+        const runtime_metal_archive_pipeline_receipt* metal_archive_receipt = nullptr; ///< Receipt when loaded from Metal archive.
     };
 
     /// @brief One cached seed-lookup compute pipeline with its own
@@ -508,31 +513,31 @@ class runtime {
     /// set. Keyed by (kind, local_size, max_span) — the only fields that change
     /// the emitted SPIR-V. Alphabet/word routing is a runtime push constant.
     struct compute_pipeline {
-        shader_kind kind{};
-        std::uint32_t local_size = 0;
-        std::uint32_t max_span = 0;
-        std::uint32_t binding_count = 0;
-        std::uint32_t push_size = 0;
-        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-        VkShaderModule module = VK_NULL_HANDLE;
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        const runtime_metal_archive_pipeline_receipt* metal_archive_receipt = nullptr;
+        shader_kind kind{};                         ///< Shader family routed by the compute cache.
+        std::uint32_t local_size = 0;               ///< Local workgroup size in threads.
+        std::uint32_t max_span = 0;                 ///< Maximum span encoded in specialization constants.
+        std::uint32_t binding_count = 0;            ///< Number of storage-buffer bindings.
+        std::uint32_t push_size = 0;                ///< Push-constant byte size.
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE; ///< Borrowed descriptor set layout.
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE; ///< Borrowed pipeline layout.
+        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE; ///< Borrowed descriptor pool.
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;   ///< Reusable descriptor set for the entry.
+        VkShaderModule module = VK_NULL_HANDLE;            ///< Borrowed shader module.
+        VkPipeline pipeline = VK_NULL_HANDLE;            ///< Borrowed compute pipeline.
+        const runtime_metal_archive_pipeline_receipt* metal_archive_receipt = nullptr; ///< Receipt when loaded from Metal archive.
     };
 
     struct owned_compute_pipeline {
-        shader_kind kind{};
-        std::uint32_t local_size = 0;
-        std::uint32_t max_span = 0;
-        std::uint32_t binding_count = 0;
-        std::uint32_t push_size = 0;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-        owned_pipeline_handles handles{};
-        std::string entry_name = "main";
-        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{};
-        std::uint64_t pipeline_create_ns = 0u;
+        shader_kind kind{};                         ///< Shader family owned by the cache entry.
+        std::uint32_t local_size = 0;               ///< Local workgroup size in threads.
+        std::uint32_t max_span = 0;                 ///< Maximum span encoded in specialization constants.
+        std::uint32_t binding_count = 0;            ///< Number of storage-buffer bindings.
+        std::uint32_t push_size = 0;                ///< Push-constant byte size.
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Reusable descriptor set owned by the entry.
+        owned_pipeline_handles handles{};           ///< Owned Vulkan handles for the pipeline.
+        std::string entry_name = "main";            ///< Shader entry point recorded at creation.
+        std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{}; ///< Optional Metal archive receipt.
+        std::uint64_t pipeline_create_ns = 0u;      ///< Nanoseconds spent creating the pipeline.
 
         /// @brief Constructs an empty owned compute pipeline.
         owned_compute_pipeline() = default;
@@ -697,19 +702,19 @@ class runtime {
     }
 
     struct prefilter_recorded_command {
-        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-        shader_kind kind{};
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-        gpu_prefilter_push push{};
-        std::uint32_t groups = 0u;
-        bool recorded = false;
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE; ///< Command buffer containing the recorded dispatch.
+        shader_kind kind{};                              ///< Prefilter shader family for the route.
+        VkPipeline pipeline = VK_NULL_HANDLE;            ///< Pipeline bound when the command was recorded.
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE; ///< Pipeline layout bound with the dispatch.
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Descriptor set bound for the dispatch.
+        gpu_prefilter_push push{};                       ///< Push constants sealed into the recording.
+        std::uint32_t groups = 0u;                       ///< Dispatch group count recorded.
+        bool recorded = false;                           ///< Whether a valid command is cached for replay.
     };
 
     struct prefilter_descriptor_binding_cache {
-        std::array<VkBuffer, 4> buffers{};
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        std::array<VkBuffer, 4> buffers{}; ///< Last bound rank and job buffers for one algorithm.
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE; ///< Descriptor set updated with `buffers`.
     };
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -776,12 +781,15 @@ class runtime {
 };
 
 /// @brief Reports whether runtime initialization selected a hardware Vulkan device.
+/// @param[in] runtime Runtime whose device type is inspected.
 /// @return `true` for an available non-software device.
 [[nodiscard]] inline bool hardware_device_available(const runtime& runtime) noexcept {
     return runtime.is_usable() && !runtime.features().software_device;
 }
 
 /// @brief Rejects an unavailable or software-only Vulkan runtime for an operation.
+/// @param[in] runtime Runtime required to be usable on hardware.
+/// @param[in] operation Human-readable operation name included in thrown diagnostics.
 inline void require_hardware_device(const runtime& runtime, const char* operation) {
     if (!runtime.is_usable()) {
         throw vulkan_runtime_error(fmt::format("{} selected but Vulkan runtime is unavailable: {}",
@@ -799,6 +807,8 @@ inline void require_hardware_device(const runtime& runtime, const char* operatio
 }
 
 /// @brief Computes saturated device and host scratch bytes for anchor sorting.
+/// @param[in] anchor_count Number of seed anchors to sort.
+/// @param[in] workgroup_count Radix-sort workgroup count used for histogram sizing.
 /// @return Total reserved bytes, saturated at the maximum `uint64_t` value.
 [[nodiscard]] inline std::uint64_t
 seed_anchor_reserved_bytes(std::uint64_t anchor_count, std::uint64_t workgroup_count) noexcept {

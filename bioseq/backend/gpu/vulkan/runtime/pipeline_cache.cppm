@@ -25,6 +25,8 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Destroys one pipeline handle set in reverse ownership order.
+///
+/// All handles become null before return. The owning device must still be live.
 void runtime::owned_pipeline_handles::reset() noexcept {
     if (device != VK_NULL_HANDLE) {
         if (pipeline != VK_NULL_HANDLE && vkDestroyPipeline != nullptr) {
@@ -76,6 +78,9 @@ std::uint64_t runtime::pipeline_cache_metadata_bytes_locked() const noexcept {
 }
 
 /// @brief Admits a prospective cache capacity before either vector grows.
+/// @param[in] normal_capacity Proposed chaining-pipeline vector capacity.
+/// @param[in] compute_pipeline_capacity Proposed general compute-pipeline vector capacity.
+/// @throws vulkan_runtime_error When the metadata reservation is not admitted.
 void runtime::admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
                                                  std::size_t compute_pipeline_capacity) {
     using bioseq::common::saturating_add;
@@ -154,6 +159,9 @@ void runtime::reconcile_pipeline_cache_metadata_locked() noexcept {
 }
 
 /// @brief Creates one chaining pipeline and binds its immutable Metal archive receipt.
+/// @param[in] key Tile and local-size specialization used as the cache key.
+/// @return Pipeline view whose handles and receipt remain valid while the cache entry is retained.
+/// @throws vulkan_runtime_error When shader loading, ABI validation, policy, or creation fails.
 runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeline_key& key) {
     const bool provider_used = should_use_shader_provider_locked();
     const bool archive_receipt_required =
@@ -328,6 +336,11 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
 // ---------------------------------------------------------------------------
 
 /// @brief Returns a cached compute pipeline or creates its exact shader variant.
+/// @param[in] kind Shader program selected for the pipeline.
+/// @param[in] local_size Variant local-size parameter.
+/// @param[in] max_span Variant span or geometry parameter.
+/// @return Non-owning view valid while its cache entry and runtime remain alive.
+/// @throws vulkan_runtime_error When geometry, shader loading, policy, or creation fails.
 runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
                                                                std::uint32_t local_size,
                                                                std::uint32_t max_span) {
@@ -584,6 +597,8 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
 }
 
 /// @brief Updates one reusable descriptor set with whole-buffer storage bindings.
+/// @param[in] entry Pipeline whose descriptor set is updated.
+/// @param[in] buffers Buffer handles ordered by shader binding number.
 void runtime::bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                        std::span<const VkBuffer> buffers) {
     DEBUG_ASSERT(buffers.size() == entry.binding_count,

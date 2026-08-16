@@ -72,9 +72,9 @@ struct gpu_grouped_soa_resident_view {
 
 /// @brief Mutually exclusive resident target-index representations accepted by seeding.
 enum class gpu_seed_index_representation : std::uint8_t {
-    invalid = 0,
-    source_direct_sorted_dense = 1,
-    grouped_soa = 2,
+    invalid = 0,                    ///< Missing or mixed resident inputs.
+    source_direct_sorted_dense = 1, ///< Sorted dense slot and position buffers.
+    grouped_soa = 2,                ///< Authenticated persisted grouped-SoA buffers.
 };
 
 /// @brief One resident target-index job in a batched seed→coordinate run. Source-direct
@@ -95,6 +95,7 @@ struct gpu_seed_coordinate_job {
 };
 
 /// @brief Determines which mutually exclusive resident-index representation a job uses.
+/// @param[in] job Resident buffers and representation fields to classify.
 /// @return The selected representation, or `invalid` for mixed or incomplete inputs.
 [[nodiscard]] inline constexpr gpu_seed_index_representation
 classify_gpu_seed_index_representation(const gpu_seed_coordinate_job& job) noexcept {
@@ -116,8 +117,8 @@ classify_gpu_seed_index_representation(const gpu_seed_coordinate_job& job) noexc
 /// coordinate-vote prototype is a distinct algorithm and may never be entered
 /// implicitly as an optimization of tiled-DP.
 enum class gpu_seed_coordinate_algorithm : std::uint8_t {
-    vulkan_tiled_dp = 0,
-    coordinate_vote = 1,
+    vulkan_tiled_dp = 0, ///< Exact tiled dynamic-programming chaining route.
+    coordinate_vote = 1, ///< Approximate diagonal-vote prototype route.
 };
 
 /// @brief Exact algorithm inputs bound into a persisted grouped-SoA coordinate receipt.
@@ -153,6 +154,20 @@ struct persisted_grouped_soa_coordinate_config_identity {
 };
 
 /// @brief Builds an exact configuration identity, preserving float bit patterns.
+/// @param[in] kmer_size K-mer span used during seeding.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @param[in] coordinate_algorithm Coordinate reduction algorithm.
+/// @param[in] chain_key Chaining pipeline specialization.
+/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
+/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
+/// @param[in] bandwidth Chaining diagonal bandwidth.
+/// @param[in] max_iter Maximum predecessors examined per anchor.
+/// @param[in] gap_penalty Chaining gap penalty preserved by bit pattern.
+/// @param[in] skip_penalty Chaining skip penalty preserved by bit pattern.
+/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
+/// @param[in] min_chain_score Minimum accepted chain score.
+/// @param[in] min_seed_count Minimum accepted seed count.
+/// @param[in] probe_limit Maximum coordinate candidates examined.
 /// @return Fully populated configuration identity.
 [[nodiscard]] inline persisted_grouped_soa_coordinate_config_identity
 make_persisted_grouped_soa_coordinate_config_identity(
@@ -204,6 +219,8 @@ struct gpu_seed_coordinate_batch_stats {
 };
 
 /// @brief Compares every coordinate-result wire field.
+/// @param[in] lhs First result wire.
+/// @param[in] rhs Second result wire.
 /// @return `true` when the two wire values are bitwise-field equivalent.
 [[nodiscard]] inline constexpr bool
 are_coordinate_result_wires_equal(const gpu_coordinate_result_wire& lhs,
@@ -216,6 +233,9 @@ are_coordinate_result_wires_equal(const gpu_coordinate_result_wire& lhs,
 }
 
 /// @brief Validates a coordinate result against query and target bounds.
+/// @param[in] result Wire value to validate.
+/// @param[in] query_len Query length in symbols.
+/// @param[in] target_len Target length in symbols.
 /// @return `true` for the canonical empty result or a bounded valid alignment.
 [[nodiscard]] inline constexpr bool
 is_coordinate_result_wire_well_formed(const gpu_coordinate_result_wire& result,
@@ -927,17 +947,20 @@ class persisted_grouped_soa_coordinate_operation_receipt {
   private:
     friend class runtime;
 
+    /// @brief One-shot consumption state for an operation job record.
     enum class record_state : std::uint8_t {
-        fresh,
-        accepted,
-        burned,
+        fresh,    ///< Available for its first validation attempt.
+        accepted, ///< Successfully converted into a job receipt.
+        burned,   ///< Permanently invalidated by failed validation.
     };
 
+    /// @brief Sealed job audit and its one-shot consumption state.
     struct record {
         persisted_grouped_soa_coordinate_job_audit audit{};
         record_state state = record_state::fresh;
     };
 
+    /// @brief Deduplicated pipeline receipts shared by query and shape tokens.
     struct pipeline_receipt_union {
         std::array<shader_variant_key, k_runtime_pipeline_prepared_slots> keys{};
         std::array<const runtime_metal_archive_pipeline_receipt*, k_runtime_pipeline_prepared_slots>
@@ -954,6 +977,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
             !grouped_soa_pipeline_token_.is_valid_for_grouped_soa_coordinate()) {
             return result;
         }
+        // Merges one operation token while rejecting duplicate keys with different receipts.
         const auto merge = [&result](const runtime_pipeline_operation_token& operation) {
             for (std::size_t i = 0u; i < operation.audit_.prepared_count; ++i) {
                 std::size_t slot = result.count;

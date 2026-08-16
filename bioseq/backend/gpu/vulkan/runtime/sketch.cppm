@@ -23,6 +23,14 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Runs one count, scan, and emit sketch roundtrip with host materialization.
+/// @param[in] packed_sequence Borrowed packed sequence bytes consumed before return.
+/// @param[in] rank_lut Rank translation table copied into the arena.
+/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
+/// @param[in] max_minimizers Maximum output count covered by the allocation.
+/// @param[in] query_gate_words Optional canonical query-position gate bitset.
+/// @param[in] query_gate_mask Mask for the final gate word, or zero when no gate is supplied.
+/// @return Sketch count and an owning device buffer when output fits.
+/// @throws vulkan_runtime_error When validation, allocation, submission, or policy checks fail.
 runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> packed_sequence,
                                                     const vulkan_rank_lut& rank_lut,
                                                     const vulkan_sketch_params& params,
@@ -90,7 +98,7 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     }
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    // : the sketch kernel grid-strides one invocation per tile, so the
+    // The sketch kernel grid-strides one invocation per tile, so the
     // dispatch is ceil(num_tiles / local) workgroups CLAMPED to the device limit
     // (the shader loop covers any tiles beyond the clamped grid). No throw — a
     // window larger than 64 * max_workgroup_count_x tiles is still processed
@@ -287,6 +295,15 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
 }
 
 /// @brief Runs a tiled sketch batch while preserving device-only authorization when requested.
+/// @param[in] packed_sequence Borrowed packed sequence bytes consumed before return.
+/// @param[in] rank_lut Rank translation table copied into the arena.
+/// @param[in] params Packed alphabet and minimizer geometry shared by every tile.
+/// @param[in] tiles Dense tile records processed in input order.
+/// @param[in] query_layouts Dense per-query partitions over `tiles`.
+/// @param[in] max_minimizers Maximum output count accepted by the caller.
+/// @param[in] materialization Whether host bytes are copied or device authority is retained.
+/// @return Tile counts, offsets, dispatch statistics, and the owning output buffer.
+/// @throws vulkan_runtime_error When validation, allocation, submission, or policy checks fail.
 runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     std::span<const std::byte> packed_sequence,
     const vulkan_rank_lut& rank_lut,
@@ -367,6 +384,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
                         arena_bytes));
     }
     const gpu_arena_mark mark = arena.mark();
+    // Restores the borrowed arena cursors on normal and exceptional exits.
     struct arena_rewind_guard {
         gpu_arena* arena = nullptr;
         gpu_arena_mark mark{};
@@ -434,6 +452,7 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     const compute_pipeline scan_add_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_add, 128u, 1u);
     if (query_pipeline_collector != nullptr) {
+        // Registers every pipeline whose receipt contributes to query authority.
         const auto prepare = [&query_pipeline_collector](const compute_pipeline& pipe) {
             query_pipeline_collector->prepare(
                 make_shader_key(pipe.kind, 384u, pipe.local_size, pipe.max_span),

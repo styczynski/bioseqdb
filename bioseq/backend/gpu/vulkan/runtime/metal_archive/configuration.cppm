@@ -20,25 +20,37 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Install-once state and live-gate counters for the admitted archive image.
+/**
+ * @brief Process-owned install-once slot for admitted Metal archive configuration.
+ *
+ * The mutex serializes install and snapshot reads. After `sealed` is set, a
+ * different configuration image is rejected. Atomics record live-gate traffic
+ * without rereading archive bytes.
+ */
 struct runtime_metal_archive_configuration_slot {
-    std::mutex mu;
-    std::shared_ptr<const runtime_metal_archive_configuration_image> configuration;
-    bool sealed = false;
-    std::atomic<bool> installed_accepted{false};
-    std::atomic<std::uint64_t> install_validation_count{0u};
-    std::atomic<std::uint64_t> live_gate_calls{0u};
-    std::atomic<std::uint64_t> live_configuration_scan_count{0u};
+    std::mutex mu; ///< Serializes install and snapshot access.
+    std::shared_ptr<const runtime_metal_archive_configuration_image> configuration; ///< Admitted image, or null before the first install.
+    bool sealed = false; ///< Whether install has committed an image.
+    std::atomic<bool> installed_accepted{false}; ///< Published after a successful install under the mutex.
+    std::atomic<std::uint64_t> install_validation_count{0u}; ///< Install attempts observed before mutex acquisition.
+    std::atomic<std::uint64_t> live_gate_calls{0u}; ///< Calls to the immutable Metal policy live gate.
+    std::atomic<std::uint64_t> live_configuration_scan_count{0u}; ///< Live configuration rescans performed by interposition.
 };
 
-/// @brief Returns the process-owned archive configuration slot.
+/**
+ * @brief Returns the singleton archive configuration slot for this process.
+ * @return Reference to the function-local static slot.
+ */
 runtime_metal_archive_configuration_slot&
 runtime_metal_archive_configuration_slot_instance() noexcept {
     static runtime_metal_archive_configuration_slot slot;
     return slot;
 }
 
-/// @brief Captures the immutable configuration image under the slot mutex.
+/**
+ * @brief Captures the immutable configuration image under the slot mutex.
+ * @return Shared pointer to the admitted image, or null when install has not run.
+ */
 [[nodiscard]] std::shared_ptr<const runtime_metal_archive_configuration_image>
 runtime_metal_archive_configuration_snapshot() {
     auto& slot = runtime_metal_archive_configuration_slot_instance();
@@ -46,7 +58,18 @@ runtime_metal_archive_configuration_snapshot() {
     return slot.configuration;
 }
 
-/// @brief Validates and admits a sealed archive image against exact device expectations.
+/**
+ * @brief Builds one admitted configuration image from a sealed seed image.
+ *
+ * Validates Metal binary-archive artifacts, paired qualification receipts, helper
+ * provenance, and device identity fields. Reserves peak memory through the
+ * process admission controller before allocating owned storage.
+ *
+ * @param[in] seed_image Accepted sealed shader-cache seed image.
+ * @param[in] vulkan_device_uuid Exact Vulkan device UUID for compatibility checks.
+ * @param[in] metal_device_registry_id Metal registry identifier for compatibility checks.
+ * @return Admitted configuration image on success, or a diagnostic string on failure.
+ */
 std::expected<std::shared_ptr<const runtime_metal_archive_configuration_image>, std::string>
 make_runtime_metal_archive_configuration_image(
     std::shared_ptr<const sealed_shader_cache_seed_image> seed_image,
@@ -184,7 +207,15 @@ make_runtime_metal_archive_configuration_image(
     }
 }
 
-/// @brief Installs one admitted configuration before runtime singleton construction.
+/**
+ * @brief Installs one admitted configuration before runtime singleton construction.
+ *
+ * The first successful install seals the slot. A later install with identical
+ * configuration evidence is idempotent. A conflicting image is rejected.
+ *
+ * @param[in] configuration Valid admitted configuration image to install.
+ * @return Empty success, or a diagnostic when the image is invalid or conflicts.
+ */
 std::expected<void, std::string> install_runtime_metal_archive_configuration(
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration) {
     if (!configuration || !configuration->is_valid()) {
@@ -208,13 +239,19 @@ std::expected<void, std::string> install_runtime_metal_archive_configuration(
     return {};
 }
 
-/// @brief Reports whether immutable archive configuration passed install validation.
+/**
+ * @brief Reports whether immutable archive configuration passed install validation.
+ * @return True after a successful install published `installed_accepted`.
+ */
 bool is_runtime_metal_archive_configuration_installed() noexcept {
     auto& slot = runtime_metal_archive_configuration_slot_instance();
     return slot.installed_accepted.load(std::memory_order_acquire);
 }
 
-/// @brief Captures install and live-gate counters without rescanning archive bytes.
+/**
+ * @brief Captures install and live-gate counters without rescanning archive bytes.
+ * @return Snapshot of install validation and live-gate traffic atomics.
+ */
 [[nodiscard]] runtime_metal_archive_live_gate_result
 capture_runtime_metal_archive_live_gate_result() noexcept {
     auto& slot = runtime_metal_archive_configuration_slot_instance();

@@ -10,7 +10,12 @@ export module bioseq.gpu.vulkan.abi:prefix_scan;
 
 export namespace bioseq::gpu::vulkan {
 
-/** @brief Number of 32-bit elements assigned to each first-pass prefix-scan block. */
+/**
+ * @brief Number of 32-bit elements scanned by one prefix-scan block.
+ *
+ * Host planners pass this value as the `block_size` push constant and derive
+ * `num_blocks` with a ceiling division over the logical element count.
+ */
 inline constexpr std::uint32_t k_prefix_scan_block_size = 256u;
 
 } // namespace bioseq::gpu::vulkan

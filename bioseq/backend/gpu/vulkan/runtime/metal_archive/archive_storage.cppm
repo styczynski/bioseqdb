@@ -33,6 +33,7 @@ import std;
 export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
+/// Pipeline-call scope that borrows the process archive state.
 struct active_metal_archive_pipeline_scope;
 
 /// @brief Process state for immutable Metal archives and pipeline interception.
@@ -98,12 +99,14 @@ struct metal_pipeline_archive_interpose {
 };
 
 /// @brief Returns the process-owned pipeline interpose state.
+/// @return Singleton retained through process teardown.
 metal_pipeline_archive_interpose& metal_pipeline_archive_interpose_state() noexcept {
     static metal_pipeline_archive_interpose state;
     return state;
 }
 
 /// @brief Releases resident archives while retaining sticky failure state.
+/// @param[in,out] state Process state whose retained NSArray and qualification are cleared.
 void rollback_metal_archive_loaded_state(metal_pipeline_archive_interpose& state) noexcept {
     if (state.archive_array != nullptr && state.sel_release != nullptr &&
         state.objc.msg_send != nullptr) {
@@ -121,6 +124,7 @@ void rollback_metal_archive_loaded_state(metal_pipeline_archive_interpose& state
 }
 
 /// @brief Restores original Objective-C methods and clears a partial installation.
+/// @param[in,out] state Process state whose method implementations and owned objects are released.
 void rollback_metal_pipeline_archive_interpose_install(
     metal_pipeline_archive_interpose& state) noexcept {
     if (state.objc.method_set_implementation != nullptr) {
@@ -171,6 +175,10 @@ void rollback_metal_pipeline_archive_interpose_install(
 }
 
 /// @brief Copies a borrowed NSString into process-owned UTF-8 storage.
+/// @param[in] objc Resolved Objective-C messaging functions.
+/// @param[in] ns_string Borrowed NSString, or null.
+/// @param[in] sel_utf8_string Registered `UTF8String` selector.
+/// @return Owned UTF-8 copy, or an empty string when conversion is unavailable.
 [[nodiscard]] std::string
 bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_utf8_string) {
     if (ns_string == nullptr || sel_utf8_string == nullptr) {
@@ -182,6 +190,9 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
 }
 
 /// @brief Creates an autoreleased NSString from one owned UTF-8 view.
+/// @param[in] objc Resolved Objective-C messaging functions.
+/// @param[in] value UTF-8 bytes copied before return.
+/// @return Autoreleased NSString pointer, or null when creation is unavailable.
 [[nodiscard]] void* bioseq_make_ns_string(objc_runtime_functions& objc, std::string_view value) {
     void* ns_string_cls = objc.get_class("NSString");
     if (ns_string_cls == nullptr) {
@@ -194,6 +205,9 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
 }
 
 /// @brief Creates a file URL for one canonical private archive path.
+/// @param[in] objc Resolved Objective-C messaging functions.
+/// @param[in] path Canonical path copied into the URL.
+/// @return Autoreleased NSURL pointer, or null when creation is unavailable.
 [[nodiscard]] void* bioseq_make_file_url(objc_runtime_functions& objc,
                                          const std::filesystem::path& path) {
     void* url_cls = objc.get_class("NSURL");
@@ -207,6 +221,9 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
 }
 
 /// @brief Copies a Metal error description without retaining the error object.
+/// @param[in] objc Resolved Objective-C messaging functions.
+/// @param[in] error Borrowed NSError pointer, or null.
+/// @return Owned UTF-8 diagnostic.
 [[nodiscard]] std::string bioseq_ns_error_description(objc_runtime_functions& objc, void* error) {
     if (error == nullptr) {
         return {};
@@ -218,6 +235,8 @@ bioseq_ns_string_utf8(objc_runtime_functions& objc, void* ns_string, void* sel_u
 }
 
 /// @brief Records the first owned diagnostic and permanently closes archive use.
+/// @param[in,out] state Process state receiving the sticky failure.
+/// @param[in] reason Owned diagnostic retained only when it is the first failure.
 void mark_metal_archive_sticky_failure(metal_pipeline_archive_interpose& state,
                                        std::string reason) noexcept {
     state.sticky_failure.store(true, std::memory_order_release);
@@ -232,6 +251,8 @@ void mark_metal_archive_sticky_failure(metal_pipeline_archive_interpose& state,
 }
 
 /// @brief Records a literal diagnostic without allowing allocation failure to escape.
+/// @param[in,out] state Process state receiving the sticky failure.
+/// @param[in] reason Null-terminated diagnostic copied when possible.
 void mark_metal_archive_sticky_failure_literal(metal_pipeline_archive_interpose& state,
                                                const char* reason) noexcept {
     state.sticky_failure.store(true, std::memory_order_release);
@@ -244,6 +265,8 @@ void mark_metal_archive_sticky_failure_literal(metal_pipeline_archive_interpose&
 }
 
 /// @brief Captures the first sticky failure diagnostic under its mutex.
+/// @param[in] state Process state whose diagnostic is copied.
+/// @return Owned diagnostic or a generic fail-closed message.
 [[nodiscard]] std::string metal_archive_failure_reason(metal_pipeline_archive_interpose& state) {
     std::lock_guard<std::mutex> guard(state.failure_mu);
     return state.failure_reason.empty() ? std::string{"immutable Metal archive receipt failed"}
@@ -263,10 +286,15 @@ struct metal_archive_file_snapshot {
     std::uint64_t scratch_capacity_bytes = 0u;
     bool exact_seed_compared = false;
 
+    /// @brief Compares the archive digest and every stable file-identity field.
     [[nodiscard]] bool operator==(const metal_archive_file_snapshot&) const noexcept = default;
 };
 
 /// @brief Validates one archive path and streams its exact retained bytes.
+/// @param[in] physical_path Canonical regular-file path to snapshot.
+/// @param[in] expected Sealed filename, size, and checksum.
+/// @param[in] exact_seed_bytes Optional retained bytes requiring byte-for-byte equality.
+/// @return Stable snapshot or a diagnostic describing the failed identity check.
 [[nodiscard]] std::expected<metal_archive_file_snapshot, std::string>
 capture_metal_archive_file_snapshot(const std::filesystem::path& physical_path,
                                     const runtime_metal_archive_spec& expected,
@@ -509,6 +537,10 @@ class private_snapshot_unlink_guard {
 };
 
 /// @brief Writes one exact seed artifact into a private snapshot.
+/// @param[in] artifact_filename Filename component used in diagnostics and the template.
+/// @param[in] bytes Exact archive bytes written and synchronized.
+/// @param[in] temp_parent_override Optional test-only parent directory.
+/// @return Owner that unlinks the snapshot, or a creation diagnostic.
 [[nodiscard]] std::expected<private_metal_archive_snapshot, std::string>
 write_private_metal_archive_snapshot(std::string_view artifact_filename,
                                      std::span<const std::byte> bytes,
@@ -637,6 +669,7 @@ class private_metal_archive_process_directory {
 };
 
 /// @brief Creates the private process directory used during qualification.
+/// @return Owner of a mode-0700 process directory, or a creation diagnostic.
 [[nodiscard]] std::expected<private_metal_archive_process_directory, std::string>
 make_private_metal_archive_process_directory() {
     std::error_code temp_error;
@@ -780,6 +813,10 @@ class open_private_metal_archive {
 };
 
 /// @brief Writes and fsyncs one exact archive image without following links.
+/// @param[in] directory Private process directory.
+/// @param[in] ordinal Ordered archive index used in the private filename.
+/// @param[in] bytes Exact archive bytes written before return.
+/// @return Open descriptor owner with a sealed file identity, or a diagnostic.
 [[nodiscard]] std::expected<open_private_metal_archive, std::string>
 write_open_private_metal_archive(const std::filesystem::path& directory,
                                  std::size_t ordinal,
@@ -824,6 +861,10 @@ write_open_private_metal_archive(const std::filesystem::path& directory,
 }
 
 /// @brief Hashes an open private archive once and compares retained seed bytes.
+/// @param[in,out] image Open descriptor rewound and streamed by this call.
+/// @param[in] expected Sealed size and checksum.
+/// @param[in] exact_seed_bytes Retained bytes requiring byte-for-byte equality.
+/// @return Number of streamed bytes, or an identity diagnostic.
 [[nodiscard]] std::expected<std::uint64_t, std::string>
 hash_open_private_metal_archive_once(open_private_metal_archive& image,
                                      const runtime_metal_archive_spec& expected,
@@ -862,6 +903,10 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
 }
 
 /// @brief Loads one private Metal binary archive object from its open-file URL.
+/// @param[in] state Process state providing Objective-C functions and selectors.
+/// @param[in] loader_device Borrowed Metal device.
+/// @param[in] path Linked private archive path kept valid through this call.
+/// @return Retained archive object transferred to the caller, or null on failure.
 [[nodiscard]] void* load_metal_binary_archive(metal_pipeline_archive_interpose& state,
                                               void* loader_device,
                                               const std::filesystem::path& path) {
@@ -897,6 +942,9 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
 }
 
 /// @brief Loads the ordered archive set and seals process qualification.
+/// @param[in,out] state Process state receiving the immutable NSArray and qualification.
+/// @param[in] loader_device Borrowed Metal device retained separately by `state`.
+/// @return `true` when every archive is loaded, unlinked, and identity-checked.
 [[nodiscard]] bool load_exact_metal_binary_archives(metal_pipeline_archive_interpose& state,
                                                     void* loader_device) {
     state.loaded_pre_post_identity_checks = 0u;
@@ -1128,6 +1176,9 @@ hash_open_private_metal_archive_once(open_private_metal_archive& image,
 }
 
 /// @brief Verifies in-memory qualification without reopening archive paths.
+/// @param[in] state Process state with a retained archive array.
+/// @param[in] operation_label Label included in diagnostics.
+/// @return Zero filesystem bytes on success, or a qualification diagnostic.
 [[nodiscard]] std::expected<std::uint64_t, std::string>
 verify_resident_metal_archive_snapshots(metal_pipeline_archive_interpose& state,
                                         std::string_view operation_label) {

@@ -65,6 +65,7 @@ struct metal_archive_qualification_receipt {
     }
     /// @brief Validates complete archive, metallib, helper, and entrypoint identity.
     [[nodiscard]] bool is_accepted() const noexcept {
+        // Accepts only digests containing at least one nonzero byte.
         const auto nonzero_digest = [](const auto& digest) {
             return std::any_of(
                 digest.begin(), digest.end(), [](std::uint8_t byte) { return byte != 0u; });
@@ -426,6 +427,8 @@ load_qualified_metal_archive_helper() {
 }
 
 /// @brief Loads and retains exactly one archive helper qualification per process.
+///
+/// All access is serialized by the store mutex.
 class qualified_metal_archive_helper_process_store {
   public:
     /// @brief Loads and hashes the qualified helper at most once.
@@ -480,6 +483,7 @@ class qualified_metal_archive_helper_process_store {
 };
 
 /// @brief Returns the process-owned archive helper store.
+/// @return Thread-safe singleton retained through process teardown.
 [[nodiscard]] inline qualified_metal_archive_helper_process_store&
 qualified_metal_archive_helper_process_store_instance() noexcept {
     static qualified_metal_archive_helper_process_store store;
@@ -565,6 +569,7 @@ parse_archive_helper_negative_error_fingerprint(std::string_view transcript) {
     }
     std::string domain;
     domain.reserve(domain_hex.size() / 2u);
+    // Decodes one lowercase hexadecimal nibble from the helper transcript.
     const auto hex_digit = [](char value) -> int {
         if (value >= '0' && value <= '9')
             return value - '0';
@@ -737,15 +742,18 @@ class staged_archive_helper_invocation {
     }
 
     /// @brief Returns the private helper executable path.
+    /// @return Borrowed path valid until this owner is moved, finished, or destroyed.
     [[nodiscard]] const std::filesystem::path& helper_path() const noexcept {
         return helper_path_;
     }
     /// @brief Returns the staged metallib descriptor inherited by the child.
+    /// @return Open descriptor owned by this staging object.
     [[nodiscard]] int metallib_fd() const noexcept {
         return metallib_fd_;
     }
 
     /// @brief Checks that the linked helper and retained descriptor still match.
+    /// @return `true` when pathname and descriptor identities equal the sealed image.
     [[nodiscard]] bool helper_identity_matches() const noexcept {
         if (helper_fd_ < 0 || helper_path_.empty() || !helper_linked_) {
             return false;
@@ -762,6 +770,7 @@ class staged_archive_helper_invocation {
     }
 
     /// @brief Verifies, unlinks, closes, and removes all staged resources.
+    /// @return Success when every resource is removed, otherwise a cleanup diagnostic.
     [[nodiscard]] std::expected<void, std::string> finish() {
         if (!helper_identity_matches()) {
             return std::unexpected("private archive helper identity changed across execution");

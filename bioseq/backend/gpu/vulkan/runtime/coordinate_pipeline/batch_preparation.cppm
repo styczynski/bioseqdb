@@ -159,7 +159,26 @@ struct coordinate_minimizer_binding {
 };
 
 /// @brief Classifies a batch and validates its common target identity.
+/// @param[in] jobs Coordinate jobs that must share one index representation.
+/// @param[in] query_inputs Query records used to validate every job index.
+/// @param[in] coordinate_vote_selected Whether diagonal-vote reduction was selected.
+/// @param[in] features Live device identity and capability limits.
+/// @param[in] kmer_size K-mer span used by the seed stage.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @param[in] coordinate_algorithm Requested coordinate reduction algorithm.
+/// @param[in] chain_key Chaining pipeline specialization.
+/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
+/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
+/// @param[in] bandwidth Chaining diagonal bandwidth.
+/// @param[in] max_iter Maximum predecessors examined per anchor.
+/// @param[in] gap_penalty Chaining gap penalty.
+/// @param[in] skip_penalty Chaining skip penalty.
+/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
+/// @param[in] min_chain_score Minimum accepted chain score.
+/// @param[in] min_seed_count Minimum accepted seed count.
+/// @param[in] probe_limit Maximum coordinate candidates examined.
 /// @return Uniform representation and grouped-SoA configuration identity.
+/// @throws vulkan_runtime_error When jobs mix representations or resident identities.
 [[nodiscard]] inline coordinate_batch_shape inspect_coordinate_batch_shape(
     std::span<const gpu_seed_coordinate_job> jobs,
     const gpu_seed_query_inputs& query_inputs,
@@ -245,7 +264,15 @@ struct coordinate_minimizer_binding {
 }
 
 /// @brief Validates grouped-SoA resident buffers and records their audit identity.
+/// @param[in] owner Runtime that must own every resident buffer.
+/// @param[in] shape Common representation and resident generation.
+/// @param[in] query_inputs Query sketch ABI traits.
+/// @param[in] features Live Vulkan identity and storage-range limit.
+/// @param[in] kmer_size K-mer span required by the persisted generation.
+/// @param[in] max_occ Requested occurrence cap.
+/// @param[in,out] run Batch result receiving resident-generation statistics.
 /// @return Padded shader-visible word extents for the resident generation.
+/// @throws vulkan_runtime_error When identity, layout, ownership, or range checks fail.
 [[nodiscard]] inline grouped_soa_resident_layout validate_grouped_soa_resident(
     const runtime* owner,
     const coordinate_batch_shape& shape,
@@ -266,6 +293,7 @@ struct coordinate_minimizer_binding {
         query_inputs.pos_bits >= 64u) {
         throw vulkan_runtime_error("gpu grouped-SoA query sketch traits exceed the grouped-SoA ABI");
     }
+    // Accepts only coherent live buffers owned by the executing runtime.
     const auto valid_resident_buffer = [owner](const buffer* candidate) {
         return candidate != nullptr && candidate->owner == owner && candidate->is_valid() &&
                candidate->is_host_visible_coherent() && candidate->mapped != nullptr;
@@ -299,6 +327,7 @@ struct coordinate_minimizer_binding {
         common_shape_view->descriptor_bytes > common_shape_view->descriptors->bytes) {
         throw vulkan_runtime_error("gpu grouped-SoA descriptor byte extent is invalid");
     }
+    // Converts a nonempty byte extent to its bounded shader-visible word count.
     const auto checked_word_count = [](std::uint64_t bytes, const char* label) {
         constexpr std::uint64_t maximum_word_bytes =
             static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()) * 4u;
@@ -353,7 +382,13 @@ struct coordinate_minimizer_binding {
 }
 
 /// @brief Validates query records and minimizer storage extents.
+/// @param[in] owner Runtime that must own a resident minimizer buffer.
+/// @param[in] query_inputs Query records and either host or device minimizer storage.
+/// @param[in] features Live device storage-buffer limit.
+/// @param[in] grouped_soa_selected Whether the direct persisted route is active.
+/// @param[in] kmer_size Minimum valid grouped-SoA query length.
 /// @return Required word shape and minimum byte extent.
+/// @throws vulkan_runtime_error When records, representation, ownership, or sizes are invalid.
 [[nodiscard]] inline coordinate_query_layout validate_coordinate_query_layout(
     const runtime* owner,
     const gpu_seed_query_inputs& query_inputs,
@@ -419,6 +454,9 @@ struct coordinate_minimizer_binding {
 }
 
 /// @brief Checks whether two jobs may share one resident target submission.
+/// @param[in] lhs First job identity.
+/// @param[in] rhs Second job identity.
+/// @return `true` when both jobs bind the same target buffers and coordinate domain.
 [[nodiscard]] inline bool
 has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
                            const gpu_seed_coordinate_job& rhs) noexcept {
@@ -430,6 +468,13 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
 }
 
 /// @brief Computes one bounded wave and its arena requirement.
+/// @param[in] jobs Complete ordered job list.
+/// @param[in] query_records Query records indexed by the jobs.
+/// @param[in] wave_begin First job included in this wave.
+/// @param[in] coordinate_vote_selected Whether compatible vote jobs may be coalesced.
+/// @param[in] grouped_soa_selected Whether each problem needs a status word.
+/// @param[in] min_words_bytes Shared query minimizer allocation in bytes.
+/// @param[in] query_record_bytes Shared query-record allocation in bytes.
 /// @return Wave end, problem count, and complete arena capacity requirement.
 [[nodiscard]] inline coordinate_wave_plan prepare_coordinate_wave(
     std::span<const gpu_seed_coordinate_job> jobs,
@@ -477,6 +522,11 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
 }
 
 /// @brief Copies optional host minimizers and dense query records into arena slices.
+/// @param[out] base Mapped base address of the arena device buffer.
+/// @param[in] query_record_slice Destination slice for strided query records.
+/// @param[in] minimizer_slice Destination used only for host minimizer bytes.
+/// @param[in] query_inputs Host records and selected minimizer storage.
+/// @param[in] query_record_stride Destination stride in bytes.
 /// @return Descriptor binding for the selected minimizer storage.
 [[nodiscard]] inline coordinate_minimizer_binding prepare_coordinate_query_upload(
     std::byte* base,
@@ -515,6 +565,8 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
 }
 
 /// @brief Checks whether all active wave states bind the same source-direct target.
+/// @param[in] active_states Non-null states retained for this submission.
+/// @return `true` when at least two states share the same resident target.
 [[nodiscard]] inline bool has_same_active_coordinate_target(
     std::span<gpu_seed_coordinate_wave_state* const> active_states) noexcept {
     if (active_states.size() < 2u) {
@@ -536,6 +588,14 @@ has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
 }
 
 /// @brief Initializes the immutable grouped-SoA audit fields for one job.
+/// @param[in,out] state Wave state whose audit record is populated.
+/// @param[in] resident_view Authenticated persisted generation.
+/// @param[in] query_minimizer_buffer Resident query output buffer.
+/// @param[in] operation_configuration Immutable algorithm configuration identity.
+/// @param[in] operation_identity Runtime operation sequence identity.
+/// @param[in] query_authority_identity Identity carried by the query sketch authority.
+/// @param[in] query_tile_count Tiles contributing to this query.
+/// @param[in] query_dispatch_stats Causal count, scan, and emit statistics.
 inline void initialize_grouped_soa_job_audit(
     gpu_seed_coordinate_wave_state& state,
     const gpu_grouped_soa_resident_view& resident_view,
@@ -578,6 +638,13 @@ inline void initialize_grouped_soa_job_audit(
 }
 
 /// @brief Builds both seed push layouts without changing their dispatch values.
+/// @param[in,out] state Job state receiving source-direct and grouped-SoA push blocks.
+/// @param[in] query_inputs Shared minimizer representation.
+/// @param[in] grouped_soa_selected Whether to populate the persisted push block.
+/// @param[in] kmer_size K-mer span encoded into anchors.
+/// @param[in] max_occ Maximum occurrences emitted per minimizer.
+/// @param[in] total_mc Total query minimizers visible to the batch.
+/// @param[in] resident_layout Validated grouped-SoA word extents.
 inline void prepare_seed_push_constants(gpu_seed_coordinate_wave_state& state,
                                         const gpu_seed_query_inputs& query_inputs,
                                         bool grouped_soa_selected,

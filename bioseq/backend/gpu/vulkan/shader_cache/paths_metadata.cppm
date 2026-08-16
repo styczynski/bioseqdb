@@ -34,19 +34,19 @@ template <class... p_argument_types>
 
 /// @brief Stable error categories returned by shader-cache orchestration.
 enum class shader_cache_error : std::uint32_t {
-    ok = 0,
-    no_toolchain = 1,
-    glslang = 2,
-    spirv_to_msl = 3,
-    metal_spawn = 4,
-    metal_exit = 5,
-    metallib_write = 6,
-    metadata_io = 7,
-    abi_scan = 8,
-    dynamic_symbol_missing = 9,
-    queue_full = 10,
-    supervisor_gone = 11,
-    timeout = 12,
+    ok = 0,                     ///< Operation completed successfully.
+    no_toolchain = 1,           ///< Required compiler toolchain is unavailable.
+    glslang = 2,                ///< GLSL-to-SPIR-V compilation failed.
+    spirv_to_msl = 3,           ///< SPIR-V-to-MSL translation failed.
+    metal_spawn = 4,            ///< Metal compiler process could not be started.
+    metal_exit = 5,             ///< Metal compiler process returned failure.
+    metallib_write = 6,         ///< Metal library artifact could not be written.
+    metadata_io = 7,            ///< Metadata read or write failed.
+    abi_scan = 8,               ///< Compiled shader layout violated its host ABI.
+    dynamic_symbol_missing = 9, ///< Required runtime symbol is unavailable.
+    queue_full = 10,            ///< Compiler service queue has no capacity.
+    supervisor_gone = 11,       ///< Compiler supervisor is no longer reachable.
+    timeout = 12,               ///< Bounded compiler operation expired.
 };
 
 /// @brief Fixed metadata stored next to one compiled shader artifact.
@@ -61,7 +61,7 @@ struct shader_cache_metadata {
 };
 static_assert(std::is_standard_layout_v<shader_cache_metadata>);
 
-/// @brief Loaded Vulkan shader module and its dispatch geometry.
+/// @brief Metal Shading Language version included in the cache identity.
 struct msl_version {
     std::uint32_t major = 3;
     std::uint32_t minor = 2;
@@ -79,11 +79,11 @@ struct shader_cache_build_inputs {
 /// @brief Serialized artifact categories in a sealed shader-cache seed.
 enum class sealed_shader_cache_artifact_kind : std::uint32_t {
     // Wire value 0 remains reserved and cannot identify a seed artifact.
-    reserved_command_metallib = 0,
-    shader_meta = 1,
-    shader_metallib = 2,
-    metal_binary_archive = 3,
-    metal_binary_archive_qualification = 4,
+    reserved_command_metallib = 0,        ///< Reserved wire value.
+    shader_meta = 1,                      ///< Shader metadata record.
+    shader_metallib = 2,                  ///< Compiled Metal library.
+    metal_binary_archive = 3,             ///< Metal binary archive.
+    metal_binary_archive_qualification = 4, ///< Archive qualification receipt.
 };
 
 /// @brief Manifest descriptor for one sealed shader-cache artifact.
@@ -109,7 +109,7 @@ struct sealed_shader_cache_manifest {
     std::uint64_t manifest_checksum = 0;
 };
 
-/// @brief Stable NSError identity captured from the archive negative control.
+/// @brief Manifest descriptor paired with the exact retained artifact bytes.
 struct sealed_shader_cache_artifact_image {
     sealed_shader_cache_artifact descriptor;
     std::vector<std::byte> bytes;
@@ -431,6 +431,8 @@ class sha256_hasher {
         0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u,
         0xc67178f2u};
 
+    /// @brief Compresses one complete 64-byte SHA-256 block.
+    /// @param[in] block Pointer to 64 readable bytes.
     void transform(const std::byte* block) noexcept {
         std::array<std::uint32_t, 64> words{};
         for (std::size_t index = 0; index < 16u; ++index) {
@@ -487,6 +489,7 @@ class sha256_hasher {
 
   public:
     /// @brief Appends raw bytes to the digest state.
+    /// @param[in] bytes Bytes consumed before return.
     void update(std::span<const std::byte> bytes) noexcept {
         for (const std::byte value : bytes) {
             buffer_[buffered_++] = value;
@@ -499,11 +502,13 @@ class sha256_hasher {
     }
 
     /// @brief Appends string bytes to the digest state.
+    /// @param[in] text Text bytes consumed before return.
     void update(std::string_view text) noexcept {
         update(std::as_bytes(std::span{text.data(), text.size()}));
     }
 
     /// @brief Appends one unsigned value in canonical little-endian order.
+    /// @param[in] value Value serialized as eight bytes.
     void update_little_endian(std::uint64_t value) noexcept {
         std::array<std::byte, 8> bytes{};
         for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -830,6 +835,7 @@ expected_artifacts(const std::filesystem::path& cache_dir,
                    std::span<const shader_variant_key> canonical) {
     std::vector<expected_artifact> artifacts;
     artifacts.reserve(canonical.size() * 6u);
+    // Adds one artifact using its filename as the manifest path component.
     const auto append = [&artifacts](sealed_shader_cache_artifact_kind kind,
                                      std::uint32_t key_index,
                                      const std::filesystem::path& path) {
@@ -953,6 +959,7 @@ struct regular_file_identity {
     std::int64_t changed_seconds = 0;
     std::int64_t changed_nanoseconds = 0;
 
+    /// @brief Compares every stable file-identity field.
     [[nodiscard]] bool operator==(const regular_file_identity&) const noexcept = default;
 };
 
@@ -965,13 +972,20 @@ struct stable_regular_file_image {
 /// @brief Owns one descriptor used for stable artifact reads.
 class scoped_file_descriptor {
   public:
+    /// @brief Adopts one open descriptor.
+    /// @param[in] fd Descriptor closed on destruction unless closed earlier.
     explicit scoped_file_descriptor(int fd) noexcept : fd_(fd) {}
+    /// @brief Prevents copying descriptor ownership.
     scoped_file_descriptor(const scoped_file_descriptor&) = delete;
+    /// @brief Prevents copy assignment of descriptor ownership.
     scoped_file_descriptor& operator=(const scoped_file_descriptor&) = delete;
+    /// @brief Closes the descriptor when ownership remains.
     ~scoped_file_descriptor() {
         if (fd_ >= 0)
             (void)::close(fd_);
     }
+    /// @brief Closes the descriptor and relinquishes ownership.
+    /// @return Result from `close`, or zero when already closed.
     [[nodiscard]] int close_now() noexcept {
         const int fd = std::exchange(fd_, -1);
         return fd >= 0 ? ::close(fd) : 0;
@@ -1231,15 +1245,22 @@ class manifest_reader {
     std::size_t cursor_ = 0u;
 
   public:
+    /// @brief Starts a reader over borrowed manifest bytes.
+    /// @param[in] bytes Storage that must outlive the reader.
     explicit manifest_reader(std::span<const std::byte> bytes) noexcept : bytes_(bytes) {}
 
+    /// @brief Returns the next unread byte offset.
     [[nodiscard]] std::size_t cursor() const noexcept {
         return cursor_;
     }
+    /// @brief Reports whether all bytes were consumed.
     [[nodiscard]] bool at_end() const noexcept {
         return cursor_ == bytes_.size();
     }
 
+    /// @brief Consumes one bounded byte range.
+    /// @param[in] count Number of bytes to consume.
+    /// @return Borrowed subspan or a truncation diagnostic.
     [[nodiscard]] std::expected<std::span<const std::byte>, std::string> take(std::size_t count) {
         if (count > bytes_.size() - cursor_) {
             return std::unexpected("sealed shader cache manifest is truncated");
@@ -1249,6 +1270,7 @@ class manifest_reader {
         return result;
     }
 
+    /// @brief Reads one little-endian 32-bit value.
     [[nodiscard]] std::expected<std::uint32_t, std::string> u32() {
         auto raw = take(4u);
         if (!raw)
@@ -1261,6 +1283,7 @@ class manifest_reader {
         return value;
     }
 
+    /// @brief Reads one little-endian 64-bit value.
     [[nodiscard]] std::expected<std::uint64_t, std::string> u64() {
         auto raw = take(8u);
         if (!raw)
@@ -1273,6 +1296,8 @@ class manifest_reader {
         return value;
     }
 
+    /// @brief Reads an owned text field of the requested length.
+    /// @param[in] count Number of text bytes.
     [[nodiscard]] std::expected<std::string, std::string> text(std::size_t count) {
         auto raw = take(count);
         if (!raw)
@@ -1280,6 +1305,7 @@ class manifest_reader {
         return std::string(reinterpret_cast<const char*>(raw->data()), raw->size());
     }
 
+    /// @brief Reads one fixed 32-byte SHA-256 digest.
     [[nodiscard]] std::expected<std::array<std::uint8_t, 32>, std::string> digest() {
         auto raw = take(32u);
         if (!raw)

@@ -25,7 +25,9 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-/// @brief Releases one buffer through its owning runtime and clears borrowed state.
+/// @brief Releases one buffer through its owning runtime and clears every handle.
+///
+/// The mapped pointer and Vulkan handles become invalid before this function returns.
 void buffer::reset() noexcept {
     if (owner != nullptr && buffer_handle != VK_NULL_HANDLE) {
         owner->destroy_buffer(*this);
@@ -44,7 +46,10 @@ void buffer::reset() noexcept {
 // runtime lifecycle
 // ---------------------------------------------------------------------------
 
-/// @brief Initializes the process runtime once and retains any diagnostic on failure.
+/// @brief Initializes the process runtime and retains any diagnostic on failure.
+///
+/// Construction is non-throwing by policy. An initialization failure leaves
+/// `features().available` false and is exposed through the runtime diagnostic.
 runtime::runtime() {
     try {
         init();
@@ -67,6 +72,7 @@ runtime::~runtime() {
 }
 
 /// @brief Returns the lazily initialized process-wide runtime owner.
+/// @return Singleton whose lifetime extends through process teardown.
 runtime& runtime::instance() {
     static runtime runtime;
     return runtime;
@@ -76,6 +82,7 @@ runtime& runtime::instance() {
 void runtime::resolve_moltenvk_private_api() noexcept {
     set_workgroup_size_mvk_ = nullptr;
 #if defined(__APPLE__)
+    // Resolves the private entry point from one already-open image handle.
     auto resolve_from = [](void* handle) noexcept -> set_workgroup_size_mvk_function {
         if (handle == nullptr)
             return nullptr;
@@ -102,12 +109,14 @@ void runtime::resolve_moltenvk_private_api() noexcept {
 }
 
 /// @brief Checks whether the installed provider must supply shader modules.
+/// @return `true` when a provider with a module loader is installed.
 bool runtime::should_use_shader_provider_locked() const noexcept {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     return provider != nullptr && provider->load_module != nullptr;
 }
 
 /// @brief Lets the installed provider prepare shader state before runtime creation.
+/// @throws vulkan_runtime_error When provider preparation reports failure.
 void prepare_shader_provider_runtime() {
     runtime_shader_provider* provider = runtime_shader_provider_slot();
     if (provider == nullptr || provider->prepare_runtime == nullptr) {
@@ -606,6 +615,10 @@ void runtime::shutdown() noexcept {
 }
 
 /// @brief Selects a memory type satisfying the requested property mask.
+/// @param[in] type_bits Bit mask of memory types accepted by the allocation.
+/// @param[in] flags Properties every selected memory type must provide.
+/// @return Index into the physical device's memory-type array.
+/// @throws vulkan_runtime_error When no compatible type exists.
 std::uint32_t runtime::find_memory_type(std::uint32_t type_bits,
                                         VkMemoryPropertyFlags flags) const {
     VkPhysicalDeviceMemoryProperties mem_props{};
@@ -625,6 +638,10 @@ std::uint32_t runtime::find_memory_type(std::uint32_t type_bits,
 // ---------------------------------------------------------------------------
 
 /// @brief Creates one persistently mapped host-visible buffer.
+/// @param[in] bytes Logical buffer size in bytes. Zero requests allocate one byte.
+/// @param[in] usage Vulkan usages enabled for the buffer.
+/// @return Move-only allocation owned by this runtime and released by `buffer::reset`.
+/// @throws vulkan_runtime_error When creation, allocation, binding, or mapping fails.
 buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
     if (!features_.available) {
         throw vulkan_runtime_error("create_host_buffer on unavailable device");
@@ -690,6 +707,9 @@ buffer runtime::create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage
 }
 
 /// @brief Queries physical allocation bytes for a logical buffer shape.
+/// @param[in] bytes Logical buffer size in bytes. Zero is queried as one byte.
+/// @param[in] usage Vulkan usages that affect the memory requirements.
+/// @return Device-reported allocation size in bytes.
 std::uint64_t runtime::buffer_memory_requirement_locked(std::uint64_t bytes,
                                                         VkBufferUsageFlags usage) const {
     if (bytes == 0u)
@@ -728,6 +748,10 @@ void runtime::release_prefilter_workspace_locked() noexcept {
 }
 
 /// @brief Grows one prefilter allocation without shrinking a sufficient buffer.
+/// @param[in,out] allocation Existing allocation replaced only when too small.
+/// @param[in] bytes Minimum logical size in bytes.
+/// @param[in] usage Vulkan usage flags for a replacement allocation.
+/// @throws vulkan_runtime_error When admission or allocation fails.
 void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
                                                        std::uint64_t bytes,
                                                        VkBufferUsageFlags usage) {
@@ -789,6 +813,8 @@ void runtime::ensure_prefilter_workspace_buffer_locked(buffer& allocation,
 }
 
 /// @brief Computes physical arena bytes including retained high-water capacity.
+/// @param[in] requested_bytes Logical arena size in bytes.
+/// @return Larger of the requested allocation requirement and retained arena allocation.
 std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_bytes) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -807,6 +833,9 @@ std::uint64_t runtime::gpu_arena_allocation_requirement(std::uint64_t requested_
 }
 
 /// @brief Computes physical allocation bytes for one buffer usage contract.
+/// @param[in] requested_bytes Logical buffer size in bytes.
+/// @param[in] usage Vulkan usage flags for the proposed buffer.
+/// @return Device-reported allocation size in bytes.
 std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_bytes,
                                                      VkBufferUsageFlags usage) {
     std::lock_guard<std::mutex> guard(mu_);
@@ -817,6 +846,10 @@ std::uint64_t runtime::buffer_allocation_requirement(std::uint64_t requested_byt
 }
 
 /// @brief Creates one device buffer admitted against its physical allocation.
+/// @param[in] bytes Logical buffer size in bytes. Zero requests allocate one byte.
+/// @param[in] usage Vulkan usages enabled for the buffer.
+/// @return Move-only runtime-owned allocation, persistently mapped when supported.
+/// @throws vulkan_runtime_error When allocation or binding fails.
 buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage) {
     if (!features_.available) {
         throw vulkan_runtime_error("create_device_buffer on unavailable device");
@@ -903,7 +936,8 @@ buffer runtime::create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usa
                   mapped};
 }
 
-/// @brief Releases one allocation and its admission permit exactly once.
+/// @brief Destroys the Vulkan objects held by one runtime-owned allocation.
+/// @param[in,out] allocation Allocation whose mapped memory, buffer, and memory are released.
 void runtime::destroy_buffer(buffer& allocation) noexcept {
     if (device_ == VK_NULL_HANDLE)
         return;

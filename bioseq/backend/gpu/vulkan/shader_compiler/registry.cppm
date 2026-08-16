@@ -331,6 +331,7 @@ expected_shader_workgroup_size(const shader_compile_request& request) noexcept {
 /// `vulkan_runtime_error`. Selected Vulkan algorithms propagate that error.
 class shader_compile_error final : public std::runtime_error {
   public:
+    /// @brief Inherits message-bearing runtime-error constructors.
     using std::runtime_error::runtime_error;
 };
 

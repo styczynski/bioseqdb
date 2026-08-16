@@ -29,9 +29,9 @@ export namespace bioseq::gpu::vulkan {
 /// bind exactly this sub-range, so several logical resources can share one
 /// physical arena buffer.
 struct gpu_arena_slice {
-    buffer* buffer = nullptr;
-    std::uint64_t offset = 0;
-    std::uint64_t size = 0;
+    buffer* buffer = nullptr;       ///< Arena backing buffer, or null when invalid.
+    std::uint64_t offset = 0;       ///< Byte offset from the buffer base.
+    std::uint64_t size = 0;         ///< Sub-range byte length bound into descriptors.
 
     /// @brief Reports whether the slice refers to an arena buffer.
     /// @return `true` when the buffer pointer is non-null.
@@ -42,9 +42,9 @@ struct gpu_arena_slice {
 
 /// @brief A snapshot of the three arena cursors. `rewind(mark)` restores all three.
 struct gpu_arena_mark {
-    std::uint64_t device_cursor = 0;
-    std::uint64_t upload_cursor = 0;
-    std::uint64_t download_cursor = 0;
+    std::uint64_t device_cursor = 0;   ///< Device-local bump cursor at `mark()`.
+    std::uint64_t upload_cursor = 0;    ///< Host-visible upload bump cursor at `mark()`.
+    std::uint64_t download_cursor = 0;  ///< Host-visible download bump cursor at `mark()`.
 };
 
 /// @brief Per-runtime arena with three geometrically-grown, persistently-mapped
@@ -74,22 +74,36 @@ class gpu_arena {
     /// before count submit,
     /// so no buffer is reallocated between the two submits. Returns false if any
     /// grow failed (caller declines GPU frontend).
+    /// @param[in] device_bytes Worst-case device-local bytes for the pair.
+    /// @param[in] upload_bytes Worst-case host-visible upload bytes for the pair.
+    /// @param[in] download_bytes Worst-case host-visible download bytes for the pair.
     /// @return `true` when every arena buffer satisfies the requested capacity.
     [[nodiscard]] bool ensure_capacity(std::uint64_t device_bytes,
                                        std::uint64_t upload_bytes,
                                        std::uint64_t download_bytes);
 
     /// @brief Bump-allocates an aligned slice from device-local storage.
+    /// @param[in] bytes Logical byte size to reserve.
+    /// @param[in] alignment Alignment requirement in bytes.
     /// @return Allocated device slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_device(std::uint64_t bytes, std::uint64_t alignment);
     /// @brief Bump-allocates an aligned slice from host-visible upload storage.
+    /// @param[in] bytes Logical byte size to reserve.
+    /// @param[in] alignment Alignment requirement in bytes.
     /// @return Allocated upload slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_upload(std::uint64_t bytes, std::uint64_t alignment);
     /// @brief Bump-allocates an aligned slice from host-visible download storage.
+    /// @param[in] bytes Logical byte size to reserve.
+    /// @param[in] alignment Alignment requirement in bytes.
     /// @return Allocated download slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_download(std::uint64_t bytes, std::uint64_t alignment);
 
     /// @brief Binds an arena slice to one storage-buffer descriptor write.
+    /// @param[out] write Descriptor write receiving the storage binding.
+    /// @param[out] info Buffer info populated with offset and range.
+    /// @param[in] binding Descriptor binding index within `dst_set`.
+    /// @param[in] dst_set Target descriptor set.
+    /// @param[in] slice Arena sub-range to bind.
     void bind_storage_slice(VkWriteDescriptorSet& write,
                             VkDescriptorBufferInfo& info,
                             std::uint32_t binding,
@@ -132,16 +146,16 @@ class gpu_arena {
             .value_or((std::numeric_limits<std::uint64_t>::max)());
     }
 
-    runtime* runtime_ = nullptr;
-    buffer device_;
-    buffer upload_;
-    buffer download_;
-    std::uint64_t device_cursor_ = 0;
-    std::uint64_t upload_cursor_ = 0;
-    std::uint64_t download_cursor_ = 0;
-    std::uint64_t device_capacity_ = 0;
-    std::uint64_t upload_capacity_ = 0;
-    std::uint64_t download_capacity_ = 0;
+    runtime* runtime_ = nullptr;              ///< Owning runtime that allocates backing buffers.
+    buffer device_;                         ///< Device-local arena backing buffer.
+    buffer upload_;                         ///< Host-visible upload arena backing buffer.
+    buffer download_;                       ///< Host-visible download arena backing buffer.
+    std::uint64_t device_cursor_ = 0;       ///< Current device-local bump offset.
+    std::uint64_t upload_cursor_ = 0;       ///< Current upload bump offset.
+    std::uint64_t download_cursor_ = 0;     ///< Current download bump offset.
+    std::uint64_t device_capacity_ = 0;     ///< Reserved device-local capacity in bytes.
+    std::uint64_t upload_capacity_ = 0;     ///< Reserved upload capacity in bytes.
+    std::uint64_t download_capacity_ = 0;   ///< Reserved download capacity in bytes.
 };
 
 /// @brief RAII arena reservation: holds the admission permit, marks the arena on
@@ -149,6 +163,8 @@ class gpu_arena {
 class gpu_arena_reservation {
   public:
     /// @brief Takes an admission permit and records the arena rewind point.
+    /// @param[in] arena Arena whose cursors are marked for later rewind.
+    /// @param[in] permit Admission permit held for the count and execution submit pair.
     gpu_arena_reservation(gpu_arena& arena, bioseq::parallelism::memory_permit permit) noexcept
         : arena_(&arena), permit_(std::move(permit)), mark_(arena.mark()) {}
     /// @brief Prevents copying an owning arena reservation.
@@ -188,9 +204,9 @@ class gpu_arena_reservation {
     }
 
   private:
-    gpu_arena* arena_ = nullptr;
-    bioseq::parallelism::memory_permit permit_;
-    gpu_arena_mark mark_{};
+    gpu_arena* arena_ = nullptr;                         ///< Reserved arena, or null after `release`.
+    bioseq::parallelism::memory_permit permit_;          ///< Peak admission held across both submits.
+    gpu_arena_mark mark_{};                            ///< Cursor snapshot restored on rewind.
 };
 
 /// @brief Request-boundary cleanup for operations whose result never aliases the
@@ -201,6 +217,7 @@ class gpu_arena_reservation {
 class gpu_arena_trim_guard {
   public:
     /// @brief Records an arena mark for request-boundary trimming.
+    /// @param[in] arena Arena trimmed and rewound at guard destruction.
     explicit gpu_arena_trim_guard(gpu_arena& arena) noexcept
         : arena_(&arena), mark_(arena.mark()) {}
     /// @brief Prevents copying a trim guard.
@@ -228,8 +245,8 @@ class gpu_arena_trim_guard {
     }
 
   private:
-    gpu_arena* arena_ = nullptr;
-    gpu_arena_mark mark_{};
+    gpu_arena* arena_ = nullptr; ///< Arena trimmed on destruction, or null after `release_now`.
+    gpu_arena_mark mark_{};      ///< Cursor snapshot restored before idle-capacity release.
 };
 
 } // namespace bioseq::gpu::vulkan

@@ -30,71 +30,71 @@ export namespace bioseq::gpu::vulkan {
 /// the slot mask / counts). Lets the runtime accept an index without importing
 /// `bioseq::indexing` (which would create a module cycle).
 struct gpu_target_index_view {
-    gpu_arena_slice slots;
-    gpu_arena_slice positions;
-    std::uint64_t target_len = 0;
-    std::uint32_t slot_mask = 0;
-    std::uint32_t position_count = 0;
-    std::uint32_t valid = 0;
+    gpu_arena_slice slots;              ///< Open-addressed or dense slot table slice.
+    gpu_arena_slice positions;          ///< Hash-run-ordered encoded positions slice.
+    std::uint64_t target_len = 0;       ///< Target sequence length in bases.
+    std::uint32_t slot_mask = 0;        ///< Open-addressing mask, or zero for dense buckets.
+    std::uint32_t position_count = 0;   ///< Number of encoded positions stored.
+    std::uint32_t valid = 0;            ///< Nonzero when every slice and count is consistent.
 };
 
 /// @brief Plan describing one device radix sort over parallel (key,value) uint64 arrays.
 struct gpu_sort_plan {
-    std::uint64_t element_count = 0;
-    std::uint32_t key_bytes = 8;
-    std::uint32_t value_bytes = 8;
-    std::uint32_t radix_bits = 8;
-    std::uint32_t pass_count = 8;
+    std::uint64_t element_count = 0; ///< Number of key/value pairs to sort.
+    std::uint32_t key_bytes = 8;     ///< Key element width in bytes.
+    std::uint32_t value_bytes = 8;   ///< Value element width in bytes.
+    std::uint32_t radix_bits = 8;    ///< Radix width per pass.
+    std::uint32_t pass_count = 8;    ///< Number of radix passes recorded.
 };
 
 /// @brief Coordinate-only chain result plus the selected predecessor trace. The trace
 /// entries are anchor indices in reverse chain order, matching the
 /// `coordinate_reduce` shader scratch buffer.
 struct gpu_coordinate_chain_trace_result {
-    gpu_coordinate_result_wire result{};
-    std::vector<std::uint32_t> trace{};
+    gpu_coordinate_result_wire result{};              ///< Coordinate-only chain summary wire.
+    std::vector<std::uint32_t> trace{};             ///< Predecessor anchor indices in reverse chain order.
 };
 
 /// @brief GPU sequence-sort wire structs. Byte layout is pinned to the GLSL
 /// `P` push block and `SeqDesc`/`SeqSortRange` declarations in shader_compiler.
 struct sequence_sort_push_constants {   // 40 bytes; == GLSL pc (seq_sort kernels)
-    std::uint32_t count = 0;            // row_count (key stage) / range_count (tiebreak stage)
-    std::uint32_t unit_bits = 0;        // 8/16/32/64
-    std::uint32_t bits_per_char = 0;    // generic only
-    std::uint32_t letters_per_unit = 0; // generic only
-    std::uint32_t char_mask = 0;        // generic only
-    std::uint32_t used_mask_lo = 0;
-    std::uint32_t used_mask_hi = 0;
-    std::uint32_t key_unit_offset = 0; // dense scatter stage: selected key unit
-    std::uint32_t sort_size = 0;       // global bitonic stage: k
-    std::uint32_t sort_stride = 0;     // global bitonic stage: j
+    std::uint32_t count = 0;            ///< Row count for the key stage, or range count for tiebreak.
+    std::uint32_t unit_bits = 0;        ///< Packed unit width in bits (8, 16, 32, or 64).
+    std::uint32_t bits_per_char = 0;    ///< Bits per alphabet symbol for generic alphabets only.
+    std::uint32_t letters_per_unit = 0; ///< Letters per packed unit for generic alphabets only.
+    std::uint32_t char_mask = 0;        ///< Per-letter mask within one unit for generic alphabets only.
+    std::uint32_t used_mask_lo = 0;     ///< Low 32 bits of the used-alphabet storage mask.
+    std::uint32_t used_mask_hi = 0;     ///< High 32 bits of the used-alphabet storage mask.
+    std::uint32_t key_unit_offset = 0;  ///< Selected key unit offset for the dense scatter stage.
+    std::uint32_t sort_size = 0;        ///< Global bitonic stage sort size `k`.
+    std::uint32_t sort_stride = 0;      ///< Global bitonic stage stride `j`.
 };
 static_assert(sizeof(sequence_sort_push_constants) == 40);
 
 /// @brief Packed sequence descriptor consumed by sequence-sort shaders.
 struct sequence_descriptor_wire { // 16 bytes; == GLSL SeqDesc. word_offset in uint32 words.
-    std::uint32_t word_offset = 0;
-    std::uint32_t unit_count = 0;
-    std::uint32_t bp_size = 0;
-    std::uint32_t pad = 0;
+    std::uint32_t word_offset = 0; ///< Offset into packed units in `uint32_t` words.
+    std::uint32_t unit_count = 0;  ///< Number of packed units for the sequence.
+    std::uint32_t bp_size = 0;     ///< Sequence length in bases.
+    std::uint32_t pad = 0;         ///< Padding to the 16-byte GLSL layout.
 };
 static_assert(sizeof(sequence_descriptor_wire) == 16);
 
 /// @brief One borrowed byte range participating in a sequence-sort upload.
 struct sequence_sort_upload_chunk {
-    const void* bytes = nullptr;
-    std::uint64_t byte_size = 0;
-    std::uint64_t padded_byte_size = 0;
+    const void* bytes = nullptr;           ///< Borrowed packed-sequence bytes for one chunk.
+    std::uint64_t byte_size = 0;           ///< Logical byte length of `bytes`.
+    std::uint64_t padded_byte_size = 0;    ///< Device upload size after alignment padding.
 };
 
 /// @brief Resolved by the façade from compact_sequence_range<S>::traits.
 struct sequence_sort_kernel_parameters {
-    std::uint32_t alphabet_kind = 0; // alphabet_kernel_kind: dna4_nt4 -> _dna4 kinds; else _generic
-    std::uint32_t unit_bits = 0;
-    std::uint32_t bits_per_char = 0;
-    std::uint32_t letters_per_unit = 0;
-    std::uint32_t char_mask = 0;
-    std::uint64_t used_storage_mask = 0;
+    std::uint32_t alphabet_kind = 0; ///< `alphabet_kernel_kind`: dna4_nt4 maps to `_dna4`, else `_generic`.
+    std::uint32_t unit_bits = 0;     ///< Packed unit width in bits (8, 16, 32, or 64).
+    std::uint32_t bits_per_char = 0; ///< Bits per alphabet symbol for generic alphabets.
+    std::uint32_t letters_per_unit = 0; ///< Letters encoded in each packed unit for generic alphabets.
+    std::uint32_t char_mask = 0;     ///< Per-letter mask within one packed unit for generic alphabets.
+    std::uint64_t used_storage_mask = 0; ///< Mask of alphabet symbols present in the batch.
 };
 
 /// @brief Result of a GPU-resident target minimizer index build. Owns the
@@ -102,35 +102,38 @@ struct sequence_sort_kernel_parameters {
 /// indexing layer adopts these into a `gpu_resident_minimizer_index` outside the
 /// runtime module (which must not import `bioseq::indexing`).
 enum class gpu_index_build_failure : std::uint8_t {
-    none,
-    invalid_shape,
-    minimizer_capacity_exceeds_u32,
-    memory_plan_invalid,
-    device_arena_allocation_failed,
-    output_capacity_overflow,
-    device_buffer_allocation_failed,
-    count_peak_memory_admission_denied,
-    execution_peak_memory_admission_denied,
-    peak_allocation_exceeds_admission,
-    index_invariant_failed,
+    none, ///< Build succeeded.
+    invalid_shape, ///< Packed sequence or sketch parameters are inconsistent.
+    minimizer_capacity_exceeds_u32, ///< Exact minimizer count exceeds `uint32_t` range.
+    memory_plan_invalid, ///< Derived arena or output sizes overflow checked arithmetic.
+    device_arena_allocation_failed, ///< Arena bump allocation failed during the build.
+    output_capacity_overflow, ///< Required output bytes exceed representable limits.
+    device_buffer_allocation_failed, ///< Standalone device buffer allocation failed.
+    count_peak_memory_admission_denied, ///< Count-submit peak admission was rejected.
+    execution_peak_memory_admission_denied, ///< Execution-submit peak admission was rejected.
+    peak_allocation_exceeds_admission, ///< Observed peak exceeded the admitted budget.
+    index_invariant_failed, ///< Post-build slot or position invariant check failed.
 };
 
 /// @brief Canonical query-gate identity carried with every GPU-built index.  The
 /// digest accelerates rejection, but immutable exact words remain authoritative.
+/// @brief Number of low bits in the canonical GPU query-gate word index.
 inline constexpr std::uint32_t k_gpu_query_gate_bits = 26u;
+/// @brief Word count of the immutable canonical query-gate bitmap.
 inline constexpr std::uint32_t k_gpu_query_gate_word_count =
     (std::uint32_t{1} << k_gpu_query_gate_bits) / 32u;
+/// @brief Mask selecting valid bits inside one query-gate word.
 inline constexpr std::uint32_t k_gpu_query_gate_mask =
     (std::uint32_t{1} << k_gpu_query_gate_bits) - 1u;
 
 /// @brief Immutable canonical query-gate identity for a GPU-built index.
 struct gpu_index_gate_identity {
-    bool enabled = false;
-    std::uint32_t word_count = 0u;
-    std::uint32_t mask = 0u;
-    std::uint64_t digest_lo = 0u;
-    std::uint64_t digest_hi = 0u;
-    std::shared_ptr<const std::vector<std::uint32_t>> canonical_words{};
+    bool enabled = false; ///< Whether query-gate filtering is active for the index.
+    std::uint32_t word_count = 0u; ///< Canonical word count when enabled.
+    std::uint32_t mask = 0u;       ///< Valid-bit mask within the final gate word.
+    std::uint64_t digest_lo = 0u;  ///< Low 64 bits of the gate-word digest.
+    std::uint64_t digest_hi = 0u;  ///< High 64 bits of the gate-word digest.
+    std::shared_ptr<const std::vector<std::uint32_t>> canonical_words{}; ///< Immutable gate words.
 
     /// @brief Validates the disabled or fully populated gate representation.
     /// @return `true` when fields and canonical storage agree with `enabled`.
@@ -144,6 +147,7 @@ struct gpu_index_gate_identity {
     }
 
     /// @brief Compares complete immutable gate identities after digest prefiltering.
+    /// @param[in] other Gate identity to compare against.
     /// @return `true` when both identities represent exactly the same gate words.
     [[nodiscard]] bool is_exactly_equal_to(const gpu_index_gate_identity& other) const {
         if (enabled != other.enabled || word_count != other.word_count || mask != other.mask ||
@@ -240,21 +244,21 @@ struct gpu_index_build_stats {
 /// @brief Move-owned buffers, permits, and identity for a GPU-built target index.
 struct gpu_built_index {
     // Declared first so ownership is released only after both buffers.
-    bioseq::parallelism::memory_permit permit;
-    buffer slots;
-    buffer positions;
-    gpu_index_gate_identity gate_identity{};
-    bioseq::parallelism::memory_materialization_result materialization{};
-    gpu_index_build_stats ownership{};
-    std::uint64_t peak_admission_bytes = 0;
-    std::uint64_t observed_device_peak_bytes = 0;
-    bioseq::parallelism::memory_admission_failure execution_peak_admission_failure{};
-    std::uint64_t target_len = 0;
-    std::uint32_t slot_mask = 0;
-    std::uint32_t occupied_slots = 0;
-    std::uint32_t position_count = 0;
-    gpu_index_build_failure failure_reason = gpu_index_build_failure::none;
-    bool valid = false;
+    bioseq::parallelism::memory_permit permit; ///< Peak admission for resident slots and positions.
+    buffer slots;                              ///< Open-addressed minimizer slot table.
+    buffer positions;                          ///< Hash-run-ordered encoded positions.
+    gpu_index_gate_identity gate_identity{}; ///< Immutable query-gate identity sealed into the index.
+    bioseq::parallelism::memory_materialization_result materialization{}; ///< Host-visible materialization receipt.
+    gpu_index_build_stats ownership{};       ///< Dispatch and lifetime statistics owned by the build.
+    std::uint64_t peak_admission_bytes = 0;  ///< Largest admitted byte budget during the build.
+    std::uint64_t observed_device_peak_bytes = 0; ///< Observed device peak including arena high-water.
+    bioseq::parallelism::memory_admission_failure execution_peak_admission_failure{}; ///< Execution admission failure detail.
+    std::uint64_t target_len = 0;            ///< Target sequence length in bases.
+    std::uint32_t slot_mask = 0;             ///< Open-addressing mask for `slots`.
+    std::uint32_t occupied_slots = 0;        ///< Number of occupied minimizer slots.
+    std::uint32_t position_count = 0;        ///< Number of stored encoded positions.
+    gpu_index_build_failure failure_reason = gpu_index_build_failure::none; ///< Terminal failure, if any.
+    bool valid = false;                      ///< Whether the index buffers are adoptable.
 
     /// @brief Constructs an empty invalid build result.
     gpu_built_index() = default;
@@ -312,24 +316,24 @@ static_assert(offsetof(gpu_built_index, permit) < offsetof(gpu_built_index, posi
 /// Owns the device buffer holding the final sorted run plus the downloaded
 /// host bytes (host/Postgres-format persistence happens on the CPU side).
 struct gpu_sorted_pair_result {
-    buffer keys;
-    buffer values;
-    std::vector<std::byte> host_key_bytes;
-    std::vector<std::byte> host_value_bytes;
-    std::uint64_t target_len = 0;
-    std::uint32_t pair_count = 0;
-    bool valid = false;
+    buffer keys;                         ///< Device buffer holding sorted kmer keys.
+    buffer values;                       ///< Device buffer holding sorted encoded positions.
+    std::vector<std::byte> host_key_bytes;   ///< Optional downloaded key bytes.
+    std::vector<std::byte> host_value_bytes; ///< Optional downloaded value bytes.
+    std::uint64_t target_len = 0;        ///< Target sequence length in bases.
+    std::uint32_t pair_count = 0;        ///< Number of `(kmer, encoded_pos)` pairs.
+    bool valid = false;                  ///< Whether sort output is complete and consistent.
 };
 
 /// @brief Device-side ping-pong views for the stable two-key pair
 /// sort. Hoisted above `class runtime` because the private method
 /// `record_stable_pair_sort_by_value_then_key_locked` takes it by reference.
 struct sorted_pair_device_views {
-    gpu_arena_slice keys;
-    gpu_arena_slice values;
-    gpu_arena_slice keys_scratch;
-    gpu_arena_slice values_scratch;
-    bool keys_in_scratch = false;
+    gpu_arena_slice keys;           ///< Primary key slice for ping-pong radix sort.
+    gpu_arena_slice values;         ///< Primary value slice for ping-pong radix sort.
+    gpu_arena_slice keys_scratch;   ///< Scratch key slice for ping-pong radix sort.
+    gpu_arena_slice values_scratch; ///< Scratch value slice for ping-pong radix sort.
+    bool keys_in_scratch = false;   ///< Whether the final sorted keys live in `keys_scratch`.
 };
 
 /// @brief Selects the slice containing the final sorted keys.
@@ -350,20 +354,20 @@ choose_sorted_values(const sorted_pair_device_views& views) noexcept {
 /// minimizer words arrive resident (`device_minimizer_words`) or as host bytes.
 /// the index slots/positions are the GPU-resident buffers.
 struct gpu_seed_inputs {
-    std::span<const std::byte> host_minimizer_bytes{};
-    const buffer* device_minimizer_words = nullptr;
-    const buffer* slots = nullptr;
-    const buffer* positions = nullptr;
-    std::uint64_t target_len = 0;
-    std::uint32_t slot_mask = 0;
-    std::uint32_t position_count = 0;
-    std::uint32_t minimizer_count = 0;
-    std::uint32_t minimizer_word_kind = 0;
-    std::uint32_t minimizer_words32_per_record = 0;
-    std::uint32_t hash_shift = 0;
-    std::uint32_t pos_bits = 0;
-    std::uint32_t bucket_count = 0; // >0 ⇒ slots is a hash-sorted dense bucket array
-    std::uint64_t target_position_offset = 0;
+    std::span<const std::byte> host_minimizer_bytes{}; ///< Host minimizer bytes uploaded once when resident words are absent.
+    const buffer* device_minimizer_words = nullptr;    ///< Resident minimizer device buffer, when already on GPU.
+    const buffer* slots = nullptr;                     ///< GPU-resident index slot table.
+    const buffer* positions = nullptr;                 ///< GPU-resident encoded positions buffer.
+    std::uint64_t target_len = 0;                      ///< Target sequence length in bases.
+    std::uint32_t slot_mask = 0;                       ///< Open-addressing mask when `bucket_count` is zero.
+    std::uint32_t position_count = 0;                  ///< Number of encoded positions in `positions`.
+    std::uint32_t minimizer_count = 0;                 ///< Number of query minimizer records.
+    std::uint32_t minimizer_word_kind = 0;             ///< Minimizer word encoding kind for shaders.
+    std::uint32_t minimizer_words32_per_record = 0;    ///< `uint32_t` words per minimizer record.
+    std::uint32_t hash_shift = 0;                      ///< Right-shift applied before slot indexing.
+    std::uint32_t pos_bits = 0;                        ///< Bit width of encoded positions.
+    std::uint32_t bucket_count = 0;                    ///< Dense bucket count when slots are hash-sorted, else zero.
+    std::uint64_t target_position_offset = 0;            ///< Base offset added to decoded target positions.
 };
 
 } // namespace bioseq::gpu::vulkan

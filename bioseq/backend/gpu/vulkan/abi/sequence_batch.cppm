@@ -1,6 +1,9 @@
 /**
- * @file
+ * @file vulkan/abi/sequence_batch.cppm
  * @brief Defines packed-sequence batch records shared with Vulkan shaders.
+ *
+ * Wire structs are standard layout so host uploads and shader loads share one
+ * field order without reinterpretation.
  */
 module;
 
@@ -13,10 +16,10 @@ export namespace bioseq::gpu::vulkan {
 
 /** @brief Tags the role and strand routing of one packed sequence record. */
 enum class gpu_sequence_record_flags : std::uint32_t {
-    none = 0u,
-    reverse_complement = 1u << 0u,
-    target_record = 1u << 1u,
-    query_record = 1u << 2u,
+    none = 0u,///< No routing flags set.
+    reverse_complement = 1u << 0u,///< Packed bytes are reverse-complemented on read.
+    target_record = 1u << 1u,///< Record describes a target sequence slice.
+    query_record = 1u << 2u,///< Record describes a query sequence slice.
 };
 
 /**
@@ -53,31 +56,41 @@ struct gpu_sequence_view_wire {
     std::uint32_t char_mask;         ///< traits::char_mask truncated to 32 bits.
     std::uint32_t padding_letters;   ///< sequence padding().
     std::uint32_t alphabet_kind;     ///< alphabet_kernel_kind from the upload view.
-    std::uint32_t reserved;
+    std::uint32_t reserved;///< Reserved for ABI growth, must be zero on upload.
 };
 
-/** @brief Binds a query sequence to its minimizer, anchor, and chain slices. */
+/**
+ * @brief Binds a query sequence to its minimizer, anchor, and chain slices.
+ *
+ * Output offsets address device arrays sized by the count submit. Count fields
+ * are written by the count pass and consumed by later seed and chain dispatches.
+ */
 struct gpu_query_record_wire {
-    gpu_sequence_view_wire sequence;
-    std::uint64_t minimizer_offset;  ///< output minimizer-word offset (in records).
-    std::uint64_t minimizer_count;   ///< filled by count submit.
-    std::uint64_t anchor_offset;     ///< output anchor offset.
-    std::uint64_t anchor_count;      ///< filled by count submit.
-    std::uint64_t chain_range_offset;
-    std::uint64_t chain_range_count;
-    std::uint32_t record_id;
-    std::uint32_t flags;
+    gpu_sequence_view_wire sequence;///< Packed query bytes and alphabet traits.
+    std::uint64_t minimizer_offset;  ///< Output minimizer-word offset in records.
+    std::uint64_t minimizer_count;   ///< Minimizer count filled by count submit.
+    std::uint64_t anchor_offset;     ///< Output anchor array offset in records.
+    std::uint64_t anchor_count;      ///< Anchor count filled by count submit.
+    std::uint64_t chain_range_offset;///< Output chain-range array offset in records.
+    std::uint64_t chain_range_count;///< Chain-range count filled by count submit.
+    std::uint32_t record_id;///< Stable query record identifier for the batch.
+    std::uint32_t flags;///< `gpu_sequence_record_flags` bit mask.
 };
 
-/** @brief Binds a target sequence to its global coordinates and minimizer pairs. */
+/**
+ * @brief Binds a target sequence to its global coordinates and minimizer pairs.
+ *
+ * Global base-pair offsets let shaders map segment-local hits back to the full
+ * target coordinate space.
+ */
 struct gpu_target_record_wire {
-    gpu_sequence_view_wire sequence;
-    std::uint64_t target_global_bp_offset;
-    std::uint64_t target_id;
-    std::uint64_t minimizer_pair_offset;
-    std::uint64_t minimizer_pair_count;
-    std::uint32_t record_id;
-    std::uint32_t flags;
+    gpu_sequence_view_wire sequence;///< Packed target bytes and alphabet traits.
+    std::uint64_t target_global_bp_offset;///< Base-pair origin of this slice in the full target.
+    std::uint64_t target_id;///< Stable target identifier within the batch.
+    std::uint64_t minimizer_pair_offset;///< Minimizer-pair array offset in records.
+    std::uint64_t minimizer_pair_count;///< Number of minimizer pairs for this target slice.
+    std::uint32_t record_id;///< Stable target record identifier for the batch.
+    std::uint32_t flags;///< `gpu_sequence_record_flags` bit mask.
 };
 static_assert(std::is_standard_layout_v<gpu_sequence_view_wire>);
 static_assert(std::is_standard_layout_v<gpu_query_record_wire>);

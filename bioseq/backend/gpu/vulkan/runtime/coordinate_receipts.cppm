@@ -23,6 +23,11 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Prepares a side-effect-free claim plan after validating receipt and live identities.
+/// @param[in] receipt Sealed operation receipt whose jobs and pipeline uses are inspected.
+/// @param[in] expected_preview Caller-provided SQL-visible acceptance preview.
+/// @param[in] live_features Current Vulkan device and driver identity.
+/// @param[in] seed_metrics_claimed Whether process-wide seed metrics were already reported.
+/// @return Valid claim plan on exact identity agreement, otherwise an invalid plan.
 runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
 runtime::prepare_persisted_grouped_soa_coordinate_finalization(
     const persisted_grouped_soa_coordinate_operation_receipt& receipt,
@@ -115,6 +120,8 @@ runtime::prepare_persisted_grouped_soa_coordinate_finalization(
 }
 
 /// @brief Exercises finalizer rejection paths without consuming cache metric claims.
+/// @param[in] base_audit Valid pipeline audit used to construct sealed test receipts.
+/// @return `true` when every mutated identity is rejected without claiming metrics.
 bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -148,6 +155,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         if (!receipts[i].is_valid())
             return false;
     }
+    // Creates stable non-null command identities without allocating Vulkan objects.
     const auto command = [](const std::uintptr_t identity) {
         return reinterpret_cast<VkCommandBuffer>(identity);
     };
@@ -241,6 +249,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     live_features.device_id = expected.device_id;
     live_features.pipeline_cache_uuid = expected.pipeline_cache_uuid;
     bool seed_claimed = false;
+    // Confirms that validation has not consumed any report-once claim.
     const auto claims_unchanged = [&receipts, &seed_claimed]() {
         return !seed_claimed &&
                std::none_of(receipts.begin(), receipts.end(), [](const auto& receipt) {
@@ -262,17 +271,20 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
     if (!claims_unchanged())
         return false;
 
+    // Requires a candidate mismatch to fail before any claim is committed.
     const auto rejected = [&claims_unchanged, &receipt, &seed_claimed](
                               const auto& candidate, const vulkan_feature_set& live) {
         auto plan = prepare_persisted_grouped_soa_coordinate_finalization(
             receipt, candidate, live, seed_claimed);
         return !plan.is_valid() && claims_unchanged();
     };
+    // Applies one mutation to the sealed caller preview.
     const auto rejected_preview = [&expected, &live_features, &rejected](auto mutate) {
         auto candidate = expected;
         mutate(candidate);
         return rejected(candidate, live_features);
     };
+    // Applies one mutation to the live device identity.
     const auto rejected_live = [&expected, &live_features, &rejected](auto mutate) {
         auto candidate = live_features;
         mutate(candidate);
@@ -334,6 +346,7 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
         return false;
     }
 
+    // Mutates one retained pipeline receipt while preserving its standalone validity.
     const auto rejected_receipt =
         [&claims_unchanged, &expected, &live_features, &receipts, &rejected](auto mutate) {
             runtime_metal_archive_pipeline_audit saved = receipts[10].audit_;
@@ -363,10 +376,12 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
             receipts[10].audit_ = std::move(saved);
             return result && claims_unchanged();
         };
+    // Changes a nonzero scalar without wrapping it to zero.
     const auto change_nonzero = [](auto& value) {
         using value_type = std::remove_reference_t<decltype(value)>;
         value = value == (std::numeric_limits<value_type>::max)() ? value - 1u : value + 1u;
     };
+    // Changes the first identity byte while keeping it nonzero.
     const auto change_nonzero_byte = [](auto& bytes) {
         bytes[0] = bytes[0] == 0xffu ? static_cast<std::uint8_t>(0xfeu)
                                      : static_cast<std::uint8_t>(bytes[0] + 1u);
@@ -408,6 +423,8 @@ bool runtime::self_test_persisted_grouped_soa_finalizer_preclaim_contract(
 }
 
 /// @brief Exercises partial cache-metric deltas and their one-shot claim behavior.
+/// @param[in] base_audit Valid pipeline audit used to create independent receipts.
+/// @return `true` when partial and zero deltas obey their one-shot contracts.
 bool runtime::self_test_gpu_cache_partial_delta_contract(
     runtime_metal_archive_pipeline_audit base_audit) {
     if (!base_audit.is_internally_consistent() || base_audit.pipeline_create_ns == 0u) {
@@ -539,6 +556,10 @@ bool runtime::self_test_gpu_cache_partial_delta_contract(
 }
 
 /// @brief Validates and commits one persisted grouped-SoA coordinate receipt.
+/// @param[in,out] receipt Rvalue receipt cleared after successful publication.
+/// @param[in] expected_preview Caller-provided acceptance preview that must match exactly.
+/// @return Single-use accepted operation carrying environment and cache-metric audits.
+/// @throws vulkan_runtime_error When validation or the final live policy gate fails.
 persisted_grouped_soa_coordinate_accepted_operation
 runtime::finalize_persisted_grouped_soa_coordinate_operation(
     persisted_grouped_soa_coordinate_operation_receipt&& receipt,
@@ -570,6 +591,25 @@ runtime::finalize_persisted_grouped_soa_coordinate_operation(
 }
 
 /// @brief Runs a coordinate batch and returns only its host-visible result wires.
+/// @param[in] query_inputs Shared minimizer storage for the synthetic single query record.
+/// @param[in] jobs Ordered coordinate jobs.
+/// @param[in] query_len Query length in symbols.
+/// @param[in] kmer_size K-mer span encoded into anchors.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @param[in] coordinate_algorithm Tiled-DP or diagonal-vote reduction.
+/// @param[in] chain_key Chaining pipeline specialization.
+/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
+/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
+/// @param[in] bandwidth Chaining diagonal bandwidth.
+/// @param[in] max_iter Maximum predecessors examined per anchor.
+/// @param[in] gap_penalty Chaining gap penalty.
+/// @param[in] skip_penalty Chaining skip penalty.
+/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
+/// @param[in] min_chain_score Minimum accepted chain score.
+/// @param[in] min_seed_count Minimum accepted seed count.
+/// @param[in] probe_limit Maximum coordinate candidates examined.
+/// @return One host-visible coordinate result per job.
+/// @throws vulkan_runtime_error When validation or batched execution fails.
 std::vector<gpu_coordinate_result_wire> runtime::run_seed_to_coordinate_results_roundtrip(
     const gpu_seed_query_inputs& query_inputs,
     std::span<const gpu_seed_coordinate_job> jobs,

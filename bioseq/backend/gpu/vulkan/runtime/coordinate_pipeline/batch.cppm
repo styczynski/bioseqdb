@@ -28,6 +28,25 @@ using coordinate_pipeline_detail::gpu_coordinate_vote_job_wire;
 using coordinate_pipeline_detail::gpu_seed_coordinate_wave_state;
 
 /// @brief Runs the batched seed, sort, chain, and coordinate submission sequence.
+/// @param[in] query_inputs Shared query minimizer storage and per-query records.
+/// @param[in] jobs Ordered coordinate jobs referring to `query_inputs`.
+/// @param[in] kmer_size K-mer span encoded into anchors.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @param[in] coordinate_algorithm Tiled-DP or diagonal-vote reduction.
+/// @param[in] chain_key Chaining pipeline specialization.
+/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
+/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
+/// @param[in] bandwidth Chaining diagonal bandwidth.
+/// @param[in] max_iter Maximum predecessors examined per anchor.
+/// @param[in] gap_penalty Chaining gap penalty.
+/// @param[in] skip_penalty Chaining skip penalty.
+/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
+/// @param[in] min_chain_score Minimum accepted chain score.
+/// @param[in] min_seed_count Minimum accepted seed count.
+/// @param[in] probe_limit Maximum coordinate candidates examined.
+/// @param[in] query_authority Device-query authorization consumed into the final receipt.
+/// @return Per-job results, dispatch statistics, and causal operation receipt.
+/// @throws vulkan_runtime_error When identity, allocation, submission, or policy checks fail.
 gpu_seed_coordinate_batch_result
 runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& query_inputs,
                                                 std::span<const gpu_seed_coordinate_job> jobs,
@@ -190,6 +209,7 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
     }
     const chaining_pipeline chain_pipeline = create_pipeline_locked(chain_key);
     if (shape_pipeline_collector != nullptr) {
+        // Registers each pipeline whose receipt contributes to the shape token.
         const auto prepare = [&shape_pipeline_collector](const compute_pipeline& pipe) {
             shape_pipeline_collector->prepare(
                 make_shader_key(pipe.kind, 384u, pipe.local_size, pipe.max_span),

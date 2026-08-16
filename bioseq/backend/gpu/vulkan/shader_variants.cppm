@@ -297,6 +297,7 @@ inline void for_each_static_shader_variant(
     const vulkan_static_variant_inputs& inputs,
     p_visitor&& visitor)
 {
+    // Publishes only selector tuples accepted by the shared cache-key validator.
     const auto emit = [&visitor](shader_variant_key key) {
         if (is_shader_variant_key_valid(key)) {
             visitor(key);

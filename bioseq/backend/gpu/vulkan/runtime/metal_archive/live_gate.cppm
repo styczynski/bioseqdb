@@ -20,7 +20,16 @@ import std;
 
 export namespace bioseq::gpu::vulkan {
 
-/// @brief Fails when live interposition state diverges from immutable qualification.
+/**
+ * @brief Fails when live interposition state diverges from immutable qualification.
+ *
+ * On Apple platforms, compares archive and command interposition state against
+ * the installed configuration and process qualification. Non-Apple builds are a
+ * no-op. Increments the slot live-gate counter on every call.
+ *
+ * @param[in] operation_label Label included in the thrown diagnostic on failure.
+ * @throws vulkan_runtime_error On Apple platforms when interposition state is stale or poisoned.
+ */
 void require_immutable_metal_policy_live(std::string_view operation_label) {
     runtime_metal_archive_configuration_slot_instance().live_gate_calls.fetch_add(
         1u, std::memory_order_relaxed);
@@ -69,12 +78,26 @@ void require_immutable_metal_policy_live(std::string_view operation_label) {
 #endif
 }
 
-/// @brief Executes the production live gate through the test-only public seam.
+/**
+ * @brief Executes the production live gate through the test-only public seam.
+ *
+ * Invokes @ref require_immutable_metal_policy_live with a fixed unit-test label.
+ */
 void probe_immutable_metal_policy_live_for_test() {
     require_immutable_metal_policy_live("unit-test live gate");
 }
 
-/// @brief Creates, verifies, tampers with, and rejects one private archive snapshot.
+/**
+ * @brief Creates, verifies, tampers with, and rejects one private archive snapshot.
+ *
+ * Writes a private snapshot, captures it against expected bytes, mutates the
+ * on-disk file, and confirms the second capture fails. Apple-only.
+ *
+ * @param[in] artifact_filename Stable archive artifact filename for the spec.
+ * @param[in] bytes Immutable expected archive bytes used for digest comparison.
+ * @param[in] temp_parent Parent directory for the private validation snapshot.
+ * @return Capture metrics and tamper-rejection flag, or a diagnostic on failure.
+ */
 [[nodiscard]] std::expected<runtime_private_archive_snapshot_test_result, std::string>
 verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filename,
                                                  std::span<const std::byte> bytes,

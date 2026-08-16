@@ -1,6 +1,9 @@
 /**
- * @file
+ * @file vulkan/abi/alignment.cppm
  * @brief Defines Vulkan chaining, coordinate, extension, and CIGAR ABI records.
+ *
+ * Wire structs and push layouts are size- and offset-pinned by static assertions
+ * so host validation and shader reflection share one layout contract.
  */
 module;
 
@@ -66,51 +69,57 @@ gpu_alignment_cigar_gridded_traceback_words(
 }
 /** @brief Mirrors the byte-identical 24-byte chaining anchor on the device. */
 struct gpu_anchor_wire {
-    std::uint64_t ref_position;
-    std::uint64_t query_position;
-    std::uint32_t is_reverse;
-    std::uint8_t query_span;
-    std::uint8_t flags;
-    std::uint16_t segment_id;
+    std::uint64_t ref_position;///< Target reference coordinate in segment-local base pairs.
+    std::uint64_t query_position;///< Query coordinate in base pairs.
+    std::uint32_t is_reverse;///< Nonzero when the anchor lies on the reverse strand.
+    std::uint8_t query_span;///< Query span covered by this anchor in symbols.
+    std::uint8_t flags;///< Anchor routing flags consumed by chain kernels.
+    std::uint16_t segment_id;///< Target segment identifier for rebasing.
 };
 
 /** @brief Stores one 8-byte chain range as `{begin, length}`. */
 struct gpu_chain_range_wire {
-    std::uint32_t begin;
-    std::uint32_t length;
+    std::uint32_t begin;///< First anchor index included in the range.
+    std::uint32_t length;///< Number of consecutive anchors in the range.
 };
 
 /** @brief Stores one query span consumed by the device hard-range builder. */
 struct gpu_chain_range_build_span_wire {
-    std::uint32_t anchor_lo;
-    std::uint32_t anchor_hi;
-    std::uint32_t range_lo;
-    std::uint32_t range_out;
+    std::uint32_t anchor_lo;///< Inclusive lower anchor index for the build span.
+    std::uint32_t anchor_hi;///< Exclusive upper anchor index for the build span.
+    std::uint32_t range_lo;///< Input chain-range index selected for compaction.
+    std::uint32_t range_out;///< Output chain-range slot written by the builder.
 };
 
-/** @brief Stores a compact coordinate-only seed-and-chain result. */
+/**
+ * @brief Stores a compact coordinate-only seed-and-chain result.
+ *
+ * Coordinates are half-open `[start, end)` intervals in query and target base
+ * pairs. `is_valid` is one for a populated result and zero for the canonical
+ * empty wire value.
+ */
 struct gpu_coordinate_result_wire {
-    std::uint64_t query_start;
-    std::uint64_t query_end;
-    std::uint64_t target_start;
-    std::uint64_t target_end;
-    std::uint64_t match_length;
-    std::uint64_t block_length;
-    std::int32_t chain_score;
-    std::int32_t seed_count;
-    std::uint32_t is_reverse;
-    std::uint32_t is_valid;
+    std::uint64_t query_start;///< Query interval start in base pairs.
+    std::uint64_t query_end;///< Query interval end in base pairs.
+    std::uint64_t target_start;///< Target interval start in base pairs.
+    std::uint64_t target_end;///< Target interval end in base pairs.
+    std::uint64_t match_length;///< Matched span length in base pairs.
+    std::uint64_t block_length;///< Chained block span length in base pairs.
+    std::int32_t chain_score;///< Aggregate chain score for the result.
+    std::int32_t seed_count;///< Number of seeds contributing to the chain.
+    std::uint32_t is_reverse;///< Nonzero when the alignment is on the reverse strand.
+    std::uint32_t is_valid;///< One when the result is populated, zero when empty.
 };
 
 /** @brief Carries coordinate-only chain-reduction parameters. */
 struct gpu_coordinate_reduce_push {
-    std::uint32_t anchor_count;
-    std::uint32_t query_len_lo;
-    std::uint32_t query_len_hi;
-    std::int32_t min_chain_score;
-    std::int32_t min_seed_count;
-    std::uint32_t probe_limit;
-    std::uint32_t reserved;
+    std::uint32_t anchor_count;///< Number of anchors considered by the reducer.
+    std::uint32_t query_len_lo;///< Low 32 bits of the query length bound in base pairs.
+    std::uint32_t query_len_hi;///< High 32 bits of the query length bound in base pairs.
+    std::int32_t min_chain_score;///< Minimum chain score required to keep a candidate.
+    std::int32_t min_seed_count;///< Minimum seed count required to keep a candidate.
+    std::uint32_t probe_limit;///< Upper bound on reducer probe steps per dispatch.
+    std::uint32_t reserved;///< Reserved for ABI growth, must be zero on upload.
 };
 
 /**
@@ -119,84 +128,84 @@ struct gpu_coordinate_reduce_push {
  * Offsets address caller-normalized alphabet-rank streams.
  */
 struct gpu_alignment_extension_job_wire {
-    std::uint32_t query_offset;
-    std::uint32_t target_offset;
-    std::uint32_t query_len;
-    std::uint32_t target_len;
-    std::uint32_t band_width;
-    std::uint32_t flags;
-    std::uint32_t reserved0;
-    std::uint32_t reserved1;
+    std::uint32_t query_offset;///< Query rank stream offset in 32-bit symbols.
+    std::uint32_t target_offset;///< Target rank stream offset in 32-bit symbols.
+    std::uint32_t query_len;///< Query span length in symbols.
+    std::uint32_t target_len;///< Target span length in symbols.
+    std::uint32_t band_width;///< Band width admitted for this job.
+    std::uint32_t flags;///< Reserved routing flags, must be zero on upload.
+    std::uint32_t reserved0;///< Reserved for ABI growth, must be zero on upload.
+    std::uint32_t reserved1;///< Reserved for ABI growth, must be zero on upload.
 };
 
 /** @brief Stores the score and best endpoint of one extension job. */
 struct gpu_alignment_extension_result_wire {
-    std::int32_t score;
-    std::uint32_t query_end;
-    std::uint32_t target_end;
-    std::uint32_t status;
+    std::int32_t score;///< Best extension score produced by the kernel.
+    std::uint32_t query_end;///< Best query endpoint in local symbols.
+    std::uint32_t target_end;///< Best target endpoint in local symbols.
+    std::uint32_t status;///< Extension status code (`k_gpu_alignment_extension_status_*`).
 };
 
 /** @brief Defines geometry and scoring limits for an extension batch. */
 struct gpu_alignment_extension_params {
-    std::uint32_t max_query_len = 0;
-    std::uint32_t max_target_len = 0;
-    std::uint32_t max_band_width = 0;
-    std::uint32_t alphabet_size = 0;
-    std::int32_t match_score = 0;
-    std::int32_t mismatch_penalty = 0;
-    std::int32_t gap_open_penalty = 0;
-    std::int32_t gap_extend_penalty = 0;
-    std::uint32_t flags = 0;
-    std::uint32_t reserved0 = 0;
+    std::uint32_t max_query_len = 0;///< Maximum query length in symbols for the batch.
+    std::uint32_t max_target_len = 0;///< Maximum target length in symbols for the batch.
+    std::uint32_t max_band_width = 0;///< Maximum band width admitted for any job.
+    std::uint32_t alphabet_size = 0;///< Rank alphabet size used to validate symbols.
+    std::int32_t match_score = 0;///< Match score applied by the extension kernel.
+    std::int32_t mismatch_penalty = 0;///< Mismatch penalty applied by the extension kernel.
+    std::int32_t gap_open_penalty = 0;///< Gap-open penalty applied by the extension kernel.
+    std::int32_t gap_extend_penalty = 0;///< Gap-extend penalty applied by the extension kernel.
+    std::uint32_t flags = 0;///< Reserved routing flags, must be zero on upload.
+    std::uint32_t reserved0 = 0;///< Reserved for ABI growth, must be zero on upload.
 };
 
 /** @brief Describes one CIGAR-capable extension and traceback job. */
 struct gpu_alignment_cigar_job_wire {
-    std::uint32_t query_symbol_offset = 0;
-    std::uint32_t target_symbol_offset = 0;
-    std::uint32_t query_len = 0;
-    std::uint32_t target_len = 0;
-    std::uint32_t query_global_start = 0;
-    std::uint32_t target_global_start = 0;
-    std::uint32_t band_width = 0;
-    std::uint32_t flags = 0;
-    std::uint32_t cigar_offset = 0;
-    std::uint32_t cigar_capacity = 0;
-    std::uint32_t traceback_tile_offset = 0;
-    std::uint32_t traceback_tile_count = 0;
+    std::uint32_t query_symbol_offset = 0;///< Query rank stream offset in 32-bit symbols.
+    std::uint32_t target_symbol_offset = 0;///< Target rank stream offset in 32-bit symbols.
+    std::uint32_t query_len = 0;///< Query span length in symbols.
+    std::uint32_t target_len = 0;///< Target span length in symbols.
+    std::uint32_t query_global_start = 0;///< Query global start added to local coordinates.
+    std::uint32_t target_global_start = 0;///< Target global start added to local coordinates.
+    std::uint32_t band_width = 0;///< Band width admitted for this job.
+    std::uint32_t flags = 0;///< Reserved routing flags, must be zero on upload.
+    std::uint32_t cigar_offset = 0;///< Output CIGAR array offset in operations.
+    std::uint32_t cigar_capacity = 0;///< Maximum CIGAR operations writable for this job.
+    std::uint32_t traceback_tile_offset = 0;///< Traceback tile array offset for this job.
+    std::uint32_t traceback_tile_count = 0;///< Number of traceback tiles allocated.
 };
 
 /** @brief Stores score, coordinate, status, and CIGAR output for one job. */
 struct gpu_alignment_cigar_result_wire {
-    std::int32_t score = 0;
-    std::int32_t max_score = 0;
-    std::uint32_t query_start = 0;
-    std::uint32_t query_end = 0;
-    std::uint32_t target_start = 0;
-    std::uint32_t target_end = 0;
-    std::uint32_t cigar_offset = 0;
-    std::uint32_t cigar_length = 0;
-    std::uint32_t status = 0;
-    std::uint32_t reserved = 0;
+    std::int32_t score = 0;///< Reported alignment score for the job.
+    std::int32_t max_score = 0;///< Maximum score observed during extension.
+    std::uint32_t query_start = 0;///< Query interval start in local symbols.
+    std::uint32_t query_end = 0;///< Query interval end in local symbols.
+    std::uint32_t target_start = 0;///< Target interval start in local symbols.
+    std::uint32_t target_end = 0;///< Target interval end in local symbols.
+    std::uint32_t cigar_offset = 0;///< CIGAR array offset written for this job.
+    std::uint32_t cigar_length = 0;///< Number of CIGAR operations written.
+    std::uint32_t status = 0;///< CIGAR status code (`k_gpu_alignment_extension_status_*`).
+    std::uint32_t reserved = 0;///< Reserved for ABI growth, must be zero on readback.
 };
 
 /** @brief Defines scoring and traceback geometry for CIGAR alignment. */
 struct gpu_alignment_cigar_params {
-    std::uint32_t alphabet_size = 0;
-    std::uint32_t max_band_width = 0;
-    std::uint32_t tile_query = 0;
-    std::uint32_t tile_target = 0;
-    std::int32_t match_score = 0;
-    std::int32_t mismatch_penalty = 0;
-    std::int32_t gap_open_short = 0;
-    std::int32_t gap_extend_short = 0;
-    std::int32_t gap_open_long = 0;
-    std::int32_t gap_extend_long = 0;
-    std::int32_t z_drop = 0;
-    std::int32_t end_bonus = 0;
-    std::uint32_t flags = 0;
-    std::uint32_t reserved = 0;
+    std::uint32_t alphabet_size = 0;///< Rank alphabet size used to validate symbols.
+    std::uint32_t max_band_width = 0;///< Maximum band width admitted for any job.
+    std::uint32_t tile_query = 0;///< Query symbols covered by one traceback tile.
+    std::uint32_t tile_target = 0;///< Target symbols covered by one traceback tile.
+    std::int32_t match_score = 0;///< Match score applied by the CIGAR kernel.
+    std::int32_t mismatch_penalty = 0;///< Mismatch penalty applied by the CIGAR kernel.
+    std::int32_t gap_open_short = 0;///< Short gap-open penalty.
+    std::int32_t gap_extend_short = 0;///< Short gap-extend penalty.
+    std::int32_t gap_open_long = 0;///< Long gap-open penalty.
+    std::int32_t gap_extend_long = 0;///< Long gap-extend penalty.
+    std::int32_t z_drop = 0;///< Z-drop threshold terminating extension early.
+    std::int32_t end_bonus = 0;///< End bonus applied at alignment endpoints.
+    std::uint32_t flags = 0;///< Reserved routing flags, must be zero on upload.
+    std::uint32_t reserved = 0;///< Reserved for ABI growth, must be zero on upload.
 };
 static_assert(std::is_standard_layout_v<gpu_anchor_wire>);
 static_assert(sizeof(gpu_anchor_wire) == 24);

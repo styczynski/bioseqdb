@@ -1,6 +1,6 @@
 /**
  * @file index.cppm
- * @brief Preserves Vulkan runtime receipt identities across semantic partitions.
+ * @brief Re-exports Vulkan runtime receipt partitions under one module name.
  */
 
 export module bioseq.gpu.vulkan.runtime:receipts;

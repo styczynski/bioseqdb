@@ -34,22 +34,22 @@ class runtime;
 /** @brief Test-build-only latch around the real GPU frontend upload/submit/fence path.
  * Normal builds do not contain this API or its branches. */
 enum class vulkan_submission_test_fault : std::uint8_t {
-    none,
-    cancellation_after_submit,
-    upload_failure_after_submit,
+    none,                        ///< No fault is armed.
+    cancellation_after_submit,   ///< Request cancellation after submit returns.
+    upload_failure_after_submit, ///< Latch an upload failure after submit returns.
 };
 
 /// @brief Observable state of the test-only submission fault seam.
 struct vulkan_submission_test_snapshot {
-    vulkan_submission_test_fault fault{vulkan_submission_test_fault::none};
-    std::uint64_t upload_latches = 0u;
-    std::uint64_t submissions = 0u;
-    std::uint64_t fence_drains = 0u;
-    std::uint64_t delivered_faults = 0u;
-    bool waiting_after_submit = false;
-    bool waiting_after_drain = false;
-    bool cancellation_requested = false;
-    bool upload_failure_latched = false;
+    vulkan_submission_test_fault fault{vulkan_submission_test_fault::none}; ///< Armed fault kind.
+    std::uint64_t upload_latches = 0u;       ///< Upload paths that entered the seam.
+    std::uint64_t submissions = 0u;          ///< Submissions observed by the seam.
+    std::uint64_t fence_drains = 0u;         ///< Fence drains completed by the seam.
+    std::uint64_t delivered_faults = 0u;     ///< Faults released to callers.
+    bool waiting_after_submit = false;       ///< Whether a submission waits after submit.
+    bool waiting_after_drain = false;        ///< Whether a submission waits after drain.
+    bool cancellation_requested = false;     ///< Whether cancellation was requested.
+    bool upload_failure_latched = false;     ///< Whether an upload failure was latched.
 };
 
 /// @brief Arms one test-only fault for the next Vulkan submission.
@@ -67,37 +67,38 @@ void reset_vulkan_submission_test_seam() noexcept;
 
 /// @brief Host-owned results from one batched alignment and CIGAR dispatch.
 struct alignment_cigar_batch_result {
-    std::vector<gpu_alignment_cigar_result_wire> results{};
-    std::vector<std::uint32_t> packed_cigar{};
+    std::vector<gpu_alignment_cigar_result_wire> results{}; ///< Per-job alignment wire records.
+    std::vector<std::uint32_t> packed_cigar{};              ///< Packed CIGAR words for all jobs.
 };
 
 /// @brief Capabilities probed once at init. `available == false` means there is no
 /// usable Vulkan device and selected GPU algorithms must fail.
 struct vulkan_feature_set {
-    bool available = false;
-    bool shader_int64 = false;
-    bool scalar_block_layout = false;
-    bool timeline_semaphore = false;
-    bool software_device = false;
-    std::uint32_t device_type = 0;
-    std::uint32_t api_version = 0;
-    std::uint32_t driver_version = 0;
-    std::uint32_t vendor_id = 0;
-    std::uint32_t device_id = 0;
-    std::uint32_t max_workgroup_invocations = 0;
-    std::uint32_t max_workgroup_size_x = 0;
-    std::uint32_t max_workgroup_size_y = 0;
-    std::uint32_t max_workgroup_size_z = 0;
-    std::uint32_t max_workgroup_count_x = 0;
-    std::uint32_t max_shared_memory_bytes = 0;
-    std::uint64_t max_storage_buffer_range = 0;
-    std::uint64_t min_storage_buffer_offset_alignment = 1;
-    std::uint64_t device_local_bytes = 0;
-    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
-    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
-    std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
+    bool available = false;              ///< Whether a usable Vulkan device was found.
+    bool shader_int64 = false;           ///< Whether 64-bit integer shaders are supported.
+    bool scalar_block_layout = false;    ///< Whether scalar block layout is supported.
+    bool timeline_semaphore = false;     ///< Whether timeline semaphores are supported.
+    bool software_device = false;        ///< Whether the selected device is software rasterized.
+    std::uint32_t device_type = 0;       ///< Vulkan physical-device type enum value.
+    std::uint32_t api_version = 0;       ///< Packed Vulkan API version reported by the device.
+    std::uint32_t driver_version = 0;    ///< Driver version reported by the device.
+    std::uint32_t vendor_id = 0;         ///< PCI vendor identifier.
+    std::uint32_t device_id = 0;         ///< PCI device identifier.
+    std::uint32_t max_workgroup_invocations = 0; ///< Maximum invocations per workgroup.
+    std::uint32_t max_workgroup_size_x = 0;      ///< Maximum local size along X.
+    std::uint32_t max_workgroup_size_y = 0;      ///< Maximum local size along Y.
+    std::uint32_t max_workgroup_size_z = 0;      ///< Maximum local size along Z.
+    std::uint32_t max_workgroup_count_x = 0;     ///< Maximum dispatched workgroups along X.
+    std::uint32_t max_shared_memory_bytes = 0;    ///< Maximum shared memory per workgroup in bytes.
+    std::uint64_t max_storage_buffer_range = 0;  ///< Maximum storage-buffer span in bytes.
+    std::uint64_t min_storage_buffer_offset_alignment = 1; ///< Required storage-buffer offset alignment.
+    std::uint64_t device_local_bytes = 0;        ///< Device-local heap size in bytes.
+    std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{}; ///< Stable Vulkan device UUID bytes.
+    std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{}; ///< Pipeline-cache compatibility UUID.
+    std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{}; ///< NUL-terminated device name.
 };
 
+/// @brief Count of fixed rank-prefilter replay slots exercised by recorded-command tests.
 inline constexpr std::size_t k_rank_prefilter_replay_route_count = 7u;
 
 /// @brief Resolve the fixed recorded-command slot for one rank-prefilter shader and
@@ -135,8 +136,8 @@ rank_prefilter_replay_index(shader_kind kind, std::uint32_t push_mode) noexcept 
 
 /// @brief Shader identity and replay slot selected for one GateKeeper batch.
 struct gatekeeper_rank_batch_route {
-    shader_kind kind = shader_kind::gatekeeper_rank_batch;
-    std::size_t replay_index = 2u;
+    shader_kind kind = shader_kind::gatekeeper_rank_batch; ///< Selected GateKeeper shader identity.
+    std::size_t replay_index = 2u;                       ///< Recorded-command replay slot for the route.
 
     constexpr bool operator==(const gatekeeper_rank_batch_route&) const noexcept = default;
 };
@@ -199,6 +200,7 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
     constexpr char hex[] = "0123456789abcdef";
     std::size_t cursor = 0u;
     const auto append_literal = [&result, &cursor](std::string_view value) {
+        // Append one ASCII literal fragment into the fixed identity buffer.
         if (cursor > result.size() - value.size() - 1u)
             return false;
         for (const char ch : value)
@@ -206,6 +208,7 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
         return true;
     };
     const auto append_u32 = [&result, &cursor](std::uint32_t value) {
+        // Append one lowercase hexadecimal u32 field into the identity buffer.
         constexpr char digits[] = "0123456789abcdef";
         if (cursor > result.size() - 9u)
             return false;
@@ -305,14 +308,14 @@ struct buffer {
         return (memory_properties & required) == required;
     }
 
-    runtime* owner = nullptr;
-    VkBuffer buffer_handle = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    std::uint64_t bytes = 0;
-    std::uint64_t allocation_bytes = 0;
-    VkMemoryPropertyFlags memory_properties = 0;
-    bool process_footprint_reflected = false;
-    void* mapped = nullptr;
+    runtime* owner = nullptr;                 ///< Runtime that releases this allocation.
+    VkBuffer buffer_handle = VK_NULL_HANDLE;  ///< Vulkan buffer handle.
+    VkDeviceMemory memory = VK_NULL_HANDLE;   ///< Device memory backing the buffer.
+    std::uint64_t bytes = 0;                  ///< Logical buffer extent in bytes.
+    std::uint64_t allocation_bytes = 0;       ///< Allocator-reported memory extent in bytes.
+    VkMemoryPropertyFlags memory_properties = 0; ///< Vulkan memory-type properties.
+    bool process_footprint_reflected = false; ///< Whether process accounting includes the allocation.
+    void* mapped = nullptr;                   ///< Persistent host mapping, or null for device-only memory.
 
   private:
     /// @brief Moves every handle and accounting field, then clears the source.
@@ -338,6 +341,7 @@ struct buffer {
 };
 
 /// @brief Converts a Vulkan dispatchable or non-dispatchable handle to stable bits.
+/// @tparam p_handle_type Vulkan handle type to encode without dereferencing it.
 /// @param[in] handle Vulkan handle to encode without dereferencing it.
 /// @return Stable unsigned handle bits.
 template <class p_handle_type>
@@ -352,13 +356,15 @@ template <class p_handle_type>
 /// insufficient because buffer is move-assignable. Operation receipt therefore
 /// binds its owner, Vulkan allocation handles, and physical/logical sizes too.
 struct runtime_buffer_identity {
-    const buffer* object = nullptr;
-    const runtime* owner = nullptr;
-    std::uint64_t buffer_handle = 0u;
-    std::uint64_t memory_handle = 0u;
-    std::uint64_t bytes = 0u;
-    std::uint64_t allocation_bytes = 0u;
+    const buffer* object = nullptr;       ///< Borrowed buffer object whose identity is captured.
+    const runtime* owner = nullptr;       ///< Runtime owner recorded for receipt binding.
+    std::uint64_t buffer_handle = 0u;   ///< Encoded Vulkan buffer handle bits.
+    std::uint64_t memory_handle = 0u;   ///< Encoded Vulkan device-memory handle bits.
+    std::uint64_t bytes = 0u;           ///< Logical buffer extent in bytes.
+    std::uint64_t allocation_bytes = 0u; ///< Allocator-reported memory extent in bytes.
 
+    /// @brief Checks that every receipt identity field is populated and consistent.
+    /// @return Whether the identity can bind an operation receipt.
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return object != nullptr && owner != nullptr && buffer_handle != 0u &&
                memory_handle != 0u && bytes != 0u && allocation_bytes >= bytes;
@@ -385,8 +391,8 @@ make_runtime_buffer_identity(const buffer* allocation) noexcept {
 
 /// @brief One independent hard chaining range = one dispatched workgroup.
 struct gpu_chain_range {
-    std::uint32_t begin = 0;
-    std::uint32_t length = 0;
+    std::uint32_t begin = 0;  ///< Inclusive start index within the chained batch.
+    std::uint32_t length = 0; ///< Number of elements covered by one workgroup dispatch.
 };
 
 /// @brief Thrown on any per-run Vulkan failure once the device is usable. Selected
@@ -400,13 +406,15 @@ class vulkan_runtime_error : public std::runtime_error {
 /// When installed, runtime pipeline creation asks this hook for a shader module
 /// instead of invoking glslang/spirv-cross on the backend worker thread.
 struct runtime_shader_provider {
+    /// @brief Prepares supervisor-owned shader artifacts before runtime construction.
     using prepare_function = std::expected<void, std::string> (*)();
+    /// @brief Loads one precompiled shader module for a variant key.
     using load_function = std::expected<shader_module_load, std::string> (*)(
         VkDevice device,
         const shader_variant_key& key,
         PFN_vkCreateShaderModule create_shader_module);
-    prepare_function prepare_runtime = nullptr;
-    load_function load_module = nullptr;
+    prepare_function prepare_runtime = nullptr; ///< Optional prepare hook installed by the supervisor.
+    load_function load_module = nullptr;        ///< Optional module loader installed by the supervisor.
 };
 
 /// @brief Returns the process-owned optional shader-provider slot.

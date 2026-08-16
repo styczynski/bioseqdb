@@ -23,6 +23,15 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Counts and emits seed hits against an already resident target index.
+/// @param[in] inputs Borrowed resident index buffers and query minimizer storage.
+/// @param[in] prefix_counts Exclusive per-minimizer anchor offsets plus the final total.
+/// @param[in] query_len Query length used to encode anchor coordinates.
+/// @param[in] kmer_size K-mer span encoded into emitted anchors.
+/// @param[in] exact_anchor_count Exact output count established by the count pass.
+/// @param[in] sort_plan Device-specific bitonic or radix allocation plan.
+/// @param[in] expected_vulkan_allocation_bytes Exact allocation total admitted by the caller.
+/// @return Canonically ordered anchors in owned host storage with dispatch statistics.
+/// @throws vulkan_runtime_error When inputs, allocation accounting, dispatch, or order checks fail.
 seed_lookup_result
 runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
                                    std::span<const std::uint32_t> prefix_counts,
@@ -143,6 +152,7 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     }
 
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    // Accumulates the exact physical allocations retained for this operation.
     const auto add_allocation = [&actual_vulkan_allocation_bytes](const buffer& buffer) noexcept {
         actual_vulkan_allocation_bytes =
             bioseq::common::saturating_add(actual_vulkan_allocation_bytes, buffer.allocation_bytes);
@@ -360,6 +370,12 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
 // ===========================================================================
 
 /// @brief Runs seed lookup and canonical anchor sorting for one query.
+/// @param[in] inputs Borrowed resident index and query minimizer buffers.
+/// @param[in] query_len Query length used to encode emitted anchors.
+/// @param[in] kmer_size K-mer span represented by each seed.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @return Canonically ordered anchors in owned host storage with dispatch statistics.
+/// @throws vulkan_runtime_error When validation, admission, allocation, dispatch, or order checks fail.
 seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inputs,
                                                       std::uint64_t query_len,
                                                       std::uint32_t kmer_size,
@@ -405,6 +421,7 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         throw vulkan_runtime_error("gpu seed arena grow failed");
     }
     const gpu_arena_mark mark = arena.mark();
+    // Rewinds all per-query slices and releases the arena on every exit path.
     struct seed_arena_lifetime {
         gpu_arena& arena;
         gpu_arena_mark mark;

@@ -35,6 +35,9 @@ export namespace bioseq::gpu::vulkan {
 
 #if defined(__APPLE__)
 /// @brief Reads the exact Metal function name bound by one pipeline descriptor.
+/// @param[in] state Process state providing selectors and Objective-C messaging.
+/// @param[in] desc Borrowed compute-pipeline descriptor.
+/// @return Owned UTF-8 function name, or an empty string when absent.
 [[nodiscard]] std::string descriptor_function_name(metal_pipeline_archive_interpose& state,
                                                    void* desc) {
     if (desc == nullptr || state.sel_compute_function == nullptr || state.sel_name == nullptr) {
@@ -57,6 +60,9 @@ struct metal_error_identity {
 };
 
 /// @brief Captures a borrowed NSError domain and code into owned storage.
+/// @param[in] state Process state providing selectors and Objective-C messaging.
+/// @param[in] error Borrowed NSError pointer, or null.
+/// @return Owned domain and scalar code.
 [[nodiscard]] metal_error_identity
 metal_error_identity_from_error(metal_pipeline_archive_interpose& state, void* error) {
     if (error == nullptr || state.sel_error_domain == nullptr || state.sel_error_code == nullptr) {
@@ -73,6 +79,7 @@ metal_error_identity_from_error(metal_pipeline_archive_interpose& state, void* e
     };
 }
 
+/// Metal pipeline option that forbids compilation after a binary-archive miss.
 constexpr unsigned long k_metal_pipeline_fail_on_binary_archive_miss = 1ul << 2u;
 
 /// @brief Mutable state for one explicitly scoped Vulkan pipeline creation.
@@ -87,6 +94,8 @@ struct active_metal_archive_pipeline_scope {
 };
 
 /// @brief Produces a nonzero monotonically increasing receipt identity.
+/// @param[in,out] counter Next process-wide identity.
+/// @return Prior nonzero value, or zero after exhaustion.
 [[nodiscard]] std::uint64_t next_nonzero_identity(std::atomic<std::uint64_t>& counter) noexcept {
     constexpr std::uint64_t exhausted = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t value = counter.load(std::memory_order_relaxed);
@@ -100,6 +109,9 @@ struct active_metal_archive_pipeline_scope {
 }
 
 /// @brief Reads the registry identity from one intercepted Metal device.
+/// @param[in] state Process state providing the registry selector.
+/// @param[in] device Borrowed Metal device.
+/// @return Registry ID, or zero when unavailable.
 [[nodiscard]] std::uint64_t metal_device_registry_id(metal_pipeline_archive_interpose& state,
                                                      void* device) noexcept {
     if (device == nullptr || state.sel_registry_id == nullptr)
@@ -110,6 +122,8 @@ struct active_metal_archive_pipeline_scope {
 }
 
 /// @brief Releases one Objective-C object through the cached selector.
+/// @param[in] state Process state providing Objective-C messaging.
+/// @param[in] object Retained object whose ownership is consumed.
 void release_objc_object(metal_pipeline_archive_interpose& state, void* object) noexcept {
     if (object == nullptr || state.sel_release == nullptr)
         return;
@@ -118,6 +132,9 @@ void release_objc_object(metal_pipeline_archive_interpose& state, void* object) 
 }
 
 /// @brief Creates an empty binary-archive array for the negative control.
+/// @param[in] state Process state providing Objective-C classes and selectors.
+/// @param[in] device Borrowed Metal device used to create the empty archive.
+/// @return Retained mutable array transferred to the caller, or null on failure.
 [[nodiscard]] void* make_empty_metal_archive_array(metal_pipeline_archive_interpose& state,
                                                    void* device) noexcept {
     void* desc_cls = state.objc.get_class("MTLBinaryArchiveDescriptor");
@@ -159,6 +176,9 @@ void release_objc_object(metal_pipeline_archive_interpose& state, void* object) 
 }
 
 /// @brief Marks both the active scope and process interpose as failed.
+/// @param[in,out] state Process state receiving the sticky diagnostic.
+/// @param[in,out] scope Active scope receiving its first failure.
+/// @param[in] reason Owned diagnostic retained by both scopes when possible.
 void fail_active_metal_archive_scope(metal_pipeline_archive_interpose& state,
                                      active_metal_archive_pipeline_scope& scope,
                                      std::string reason) noexcept {
@@ -171,13 +191,19 @@ void fail_active_metal_archive_scope(metal_pipeline_archive_interpose& state,
     mark_metal_archive_sticky_failure(state, std::move(reason));
 }
 
+/// @brief Disposition of one intercepted Metal pipeline call.
 enum class metal_pipeline_intercept_verdict : std::uint8_t {
-    outside_scope,
-    enforced,
-    rejected,
+    outside_scope, ///< Forward the unscoped call unchanged.
+    enforced,      ///< Call the original method with sealed archive enforcement.
+    rejected,      ///< Return failure without invoking the original method.
 };
 
 /// @brief Replaces archive descriptors and runs the required negative control.
+/// @param[in] self Borrowed Metal device receiver.
+/// @param[in] desc Borrowed pipeline descriptor mutated for the scoped call.
+/// @param[in] options Original Metal pipeline options.
+/// @param[in] asynchronous Whether the intercepted outer call uses a completion block.
+/// @return Forward, enforce, or reject disposition.
 [[nodiscard]] metal_pipeline_intercept_verdict prepare_scoped_metal_pipeline_call(
     void* self, void* desc, unsigned long options, bool asynchronous) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -437,11 +463,13 @@ extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
 }
 
 /// @brief Installs pipeline wrappers for the selected Vulkan device.
+/// @param[in] selected_vulkan_device Device identity sealed before logical-device creation.
 void install_metal_pipeline_archive_interpose(
     runtime_vulkan_device_identity selected_vulkan_device) noexcept {
     auto& state = metal_pipeline_archive_interpose_state();
     void* async_method = nullptr;
     void* sync_method = nullptr;
+    // Restores original methods and releases every partial installation object.
     const auto rollback_install = [&state]() noexcept {
         rollback_metal_pipeline_archive_interpose_install(state);
     };

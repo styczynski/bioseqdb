@@ -23,6 +23,7 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Prepares every pipeline used by the complete target-index route while locked.
+/// @param[in] params Sketch geometry that selects the ordered-sketch variant.
 void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& params) {
     // Keep this list identical to the complete target-index route. Pipeline
     // owners and their exact metadata permits remain process-lived in runtime;
@@ -41,6 +42,8 @@ void runtime::prepare_target_index_pipelines_locked(const vulkan_sketch_params& 
 }
 
 /// @brief Validates the sketch shape and prepares target-index pipelines under queue ownership.
+/// @param[in] params Sketch geometry that selects the ordered-sketch variant.
+/// @throws vulkan_runtime_error When the runtime is unavailable or the window is zero.
 void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
@@ -53,7 +56,20 @@ void runtime::prepare_target_index_pipelines(const vulkan_sketch_params& params)
 }
 
 /// @brief Builds and validates a resident target index without materializing it on the host.
+/// @param[in] packed_sequence Borrowed logical sequence bytes copied before execution.
+/// @param[in] padded_sequence_bytes Arena size including required zero padding.
+/// @param[in] owned_sequence_staging_bytes Host staging capacity released after the arena copy.
+/// @param[in] release_owned_sequence_staging Optional one-shot release callback. It is not called
+///            when validation fails before the arena copy.
+/// @param[in] rank_lut Rank translation table copied into the device arena.
+/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
+/// @param[in] max_target_minimizers Pessimistic target minimizer capacity.
+/// @param[in] query_gate_words Canonical query-position gate words.
+/// @param[in] query_gate_mask Mask for the final gate word.
+/// @param[in] query_gate_identity Immutable identity moved into a successful result.
+/// @param[in,out] peak_permit Borrowed permit grown to each observed execution peak.
 /// @return Move-owned index buffers, admission statistics, and a precise failure reason.
+/// @throws vulkan_runtime_error When runtime, identity, allocation, submission, or policy checks fail.
 gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_sequence,
                                             std::uint64_t padded_sequence_bytes,
                                             std::uint64_t owned_sequence_staging_bytes,
@@ -158,7 +174,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     out.ownership.execution_submit_host_transient_bytes = host_scratch_plan.execution_submit_bytes;
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
-    // : grid-strided sketch — clamp the dispatch to the device limit.
+    // The sketch shader grid-strides, so the physical dispatch is device-capped.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
     const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
@@ -495,6 +511,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
+    // Queries the physical allocation for one storage-and-transfer workspace.
     const auto allocation_requirement = [this](std::uint64_t bytes) {
         return buffer_memory_requirement_locked(bytes, k_compute_buffer_usage);
     };
@@ -1076,7 +1093,12 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
 }
 
 /// @brief Sketches a target and returns stable value-then-key sorted minimizer pairs.
+/// @param[in] packed_sequence Borrowed packed sequence bytes copied before submission.
+/// @param[in] rank_lut Rank translation table copied into the arena.
+/// @param[in] params Packed alphabet, minimizer, and sequence geometry.
+/// @param[in] max_target_minimizers Maximum pair count covered by the allocation.
 /// @return Resident sorted pairs and the exact host download used for persistence.
+/// @throws vulkan_runtime_error When runtime, allocation, submission, or policy checks fail.
 gpu_sorted_pair_result
 runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_sequence,
                                          const vulkan_rank_lut& rank_lut,
@@ -1123,7 +1145,7 @@ runtime::run_sketch_sort_pairs_roundtrip(std::span<const std::byte> packed_seque
     if (num_tiles == 0u) {
         return out;
     }
-    // : grid-strided sketch — clamp the dispatch to the device limit.
+    // The sketch shader grid-strides, so the physical dispatch is device-capped.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
 

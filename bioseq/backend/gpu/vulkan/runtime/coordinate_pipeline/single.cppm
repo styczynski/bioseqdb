@@ -23,6 +23,24 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 /// @brief Runs the single-query seed, sort, chain, and coordinate submission sequence.
+/// @param[in] inputs Borrowed resident target index and query minimizer storage.
+/// @param[in] query_len Query length in symbols.
+/// @param[in] target_len Target length used when the resident input omits it.
+/// @param[in] kmer_size K-mer span encoded into anchors.
+/// @param[in] max_occ Maximum target occurrences emitted per minimizer.
+/// @param[in] chain_key Chaining pipeline specialization.
+/// @param[in] max_dist_x Maximum reference-coordinate chaining distance.
+/// @param[in] max_dist_y Maximum query-coordinate chaining distance.
+/// @param[in] bandwidth Chaining diagonal bandwidth.
+/// @param[in] max_iter Maximum predecessors examined per anchor.
+/// @param[in] gap_penalty Chaining gap penalty.
+/// @param[in] skip_penalty Chaining skip penalty.
+/// @param[in] max_chain_skip Maximum consecutive unproductive predecessors.
+/// @param[in] min_chain_score Minimum accepted chain score.
+/// @param[in] min_seed_count Minimum accepted seed count.
+/// @param[in] probe_limit Maximum coordinate candidates examined.
+/// @return Downloaded coordinate result. An all-zero wire denotes no accepted chain.
+/// @throws vulkan_runtime_error When validation, allocation, submission, or policy checks fail.
 gpu_coordinate_result_wire
 runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
                                           std::uint64_t query_len,
@@ -55,6 +73,7 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
     if (mc == 0u || max_occ < 0)
         return result;
 
+    // Mirrors the range-builder push block for this one-query dispatch.
     struct chain_range_push_constants {
         std::uint32_t query_count;
         std::uint32_t max_ref_gap;

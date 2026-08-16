@@ -12,12 +12,13 @@ export module bioseq.gpu.vulkan.abi:persisted_index;
 export namespace bioseq::gpu::vulkan {
 
 /**
- * @brief Represents the Vulkan device UUID bound to a persisted GPU index.
+ * @brief Opaque Vulkan device UUID stored with a persisted GPU index.
  *
- * The bytes preserve Vulkan's device identity without text encoding so readers can reject an
- * index created for a different physical device.
+ * The 16-byte layout matches `VK_UUID_SIZE`. Readers compare the bytes directly
+ * and reject an index built on a different physical device.
  */
 using gpu_device_uuid = std::array<std::uint8_t, 16u>;
-static_assert(sizeof(gpu_device_uuid) == 16u); // Vulkan VK_UUID_SIZE.
+// Matches Vulkan VK_UUID_SIZE.
+static_assert(sizeof(gpu_device_uuid) == 16u);
 
 } // namespace bioseq::gpu::vulkan

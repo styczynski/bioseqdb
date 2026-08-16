@@ -26,6 +26,10 @@ import std;
 namespace bioseq::gpu::vulkan {
 
 #ifdef BIOSEQ_TEST_INDEXES
+/// @brief Process-wide synchronization and counters for injected submission faults.
+///
+/// Atomic fields let a controller thread observe a runtime thread without
+/// participating in the runtime mutex protocol.
 struct vulkan_submission_test_state {
     std::atomic<std::uint8_t> fault{static_cast<std::uint8_t>(vulkan_submission_test_fault::none)};
     std::atomic<std::uint8_t> release_gate{1u};
@@ -40,6 +44,7 @@ struct vulkan_submission_test_state {
     std::atomic<std::uint64_t> delivered_faults{0u};
 };
 
+/// Test-only state shared by the submission seam entry points.
 vulkan_submission_test_state g_vulkan_submission_test_state{};
 
 /// @brief Reads the fault selected for the test-only submission seam.
@@ -115,9 +120,10 @@ void deliver_vulkan_submission_test_fault_after_drain(vulkan_submission_test_fau
 }
 #endif
 
-/// @brief Throw `vulkan_runtime_error` on any non-success VkResult. A free function
-/// rather than a capture-all lambda so it leaves no per-call closure in the hot
-/// path and is trivially inlinable.
+/// @brief Throws when a Vulkan operation does not report success.
+/// @param[in] result Result returned by Vulkan.
+/// @param[in] what Operation label copied into the diagnostic.
+/// @throws vulkan_runtime_error When `result` is not `VK_SUCCESS`.
 inline void check_vk(VkResult result, const char* what) {
     if (result != VK_SUCCESS) {
         throw vulkan_runtime_error(fmt::format("{}: VkResult {}", what, static_cast<int>(result)));
@@ -183,12 +189,18 @@ inline void check_vk(VkResult result, const char* what) {
 BIOSEQ_VULKAN_RUNTIME_FUNCTIONS(BIOSEQ_DECLARE_VULKAN_FUNCTION)
 #undef BIOSEQ_DECLARE_VULKAN_FUNCTION
 
+/// Instance extension that exposes portability devices such as MoltenVK.
 constexpr const char* k_portability_enumeration = "VK_KHR_portability_enumeration";
+/// Instance extension used to query chained physical-device properties.
 constexpr const char* k_get_physical_device_properties2 = "VK_KHR_get_physical_device_properties2";
+/// Device extension required by portability implementations.
 constexpr const char* k_portability_subset = "VK_KHR_portability_subset";
+/// Instance extension used to pass loader layer settings.
 constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
 
 /// @brief True if `name` appears in a list of VkExtensionProperties.
+/// @param[in] available Extension properties returned by the Vulkan loader.
+/// @param[in] name Null-terminated extension name to find.
 /// @return `true` when the extension name is present.
 [[nodiscard]] bool has_extension(const std::vector<VkExtensionProperties>& available,
                                  const char* name) noexcept {
@@ -214,6 +226,7 @@ constexpr const char* k_layer_settings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
 }
 
 /// @brief Enumerates extensions for one physical device.
+/// @param[in] device Physical device whose extensions are queried.
 /// @return Available device extensions or an empty list when enumeration fails.
 [[nodiscard]] std::vector<VkExtensionProperties> device_extensions(VkPhysicalDevice device) {
     std::uint32_t count = 0;
@@ -255,6 +268,8 @@ void ensure_homebrew_moltenvk_icd_visible() {
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
+/// @brief Arms one submission fault and closes both controller gates.
+/// @param[in] fault Fault delivered by the next matching submission.
 void arm_vulkan_submission_test_seam(vulkan_submission_test_fault fault) noexcept {
     auto& state = g_vulkan_submission_test_state;
     state.release_gate.store(0u, std::memory_order_relaxed);
@@ -270,6 +285,7 @@ void arm_vulkan_submission_test_seam(vulkan_submission_test_fault fault) noexcep
     state.fault.store(static_cast<std::uint8_t>(fault), std::memory_order_release);
 }
 
+/// @brief Releases a submission to drain its fence before fault delivery.
 void release_vulkan_submission_test_fence() noexcept {
     auto& state = g_vulkan_submission_test_state;
     if (active_vulkan_submission_test_fault() ==
@@ -280,12 +296,14 @@ void release_vulkan_submission_test_fence() noexcept {
     state.release_gate.notify_all();
 }
 
+/// @brief Releases fault delivery after the runtime has restored its fence.
 void release_vulkan_submission_test_delivery() noexcept {
     auto& state = g_vulkan_submission_test_state;
     state.delivery_gate.store(1u, std::memory_order_release);
     state.delivery_gate.notify_all();
 }
 
+/// @brief Disarms the test seam, opens its gates, and clears its counters.
 void reset_vulkan_submission_test_seam() noexcept {
     auto& state = g_vulkan_submission_test_state;
     state.fault.store(static_cast<std::uint8_t>(vulkan_submission_test_fault::none),
@@ -304,6 +322,8 @@ void reset_vulkan_submission_test_seam() noexcept {
     state.delivered_faults.store(0u, std::memory_order_relaxed);
 }
 
+/// @brief Takes an acquire-ordered snapshot of the submission test seam.
+/// @return Controller-visible fault, gate, and counter state.
 [[nodiscard]] vulkan_submission_test_snapshot capture_vulkan_submission_test_snapshot() noexcept {
     auto& state = g_vulkan_submission_test_state;
     return {
@@ -388,6 +408,7 @@ void ensure_vulkan_loader_loaded_for_runtime() {
 }
 
 /// @brief Resolves the image that owns a loaded symbol on platforms that expose it.
+/// @param[in] symbol Process-visible symbol address.
 /// @return Owning image path or an empty string when unavailable.
 [[nodiscard]] std::string symbol_image(const void* symbol) {
 #if defined(__APPLE__)
@@ -402,6 +423,11 @@ void ensure_vulkan_loader_loaded_for_runtime() {
 }
 
 /// @brief Copies host bytes into a mapped device allocation before shader access.
+/// @param[in,out] transfer_scratch Reserved staging allocation for a discrete-device path.
+/// @param[out] dst Host-visible destination allocation.
+/// @param[in] bytes Source bytes, valid until the copy returns.
+/// @param[in] dst_access Intended consumer access for a future transfer barrier.
+/// @throws vulkan_runtime_error When `dst` is not host-visible.
 void runtime::upload_locked(buffer& transfer_scratch,
                             buffer& dst,
                             std::span<const std::byte> bytes,
@@ -427,6 +453,10 @@ void runtime::upload_locked(buffer& transfer_scratch,
 }
 
 /// @brief Copies a mapped device allocation into caller-owned host bytes.
+/// @param[in,out] transfer_scratch Reserved staging allocation for a discrete-device path.
+/// @param[in] src Host-visible source allocation.
+/// @param[out] bytes Destination storage, valid for the duration of the copy.
+/// @throws vulkan_runtime_error When `src` is not host-visible.
 void runtime::download_locked(buffer& transfer_scratch,
                               const buffer& src,
                               std::span<std::byte> bytes) {
@@ -447,6 +477,9 @@ void runtime::download_locked(buffer& transfer_scratch,
 // The one hot entry point
 // ---------------------------------------------------------------------------
 
+/// @brief Mirrors the seed-lookup shader push block.
+///
+/// Field order and widths are part of the CPU/GPU ABI.
 struct seed_lookup_push_constants {
     std::uint32_t minimizer_count;
     std::uint32_t words32_per_minimizer;
@@ -462,10 +495,12 @@ struct seed_lookup_push_constants {
 };
 static_assert(sizeof(seed_lookup_push_constants) == 44);
 
+/// Usage shared by host-visible compute buffers that may also participate in transfers.
 constexpr VkBufferUsageFlags k_compute_buffer_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
+/// @brief Mirrors the score-only alignment extension push block.
 struct alignment_extension_push_constants {
     std::uint32_t job_count = 0;
     std::uint32_t max_query_len = 0;
@@ -482,6 +517,7 @@ struct alignment_extension_push_constants {
 static_assert(sizeof(alignment_extension_push_constants) == 44);
 static_assert(std::is_standard_layout_v<alignment_extension_push_constants>);
 
+/// @brief Mirrors the bounded-CIGAR alignment extension push block.
 struct alignment_cigar_push_constants {
     std::uint32_t job_count = 0;
     std::uint32_t alphabet_size = 0;
@@ -503,6 +539,8 @@ static_assert(sizeof(alignment_cigar_push_constants) == 60);
 static_assert(std::is_standard_layout_v<alignment_cigar_push_constants>);
 
 /// @brief Encodes alignment-extension parameters into the shader push layout.
+/// @param[in] job_count Number of job records visible to the dispatch.
+/// @param[in] params Validated alignment scoring and geometry parameters.
 /// @return ABI-pinned push constants for one dispatch.
 [[nodiscard]] alignment_extension_push_constants
 alignment_extension_push(std::uint32_t job_count,
@@ -521,6 +559,8 @@ alignment_extension_push(std::uint32_t job_count,
 }
 
 /// @brief Encodes bounded-CIGAR parameters into the shader push layout.
+/// @param[in] job_count Number of job records visible to the dispatch.
+/// @param[in] params Validated scoring, tiling, and gap parameters.
 /// @return ABI-pinned push constants for one dispatch.
 [[nodiscard]] alignment_cigar_push_constants
 alignment_cigar_push(std::uint32_t job_count, const gpu_alignment_cigar_params& params) noexcept {
@@ -987,7 +1027,10 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
 }
 
 /// @brief Device byte footprint for `count` packed minimizers of the given word kind.
-/// @return Saturating device byte footprint.
+/// @param[in] word_kind Packed minimizer representation selector.
+/// @param[in] words32_per_minimizer Words per element for non-16-bit representations.
+/// @param[in] count Number of minimizers.
+/// @return Required device bytes. The caller keeps the multiplication representable.
 [[nodiscard]] std::uint64_t minimizer_device_bytes(std::uint32_t word_kind,
                                                    std::uint32_t words32_per_minimizer,
                                                    std::uint64_t count) noexcept {
@@ -998,7 +1041,9 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
 }
 
 /// @brief Host byte footprint for `count` minimizers (one packed element each).
-/// @return Saturating host byte footprint.
+/// @param[in] word_kind Packed minimizer representation selector.
+/// @param[in] count Number of minimizers.
+/// @return Required host bytes. The caller keeps the multiplication representable.
 [[nodiscard]] std::uint64_t minimizer_host_bytes(std::uint32_t word_kind,
                                                  std::uint64_t count) noexcept {
     switch (word_kind) {
@@ -1013,10 +1058,12 @@ void validate_alignment_cigar_inputs(std::span<const std::uint32_t> query_symbol
     }
 }
 
+/// Usage flags required by reusable arena slices across compute and transfer passes.
 constexpr VkBufferUsageFlags k_gpu_arena_usage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
     VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 
+/// @brief Validated arena size and prefix-scan geometry for one sketch batch.
 struct gpu_sketch_batch_arena_request {
     bool valid = false;
     std::uint32_t num_blocks = 0;
@@ -1037,6 +1084,7 @@ make_sketch_batch_arena_request(std::uint64_t packed_sequence_bytes,
     }
     const std::uint32_t num_blocks =
         std::max<std::uint32_t>(bioseq::common::ceil_div(tile_count, k_prefix_scan_block_size), 1u);
+    // Adds one offset-aligned slice while preserving saturation on overflow.
     const auto append_slice = [](std::uint64_t total,
                                  std::uint64_t bytes) noexcept -> std::uint64_t {
         const std::uint64_t aligned_bytes =
@@ -1071,9 +1119,11 @@ make_sketch_batch_arena_request(std::uint64_t packed_sequence_bytes,
     };
 }
 
+/// Host type written into the sketch shader's tile-record buffer.
 using sketch_tile_type = gpu_sketch_tile_wire;
 static_assert(sizeof(sketch_tile_type) == 24);
 
+/// @brief Mirrors the sketch count and emit shader push block.
 struct sketch_push_constants {
     std::uint32_t emit_mode, window_size, kmer_size, hash_bits, hash_shift, pos_bits;
     std::uint32_t word_kind, words32_per_minimizer, span_value, alphabet_kind;
@@ -1082,11 +1132,13 @@ struct sketch_push_constants {
 };
 static_assert(sizeof(sketch_push_constants) == 72);
 
+/// @brief Mirrors the two-pass prefix-scan shader push block.
 struct scan_push_constants {
     std::uint32_t element_count, block_size, num_blocks, pass;
 };
 static_assert(sizeof(scan_push_constants) == 16);
 
+/// @brief Mirrors the resident-index seed count and emit push block.
 struct seed_push_constants {
     std::uint32_t words32_per_minimizer, word_kind, hash_shift, pos_bits, kmer_size;
     std::uint32_t slot_mask, max_occ, emit_mode, record_count, bucket_count;
@@ -1094,13 +1146,17 @@ struct seed_push_constants {
 };
 static_assert(sizeof(seed_push_constants) == 52);
 
+/// @brief Radix width needed to order encoded target coordinates.
 struct gpu_anchor_sort_key_plan {
     std::uint32_t target_ref_bits = 63u;
     std::uint32_t pass_count = 8u;
 };
 
 /// @brief Derives the exact radix width for encoded target coordinates.
+/// @param[in] target_len Number of target positions in the encoded span.
+/// @param[in] target_position_offset Global offset of the first target position.
 /// @return Conservative default when the coordinate span is not representable.
+/// @pre `target_len` is nonzero.
 [[nodiscard]] gpu_anchor_sort_key_plan
 make_anchor_sort_key_plan(std::uint64_t target_len, std::uint64_t target_position_offset) noexcept {
     const auto pass_count =
@@ -1118,16 +1174,19 @@ make_anchor_sort_key_plan(std::uint64_t target_len, std::uint64_t target_positio
     };
 }
 
+/// @brief Mirrors the radix histogram, scan, and scatter push block.
 struct sort_push_constants {
     std::uint32_t element_count, radix_shift, num_workgroups, elems_per_wg, value_words;
 };
 static_assert(sizeof(sort_push_constants) == 20);
 
+/// @brief Mirrors target-index run marking and slot-emission push data.
 struct index_push_constants {
     std::uint32_t element_count, slot_mask, slot_capacity, num_buckets, probe_cap, pass;
 };
 static_assert(sizeof(index_push_constants) == 24);
 
+/// @brief Host layout copied into the seed shader's per-query record buffer.
 struct host_query_record {
     std::uint32_t min_offset, min_count, query_len, flags;
 };
@@ -1187,15 +1246,16 @@ void record_shader_to_host(VkCommandBuffer cmd) {
                          nullptr);
 }
 
-/// @brief Picks `(num_workgroups, elems_per_wg)` for a device sort or scan,
-/// keeping the workgroup count under the device dispatch limit.
-/// @param[in] element_count Number of elements covered by the dispatch.
-/// @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
-/// @return Dispatch workgroup count and elements assigned per workgroup.
+/// @brief Workgroup count and grid-stride span for a sort or scan.
 struct workgroup_plan {
     std::uint32_t num_workgroups;
     std::uint32_t elems_per_wg;
 };
+/// @brief Picks a device-legal grid-stride plan for a sort or scan.
+/// @param[in] element_count Number of elements covered by the dispatch.
+/// @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
+/// @return Dispatch workgroup count and elements assigned per workgroup.
+/// @pre `maximum_workgroup_count` is nonzero when `element_count` is nonzero.
 [[nodiscard]] workgroup_plan plan_workgroups(std::uint64_t element_count,
                                              std::uint32_t maximum_workgroup_count) {
     if (element_count == 0)
@@ -1215,6 +1275,7 @@ struct workgroup_plan {
 
 /// @brief Next power-of-two open-addressed slot capacity for `distinct` buckets,
 /// matching `indexing::gpu_slot_capacity` (load factor < 0.5).
+/// @param[in] distinct Number of distinct target minimizer buckets.
 /// @return Slot capacity, or zero when the requirement is not representable.
 [[nodiscard]] std::uint32_t sketch_slot_capacity(std::uint64_t distinct) {
     const std::uint64_t wanted =
@@ -1227,6 +1288,12 @@ struct workgroup_plan {
 
 /// @brief Submit an executable command buffer and wait for the synchronous runtime
 /// contract. The command buffer remains executable and may be submitted again.
+/// @param[in] device Device that owns `fence` and `cmd`.
+/// @param[in] queue Queue compatible with the recorded command buffer.
+/// @param[in] cmd Executable command buffer retained by the caller.
+/// @param[in] fence Unsignalled fence reset before this function returns or throws.
+/// @param[in] what Operation label used in diagnostics and policy checks.
+/// @param[in,out] collector Optional receipt collector committed after completion.
 void submit_executable_and_wait(VkDevice device,
                                 VkQueue queue,
                                 VkCommandBuffer cmd,
@@ -1254,6 +1321,12 @@ void submit_executable_and_wait(VkDevice device,
 
 /// @brief End the currently-recording command buffer, submit it, and wait. This keeps
 /// the established helper contract for GPU frontend's multi-submit operations.
+/// @param[in] device Device that owns `fence` and `cmd`.
+/// @param[in] queue Queue compatible with the recorded command buffer.
+/// @param[in] cmd Recording command buffer ended by this call.
+/// @param[in] fence Unsignalled fence reset before this function returns or throws.
+/// @param[in] what Operation label used in diagnostics and policy checks.
+/// @param[in,out] collector Optional receipt collector committed after completion.
 void submit_and_wait(VkDevice device,
                      VkQueue queue,
                      VkCommandBuffer cmd,

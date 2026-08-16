@@ -83,9 +83,11 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
                                                 !scan.has_array_stride(key.max_span / 8u))) {
         return std::unexpected("SPIR-V generate_units layout mismatch");
     }
+    // Checks descriptor-set 0 scalar storage stride for one binding.
     const auto binding_scalar = [&scan](std::uint32_t binding, std::uint32_t stride) {
         return scan.has_binding_array_stride(0u, binding, stride);
     };
+    // Checks descriptor-set 0 struct stride and member offsets for one binding.
     const auto binding_struct = [&scan](std::uint32_t binding,
                                         std::uint32_t stride,
                                         std::initializer_list<std::uint32_t> offsets) {
@@ -117,13 +119,13 @@ validate_spirv_layout(const shader_variant_key& key, std::span<const std::uint32
 
 /// @brief MSL source and reflected execution metadata produced by SPIRV-Cross.
 struct msl_compile_result {
-    std::string msl;
-    std::string entry_name;
-    std::uint32_t wg_x = 1;
-    std::uint32_t wg_y = 1;
-    std::uint32_t wg_z = 1;
-    bool needs_buffer_size_buffer = false;
-    std::uint32_t buffer_size_buffer_index = 25u;
+    std::string msl; ///< Translated Metal shading language source.
+    std::string entry_name; ///< Cleansed compute entry point name for pipeline creation.
+    std::uint32_t wg_x = 1; ///< Reflected local-size X dimension in threads.
+    std::uint32_t wg_y = 1; ///< Reflected local-size Y dimension in threads.
+    std::uint32_t wg_z = 1; ///< Reflected local-size Z dimension in threads.
+    bool needs_buffer_size_buffer = false; ///< Whether SPIRV-Cross emitted OpArrayLength support.
+    std::uint32_t buffer_size_buffer_index = 25u; ///< Metal buffer index reserved for array lengths.
 };
 
 /// @brief Translates SPIR-V to MSL with the runtime descriptor mapping.
@@ -192,6 +194,7 @@ spirv_to_msl(std::vector<std::uint32_t> spirv, const shader_variant_key& key, ms
                                      " expected=",
                                      expected_push_count));
         }
+        // Maps one SPIR-V storage binding to its fixed Metal buffer index.
         auto add_storage_binding = [&compiler](std::uint32_t desc_set,
                                                std::uint32_t binding,
                                                std::uint32_t count,
@@ -402,6 +405,9 @@ compile_variant_to_cache(const std::filesystem::path& cache_dir,
 }
 
 /// @brief Ensures one complete cache entry, compiling it when absent.
+/// @param[in] cache_dir Shader-cache directory.
+/// @param[in] key Shader variant identity.
+/// @param[in] version Requested Metal shading-language version.
 /// @return Success or the compilation diagnostic.
 [[nodiscard]] inline std::expected<void, std::string> ensure_compiled(
     const std::filesystem::path& cache_dir, const shader_variant_key& key, msl_version version) {
@@ -417,6 +423,9 @@ compile_variant_to_cache(const std::filesystem::path& cache_dir,
 /// SPIR-V/layout/MSL pipeline. Every binary archive is rebuilt and passes the
 /// reopen and `FailOnBinaryArchiveMiss` controls.
 ///
+/// @param[in] cache_dir Shader-cache directory.
+/// @param[in] key Shader variant identity.
+/// @param[in] version Requested Metal shading-language version.
 /// @return Success or the compilation or completeness diagnostic.
 [[nodiscard]] inline std::expected<void, std::string> ensure_compiled_for_sealed_seed(
     const std::filesystem::path& cache_dir, const shader_variant_key& key, msl_version version) {

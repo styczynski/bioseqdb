@@ -66,12 +66,16 @@ struct moltenvk_command_library_interpose {
 };
 
 /// @brief Returns the process-owned command-library interpose state.
+/// @return Singleton retained through process teardown.
 moltenvk_command_library_interpose& moltenvk_command_interpose_state() noexcept {
     static moltenvk_command_library_interpose state;
     return state;
 }
 
 /// @brief Casts the dynamically resolved Objective-C message entry point.
+/// @tparam p_function_type Exact ABI-compatible function-pointer type.
+/// @param[in] function Raw Objective-C runtime entry point.
+/// @return Reinterpreted typed function pointer.
 template <class p_function_type>
 [[nodiscard]] p_function_type objc_msg_cast(void* function) noexcept {
     return reinterpret_cast<p_function_type>(function);
@@ -219,6 +223,9 @@ struct objc_block_literal {
 };
 
 /// @brief Completes a wrapped Metal library callback through the original block.
+/// @param[in] completion Borrowed Objective-C completion block.
+/// @param[in] library Borrowed library result forwarded to the block.
+/// @param[in] error Borrowed error result forwarded to the block.
 void invoke_metal_library_completion(void* completion, void* library, void* error) noexcept {
     if (completion == nullptr) {
         return;
@@ -232,6 +239,10 @@ void invoke_metal_library_completion(void* completion, void* library, void* erro
 }
 
 /// @brief Completes a wrapped Metal pipeline callback through the original block.
+/// @param[in] completion Borrowed Objective-C completion block.
+/// @param[in] pipeline Borrowed pipeline result forwarded to the block.
+/// @param[in] reflection Borrowed reflection result forwarded to the block.
+/// @param[in] error Borrowed error result forwarded to the block.
 void invoke_metal_pipeline_completion(void* completion,
                                       void* pipeline,
                                       void* reflection,
@@ -321,6 +332,9 @@ extern "C" void bioseq_moltenvk_new_library_with_source_async(
 }
 
 /// @brief Reads one metallib candidate into an owned byte vector.
+/// @param[in] path Null-terminated candidate path.
+/// @param[out] out Vector replaced with the complete nonempty file contents.
+/// @return `true` when the full file was read.
 [[nodiscard]] bool read_file_bytes(const char* path, std::vector<std::byte>* out) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -342,6 +356,7 @@ void install_moltenvk_command_library_interpose() noexcept {
     auto& state = moltenvk_command_interpose_state();
     void* installed_method = nullptr;
     void* installed_method_async = nullptr;
+    // Restores any methods replaced during this partial installation attempt.
     const auto rollback_swizzles = [&state, &installed_method, &installed_method_async]() noexcept {
         if (state.objc.method_set_implementation != nullptr) {
             if (installed_method != nullptr && state.original_new_library_with_source != nullptr) {
@@ -371,6 +386,7 @@ void install_moltenvk_command_library_interpose() noexcept {
     try {
         const bool immutable_fail_closed = is_runtime_metal_archive_configuration_installed();
         const bool previously_immutable_fail_closed = state.immutable_fail_closed;
+        // Latches immutable-mode installation failures without throwing.
         const auto reject_immutable_install = [&state, immutable_fail_closed]() noexcept {
             if (immutable_fail_closed) {
                 state.sticky_failure.store(true, std::memory_order_release);
@@ -574,6 +590,7 @@ void install_moltenvk_command_library_interpose() noexcept {
     }
 }
 
+/// @brief Cached registry identity and wrapper coverage for one Metal device.
 struct command_interpose_device_binding {
     std::uint64_t registry_id = 0u;
     std::uint64_t methods_present = 0u;
@@ -582,7 +599,7 @@ struct command_interpose_device_binding {
 
 /// @brief Rare PSO-creation receipt: bind the receipt to the exact intercepted device
 /// and its live method table. Submit/wait gates consume cached scalar facts.
-/// this two-selector reflection runs only while creating a pipeline receipt.
+/// This two-selector reflection runs only while creating a pipeline receipt.
 /// @param[in] device Objective-C Metal device to inspect.
 /// @return Intercepted device registry identity and available method mask.
 [[nodiscard]] command_interpose_device_binding

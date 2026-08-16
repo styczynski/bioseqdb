@@ -36,25 +36,25 @@ export namespace bioseq::gpu::vulkan {
 
 /// @brief Loaded Vulkan shader module and its dispatch geometry.
 struct shader_module_load {
-    VkShaderModule module = VK_NULL_HANDLE;
-    std::string entry_name;
-    std::uint32_t wg_x = 1;
-    std::uint32_t wg_y = 1;
-    std::uint32_t wg_z = 1;
+    VkShaderModule module = VK_NULL_HANDLE; ///< Created module owned by the caller device.
+    std::string entry_name; ///< Entry point recorded in cache metadata.
+    std::uint32_t wg_x = 1; ///< Local workgroup size X in threads.
+    std::uint32_t wg_y = 1; ///< Local workgroup size Y in threads.
+    std::uint32_t wg_z = 1; ///< Local workgroup size Z in threads.
 };
 static_assert(std::is_nothrow_move_constructible_v<shader_module_load>);
 
 /// @brief MoltenVK shader-module bytes retained under memory admission.
 struct moltenvk_shader_module_code {
     // Declared first so words release before the transient permit.
-    bioseq::parallelism::memory_permit permit;
-    std::vector<std::uint32_t> words;
-    std::size_t code_size_bytes = 0;
-    std::size_t header_size_bytes = sizeof(MVKMSLSPIRVHeader);
-    std::uint64_t admission_count = 0u;
-    std::uint64_t peak_admitted_bytes = 0u;
-    std::uint64_t retained_capacity_bytes = 0u;
-    bool admission_saturated = false;
+    bioseq::parallelism::memory_permit permit; ///< Peak reservation held while words live.
+    std::vector<std::uint32_t> words; ///< Header plus metallib payload in MoltenVK module layout.
+    std::size_t code_size_bytes = 0; ///< Byte length passed to VkShaderModuleCreateInfo::codeSize.
+    std::size_t header_size_bytes = sizeof(MVKMSLSPIRVHeader); ///< Leading MVKMSLSPIRVHeader size.
+    std::uint64_t admission_count = 0u; ///< Number of admission reservations taken.
+    std::uint64_t peak_admitted_bytes = 0u; ///< Largest admitted byte budget for this object.
+    std::uint64_t retained_capacity_bytes = 0u; ///< Vector capacity currently charged to the permit.
+    bool admission_saturated = false; ///< Set when allocation would exceed the admitted peak.
 };
 
 /// @brief Returns the MoltenVK compiled-MSL shader module header size.
@@ -135,6 +135,10 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path) {
 }
 
 /// @brief Creates a Vulkan shader module from an on-disk complete cache entry.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] cache_dir Shader-cache directory.
+/// @param[in] key Shader variant identity.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
 /// @return Loaded shader module and geometry or a cache or Vulkan diagnostic.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_cached_module(VkDevice device,
@@ -180,6 +184,9 @@ load_cached_module(VkDevice device,
 }
 
 /// @brief Creates a Vulkan shader module from one owned sealed key image.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] image Sealed cache key image with metallib bytes and metadata.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
 /// @return Loaded shader module and geometry or an image or Vulkan diagnostic.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_image(VkDevice device,
@@ -216,6 +223,9 @@ create_shader_module_from_sealed_key_image(VkDevice device,
 }
 
 /// @brief Creates a Vulkan shader module from one borrowed sealed key view.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] view Borrowed sealed cache key view with metallib bytes and metadata.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
 /// @return Loaded shader module and geometry or a view or Vulkan diagnostic.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 create_shader_module_from_sealed_key_view(VkDevice device,
@@ -251,6 +261,10 @@ create_shader_module_from_sealed_key_view(VkDevice device,
 }
 
 /// @brief Loads one shader module from a retained process seed.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] seed Retained sealed shader-cache seed image.
+/// @param[in] key Shader variant identity to resolve inside the seed.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
 /// @return Loaded shader module and geometry or a membership or Vulkan diagnostic.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(VkDevice device,
@@ -268,6 +282,12 @@ load_sealed_cached_module(VkDevice device,
 }
 
 /// @brief Loads one shader module from a validated on-disk sealed seed.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] cache_dir Shader-cache directory.
+/// @param[in] cache_digest Cache identity digest for the sealed seed.
+/// @param[in] exact_aot_keys Exact AOT variant keys recorded in the seed.
+/// @param[in] key Shader variant identity to load.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
 /// @return Loaded shader module and geometry or a seed or Vulkan diagnostic.
 [[nodiscard]] inline std::expected<shader_module_load, std::string>
 load_sealed_cached_module(VkDevice device,
@@ -285,7 +305,12 @@ load_sealed_cached_module(VkDevice device,
 }
 
 /// @brief Loads one module after asking a compile service to fill an absent entry.
-/// @tparam p_service Runtime compile service type.
+/// @tparam p_service Runtime compile service type satisfying `is_runtime_compile_service`.
+/// @param[in] device Vulkan device that will own the module.
+/// @param[in] cache_dir Shader-cache directory.
+/// @param[in] key Shader variant identity.
+/// @param[in] create_shader_module Device dispatch entry for module creation.
+/// @param[in] service Compile service invoked when the cache entry is incomplete.
 /// @return Loaded shader module and geometry or a compile, cache, or Vulkan diagnostic.
 template <is_runtime_compile_service p_service>
 [[nodiscard]] inline std::expected<shader_module_load, std::string>

@@ -1,6 +1,9 @@
 /**
- * @file
+ * @file vulkan/abi/grouped_index.cppm
  * @brief Defines the retained grouped-SoA resident-index Vulkan ABI.
+ *
+ * Partition descriptors and seed push constants are size- and offset-pinned by
+ * static assertions so host uploads and shader loads stay byte-identical.
  */
 module;
 
@@ -39,12 +42,12 @@ inline constexpr std::uint32_t k_gpu_grouped_soa_partition_required_flags =
  * The status word is outside the query-local prefix-scan range.
  */
 enum class gpu_grouped_soa_seed_status : std::uint32_t {
-    none = 0u,
-    contract = 1u << 0u,
-    query = 1u << 1u,
-    control = 1u << 2u,
-    position = 1u << 3u,
-    emission = 1u << 4u,
+    none = 0u,///< No seed-shader failure recorded.
+    contract = 1u << 0u,///< Push constants or admission contract violated.
+    query = 1u << 1u,///< Query minimizer stream or count invalid.
+    control = 1u << 2u,///< Control stream decode or bounds failure.
+    position = 1u << 3u,///< Position stream decode or bounds failure.
+    emission = 1u << 4u,///< Anchor or count emission capacity exceeded.
 };
 
 /**
@@ -66,24 +69,24 @@ enum class gpu_grouped_soa_seed_status : std::uint32_t {
  * hash, terminal-prefix, saturated-count, and raw-position arrays.
  */
 struct gpu_grouped_soa_resident_partition_descriptor {
-    std::uint32_t partition_id = 0;
-    std::uint32_t directory_ordinal = 0;
-    std::uint32_t position_segment = 0;
-    std::uint32_t flags = 0;
-    std::uint64_t hash_byte_offset = 0;
-    std::uint64_t prefix_byte_offset = 0;
-    std::uint64_t count_byte_offset = 0;
-    std::uint64_t position_byte_offset = 0;
-    std::uint32_t control_count = 0;
-    std::uint32_t position_count = 0;
-    std::uint32_t hash_width = 0;
-    std::uint32_t offset_width = 0;
-    std::uint32_t count_width = 0;
-    std::uint32_t position_width = 0;
-    std::uint64_t low_hash = 0;
-    std::uint64_t high_hash = 0;
-    std::uint64_t segment_base_bp = 0;
-    std::uint64_t segment_end_bp = 0;
+    std::uint32_t partition_id = 0;///< Stable partition identifier from ingest.
+    std::uint32_t directory_ordinal = 0;///< Index of this partition in the directory.
+    std::uint32_t position_segment = 0;///< Segment index for segment-local positions.
+    std::uint32_t flags = 0;///< Required grouped-SoA partition flag mask.
+    std::uint64_t hash_byte_offset = 0;///< First hash scalar byte in the control buffer.
+    std::uint64_t prefix_byte_offset = 0;///< Terminal-prefix array byte offset in controls.
+    std::uint64_t count_byte_offset = 0;///< Saturated-count array byte offset in controls.
+    std::uint64_t position_byte_offset = 0;///< First position scalar byte in the position buffer.
+    std::uint32_t control_count = 0;///< Number of control buckets in this partition.
+    std::uint32_t position_count = 0;///< Number of encoded positions in this partition.
+    std::uint32_t hash_width = 0;///< Hash scalar width in bytes (2, 4, or 8).
+    std::uint32_t offset_width = 0;///< Prefix offset scalar width in bytes.
+    std::uint32_t count_width = 0;///< Count scalar width in bytes.
+    std::uint32_t position_width = 0;///< Position scalar width in bytes.
+    std::uint64_t low_hash = 0;///< Inclusive lower hash bound for this partition.
+    std::uint64_t high_hash = 0;///< Inclusive upper hash bound for this partition.
+    std::uint64_t segment_base_bp = 0;///< Segment base in base pairs for position decode.
+    std::uint64_t segment_end_bp = 0;///< Segment end in base pairs for position decode.
 };
 
 /**
@@ -93,26 +96,26 @@ struct gpu_grouped_soa_resident_partition_descriptor {
  * dispatch is legal only when the query threshold does not exceed that cap.
  */
 struct gpu_grouped_soa_seed_push {
-    std::uint32_t abi_revision = k_gpu_grouped_soa_abi_revision;
-    std::uint32_t words32_per_minimizer = 0;
-    std::uint32_t word_kind = 0;
-    std::uint32_t hash_shift = 0;
-    std::uint32_t pos_bits = 0;
-    std::uint32_t kmer_size = 0;
-    std::uint32_t partition_count = 0;
-    std::uint32_t max_occ = 0;
-    std::uint32_t emit_mode = 0;
-    std::uint32_t record_count = 0;
-    std::uint32_t target_ref_bits = 0;
-    std::uint32_t query_minimizer_count = 0;
-    std::uint32_t control_word_count = 0;
-    std::uint32_t position_word_count = 0;
-    std::uint32_t anchor_capacity = 0;
-    std::uint32_t max_occ_cap_lo = 0;
-    std::uint32_t max_occ_cap_hi = 0;
+    std::uint32_t abi_revision = k_gpu_grouped_soa_abi_revision;///< Wire revision checked by shaders.
+    std::uint32_t words32_per_minimizer = 0;///< 32-bit words per query minimizer record.
+    std::uint32_t word_kind = 0;///< Minimizer word encoding kind from query upload.
+    std::uint32_t hash_shift = 0;///< Right shift applied before hash lookup.
+    std::uint32_t pos_bits = 0;///< Position field width used during decode.
+    std::uint32_t kmer_size = 0;///< Minimizer k-mer length in symbols.
+    std::uint32_t partition_count = 0;///< Number of resident partitions in the dispatch.
+    std::uint32_t max_occ = 0;///< Query-side occurrence threshold for this dispatch.
+    std::uint32_t emit_mode = 0;///< Seed emission mode selector for the bound shader.
+    std::uint32_t record_count = 0;///< Number of query records covered by the dispatch.
+    std::uint32_t target_ref_bits = 0;///< Target coordinate bit width for anchor rebasing.
+    std::uint32_t query_minimizer_count = 0;///< Total query minimizers in the bound buffer.
+    std::uint32_t control_word_count = 0;///< Control aggregate size in 32-bit words.
+    std::uint32_t position_word_count = 0;///< Position aggregate size in 32-bit words.
+    std::uint32_t anchor_capacity = 0;///< Maximum anchors writable by the emit pass.
+    std::uint32_t max_occ_cap_lo = 0;///< Low 32 bits of the persisted occurrence cap.
+    std::uint32_t max_occ_cap_hi = 0;///< High 32 bits of the persisted occurrence cap.
     // Query-local counts occupy [0, status_index); the final extra word is
     // reserved for fail-closed shader status and is never part of prefix scan.
-    std::uint32_t status_index = 0;
+    std::uint32_t status_index = 0;///< Index of the fail-closed status word in query counts.
 };
 
 static_assert(sizeof(gpu_grouped_soa_resident_partition_descriptor) == 104u);

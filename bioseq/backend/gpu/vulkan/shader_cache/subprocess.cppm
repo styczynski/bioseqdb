@@ -35,14 +35,14 @@ export namespace bioseq::gpu::vulkan {
 
 /// @brief Resource bounds for one captured subprocess invocation.
 struct run_capture_limits {
-    std::size_t maximum_output_bytes = 4u << 20u;
-    std::chrono::milliseconds timeout = std::chrono::minutes(5);
+    std::size_t maximum_output_bytes = 4u << 20u; ///< Combined stdout and stderr byte cap.
+    std::chrono::milliseconds timeout = std::chrono::minutes(5); ///< Wall-clock limit before abort.
 };
 
 /// @brief Descriptor mapping inherited by a captured subprocess.
 struct run_capture_inherited_fd {
-    int source_fd = -1;
-    int target_fd = -1;
+    int source_fd = -1; ///< Open descriptor duplicated into the child.
+    int target_fd = -1; ///< Child descriptor number receiving the duplicate.
 };
 
 /// @brief Move-disabled owner for one subprocess file descriptor.
@@ -228,10 +228,10 @@ class captured_child_process {
   private:
     /// @brief Result of a nonblocking direct-child reap attempt.
     enum class reap_probe : std::uint8_t {
-        running,
-        reaped,
-        no_longer_a_child,
-        error,
+        running, ///< Direct child is still executing.
+        reaped, ///< Direct child exited and was reaped.
+        no_longer_a_child, ///< Process is no longer this parent's direct child.
+        error, ///< waitpid failed with an unexpected errno.
     };
 
     /// @brief Attempts a nonblocking direct-child reap.
@@ -311,6 +311,7 @@ run_capture(std::span<const std::string> args,
     }
     capture_file_descriptor read_owner{pipe_fds[0]};
     capture_file_descriptor write_owner{pipe_fds[1]};
+    // Marks one pipe end close-on-exec so the child cannot inherit it.
     const auto set_close_on_exec = [](int fd) noexcept -> int {
         const int flags = ::fcntl(fd, F_GETFD, 0);
         if (flags < 0)

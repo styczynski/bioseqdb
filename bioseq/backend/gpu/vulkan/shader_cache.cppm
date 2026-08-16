@@ -1,6 +1,6 @@
 /**
  * @file shader_cache.cppm
- * @brief Exposes Vulkan shader-cache contracts and services.
+ * @brief Aggregate module facade for Vulkan shader-cache paths, compilation, and loading.
  */
 export module bioseq.gpu.vulkan.shader_cache;
 

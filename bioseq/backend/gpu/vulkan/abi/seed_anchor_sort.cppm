@@ -81,6 +81,7 @@ struct seed_anchor_sort_plan {
         return failure == seed_anchor_sort_plan_failure::none;
     }
 
+    /** @brief Compares the complete admission, allocation, and dispatch plan. */
     [[nodiscard]] constexpr bool operator==(
         const seed_anchor_sort_plan&) const noexcept = default;
 };
@@ -127,6 +128,14 @@ compute_seed_anchor_bitonic_capacity(
 
 /**
  * @brief Builds the deterministic allocation and dispatch plan for an anchor sort.
+ * @param[in] anchor_count Number of anchors to sort.
+ * @param[in] target_length Target segment length in bases.
+ * @param[in] target_position_offset Absolute coordinate of the segment's first base.
+ * @param[in] bitonic_capacity Largest anchor count supported by one bitonic workgroup.
+ * @param[in] max_workgroup_count_x Device X-dimension dispatch limit.
+ * @param[in] max_workgroup_invocations Maximum invocations in one workgroup.
+ * @param[in] max_workgroup_size_x Device X-dimension workgroup-size limit.
+ * @param[in] max_storage_buffer_range Maximum bytes addressable by one storage binding.
  * @return A plan whose `is_valid()` predicate reports admission success.
  */
 [[nodiscard]] inline constexpr seed_anchor_sort_plan make_seed_anchor_sort_plan(
@@ -250,6 +259,7 @@ struct seed_lookup_sort_execution_stats {
     std::uint64_t radix_scatter_dispatches = 0;
     std::uint64_t host_sort_fallbacks = 0;
 
+    /** @brief Compares all accumulated sort counters. */
     [[nodiscard]] constexpr bool operator==(
         const seed_lookup_sort_execution_stats&) const noexcept = default;
 };
@@ -431,6 +441,7 @@ inline void normalize_seed_anchor_tie_run(
     std::uint64_t begin,
     std::uint64_t count) noexcept
 {
+    // Restores max-heap order within the selected equal-reference run.
     const auto sift_down = [payload, begin](
             std::uint64_t heap_count,
             std::uint64_t first_root) noexcept {
