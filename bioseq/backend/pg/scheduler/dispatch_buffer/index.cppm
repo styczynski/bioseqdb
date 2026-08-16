@@ -79,8 +79,8 @@ import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
 import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence;                  // allocation observer for route-aware sequence payload tracing
-import bioseq.postgres.scheduler.dispatch_processor;   // fixed-shape batch_processor, heavy pipeline in its own module
+import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.pipeline.minimap_port;
@@ -90,19 +90,18 @@ import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.scanner;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;       // statement-owned source provider for locator targets
+import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.column.table_access;
 
 export namespace bioseq::scheduler {
 
-
 // Fixed upper bound on one physical dispatch. The custom scan rolls over at
 // this boundary, drains every result, clears the completed physical batch and
 // then resumes the same source scan. No source tuple may be truncated.
 class tuple_dispatch_buffer {
-public:
+  public:
     /*
      * Context captured at BeginCustomScan from cscan->scan.plan.qual /
      * targetlist. seq_attno is the 1-based attribute number of the Var
@@ -116,15 +115,16 @@ public:
      * never has to re-read from the plan tree.
      */
     struct mmsearch_context {
-        AttrNumber seq_attno           = InvalidAttrNumber;
-        AttrNumber primary_key_attno   = InvalidAttrNumber;
+        AttrNumber seq_attno = InvalidAttrNumber;
+        AttrNumber primary_key_attno = InvalidAttrNumber;
         std::string column_name;
-        std::vector<char> query_varlena;  // full detoasted varlena bytes, 16-byte aligned by std::allocator
-        uint8_t alphabet_code          = 0;
-        uint8_t storage_unit_byte_width             = 0;
-        uint8_t query_alphabet_code    = 0;
+        std::vector<char>
+            query_varlena; // full detoasted varlena bytes, 16-byte aligned by std::allocator
+        uint8_t alphabet_code = 0;
+        uint8_t storage_unit_byte_width = 0;
+        uint8_t query_alphabet_code = 0;
         uint8_t query_storage_unit_byte_width = 0;
-        bool active                    = false;
+        bool active = false;
 
         /*
          * Per-row-query attno. Set when the mmsearch second argument is a
@@ -148,9 +148,9 @@ public:
          * the byte-for-byte alignment that the user can inspect via
          * bioseq.cigar / target_start / etc.
          */
-        AttrNumber per_row_query_attno      = InvalidAttrNumber;
-        bool       per_row_self_alignment   = false;
-        bool       per_row_evaluated        = false;
+        AttrNumber per_row_query_attno = InvalidAttrNumber;
+        bool per_row_self_alignment = false;
+        bool per_row_evaluated = false;
 
         /*
          * Typmod coalesce: when the column and the query have the same
@@ -168,7 +168,7 @@ public:
          * available, and the original ones otherwise.
          */
         std::vector<char> coalesced_query_varlena;
-        bool       coalesce_active          = false;
+        bool coalesce_active = false;
         [[nodiscard]] const bioseq::pg_types::seq* query_hdr() const {
             const std::vector<char>& bytes =
                 coalesce_active ? coalesced_query_varlena : query_varlena;
@@ -197,13 +197,14 @@ public:
             Datum datum = Datum{0};
             pg_sequence_descriptor descriptor{};
         };
-        TupleTableSlot* scan_slot_copy      = nullptr;
-        int32_t         primary_key         = -1;
-        bool            primary_key_is_null = true;
-        int64_t         sequence_rowno      = -1;   /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
+        TupleTableSlot* scan_slot_copy = nullptr;
+        int32_t primary_key = -1;
+        bool primary_key_is_null = true;
+        int64_t sequence_rowno =
+            -1; /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
         std::vector<char> seq_varlena;
-        bool            seq_is_null         = true;
-        bool            target_from_evaluated_expression = false;
+        bool seq_is_null = true;
+        bool target_from_evaluated_expression = false;
 
         /*
          * Per-row mmsearch query, populated only when mmsearch state's
@@ -217,8 +218,8 @@ public:
          * column's alphabet/width via the same Var resolution path).
          */
         std::vector<char> per_row_query_varlena;
-        bool            per_row_query_is_null = true;
-        bool            query_from_evaluated_expression = false;
+        bool per_row_query_is_null = true;
+        bool query_from_evaluated_expression = false;
 
         /*
          * Deferred-hydration stage. Under
@@ -245,7 +246,7 @@ public:
         pg_sequence_descriptor seq_recipe_descriptor{};
         pg_sequence_descriptor per_row_query_recipe_descriptor{};
         std::vector<retained_expanded_attribute> expanded_sequence_attributes{};
-        const bioseq::pg_types::seq* hydrated_seq_hdr           = nullptr;
+        const bioseq::pg_types::seq* hydrated_seq_hdr = nullptr;
         const bioseq::pg_types::seq* hydrated_per_row_query_hdr = nullptr;
 
         [[nodiscard]] bool has_seq_recipe() const noexcept {
@@ -286,8 +287,7 @@ public:
             if (per_row_query_is_null || per_row_query_varlena.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const bioseq::pg_types::seq*>(
-                per_row_query_varlena.data());
+            return reinterpret_cast<const bioseq::pg_types::seq*>(per_row_query_varlena.data());
         }
     };
 
@@ -297,7 +297,7 @@ public:
      */
     struct output_cursor {
         size_t scan_entry_index = 0;
-        size_t match_index      = 0;
+        size_t match_index = 0;
     };
 
     struct next_output {
@@ -325,20 +325,16 @@ public:
         std::exception_ptr cpp_error{};
 
         [[nodiscard]] bool empty() const noexcept {
-            return query_headers.empty()
-                && query_recipe_datums.empty()
-                && query_recipe_descriptors.empty()
-                && query_ordinals.empty()
-                && detoast_copies.empty()
-                && rewidthed_query_varlenas.empty()
-                && cpp_error == nullptr;
+            return query_headers.empty() && query_recipe_datums.empty() &&
+                   query_recipe_descriptors.empty() && query_ordinals.empty() &&
+                   detoast_copies.empty() && rewidthed_query_varlenas.empty() &&
+                   cpp_error == nullptr;
         }
 
         void clear_storage_noexcept() noexcept {
             std::vector<const bioseq::pg_types::seq*>{}.swap(query_headers);
             std::vector<Datum>{}.swap(query_recipe_datums);
-            std::vector<pg_sequence_descriptor>{}.swap(
-                query_recipe_descriptors);
+            std::vector<pg_sequence_descriptor>{}.swap(query_recipe_descriptors);
             std::vector<std::uint64_t>{}.swap(query_ordinals);
             std::vector<bioseq::pg_types::seq*>{}.swap(detoast_copies);
             std::vector<std::vector<char>>{}.swap(rewidthed_query_varlenas);
@@ -351,7 +347,7 @@ public:
         std::size_t match_index = 0;
     };
 
-private:
+  private:
     ::bioseq::simd::batch_processor processor;
     mmsearch_context mmsearch_state;
 
@@ -406,9 +402,7 @@ private:
     std::vector<join_query_ref> join_pending_cpu_preparation_queries{};
     bool join_cpu_preparation_pending = false;
     join_cpu_preparation_scratch join_cpu_preparation_scratch{};
-    std::map<std::uint64_t,
-        std::vector<::bioseq::simd::match_result>>
-        join_match_map{};
+    std::map<std::uint64_t, std::vector<::bioseq::simd::match_result>> join_match_map{};
     std::vector<join_output_cursor> join_output_cursors{};
     std::size_t join_output_position = 0;
     bool join_target_active = false;
@@ -418,10 +412,8 @@ private:
     bool join_prepared_build_checksum_recorded = false;
     std::optional<bioseq::storage::indexing::active_read_policy_resolution>
         join_active_read_policy{};
-    bioseq::storage::indexing::cold_index_preparation_stats
-        join_cold_policy_stats{};
-    ::bioseq::simd::batch_processor::cpu_prepared_target
-        join_cpu_prepared_target{};
+    bioseq::storage::indexing::cold_index_preparation_stats join_cold_policy_stats{};
+    ::bioseq::simd::batch_processor::cpu_prepared_target join_cpu_prepared_target{};
     ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target
         join_gpu_prepared_grouped_soa_target{};
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> join_target_hdrs{};
@@ -429,15 +421,11 @@ private:
     std::array<int32_t, dispatch_batch_capacity> join_query_ids{};
     std::array<bioseq::pg_types::seq*, dispatch_batch_capacity> join_query_detoast_copies{};
     std::vector<std::vector<char>> join_query_rewidth_varlenas{};
-    std::unique_ptr<
-        ::bioseq::simd::batch_processor::scanner_pg_context>
-        join_scanner_pg_ctx{};
+    std::unique_ptr<::bioseq::simd::batch_processor::scanner_pg_context> join_scanner_pg_ctx{};
     // PG_TRY is sigsetjmp-based: the catch path must not read a cache pointer
     // automatic that was assigned inside the protected region.
     bioseq::storage::seq_caches* join_scanner_pg_cache = nullptr;
-    std::map<int32_t,
-        std::vector<::bioseq::simd::match_result>>
-        join_result_scratch{};
+    std::map<int32_t, std::vector<::bioseq::simd::match_result>> join_result_scratch{};
 
     /*
      * Additional Const-only mmsearch quals that share the primary
@@ -467,15 +455,15 @@ private:
      * per-scan db/spc/relfilenode identity is captured by configure_params.
      */
     using storage_manager_type = bioseq::storage::bioseq_default_storage_manager;
-    Oid user_main_database_oid   = InvalidOid;
+    Oid user_main_database_oid = InvalidOid;
     Oid user_main_tablespace_oid = InvalidOid;
-    Oid user_main_relfilenode    = InvalidOid;
+    Oid user_main_relfilenode = InvalidOid;
     std::optional<bioseq::storage::indexing::borrowed_executor_read_context>
         executor_read_context{};
     // Borrowed from the owning executor state for active scan execution. The
     // owner keeps it registered until every batch/scanner is drained; buffer
     // destruction never dereferences it and never changes its registration.
-    Snapshot scan_snapshot       = nullptr;
+    Snapshot scan_snapshot = nullptr;
     MemoryContext executor_query_mctx = nullptr;
     // Borrowed from the bioseq scan provider. Every locator-backed scanner
     // target must use this exact source-domain route; this buffer never owns
@@ -485,10 +473,8 @@ private:
     bioseq::pipeline_stats::persisted_gpu_operation_accumulator*
         persisted_gpu_operation_stats_sink = nullptr;
     slice_async_owner_guard* slice_async_owner = nullptr;
-    bioseq::storage::sequence_payload_allocation_observer
-        mmsearch_target_payload_observer{};
-    bioseq::storage::sequence_payload_allocation_observer
-        mmsearch_query_payload_observer{};
+    bioseq::storage::sequence_payload_allocation_observer mmsearch_target_payload_observer{};
+    bioseq::storage::sequence_payload_allocation_observer mmsearch_query_payload_observer{};
     MemoryContext batch_payload_ctx = nullptr;
     /* Reused virtual serializer input for rows containing expanded recipe
      * Datums.  Keeping this handle in member storage makes the PG_TRY error
@@ -500,14 +486,14 @@ private:
     std::array<std::vector<storage_manager_type::fetch_request>, storage_manager_type::bucket_count>
         per_bucket_query_requests{};
     std::vector<storage_manager_type::fetch_request> fetch_bulk_sort_scratch{};
-    std::vector<bioseq::pg_types::seq*>          hydrated_target_payloads{};
-    std::vector<bioseq::pg_types::seq*>          hydrated_query_payloads{};
+    std::vector<bioseq::pg_types::seq*> hydrated_target_payloads{};
+    std::vector<bioseq::pg_types::seq*> hydrated_query_payloads{};
     pg_sequence_read_session* active_wave_read_session = nullptr;
     // Member storage is intentional: PG_TRY/PG_CATCH uses setjmp/longjmp, so
     // a modified automatic optional would have an indeterminate catch value.
     std::optional<bioseq::parallelism::memory_permit> active_wave_permit{};
     /* §9.6 EXPLAIN counters. */
-    std::uint64_t explain_bucket_touched_mask      = 0;
+    std::uint64_t explain_bucket_touched_mask = 0;
     std::uint64_t explain_storage_bulk_fetch_calls = 0;
 
     struct evaluated_row_operands {
@@ -524,21 +510,19 @@ private:
 
     [[nodiscard]] Datum retain_expanded_recipe_(Datum input);
 
-    static void require_recipe_descriptor_(
-            const pg_sequence_descriptor& descriptor,
-            const std::uint8_t alphabet_code,
-            const std::uint8_t storage_unit_byte_width,
-            const char* operand);
+    static void require_recipe_descriptor_(const pg_sequence_descriptor& descriptor,
+                                           const std::uint8_t alphabet_code,
+                                           const std::uint8_t storage_unit_byte_width,
+                                           const char* operand);
 
     void capture_target_datum_(buffered_scan_entry& entry, Datum datum);
 
     void capture_query_datum_(buffered_scan_entry& entry, Datum datum);
 
-    void retain_expanded_sequence_output_attributes_(
-            buffered_scan_entry& entry,
-            TupleTableSlot* slot);
+    void retain_expanded_sequence_output_attributes_(buffered_scan_entry& entry,
+                                                     TupleTableSlot* slot);
 
-public:
+  public:
     explicit tuple_dispatch_buffer(const size_t estimated_tuple_count);
 
     /// Bind the sole statement-root owner used by every batch/node/rescan.
@@ -547,8 +531,7 @@ public:
 
     void bind_slice_async_owner(slice_async_owner_guard* owner);
 
-    void bind_sequence_source_provider(
-            bioseq::storage::pg_sequence_source_provider* provider);
+    void bind_sequence_source_provider(bioseq::storage::pg_sequence_source_provider* provider);
 
     void clear_sequence_source_provider_binding() noexcept;
 
@@ -591,9 +574,16 @@ public:
     // scan_state.
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
-    [[nodiscard]] const ::bioseq::simd::minimap2_parameters& base_aligner_params() const { return base_params; }
-    [[nodiscard]] const ::bioseq::pipeline_stats::pipeline_execution_stats& execution_stats() const { return last_stats; }
-    [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
+    [[nodiscard]] const ::bioseq::simd::minimap2_parameters& base_aligner_params() const {
+        return base_params;
+    }
+    [[nodiscard]] const ::bioseq::pipeline_stats::pipeline_execution_stats&
+    execution_stats() const {
+        return last_stats;
+    }
+    [[nodiscard]] bool reads_sequence_index() const {
+        return read_sequence_index_active;
+    }
     [[nodiscard]] AttrNumber target_sequence_attno() const noexcept {
         return mmsearch_state.seq_attno;
     }
@@ -655,47 +645,42 @@ public:
      * passing base row.  The physical seq_attno remains source metadata and
      * identifies the raw output attribute, but is never read as an operand by
      * this mode. */
-    void configure_mmsearch_per_row_evaluated(
-            const AttrNumber seq_attno,
-            std::string column_name,
-            const std::uint8_t alphabet_code,
-            const std::uint8_t storage_unit_byte_width,
-            const std::uint8_t query_alphabet_code,
-            const std::uint8_t query_storage_unit_byte_width,
-            const AttrNumber primary_key_attno);
+    void configure_mmsearch_per_row_evaluated(const AttrNumber seq_attno,
+                                              std::string column_name,
+                                              const std::uint8_t alphabet_code,
+                                              const std::uint8_t storage_unit_byte_width,
+                                              const std::uint8_t query_alphabet_code,
+                                              const std::uint8_t query_storage_unit_byte_width,
+                                              const AttrNumber primary_key_attno);
 
     /* Configure the narrow two-child bioseq batch join seam. */
-    void configure_mmsearch_join(
-            const Oid target_relation_oid,
-            const AttrNumber target_storage_seq_attno,
-            const AttrNumber target_slot_seq_resno,
-            const AttrNumber target_slot_rowno_resno,
-            const AttrNumber query_slot_seq_resno,
-            std::string target_column_name,
-            const std::uint8_t alphabet_code,
-            const std::uint8_t storage_unit_byte_width,
-            const std::uint8_t query_alphabet_code,
-            const std::uint8_t query_storage_unit_byte_width);
+    void configure_mmsearch_join(const Oid target_relation_oid,
+                                 const AttrNumber target_storage_seq_attno,
+                                 const AttrNumber target_slot_seq_resno,
+                                 const AttrNumber target_slot_rowno_resno,
+                                 const AttrNumber query_slot_seq_resno,
+                                 std::string target_column_name,
+                                 const std::uint8_t alphabet_code,
+                                 const std::uint8_t storage_unit_byte_width,
+                                 const std::uint8_t query_alphabet_code,
+                                 const std::uint8_t query_storage_unit_byte_width);
 
     /* Pin/copy one locator-passthrough target for all query batches. */
     void begin_join_target(TupleTableSlot* target_slot);
 
-private:
+  private:
     static void prepare_join_cpu_after_highway_selection_thunk(
-            void* state,
-            ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-            const ::bioseq::simd::minimap2_parameters& dispatched_params,
-            const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
-                typmod_ops);
+        void* state,
+        ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
+        const ::bioseq::simd::minimap2_parameters& dispatched_params,
+        const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops);
 
     void prepare_join_cpu_after_highway_selection(
-            ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-            const ::bioseq::simd::minimap2_parameters& dispatched_params,
-            const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
-                typmod_ops);
+        ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
+        const ::bioseq::simd::minimap2_parameters& dispatched_params,
+        const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations& typmod_ops);
 
-public:
-
+  public:
     void prepare_join_target_queries(std::span<const join_query_ref> all_queries);
 
     void set_join_query_batch(std::span<const join_query_ref> queries);
@@ -773,21 +758,22 @@ public:
         submit_scan_impl_(scan_slot, nullptr);
     }
 
-    void submit_scan_evaluated(
-            TupleTableSlot* scan_slot,
-            const Datum target,
-            const bool target_is_null,
-            const bool has_query_override,
-            const Datum query,
-            const bool query_is_null) {
+    void submit_scan_evaluated(TupleTableSlot* scan_slot,
+                               const Datum target,
+                               const bool target_is_null,
+                               const bool has_query_override,
+                               const Datum query,
+                               const bool query_is_null) {
         require_evaluated_mmsearch_index_policy_();
         if (has_query_override != per_row_mode()) {
-            ereport(ERROR,
+            ereport(
+                ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("evaluated bioseq mmsearch query submission disagrees with its configuration"),
+                 errmsg(
+                     "evaluated bioseq mmsearch query submission disagrees with its configuration"),
                  errdetail("per_row_mode=%s has_query_override=%s",
-                    per_row_mode() ? "true" : "false",
-                    has_query_override ? "true" : "false")));
+                           per_row_mode() ? "true" : "false",
+                           has_query_override ? "true" : "false")));
         }
         const evaluated_row_operands evaluated{
             .target = target,
@@ -799,24 +785,26 @@ public:
         submit_scan_impl_(scan_slot, std::addressof(evaluated));
     }
 
-private:
-    [[gnu::always_inline]] inline void submit_scan_impl_(
-            TupleTableSlot* scan_slot,
-            const evaluated_row_operands* evaluated) {
+  private:
+    [[gnu::always_inline]] inline void submit_scan_impl_(TupleTableSlot* scan_slot,
+                                                         const evaluated_row_operands* evaluated) {
         if (!mmsearch_state.active) {
-            bioseq_log<logging_level::debug>("[bioseq] pg: submit_scan called while mmsearch state inactive; skipping");
+            bioseq_log<logging_level::debug>(
+                "[bioseq] pg: submit_scan called while mmsearch state inactive; skipping");
             return;
         }
         if (scan_slot == nullptr) {
-            bioseq_log<logging_level::debug>("[bioseq] pg: submit_scan received null scan_slot; skipping");
+            bioseq_log<logging_level::debug>(
+                "[bioseq] pg: submit_scan received null scan_slot; skipping");
             return;
         }
         if (buffered_entries.size() >= dispatch_batch_capacity) {
             ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq dispatch buffer capacity invariant was violated"),
-                 errdetail("buffered=%zu capacity=%zu",
-                    buffered_entries.size(), dispatch_batch_capacity)));
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("bioseq dispatch buffer capacity invariant was violated"),
+                     errdetail("buffered=%zu capacity=%zu",
+                               buffered_entries.size(),
+                               dispatch_batch_capacity)));
         }
 
         buffered_scan_entry entry{};
@@ -830,8 +818,7 @@ private:
          * so the encoding stays in lockstep with row_number_to_tid.
          */
         if (ItemPointerIsValid(&scan_slot->tts_tid)) {
-            entry.sequence_rowno = static_cast<int64_t>(
-                tid_to_row_number(scan_slot->tts_tid));
+            entry.sequence_rowno = static_cast<int64_t>(tid_to_row_number(scan_slot->tts_tid));
         }
 
         /* ExprState NULL is authoritative for an evaluated operand.  Do not
@@ -843,8 +830,8 @@ private:
                 entry.seq_is_null = true;
             } else if (evaluated->target == Datum{0}) {
                 ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("evaluated bioseq mmsearch target has a null Datum")));
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("evaluated bioseq mmsearch target has a null Datum")));
             } else {
                 capture_target_datum_(entry, evaluated->target);
             }
@@ -897,8 +884,8 @@ private:
                 entry.per_row_query_is_null = true;
             } else if (evaluated->query == Datum{0}) {
                 ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("evaluated bioseq mmsearch query has a null Datum")));
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("evaluated bioseq mmsearch query has a null Datum")));
             } else {
                 /* Evaluate and retain target/query independently.  In
                  * particular, a self-alignment may contain two different
@@ -906,26 +893,22 @@ private:
                  * the target recipe merely because the raw attnos match. */
                 capture_query_datum_(entry, evaluated->query);
             }
-        } else if (mmsearch_state.per_row_query_attno
-                != InvalidAttrNumber) {
+        } else if (mmsearch_state.per_row_query_attno != InvalidAttrNumber) {
             bool query_null = true;
-            Datum query_datum = slot_getattr(scan_slot,
-                mmsearch_state.per_row_query_attno, &query_null);
+            Datum query_datum =
+                slot_getattr(scan_slot, mmsearch_state.per_row_query_attno, &query_null);
             if (query_null) {
                 entry.per_row_query_is_null = true;
-            } else if (mmsearch_state.per_row_query_attno
-                           == mmsearch_state.seq_attno
-                       && entry.has_seq_recipe()) {
+            } else if (mmsearch_state.per_row_query_attno == mmsearch_state.seq_attno &&
+                       entry.has_seq_recipe()) {
                 /* A self-alignment needs one retained wrapper, not two
                  * independently retained source graphs. */
-                require_recipe_descriptor_(
-                    entry.seq_recipe_descriptor,
-                    mmsearch_state.query_alphabet_code,
-                    mmsearch_state.query_storage_unit_byte_width,
-                    "query");
+                require_recipe_descriptor_(entry.seq_recipe_descriptor,
+                                           mmsearch_state.query_alphabet_code,
+                                           mmsearch_state.query_storage_unit_byte_width,
+                                           "query");
                 entry.per_row_query_recipe_datum = entry.seq_recipe_datum;
-                entry.per_row_query_recipe_descriptor =
-                    entry.seq_recipe_descriptor;
+                entry.per_row_query_recipe_descriptor = entry.seq_recipe_descriptor;
                 entry.per_row_query_is_null = false;
             } else {
                 capture_query_datum_(entry, query_datum);
@@ -950,29 +933,27 @@ private:
         TupleTableSlot* copy_source = scan_slot;
         if (batch_payload_ctx == nullptr) {
             ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("bioseq dispatch tuple arena is not initialized")));
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("bioseq dispatch tuple arena is not initialized")));
         }
-        MemoryContext previous_copy_context = MemoryContextSwitchTo(
-            batch_payload_ctx);
+        MemoryContext previous_copy_context = MemoryContextSwitchTo(batch_payload_ctx);
         if (!entry.expanded_sequence_attributes.empty()) {
             if (copy_staging_slot == nullptr) {
-                copy_staging_slot = MakeSingleTupleTableSlot(
-                    scan_slot->tts_tupleDescriptor, &TTSOpsVirtual);
-            } else if (copy_staging_slot->tts_tupleDescriptor
-                    != scan_slot->tts_tupleDescriptor) {
+                copy_staging_slot =
+                    MakeSingleTupleTableSlot(scan_slot->tts_tupleDescriptor, &TTSOpsVirtual);
+            } else if (copy_staging_slot->tts_tupleDescriptor != scan_slot->tts_tupleDescriptor) {
                 ereport(ERROR,
-                    (errcode(ERRCODE_DATA_CORRUPTED),
-                     errmsg("bioseq dispatch staging slot descriptor changed")));
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq dispatch staging slot descriptor changed")));
             }
             ExecClearTuple(copy_staging_slot);
             const int natts = scan_slot->tts_tupleDescriptor->natts;
-            std::memcpy(
-                copy_staging_slot->tts_values, scan_slot->tts_values,
-                static_cast<std::size_t>(natts) * sizeof(Datum));
-            std::memcpy(
-                copy_staging_slot->tts_isnull, scan_slot->tts_isnull,
-                static_cast<std::size_t>(natts) * sizeof(bool));
+            std::memcpy(copy_staging_slot->tts_values,
+                        scan_slot->tts_values,
+                        static_cast<std::size_t>(natts) * sizeof(Datum));
+            std::memcpy(copy_staging_slot->tts_isnull,
+                        scan_slot->tts_isnull,
+                        static_cast<std::size_t>(natts) * sizeof(bool));
             const auto mask_recipe = [this, natts](AttrNumber attno) {
                 const int index = static_cast<int>(attno) - 1;
                 if (index >= 0 && index < natts) {
@@ -980,8 +961,7 @@ private:
                     copy_staging_slot->tts_isnull[index] = true;
                 }
             };
-            for (const auto& expanded :
-                 entry.expanded_sequence_attributes) {
+            for (const auto& expanded : entry.expanded_sequence_attributes) {
                 mask_recipe(expanded.attno);
             }
             copy_staging_slot->tts_nvalid = natts;
@@ -989,10 +969,10 @@ private:
             copy_source = copy_staging_slot;
         }
 
-        entry.scan_slot_copy = MakeSingleTupleTableSlot(
-            scan_slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-        ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(copy_source),
-                              entry.scan_slot_copy, /*shouldFree=*/true);
+        entry.scan_slot_copy =
+            MakeSingleTupleTableSlot(scan_slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+        ExecStoreMinimalTuple(
+            ExecCopySlotMinimalTuple(copy_source), entry.scan_slot_copy, /*shouldFree=*/true);
         MemoryContextSwitchTo(previous_copy_context);
 
         /*
@@ -1005,14 +985,10 @@ private:
          * materialization now removes that ambiguity for zero cost.
          */
         slot_getallattrs(entry.scan_slot_copy);
-        bioseq::postgres::support::pg_slot_datums_view copied_values{
-            entry.scan_slot_copy};
-        for (const auto& expanded :
-             entry.expanded_sequence_attributes) {
-            copied_values.set_raw(
-                expanded.attno,
-                bioseq::postgres::support::pg_datum::from_raw(
-                    expanded.datum));
+        bioseq::postgres::support::pg_slot_datums_view copied_values{entry.scan_slot_copy};
+        for (const auto& expanded : entry.expanded_sequence_attributes) {
+            copied_values.set_raw(expanded.attno,
+                                  bioseq::postgres::support::pg_datum::from_raw(expanded.datum));
         }
 
         /*
@@ -1023,16 +999,17 @@ private:
          * rowno (carried into scanner_pg_ctx.target_rownos[]).
          */
         const std::uint64_t entry_seq_bp_size = entry.seq_bp_size();
-        bioseq_log<logging_level::debug>("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
-                entry.primary_key_is_null ? -1 : entry.primary_key,
-                entry.sequence_rowno,
-                entry_seq_bp_size,
-                entry.seq_is_null);
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
+            entry.primary_key_is_null ? -1 : entry.primary_key,
+            entry.sequence_rowno,
+            entry_seq_bp_size,
+            entry.seq_is_null);
 
         buffered_entries.push_back(std::move(entry));
     }
 
-public:
+  public:
     /* True exactly when the current physical buffer must be dispatched. */
     [[nodiscard]] bool ready_to_dispatch() const noexcept {
         return buffered_entries.size() == dispatch_batch_capacity;
@@ -1048,13 +1025,13 @@ public:
      * into the buffered output slot so a target list projecting the raw seq
      * column resolves the Var to the materialised payload, not the stub.
      */
-    void hydrate_one_column(
-            std::span<const size_t> rows,
-            bioseq::storage::seq_caches* cache,
-            std::int16_t column_attno,
-            std::array<std::vector<storage_manager_type::fetch_request>, storage_manager_type::bucket_count>& per_bucket,
-            std::vector<bioseq::pg_types::seq*>& out_payloads,
-            bool is_query);
+    void hydrate_one_column(std::span<const size_t> rows,
+                            bioseq::storage::seq_caches* cache,
+                            std::int16_t column_attno,
+                            std::array<std::vector<storage_manager_type::fetch_request>,
+                                       storage_manager_type::bucket_count>& per_bucket,
+                            std::vector<bioseq::pg_types::seq*>& out_payloads,
+                            bool is_query);
 
     /* Integration-only in-memory baselines. Production scanner dispatch must
      * not call this routine: it would stitch every locator into a flat varlena
@@ -1131,8 +1108,10 @@ public:
      * mmsearch state untouched so callers can reuse configuration.
      */
     [[gnu::always_inline]] inline void clear_slots() {
-        bioseq_log<logging_level::debug>("[bioseq] pg: tuple_dispatch_buffer::clear_slots() entered; freeing {} slots, {} outputs",
-                buffered_entries.size(), output_cursors.size());
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: tuple_dispatch_buffer::clear_slots() entered; freeing {} slots, {} outputs",
+            buffered_entries.size(),
+            output_cursors.size());
         for (auto& entry : buffered_entries) {
             if (entry.scan_slot_copy != nullptr) {
                 ExecDropSingleTupleTableSlot(entry.scan_slot_copy);
@@ -1143,8 +1122,7 @@ public:
         match_map.clear();
         output_cursors.clear();
         output_position = -1;
-        ::abort_pg_sequence_read_session_noexcept(
-            std::exchange(active_wave_read_session, nullptr));
+        ::abort_pg_sequence_read_session_noexcept(std::exchange(active_wave_read_session, nullptr));
         active_wave_permit.reset();
         if (copy_staging_slot != nullptr) {
             ExecDropSingleTupleTableSlot(copy_staging_slot);
@@ -1180,7 +1158,6 @@ public:
 };
 
 static_assert(noexcept(
-    std::declval<tuple_dispatch_buffer&>()
-        .abandon_join_runtime_after_pg_error_noexcept()));
+    std::declval<tuple_dispatch_buffer&>().abandon_join_runtime_after_pg_error_noexcept()));
 
 } // namespace bioseq::scheduler
