@@ -246,13 +246,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
             prepared_target.query_sketch_cache_permit.emplace(std::move(*retained_query_permit));
         }
     }
-    auto ensure_group =
+    auto find_or_create_group =
         [&prepared_target](
-            const std::int32_t k,
-            const std::int32_t w,
+            const std::int32_t kmer_size,
+            const std::int32_t window_size,
             const std::int32_t max_occ,
             const minimizer_sketch_backend sketch_backend) -> cpu_prepared_index_group& {
-        if (auto* existing = prepared_target.find_group(k, w, max_occ, sketch_backend)) {
+        if (auto* existing =
+                prepared_target.find_group(kmer_size, window_size, max_occ, sketch_backend)) {
             return *existing;
         }
         if (prepared_target.groups.size() == prepared_target.groups.capacity()) {
@@ -307,8 +308,8 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 prepared_target.query_union_admission_bytes);
         }
         prepared_target.groups.push_back(cpu_prepared_index_group{
-            .kmer_size = k,
-            .window_size = w,
+            .kmer_size = kmer_size,
+            .window_size = window_size,
             .max_occ = max_occ,
             .sketch_backend = sketch_backend,
         });
@@ -350,7 +351,7 @@ void batch_processor::prepare_cpu_shared_query_unions(
     }
     if (parallel_group_is_uniform) {
         cpu_prepared_index_group& group =
-            ensure_group(15, 10, parallel_max_occ, parallel_sketch_backend);
+            find_or_create_group(15, 10, parallel_max_occ, parallel_sketch_backend);
         if (!reserve_parallel_query_sketch_slots(
                 group.retained_query_sketches,
                 query_headers.size(),
@@ -378,8 +379,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
                  &query_headers,
                  &query_ordinals,
                  &statuses,
-                 &typmod_ops](const std::size_t lo, const std::size_t hi) {
-                    for (std::size_t query_index = lo; query_index < hi; ++query_index) {
+                 &typmod_ops](const std::size_t range_begin, const std::size_t range_end) {
+                    for (std::size_t query_index = range_begin; query_index < range_end;
+                         ++query_index) {
                         try {
                             statuses[query_index] = typmod_ops.prepare_independent(
                                 *query_headers[query_index],
@@ -624,9 +626,9 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 }
             };
             if (include_persisted_parameter_group) {
-                append_to(ensure_group(15, 10, effective.max_occ, sketch_backend));
+                append_to(find_or_create_group(15, 10, effective.max_occ, sketch_backend));
             } else {
-                append_to(ensure_group(
+                append_to(find_or_create_group(
                     effective.kmer_size, effective.window_size, effective.max_occ, sketch_backend));
             }
         }
@@ -688,13 +690,14 @@ void batch_processor::prepare_cpu_shared_query_unions(
                     pg_unreachable();
                 }
             }
-            auto& canonical = group.canonical_query_hash_union_u32;
-            if (canonical.size() > 1u) {
-                bioseq::sorting::radix_sort(canonical.data(),
-                                            canonical.data() + canonical.size(),
+            auto& canonical_hashes = group.canonical_query_hash_union_u32;
+            if (canonical_hashes.size() > 1u) {
+                bioseq::sorting::radix_sort(canonical_hashes.data(),
+                                            canonical_hashes.data() + canonical_hashes.size(),
                                             [](const std::uint32_t hash) noexcept { return hash; });
             }
-            canonical.erase(std::unique(canonical.begin(), canonical.end()), canonical.end());
+            canonical_hashes.erase(std::unique(canonical_hashes.begin(), canonical_hashes.end()),
+                                   canonical_hashes.end());
             const auto fnv_mix_u64 = [](std::uint64_t hash, std::uint64_t value) noexcept {
                 for (int byte_index = 0; byte_index < 8; ++byte_index) {
                     hash ^= value & 0xffu;
@@ -703,26 +706,30 @@ void batch_processor::prepare_cpu_shared_query_unions(
                 }
                 return hash;
             };
-            std::uint64_t signature = 1469598103934665603ull;
-            signature = fnv_mix_u64(signature, static_cast<std::uint32_t>(group.kmer_size));
-            signature = fnv_mix_u64(signature, static_cast<std::uint32_t>(group.window_size));
-            signature = fnv_mix_u64(signature, static_cast<std::uint32_t>(group.max_occ));
-            for (const std::uint32_t hash : canonical) {
-                signature = fnv_mix_u64(signature, hash);
+            std::uint64_t group_key_signature = 1469598103934665603ull;
+            group_key_signature =
+                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.kmer_size));
+            group_key_signature =
+                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.window_size));
+            group_key_signature =
+                fnv_mix_u64(group_key_signature, static_cast<std::uint32_t>(group.max_occ));
+            for (const std::uint32_t hash : canonical_hashes) {
+                group_key_signature = fnv_mix_u64(group_key_signature, hash);
             }
-            group.key_set_checksum = signature;
-            prepared_target.total_unique_keys = bioseq::common::saturating_add(
-                prepared_target.total_unique_keys, static_cast<std::uint64_t>(canonical.size()));
-            auto mix = [&prepared_target](const std::uint64_t value) noexcept {
+            group.key_set_checksum = group_key_signature;
+            prepared_target.total_unique_keys =
+                bioseq::common::saturating_add(prepared_target.total_unique_keys,
+                                               static_cast<std::uint64_t>(canonical_hashes.size()));
+            auto mix_target_checksum = [&prepared_target](const std::uint64_t value) noexcept {
                 prepared_target.key_set_checksum ^= value;
                 prepared_target.key_set_checksum *= 1099511628211ull;
             };
-            mix(static_cast<std::uint64_t>(group.kmer_size));
-            mix(static_cast<std::uint64_t>(group.window_size));
-            mix(static_cast<std::uint64_t>(group.max_occ));
-            mix(static_cast<std::uint64_t>(group.sketch_backend));
-            mix(static_cast<std::uint64_t>(canonical.size()));
-            mix(group.key_set_checksum);
+            mix_target_checksum(static_cast<std::uint64_t>(group.kmer_size));
+            mix_target_checksum(static_cast<std::uint64_t>(group.window_size));
+            mix_target_checksum(static_cast<std::uint64_t>(group.max_occ));
+            mix_target_checksum(static_cast<std::uint64_t>(group.sketch_backend));
+            mix_target_checksum(static_cast<std::uint64_t>(canonical_hashes.size()));
+            mix_target_checksum(group.key_set_checksum);
             continue;
         }
         if (!group.canonical_query_hash_union_u32.empty() ||
@@ -789,16 +796,16 @@ void batch_processor::prepare_cpu_shared_query_unions(
         prepared_target.total_unique_keys = bioseq::common::saturating_add(
             prepared_target.total_unique_keys,
             static_cast<std::uint64_t>(group.query_hash_union.size()));
-        auto mix = [&prepared_target](const std::uint64_t value) noexcept {
+        auto mix_target_checksum = [&prepared_target](const std::uint64_t value) noexcept {
             prepared_target.key_set_checksum ^= value;
             prepared_target.key_set_checksum *= 1099511628211ull;
         };
-        mix(static_cast<std::uint64_t>(group.kmer_size));
-        mix(static_cast<std::uint64_t>(group.window_size));
-        mix(static_cast<std::uint64_t>(group.max_occ));
-        mix(static_cast<std::uint64_t>(group.sketch_backend));
-        mix(static_cast<std::uint64_t>(group.query_hash_union.size()));
-        mix(group.key_set_checksum);
+        mix_target_checksum(static_cast<std::uint64_t>(group.kmer_size));
+        mix_target_checksum(static_cast<std::uint64_t>(group.window_size));
+        mix_target_checksum(static_cast<std::uint64_t>(group.max_occ));
+        mix_target_checksum(static_cast<std::uint64_t>(group.sketch_backend));
+        mix_target_checksum(static_cast<std::uint64_t>(group.query_hash_union.size()));
+        mix_target_checksum(group.key_set_checksum);
     }
     const std::uint64_t tracked_query_union_bytes = prepared_target.query_union_admission_bytes;
     std::uint64_t measured_query_union_bytes = bioseq::common::saturating_mul(
@@ -908,16 +915,16 @@ bool batch_processor::publish_compact_direct_query_set_stats(
     group.build_set_checksum = query_set_stats.group_key_set_checksum;
     group.build_set_checksum_present = true;
     prepared_target.total_unique_keys = query_set_stats.unique_hash_count;
-    auto mix = [&prepared_target](const std::uint64_t value) noexcept {
+    auto mix_target_checksum = [&prepared_target](const std::uint64_t value) noexcept {
         prepared_target.key_set_checksum ^= value;
         prepared_target.key_set_checksum *= bioseq::indexing::k_compact_direct_query_set_fnv_prime;
     };
-    mix(static_cast<std::uint64_t>(group.kmer_size));
-    mix(static_cast<std::uint64_t>(group.window_size));
-    mix(static_cast<std::uint64_t>(group.max_occ));
-    mix(static_cast<std::uint64_t>(group.sketch_backend));
-    mix(query_set_stats.unique_hash_count);
-    mix(query_set_stats.group_key_set_checksum);
+    mix_target_checksum(static_cast<std::uint64_t>(group.kmer_size));
+    mix_target_checksum(static_cast<std::uint64_t>(group.window_size));
+    mix_target_checksum(static_cast<std::uint64_t>(group.max_occ));
+    mix_target_checksum(static_cast<std::uint64_t>(group.sketch_backend));
+    mix_target_checksum(query_set_stats.unique_hash_count);
+    mix_target_checksum(query_set_stats.group_key_set_checksum);
     group.compact_direct_query_set_validation_pending = false;
     return true;
 }
@@ -974,11 +981,11 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
             bioseq::indexing::persisted_minimizer_lookup_error::reason::admission_or_allocation,
             "compact-direct query-set fallback cannot be admitted");
     }
-    std::vector<std::uint32_t> canonical;
+    std::vector<std::uint32_t> canonical_hashes;
     try {
-        canonical.reserve(static_cast<std::size_t>(occurrence_count));
+        canonical_hashes.reserve(static_cast<std::size_t>(occurrence_count));
         const std::uint64_t measured_bytes =
-            bioseq::common::saturating_mul(canonical.capacity(), sizeof(std::uint32_t));
+            bioseq::common::saturating_mul(canonical_hashes.capacity(), sizeof(std::uint32_t));
         if (measured_bytes == (std::numeric_limits<std::uint64_t>::max)() ||
             measured_bytes > fallback_permit->bytes()) {
             throw bioseq::indexing::persisted_minimizer_lookup_error(
@@ -992,21 +999,22 @@ void batch_processor::finalize_pending_compact_direct_query_set_validation_fallb
                     throw bioseq::indexing::persisted_minimizer_lookup_error(
                         "compact-direct query-set fallback hash exceeds u32");
                 }
-                canonical.push_back(static_cast<std::uint32_t>(minimizer.kmer()));
+                canonical_hashes.push_back(static_cast<std::uint32_t>(minimizer.kmer()));
             }
         }
-        if (canonical.size() > 1u) {
-            bioseq::sorting::radix_sort(canonical.data(),
-                                        canonical.data() + canonical.size(),
+        if (canonical_hashes.size() > 1u) {
+            bioseq::sorting::radix_sort(canonical_hashes.data(),
+                                        canonical_hashes.data() + canonical_hashes.size(),
                                         [](const std::uint32_t hash) noexcept { return hash; });
         }
-        canonical.erase(std::unique(canonical.begin(), canonical.end()), canonical.end());
+        canonical_hashes.erase(std::unique(canonical_hashes.begin(), canonical_hashes.end()),
+                               canonical_hashes.end());
         const bioseq::indexing::compact_direct_query_set_stats query_set_stats{
             .query_count = prepared_target.query_count,
             .query_occurrence_count = occurrence_count,
-            .unique_hash_count = canonical.size(),
+            .unique_hash_count = canonical_hashes.size(),
             .group_key_set_checksum = bioseq::indexing::compact_direct_query_set_checksum(
-                canonical,
+                canonical_hashes,
                 static_cast<std::uint32_t>(group.kmer_size),
                 static_cast<std::uint32_t>(group.window_size),
                 static_cast<std::uint32_t>(group.max_occ)),
