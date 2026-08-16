@@ -12,6 +12,7 @@ module;
 
 export module bioseq.gpu.vulkan.runtime:coordinate_pipeline.batch;
 
+import :coordinate_pipeline.batch_preparation;
 import :frontend_types;
 import :support;
 import bioseq.common.logging;
@@ -22,118 +23,9 @@ import std;
 
 namespace bioseq::gpu::vulkan {
 
-namespace {
-
-/// Maximum logical jobs retained in one bounded submission wave.
-constexpr std::uint32_t k_gpu_seed_coordinate_batch_wave_size = 4096u;
-
-/// @brief Push constants for constructing one chaining range per query.
-struct chain_range_push_constants {
-    std::uint32_t query_count;
-    std::uint32_t max_ref_gap;
-};
-static_assert(sizeof(chain_range_push_constants) == 8);
-
-/// @brief Per-job coordinate-vote input consumed by the batched reduction shader.
-struct gpu_coordinate_vote_job_wire {
-    std::uint32_t anchor_offset;
-    std::uint32_t anchor_count;
-    std::uint32_t query_len_lo;
-    std::uint32_t query_len_hi;
-};
-static_assert(sizeof(gpu_coordinate_vote_job_wire) == 16);
-
-/// @brief Host ownership and arena slices retained through one submission wave.
-struct gpu_seed_coordinate_wave_state {
-    std::size_t result_index = 0;
-    gpu_seed_coordinate_job job{};
-    gpu_seed_query_record_wire query_record{};
-    persisted_grouped_soa_coordinate_job_audit operation_audit{};
-    std::uint32_t minimizer_count = 0;
-    std::uint32_t num_blocks = 0;
-    std::uint32_t seed_groups = 0;
-    std::uint64_t query_len = 0;
-    gpu_arena_slice counts_s{};
-    gpu_arena_slice prefix_s{};
-    gpu_arena_slice blocks_s{};
-    seed_push_constants seed_push{};
-    gpu_grouped_soa_seed_push grouped_soa_seed_push{};
-    std::uint64_t total_anchors = 0;
-    std::uint32_t total_anchors_u32 = 0;
-    std::uint32_t anchor_offset = 0;
-    std::uint32_t vote_result_index = 0;
-    workgroup_plan anchor_wg{};
-    buffer anchors_buf;
-    buffer anchor_keys_buf;
-    buffer anchors_scratch_buf;
-    buffer anchor_keys_scratch_buf;
-    buffer anchor_histogram_buf;
-    buffer ranges_buf;
-    buffer range_count_buf;
-    buffer compacted_anchors_buf;
-    buffer span_buf;
-    bool sorted_in_scratch = false;
-    std::uint32_t range_count = 0;
-    std::uint32_t compacted_anchor_count = 0;
-    std::uint32_t active_anchor_count = 0;
-    buffer score_buf;
-    buffer predecessor_buf;
-    buffer visited_buf;
-    buffer trace_buf;
-    buffer result_buf;
-    bool skip_seed = false;
-    bool has_anchors = false;
-    bool has_ranges = false;
-    bool chain_active = false;
-
-    /// @brief Views the complete primary anchor allocation.
-    /// @return Arena slice spanning `anchors_buf`.
-    [[nodiscard]] gpu_arena_slice anchors_slice() noexcept {
-        return gpu_arena_slice{&anchors_buf, 0, anchors_buf.bytes};
-    }
-
-    /// @brief Views the complete primary anchor-key allocation.
-    /// @return Arena slice spanning `anchor_keys_buf`.
-    [[nodiscard]] gpu_arena_slice anchor_keys_slice() noexcept {
-        return gpu_arena_slice{&anchor_keys_buf, 0, anchor_keys_buf.bytes};
-    }
-
-    /// @brief Views the complete scratch anchor allocation.
-    /// @return Arena slice spanning `anchors_scratch_buf`.
-    [[nodiscard]] gpu_arena_slice anchors_scratch_slice() noexcept {
-        return gpu_arena_slice{&anchors_scratch_buf, 0, anchors_scratch_buf.bytes};
-    }
-
-    /// @brief Views the complete scratch anchor-key allocation.
-    /// @return Arena slice spanning `anchor_keys_scratch_buf`.
-    [[nodiscard]] gpu_arena_slice anchor_keys_scratch_slice() noexcept {
-        return gpu_arena_slice{&anchor_keys_scratch_buf, 0, anchor_keys_scratch_buf.bytes};
-    }
-
-    /// @brief Views the complete radix histogram allocation.
-    /// @return Arena slice spanning `anchor_histogram_buf`.
-    [[nodiscard]] gpu_arena_slice anchor_histogram_slice() noexcept {
-        return gpu_arena_slice{&anchor_histogram_buf, 0, anchor_histogram_buf.bytes};
-    }
-
-    /// @brief Views the complete compacted-anchor allocation.
-    /// @return Arena slice spanning `compacted_anchors_buf`.
-    [[nodiscard]] gpu_arena_slice compacted_anchors_slice() noexcept {
-        return gpu_arena_slice{&compacted_anchors_buf, 0, compacted_anchors_buf.bytes};
-    }
-};
-
-/// @brief Checks whether two jobs may share one resident target submission.
-[[nodiscard]] bool has_same_coordinate_target(const gpu_seed_coordinate_job& lhs,
-                                              const gpu_seed_coordinate_job& rhs) noexcept {
-    return lhs.grouped_soa == rhs.grouped_soa && lhs.slots == rhs.slots &&
-           lhs.positions == rhs.positions && lhs.target_len == rhs.target_len &&
-           lhs.slot_mask == rhs.slot_mask && lhs.position_count == rhs.position_count &&
-           lhs.bucket_count == rhs.bucket_count &&
-           lhs.target_position_offset == rhs.target_position_offset;
-}
-
-} // namespace
+using coordinate_pipeline_detail::chain_range_push_constants;
+using coordinate_pipeline_detail::gpu_coordinate_vote_job_wire;
+using coordinate_pipeline_detail::gpu_seed_coordinate_wave_state;
 
 /// @brief Runs the batched seed, sort, chain, and coordinate submission sequence.
 gpu_seed_coordinate_batch_result
@@ -173,67 +65,28 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
             "gpu seed-to-coordinate device query records are not implemented");
     }
 
-    const gpu_seed_index_representation representation =
-        jobs.empty() ? gpu_seed_index_representation::invalid
-                     : classify_gpu_seed_index_representation(jobs.front());
-    const bool grouped_soa_selected = representation == gpu_seed_index_representation::grouped_soa;
-    if (grouped_soa_selected && coordinate_vote_selected) {
-        throw vulkan_runtime_error(
-            "gpu grouped-SoA direct route requires Vulkan tiled-DP coordinate output");
-    }
-    if (grouped_soa_selected && features_.software_device) {
-        throw vulkan_runtime_error("gpu grouped-SoA direct route rejects software Vulkan devices");
-    }
-    const auto shape_operation_configuration =
-        make_persisted_grouped_soa_coordinate_config_identity(kmer_size,
-                                                              max_occ,
-                                                              coordinate_algorithm,
-                                                              chain_key,
-                                                              max_dist_x,
-                                                              max_dist_y,
-                                                              bandwidth,
-                                                              max_iter,
-                                                              gap_penalty,
-                                                              skip_penalty,
-                                                              max_chain_skip,
-                                                              min_chain_score,
-                                                              min_seed_count,
-                                                              probe_limit);
-    if (grouped_soa_selected && !shape_operation_configuration.is_valid()) {
-        throw vulkan_runtime_error("gpu grouped-SoA coordinate configuration identity is invalid");
-    }
-
-    const gpu_grouped_soa_resident_view* common_shape_view = nullptr;
-    std::uint64_t common_shape_target_len = 0u;
-    for (const gpu_seed_coordinate_job& job : jobs) {
-        const gpu_seed_index_representation job_representation =
-            classify_gpu_seed_index_representation(job);
-        if (job_representation == gpu_seed_index_representation::invalid ||
-            job_representation != representation) {
-            throw vulkan_runtime_error("gpu seed-to-coordinate resident index representation must "
-                                       "be strict XOR and uniform");
-        }
-        if (job.query_index >= query_inputs.host_query_records.size()) {
-            throw vulkan_runtime_error("gpu seed-to-coordinate job query_index out of range");
-        }
-        if (job.target_len == 0u) {
-            throw vulkan_runtime_error("gpu seed-to-coordinate target length must be nonzero");
-        }
-        if (grouped_soa_selected) {
-            if (job.target_len > (std::uint64_t{1} << 63u)) {
-                throw vulkan_runtime_error("gpu grouped-SoA target length exceeds anchor-key ABI");
-            }
-            if (common_shape_view == nullptr) {
-                common_shape_view = job.grouped_soa;
-                common_shape_target_len = job.target_len;
-            } else if (job.grouped_soa != common_shape_view) {
-                throw vulkan_runtime_error(
-                    "gpu grouped-SoA batch must bind one resident generation");
-            } else if (job.target_len != common_shape_target_len) {
-                throw vulkan_runtime_error("gpu grouped-SoA batch target identity is inconsistent");
-            }
-        }
-    }
+    const coordinate_pipeline_detail::coordinate_batch_shape batch_shape =
+        coordinate_pipeline_detail::inspect_coordinate_batch_shape(jobs,
+                                                                   query_inputs,
+                                                                   coordinate_vote_selected,
+                                                                   features_,
+                                                                   kmer_size,
+                                                                   max_occ,
+                                                                   coordinate_algorithm,
+                                                                   chain_key,
+                                                                   max_dist_x,
+                                                                   max_dist_y,
+                                                                   bandwidth,
+                                                                   max_iter,
+                                                                   gap_penalty,
+                                                                   skip_penalty,
+                                                                   max_chain_skip,
+                                                                   min_chain_score,
+                                                                   min_seed_count,
+                                                                   probe_limit);
+    const bool grouped_soa_selected = batch_shape.grouped_soa_selected;
+    const auto& shape_operation_configuration = batch_shape.operation_configuration;
+    const gpu_grouped_soa_resident_view* common_shape_view = batch_shape.common_view;
 
     gpu_seed_coordinate_batch_result run{};
     run.results.resize(jobs.size());
@@ -241,164 +94,20 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
     run.grouped_soa_direct.selected = grouped_soa_selected;
     run.grouped_soa_direct.problem_count = static_cast<std::uint64_t>(jobs.size());
 
-    std::uint32_t shape_control_word_count = 0u;
-    std::uint32_t shape_position_word_count = 0u;
-    std::uint64_t shape_control_padded_bytes = 0u;
-    std::uint64_t shape_position_padded_bytes = 0u;
-    if (grouped_soa_selected) {
-        if (common_shape_view == nullptr) {
-            throw vulkan_runtime_error("gpu grouped-SoA route has no resident generation");
-        }
-        if (kmer_size == 0u || kmer_size > 255u || query_inputs.hash_shift >= 64u ||
-            query_inputs.pos_bits >= 64u) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA query sketch traits exceed the grouped-SoA ABI");
-        }
-        const auto valid_resident_buffer = [this](const buffer* buffer) {
-            return buffer != nullptr && buffer->owner == this && buffer->is_valid() &&
-                   buffer->is_host_visible_coherent() && buffer->mapped != nullptr;
-        };
-        if (!valid_resident_buffer(common_shape_view->descriptors) ||
-            !valid_resident_buffer(common_shape_view->controls) ||
-            !valid_resident_buffer(common_shape_view->positions)) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA resident buffers are invalid, foreign, or not coherent");
-        }
-        if (common_shape_view->descriptors->buffer_handle ==
-                common_shape_view->controls->buffer_handle ||
-            common_shape_view->descriptors->buffer_handle ==
-                common_shape_view->positions->buffer_handle ||
-            common_shape_view->controls->buffer_handle ==
-                common_shape_view->positions->buffer_handle) {
-            throw vulkan_runtime_error("gpu grouped-SoA resident buffers must not alias");
-        }
-        if (common_shape_view->abi_revision != k_gpu_grouped_soa_abi_revision ||
-            common_shape_view->partition_count == 0u || common_shape_view->control_bytes == 0u ||
-            common_shape_view->position_bytes == 0u || common_shape_view->position_count == 0u ||
-            common_shape_view->max_occ_cap == (std::numeric_limits<std::uint64_t>::max)() ||
-            common_shape_view->generation_id == 0u || common_shape_view->source_identity == 0u ||
-            common_shape_view->cold_load_identity == 0u) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA resident identity or generation contract is invalid");
-        }
-        const std::uint64_t expected_descriptor_bytes =
-            static_cast<std::uint64_t>(common_shape_view->partition_count) *
-            sizeof(gpu_grouped_soa_resident_partition_descriptor);
-        if (common_shape_view->descriptor_bytes != expected_descriptor_bytes ||
-            common_shape_view->descriptor_bytes > common_shape_view->descriptors->bytes) {
-            throw vulkan_runtime_error("gpu grouped-SoA descriptor byte extent is invalid");
-        }
-        const auto checked_word_count = [](std::uint64_t bytes, const char* label) {
-            constexpr std::uint64_t maximum_word_bytes =
-                static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)()) * 4u;
-            if (bytes == 0u || bytes > maximum_word_bytes) {
-                throw vulkan_runtime_error(
-                    fmt::format("gpu grouped-SoA {} byte extent exceeds GLSL word ABI", label));
-            }
-            return static_cast<std::uint32_t>((bytes + 3u) / 4u);
-        };
-        shape_control_word_count = checked_word_count(common_shape_view->control_bytes, "control");
-        shape_position_word_count =
-            checked_word_count(common_shape_view->position_bytes, "position");
-        shape_control_padded_bytes = static_cast<std::uint64_t>(shape_control_word_count) * 4u;
-        shape_position_padded_bytes = static_cast<std::uint64_t>(shape_position_word_count) * 4u;
-        if (shape_control_padded_bytes > common_shape_view->controls->bytes ||
-            shape_position_padded_bytes > common_shape_view->positions->bytes ||
-            common_shape_view->descriptor_bytes > features_.max_storage_buffer_range ||
-            shape_control_padded_bytes > features_.max_storage_buffer_range ||
-            shape_position_padded_bytes > features_.max_storage_buffer_range) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA resident byte extent exceeds its buffer or Vulkan range");
-        }
-        const bool nil_view_uuid = std::all_of(common_shape_view->device_uuid.begin(),
-                                               common_shape_view->device_uuid.end(),
-                                               [](std::uint8_t byte) { return byte == 0u; });
-        if (nil_view_uuid || common_shape_view->device_uuid != features_.device_uuid) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA resident generation belongs to a different Vulkan device");
-        }
-        const auto* descriptor_bytes =
-            static_cast<const std::byte*>(common_shape_view->descriptors->mapped);
-        for (std::uint32_t ordinal = 0u; ordinal < common_shape_view->partition_count; ++ordinal) {
-            gpu_grouped_soa_resident_partition_descriptor descriptor{};
-            std::memcpy(&descriptor,
-                        descriptor_bytes +
-                            static_cast<std::uint64_t>(ordinal) *
-                                sizeof(gpu_grouped_soa_resident_partition_descriptor),
-                        sizeof(descriptor));
-            if (!is_gpu_grouped_soa_partition_descriptor_valid(descriptor,
-                                                               common_shape_view->control_bytes,
-                                                               common_shape_view->position_bytes) ||
-                descriptor.segment_end_bp > common_shape_target_len) {
-                throw vulkan_runtime_error("gpu grouped-SoA resident descriptor validation failed");
-            }
-        }
-        if (max_occ >= 0 && static_cast<std::uint64_t>(max_occ) > common_shape_view->max_occ_cap) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA query max_occ exceeds persisted generation cap");
-        }
-        run.grouped_soa_direct.generation_id = common_shape_view->generation_id;
-        run.grouped_soa_direct.source_identity = common_shape_view->source_identity;
-        run.grouped_soa_direct.cold_load_identity = common_shape_view->cold_load_identity;
-    }
+    const coordinate_pipeline_detail::grouped_soa_resident_layout resident_layout =
+        coordinate_pipeline_detail::validate_grouped_soa_resident(
+            this, batch_shape, query_inputs, features_, kmer_size, max_occ, run);
+    const std::uint64_t shape_control_padded_bytes = resident_layout.control_padded_bytes;
+    const std::uint64_t shape_position_padded_bytes = resident_layout.position_padded_bytes;
     const std::uint32_t total_mc = query_inputs.minimizer_count;
     if (jobs.empty() || max_occ < 0 || (total_mc == 0u && !grouped_soa_selected)) {
         run.grouped_soa_direct.direct_count_scan_emit_completed = grouped_soa_selected;
         return run;
     }
-    if (query_inputs.host_query_records.empty()) {
-        throw vulkan_runtime_error("gpu seed-to-coordinate batch missing query records");
-    }
-    for (const gpu_seed_query_record_wire& qrec : query_inputs.host_query_records) {
-        const std::uint64_t end =
-            static_cast<std::uint64_t>(qrec.minimizer_offset) + qrec.minimizer_count;
-        if (qrec.flags != 0u || qrec.minimizer_offset > total_mc || end > total_mc) {
-            throw vulkan_runtime_error(
-                "gpu seed-to-coordinate query minimizer slice or flags are invalid");
-        }
-        if (qrec.minimizer_count == 0u) {
-            continue;
-        }
-        if (grouped_soa_selected &&
-            (qrec.query_len < kmer_size ||
-             qrec.minimizer_count == (std::numeric_limits<std::uint32_t>::max)() ||
-             (static_cast<std::uint64_t>(qrec.minimizer_count) + 1u) * sizeof(std::uint32_t) >
-                 features_.max_storage_buffer_range)) {
-            throw vulkan_runtime_error(
-                "gpu grouped-SoA query record violates local count/status ABI");
-        }
-    }
-
-    const std::uint32_t required_words_per_minimizer =
-        query_inputs.minimizer_word_kind == 0u || query_inputs.minimizer_word_kind == 1u ? 1u
-        : query_inputs.minimizer_word_kind == 2u                                         ? 2u
-                                                                                         : 4u;
-    if (query_inputs.minimizer_word_kind > 3u ||
-        query_inputs.minimizer_words32_per_record < required_words_per_minimizer ||
-        (query_inputs.minimizer_word_kind != 0u &&
-         static_cast<std::uint64_t>(total_mc) >
-             (std::numeric_limits<std::uint64_t>::max)() /
-                 (static_cast<std::uint64_t>(query_inputs.minimizer_words32_per_record) *
-                  sizeof(std::uint32_t)))) {
-        throw vulkan_runtime_error(
-            "gpu seed-to-coordinate minimizer word shape is invalid or overflows");
-    }
-    const std::uint64_t required_min_words_bytes = std::max<std::uint64_t>(
-        minimizer_device_bytes(
-            query_inputs.minimizer_word_kind, query_inputs.minimizer_words32_per_record, total_mc),
-        4u);
-    if (query_inputs.device_minimizer_words != nullptr &&
-        (!query_inputs.device_minimizer_words->is_valid() ||
-         query_inputs.device_minimizer_words->owner != this ||
-         required_min_words_bytes > query_inputs.device_minimizer_words->bytes)) {
-        throw vulkan_runtime_error(
-            "gpu seed-to-coordinate device minimizer buffer is invalid or undersized");
-    }
-    if (grouped_soa_selected && (query_inputs.device_minimizer_words == nullptr ||
-                                 !query_inputs.host_minimizer_bytes.empty())) {
-        throw vulkan_runtime_error(
-            "gpu grouped-SoA direct route requires an unambiguous GPU-resident query sketch");
-    }
+    const coordinate_pipeline_detail::coordinate_query_layout query_layout =
+        coordinate_pipeline_detail::validate_coordinate_query_layout(
+            this, query_inputs, features_, grouped_soa_selected, kmer_size);
+    const std::uint64_t required_min_words_bytes = query_layout.required_min_words_bytes;
     std::unique_ptr<runtime_pipeline_use_collector> shape_pipeline_collector;
     if (grouped_soa_selected) {
         bool authority_records_match =
@@ -505,40 +214,18 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
     gpu_arena& arena = reusable_gpu_arena();
     std::uint64_t submitted_waves = 0;
     for (std::size_t wave_begin = 0; wave_begin < jobs.size();) {
-        std::size_t wave_end =
-            std::min<std::size_t>(jobs.size(), wave_begin + k_gpu_seed_coordinate_batch_wave_size);
-        if (coordinate_vote_selected && wave_begin + 1u < wave_end) {
-            std::size_t same_target_end = wave_begin + 1u;
-            while (same_target_end < wave_end &&
-                   has_same_coordinate_target(jobs[wave_begin], jobs[same_target_end])) {
-                ++same_target_end;
-            }
-            if (same_target_end > wave_begin + 1u) {
-                wave_end = same_target_end;
-            }
-        }
+        const coordinate_pipeline_detail::coordinate_wave_plan wave =
+            coordinate_pipeline_detail::prepare_coordinate_wave(jobs,
+                                                                  query_inputs.host_query_records,
+                                                                  wave_begin,
+                                                                  coordinate_vote_selected,
+                                                                  grouped_soa_selected,
+                                                                  min_words_bytes,
+                                                                  query_record_bytes);
+        const std::size_t wave_end = wave.end;
         const std::size_t next_wave_begin = wave_end;
-        const std::size_t wave_count = wave_end - wave_begin;
-        std::uint64_t per_wave_problem_bytes = 0u;
-        for (std::size_t job_index = wave_begin; job_index < wave_end; ++job_index) {
-            const gpu_seed_query_record_wire& qrec =
-                query_inputs.host_query_records[jobs[job_index].query_index];
-            const std::uint32_t qblocks = std::max<std::uint32_t>(
-                bioseq::common::ceil_div(qrec.minimizer_count, k_prefix_scan_block_size), 1u);
-            per_wave_problem_bytes = bioseq::common::saturating_add(
-                per_wave_problem_bytes,
-                bioseq::common::saturating_add(
-                    bioseq::common::saturating_add(std::uint64_t{qrec.minimizer_count} * 8u,
-                                                   grouped_soa_selected ? 4u : 0u),
-                    std::uint64_t{qblocks} * 4u));
-        }
-        const std::uint64_t arena_bytes = bioseq::common::saturating_add(
-            bioseq::common::saturating_add(min_words_bytes, query_record_bytes),
-            bioseq::common::saturating_add(
-                per_wave_problem_bytes,
-                bioseq::common::saturating_mul(static_cast<std::uint64_t>(3u * wave_count + 2u),
-                                               std::uint64_t{k_gpu_buffer_offset_alignment})));
-        if (!arena.ensure_capacity(arena_bytes, 0u, 0u)) {
+        const std::size_t wave_count = wave.count;
+        if (!arena.ensure_capacity(wave.arena_bytes, 0u, 0u)) {
             throw vulkan_runtime_error("gpu seed-to-coordinate batch arena grow failed");
         }
         const gpu_arena_mark mark = arena.mark();
@@ -554,30 +241,12 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 throw vulkan_runtime_error("gpu seed-to-coordinate batch arena oversubscribed");
             }
 
-            const VkBuffer min_words_buffer =
-                query_inputs.device_minimizer_words != nullptr
-                    ? query_inputs.device_minimizer_words->buffer_handle
-                    : minw_s.buffer->buffer_handle;
-            const std::uint64_t min_words_offset =
-                query_inputs.device_minimizer_words != nullptr ? 0u : minw_s.offset;
-            const std::uint64_t min_words_range =
-                query_inputs.device_minimizer_words != nullptr ? VK_WHOLE_SIZE : minw_s.size;
-            if (query_inputs.device_minimizer_words == nullptr) {
-                std::memset(base + minw_s.offset, 0, static_cast<std::size_t>(minw_s.size));
-                if (!query_inputs.host_minimizer_bytes.empty()) {
-                    std::memcpy(base + minw_s.offset,
-                                query_inputs.host_minimizer_bytes.data(),
-                                query_inputs.host_minimizer_bytes.size());
-                }
-            }
-            std::memset(base + qrec_s.offset, 0, static_cast<std::size_t>(qrec_s.size));
-            for (std::size_t qrec_index = 0; qrec_index < query_inputs.host_query_records.size();
-                 ++qrec_index) {
-                std::memcpy(base + qrec_s.offset +
-                                static_cast<std::uint64_t>(qrec_index) * qrec_stride,
-                            &query_inputs.host_query_records[qrec_index],
-                            sizeof(gpu_seed_query_record_wire));
-            }
+            const coordinate_pipeline_detail::coordinate_minimizer_binding minimizer_binding =
+                coordinate_pipeline_detail::prepare_coordinate_query_upload(
+                    base, qrec_s, minw_s, query_inputs, qrec_stride);
+            const VkBuffer min_words_buffer = minimizer_binding.buffer;
+            const std::uint64_t min_words_offset = minimizer_binding.offset;
+            const std::uint64_t min_words_range = minimizer_binding.range;
 
             std::vector<gpu_seed_coordinate_wave_state> states;
             states.reserve(wave_count);
@@ -588,44 +257,15 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                 state.job = jobs[job_index];
                 state.query_record = query_inputs.host_query_records[state.job.query_index];
                 if (grouped_soa_selected) {
-                    auto& audit = state.operation_audit;
-                    audit.operation_identity = run.operation_receipt.operation_identity_;
-                    audit.query_authority_identity = query_authority.identity_;
-                    audit.resident_descriptors =
-                        make_runtime_buffer_identity(common_shape_view->descriptors);
-                    audit.resident_controls =
-                        make_runtime_buffer_identity(common_shape_view->controls);
-                    audit.resident_positions =
-                        make_runtime_buffer_identity(common_shape_view->positions);
-                    audit.query_minimizer_buffer =
-                        make_runtime_buffer_identity(query_inputs.device_minimizer_words);
-                    audit.device_uuid = common_shape_view->device_uuid;
-                    audit.descriptor_bytes = common_shape_view->descriptor_bytes;
-                    audit.control_bytes = common_shape_view->control_bytes;
-                    audit.position_bytes = common_shape_view->position_bytes;
-                    audit.position_count = common_shape_view->position_count;
-                    audit.max_occ_cap = common_shape_view->max_occ_cap;
-                    audit.partition_count = common_shape_view->partition_count;
-                    audit.abi_revision = common_shape_view->abi_revision;
-                    audit.generation_id = common_shape_view->generation_id;
-                    audit.source_identity = common_shape_view->source_identity;
-                    audit.cold_load_identity = common_shape_view->cold_load_identity;
-                    audit.target_len = state.job.target_len;
-                    audit.problem_index = state.result_index;
-                    audit.query_index = state.job.query_index;
-                    audit.logical_target_row = state.job.logical_target_row;
-                    audit.logical_query_ordinal = state.job.logical_query_ordinal;
-                    audit.query_record = state.query_record;
-                    audit.configuration = shape_operation_configuration;
-                    audit.query_tile_count =
-                        query_authority.query_tile_counts_[state.job.query_index];
-                    audit.query_count_dispatches =
-                        query_authority.dispatch_stats_.count_dispatches();
-                    audit.query_scan_dispatches =
-                        query_authority.dispatch_stats_.prefix_scan_dispatches();
-                    audit.query_emit_dispatches = query_authority.dispatch_stats_.emit_dispatches();
-                    audit.query_completed_roundtrips =
-                        query_authority.dispatch_stats_.completed_roundtrips();
+                    coordinate_pipeline_detail::initialize_grouped_soa_job_audit(
+                        state,
+                        *common_shape_view,
+                        query_inputs.device_minimizer_words,
+                        shape_operation_configuration,
+                        run.operation_receipt.operation_identity_,
+                        query_authority.identity_,
+                        query_authority.query_tile_counts_[state.job.query_index],
+                        query_authority.dispatch_stats_);
                 }
                 state.minimizer_count = state.query_record.minimizer_count;
                 state.query_len = state.query_record.query_len;
@@ -668,49 +308,13 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
                                 &zero_status,
                                 sizeof(zero_status));
                 }
-                const std::uint32_t target_offset_lo =
-                    static_cast<std::uint32_t>(state.job.target_position_offset & 0xffffffffull);
-                const std::uint32_t target_offset_hi =
-                    static_cast<std::uint32_t>(state.job.target_position_offset >> 32);
-                const gpu_anchor_sort_key_plan anchor_sort_plan = make_anchor_sort_key_plan(
-                    state.job.target_len, state.job.target_position_offset);
-                state.seed_push = seed_push_constants{query_inputs.minimizer_words32_per_record,
-                                                      query_inputs.minimizer_word_kind,
-                                                      query_inputs.hash_shift,
-                                                      query_inputs.pos_bits,
-                                                      kmer_size,
-                                                      state.job.slot_mask,
-                                                      static_cast<std::uint32_t>(max_occ),
-                                                      0u,
-                                                      1u,
-                                                      state.job.bucket_count,
-                                                      target_offset_lo,
-                                                      target_offset_hi,
-                                                      anchor_sort_plan.target_ref_bits};
-                if (grouped_soa_selected) {
-                    const gpu_grouped_soa_resident_view& view = *state.job.grouped_soa;
-                    state.grouped_soa_seed_push = gpu_grouped_soa_seed_push{
-                        .abi_revision = k_gpu_grouped_soa_abi_revision,
-                        .words32_per_minimizer = query_inputs.minimizer_words32_per_record,
-                        .word_kind = query_inputs.minimizer_word_kind,
-                        .hash_shift = query_inputs.hash_shift,
-                        .pos_bits = query_inputs.pos_bits,
-                        .kmer_size = kmer_size,
-                        .partition_count = view.partition_count,
-                        .max_occ = static_cast<std::uint32_t>(max_occ),
-                        .emit_mode = 0u,
-                        .record_count = 1u,
-                        .target_ref_bits = anchor_sort_plan.target_ref_bits,
-                        .query_minimizer_count = total_mc,
-                        .control_word_count = shape_control_word_count,
-                        .position_word_count = shape_position_word_count,
-                        .anchor_capacity = 0u,
-                        .max_occ_cap_lo =
-                            static_cast<std::uint32_t>(view.max_occ_cap & 0xffffffffull),
-                        .max_occ_cap_hi = static_cast<std::uint32_t>(view.max_occ_cap >> 32u),
-                        .status_index = state.minimizer_count,
-                    };
-                }
+                coordinate_pipeline_detail::prepare_seed_push_constants(state,
+                                                                           query_inputs,
+                                                                           grouped_soa_selected,
+                                                                           kmer_size,
+                                                                           max_occ,
+                                                                           total_mc,
+                                                                           resident_layout);
                 if (!state.skip_seed) {
                     seed_active_count += 1u;
                 }
@@ -733,22 +337,8 @@ runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& que
 
                 const gpu_seed_coordinate_wave_state* first_active =
                     active_states.empty() ? nullptr : active_states.front();
-                bool same_target_wave = active_states.size() >= 2u;
-                if (same_target_wave) {
-                    for (const gpu_seed_coordinate_wave_state* state : active_states) {
-                        if (state->job.slots != first_active->job.slots ||
-                            state->job.positions != first_active->job.positions ||
-                            state->job.target_len != first_active->job.target_len ||
-                            state->job.slot_mask != first_active->job.slot_mask ||
-                            state->job.position_count != first_active->job.position_count ||
-                            state->job.bucket_count != first_active->job.bucket_count ||
-                            state->job.target_position_offset !=
-                                first_active->job.target_position_offset) {
-                            same_target_wave = false;
-                            break;
-                        }
-                    }
-                }
+                const bool same_target_wave =
+                    coordinate_pipeline_detail::has_same_active_coordinate_target(active_states);
 
                 if (same_target_wave) {
                     const std::uint32_t total_blocks = std::max<std::uint32_t>(

@@ -299,9 +299,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # Fail closed on authored additions until their target and generator ownership
 # has been reviewed and the exact inventory count is advanced deliberately.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 332)
+if(NOT _bioseq_nopg_module_count EQUAL 336)
   message(FATAL_ERROR
-    "Domain-neutral module inventory must contain exactly 332 authored units; "
+    "Domain-neutral module inventory must contain exactly 336 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -986,6 +986,22 @@ set(BIOSEQ_RUNTIME_CORE_MODULES
 # but not sequence/index/dispatch modules. Keep one canonical provider for this
 # small runtime closure and share it with the full Domain-N library.
 set(BIOSEQ_NOPG_OWNED_MODULES ${BIOSEQ_NOPG_MODULES})
+set(BIOSEQ_VULKAN_RUNTIME_PARTITION_MODULES
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime/coordinate_pipeline/batch_preparation.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime/metal_archive/archive_storage.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime/metal_archive/command_interpose.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime/metal_archive/pipeline_interpose.cppm")
+foreach(_bioseq_vulkan_runtime_partition IN LISTS
+    BIOSEQ_VULKAN_RUNTIME_PARTITION_MODULES)
+  if(NOT _bioseq_vulkan_runtime_partition IN_LIST BIOSEQ_NOPG_OWNED_MODULES)
+    message(FATAL_ERROR
+      "Vulkan runtime partition escaped domain-neutral ownership: "
+      "${_bioseq_vulkan_runtime_partition}")
+  endif()
+endforeach()
+unset(_bioseq_vulkan_runtime_partition)
+list(REMOVE_ITEM BIOSEQ_NOPG_OWNED_MODULES
+  ${BIOSEQ_VULKAN_RUNTIME_PARTITION_MODULES})
 foreach(_bioseq_pipeline_dispatch_owner IN LISTS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
   list(FIND BIOSEQ_NOPG_OWNED_MODULES
@@ -1244,6 +1260,10 @@ target_sources(bioseq_modules_nopg
     TYPE CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_INSTRUMENTATION_BACKEND_MODULES}
+  PUBLIC FILE_SET bioseq_vulkan_runtime_partition_modules
+    TYPE CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_VULKAN_RUNTIME_PARTITION_MODULES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_OWNED_MODULES})
