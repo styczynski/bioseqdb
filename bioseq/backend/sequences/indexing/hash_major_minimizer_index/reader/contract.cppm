@@ -95,12 +95,14 @@ struct hash_major_minimizer_logical_stream_source_ref {
     hash_major_minimizer_read_control_wave_fn read_control_wave = nullptr;
     hash_major_minimizer_read_posting_wave_fn read_posting_wave = nullptr;
 
+    /// Read an exact logical byte interval through the generic source callback.
     [[nodiscard]] bool read(hash_major_minimizer_stream_kind kind,
                             std::uint64_t offset,
                             std::span<std::byte> output) const {
         return read_bytes != nullptr && read_bytes(context, kind, offset, output);
     }
 
+    /// Return a logical stream's declared byte length, or zero without a size callback.
     [[nodiscard]] std::uint64_t size(hash_major_minimizer_stream_kind kind) const {
         return logical_size == nullptr ? 0u : logical_size(context, kind);
     }
@@ -115,6 +117,7 @@ struct hash_major_minimizer_logical_stream_source_ref {
  */
 class hash_major_minimizer_selective_reader {
   private:
+    /// Directory-derived posting authority retained while a selected block is processed.
     struct block_authority {
         std::uint64_t directory_ordinal = 0u;
         std::uint64_t posting_byte_offset = 0u;
@@ -123,6 +126,7 @@ class hash_major_minimizer_selective_reader {
     };
     static_assert(sizeof(block_authority) == 32u);
 
+    /// Stage labels used to attribute peak admitted memory.
     enum class memory_admission_stage : std::uint8_t {
         directory,
         control,
@@ -134,6 +138,7 @@ class hash_major_minimizer_selective_reader {
     inline static constexpr std::uint64_t k_unavailable_query_offset =
         (std::numeric_limits<std::uint64_t>::max)() - 1u;
 
+    /// Mutable state shared by posting-wave callbacks during ordered delivery.
     struct posting_delivery_context {
         hash_major_minimizer_selective_reader* reader = nullptr;
         const hash_major_minimizer_manifest* manifest = nullptr;
@@ -149,6 +154,7 @@ class hash_major_minimizer_selective_reader {
         std::optional<hash_major_minimizer_error> error{};
     };
 
+    /// Mutable state shared by control-wave callbacks during selection planning.
     struct control_delivery_context {
         hash_major_minimizer_selective_reader* reader = nullptr;
         const hash_major_minimizer_manifest* manifest = nullptr;
@@ -184,6 +190,8 @@ class hash_major_minimizer_selective_reader {
     std::size_t posting_wave_peak_owner_bytes_ = 0u;
     std::size_t transient_authority_peak_owner_bytes_ = 0u;
 
+    /// Convert a vector's retained capacity to bytes without overflow.
+    /// @tparam p_value_type Element type whose width determines the retained byte count.
     template <class p_value_type>
     [[nodiscard]] static bool vector_capacity_bytes_(const std::vector<p_value_type>& values,
                                                      std::uint64_t& output) noexcept {
@@ -191,9 +199,11 @@ class hash_major_minimizer_selective_reader {
             values.capacity(), sizeof(p_value_type), output);
     }
 
+    /// Recompute the reader-owned allocation total used by admission accounting.
     [[nodiscard]] bool refresh_persistent_owner_bytes_() noexcept {
         using namespace hash_major_minimizer_detail;
         std::uint64_t total = 0u;
+        // Accumulate one retained allocation while rejecting byte-count overflow.
         const auto add = [&total](std::uint64_t bytes) { return checked_add(total, bytes, total); };
         std::uint64_t bytes = 0u;
         if (!vector_capacity_bytes_(primary_counts_, bytes) || !add(bytes) ||
@@ -209,6 +219,7 @@ class hash_major_minimizer_selective_reader {
         return true;
     }
 
+    /// Attribute a permit watermark to the current open stage and overall peak.
     void record_admitted_peak_(memory_admission_stage admission_stage,
                                std::uint64_t bytes) noexcept {
         memory_stats_.peak_admitted_bytes = std::max(memory_stats_.peak_admitted_bytes, bytes);
@@ -227,6 +238,7 @@ class hash_major_minimizer_selective_reader {
         *stage_peak = std::max(*stage_peak, bytes);
     }
 
+    /// Grow the shared permit and record the resulting stage watermark.
     [[nodiscard]] bool grow_permit_to_(std::uint64_t bytes,
                                        memory_admission_stage admission_stage) noexcept {
         if (!permit_.grow_to(bytes))
@@ -235,6 +247,7 @@ class hash_major_minimizer_selective_reader {
         return true;
     }
 
+    /// Recover the exact count for one canonical query, including saturated exceptions.
     [[nodiscard]] std::uint64_t exact_count_(std::size_t query_ordinal) const noexcept {
         const std::uint16_t primary = primary_counts_[query_ordinal];
         if (primary != 65'535u)
@@ -251,6 +264,7 @@ class hash_major_minimizer_selective_reader {
                    : 0u;
     }
 
+    /// Map a prepared hash to its canonical query ordinal using the retained radix table.
     [[nodiscard]] std::size_t canonical_ordinal_(std::uint64_t hash) const noexcept {
         if (hash > (std::numeric_limits<std::uint32_t>::max)() ||
             canonical_radix_prefix_.size() != 65'537u) {
@@ -263,6 +277,7 @@ class hash_major_minimizer_selective_reader {
         return found < end && query_hashes_.at(found) == hash ? found : query_hashes_.size();
     }
 
+    /// Find a hash lower bound at or after `first` within its radix bucket.
     [[nodiscard]] std::size_t canonical_lower_bound_(std::size_t first,
                                                      std::uint64_t hash) const noexcept {
         if (hash > (std::numeric_limits<std::uint32_t>::max)() ||
@@ -277,14 +292,17 @@ class hash_major_minimizer_selective_reader {
         return query_hashes_.lower_bound(std::max(first, bucket_begin), bucket_end, hash);
     }
 
+    /// Test whether a hash belongs to the authenticated canonical query image.
     [[nodiscard]] bool canonical_contains_(std::uint64_t hash) const noexcept {
         return canonical_ordinal_(hash) != query_hashes_.size();
     }
 
+    /// Validate and consume one complete control block delivered by a batch source.
     [[nodiscard]] static bool consume_control_block_(void* opaque,
                                                      std::uint32_t range_ordinal,
                                                      std::span<const std::byte> encoded_control);
 
+    /// Validate and consume one ordered posting fragment delivered by a batch source.
     [[nodiscard]] static bool consume_posting_bytes_(void* opaque,
                                                      std::uint32_t range_ordinal,
                                                      std::uint64_t range_byte_offset,
@@ -295,6 +313,7 @@ class hash_major_minimizer_selective_reader {
     hash_major_minimizer_selective_reader(const hash_major_minimizer_selective_reader&) = delete;
     hash_major_minimizer_selective_reader&
     operator=(const hash_major_minimizer_selective_reader&) = delete;
+    /// Transfer all admitted storage and borrowed-query bindings to a new reader.
     hash_major_minimizer_selective_reader(hash_major_minimizer_selective_reader&& other) noexcept
         : permit_(std::move(other.permit_)),
           manifest_(std::exchange(other.manifest_, hash_major_minimizer_manifest{})),
@@ -317,9 +336,20 @@ class hash_major_minimizer_selective_reader {
     operator=(hash_major_minimizer_selective_reader&&) noexcept = delete;
 
     /**
-     * Open against a caller-owned sorted-unique canonical image. The caller
-     * keeps that image alive for the reader lifetime. No query hash is copied,
-     * widened, sorted, or deduplicated here.
+     * @brief Open against a caller-owned sorted-unique canonical query image.
+     *
+     * The caller keeps the canonical image and callback context alive for the reader lifetime.
+     * Query hashes are neither copied, widened, sorted, nor deduplicated. Every retained owner
+     * and transient read wave must fit the shared admission permit.
+     *
+     * @param admission Shared controller charged for retained and transient memory.
+     * @param encoded_head Authenticated fixed-width publication head.
+     * @param encoded_manifest Authenticated fixed-width manifest selected by the head.
+     * @param expected Exact generation and storage identity required by the caller.
+     * @param source Borrowed callbacks for logical streams and optional batch reads.
+     * @param query_hashes Sorted, unique hashes bound to the expected storage profile.
+     * @param max_occ Maximum global count whose positions may be retained.
+     * @return An admitted reader, or a fail-closed identity, validation, source, or memory error.
      */
     [[nodiscard]] static std::expected<hash_major_minimizer_selective_reader,
                                        hash_major_minimizer_error>
@@ -331,6 +361,10 @@ class hash_major_minimizer_selective_reader {
          canonical_query_hash_view query_hashes,
          std::uint64_t max_occ);
 
+    /// Return retained positions and the exact global count for one prepared query hash.
+    ///
+    /// @throws persisted_minimizer_lookup_error If the hash was not prepared or retained
+    /// accounting is inconsistent.
     [[nodiscard]] minimizer_lookup_spans lookup_spans(std::uint64_t hash) const {
         const std::size_t query_ordinal = canonical_ordinal_(hash);
         if (query_ordinal == query_hashes_.size()) {
@@ -368,51 +402,63 @@ class hash_major_minimizer_selective_reader {
                 .subspan(position_offset, position_count));
     }
 
+    /// Return the authenticated target length in base-pair coordinates.
     [[nodiscard]] std::uint64_t target_length() const noexcept {
         return manifest_.target_length;
     }
 
+    /// Borrow retained encoded positions when the persisted posting width is four bytes.
     [[nodiscard]] std::span<const std::uint32_t> retained_positions32() const noexcept {
         return {retained_positions32_.get(), retained_positions32_ ? retained_position_count_ : 0u};
     }
 
+    /// Borrow retained encoded positions when the persisted posting width is eight bytes.
     [[nodiscard]] std::span<const std::uint64_t> retained_positions64() const noexcept {
         return {retained_positions64_.get(), retained_positions64_ ? retained_position_count_ : 0u};
     }
 
+    /// Borrow exact counts that replaced saturated 16-bit primary counts.
     [[nodiscard]] std::span<const exact_global_count_exception>
     exact_count_exceptions() const noexcept {
         return count_exceptions_;
     }
 
+    /// Return the number of prepared hashes present in the generation.
     [[nodiscard]] std::size_t selected_hash_count() const noexcept {
         return selected_hash_count_;
     }
 
+    /// Test membership in the caller-provided canonical query image.
     [[nodiscard]] bool contains_prepared_hash(std::uint64_t hash) const noexcept {
         return canonical_contains_(hash);
     }
 
+    /// Return the largest caller-owned posting-wave buffer requirement in bytes.
     [[nodiscard]] std::size_t posting_wave_peak_owner_bytes() const noexcept {
         return posting_wave_peak_owner_bytes_;
     }
 
+    /// Return the largest caller-owned control-wave buffer requirement in bytes.
     [[nodiscard]] std::size_t control_wave_peak_owner_bytes() const noexcept {
         return control_wave_peak_owner_bytes_;
     }
 
+    /// Return the peak temporary authority-vector capacity in bytes.
     [[nodiscard]] std::size_t transient_authority_peak_owner_bytes() const noexcept {
         return transient_authority_peak_owner_bytes_;
     }
 
+    /// Report that no transient block authority remains owned after open.
     [[nodiscard]] static constexpr std::size_t transient_authority_retained_bytes() noexcept {
         return 0u;
     }
 
+    /// Return the current memory-permit reservation in bytes.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return permit_.bytes();
     }
 
+    /// Borrow the reader's admission, checksum, selection, and delivery counters.
     [[nodiscard]] const hash_major_minimizer_memory_stats& memory_stats() const noexcept {
         return memory_stats_;
     }

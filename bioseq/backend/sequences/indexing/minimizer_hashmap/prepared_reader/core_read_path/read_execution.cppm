@@ -122,7 +122,7 @@ trait_driven_prepared_query_core<p_traits>::accept_protocol_row_impl(
         return protocol_poison<void>(minimizer_generation_encoding_error::checksum);
     }
     // Raw callers reached this point only after their mandatory row CRC
-    // traversal above; receipt callers carry the same authenticated
+    // traversal above. Receipt callers carry the same authenticated
     // address-bound checksum. Compose the extent CRC algebraically in
     // both cases and never reread the payload solely for another CRC.
     session.crc.value =

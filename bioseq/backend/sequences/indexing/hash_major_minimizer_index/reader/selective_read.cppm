@@ -32,6 +32,10 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 
+/// Assemble a selective reader after authenticating generation identity and selected streams.
+///
+/// Directory bytes are checked completely. Only control blocks intersecting the canonical query
+/// image and postings below `max_occ` are retained, with every allocation charged to `admission`.
 [[nodiscard]] inline std::expected<hash_major_minimizer_selective_reader,
                                    hash_major_minimizer_error>
 hash_major_minimizer_selective_reader::open(
@@ -128,6 +132,7 @@ hash_major_minimizer_selective_reader::open(
         return std::unexpected(hash_major_minimizer_error::arithmetic_overflow);
     }
     std::uint64_t initial_logical_bytes = 0u;
+    // Accumulate the first-stage logical owners without allowing byte-count overflow.
     const auto add_initial = [&initial_logical_bytes](std::uint64_t bytes) {
         return checked_add(initial_logical_bytes, bytes, initial_logical_bytes);
     };
@@ -347,6 +352,7 @@ hash_major_minimizer_selective_reader::open(
             .control_stream_crc = &control_stream_crc,
             .max_occ = max_occ,
         };
+        // Deliver and authenticate one bounded batch of selected control blocks.
         auto deliver_control_wave = [&control_ranges, &delivery, &source, &reader, &scratch]()
             -> std::expected<void, hash_major_minimizer_error> {
             if (control_ranges.empty())
@@ -542,6 +548,7 @@ hash_major_minimizer_selective_reader::open(
     std::size_t authority_cursor = 0u;
     std::size_t accepted_delivered = 0u;
     std::uint64_t output_cursor = 0u;
+    // Skip prepared hashes whose posting count exceeded the retention threshold.
     const auto next_accepted_query = [&reader, query_count](std::size_t ordinal) noexcept {
         while (ordinal < query_count &&
                reader.query_offsets_[ordinal] >= k_unavailable_query_offset) {

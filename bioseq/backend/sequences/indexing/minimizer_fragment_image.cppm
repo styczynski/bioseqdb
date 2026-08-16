@@ -51,9 +51,12 @@ inline constexpr std::uint64_t k_minimizer_fragment_compact_hash32_alignment = 6
 /// Feature bit advertising an embedded direct compact-hash section.
 inline constexpr std::uint64_t k_minimizer_fragment_compact_hash32_feature =
     std::uint64_t{1u} << 0u;
+/// Feature bits understood by this image revision.
 inline constexpr std::uint64_t k_minimizer_fragment_image_known_features =
     k_minimizer_fragment_compact_hash32_feature;
+/// Byte offset of the checksum field within the fixed header.
 inline constexpr std::size_t k_minimizer_fragment_image_header_crc_offset = 184u;
+/// Width of the fixed header checksum field in bytes.
 inline constexpr std::size_t k_minimizer_fragment_image_header_crc_bytes = 8u;
 /// Largest image offset representable by the current platform.
 inline constexpr std::uint64_t k_minimizer_fragment_image_default_max_file_offset = []() constexpr {
@@ -145,6 +148,7 @@ struct minimizer_fragment_image_header {
         const minimizer_fragment_image_header&, const minimizer_fragment_image_header&) = default;
 };
 
+/// Fixed-size byte array containing the stable little-endian image header.
 using encoded_minimizer_fragment_image_header =
     std::array<std::byte, static_cast<std::size_t>(k_minimizer_fragment_image_header_bytes)>;
 
@@ -268,9 +272,12 @@ struct validated_minimizer_fragment_image_view {
 
 namespace bioseq::indexing::minimizer_fragment_image_detail {
 
+/**
+ * @brief Stores one unsigned value at a prevalidated little-endian offset.
+ * @tparam p_uint Unsigned integer type that fixes the encoded width.
+ */
 template <class p_uint>
 requires (std::is_unsigned_v<p_uint>)
-/** @brief Stores one unsigned value at a prevalidated little-endian offset. */
 constexpr void store_le(
         std::span<std::byte> encoded,
         std::size_t offset,
@@ -281,9 +288,12 @@ constexpr void store_le(
     }
 }
 
+/**
+ * @brief Loads one unsigned value from a prevalidated little-endian offset.
+ * @tparam p_uint Unsigned integer type that fixes the encoded width.
+ */
 template <class p_uint>
 requires (std::is_unsigned_v<p_uint>)
-/** @brief Loads one unsigned value from a prevalidated little-endian offset. */
 [[nodiscard]] constexpr p_uint load_le(
         std::span<const std::byte> encoded,
         std::size_t offset) noexcept {
@@ -296,6 +306,7 @@ requires (std::is_unsigned_v<p_uint>)
     return value;
 }
 
+/// Add two persisted image quantities without allowing unsigned wraparound.
 [[nodiscard]] constexpr std::expected<std::uint64_t, minimizer_fragment_image_error>
 checked_add(std::uint64_t left, std::uint64_t right) noexcept {
     const auto sum = bioseq::common::checked_add(left, right);
@@ -305,6 +316,7 @@ checked_add(std::uint64_t left, std::uint64_t right) noexcept {
     return *sum;
 }
 
+/// Align a persisted section offset upward without allowing unsigned wraparound.
 [[nodiscard]] constexpr std::expected<std::uint64_t, minimizer_fragment_image_error>
 checked_align_up(
         std::uint64_t value,
@@ -321,16 +333,19 @@ static_assert((k_minimizer_fragment_image_section_alignment
 static_assert((k_minimizer_fragment_compact_hash32_alignment
     & (k_minimizer_fragment_compact_hash32_alignment - 1u)) == 0u);
 
+/// Test whether the feature bitmap advertises an embedded compact direct index.
 [[nodiscard]] constexpr bool has_compact_hash32_direct_feature(
         std::uint64_t feature_bitmap) noexcept {
     return (feature_bitmap & k_minimizer_fragment_compact_hash32_feature) != 0u;
 }
 
+/// Test whether every field of an absent compact direct-index receipt is zero.
 [[nodiscard]] constexpr bool direct_receipt_is_zero(
         const minimizer_fragment_compact_hash32_section_receipt& receipt) noexcept {
     return receipt == minimizer_fragment_compact_hash32_section_receipt{};
 }
 
+/// Test whether a reserved or alignment-padding byte range is zero-filled.
 [[nodiscard]] constexpr bool all_zero(
         std::span<const std::byte> bytes) noexcept {
     for (const std::byte value : bytes) {
@@ -341,6 +356,7 @@ static_assert((k_minimizer_fragment_compact_hash32_alignment
     return true;
 }
 
+/// Compute the full-header CRC with its checksum field treated as zero.
 [[nodiscard]] constexpr std::uint64_t header_crc(
         std::span<const std::byte> encoded) noexcept {
     crc64_ecma182_accumulator crc{};
@@ -353,6 +369,7 @@ static_assert((k_minimizer_fragment_compact_hash32_alignment
     return crc.checksum();
 }
 
+/// Compare decoded publication and section identity with bounded-open authority.
 [[nodiscard]] constexpr bool identity_matches(
         const minimizer_fragment_image_header& header,
         const expected_minimizer_fragment_image_identity& expected) noexcept {

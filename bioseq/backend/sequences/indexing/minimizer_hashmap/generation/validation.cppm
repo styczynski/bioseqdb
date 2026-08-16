@@ -41,6 +41,7 @@ export namespace bioseq::indexing {
 /// Streaming complete-generation validator for ordered qualified rows.
 class minimizer_generation_row_validator {
   private:
+    /// Restricts construction to metadata-validated generation state.
     struct validated_tag {};
 
     encoded_grouped_soa_generation generation_{};
@@ -53,6 +54,7 @@ class minimizer_generation_row_validator {
     bool manifest_seen_ = false;
     bool ready_validated_ = false;
 
+    /// Copy bounded generation metadata after `create()` validates every fixed contract.
     explicit minimizer_generation_row_validator(validated_tag,
                                                 const encoded_grouped_soa_generation& generation)
         : generation_(generation) {}

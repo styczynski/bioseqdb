@@ -30,6 +30,7 @@ struct hash_major_minimizer_logical_stream_sink_ref {
     void* context = nullptr;
     hash_major_minimizer_append_logical_bytes_fn append_bytes = nullptr;
 
+    /// Append bytes to the selected logical stream through the borrowed callback.
     [[nodiscard]] bool append(
             hash_major_minimizer_stream_kind kind,
             std::span<const std::byte> bytes) const {
@@ -75,11 +76,13 @@ private:
     bool hash_open_ = false;
     bool finished_ = false;
 
+    /// Map a persisted stream kind to its zero-based accounting slot.
     [[nodiscard]] static constexpr std::size_t stream_index_(
             hash_major_minimizer_stream_kind kind) noexcept {
         return static_cast<std::size_t>(kind) - 1u;
     }
 
+    /// Append a nonempty chunk and advance its stream checksum and byte count.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> emit_(
             hash_major_minimizer_stream_kind kind,
             std::span<const std::byte> bytes) {
@@ -100,6 +103,7 @@ private:
         return {};
     }
 
+    /// Publish buffered posting bytes without changing their encoded order.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     flush_posting_buffer_() {
         if (posting_buffer_bytes_ == 0u) return {};
@@ -113,6 +117,7 @@ private:
         return {};
     }
 
+    /// Add little-endian posting bytes to stream and current-block authentication state.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     append_posting_bytes_(std::span<const std::byte> bytes) {
         const std::size_t index = stream_index_(
@@ -137,6 +142,7 @@ private:
         return {};
     }
 
+    /// Seal and publish the current control block after its postings are visible.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error>
     finish_block_() {
         using namespace hash_major_minimizer_detail;
@@ -230,6 +236,9 @@ private:
     }
 
 public:
+    /// Bind generation metadata and a caller-owned append sink for ordered emission.
+    ///
+    /// The sink callback and its context must remain valid through `finish()`.
     hash_major_minimizer_logical_encoder(
             hash_major_minimizer_generation_options options,
             hash_major_minimizer_logical_stream_sink_ref sink)
@@ -243,6 +252,9 @@ public:
     hash_major_minimizer_logical_encoder& operator=(
         const hash_major_minimizer_logical_encoder&) = delete;
 
+    /// Begin one strictly increasing hash group with its exact posting count.
+    ///
+    /// @return Success, or a state, count, ordering, or storage-profile error before emission.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> begin_hash(
             std::uint64_t hash,
             std::uint64_t exact_count) {
@@ -274,6 +286,10 @@ public:
         return {};
     }
 
+    /// Append one encoded position to the open hash group in strictly increasing order.
+    ///
+    /// The low bit stores strand and the remaining bits store a global base-pair coordinate.
+    /// A sink failure can leave an already accepted prefix externally visible.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_posting(
             std::uint64_t encoded_position) {
         if (!hash_open_ || current_written_count_ >= current_expected_count_) {
@@ -310,6 +326,7 @@ public:
         return {};
     }
 
+    /// Close the current hash group after exactly its declared postings were supplied.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> end_hash() {
         if (!hash_open_ || current_written_count_ != current_expected_count_) {
             return std::unexpected(hash_major_minimizer_error::count);
@@ -333,6 +350,10 @@ public:
         return {};
     }
 
+    /// Append one complete hash group from a borrowed ordered position span.
+    ///
+    /// A failure can leave a prefix buffered or published and the encoder must not be reused
+    /// unless the returned state permits the caller to complete the open group.
     [[nodiscard]] std::expected<void, hash_major_minimizer_error> append_hash(
             std::uint64_t hash,
             std::span<const std::uint64_t> positions) {
@@ -347,6 +368,10 @@ public:
         return end_hash();
     }
 
+    /// Seal all streams and return byte-exact manifest and head publication metadata.
+    ///
+    /// Posting bytes precede their control and directory authority. The returned head is the
+    /// final atomic publication record. A sink failure can leave unpublished stream bytes.
     [[nodiscard]] std::expected<
         hash_major_minimizer_encoded_metadata, hash_major_minimizer_error>
     finish() {

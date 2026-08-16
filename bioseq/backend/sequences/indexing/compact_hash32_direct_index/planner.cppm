@@ -10,6 +10,18 @@ import :writer;
 
 export namespace bioseq::indexing {
 
+/**
+ * @brief Estimates compact image bytes from aggregate accepted-run cardinalities.
+ *
+ * The estimate uses the guaranteed minimum number of inline P32 singletons, so it is an upper
+ * bound when only distinct-hash and posting totals are known.
+ *
+ * @param[in] geometry Hash-domain width and inclusive maximum
+ * @param[in] accepted_hash_count Number of nonempty accepted hash runs
+ * @param[in] accepted_posting_count Total postings in accepted runs
+ * @param[in] posting_width_bytes Persisted posting width, either 4 or 8 bytes
+ * @return Section and image byte estimate, or a geometry, width, or arithmetic error
+ */
 [[nodiscard]] constexpr std::expected<compact_hash32_image_estimate, direct_inverted_index_error>
 estimate_compact_hash32_image_bytes(compact_hash32_geometry geometry,
                                     std::uint64_t accepted_hash_count,
@@ -75,6 +87,13 @@ estimate_compact_hash32_image_bytes(compact_hash32_geometry geometry,
     return estimate;
 }
 
+/**
+ * @brief Bounds compact metadata bytes touched by a monotonic query batch.
+ * @param[in] query_hashes Number of hashes probed
+ * @param[in] distinct_rank_groups Number of 256-hash rank groups entered
+ * @param[in] accepted_query_hashes Number of probes that require descriptors
+ * @return Maximum membership, rank, descriptor, and total metadata bytes, or an input error
+ */
 [[nodiscard]] constexpr std::expected<compact_hash32_query_touch_estimate,
                                       direct_inverted_index_error>
 estimate_compact_hash32_query_touches(std::uint64_t query_hashes,
@@ -113,6 +132,12 @@ estimate_compact_hash32_query_touches(std::uint64_t query_hashes,
 
 export namespace bioseq::indexing {
 
+/**
+ * @brief Scans a replayable source and plans an exact compact hash32 image.
+ * @param[in] source Strictly ordered source that can be replayed for emission
+ * @param[in] options Identity, filtering, geometry, and image limits
+ * @return Exact section plan and stream receipt, or a source, layout, or admission error
+ */
 [[nodiscard]] inline std::expected<compact_hash32_image_plan, direct_inverted_index_error>
 plan_compact_hash32_direct_index(const compact_hash32_sorted_run_source& source,
                                  const compact_hash32_build_options& options) {
@@ -132,6 +157,12 @@ plan_compact_hash32_direct_index(const compact_hash32_sorted_run_source& source,
     return plan;
 }
 
+/**
+ * @brief Plans and builds an owning compact hash32 direct-index image.
+ * @param[in] source Strictly ordered source replayed once for planning and once for emission
+ * @param[in] options Identity, filtering, geometry, and image limits
+ * @return Complete authenticated image bytes, or a planning, replay, or allocation error
+ */
 [[nodiscard]] inline std::expected<std::vector<std::byte>, direct_inverted_index_error>
 build_compact_hash32_direct_index(const compact_hash32_sorted_run_source& source,
                                   const compact_hash32_build_options& options) {
@@ -152,6 +183,17 @@ build_compact_hash32_direct_index(const compact_hash32_sorted_run_source& source
     }
 }
 
+/**
+ * @brief Plans compact lookups for a nondecreasing sequence of query occurrences.
+ *
+ * Repeated hashes reuse membership and descriptor work. The plan owns all selections, spans, and
+ * per-occurrence results while the underlying image remains borrowed by the caller.
+ *
+ * @param[in] view Validated compact image
+ * @param[in] queries Query hashes in nondecreasing order with query-strand orientation
+ * @param[in] runtime_max_occ Positive runtime frequency ceiling no greater than the build cap
+ * @return Prepared query plan, or an order, contract, allocation, or image error
+ */
 [[nodiscard]] inline std::expected<compact_hash32_query_plan, direct_inverted_index_error>
 query_compact_hash32_direct_index(const compact_hash32_direct_index_view& view,
                                   std::span<const compact_hash32_query_occurrence> queries,
@@ -328,15 +370,20 @@ query_compact_hash32_direct_index(const compact_hash32_direct_index_view& view,
     }
 }
 
-/// Projected admission-safe lookup for already-deduplicated monotonic query
-/// hashes. `hash_at` is deliberately constrained to a noexcept exact-u32
-/// projection so callers can expose hashes already embedded in a wider query
-/// plan without allocating and filling a duplicate contiguous hash owner.
-/// Construction reserves U mappings exactly once, fills without growth, and
-/// then replaces that owner with an exact accepted-only c-element owner. Thus
-/// peak logical capacity is U+c (at most 2U), while the returned plan retains
-/// exactly c 8-byte mappings. The visitor re-derives descriptors and strand
-/// spans from the image.
+/**
+ * @brief Plans accepted compact lookups from a projected strictly increasing hash sequence.
+ *
+ * The projection avoids a duplicate contiguous hash owner. Construction reserves U mappings once,
+ * fills without growth, and compacts to exactly c accepted mappings. Peak logical capacity is U+c,
+ * at most 2U, and the returned plan retains c eight-byte mappings.
+ *
+ * @tparam p_hash_at Nonthrowing projection returning one exact 32-bit hash by ordinal
+ * @param[in] view Validated compact image
+ * @param[in] strictly_increasing_unique_hash_count Number of hashes exposed by `hash_at`
+ * @param[in] hash_at Projection valid for every ordinal below the supplied count
+ * @param[in] runtime_max_occ Positive runtime frequency ceiling no greater than the build cap
+ * @return Authenticated accepted-only plan, or an order, contract, admission, or image error
+ */
 template <class p_hash_at>
     requires std::is_nothrow_invocable_v<p_hash_at&, std::size_t> &&
              std::is_same_v<std::invoke_result_t<p_hash_at&, std::size_t>, std::uint32_t>
@@ -529,8 +576,13 @@ query_compact_hash32_direct_index_unique_projected(
     }
 }
 
-/// Contiguous-u32 adapter over the projected query authority. It preserves
-/// accepted-plan accounting and authentication.
+/**
+ * @brief Plans accepted compact lookups from a contiguous strictly increasing hash span.
+ * @param[in] view Validated compact image
+ * @param[in] strictly_increasing_unique_hashes Unique hashes in strict ascending order
+ * @param[in] runtime_max_occ Positive runtime frequency ceiling no greater than the build cap
+ * @return Authenticated accepted-only plan, or an order, contract, admission, or image error
+ */
 [[nodiscard]] inline std::expected<compact_hash32_unique_query_plan, direct_inverted_index_error>
 query_compact_hash32_direct_index_unique(
     const compact_hash32_direct_index_view& view,
@@ -549,6 +601,12 @@ query_compact_hash32_direct_index_unique(
 
 export namespace bioseq::indexing {
 
+/**
+ * @brief Plans a direct open-addressed image from unsorted input occurrences.
+ * @param[in] occurrences Hash occurrences with 64-bit target coordinates
+ * @param[in] options Identity, fragment-summary policy, and resource limits
+ * @return Exact image and scratch plan, or a range, admission, allocation, or layout error
+ */
 [[nodiscard]] inline std::expected<direct_index_image_plan, direct_inverted_index_error>
 plan_direct_inverted_index(std::span<const direct_index_occurrence> occurrences,
                            const direct_index_build_options& options) {
@@ -558,6 +616,17 @@ plan_direct_inverted_index(std::span<const direct_index_occurrence> occurrences,
     return prepared->plan;
 }
 
+/**
+ * @brief Plans direct-index posting spans for arbitrary query occurrence order.
+ *
+ * Each distinct accepted hash is selected once. Per-occurrence results retain query-strand-adjusted
+ * forward and reverse counts, while fragment summaries split the posting range when present.
+ *
+ * @param[in] view Validated direct inverted-index image
+ * @param[in] queries Query hashes and query-strand orientations
+ * @param[in] max_occ Maximum occurrence count whose positions may be selected
+ * @return Owning query plan, or a query-size, dictionary, allocation, or arithmetic error
+ */
 [[nodiscard]] inline std::expected<direct_index_query_plan, direct_inverted_index_error>
 query_direct_inverted_index(const direct_inverted_index_view& view,
                             std::span<const direct_index_query_occurrence> queries,

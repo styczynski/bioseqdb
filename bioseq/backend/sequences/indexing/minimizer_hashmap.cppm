@@ -17,5 +17,6 @@ export import :fragment_producer;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 namespace bioseq::indexing::detail {
+/// @brief Declares the private fragment-index table shared by implementation partitions.
 struct minimizer_hashmap_fragment_index_table;
 }

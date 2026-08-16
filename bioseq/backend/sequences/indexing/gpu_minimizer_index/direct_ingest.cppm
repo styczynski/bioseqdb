@@ -43,14 +43,16 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
+/// Device-visible 16-byte bucket shared with the minimizer hash-map representation.
 using gpu_minimizer_slot = minimizer_hashmap_fragment_index::encoded_bucket;
 static_assert(sizeof(gpu_minimizer_slot) == 16);
 static_assert(offsetof(gpu_minimizer_slot, hash) == 0);
 static_assert(offsetof(gpu_minimizer_slot, pos_offset) == 8);
 static_assert(offsetof(gpu_minimizer_slot, pos_count) == 12);
 
-// Raw-target host upload object. The persisted path below cannot accept
-// it and publishes only fully owned streamed residents through insert_resident.
+/// Owning host image used only by the raw-target upload path.
+///
+/// Persisted ingestion does not accept this type and publishes fully owned streamed residents.
 struct gpu_minimizer_index_upload {
     std::vector<gpu_minimizer_slot> slots;
     std::vector<std::uint64_t> positions;
@@ -59,13 +61,17 @@ struct gpu_minimizer_index_upload {
     std::uint32_t slot_mask = 0;
 };
 
+/// Signals that an index cannot be represented by the 32-bit device ABI.
 struct gpu_index_too_large final : std::exception {
+    /// Return a stable diagnostic string for the device ABI limit.
     [[nodiscard]] const char* what() const noexcept override {
         return "GPU minimizer index exceeds 32-bit device slot limits";
     }
 };
 
+/// Signals malformed source buckets or failure to fill the planned device table.
 struct gpu_index_direct_fill_invariant final : std::exception {
+    /// Return a stable diagnostic string for a direct-fill contract failure.
     [[nodiscard]] const char* what() const noexcept override {
         return "GPU minimizer index direct-fill invariant failed";
     }
@@ -86,6 +92,7 @@ enum class gpu_index_upload_decline_reason : std::uint8_t {
     non_host_visible_device_memory,
 };
 
+/// Device-side lookup representation selected for a resident index.
 enum class gpu_index_representation : std::uint8_t {
     open_addressed_70,
     source_direct_sorted_dense,
@@ -95,6 +102,7 @@ enum class gpu_index_representation : std::uint8_t {
 inline constexpr std::uint32_t
     k_minimizer_sorted_dense_gpu_abi_revision = 1u;
 
+/// Return the stable diagnostic name for a device representation.
 [[nodiscard]] inline constexpr std::string_view gpu_index_representation_name(
         gpu_index_representation representation) noexcept {
     switch (representation) {
@@ -106,6 +114,7 @@ inline constexpr std::uint32_t
     return "unknown";
 }
 
+/// Capacity, admission, and allocation diagnostics for a declined GPU upload.
 struct gpu_index_upload_decline {
     gpu_index_upload_decline_reason reason = gpu_index_upload_decline_reason::none;
     std::uint64_t resident_bytes = 0;
@@ -127,15 +136,18 @@ struct gpu_index_upload_decline {
         gpu_index_representation::open_addressed_70;
     bioseq::parallelism::memory_admission_failure admission{};
 
+    /// Test whether a decline reason was recorded.
     [[nodiscard]] constexpr bool is_declined() const noexcept {
         return reason != gpu_index_upload_decline_reason::none;
     }
 
+    /// Test whether no decline reason was recorded.
     [[nodiscard]] constexpr bool is_accepted() const noexcept {
         return !is_declined();
     }
 };
 
+/// Return the stable diagnostic name for an upload decline reason.
 [[nodiscard]] inline constexpr std::string_view
 gpu_index_upload_decline_reason_name(
     gpu_index_upload_decline_reason reason) noexcept
@@ -159,6 +171,7 @@ gpu_index_upload_decline_reason_name(
     return "unknown";
 }
 
+/// Format all available upload-decline and memory-admission diagnostics.
 [[nodiscard]] inline std::string format_gpu_index_upload_decline(
     const gpu_index_upload_decline& decline)
 {
@@ -236,9 +249,10 @@ gpu_index_upload_decline_reason_name(
         decline.max_storage_buffer_range);
 }
 
-// Raw-target/recompute cache key. It is intentionally not accepted by
-// grouped-SoA persisted API below. The pointer-shaped route is confined to
-// source-direct batch ownership.
+/// Identity and shape key for raw-target or recomputed resident indexes.
+///
+/// Grouped persisted ingestion does not accept this pointer-shaped key. A pointer source identity
+/// is confined to a source-direct batch whose underlying CPU index remains immutable.
 struct gpu_minimizer_index_cache_key {
     std::uintptr_t source_id = 0;
     std::uint64_t caller_identity = 0;
@@ -269,6 +283,7 @@ struct gpu_minimizer_index_cache_key {
     std::uint64_t gate_digest_hi = 0;
     std::shared_ptr<const std::vector<std::uint32_t>> gate_canonical_words{};
 
+    /// Compare all representation, source, device, and canonical gate authority fields.
     [[nodiscard]] bool operator==(
         const gpu_minimizer_index_cache_key& other) const
     {
@@ -306,6 +321,7 @@ struct gpu_minimizer_index_cache_key {
     }
 };
 
+/// Project gate authority from a cache key into the Vulkan runtime identity type.
 [[nodiscard]] inline bioseq::gpu::vulkan::gpu_index_gate_identity
 gpu_index_gate_identity_from_key(
     const gpu_minimizer_index_cache_key& key)
@@ -320,6 +336,7 @@ gpu_index_gate_identity_from_key(
     };
 }
 
+/// Mix one 64-bit key component for host-side open addressing and cache hashing.
 [[nodiscard]] inline std::uint64_t splitmix64(std::uint64_t x) noexcept {
     x += 0x9e3779b97f4a7c15ULL;
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
@@ -327,7 +344,9 @@ gpu_index_gate_identity_from_key(
     return x ^ (x >> 31);
 }
 
+/// Hash functor covering all cache-key fields that participate in equality.
 struct gpu_minimizer_index_cache_key_hash {
+    /// Compute a platform-sized mixed hash for an exact cache key.
     [[nodiscard]] std::size_t operator()(const gpu_minimizer_index_cache_key& k) const noexcept {
         std::uint64_t h = splitmix64(static_cast<std::uint64_t>(k.source_id));
         h ^= splitmix64(k.caller_identity + (h << 1));
@@ -360,6 +379,7 @@ struct gpu_minimizer_index_cache_key_hash {
     }
 };
 
+/// Build a wave-local cache key from an immutable in-memory CPU index address and shape.
 [[nodiscard]] inline gpu_minimizer_index_cache_key make_gpu_index_cache_key_for_in_memory(
     const minimizer_hashmap_fragment_index& idx) noexcept
 {
@@ -372,6 +392,7 @@ struct gpu_minimizer_index_cache_key_hash {
     };
 }
 
+/// Build a stable cache key from a nonzero persisted assembly identity and index shape.
 [[nodiscard]] inline gpu_minimizer_index_cache_key make_gpu_index_cache_key_for_assembly(
     const minimizer_hashmap_fragment_index& idx,
     std::uint64_t assembly_identity) noexcept
@@ -386,6 +407,7 @@ struct gpu_minimizer_index_cache_key_hash {
     };
 }
 
+/// Caller-supplied identity metadata used to select and bind a cache-key route.
 struct gpu_index_cache_identity {
     // Zero means a stable, non-mutated in-memory index in the current wave.
     // Nonzero means persisted assembly or segmented recompute identity.
@@ -416,10 +438,12 @@ struct gpu_index_cache_identity {
     std::shared_ptr<const std::vector<std::uint32_t>> gate_canonical_words{};
 };
 
+/// Build the cache key for in-memory, assembly, or operation-owned direct-resident input.
 [[nodiscard]] inline gpu_minimizer_index_cache_key make_gpu_index_cache_key(
     const minimizer_hashmap_fragment_index& idx,
     gpu_index_cache_identity identity) noexcept
 {
+    // Attach operation, device, representation, and canonical gate authority to a base key.
     const auto bind_gate = [identity](gpu_minimizer_index_cache_key key) noexcept {
         key.operation_identity = identity.operation_identity;
         key.alphabet_size = identity.alphabet_size;
@@ -466,12 +490,17 @@ struct gpu_index_cache_identity {
         make_gpu_index_cache_key_for_assembly(idx, identity.assembly_identity));
 }
 
+/// Evidence that accounts for the actual bytes owned by a resident GPU index.
 enum class gpu_resident_accounting_authority : std::uint8_t {
     none,
     reflected_process_footprint,
     retained_exact_permit,
 };
 
+/// Shared owner and host attestation for one device-resident minimizer index.
+///
+/// The permit is destroyed after both Vulkan buffers, and the representation fields mirror the
+/// lookup ABI consumed by the seed shader.
 struct gpu_resident_minimizer_index {
     // Declared first so it is destroyed last, after both resident buffers.
     bioseq::parallelism::memory_permit permit;
@@ -483,7 +512,7 @@ struct gpu_resident_minimizer_index {
     std::uint32_t slot_mask = 0;
     std::uint32_t position_count = 0;
     // When nonzero, `slots` is a source-direct hash-sorted dense bucket array
-    // that the seed lookup binary-searches; `slot_mask` is then 0. When zero,
+    // that the seed lookup binary-searches. `slot_mask` is then 0. When zero,
     // `slots` is the open-addressed table and `slot_mask` is the power-of-two
     // mask. The explicit `representation` field is the host-side attestation.
     std::uint32_t bucket_count = 0;
@@ -510,9 +539,11 @@ static_assert(offsetof(gpu_resident_minimizer_index, permit)
 static_assert(offsetof(gpu_resident_minimizer_index, permit)
     < offsetof(gpu_resident_minimizer_index, positions));
 
+/// Plan a power-of-two open-address table at no more than 70 percent load.
+/// @throws gpu_index_too_large When the capacity cannot fit the 32-bit device ABI.
 [[nodiscard]] inline std::uint32_t gpu_slot_capacity(std::uint64_t distinct) {
     // Power-of-two open addressing at <= 70% load.  ceil(10*D/7) is
-    // deliberately evaluated only after an overflow guard; P=93,308,896
+    // deliberately evaluated only after an overflow guard. P=93,308,896
     // therefore plans 133,298,423 wanted slots -> C=2^27.
     if (distinct > ((std::numeric_limits<std::uint64_t>::max)() - 6u) / 10u) {
         throw gpu_index_too_large{};
@@ -524,6 +555,7 @@ static_assert(offsetof(gpu_resident_minimizer_index, permit)
     return static_cast<std::uint32_t>(std::bit_ceil(std::max<std::uint64_t>(2, wanted)));
 }
 
+/// Express a table load as parts per million, saturated at one million.
 [[nodiscard]] inline std::uint32_t gpu_index_load_ppm(
         std::uint64_t distinct,
         std::uint64_t capacity) noexcept {
@@ -534,6 +566,7 @@ static_assert(offsetof(gpu_resident_minimizer_index, permit)
         scaled / capacity, 1'000'000u));
 }
 
+/// Test both planned Vulkan storage-buffer byte ranges against the device limit.
 [[nodiscard]] inline bool gpu_index_storage_ranges_fit(
         std::uint64_t slot_buffer_bytes,
         std::uint64_t position_buffer_bytes,
@@ -543,6 +576,7 @@ static_assert(offsetof(gpu_resident_minimizer_index, permit)
         && position_buffer_bytes <= max_storage_buffer_range;
 }
 
+/// Observed shape and maximum probe length from direct device-buffer filling.
 struct gpu_index_direct_fill_stats {
     std::uint64_t unique_key_count = 0;
     std::uint64_t slot_capacity = 0;
@@ -550,6 +584,7 @@ struct gpu_index_direct_fill_stats {
     std::uint32_t max_probe = 0;
 };
 
+/// Logical and minimum Vulkan allocation sizes for one device representation.
 struct gpu_index_materialization_plan {
     gpu_index_representation representation =
         gpu_index_representation::open_addressed_70;
@@ -666,6 +701,12 @@ plan_gpu_index_materialization(
     }
     return stats;
 }
+
+/// Build an owning host upload image from the CPU index's authoritative buckets and positions.
+///
+/// Hashes use 70-percent-load open addressing. Position order and encoded 64-bit values are
+/// copied unchanged.
+/// @throws gpu_index_too_large When device offsets or counts cannot fit 32 bits.
 [[nodiscard]] inline gpu_minimizer_index_upload
 build_gpu_minimizer_upload(const minimizer_hashmap_fragment_index& idx) {
     if (idx.positions.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -704,6 +745,11 @@ build_gpu_minimizer_upload(const minimizer_hashmap_fragment_index& idx) {
     return upload;
 }
 
+/// Sort hash-position pairs by hash and build an owning open-addressed upload image.
+///
+/// The input span is reordered. Positions within an equal-hash group retain the radix sort's
+/// resulting order and are copied into one contiguous posting interval.
+/// @throws gpu_index_too_large When device offsets or counts cannot fit 32 bits.
 [[nodiscard]] inline gpu_minimizer_index_upload
 build_gpu_minimizer_upload_from_pairs(
     std::span<std::pair<std::uint64_t, std::uint64_t>> pairs,

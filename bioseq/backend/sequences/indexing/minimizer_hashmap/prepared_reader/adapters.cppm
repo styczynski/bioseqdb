@@ -42,8 +42,11 @@ export namespace bioseq::indexing {
 
 /// Lookup result containing the global count and any retained positions.
 struct grouped_soa_query_lookup {
+    /// Total authenticated occurrences across every selected extent.
     std::uint64_t global_occurrence_count = 0;
+    /// Whether all counted positions were retained under `max_occ`.
     bool positions_complete = true;
+    /// Reader-owned positions, valid until the reader is destroyed.
     std::span<const std::uint64_t> positions{};
 };
 
@@ -52,44 +55,74 @@ struct grouped_soa_query_lookup {
 /// ingestion did not re-run live memory admission (and its OS probes) while
 /// appending individual retained positions.
 struct grouped_soa_query_reader_memory_stats {
+    /// Number of full owned-capacity ledger reconciliations.
     std::uint64_t capacity_accounting_passes = 0;
+    /// Number of attempts to allocate the final position array.
     std::uint64_t global_position_storage_preparations = 0;
+    /// Number of successful final position-array allocations.
     std::uint64_t global_position_storage_allocations = 0;
+    /// Admission requests made while appending decoded positions.
     std::uint64_t position_append_growth_reservations = 0;
+    /// Number of authenticated positions retained for lookup.
     std::uint64_t retained_position_count = 0;
-    // Exact allocated array elements. For grouped-SoA this must equal the
-    // retained count; the exported capacity name remains stable for E2E SQL.
+    /// Exact allocated array elements. For grouped-SoA this equals the retained
+    /// count. The exported capacity name remains stable for E2E SQL.
     std::uint64_t retained_position_capacity = 0;
+    /// Width of each compact query-state record in bytes.
     std::uint64_t query_record_size_bytes = 0;
+    /// Number of live compact query-state records.
     std::uint64_t query_record_count = 0;
+    /// Allocated compact query-state record count.
     std::uint64_t query_record_capacity = 0;
+    /// Bytes owned by compact query-state records.
     std::uint64_t query_record_capacity_bytes = 0;
+    /// Bytes owned by per-query position offsets.
     std::uint64_t query_record_position_capacity_bytes = 0;
-    // Exact bucket-implied query suffixes plus high-bit radix offsets. The
-    // aggregate SQL key retains this stable name and exact owner equation.
+    /// Exact bucket-implied query suffixes plus high-bit radix offsets. The
+    /// aggregate SQL key retains this stable name and exact owner equation.
     std::uint64_t query_hash_capacity_bytes = 0;
+    /// Query-routing bytes released after route construction.
     std::uint64_t released_query_hash_capacity_bytes = 0;
+    /// Number of high hash bits used by the radix route.
     std::uint64_t query_route_radix_bits = 0;
+    /// Number of radix buckets, including empty buckets.
     std::uint64_t query_route_radix_bucket_count = 0;
+    /// Number of radix buckets containing at least one query.
     std::uint64_t query_route_radix_nonempty_bucket_count = 0;
+    /// Largest query count assigned to one radix bucket.
     std::uint64_t query_route_radix_max_bucket_size = 0;
+    /// Directory controls considered during query routing.
     std::uint64_t query_route_control_lookups = 0;
+    /// Query hashes tested against routed control ranges.
     std::uint64_t query_route_hash_probes = 0;
+    /// Query-to-control range matches retained by routing.
     std::uint64_t query_route_matches = 0;
+    /// Control records decoded from accepted rows.
     std::uint64_t decoded_control_records = 0;
+    /// Decoded controls retained because a query selected them.
     std::uint64_t retained_selected_control_records = 0;
+    /// In-memory width of one selected-control record in bytes.
     std::uint64_t selected_control_size_bytes = 0;
+    /// Peak bytes retained for selected-control records.
     std::uint64_t retained_selected_control_capacity_bytes = 0;
+    /// Current bytes retained by selected-control ownership.
     std::uint64_t current_selected_control_capacity_bytes = 0;
+    /// Bytes owned by encoded and decoded directory storage.
     std::uint64_t directory_capacity_bytes = 0;
+    /// Bytes owned by directory-ordinal routing metadata.
     std::uint64_t ordinal_route_capacity_bytes = 0;
+    /// Bytes owned by the selected-extent vector.
     std::uint64_t selected_extent_capacity_bytes = 0;
-    // Exact array bytes, not allocator headroom or vector capacity.
+    /// Exact final position-array bytes, excluding allocator headroom.
     std::uint64_t global_position_capacity_bytes = 0;
+    /// Bytes owned by control-payload decode scratch.
     std::uint64_t control_payload_capacity_bytes = 0;
+    /// Sum of all currently owned capacities.
     std::uint64_t owned_capacity_bytes = 0;
+    /// Whether any reported counter saturated.
     bool saturated = false;
 
+    /// Return whether the component capacities sum to the owned-byte total.
     [[nodiscard]] bool retained_layout_equation_holds() const noexcept {
         using bioseq::common::saturating_add;
         std::uint64_t accounted = directory_capacity_bytes;

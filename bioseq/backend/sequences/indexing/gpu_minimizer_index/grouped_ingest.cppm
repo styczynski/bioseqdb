@@ -43,8 +43,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-// Grouped-SoA restart-cold resident ingestion.
-
+/// Test whether a device UUID contains a nonzero identity byte.
 [[nodiscard]] inline bool is_gpu_device_uuid_bound(
         const bioseq::gpu::vulkan::gpu_device_uuid& uuid) noexcept {
     return std::any_of(
@@ -52,7 +51,7 @@ export namespace bioseq::indexing {
         [](std::uint8_t byte) noexcept { return byte != 0u; });
 }
 
-/** Failures exposed by grouped-SoA resident ingestion and publication. */
+/** @brief Failures exposed by grouped-SoA resident ingestion and publication. */
 enum class gpu_grouped_soa_ingest_error : std::uint8_t {
     invalid_identity,
     device_identity_mismatch,
@@ -100,6 +99,7 @@ struct gpu_grouped_soa_resident_identity {
         const gpu_grouped_soa_resident_identity&) const = default;
 };
 
+/// Check the generation, layout, device, and ABI fields required for resident publication.
 [[nodiscard]] inline bool is_gpu_grouped_soa_resident_identity_valid(
     const gpu_grouped_soa_resident_identity& identity) noexcept
 {
@@ -135,6 +135,7 @@ struct gpu_grouped_soa_cold_load_stats {
     std::uint64_t forbidden_host_index_rebuilds = 0u;
     std::uint64_t forbidden_cpu_or_simd_fallbacks = 0u;
 
+    /// Test whether the cold path decoded, globalized, rebuilt, or fell back on the host.
     [[nodiscard]] bool has_forbidden_work() const noexcept {
         return forbidden_host_control_decodes != 0u
             || forbidden_host_position_decodes != 0u
@@ -144,6 +145,7 @@ struct gpu_grouped_soa_cold_load_stats {
     }
 };
 
+/// Stateful receiver that constructs one grouped-SoA resident generation.
 class gpu_grouped_soa_generation_ingest;
 
 /// Cacheable, immutable grouped-SoA target. `controls` retains each persisted
@@ -152,9 +154,13 @@ class gpu_grouped_soa_generation_ingest;
 /// device object and contains metadata/byte offsets, never decoded payload.
 class gpu_grouped_soa_resident_target {
 private:
+    /// Restricts construction to the validated generation-ingest path.
     struct construction_token {};
 
 public:
+    /// Adopt admitted device buffers and immutable generation metadata.
+    ///
+    /// The constructor is available only to the ingest class through `construction_token`.
     gpu_grouped_soa_resident_target(
         construction_token,
         bioseq::parallelism::memory_permit permit,
@@ -182,52 +188,67 @@ public:
           position_count_(position_count),
           descriptor_count_(descriptor_count) {}
 
+    /// Borrow the byte-exact grouped control-plane device buffer.
     [[nodiscard]] const bioseq::gpu::vulkan::buffer& controls() const noexcept {
         return controls_;
     }
+    /// Borrow the byte-exact segment-local position device buffer.
     [[nodiscard]] const bioseq::gpu::vulkan::buffer& positions() const noexcept {
         return positions_;
     }
+    /// Borrow the derived partition-descriptor device buffer.
     [[nodiscard]] const bioseq::gpu::vulkan::buffer& descriptors() const noexcept {
         return descriptors_;
     }
+    /// Borrow the generation, storage, ABI, and device identity bound to these buffers.
     [[nodiscard]] const gpu_grouped_soa_resident_identity& identity() const noexcept {
         return identity_;
     }
+    /// Borrow the completed cold-load validation and prohibited-work counters.
     [[nodiscard]] const gpu_grouped_soa_cold_load_stats& cold_load_stats() const noexcept {
         return stats_;
     }
+    /// Return the retained device-memory permit in bytes.
     [[nodiscard]] std::uint64_t admitted_device_bytes() const noexcept {
         return permit_.bytes();
     }
+    /// Return the authenticated directory size in bytes.
     [[nodiscard]] std::uint64_t directory_bytes() const noexcept {
         return directory_bytes_;
     }
+    /// Return the logical control payload size in bytes.
     [[nodiscard]] std::uint64_t control_bytes() const noexcept {
         return control_bytes_;
     }
+    /// Return the logical position payload size in bytes.
     [[nodiscard]] std::uint64_t position_bytes() const noexcept {
         return position_bytes_;
     }
+    /// Return the derived descriptor payload size in bytes.
     [[nodiscard]] std::uint64_t descriptor_bytes() const noexcept {
         return descriptor_bytes_;
     }
+    /// Return the number of grouped hash controls across all partitions.
     [[nodiscard]] std::uint64_t control_count() const noexcept {
         return control_count_;
     }
+    /// Return the number of persisted segment-local positions.
     [[nodiscard]] std::uint64_t position_count() const noexcept {
         return position_count_;
     }
+    /// Return the number of resident partition descriptors.
     [[nodiscard]] std::uint32_t descriptor_count() const noexcept {
         return descriptor_count_;
     }
 
-    /// This slice is an index-residency stats, not a scheduler execution stats.
+    /// Report that residency statistics alone do not prove an all-GPU scheduler execution.
     [[nodiscard]] static constexpr bool
     qualifies_as_all_gpu_execution() noexcept { return false; }
+    /// Report that this resident contract never authorizes host decode or index rebuild.
     [[nodiscard]] static constexpr bool
     permits_host_decode_or_rebuild() noexcept { return false; }
 
+    /// Recheck resident identity, byte counts, allocations, receipts, and prohibited-work stats.
     [[nodiscard]] bool validated() const noexcept {
         const std::uint64_t payload_bytes =
             bioseq::common::saturating_add(
@@ -317,6 +338,12 @@ public:
     gpu_grouped_soa_generation_ingest& operator=(
         gpu_grouped_soa_generation_ingest&&) = delete;
 
+    /// Allocate final device buffers and plan receipt-authorized extents for one generation.
+    ///
+    /// The directory is borrowed only during this call. Persisted grouped control and position
+    /// widths are copied into descriptors without decoding payload lanes.
+    ///
+    /// @tparam p_directory_view Validated directory view exposing profile, entries, and bytes.
     template <class p_directory_view>
     [[nodiscard]] static std::expected<
         gpu_grouped_soa_generation_ingest,
@@ -586,6 +613,7 @@ public:
         std::vector<index_sub_key_request> requests;
         plans.reserve(entries.size() * 2u);
         requests.reserve(entries.size() * 2u);
+        // Append one control or position extent in the physical receive order.
         const auto append_plan = [entries, &manifest, &control_offsets,
                                   &position_offsets](
                                      std::size_t ordinal, bool position,
@@ -644,10 +672,14 @@ public:
             manifest.payload_checksum, expected_payload_rows};
     }
 
+    /// Borrow the ordered control-then-position extent requests required to complete ingestion.
     [[nodiscard]] std::span<const index_sub_key_request> requests() const noexcept {
         return requests_;
     }
 
+    /// Copy one previously validated PostgreSQL row into its authorized final buffer interval.
+    ///
+    /// Any mismatch poisons the receiver and prevents resident publication.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     accept_validated_row(
         const validated_minimizer_generation_row_receipt& receipt) noexcept
@@ -672,6 +704,7 @@ public:
 
     /// Standalone corruption-test path. Production full-generation loading
     /// must pass validated_minimizer_generation_row_receipt instead.
+    /// Test-only overload that accepts a nullable character payload and explicit byte count.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     accept_raw_chunk_for_test(
         const index_chunk_address& address,
@@ -701,6 +734,10 @@ public:
             reinterpret_cast<const std::byte*>(payload), payload_bytes});
     }
 
+    /// Authenticate completion and publish an immutable resident target.
+    ///
+    /// Publication is allowed only after the validated-receipt path delivers every requested row
+    /// in order and the aggregate row-checksum sequence matches the manifest.
     [[nodiscard]] std::expected<
         std::shared_ptr<const gpu_grouped_soa_resident_target>,
         gpu_grouped_soa_ingest_error>
@@ -744,12 +781,14 @@ public:
     }
 
 private:
+    /// Authority mode selected by the first accepted chunk and fixed for the receiver lifetime.
     enum class input_authority : std::uint8_t {
         unset,
         validated_receipt,
         raw_rehashed,
     };
 
+    /// Validate one ordered chunk and copy it into its final control or position interval.
     [[nodiscard]] std::expected<void, gpu_grouped_soa_ingest_error>
     accept_chunk_impl(
         const index_chunk_address& address,
@@ -835,12 +874,14 @@ private:
         }
         return {};
     }
+    /// Destination offset and stream kind for one requested persisted extent.
     struct extent_plan {
         index_sub_key_request request{};
         std::uint64_t destination_offset = 0u;
         bool position = false;
     };
 
+    /// Adopt the allocated resident and its complete ordered extent plan.
     gpu_grouped_soa_generation_ingest(
         std::shared_ptr<gpu_grouped_soa_resident_target> resident,
         std::vector<extent_plan> plans,
@@ -852,6 +893,8 @@ private:
           payload_checksum_expected_(payload_checksum_expected),
           expected_payload_rows_(expected_payload_rows) {}
 
+    /// Latch a terminal ingestion error and return it through `std::expected`.
+    /// @tparam p_value Result value expected by the failing operation.
     template <class p_value>
     [[nodiscard]] std::expected<p_value, gpu_grouped_soa_ingest_error>
     fail(gpu_grouped_soa_ingest_error error) noexcept {

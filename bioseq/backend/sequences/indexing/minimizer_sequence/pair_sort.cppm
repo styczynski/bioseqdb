@@ -16,9 +16,9 @@ namespace bioseq::indexing::detail {
 
 /**
  * @brief Sorts packed minimizer pairs through the selected SIMD policy.
- * @param keys Mutable packed pair keys
- * @param key_count Number of keys
- * @param sort_implementation Stable sorter ordinal
+ * @param[in,out] keys Array of `key_count` packed keys sorted in ascending order
+ * @param[in] key_count Number of keys available at `keys`
+ * @param[in] sort_implementation Stable sorter ordinal from `pair_run_sort_implementation`
  */
 void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
                                   std::size_t key_count,
@@ -49,10 +49,10 @@ void sort_minimizer_pair_run_keys(hwy::uint128_t* keys,
 } // namespace bioseq::indexing::detail
 
 /**
- * @brief Dispatches packed pair sorting across the C linkage boundary.
- * @param keys Mutable packed pair keys
- * @param key_count Number of keys
- * @param sort_implementation Stable sorter ordinal
+ * @brief Sorts packed minimizer pairs for the module caller using the C linkage boundary.
+ * @param[in,out] keys Array of `key_count` packed keys sorted in ascending order
+ * @param[in] key_count Number of keys available at `keys`
+ * @param[in] sort_implementation Stable sorter ordinal from `pair_run_sort_implementation`
  */
 extern "C" void bioseq_sort_pair_run_u128_keys(hwy::uint128_t* keys,
                                                std::size_t key_count,

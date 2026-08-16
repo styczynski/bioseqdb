@@ -35,10 +35,15 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/// Packed minimizer record shared with the selected sketch kernels.
 using bioseq::minimizers::minimap_sketch_data;
+/// Runtime selector for the available minimizer sketch backends.
 using bioseq::minimizers::minimizer_sketch_backend;
+/// Collector receiving packed minimizer records from sketch kernels.
 using bioseq::minimizers::sketch_collector;
+/// SIMD view that emits minimizers from packed sequence storage.
 using bioseq::simd::collect_minimizers_view;
+/// Unsigned coordinate type used for sequence lengths and base-pair positions.
 using bioseq::storage::sequence_size_t;
 
 /// Target-neutral status returned by the selected exact SIMD minimizer table.
@@ -236,6 +241,9 @@ struct exact_simd_index_bridge_result {
 collect_exact_simd_index_erased(const exact_simd_index_bridge_request& request);
 
 /// Execute one lazy-sequence interval or throw its exact rejection status.
+///
+/// @tparam p_collector Collector accepting typed records, raw words, or individual records.
+/// @tparam p_alphabet Packed sequence alphabet, restricted at runtime to DNA4 or DNA5.
 template <class p_collector, sequence_alphabet p_alphabet>
 [[nodiscard]] inline exact_simd_index_execution_stats
 collect_exact_simd_index_range_or_throw(p_collector& collector,
@@ -298,11 +306,13 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
             throw exact_simd_index_runtime_error{exact_simd_index_status::invalid_range, operation};
         }
 
+        /// Borrowed contiguous packed storage exposed through the erased bridge callbacks.
         struct sequence_context {
             const void* data{};
             std::size_t unit_count{};
         } sequence_state{descriptor.units, descriptor.unit_count};
 
+        // Expose the one admitted contiguous packed fragment to the erased bridge.
         const auto read_fragment = +[](void* opaque, std::size_t fragment_no) {
             const auto& context = *static_cast<sequence_context*>(opaque);
             if (fragment_no != 0u || context.unit_count == 0u) {
@@ -313,7 +323,9 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                 .storage_units = context.unit_count,
             };
         };
+        // Release is a no-op because the admitted or borrowed owner spans this synchronous call.
         const auto release_fragment = +[](void*, std::size_t) noexcept {};
+        // Forward typed bridge records to the strongest collector interface available.
         const auto append_records =
             +[](void* opaque, const minimap_sketch_data* records, std::size_t count) {
                 auto& collector = *static_cast<p_collector*>(opaque);
@@ -343,6 +355,7 @@ collect_exact_simd_index_range_or_throw(p_collector& collector,
                     return false;
                 }
             };
+        // Forward raw bridge words or reconstruct typed records for scalar collector interfaces.
         const auto append_raw = +[](void* opaque, const std::uint64_t* raw, std::size_t count) {
             auto& collector = *static_cast<p_collector*>(opaque);
             if constexpr (requires {
@@ -683,6 +696,8 @@ rejected_packed_bounded_nthash_index_result(packed_bounded_nthash_index_status s
 /// descriptor. Only the selected logical-rank interval is materialized when the source
 /// cannot expose stable resident u32 storage. A stable resident interval is
 /// borrowed synchronously without allocating or copying it.
+///
+/// @tparam p_alphabet Packed source alphabet, currently restricted to DNA4.
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] packed_bounded_nthash_index_bridge_result
 collect_packed_bounded_nthash_index_lazy(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,

@@ -9,6 +9,17 @@ import :wire_format;
 
 export namespace bioseq::indexing {
 
+/// Visit every posting selected by a validated occurrence-preserving compact plan.
+///
+/// Revalidates the plan against the bound image, decodes positions in selection order,
+/// and stops before exposing data when any descriptor or span violates the image contract.
+/// The image and plan remain owned by the caller for the duration of the call.
+///
+/// @param view Open compact image whose bytes remain readable during traversal.
+/// @param plan Plan produced for the same image and runtime occurrence limit.
+/// @param context Opaque value passed unchanged to `visitor`.
+/// @param visitor Callback invoked once per decoded posting.
+/// @return Traversal counts, or a fail-closed validation or callback error.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_view& view,
                                            const compact_hash32_query_plan& plan,
@@ -328,6 +339,8 @@ bind_compact_hash32_direct_index_selection_spans(const compact_hash32_direct_ind
 /// constant-size binding receipt and validates the selected descriptor/span
 /// geometry.  Global selection ordinals are preserved so concatenating
 /// adjacent visits is exactly equivalent to one full visit.
+///
+/// @tparam p_visitor Callable accepting one `compact_hash32_selection_posting_spans` value.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
                                    direct_inverted_index_error>
@@ -503,6 +516,8 @@ visit_compact_hash32_direct_index_selection_span_range(
 
 /// Whole-plan traversal API. Its statistics remain
 /// unchanged. Internally it binds once and delegates to the ranged visitor.
+///
+/// @tparam p_visitor Callable accepting one `compact_hash32_selection_posting_spans` value.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<compact_hash32_selection_span_visit_stats,
                                    direct_inverted_index_error>
@@ -572,6 +587,17 @@ visit_compact_hash32_direct_index_postings(const compact_hash32_direct_index_vie
 
 export namespace bioseq::indexing {
 
+/// Visit every posting selected by a validated hash-major direct-index plan.
+///
+/// Each encoded position is checked against its strand, target coordinates, and optional
+/// fragment assignment before the callback receives it. The image and plan are borrowed for
+/// the call.
+///
+/// @param view Open direct-index image supplying the persisted posting bytes.
+/// @param plan Plan produced for the same image header and posting width.
+/// @param context Opaque value passed unchanged to `visitor`.
+/// @param visitor Callback invoked once per decoded posting.
+/// @return Traversal counts, or a fail-closed plan, bounds, or callback error.
 [[nodiscard]] inline std::expected<direct_index_posting_visit_stats, direct_inverted_index_error>
 visit_direct_inverted_index_postings(const direct_inverted_index_view& view,
                                      const direct_index_query_plan& plan,

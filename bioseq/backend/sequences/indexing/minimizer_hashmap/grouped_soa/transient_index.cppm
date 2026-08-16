@@ -40,11 +40,17 @@ export namespace bioseq::indexing {
 
 /// Exact allocation bound for the transient flat hash table.
 struct minimizer_hashmap_table_allocation_plan {
+    /// Maximum number of distinct hashes accepted by the plan.
     std::uint64_t distinct_upper_bound = 0u;
+    /// Slot count requested before group rounding.
     std::uint64_t requested_slots = 0u;
+    /// Power-of-two group count allocated by the table.
     std::uint64_t group_count = 0u;
+    /// Usable slot count after reserving the sentinel slot.
     std::uint64_t capacity = 0u;
+    /// Bytes retained by the planned groups.
     std::uint64_t allocation_bytes = 0u;
+    /// Whether every intermediate and the final allocation fit.
     bool valid = false;
 };
 
@@ -114,6 +120,7 @@ struct minimizer_hashmap_fragment_index {
     void emplace_table(std::uint64_t hash, std::uint64_t packed);
 
     /// Sort minimizers by the narrowest exact radix key.
+    /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_minimizers_in_place_(std::vector<p_minimizer_type>& sorted_minimizers) {
         if (sorted_minimizers.empty())
@@ -155,6 +162,7 @@ struct minimizer_hashmap_fragment_index {
     }
 
     /// Build lookup storage from an already sorted caller-owned vector.
+    /// @tparam p_minimizer_type Minimizer representation exposing hash and encoded position.
     template <class p_minimizer_type>
     void build_presorted_in_place_(std::vector<p_minimizer_type>& sorted_minimizers,
                                    sequence_size_t target_length,
@@ -193,6 +201,7 @@ struct minimizer_hashmap_fragment_index {
     }
 
     /// Instrument sorting and lookup construction for one caller-owned vector.
+    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_sorted_in_place(std::vector<p_minimizer_type>& sorted_minimizers,
                                sequence_size_t target_length,
@@ -245,7 +254,9 @@ struct minimizer_hashmap_fragment_index {
         std::uint32_t pos_offset;
         std::uint32_t pos_count;
     };
+    /// Encoded width of the fixed header in bytes.
     static constexpr std::size_t k_encoded_header_bytes = sizeof(encoded_header);
+    /// Encoded width of each fixed hash bucket in bytes.
     static constexpr std::size_t k_encoded_bucket_bytes = sizeof(encoded_bucket);
     static_assert(k_encoded_header_bytes == 32, "wire header layout pinned");
     static_assert(k_encoded_bucket_bytes == 16, "wire bucket layout pinned");
@@ -266,6 +277,7 @@ struct minimizer_hashmap_fragment_index {
         void* ctx, void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
 
     /// Visit every hash bucket with a typed callable.
+    /// @tparam p_function Callable accepting a hash and its packed offset/count value.
     template <class p_function> void for_each_table_entry(p_function&& emit) const {
         using fn = std::remove_reference_t<p_function>;
         for_each_table_entry_erased(&emit, [](void* ctx, std::uint64_t hash, std::uint64_t packed) {
@@ -274,6 +286,7 @@ struct minimizer_hashmap_fragment_index {
     }
 
     /// Build from a caller-owned immutable minimizer sequence.
+    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build(const std::vector<p_minimizer_type>& target_minimizers,
                sequence_size_t target_length) {
@@ -288,6 +301,7 @@ struct minimizer_hashmap_fragment_index {
     /// constructing the FOA lookup table or a positions vector.  The direct
     /// mapped Vulkan route uses this same production radix implementation,
     /// then streams the sorted source into its final resident allocation.
+    /// @tparam p_minimizer_type Minimizer representation exposing `kmer()`.
     template <class p_minimizer_type>
     static void sort_source_by_hash_in_place(std::vector<p_minimizer_type>& source) {
         sort_minimizers_in_place_(source);
@@ -296,6 +310,7 @@ struct minimizer_hashmap_fragment_index {
     /// Build a transient lookup index by consuming caller-owned minimizers.
     /// Sorting happens in the caller's allocation and the vector is
     /// deterministically deallocated before this function returns.
+    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_consuming(std::vector<p_minimizer_type>&& target_minimizers,
                          sequence_size_t target_length) {
@@ -306,6 +321,7 @@ struct minimizer_hashmap_fragment_index {
     /// Admitted Vulkan build: reserve one table for worst-case D=N so no FOA
     /// growth allocation can overlap it. The caller must acquire positions +
     /// planned-table admission before entering this method.
+    /// @tparam p_minimizer_type Minimizer representation accepted by the transient lookup.
     template <class p_minimizer_type>
     void build_consuming_full_table(std::vector<p_minimizer_type>&& target_minimizers,
                                     sequence_size_t target_length) {

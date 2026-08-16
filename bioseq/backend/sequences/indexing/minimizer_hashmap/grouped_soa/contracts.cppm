@@ -90,6 +90,7 @@ struct direct_minimizer_spill_storage_binding {
     std::uint64_t generation_token = 0;
     std::uint64_t mutation_revision = 0;
 
+    /// Test whether storage issued a nonzero replay-set generation token.
     [[nodiscard]] constexpr bool valid() const noexcept {
         return generation_token != 0;
     }
@@ -158,6 +159,7 @@ is_supported_minimizer_producer_backend_identity(minimizer_producer_identity ide
 /// route without extending this switch is fail-closed.
 [[nodiscard]] constexpr minimizer_producer_identity
 minimizer_producer_backend_identity_for_backend(minimizer_sketch_backend backend) noexcept {
+    // Translate the runtime route while keeping an unmatched value fail-closed.
     const auto identity = [backend] {
         switch (backend) {
         case minimizer_sketch_backend::scalar:
@@ -420,8 +422,7 @@ select_grouped_soa_hash_width(minimizer_scheme_identity scheme,
     return minimizer_scalar_width::u64;
 }
 
-/** Derive the one admitted grouped-SoA profile. */
-/// Derive a grouped-SoA profile from a decoded manifest.
+/// Derive the one admitted grouped-SoA profile from scheme and shape constraints.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
 derive_grouped_soa_minimizer_profile(minimizer_scheme_identity scheme,
@@ -490,6 +491,7 @@ validate_grouped_soa_minimizer_profile(const grouped_soa_minimizer_profile& prof
     return {};
 }
 
+/// Derive the grouped-SoA profile encoded by a generation manifest.
 [[nodiscard]] constexpr std::expected<grouped_soa_minimizer_profile,
                                       minimizer_generation_encoding_error>
 derive_grouped_soa_minimizer_profile(const minimizer_generation_manifest& manifest) noexcept;
@@ -537,6 +539,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         !is_minimizer_scalar_width(count_width)) {
         return std::unexpected(minimizer_generation_encoding_error::storage_contract_mismatch);
     }
+    // Multiply two control-plane dimensions without unsigned wraparound.
     const auto checked_mul = [](std::uint64_t lhs,
                                 std::uint64_t rhs) -> std::optional<std::uint64_t> {
         if (rhs != 0 && lhs > (std::numeric_limits<std::uint64_t>::max)() / rhs) {
@@ -544,6 +547,7 @@ plan_grouped_soa_control_plane(std::uint64_t control_count,
         }
         return lhs * rhs;
     };
+    // Align one array boundary without unsigned wraparound.
     const auto align_up = [](std::uint64_t value,
                              std::uint64_t alignment) -> std::optional<std::uint64_t> {
         const std::uint64_t remainder = value % alignment;
@@ -767,40 +771,52 @@ struct grouped_soa_bucket_directory_entry {
 /// Variable-size fixed-record wrapper. Its unused suffix is always zero. The
 /// byte_count is the only exposed range so stored checksums and golden bytes remain
 /// exactly 128/96 bytes.
+/// @tparam p_maximum_bytes Capacity of the fixed backing array.
 template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     std::array<std::byte, p_maximum_bytes> storage{};
     std::size_t byte_count = 0;
 
+    /// Return a read-only pointer to the fixed storage prefix.
     [[nodiscard]] constexpr const std::byte* data() const noexcept {
         return storage.data();
     }
+    /// Return a writable pointer to the fixed storage prefix.
     [[nodiscard]] constexpr std::byte* data() noexcept {
         return storage.data();
     }
+    /// Return the encoded prefix length in bytes.
     [[nodiscard]] constexpr std::size_t size() const noexcept {
         return byte_count;
     }
+    /// Return a read-only iterator to the first encoded byte.
     [[nodiscard]] constexpr const std::byte* begin() const noexcept {
         return storage.data();
     }
+    /// Return a read-only iterator one past the encoded prefix.
     [[nodiscard]] constexpr const std::byte* end() const noexcept {
         return storage.data() + byte_count;
     }
+    /// Return a writable iterator to the first encoded byte.
     [[nodiscard]] constexpr std::byte* begin() noexcept {
         return storage.data();
     }
+    /// Return a writable iterator one past the encoded prefix.
     [[nodiscard]] constexpr std::byte* end() noexcept {
         return storage.data() + byte_count;
     }
+    /// Access one encoded byte without bounds checking.
     [[nodiscard]] constexpr const std::byte& operator[](std::size_t index) const noexcept {
         return storage[index];
     }
+    /// Access one writable encoded byte without bounds checking.
     [[nodiscard]] constexpr std::byte& operator[](std::size_t index) noexcept {
         return storage[index];
     }
 
     [[nodiscard]] constexpr bool operator==(const encoded_minimizer_fixed_record&) const = default;
 
+    /// Compare the encoded prefix with an exact-width byte array.
+    /// @tparam p_size Compared byte-array width.
     template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool
     operator==(const encoded_minimizer_fixed_record& lhs,
@@ -814,6 +830,8 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
         return true;
     }
 
+    /// Compare an exact-width byte array with the encoded prefix.
+    /// @tparam p_size Compared byte-array width.
     template <std::size_t p_size>
     [[nodiscard]] friend constexpr bool
     operator==(const std::array<std::byte, p_size>& lhs,
@@ -822,8 +840,10 @@ template <std::size_t p_maximum_bytes> struct encoded_minimizer_fixed_record {
     }
 };
 
+/// Bounded byte container for any supported minimizer manifest record.
 using encoded_minimizer_manifest =
     encoded_minimizer_fixed_record<minimizer_generation_manifest::encoded_bytes>;
+/// Bounded byte container for one grouped-SoA directory entry.
 using encoded_grouped_soa_bucket_directory_entry =
     encoded_minimizer_fixed_record<grouped_soa_bucket_directory_entry::encoded_bytes>;
 

@@ -39,16 +39,20 @@ export namespace bioseq::indexing {
 
 /// Callback-scoped qualified row emitted directly to PostgreSQL/fake storage.
 struct minimizer_generation_row_view {
+    /// Persisted address included in the row checksum domain.
     index_chunk_address address{};
+    /// Borrowed row bytes, valid only for the surrounding callback.
     std::span<const std::byte> bytes;
+    /// Stored address-bound CRC64 value.
     std::uint64_t row_checksum = 0;
 };
 namespace minimizer_prepared_reader_detail {
 /// Trait-directed prepared-query implementation shared by public readers.
+/// @tparam p_traits Persisted codec and ordering contract.
 template <class p_traits> class trait_driven_prepared_query_core;
 } // namespace minimizer_prepared_reader_detail
 
-/// Unforgeable stats that the address-bound row checksum was checked before
+/// Unforgeable evidence that the address-bound row checksum was checked before
 /// callback-scoped bytes reached a prepared reader. Ordinary importers can
 /// obtain one only through validate_minimizer_generation_row_receipt(), which
 /// performs that check. PostgreSQL retains that same receipt beside the loaded
@@ -61,12 +65,14 @@ class validated_minimizer_generation_row_receipt {
     std::uint64_t authority_seal_ = 0;
     bool live_ = false;
 
+    /// Bind the authenticated address, bytes, checksum, and receipt object identity.
     [[nodiscard]] static std::uint64_t
     authority_seal(const validated_minimizer_generation_row_receipt* self,
                    const index_chunk_address& address,
                    std::span<const std::byte> bytes,
                    std::uint64_t row_checksum) noexcept {
         std::uint64_t value = 0x9E3779B97F4A7C15ULL;
+        /// Mix one authority component into the process-local seal.
         const auto mix = [&value](std::uint64_t word) noexcept {
             value ^= word + 0x9E3779B97F4A7C15ULL + (value << 6u) + (value >> 2u);
         };
@@ -81,12 +87,14 @@ class validated_minimizer_generation_row_receipt {
         return value;
     }
 
+    /// Construct live authority over callback-scoped bytes after checksum validation.
     validated_minimizer_generation_row_receipt(index_chunk_address address,
                                                std::span<const std::byte> bytes,
                                                std::uint64_t row_checksum) noexcept
         : address_(address), bytes_(bytes), row_checksum_(row_checksum),
           authority_seal_(authority_seal(this, address, bytes, row_checksum)), live_(true) {}
 
+    /// Clear borrowed state and revoke this object's authority seal.
     void invalidate() noexcept {
         address_ = {};
         bytes_ = {};
@@ -117,6 +125,7 @@ class validated_minimizer_generation_row_receipt {
     validated_minimizer_generation_row_receipt&
     operator=(validated_minimizer_generation_row_receipt&&) = delete;
 
+    /// Transfer authority to a new object identity and revoke the source.
     validated_minimizer_generation_row_receipt(
         validated_minimizer_generation_row_receipt&& other) noexcept
         : address_(other.address_), bytes_(other.bytes_), row_checksum_(other.row_checksum_),
@@ -125,6 +134,7 @@ class validated_minimizer_generation_row_receipt {
         other.invalidate();
     }
 
+    /// Revoke the process-local authority seal at end of lifetime.
     ~validated_minimizer_generation_row_receipt() {
         invalidate();
     }
@@ -135,12 +145,15 @@ class validated_minimizer_generation_row_receipt {
     }
 
   private:
+    /// Return the authenticated persisted address.
     [[nodiscard]] constexpr const index_chunk_address& address() const noexcept {
         return address_;
     }
+    /// Return the callback-scoped authenticated bytes.
     [[nodiscard]] constexpr std::span<const std::byte> bytes() const noexcept {
         return bytes_;
     }
+    /// Return the authenticated row checksum.
     [[nodiscard]] constexpr std::uint64_t row_checksum() const noexcept {
         return row_checksum_;
     }
@@ -149,6 +162,7 @@ class validated_minimizer_generation_row_receipt {
 /// Visit an authenticated row without exporting the receipt's representation.
 /// The byte span remains callback-scoped. Callers cannot retain authority or
 /// mutate the receipt, and an invalid/moved-from receipt is never visited.
+/// @tparam p_visitor Callable accepting the address, byte span, and checksum.
 template <class p_visitor>
 [[nodiscard]] bool visit_validated_minimizer_generation_row(
     const validated_minimizer_generation_row_receipt& receipt,

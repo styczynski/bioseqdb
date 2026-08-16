@@ -30,6 +30,10 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 
+/// Consume one ordered fragment of an authorized posting range.
+///
+/// The callback enforces range coverage, optional whole-block CRC authority, coordinate bounds,
+/// and strictly increasing encoded positions before writing admitted retained storage.
 [[nodiscard]] inline bool
 hash_major_minimizer_selective_reader::consume_posting_bytes_(void* opaque,
                                                               std::uint32_t range_ordinal,
@@ -123,6 +127,7 @@ hash_major_minimizer_selective_reader::consume_posting_bytes_(void* opaque,
             context.error = hash_major_minimizer_error::posting;
             return false;
         }
+        // Decode one width-specific fragment directly into its authorized retained interval.
         const auto decode_segment = [&context,
                                      &bytes,
                                      chunk_byte_cursor,

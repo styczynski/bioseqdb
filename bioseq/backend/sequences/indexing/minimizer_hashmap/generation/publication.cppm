@@ -38,6 +38,9 @@ import :generation_stream;
 export namespace bioseq::indexing {
 
 /// Deterministically plan fixed geometry without retaining biological events.
+///
+/// The producer is replayed once and must retain the same scheme and backend identity afterward.
+/// @tparam p_producer Replayable canonical event source.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<grouped_soa_generation_plan, minimizer_generation_encoding_error>
 plan_minimizer_generation(p_producer& producer,
@@ -79,6 +82,13 @@ plan_minimizer_generation(p_producer& producer,
 }
 
 /// Stream one immutable qualified generation into a callback-scoped row sink.
+///
+/// Payload rows, then directory rows, then the READY manifest are written in publication order.
+/// The active head is returned unpublished for a later storage-reread boundary. A failure can
+/// leave an incomplete generation in the sink, which must not be made active.
+///
+/// @tparam p_producer Replayable canonical event source.
+/// @tparam p_sink Borrowed sink receiving rows synchronously.
 template <grouped_soa_event_producer p_producer, minimizer_generation_row_sink p_sink>
 [[nodiscard]] inline std::expected<encoded_grouped_soa_generation,
                                    minimizer_generation_encoding_error>
@@ -278,7 +288,7 @@ encode_minimizer_generation(p_producer& producer,
         return std::unexpected(metadata.error());
     }
 
-    // Publication boundary: payload was written by emit_pass above; only the
+    // Publication boundary: payload was written by emit_pass above. Only the
     // directory and READY manifest are appended here. The active head is
     // returned to the caller and must be published only after a storage
     // reread validates this complete generation.

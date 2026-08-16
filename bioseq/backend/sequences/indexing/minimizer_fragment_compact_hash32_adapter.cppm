@@ -165,6 +165,7 @@ private:
 
   /** @brief Orders merge-heap nodes by hash and fragment ordinal. */
   struct heap_greater {
+      /// Place the lowest hash and then lowest fragment ordinal at the heap front.
       [[nodiscard]] bool operator()(const heap_node& left, const heap_node& right) const noexcept {
           return left.hash != right.hash ? left.hash > right.hash
                                          : left.fragment_ordinal > right.fragment_ordinal;
@@ -187,6 +188,7 @@ private:
     std::unique_ptr<source_token> source_token_{};
     bool ready_ = false;
 
+    /// Add two byte or count quantities without unsigned wraparound.
     [[nodiscard]] static constexpr bool checked_add_(
             std::uint64_t left,
             std::uint64_t right,
@@ -199,6 +201,7 @@ private:
         return true;
     }
 
+    /// Multiply two byte or count quantities without unsigned wraparound.
     [[nodiscard]] static constexpr bool checked_multiply_(
             std::uint64_t left,
             std::uint64_t right,
@@ -211,24 +214,28 @@ private:
         return true;
     }
 
+    /// Add two diagnostic quantities with saturation.
     [[nodiscard]] static constexpr std::uint64_t saturating_add_(
             std::uint64_t left,
             std::uint64_t right) noexcept {
         return bioseq::common::saturating_add(left, right);
     }
 
+    /// Multiply two diagnostic quantities with saturation.
     [[nodiscard]] static constexpr std::uint64_t saturating_multiply_(
             std::uint64_t left,
             std::uint64_t right) noexcept {
         return bioseq::common::saturating_mul(left, right);
     }
 
+    /// Add one observation to a saturating scan counter.
     static void accumulate_stats_(
             std::uint64_t& destination,
             std::uint64_t value) noexcept {
         destination = saturating_add_(destination, value);
     }
 
+    /// Map grouped-generation diagnostics into the compact-index source error domain.
     [[nodiscard]] static constexpr direct_inverted_index_error map_generation_error_(
             minimizer_generation_encoding_error error) noexcept {
         switch (error) {
@@ -251,6 +258,7 @@ private:
         }
     }
 
+    /// Decode one little-endian scalar from the authenticated mapped payload.
     [[nodiscard]] std::expected<std::uint64_t,
         direct_inverted_index_error>
     read_scalar_(
@@ -276,6 +284,7 @@ private:
         return value;
     }
 
+    /// Derive and validate the grouped control-plane layout for a cursor's current entry.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     configure_entry_(fragment_cursor& cursor) const noexcept {
         if (cursor.entry_ordinal >= cursor.entry_end
@@ -299,6 +308,7 @@ private:
         return {};
     }
 
+    /// Decode and validate the current control record for one fragment cursor.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     load_current_(
             fragment_cursor& cursor,
@@ -401,6 +411,7 @@ private:
         return {};
     }
 
+    /// Initialize a cursor at the first control of one nonempty fragment plan.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     initialize_cursor_(
             const fragment_plan& plan,
@@ -421,6 +432,7 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
+    /// Advance a fragment cursor across controls and adjacent directory entries.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     advance_cursor_(
             fragment_cursor& cursor,
@@ -451,6 +463,8 @@ private:
         return load_current_(cursor, controls_seen);
     }
 
+    /// Decode one control's segment-local positions into ordered global encoded coordinates.
+    /// @tparam p_visitor Callable returning an expected result for each encoded position.
     template <class p_visitor>
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     visit_positions_(
@@ -504,6 +518,7 @@ private:
         return {};
     }
 
+    /// Merge fragment control streams by hash and replay canonical strand-grouped runs.
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     scan_(const compact_hash32_sorted_run_receiver& receiver) {
         ++stats_.source_scan_attempts;
@@ -617,6 +632,7 @@ private:
                 }
                 ++stats_.run_headers_emitted;
                 emission_chunk.clear();
+                // Deliver the current bounded position chunk and reuse its retained capacity.
                 const auto flush = [this, &emission_chunk, &receiver]()
                     -> std::expected<void, direct_inverted_index_error> {
                     if (emission_chunk.empty())
@@ -629,6 +645,7 @@ private:
                     emission_chunk.clear();
                     return {};
                 };
+                // Append one canonical position and flush at the configured chunk capacity.
                 const auto emit =
                     [this, &emission_chunk, &logical_positions_emitted, &flush](
                         std::uint64_t encoded) -> std::expected<void, direct_inverted_index_error> {
@@ -714,6 +731,7 @@ private:
         }
     }
 
+    /// Recover the move-stable adapter owner and dispatch one replay scan.
     [[nodiscard]] static std::expected<void, direct_inverted_index_error>
     scan_thunk_(
             void* context,

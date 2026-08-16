@@ -44,6 +44,7 @@ private:
     reason reason_ = reason::unspecified;
 
 public:
+    /// @brief Creates an unclassified lookup error from a diagnostic message.
     using std::runtime_error::runtime_error;
 
     /**
@@ -78,6 +79,7 @@ struct minimizer_position_span {
  * `global_occurrence_count` is
  * authoritative even when high-frequency positions were deliberately not
  * loaded. A consumer may prune on that count before requiring complete spans.
+ * The source storage for every borrowed span must outlive this view.
  */
 class minimizer_lookup_spans {
 private:
@@ -109,7 +111,7 @@ public:
 
   /**
    * @brief Borrows one contiguous packed-64 position run.
-   * @param positions Chronologically encoded positions
+   * @param positions Chronologically encoded positions whose storage outlives the result
    * @return Complete contiguous lookup result
    */
   [[nodiscard]] static constexpr minimizer_lookup_spans
@@ -120,7 +122,7 @@ public:
 
   /**
    * @brief Borrows one contiguous packed-32 position run.
-   * @param positions Chronologically encoded positions
+   * @param positions Chronologically encoded positions whose storage outlives the result
    * @return Complete contiguous lookup result
    */
   [[nodiscard]] static constexpr minimizer_lookup_spans
@@ -131,7 +133,7 @@ public:
 
   /**
    * @brief Borrows segmented packed-64 position runs.
-   * @param spans Chronologically ordered segment-local runs
+   * @param spans Chronologically ordered runs whose descriptors and payloads outlive the result
    * @param global_occurrence_count Authoritative total occurrence count
    * @param positions_complete Whether all counted positions are present
    * @return Segmented lookup result

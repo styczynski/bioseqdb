@@ -13,6 +13,13 @@ import bioseq.indexing.storage;
 
 namespace bioseq::indexing::direct_index_detail {
 
+/**
+ * @brief Writes an unsigned scalar to a prevalidated offset in little-endian order.
+ * @tparam p_unsigned_integer Unsigned scalar type that fixes the encoded width
+ * @param[in,out] output Destination image containing `sizeof(p_unsigned_integer)` bytes at `offset`
+ * @param[in] offset Byte offset of the scalar
+ * @param[in] value Scalar to encode
+ */
 template <class p_unsigned_integer>
     requires std::is_unsigned_v<p_unsigned_integer>
 constexpr void
@@ -30,6 +37,13 @@ write_le(std::span<std::byte> output, std::size_t offset, p_unsigned_integer val
     }
 }
 
+/**
+ * @brief Reads an unsigned scalar from a prevalidated little-endian field.
+ * @tparam p_unsigned_integer Unsigned scalar type that fixes the decoded width
+ * @param[in] input Source image containing `sizeof(p_unsigned_integer)` bytes at `offset`
+ * @param[in] offset Byte offset of the scalar
+ * @return Decoded host-order value
+ */
 template <class p_unsigned_integer>
     requires std::is_unsigned_v<p_unsigned_integer>
 [[nodiscard]] constexpr p_unsigned_integer read_le(std::span<const std::byte> input,
@@ -52,6 +66,13 @@ template <class p_unsigned_integer>
     }
 }
 
+/**
+ * @brief Adds two image-size values without unsigned overflow.
+ * @param[in] left Left operand
+ * @param[in] right Right operand
+ * @param[out] result Sum when the operation succeeds
+ * @return `true` when the sum is representable
+ */
 [[nodiscard]] constexpr bool
 checked_add(std::uint64_t left, std::uint64_t right, std::uint64_t& result) noexcept {
     const auto sum = bioseq::common::checked_add(left, right);
@@ -62,6 +83,13 @@ checked_add(std::uint64_t left, std::uint64_t right, std::uint64_t& result) noex
     return true;
 }
 
+/**
+ * @brief Multiplies two image-size values without unsigned overflow.
+ * @param[in] left Left operand
+ * @param[in] right Right operand
+ * @param[out] result Product when the operation succeeds
+ * @return `true` when the product is representable
+ */
 [[nodiscard]] constexpr bool
 checked_multiply(std::uint64_t left, std::uint64_t right, std::uint64_t& result) noexcept {
     const auto product = bioseq::common::checked_mul(left, right);
@@ -72,6 +100,13 @@ checked_multiply(std::uint64_t left, std::uint64_t right, std::uint64_t& result)
     return true;
 }
 
+/**
+ * @brief Rounds an image offset upward without overflow.
+ * @param[in] value Offset to align
+ * @param[in] alignment Required byte alignment
+ * @param[out] result Aligned offset when the operation succeeds
+ * @return `true` when the aligned value is representable
+ */
 [[nodiscard]] constexpr bool
 align_up(std::uint64_t value, std::uint64_t alignment, std::uint64_t& result) noexcept {
     const auto aligned = bioseq::common::checked_align_up(value, alignment);
@@ -82,15 +117,31 @@ align_up(std::uint64_t value, std::uint64_t alignment, std::uint64_t& result) no
     return true;
 }
 
+/**
+ * @brief Computes unsigned ceiling division for a nonzero divisor.
+ * @param[in] value Dividend
+ * @param[in] divisor Nonzero divisor
+ * @return Smallest integer not less than `value / divisor`
+ */
 [[nodiscard]] constexpr std::uint64_t ceil_div(std::uint64_t value,
                                                std::uint64_t divisor) noexcept {
     return bioseq::common::ceil_div(value, divisor);
 }
 
+/**
+ * @brief Tests whether a nonzero value has exactly one set bit.
+ * @param[in] value Value to inspect
+ * @return `true` for a power of two
+ */
 [[nodiscard]] constexpr bool power_of_two(std::uint64_t value) noexcept {
     return value != 0u && (value & (value - 1u)) == 0u;
 }
 
+/**
+ * @brief Rounds a positive value to its representable power-of-two ceiling.
+ * @param[in] value Value to round
+ * @return Rounded value, or no value when the result would exceed 64 bits
+ */
 [[nodiscard]] constexpr std::optional<std::uint64_t>
 next_power_of_two(std::uint64_t value) noexcept {
     if (value <= 1u)
@@ -100,6 +151,11 @@ next_power_of_two(std::uint64_t value) noexcept {
     return std::uint64_t{1u} << (64u - std::countl_zero(value - 1u));
 }
 
+/**
+ * @brief Mixes a 32-bit hash into the open-addressed dictionary slot domain.
+ * @param[in] value Logical minimizer hash
+ * @return Deterministically mixed dictionary hash
+ */
 [[nodiscard]] constexpr std::uint32_t mix_hash32(std::uint32_t value) noexcept {
     value ^= value >> 16u;
     value *= 0x7feb352du;
@@ -109,12 +165,25 @@ next_power_of_two(std::uint64_t value) noexcept {
     return value;
 }
 
+/// @brief Incremental checksum state used by direct-index codecs.
 using crc64_state = bioseq::indexing::crc64_ecma182_accumulator;
 
+/**
+ * @brief Computes the checksum of an authenticated wire byte range.
+ * @param[in] bytes Bytes in persisted order
+ * @return CRC-64/ECMA-182 value
+ */
 [[nodiscard]] inline std::uint64_t crc64(std::span<const std::byte> bytes) noexcept {
     return bioseq::indexing::crc64_ecma182(bytes);
 }
 
+/**
+ * @brief Computes a header checksum while treating its checksum field as zero.
+ * @param[in] header Complete fixed-width header bytes
+ * @param[in] checksum_offset Offset of the checksum field
+ * @param[in] checksum_bytes Width of the checksum field
+ * @return CRC-64/ECMA-182 over the normalized header
+ */
 [[nodiscard]] inline std::uint64_t header_crc(std::span<const std::byte> header,
                                               std::size_t checksum_offset,
                                               std::size_t checksum_bytes) noexcept {
@@ -126,6 +195,11 @@ using crc64_state = bioseq::indexing::crc64_ecma182_accumulator;
     return crc.checksum();
 }
 
+/**
+ * @brief Tests whether every byte in a reserved wire range is zero.
+ * @param[in] bytes Reserved bytes to inspect
+ * @return `true` when all bytes are zero
+ */
 [[nodiscard]] inline bool all_zero(std::span<const std::byte> bytes) noexcept {
     for (const std::byte byte : bytes) {
         if (byte != std::byte{0})
@@ -138,77 +212,129 @@ using crc64_state = bioseq::indexing::crc64_ecma182_accumulator;
 
 export namespace bioseq::indexing {
 
+/// @brief Numeric tag at the start of a direct inverted-index header.
 inline constexpr std::uint64_t k_direct_inverted_index_magic =
-    0x3132494432334842ULL; // "Bhash32DI21", byte-order-independent numeric tag.
+    0x3132494432334842ULL; // "BH32DI21", byte-order-independent numeric tag.
+/// @brief Persisted direct inverted-index layout revision accepted by this reader.
 inline constexpr std::uint32_t k_direct_inverted_index_layout_revision = 1u;
+/// @brief Fixed direct inverted-index header width in bytes.
 inline constexpr std::uint32_t k_direct_inverted_index_header_bytes = 256u;
+/// @brief Fixed hash-control record width in bytes.
 inline constexpr std::uint32_t k_direct_inverted_index_control_bytes = 48u;
+/// @brief Fixed fragment-run summary width in bytes.
 inline constexpr std::uint32_t k_direct_inverted_index_run_summary_bytes = 32u;
+/// @brief Number of dictionary buckets covered by one rank checkpoint.
 inline constexpr std::uint32_t k_direct_inverted_index_rank_group_buckets = 256u;
+/// @brief Persisted identifier of the dictionary hash mixer.
 inline constexpr std::uint32_t k_direct_inverted_index_hash_mix_id = 1u;
+/// @brief Required byte alignment of every direct-index section.
 inline constexpr std::uint64_t k_direct_inverted_index_section_alignment = 64u;
+/// @brief Header offset of the occupancy-section checksum.
 inline constexpr std::size_t k_direct_inverted_index_occupancy_crc_offset = 176u;
+/// @brief Header offset of the rank-section checksum.
 inline constexpr std::size_t k_direct_inverted_index_rank_crc_offset = 184u;
+/// @brief Header offset of the control-section checksum.
 inline constexpr std::size_t k_direct_inverted_index_controls_crc_offset = 192u;
+/// @brief Header offset of the run-summary checksum.
 inline constexpr std::size_t k_direct_inverted_index_summaries_crc_offset = 200u;
+/// @brief Header offset of the posting-section checksum.
 inline constexpr std::size_t k_direct_inverted_index_postings_crc_offset = 208u;
+/// @brief Header offset of the normalized header checksum.
 inline constexpr std::size_t k_direct_inverted_index_header_crc_offset = 216u;
+/// @brief Width in bytes of each direct-index checksum field.
 inline constexpr std::size_t k_direct_inverted_index_checksum_bytes = 8u;
+/// @brief Sentinel used when a query occurrence has no accepted selection.
 inline constexpr std::uint32_t k_direct_inverted_index_no_selection =
     (std::numeric_limits<std::uint32_t>::max)();
+/// @brief Sentinel used when a posting is not restricted to a fragment.
 inline constexpr std::uint32_t k_direct_inverted_index_no_fragment =
     (std::numeric_limits<std::uint32_t>::max)();
 
+/** @brief Classifies planning, encoding, validation, and query failures. */
 enum class direct_inverted_index_error : std::uint8_t {
+    /// @brief A size or offset calculation overflowed.
     arithmetic_overflow,
+    /// @brief Memory admission rejected the operation.
     admission,
+    /// @brief Required storage could not be allocated.
     allocation,
+    /// @brief Build or open options violate the layout contract.
     invalid_options,
+    /// @brief A hash or target coordinate lies outside its encoded domain.
     occurrence_range,
+    /// @brief Dictionary bucket geometry is invalid.
     bucket_count,
+    /// @brief The supplied image extent is incompatible with the header.
     image_size,
+    /// @brief The image magic does not identify this layout.
     bad_magic,
+    /// @brief The persisted layout revision is not accepted.
     bad_layout_revision,
+    /// @brief Fixed header fields are internally inconsistent.
     bad_header,
+    /// @brief The header contains unsupported feature flags.
     bad_flags,
+    /// @brief A reserved wire field is nonzero.
     reserved_nonzero,
+    /// @brief Persisted and expected source identities differ.
     identity_mismatch,
+    /// @brief The fixed-header checksum does not match.
     header_checksum,
+    /// @brief An authenticated payload section checksum does not match.
     section_checksum,
+    /// @brief Section offsets, sizes, or alignment are invalid.
     section_layout,
+    /// @brief The hash dictionary is malformed.
     dictionary,
+    /// @brief A control record is malformed.
     control,
+    /// @brief A fragment-run summary is malformed.
     run_summary,
+    /// @brief A posting value or extent is malformed.
     posting,
+    /// @brief Query input exceeds a fixed-width or cardinality bound.
     query_size,
+    /// @brief A prepared query plan does not authenticate against the image.
     query_plan,
+    /// @brief A caller-provided visitor stopped traversal.
     visitor_rejected,
+    /// @brief The replayable sorted-run source could not be read completely.
     source_read,
+    /// @brief Source hashes or positions violate monotonic ordering.
     order,
+    /// @brief A count or coordinate cannot fit its persisted width.
     fixed_width,
+    /// @brief A replayed source differs from its planning scan.
     replay_mismatch,
+    /// @brief Enclosing storage metadata disagrees with the direct image.
     storage_contract_mismatch,
+    /// @brief A publication or open receipt does not match the image.
     receipt_mismatch,
 };
 
+/** @brief Supplies one hash occurrence with a 64-bit target coordinate. */
 struct direct_index_occurrence {
     std::uint32_t hash = 0u;
     std::uint64_t target_bp = 0u;
     bool target_strand_one = false;
 
+    /// @brief Compares the hash, coordinate, and strand value.
     [[nodiscard]] constexpr bool
     operator==(const direct_index_occurrence&) const noexcept = default;
 };
 
+/** @brief Authenticates a direct image against its generation and target source. */
 struct direct_index_identity {
     std::uint64_t generation_id = 0u;
     std::uint64_t source_identity = 0u;
     std::uint64_t storage_contract_checksum = 0u;
     std::uint64_t target_length = 0u;
 
+    /// @brief Compares every persisted identity component.
     [[nodiscard]] constexpr bool operator==(const direct_index_identity&) const noexcept = default;
 };
 
+/** @brief Sets identity, filtering, capacity, and scratch limits for an image build. */
 struct direct_index_build_options {
     direct_index_identity identity{};
     /// Zero disables summaries.  Otherwise one summary is emitted for every
@@ -226,6 +352,7 @@ struct direct_index_build_options {
     std::uint64_t max_build_scratch_bytes = (std::numeric_limits<std::uint64_t>::max)();
 };
 
+/** @brief Describes the exact aligned sections and widths of a planned direct image. */
 struct direct_index_image_plan {
     /**
      * Exact wire equations (all section starts are align64):
@@ -257,10 +384,12 @@ struct direct_index_image_plan {
     std::uint64_t image_bytes = 0u;
     std::uint64_t estimated_build_scratch_bytes = 0u;
 
+    /// @brief Compares every planned count, width, offset, and size.
     [[nodiscard]] constexpr bool
     operator==(const direct_index_image_plan&) const noexcept = default;
 };
 
+/** @brief Holds the decoded fixed header of a direct inverted-index image. */
 struct direct_index_header {
     std::uint32_t flags = 0u;
     std::uint8_t posting_width_bytes = 0u;
@@ -289,20 +418,24 @@ struct direct_index_header {
     std::uint64_t image_bytes = 0u;
 };
 
+/** @brief Borrows a validated direct image and its decoded header. */
 struct direct_inverted_index_view {
     std::span<const std::byte> image{};
     direct_index_header header{};
 
+    /** @brief Reports whether the image contains fragment-run summaries. */
     [[nodiscard]] constexpr bool has_run_summaries() const noexcept {
         return (header.flags & 1u) != 0u;
     }
 };
 
+/** @brief Supplies one query hash and its query-strand orientation. */
 struct direct_index_query_occurrence {
     std::uint32_t hash = 0u;
     bool query_strand_one = false;
 };
 
+/** @brief Identifies one contiguous posting extent selected by query planning. */
 struct direct_index_posting_span {
     std::uint64_t byte_offset = 0u;
     std::uint64_t count = 0u;
@@ -311,6 +444,7 @@ struct direct_index_posting_span {
     bool target_strand_one = false;
 };
 
+/** @brief Aggregates accepted posting extents for one distinct query hash. */
 struct direct_index_selection {
     std::uint32_t hash = 0u;
     std::uint64_t global_count = 0u;
@@ -319,6 +453,7 @@ struct direct_index_selection {
     std::uint64_t span_count = 0u;
 };
 
+/** @brief Reports lookup acceptance and strand counts for one query occurrence. */
 struct direct_index_query_result {
     bool present = false;
     bool positions_selected = false;
@@ -328,6 +463,7 @@ struct direct_index_query_result {
     std::uint64_t reverse_count = 0u;
 };
 
+/** @brief Counts dictionary, control, summary, and posting work during planning. */
 struct direct_index_query_stats {
     std::uint64_t query_occurrence_count = 0u;
     std::uint64_t dictionary_slots_examined = 0u;
@@ -338,6 +474,7 @@ struct direct_index_query_stats {
     std::uint64_t selected_posting_bytes = 0u;
 };
 
+/** @brief Owns the authenticated selections, spans, and per-occurrence results of a query. */
 struct direct_index_query_plan {
     std::uint64_t image_header_crc64 = 0u;
     std::uint8_t posting_width_bytes = 0u;
@@ -347,24 +484,37 @@ struct direct_index_query_plan {
     direct_index_query_stats stats{};
 };
 
+/** @brief Carries one decoded posting and its query-selection identity. */
 struct direct_index_posting {
     std::uint32_t selection_ordinal = 0u;
     std::uint32_t fragment_ordinal = k_direct_inverted_index_no_fragment;
     std::uint64_t encoded_position = 0u;
     bool target_strand_one = false;
 
+    /** @brief Returns the zero-based target coordinate encoded above the strand bit. */
     [[nodiscard]] constexpr std::uint64_t target_bp() const noexcept {
         return encoded_position >> 1u;
     }
 };
 
+/**
+ * @brief Visits one decoded posting through a non-owning C callback boundary.
+ *
+ * The callback returns `false` to stop traversal. The posting reference is valid only for the call.
+ */
 using direct_index_posting_visitor = bool (*)(void*, const direct_index_posting&);
 
+/** @brief Counts spans and postings delivered by one visitor traversal. */
 struct direct_index_posting_visit_stats {
     std::uint64_t spans_visited = 0u;
     std::uint64_t postings_visited = 0u;
 };
 
+/**
+ * @brief Computes the checksum of a direct-index wire range.
+ * @param[in] bytes Persisted bytes in wire order
+ * @return CRC-64/ECMA-182 value
+ */
 [[nodiscard]] inline std::uint64_t
 direct_inverted_index_crc64(std::span<const std::byte> bytes) noexcept {
     return direct_index_detail::crc64(bytes);
@@ -377,43 +527,62 @@ direct_inverted_index_crc64(std::span<const std::byte> bytes) noexcept {
 // --------------------------------------------------------------------------
 
 namespace bioseq::indexing::compact_hash32_detail {
+/// @brief Grants the planner controlled access to the private query-plan seal.
 struct compact_hash32_unique_query_plan_access;
 }
 
 export namespace bioseq::indexing {
 
+/// @brief Numeric tag at the start of a compact hash32 image header.
 inline constexpr std::uint64_t k_compact_hash32_direct_index_magic = 0x3143443233485342ULL;
 /// Persisted compact-hash image revision. Current images retain byte value 2.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_layout_revision = 2u;
+/// @brief Fixed compact hash32 header width in bytes.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_header_bytes = 256u;
 /// `{u32 posting_or_inline,u16 count,u16 strand0}`. A P32 singleton is
 /// encoded in the first word. Every other run names its first posting ordinal.
 inline constexpr std::uint16_t k_compact_hash32_direct_index_descriptor_bytes = 8u;
+/// @brief Number of membership bits covered by one rank checkpoint.
 inline constexpr std::uint32_t k_compact_hash32_direct_index_rank_group_bits = 256u;
+/// @brief Width of the unrestricted hash32 domain.
 inline constexpr std::uint8_t k_compact_hash32_full_hash_bits = 32u;
+/// @brief Width of the canonical K=15 minimizer hash domain.
 inline constexpr std::uint8_t k_compact_hash32_canonical_k15_hash_bits = 30u;
+/// @brief Membership bitmap width in bytes for the full 32-bit hash domain.
 inline constexpr std::uint64_t k_compact_hash32_full_membership_bytes =
     std::uint64_t{1u} << 29u; // 2^32 exact membership bits.
+/// @brief Rank checkpoint width in bytes for the full 32-bit hash domain.
 inline constexpr std::uint64_t k_compact_hash32_full_rank_bytes =
     std::uint64_t{1u} << 26u; // 2^24 uint32 checkpoints.
+/// @brief Membership bitmap width in bytes for the canonical K=15 domain.
 inline constexpr std::uint64_t k_compact_hash32_canonical_k15_membership_bytes =
     std::uint64_t{1u} << 27u; // 2^30 exact membership bits.
+/// @brief Rank checkpoint width in bytes for the canonical K=15 domain.
 inline constexpr std::uint64_t k_compact_hash32_canonical_k15_rank_bytes =
     std::uint64_t{1u} << 24u; // 2^22 uint32 checkpoints.
+/// @brief Header offset of the compact membership-section checksum.
 inline constexpr std::size_t k_compact_hash32_membership_crc_offset = 176u;
+/// @brief Header offset of the compact rank-section checksum.
 inline constexpr std::size_t k_compact_hash32_rank_crc_offset = 184u;
+/// @brief Header offset of the compact descriptor-section checksum.
 inline constexpr std::size_t k_compact_hash32_descriptors_crc_offset = 192u;
+/// @brief Header offset of the compact posting-section checksum.
 inline constexpr std::size_t k_compact_hash32_postings_crc_offset = 200u;
+/// @brief Header offset of the compact normalized header checksum.
 inline constexpr std::size_t k_compact_hash32_header_crc_offset = 208u;
+/// @brief Header offset of the replayed sorted-stream checksum.
 inline constexpr std::size_t k_compact_hash32_stream_crc_offset = 224u;
+/// @brief Header offset of the count of postings stored inline in descriptors.
 inline constexpr std::size_t k_compact_hash32_inline_singleton_count_offset = 236u;
 
+/** @brief Resolves one hash to its membership byte, bit, and rank checkpoint. */
 struct compact_hash32_address {
     std::uint64_t membership_byte_ordinal = 0u;
     std::uint8_t membership_bit = 0u;
     std::uint64_t rank_checkpoint_ordinal = 0u;
     std::uint16_t bit_within_rank_group = 0u;
 
+    /// @brief Compares every resolved address component.
     [[nodiscard]] constexpr bool operator==(const compact_hash32_address&) const noexcept = default;
 };
 
@@ -425,20 +594,29 @@ struct compact_hash32_geometry {
     std::uint8_t hash_domain_bits = k_compact_hash32_canonical_k15_hash_bits;
     std::uint32_t max_hash = (std::uint32_t{1u} << k_compact_hash32_canonical_k15_hash_bits) - 1u;
 
+    /** @brief Reports whether the geometry is the canonical 30-bit K=15 domain. */
     [[nodiscard]] constexpr bool canonical_k15() const noexcept {
         return hash_domain_bits == k_compact_hash32_canonical_k15_hash_bits &&
                max_hash == 0x3fffffffu;
     }
 
+    /** @brief Reports whether the geometry covers the complete 32-bit hash domain. */
     [[nodiscard]] constexpr bool full_h32() const noexcept {
         return hash_domain_bits == k_compact_hash32_full_hash_bits &&
                max_hash == (std::numeric_limits<std::uint32_t>::max)();
     }
 
+    /// @brief Compares the hash-domain width and maximum hash.
     [[nodiscard]] constexpr bool
     operator==(const compact_hash32_geometry&) const noexcept = default;
 };
 
+/**
+ * @brief Resolves a hash under authenticated compact-domain geometry.
+ * @param[in] hash Hash to locate
+ * @param[in] geometry Hash-domain width and inclusive maximum
+ * @return Membership and rank address, or a range error for invalid geometry or hash
+ */
 [[nodiscard]] constexpr std::expected<compact_hash32_address, direct_inverted_index_error>
 resolve_compact_hash32_address(std::uint32_t hash, compact_hash32_geometry geometry = {}) noexcept {
     if (geometry.hash_domain_bits < 9u ||
@@ -461,22 +639,31 @@ resolve_compact_hash32_address(std::uint32_t hash, compact_hash32_geometry geome
     };
 }
 
+/** @brief Describes one strictly ordered hash run supplied by a replayable source. */
 struct compact_hash32_sorted_run_header {
     std::uint32_t hash = 0u;
     std::uint64_t global_count = 0u;
     std::uint64_t target_strand_zero_count = 0u;
 };
 
+/** @brief Callback that begins one sorted hash run. */
 using compact_hash32_begin_run = std::expected<void, direct_inverted_index_error> (*)(
     void*, const compact_hash32_sorted_run_header&);
+/** @brief Callback that supplies the next ordered position batch for the active run. */
 using compact_hash32_consume_positions =
     std::expected<void, direct_inverted_index_error> (*)(void*, std::span<const std::uint64_t>);
 
+/** @brief Type-erased receiver for a transient sequence of sorted run batches. */
 struct compact_hash32_sorted_run_receiver {
     void* context = nullptr;
     compact_hash32_begin_run begin_run_fn = nullptr;
     compact_hash32_consume_positions consume_positions_fn = nullptr;
 
+    /**
+     * @brief Begins one hash run after validating the receiver binding.
+     * @param[in] header Hash and strand-major occurrence counts for the run
+     * @return Success, or `source_read` when the callback binding is incomplete
+     */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     begin_run(const compact_hash32_sorted_run_header& header) const {
         if (context == nullptr || begin_run_fn == nullptr) {
@@ -485,6 +672,11 @@ struct compact_hash32_sorted_run_receiver {
         return begin_run_fn(context, header);
     }
 
+    /**
+     * @brief Delivers the next transient position batch for the active run.
+     * @param[in] encoded_positions Strand-bit encoded positions valid only for the callback
+     * @return Success, or `source_read` when the callback binding is incomplete
+     */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     consume_positions(std::span<const std::uint64_t> encoded_positions) const {
         if (context == nullptr || consume_positions_fn == nullptr) {
@@ -494,6 +686,7 @@ struct compact_hash32_sorted_run_receiver {
     }
 };
 
+/** @brief Callback that replays every sorted run into a bound receiver. */
 using compact_hash32_scan_sorted_runs = std::expected<void, direct_inverted_index_error> (*)(
     void*, const compact_hash32_sorted_run_receiver&);
 
@@ -504,6 +697,11 @@ struct compact_hash32_sorted_run_source {
     void* context = nullptr;
     compact_hash32_scan_sorted_runs scan_sorted_runs_fn = nullptr;
 
+    /**
+     * @brief Replays the complete sorted stream into a receiver.
+     * @param[in] receiver Callback binding that consumes transient run data synchronously
+     * @return Completion status from the source or receiver
+     */
     [[nodiscard]] std::expected<void, direct_inverted_index_error>
     scan_sorted_runs(const compact_hash32_sorted_run_receiver& receiver) const {
         if (context == nullptr || scan_sorted_runs_fn == nullptr) {
@@ -513,6 +711,7 @@ struct compact_hash32_sorted_run_source {
     }
 };
 
+/** @brief Sets identity, frequency filtering, geometry, and image-size limits for a compact build. */
 struct compact_hash32_build_options {
     direct_index_identity identity{};
     std::uint32_t max_occ_cap = 0u;
@@ -520,6 +719,13 @@ struct compact_hash32_build_options {
     std::uint64_t max_image_bytes = (std::numeric_limits<std::uint64_t>::max)();
 };
 
+/**
+ * @brief Describes the exact compact image sections and source-filter accounting.
+ *
+ * Membership bits and 32-bit rank checkpoints map hashes to dense 8-byte descriptors. A P32
+ * singleton may reside in its descriptor while all other accepted positions occupy the posting
+ * section. Every scalar is persisted little-endian.
+ */
 struct compact_hash32_image_plan {
     direct_index_identity identity{};
     std::uint32_t layout_revision = k_compact_hash32_direct_index_layout_revision;
@@ -547,10 +753,12 @@ struct compact_hash32_image_plan {
     std::uint64_t image_bytes = 0u;
     std::uint64_t sorted_stream_crc64 = 0u;
 
+    /// @brief Compares every identity, count, width, offset, size, and stream checksum.
     [[nodiscard]] constexpr bool
     operator==(const compact_hash32_image_plan&) const noexcept = default;
 };
 
+/** @brief Extends a compact image plan with decoded section and header checksums. */
 struct compact_hash32_header : compact_hash32_image_plan {
     std::uint64_t membership_crc64 = 0u;
     std::uint64_t rank_crc64 = 0u;
@@ -559,6 +767,7 @@ struct compact_hash32_header : compact_hash32_image_plan {
     std::uint64_t header_crc64 = 0u;
 };
 
+/** @brief Borrows a validated compact image and its decoded fixed header. */
 struct compact_hash32_direct_index_view {
     std::span<const std::byte> image{};
     compact_hash32_header header{};
@@ -576,6 +785,7 @@ struct compact_hash32_bounded_open_options {
     std::optional<std::uint64_t> expected_direct_header_crc64{};
 };
 
+/** @brief Counts bytes inspected by a bounded compact-header open. */
 struct compact_hash32_bounded_open_stats {
     std::uint64_t direct_section_bytes = 0u;
     std::uint64_t header_bytes_examined = 0u;
@@ -592,19 +802,28 @@ struct compact_hash32_bounded_open_stats {
 /// nonzero offset. The token's stored pointer need not equal image.data().
 class compact_hash32_bounded_open_view {
   public:
+    /**
+     * @brief Binds a decoded view to the token that controls its enclosing mapping lifetime.
+     * @param[in] image_owner Owning or externally leased alias token for the mapped bytes
+     * @param[in] view Non-owning direct-section view covered by the token or external lease
+     * @param[in] stats Work performed while opening the fixed header
+     */
     compact_hash32_bounded_open_view(std::shared_ptr<const std::byte> image_owner,
                                      compact_hash32_direct_index_view view,
                                      compact_hash32_bounded_open_stats stats) noexcept
         : image_owner_{std::move(image_owner)}, view_{view}, stats_{stats} {}
 
+    /** @brief Returns the non-owning decoded direct-section view. */
     [[nodiscard]] const compact_hash32_direct_index_view& view() const noexcept {
         return view_;
     }
 
+    /** @brief Returns the lifetime token retained by this open view. */
     [[nodiscard]] const std::shared_ptr<const std::byte>& image_owner() const noexcept {
         return image_owner_;
     }
 
+    /** @brief Returns the bounded-open byte accounting. */
     [[nodiscard]] const compact_hash32_bounded_open_stats& stats() const noexcept {
         return stats_;
     }
@@ -615,11 +834,13 @@ class compact_hash32_bounded_open_view {
     compact_hash32_bounded_open_stats stats_{};
 };
 
+/** @brief Supplies one compact query hash and its query-strand orientation. */
 struct compact_hash32_query_occurrence {
     std::uint32_t hash = 0u;
     bool query_strand_one = false;
 };
 
+/** @brief Reports acceptance, dense mapping, and strand counts for one query occurrence. */
 struct compact_hash32_query_result {
     bool accepted = false;
     std::uint32_t selection_ordinal = k_direct_inverted_index_no_selection;
@@ -629,6 +850,7 @@ struct compact_hash32_query_result {
     std::uint64_t reverse_count = 0u;
 };
 
+/** @brief Describes an accepted distinct hash and its posting spans. */
 struct compact_hash32_selection {
     std::uint32_t hash = 0u;
     std::uint64_t dense_ordinal = 0u;
@@ -638,6 +860,7 @@ struct compact_hash32_selection {
     std::uint64_t span_count = 0u;
 };
 
+/** @brief Records compact membership, rank, descriptor, posting, and allocation work. */
 struct compact_hash32_query_stats {
     std::uint64_t query_occurrence_count = 0u;
     std::uint64_t distinct_query_hash_count = 0u;
@@ -667,10 +890,12 @@ struct compact_hash32_query_stats {
     std::uint64_t selection_retained_capacity_elements = 0u;
     std::uint64_t selection_retained_capacity_bytes = 0u;
 
+    /// @brief Compares every query-work and allocation counter.
     [[nodiscard]] constexpr bool
     operator==(const compact_hash32_query_stats&) const noexcept = default;
 };
 
+/** @brief Owns a general compact query plan with per-occurrence results and selected spans. */
 struct compact_hash32_query_plan {
     std::uint64_t image_header_crc64 = 0u;
     std::uint32_t max_occ_cap = 0u;
@@ -682,6 +907,7 @@ struct compact_hash32_query_plan {
     compact_hash32_query_stats stats{};
 };
 
+/** @brief Maps one accepted unique query hash directly to its dense descriptor. */
 struct compact_hash32_unique_selection {
     std::uint32_t dense_ordinal = 0u;
     std::uint32_t query_ordinal = 0u;
@@ -701,6 +927,10 @@ struct compact_hash32_unique_query_plan {
     std::vector<compact_hash32_unique_selection> selections{};
     compact_hash32_query_stats stats{};
 
+    /**
+     * @brief Returns retained selection capacity in bytes with saturating overflow handling.
+     * @return Allocated vector capacity measured in bytes
+     */
     [[nodiscard]] std::uint64_t retained_selection_capacity_bytes() const noexcept {
         const std::uint64_t capacity = selections.capacity();
         return capacity > (std::numeric_limits<std::uint64_t>::max)() /
@@ -712,6 +942,7 @@ struct compact_hash32_unique_query_plan {
   private:
     std::uint64_t authentication_crc64_ = 0u;
 
+    /** @brief Mixes one public plan field into the private authentication seal. */
     [[nodiscard]] static constexpr std::uint64_t mix_authentication_(std::uint64_t state,
                                                                      std::uint64_t value) noexcept {
         value += 0x9e3779b97f4a7c15ULL;
@@ -721,8 +952,10 @@ struct compact_hash32_unique_query_plan {
         return std::rotl(state ^ value, 27u) * 0x3c79ac492ba7b653ULL + 0x1c69b3f74ac4ae35ULL;
     }
 
+    /** @brief Recomputes the private seal over all public plan state and selections. */
     [[nodiscard]] std::uint64_t computed_authentication_() const noexcept {
         std::uint64_t state = 0x43483332504c414eULL;
+        // Adds one fixed-width plan field to the private authentication state.
         const auto mix = [&state](std::uint64_t value) noexcept {
             state = mix_authentication_(state, value);
         };
@@ -775,6 +1008,11 @@ struct compact_hash32_posting_span_view {
     std::uint8_t posting_width_bytes = 0u;
     bool target_strand_one = false;
 
+    /**
+     * @brief Decodes and validates one random-access position in the bounded span.
+     * @param[in] ordinal Zero-based posting ordinal within the span
+     * @return Strand-bit encoded position, or a query-plan error for invalid bounds or coordinates
+     */
     [[nodiscard]] std::expected<std::uint64_t, direct_inverted_index_error>
     encoded_position_at(std::uint64_t ordinal) const noexcept {
         if (ordinal >= count || (posting_width_bytes != 4u && posting_width_bytes != 8u)) {
@@ -798,11 +1036,16 @@ struct compact_hash32_posting_span_view {
         return encoded;
     }
 
-    /// Decode this already-bounded span sequentially after one exact extent
-    /// check and one P32/P64 dispatch.  The typed inner loop advances byte
-    /// pointers, avoiding the ordinal multiply, repeated extent check, and
-    /// runtime-width branch performed by random access.  Every decoded value
-    /// still receives release-active strand and target-range validation.
+    /**
+     * @brief Visits an already bounded posting span after one P32 or P64 dispatch.
+     *
+     * The typed inner loop advances byte pointers and validates every strand bit and target
+     * coordinate. Returning `false` from the visitor stops traversal.
+     *
+     * @tparam p_visitor Callable accepting one strand-bit encoded position
+     * @param[in] visitor Synchronous visitor that must not retain references into the image
+     * @return Number of decoded postings, or a validation or visitor error
+     */
     template <class p_visitor>
     [[nodiscard,
       gnu::always_inline]] inline std::expected<std::uint64_t, direct_inverted_index_error>
@@ -823,6 +1066,13 @@ struct compact_hash32_posting_span_view {
     }
 
   private:
+    /**
+     * @brief Runs sequential traversal for one persisted posting width.
+     * @tparam p_encoded_integer Unsigned persisted posting type
+     * @tparam p_visitor Callable accepting one decoded position
+     * @param[in] visitor Synchronous posting visitor
+     * @return Number of decoded postings, or a validation or visitor error
+     */
     template <class p_encoded_integer, class p_visitor>
     [[nodiscard,
       gnu::always_inline]] inline std::expected<std::uint64_t, direct_inverted_index_error>
@@ -865,6 +1115,7 @@ struct compact_hash32_selection_posting_spans {
     std::uint8_t span_count = 0u;
 };
 
+/** @brief Counts selection callbacks, exposed spans, and decoded posting categories. */
 struct compact_hash32_selection_span_visit_stats {
     std::uint64_t selection_callbacks = 0u;
     std::uint64_t spans_exposed = 0u;
@@ -887,16 +1138,22 @@ struct compact_hash32_selection_span_visit_stats {
 /// may therefore run concurrently with independent visitors.
 class compact_hash32_selection_span_range_accessor {
   public:
+    /// @brief Copies a non-owning accessor without changing the bound lifetimes.
     compact_hash32_selection_span_range_accessor(
         const compact_hash32_selection_span_range_accessor&) noexcept = default;
+    /// @brief Rebinds this accessor to the same non-owning state as another accessor.
     compact_hash32_selection_span_range_accessor&
     operator=(const compact_hash32_selection_span_range_accessor&) noexcept = default;
+    /// @brief Moves a non-owning accessor without transferring image ownership.
     compact_hash32_selection_span_range_accessor(
         compact_hash32_selection_span_range_accessor&&) noexcept = default;
+    /// @brief Move-assigns the non-owning binding state.
     compact_hash32_selection_span_range_accessor&
     operator=(compact_hash32_selection_span_range_accessor&&) noexcept = default;
+    /// @brief Releases only the accessor state and never the underlying image.
     ~compact_hash32_selection_span_range_accessor() = default;
 
+    /** @brief Returns the number of authenticated accepted selections. */
     [[nodiscard]] std::uint64_t selection_count() const noexcept {
         return selections_.size();
     }
@@ -915,6 +1172,7 @@ class compact_hash32_selection_span_range_accessor {
     std::uint32_t runtime_max_occ_ = 0u;
     std::uint8_t plan_posting_width_bytes_ = 0u;
 
+    /** @brief Creates a range accessor after its friend binder authenticates all inputs. */
     compact_hash32_selection_span_range_accessor(const compact_hash32_direct_index_view& view,
                                                  const compact_hash32_unique_query_plan& plan,
                                                  std::uint64_t plan_authentication_receipt,
@@ -941,6 +1199,7 @@ class compact_hash32_selection_span_range_accessor {
         p_visitor&&);
 };
 
+/** @brief Bounds metadata bytes touched by a unique-hash query plan. */
 struct compact_hash32_query_touch_estimate {
     std::uint64_t query_hashes = 0u;
     std::uint64_t distinct_rank_groups = 0u;
@@ -951,6 +1210,7 @@ struct compact_hash32_query_touch_estimate {
     std::uint64_t maximum_metadata_bytes = 0u;
 };
 
+/** @brief Estimates the compact image sections implied by accepted hash and posting counts. */
 struct compact_hash32_image_estimate {
     compact_hash32_geometry geometry{};
     std::uint8_t posting_width_bytes = 0u;
@@ -979,11 +1239,14 @@ using direct_index_detail::header_crc;
 using direct_index_detail::read_le;
 using direct_index_detail::write_le;
 
+/** @brief Creates and verifies the private seal on accepted-only query plans. */
 struct compact_hash32_unique_query_plan_access {
+    /** @brief Stores a fresh private authentication seal over the complete public plan. */
     static void seal(compact_hash32_unique_query_plan& plan) noexcept {
         plan.authentication_crc64_ = plan.computed_authentication_();
     }
 
+    /** @brief Verifies that the public plan still matches its private seal. */
     [[nodiscard]] static bool authenticated(const compact_hash32_unique_query_plan& plan) noexcept {
         return plan.authentication_crc64_ != 0u &&
                plan.authentication_crc64_ == plan.computed_authentication_();
@@ -998,6 +1261,7 @@ struct compact_hash32_unique_query_plan_access {
     }
 };
 
+/** @brief Holds derived hash-domain, membership, and rank section cardinalities. */
 struct compact_hash32_geometry_counts {
     std::uint64_t hash_count = 0u;
     std::uint64_t membership_bytes = 0u;
@@ -1005,6 +1269,11 @@ struct compact_hash32_geometry_counts {
     std::uint64_t rank_bytes = 0u;
 };
 
+/**
+ * @brief Derives exact section cardinalities from compact hash geometry.
+ * @param[in] geometry Authenticated hash-domain width and maximum
+ * @return Derived counts, or an option or storage-contract error
+ */
 [[nodiscard]] constexpr std::expected<compact_hash32_geometry_counts, direct_inverted_index_error>
 geometry_counts(compact_hash32_geometry geometry) noexcept {
     if (geometry.hash_domain_bits < 9u ||
@@ -1027,6 +1296,7 @@ geometry_counts(compact_hash32_geometry geometry) noexcept {
     };
 }
 
+/** @brief Records accepted and rejected counts plus the checksum of one planning scan. */
 struct compact_hash32_scan_receipt {
     std::uint64_t source_hash_count = 0u;
     std::uint64_t source_posting_count = 0u;
@@ -1037,10 +1307,17 @@ struct compact_hash32_scan_receipt {
     std::uint64_t rejected_posting_count = 0u;
     std::uint64_t sorted_stream_crc64 = 0u;
 
+    /// @brief Compares every scan count and the sorted-stream checksum.
     [[nodiscard]] constexpr bool
     operator==(const compact_hash32_scan_receipt&) const noexcept = default;
 };
 
+/**
+ * @brief Converts a planning receipt into exact compact section offsets and sizes.
+ * @param[in] options Identity, filtering, geometry, and image-size limits
+ * @param[in] receipt Counts and stream checksum from the planning scan
+ * @return Complete image plan, or a validation or arithmetic error
+ */
 [[nodiscard]] constexpr std::expected<compact_hash32_image_plan, direct_inverted_index_error>
 layout_from_receipt(const compact_hash32_build_options& options,
                     const compact_hash32_scan_receipt& receipt) noexcept {
@@ -1113,6 +1390,7 @@ layout_from_receipt(const compact_hash32_build_options& options,
     return plan;
 }
 
+/** @brief Holds one decoded 8-byte compact descriptor in host-width fields. */
 struct compact_hash32_decoded_descriptor {
     std::uint32_t posting_ordinal = 0u;
     std::uint32_t inline_encoded_position = 0u;
@@ -1121,6 +1399,13 @@ struct compact_hash32_decoded_descriptor {
     bool inline_singleton = false;
 };
 
+/**
+ * @brief Decodes one prevalidated little-endian compact descriptor.
+ * @param[in] image Complete compact image
+ * @param[in] offset Byte offset of the descriptor
+ * @param[in] posting_width_bytes Persisted posting width that selects singleton encoding
+ * @return Decoded descriptor fields
+ */
 [[nodiscard]] constexpr compact_hash32_decoded_descriptor
 decode_descriptor(std::span<const std::byte> image,
                   std::uint64_t offset,
@@ -1139,6 +1424,13 @@ decode_descriptor(std::span<const std::byte> image,
     };
 }
 
+/**
+ * @brief Decodes one prevalidated P32 or P64 posting.
+ * @param[in] image Complete compact image
+ * @param[in] offset Byte offset of the posting
+ * @param[in] width Persisted posting width in bytes
+ * @return Strand-bit encoded 64-bit position
+ */
 [[nodiscard]] constexpr std::uint64_t decode_posting(std::span<const std::byte> image,
                                                      std::uint64_t offset,
                                                      std::uint8_t width) noexcept {
@@ -1151,8 +1443,10 @@ decode_descriptor(std::span<const std::byte> image,
 
 namespace bioseq::indexing::direct_index_detail {
 
+/// @brief Header flag indicating that fragment-run summaries are present.
 inline constexpr std::uint32_t k_flag_run_summaries = 1u;
 
+/** @brief Holds one decoded 48-byte direct-index control record. */
 struct direct_index_decoded_control {
     std::uint32_t hash = 0u;
     std::uint32_t flags = 0u;
@@ -1164,6 +1458,7 @@ struct direct_index_decoded_control {
     std::uint32_t reserved_zero = 0u;
 };
 
+/** @brief Holds one decoded 32-byte fragment-run summary. */
 struct direct_index_decoded_summary {
     std::uint32_t fragment_ordinal = 0u;
     std::uint32_t reserved_zero = 0u;
@@ -1172,6 +1467,15 @@ struct direct_index_decoded_summary {
     std::uint64_t total_count = 0u;
 };
 
+/**
+ * @brief Plans aligned direct-index sections from fixed-width cardinalities.
+ * @param[in] occurrence_count Total posting count
+ * @param[in] unique_hash_count Number of dense control records
+ * @param[in] bucket_count Power-of-two dictionary bucket count
+ * @param[in] summary_count Number of fragment-run summary records
+ * @param[in] posting_width Persisted posting width in bytes
+ * @return Exact section plan, or a geometry or arithmetic error
+ */
 [[nodiscard]] constexpr std::expected<direct_index_image_plan, direct_inverted_index_error>
 layout_from_counts(std::uint64_t occurrence_count,
                    std::uint64_t unique_hash_count,
@@ -1216,6 +1520,12 @@ layout_from_counts(std::uint64_t occurrence_count,
     return plan;
 }
 
+/**
+ * @brief Decodes one prevalidated little-endian direct control record.
+ * @param[in] image Complete direct image
+ * @param[in] offset Byte offset of the 48-byte record
+ * @return Decoded control fields
+ */
 [[nodiscard]] constexpr direct_index_decoded_control
 decode_control(std::span<const std::byte> image, std::uint64_t offset) noexcept {
     const std::size_t base = static_cast<std::size_t>(offset);
@@ -1231,6 +1541,12 @@ decode_control(std::span<const std::byte> image, std::uint64_t offset) noexcept 
     };
 }
 
+/**
+ * @brief Decodes one prevalidated little-endian run-summary record.
+ * @param[in] image Complete direct image
+ * @param[in] offset Byte offset of the 32-byte record
+ * @return Decoded summary fields
+ */
 [[nodiscard]] constexpr direct_index_decoded_summary
 decode_summary(std::span<const std::byte> image, std::uint64_t offset) noexcept {
     const std::size_t base = static_cast<std::size_t>(offset);
@@ -1243,6 +1559,12 @@ decode_summary(std::span<const std::byte> image, std::uint64_t offset) noexcept 
     };
 }
 
+/**
+ * @brief Counts occupied dictionary slots before one slot in its rank group.
+ * @param[in] occupancy Exact dictionary occupancy bitmap
+ * @param[in] slot Bucket ordinal
+ * @return Number of set bits earlier in the same 256-bucket group
+ */
 [[nodiscard]] inline std::uint64_t occupied_before_in_group(std::span<const std::byte> occupancy,
                                                             std::uint64_t slot) noexcept {
     const std::uint64_t group_begin = (slot / k_direct_inverted_index_rank_group_buckets) *
@@ -1263,18 +1585,32 @@ decode_summary(std::span<const std::byte> image, std::uint64_t offset) noexcept 
     return count;
 }
 
+/**
+ * @brief Tests one bucket in a prevalidated occupancy bitmap.
+ * @param[in] occupancy Exact dictionary occupancy bitmap
+ * @param[in] slot Bucket ordinal
+ * @return `true` when the bucket has a dense control record
+ */
 [[nodiscard]] inline bool occupied(std::span<const std::byte> occupancy,
                                    std::uint64_t slot) noexcept {
     return (std::to_integer<std::uint8_t>(occupancy[static_cast<std::size_t>(slot / 8u)]) &
             (std::uint8_t{1u} << (slot % 8u))) != 0u;
 }
 
+/** @brief Binds a dictionary bucket to its dense control record. */
 struct direct_index_lookup_receipt {
     std::uint64_t slot = 0u;
     std::uint64_t control_ordinal = 0u;
     direct_index_decoded_control control{};
 };
 
+/**
+ * @brief Probes the open-addressed dictionary for one hash.
+ * @param[in] view Validated direct-index image
+ * @param[in] hash Hash to locate
+ * @param[in,out] stats Optional query-work counters
+ * @return No value for an absent hash, a bucket and control receipt for a hit, or an error
+ */
 [[nodiscard]] inline std::expected<std::optional<direct_index_lookup_receipt>,
                                    direct_inverted_index_error>
 lookup_control(const direct_inverted_index_view& view,
@@ -1318,6 +1654,13 @@ lookup_control(const direct_inverted_index_view& view,
     return std::unexpected(direct_inverted_index_error::dictionary);
 }
 
+/**
+ * @brief Decodes one prevalidated P32 or P64 direct posting.
+ * @param[in] image Complete direct image
+ * @param[in] byte_offset Posting byte offset
+ * @param[in] width Persisted posting width in bytes
+ * @return Strand-bit encoded target position
+ */
 [[nodiscard]] constexpr std::uint64_t decode_position(std::span<const std::byte> image,
                                                       std::uint64_t byte_offset,
                                                       std::uint8_t width) noexcept {

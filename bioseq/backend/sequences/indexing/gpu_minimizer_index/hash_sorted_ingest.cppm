@@ -44,6 +44,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
+/// Allocate a nonzero process-local identity for one source-direct build operation.
 [[nodiscard]] inline std::uint64_t
 next_gpu_source_direct_operation_identity() noexcept {
     static std::atomic<std::uint64_t> next_identity{1u};
@@ -55,6 +56,8 @@ next_gpu_source_direct_operation_identity() noexcept {
     return identity;
 }
 
+/// Bind a presorted minimizer source to its operation, tuple, representation, and device.
+/// @tparam p_minimizer Packed minimizer type that supplies hash and position bit widths.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_index_cache_identity
 make_gpu_source_direct_sorted_dense_identity(
@@ -114,6 +117,7 @@ make_gpu_source_direct_sorted_dense_identity(
 
 /// Typed form used before the target sketch is materialized.  The layout is
 /// inspected at compile time without adding a new dispatch/template axis.
+/// @tparam p_minimizer Packed minimizer type whose layout defines the tuple widths.
 template <class p_minimizer>
 [[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
     std::uint32_t alphabet_size,
@@ -131,6 +135,7 @@ template <class p_minimizer>
         layout::k_position_bits);
 }
 
+/// Validate the complete operation, source shape, minimizer ABI, and device identity.
 [[nodiscard]] inline bool gpu_source_direct_identity_well_formed(
     const gpu_index_cache_identity& identity) noexcept
 {
@@ -166,16 +171,19 @@ template <class p_minimizer>
         && !identity.gate_canonical_words;
 }
 
+/// Vulkan usage required by source-direct resident control and position buffers.
 inline constexpr VkBufferUsageFlags k_gpu_source_direct_buffer_usage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
+/// Counts of minimizers and distinct hash groups in a presorted source.
 struct gpu_source_direct_sorted_shape {
     std::uint64_t minimizer_count = 0u;
     std::uint64_t distinct_count = 0u;
 };
 
+/// Logical, device-allocation, and conservative admission sizes for materialization.
 struct gpu_source_direct_preflight {
     gpu_source_direct_sorted_shape shape{};
     std::uint64_t control_bytes = 0u;
@@ -191,6 +199,7 @@ struct gpu_source_direct_preflight {
     bool canonical_empty = false;
 };
 
+/// Failures from source-direct preflight or final resident materialization.
 enum class gpu_source_direct_materialization_error : std::uint8_t {
     invalid_shape,
     representation_ineligible,
@@ -201,12 +210,14 @@ enum class gpu_source_direct_materialization_error : std::uint8_t {
     invariant_failed,
 };
 
+/// Materialization error with optional memory-admission diagnostics.
 struct gpu_source_direct_materialization_failure {
     gpu_source_direct_materialization_error error =
         gpu_source_direct_materialization_error::invalid_shape;
     bioseq::parallelism::memory_admission_failure admission{};
 };
 
+/// Planned, allocated, checksummed, and ownership-accounted resident statistics.
 struct gpu_source_direct_materialization_stats {
     gpu_source_direct_sorted_shape shape{};
     std::uint64_t logical_slot_bytes = 0u;
@@ -233,11 +244,13 @@ struct gpu_source_direct_materialization_stats {
         gpu_resident_accounting_authority::none;
 };
 
+/// Newly materialized resident together with its verified allocation statistics.
 struct gpu_source_direct_materialization_result {
     std::shared_ptr<gpu_resident_minimizer_index> resident;
     gpu_source_direct_materialization_stats stats{};
 };
 
+/// Required adjustment between a held memory permit and actual device allocation.
 enum class gpu_permit_reconciliation_action : std::uint8_t {
     invalid,
     shrink,
@@ -245,6 +258,7 @@ enum class gpu_permit_reconciliation_action : std::uint8_t {
     grow,
 };
 
+/// Compare held and actual byte counts to select exact permit reconciliation.
 [[nodiscard]] constexpr gpu_permit_reconciliation_action
 plan_gpu_exact_permit_reconciliation(
     std::uint64_t held_bytes,
@@ -262,6 +276,7 @@ plan_gpu_exact_permit_reconciliation(
     return gpu_permit_reconciliation_action::unchanged;
 }
 
+/// Verify that either footprint reflection or an exact retained permit accounts for a resident.
 [[nodiscard]] inline bool gpu_exact_resident_authority_valid(
     gpu_resident_accounting_authority authority,
     const bioseq::parallelism::memory_materialization_result& materialization,
@@ -294,6 +309,10 @@ plan_gpu_exact_permit_reconciliation(
     return reflected != retained;
 }
 
+/// Plan source-direct logical bytes and allocator allowances from exact device requirements.
+///
+/// Empty input is accepted only with zero allocation requirements. Nonempty shapes must fit the
+/// 32-bit shader ABI and both Vulkan storage-buffer ranges.
 [[nodiscard]] inline std::expected<gpu_source_direct_preflight,
     gpu_source_direct_materialization_error>
 plan_gpu_source_direct_sorted_dense_with_requirements(
@@ -387,6 +406,7 @@ plan_gpu_source_direct_sorted_dense_with_requirements(
     };
 }
 
+/// Test a completed preflight against currently allocatable admitted bytes.
 [[nodiscard]] inline constexpr bool gpu_source_direct_preflight_fits(
     const gpu_source_direct_preflight& preflight,
     std::uint64_t allocatable_bytes) noexcept
@@ -397,6 +417,7 @@ plan_gpu_source_direct_sorted_dense_with_requirements(
             && preflight.conservative_request_bytes <= allocatable_bytes;
 }
 
+/// Query Vulkan allocation requirements and produce a conservative source-direct preflight.
 [[nodiscard]] inline std::expected<gpu_source_direct_preflight,
     gpu_source_direct_materialization_error>
 plan_gpu_source_direct_sorted_dense(
@@ -441,6 +462,8 @@ plan_gpu_source_direct_sorted_dense(
         position_requirement);
 }
 
+/// Count hash groups while checking that a borrowed minimizer source is hash-sorted.
+/// @tparam p_minimizer Packed minimizer type exposing `kmer()`.
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<gpu_source_direct_sorted_shape,
     gpu_source_direct_materialization_error>
@@ -533,15 +556,24 @@ direct_fill_gpu_minimizer_index_sorted_dense(
     };
 }
 
+/// Fold one source or mapped word into the traversal checksum.
 [[nodiscard]] inline std::uint64_t gpu_source_direct_checksum_word(
         std::uint64_t checksum,
         std::uint64_t word) noexcept {
     return splitmix64(checksum ^ splitmix64(word));
 }
 
+/// Domain seed shared by source and mapped traversal checksums.
 inline constexpr std::uint64_t k_gpu_source_direct_checksum_seed =
     0x534f555243454450ULL;
 
+/// Stream a presorted source into final dense controls and positions, then verify it in place.
+///
+/// Each control stores one hash and a contiguous 32-bit position interval. Encoded positions are
+/// copied unchanged, and the second traversal must reproduce the source checksum.
+///
+/// @tparam p_minimizer Packed minimizer type exposing `kmer()` and `pos_strand_encoded()`.
+/// @throws gpu_index_direct_fill_invariant On shape, order, coordinate, or checksum mismatch.
 template <class p_minimizer>
 [[nodiscard]] inline gpu_source_direct_materialization_stats
 direct_fill_gpu_minimizer_index_from_presorted_source(
@@ -657,6 +689,12 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
     };
 }
 
+/// Materialize a presorted source directly into its final admitted mapped Vulkan buffers.
+///
+/// The key, preflight, source shape, device UUID, and packed minimizer ABI must agree exactly.
+/// The returned resident owns the buffers and either an exact permit or footprint authority.
+///
+/// @tparam p_minimizer Standard-layout eight-byte packed minimizer with the fixed device ABI.
 template <class p_minimizer>
 [[nodiscard]] inline std::expected<
     gpu_source_direct_materialization_result,
@@ -970,12 +1008,14 @@ materialize_sorted_dense_from_presorted_minimizers(
     };
 }
 
+/// Failures that prevent ownership transfer from a runtime-built GPU index.
 enum class gpu_built_index_adoption_error : std::uint8_t {
     invalid_build,
     missing_ownership,
     stats_mismatch,
 };
 
+/// Return the stable diagnostic name for a built-index adoption failure.
 [[nodiscard]] inline constexpr std::string_view
 gpu_built_index_adoption_error_name(
         gpu_built_index_adoption_error error) noexcept {

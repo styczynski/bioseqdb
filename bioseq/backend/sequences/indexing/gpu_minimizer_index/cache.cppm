@@ -48,17 +48,22 @@ export namespace bioseq::indexing {
 /// Batch/wave-scoped GPU minimizer index cache. Owned by the outer query
 /// batch/segment wave. It uploads each distinct index once, reuses the resident
 /// handle across queries that share it, and evicts LRU when the resident byte
-/// budget is exceeded.
+/// budget is exceeded. Public cache operations serialize through an internal
+/// mutex, while returned resident handles retain their own device allocations.
 class gpu_minimizer_index_cache {
 public:
+    /// Create an empty cache with a resident allocation limit in bytes.
+    /// A zero limit disables byte-budget eviction.
     explicit gpu_minimizer_index_cache(std::uint64_t resident_limit_bytes)
         : resident_limit_bytes_(resident_limit_bytes) {}
 
+    /// Failures that prevent binding one canonical gate identity to the cache.
     enum class gate_bind_error : std::uint8_t {
         cache_not_empty,
         invalid_identity,
         identity_mismatch,
     };
+    /// Failures that prevent adoption of an externally built resident index.
     enum class built_insert_error : std::uint8_t {
         null_handle,
         resident_limit,
@@ -66,12 +71,14 @@ public:
         resident_key_mismatch,
         duplicate_direct_key,
     };
+    /// Failures from lookup of an operation-owned preinserted resident.
     enum class required_preinsert_lookup_error : std::uint8_t {
         invalid_key,
         miss,
         resident_mismatch,
     };
 
+    /// Canonical gate words and digest metadata shared by one query wave.
     struct gate_identity {
         bool enabled = false;
         std::uint32_t word_count = 0;
@@ -83,6 +90,7 @@ public:
         // cannot publish or retrieve an index built for another query wave.
         std::shared_ptr<const std::vector<std::uint32_t>> canonical_words{};
 
+        /// Project cache-owned gate state into the runtime identity type.
         [[nodiscard]] bioseq::gpu::vulkan::gpu_index_gate_identity
         runtime_identity() const noexcept {
             return bioseq::gpu::vulkan::gpu_index_gate_identity{
@@ -95,10 +103,12 @@ public:
             };
         }
 
+        /// Check structural consistency between enabled state, metadata, and canonical words.
         [[nodiscard]] bool is_well_formed() const noexcept {
             return runtime_identity().is_well_formed();
         }
 
+        /// Compare this canonical identity with gate metadata carried by a cache key.
         [[nodiscard]] bool metadata_matches(
             const gpu_minimizer_index_cache_key& key) const noexcept
         {
@@ -106,6 +116,7 @@ public:
                 gpu_index_gate_identity_from_key(key));
         }
 
+        /// Compare gate metadata and, when enabled, the authoritative canonical words.
         [[nodiscard]] bool operator==(const gate_identity& other) const {
             if (enabled != other.enabled || word_count != other.word_count
                 || mask != other.mask || digest_lo != other.digest_lo
@@ -119,6 +130,8 @@ public:
         }
     };
 
+    /// Bind the empty cache to one gate identity for all subsequent operations.
+    /// Rebinding the identical identity is idempotent.
     [[nodiscard]] std::expected<void, gate_bind_error> bind_gate_once(
             gate_identity identity) {
         std::lock_guard<std::mutex> guard(mu_);
@@ -137,6 +150,11 @@ public:
         return {};
     }
 
+    /// Reuse or materialize a resident GPU index for a CPU fragment index.
+    ///
+    /// The returned shared handle owns the device buffers independently of cache eviction.
+    /// When `decline_out` is supplied, expected capacity or admission failures return null and
+    /// populate the decline record. Contract violations still throw a Vulkan runtime error.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> get_or_upload(
         bioseq::gpu::vulkan::runtime& runtime,
         const minimizer_hashmap_fragment_index& idx,
@@ -191,9 +209,10 @@ public:
         return handle;
     }
 
-    /// Insert a GPU-built resident index adopted from a device
-    /// index build) under `key` so the seed stage finds it instead of uploading
-    /// the CPU `minimizer_hashmap_fragment_index`.
+    /// Insert a GPU-built resident index adopted from a device index build under `key`.
+    ///
+    /// The seed stage can then reuse it instead of uploading the CPU
+    /// `minimizer_hashmap_fragment_index`.
     [[nodiscard]] std::expected<void, built_insert_error> insert_built(
         const gpu_minimizer_index_cache_key& key,
         std::shared_ptr<const gpu_resident_minimizer_index> handle)
@@ -234,6 +253,8 @@ public:
     /// This API has no CPU-index argument by construction, so a miss can never
     /// transcode or upload an empty placeholder. Runtime is read-only identity
     /// authority for the buffer owners and selected device UUID.
+    ///
+    /// @return The resident handle, or a typed key, miss, or resident-integrity error.
     [[nodiscard]] std::expected<
         std::shared_ptr<const gpu_resident_minimizer_index>,
         required_preinsert_lookup_error>
@@ -326,6 +347,9 @@ public:
         return resident;
     }
 
+    /// Materialize a prepared host upload and optionally retain it in the cache.
+    ///
+    /// Returns null when memory admission fails or mapped device storage is unavailable.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> insert_upload(
         bioseq::gpu::vulkan::runtime& runtime,
         gpu_minimizer_index_upload&& upload,
@@ -350,6 +374,7 @@ public:
         return handle;
     }
 
+    /// Remove one key from cache accounting without invalidating shared resident handles.
     void erase(const gpu_minimizer_index_cache_key& key) noexcept {
         std::lock_guard<std::mutex> guard(mu_);
         auto found = entries_.find(key);
@@ -360,6 +385,7 @@ public:
         if (pos != lru_.end()) lru_.erase(pos);
     }
 
+    /// Remove every cached entry and release the cache-wide gate binding.
     void clear() noexcept {
         std::lock_guard<std::mutex> guard(mu_);
         entries_.clear();
@@ -368,12 +394,14 @@ public:
         gate_binding_.reset();
     }
 
+    /// Return the allocation bytes attributed to currently cached residents.
     [[nodiscard]] std::uint64_t resident_bytes() const noexcept {
         std::lock_guard<std::mutex> guard(mu_);
         return resident_bytes_;
     }
 
 private:
+    /// Check a key against the canonical gate binding while the cache mutex is held.
     [[nodiscard]] bool key_gate_matches_binding_locked(
         const gpu_minimizer_index_cache_key& key) const noexcept
     {
@@ -389,6 +417,7 @@ private:
             && key.gate_digest_hi == 0u && !key.gate_canonical_words;
     }
 
+    /// Throw when a key does not match the cache's canonical gate binding.
     void validate_key_gate_locked(
         const gpu_minimizer_index_cache_key& key) const
     {
@@ -398,6 +427,7 @@ private:
         }
     }
 
+    /// Sum the resident slot and position allocation sizes with saturation.
     [[nodiscard]] static std::uint64_t handle_resident_bytes(
         const gpu_resident_minimizer_index& handle) noexcept
     {
@@ -406,6 +436,7 @@ private:
             handle.positions.allocation_bytes);
     }
 
+    /// Move an existing key to the most-recently-used end of the LRU list.
     void touch_lru_locked(const gpu_minimizer_index_cache_key& key) {
         auto pos = std::find(lru_.begin(), lru_.end(), key);
         if (pos != lru_.end()) {
@@ -413,6 +444,7 @@ private:
         }
     }
 
+    /// Replace or insert a resident and evict least-recently-used entries to budget.
     void insert_with_eviction_locked(
         const gpu_minimizer_index_cache_key& key,
         const std::shared_ptr<const gpu_resident_minimizer_index>& handle)
@@ -420,7 +452,7 @@ private:
         const std::uint64_t handle_bytes = handle_resident_bytes(*handle);
         // `insert_built()` may publish a replacement under a key that is
         // already resident. Remove the previous accounting and every stale
-        // LRU occurrence before considering the new allocation; otherwise a
+        // LRU occurrence before considering the new allocation. Otherwise a
         // replacement double-counts bytes and can later evict the wrong handle.
         if (auto existing = entries_.find(key); existing != entries_.end()) {
             const std::uint64_t existing_bytes =
@@ -431,11 +463,12 @@ private:
             entries_.erase(existing);
             lru_.remove(key);
         }
-        // A handle larger than the whole budget is used uncached (already
-        // returned to the caller); do not pollute the cache with it.
+        // A handle larger than the whole budget is used uncached after it is
+        // returned to the caller. Do not pollute the cache with it.
         if (resident_limit_bytes_ != 0 && handle_bytes > resident_limit_bytes_) {
             return;
         }
+        // Test whether adding the new allocation would exceed the configured resident budget.
         const auto exceeds_resident_limit = [this, &handle_bytes]() noexcept {
             return resident_limit_bytes_ != 0
                 && (resident_bytes_ > resident_limit_bytes_
@@ -457,6 +490,10 @@ private:
             resident_bytes_, handle_bytes);
     }
 
+    /// Direct-fill a CPU fragment index into admitted mapped Vulkan buffers.
+    ///
+    /// The cache mutex is held by the caller. Expected resource limits return null when a decline
+    /// output is present, while device ABI and fill invariant failures otherwise throw.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> upload_locked_index(
         bioseq::gpu::vulkan::runtime& runtime,
         const minimizer_hashmap_fragment_index& idx,
@@ -484,6 +521,7 @@ private:
         }
         const std::uint64_t max_storage_buffer_range =
             runtime.features().max_storage_buffer_range;
+        // Check both planned device ranges against the selected device limit.
         const auto ranges_fit = [max_storage_buffer_range](
                 const gpu_index_materialization_plan& candidate) noexcept {
             return gpu_index_storage_ranges_fit(
@@ -495,6 +533,7 @@ private:
         if (!ranges_fit(open_plan) && dense_plan) {
             plan = *dense_plan;
         }
+        // Copy the currently selected materialization plan into optional decline diagnostics.
         const auto publish_plan = [&decline_out, &upload_peak, &max_storage_buffer_range](
                                       const gpu_index_materialization_plan& selected) {
             if (decline_out == nullptr)
@@ -734,6 +773,10 @@ private:
         return resident;
     }
 
+    /// Copy a prepared host image into admitted mapped Vulkan buffers.
+    ///
+    /// The cache mutex is held by the caller. The returned handle owns both buffers and its
+    /// admission permit, or is null if reservation or host mapping fails.
     [[nodiscard]] std::shared_ptr<const gpu_resident_minimizer_index> upload_prepared_locked(
         bioseq::gpu::vulkan::runtime& runtime,
         const gpu_minimizer_index_upload& upload,

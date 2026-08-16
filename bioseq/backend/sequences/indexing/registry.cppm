@@ -4,8 +4,8 @@
  *
  * The registry is the substrate the indexes build on. It does not import the
  * index modules. Every TU that instantiates `supported_indexes<...>` must import
- * the index modules whose descriptors it reads (the §7.3 static_assert turns a
- * forgotten import into a diagnosed error). NO_POSTGRES.
+ * the index modules whose descriptors it reads. A static assertion turns a
+ * forgotten import into a diagnosed error. NO_POSTGRES.
  */
 module;
 #include <array>
@@ -530,6 +530,7 @@ struct supported_indexes {
      * @brief Finds the persisted layout of a validated index name.
      * @param name Registered index name
      * @return Persisted layout assigned to the index
+     * @pre `name` identifies an entry returned by `list_types()`
      */
     [[nodiscard]] static constexpr sequence_index_layout layout_of(std::string_view name) {
         constexpr auto k_index_types = list_types();

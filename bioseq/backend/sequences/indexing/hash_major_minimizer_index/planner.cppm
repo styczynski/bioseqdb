@@ -29,17 +29,21 @@ struct canonical_query_hash_view {
     std::uint8_t storage_width_bytes = 0u;
     std::array<std::byte, 32> storage_profile_digest{};
 
+    /// Return the number of canonical hashes in the active width-specific span.
     [[nodiscard]] std::size_t size() const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
             ? values32.size() : values64.size();
     }
 
+    /// Read one canonical hash as a width-independent value.
+    /// @pre `ordinal < size()`.
     [[nodiscard]] std::uint64_t at(std::size_t ordinal) const noexcept {
         return storage_width_bytes == sizeof(std::uint32_t)
             ? static_cast<std::uint64_t>(values32[ordinal])
             : values64[ordinal];
     }
 
+    /// Check that exactly one backing span matches the declared persisted hash width.
     [[nodiscard]] bool storage_matches_width() const noexcept {
         return width_bytes == storage_width_bytes
             && ((storage_width_bytes == sizeof(std::uint32_t)
@@ -48,6 +52,9 @@ struct canonical_query_hash_view {
                     && values32.empty()));
     }
 
+    /// Locate the first canonical hash not less than `hash` in a sorted subrange.
+    /// @pre `first <= last && last <= size()`.
+    /// @return The absolute ordinal in the active span, or `last` when none qualifies.
     [[nodiscard]] std::size_t lower_bound(
             std::size_t first,
             std::size_t last,
@@ -91,6 +98,8 @@ struct canonical_query_hash_image {
     canonical_query_hash_image& operator=(canonical_query_hash_image&&) noexcept =
         default;
 
+    /// Borrow the active canonical hash vector with its authenticated profile digest.
+    /// @return A view valid until this image is moved, mutated, or destroyed.
     [[nodiscard]] canonical_query_hash_view view() const noexcept {
         return std::visit(
             [this](const auto& value) {

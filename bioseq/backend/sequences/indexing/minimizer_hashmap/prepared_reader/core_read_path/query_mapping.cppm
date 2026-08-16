@@ -122,6 +122,7 @@ trait_driven_prepared_query_core<p_traits>::query_index_for_hash_impl_(
             return no_route;
         }
         const std::uint64_t wanted = query_radix_suffix_(narrowed, protocol_query_suffix_bits_);
+        /// Binary-search the selected width's suffix array within one radix bucket.
         const auto search = [&first, &end, &wanted, &hash_probes](const auto* suffixes) noexcept {
             std::size_t lower = first;
             std::size_t upper = end;
@@ -402,7 +403,7 @@ trait_driven_prepared_query_core<p_traits>::initialize_query_protocol(
         if constexpr (p_traits::global_controls_then_positions) {
             // The caller may provide duplicate hashes. Canonicalize into
             // a right-sized temporary image used to build suffixes and
-            // select extents; the 2x reservation covers both vectors at
+            // select extents. The 2x reservation covers both vectors at
             // this peak, and the full image is released before payload.
             if (!query_hashes_are_sorted_unique) {
                 std::vector<hash_type> canonical;

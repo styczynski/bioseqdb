@@ -46,6 +46,7 @@ struct minimizer_hashmap_table_allocation_state {
  */
 template <class p_value>
 struct minimizer_hashmap_table_allocator {
+    /// Element type allocated for the Boost table.
     using value_type = p_value;
     using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::false_type;
@@ -55,15 +56,20 @@ struct minimizer_hashmap_table_allocator {
     minimizer_hashmap_table_allocation_state* state = nullptr;
 
     minimizer_hashmap_table_allocator() noexcept = default;
+    /// Bind allocations to one table-local live and peak byte counter.
     explicit minimizer_hashmap_table_allocator(
             minimizer_hashmap_table_allocation_state* state_) noexcept
         : state(state_) {}
 
+    /// Rebind an allocator while preserving its shared accounting state.
+    /// @tparam p_other_value Source allocator element type.
     template <class p_other_value>
     minimizer_hashmap_table_allocator(
             const minimizer_hashmap_table_allocator<p_other_value>& other) noexcept
         : state(other.state) {}
 
+    /// Allocate `count` elements and update live and peak byte accounting.
+    /// @throws std::bad_alloc When byte accounting overflows or allocation fails.
     [[nodiscard]] p_value* allocate(std::size_t count) {
         if (state == nullptr
             || count > (std::numeric_limits<std::uint64_t>::max)()
@@ -87,6 +93,7 @@ struct minimizer_hashmap_table_allocator {
         }
     }
 
+    /// Deallocate `count` elements and subtract their bytes from live accounting.
     void deallocate(p_value* allocation, std::size_t count) noexcept {
         const std::uint64_t bytes =
             static_cast<std::uint64_t>(count) * sizeof(p_value);
@@ -97,6 +104,8 @@ struct minimizer_hashmap_table_allocator {
         }
     }
 
+    /// Compare allocator identity by the shared accounting state address.
+    /// @tparam p_other_value Compared allocator element type.
     template <class p_other_value>
     friend struct minimizer_hashmap_table_allocator;
 
@@ -109,8 +118,10 @@ struct minimizer_hashmap_table_allocator {
 
 /** @brief Owns the transient hash table and its allocation accounting. */
 struct minimizer_hashmap_fragment_index_table {
+    /// Accounting allocator used by the pinned Boost flat-map implementation.
     using allocator_type = minimizer_hashmap_table_allocator<
         std::pair<const std::uint64_t, std::uint64_t>>;
+    /// Transient hash-to-packed-position-range table type.
     using table_type = boost::unordered_flat_map<
         std::uint64_t,
         std::uint64_t,
@@ -121,6 +132,7 @@ struct minimizer_hashmap_fragment_index_table {
     minimizer_hashmap_table_allocation_state allocation;
     table_type table;
 
+    /// Construct an empty table bound to its own allocation counters.
     minimizer_hashmap_fragment_index_table()
         : allocation{},
           table(
@@ -129,12 +141,14 @@ struct minimizer_hashmap_fragment_index_table {
               std::equal_to<std::uint64_t>{},
               allocator_type{&allocation}) {}
 
+    /// Copy table contents into fresh allocation-accounting state.
     minimizer_hashmap_fragment_index_table(
             const minimizer_hashmap_fragment_index_table& other)
         : minimizer_hashmap_fragment_index_table() {
         table = other.table;
     }
 
+    /// Replace table contents while retaining this table's accounting state.
     minimizer_hashmap_fragment_index_table& operator=(
             const minimizer_hashmap_fragment_index_table& other) {
         if (this != &other) table = other.table;
@@ -255,6 +269,7 @@ struct kernel_sink_adapter {
     static_assert(std::is_standard_layout_v<sketch_type>);
     static_assert(std::same_as<sketch_type::storage_type, std::uint64_t>);
 
+    /// Bind collector callbacks to one fixed-capacity typed output batch.
     explicit kernel_sink_adapter(
             void* context,
             exact_simd_index_append_records records_callback,
@@ -323,6 +338,7 @@ struct kernel_sink_adapter {
         }
         auto* records = std::launder(
             reinterpret_cast<sketch_type*>(self.batch.data()));
+        // Destroy initialized records and release the single acquired batch.
         const auto destroy_records =
             [&self, records, initialized]() noexcept {
                 std::destroy_n(records, initialized);

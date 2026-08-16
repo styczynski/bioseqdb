@@ -55,9 +55,13 @@ template <class p_hash, bool p_flat_position_image> struct prepared_query_record
  * @tparam p_hash Hash value type.
  */
 template <class p_hash> struct prepared_query_record<p_hash, true> {
+    /// Total authenticated occurrences across all selected extents.
     std::uint64_t global_occurrence_count = 0;
+    /// Start ordinal in the shared global-position image.
     std::uint64_t global_position_offset = 0;
+    /// Number of retained positions written for this query.
     std::uint64_t global_positions_written = 0;
+    /// Whether the shared image retains every counted position.
     bool positions_complete = true;
 };
 
@@ -66,11 +70,17 @@ template <class p_hash> struct prepared_query_record<p_hash, true> {
  * @tparam p_hash Hash value type.
  */
 template <class p_hash> struct prepared_query_record<p_hash, false> {
+    /// Exact query hash represented by this record.
     p_hash hash = 0;
+    /// Total authenticated occurrences across all selected extents.
     std::uint64_t global_occurrence_count = 0;
+    /// Reserved offset for layouts that share a position image.
     std::uint64_t global_position_offset = 0;
+    /// Number of retained positions written for this query.
     std::uint64_t global_positions_written = 0;
+    /// Whether all counted positions are present in `positions`.
     bool positions_complete = true;
+    /// Positions owned directly by this query record.
     std::vector<std::uint64_t> positions;
 };
 
@@ -123,6 +133,7 @@ struct prepared_query_scalar_array {
     std::size_t count = 0u;
     prepared_query_scalar_width width = prepared_query_scalar_width::u8;
 
+    /// Release every width-specific allocation and restore the empty u8 state.
     void reset() noexcept {
         u8.reset();
         u16.reset();
@@ -132,11 +143,13 @@ struct prepared_query_scalar_array {
         width = prepared_query_scalar_width::u8;
     }
 
+    /// Return the exact bytes owned by the selected scalar allocation.
     [[nodiscard]] std::uint64_t capacity_bytes() const noexcept {
         return bioseq::common::saturating_mul(static_cast<std::uint64_t>(count),
                                               static_cast<std::uint8_t>(width));
     }
 
+    /// Replace storage with an optionally zero-filled array of the requested width.
     void allocate(prepared_query_scalar_width wanted_width,
                   std::size_t wanted_count,
                   bool zero_initialize) {
@@ -169,6 +182,7 @@ struct prepared_query_scalar_array {
         }
     }
 
+    /// Return one widened scalar, or zero when the index is out of range.
     [[nodiscard]] std::uint64_t get(std::size_t index) const noexcept {
         if (index >= count)
             return 0u;
@@ -185,6 +199,7 @@ struct prepared_query_scalar_array {
         return 0u;
     }
 
+    /// Store one scalar when its index and value fit the selected representation.
     [[nodiscard]] bool set(std::size_t index, std::uint64_t value) noexcept {
         if (index >= count || value > prepared_query_scalar_max(width)) {
             return false;
@@ -206,6 +221,7 @@ struct prepared_query_scalar_array {
         return false;
     }
 
+    /// Add without overflowing the selected scalar width.
     [[nodiscard]] bool add(std::size_t index, std::uint64_t delta) noexcept {
         if (index >= count)
             return false;
@@ -214,17 +230,20 @@ struct prepared_query_scalar_array {
         return delta <= maximum - old_value && set(index, old_value + delta);
     }
 
+    /// Increment one scalar when the result remains representable.
     [[nodiscard]] bool increment(std::size_t index) noexcept {
         return add(index, 1u);
     }
 };
 
+/// Wire operations for the segment-local grouped-SoA representation.
 template <>
 struct prepared_query_wire_ops<
     codec_traits<minimizer_generation_layout::grouped_soa_segment_local>> {
     using traits = codec_traits<minimizer_generation_layout::grouped_soa_segment_local>;
     using control_type = traits::control_type;
 
+    /// Decode and validate a complete grouped-SoA control extent.
     [[nodiscard]] static std::expected<std::vector<control_type>,
                                        minimizer_generation_encoding_error>
     decode_controls(std::span<const std::byte> bytes,
@@ -233,16 +252,20 @@ struct prepared_query_wire_ops<
         return decode_grouped_soa_controls(bytes, entry, profile);
     }
 
+    /// Return the exact hash represented by a decoded control.
     [[nodiscard]] static std::uint64_t hash(const control_type& control) noexcept {
         return control.hash;
     }
+    /// Return the inclusive local position ordinal for a decoded control.
     [[nodiscard]] static std::uint64_t position_begin(const control_type& control) noexcept {
         return control.position_begin;
     }
+    /// Return the exclusive local position ordinal for a decoded control.
     [[nodiscard]] static std::uint64_t position_end(const control_type& control) noexcept {
         return control.position_end;
     }
 
+    /// Decode one segment-local position as global `(bp << 1) | strand`.
     [[nodiscard]] static std::expected<std::uint64_t, minimizer_generation_encoding_error>
     decode_position(std::span<const std::byte> bytes,
                     const minimizer_position_segment_bounds& core,
@@ -283,6 +306,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
 
     using query_record = prepared_query_record<hash_type, p_traits::global_controls_then_positions>;
 
+    /// Query route and position boundary retained for a selected dense control.
     struct dense_selected_control {
         std::size_t query_index = no_route;
         std::uint64_t position_end = 0;
@@ -293,9 +317,11 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                                                 std::uint64_t,
                                                 dense_selected_control>;
 
+    /// Per-extent selected controls for layouts with direct query ownership.
     struct dense_selected_control_state {
         std::vector<dense_selected_control> controls;
     };
+    /// Narrow control-boundary image for a grouped-SoA extent.
     struct exact_selected_control_state {
         // minimizer-fragment grouped-SoA extents remain independent.  Retain each fragment's
         // authenticated control boundaries at the narrowest width selected by
@@ -310,13 +336,16 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
 
     static constexpr std::uint32_t no_narrow_route = (std::numeric_limits<std::uint32_t>::max)();
 
+    /// Sparse control ordinal to compact query-index mapping.
     struct sparse_selected_route {
         std::uint32_t control_ordinal = 0;
         std::uint32_t query_index = no_narrow_route;
     };
     static_assert(sizeof(sparse_selected_route) == 8u);
 
+    /// Empty route owner for layouts embedding routes in selected controls.
     struct no_selected_routes {};
+    /// Dense or sparse route image selected from observed control density.
     struct adaptive_selected_routes {
         std::unique_ptr<std::uint32_t[]> dense_routes;
         std::unique_ptr<sparse_selected_route[]> sparse_routes;
@@ -328,6 +357,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                                                     adaptive_selected_routes,
                                                     no_selected_routes>;
 
+    /// Decode progress and owned routing state for one selected directory extent.
     struct selected_extent {
         [[no_unique_address]] selected_control_state control_state;
         [[no_unique_address]] selected_route_state route_state;
@@ -347,6 +377,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         std::uint64_t owned_capacity_bytes = 0;
     };
 
+    /// Checksum and chunk-order state for one in-progress extent.
     struct extent_session {
         std::size_t entry_index = no_route;
         bool positions = false;
@@ -368,7 +399,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     // grouped-SoA keeps exact target-global counts at the narrowest width
     // selected by the authenticated manifest position_count. Runtime max-occ is not
     // applied until every control extent has contributed. Dense offsets make
-    // the hot positive lookup one direct load; UINT64_MAX means pruned.
+    // the hot positive lookup one direct load. UINT64_MAX means pruned.
     prepared_query_scalar_array protocol_query_exact_counts_;
     std::unique_ptr<std::uint64_t[]> protocol_query_position_offsets_;
     std::size_t protocol_query_position_offset_count_ = 0u;
@@ -398,6 +429,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     grouped_soa_query_reader_options protocol_test_options_{};
     grouped_soa_query_admission_stats protocol_admission_failure_stats_{};
 
+    /// Internal counters describing prepared-reader allocation and routing work.
     struct protocol_memory_stats {
         std::uint64_t capacity_accounting_passes = 0;
         std::uint64_t global_position_storage_preparations = 0;
@@ -417,6 +449,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     };
     mutable protocol_memory_stats protocol_memory_stats_{};
 
+    /// Return the number of retained controls in one selected extent.
     [[nodiscard]] static std::size_t
     selected_control_count_(const selected_extent& extent) noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
@@ -426,6 +459,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     }
 
+    /// Return a selected control's exclusive local position ordinal.
     [[nodiscard]] static std::uint64_t selected_position_end_(const selected_extent& extent,
                                                               std::size_t control_index) noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
@@ -435,6 +469,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     }
 
+    /// Return heap bytes owned below one selected extent.
     [[nodiscard]] static std::uint64_t
     selected_extent_control_capacity_bytes_(const selected_extent& extent) noexcept {
         using bioseq::common::saturating_add;
@@ -461,6 +496,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return bytes;
     }
 
+    /// Return the number of active query-state records.
     [[nodiscard]] std::size_t protocol_query_state_count_() const noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_count_;
@@ -468,6 +504,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return protocol_query_records_.size();
     }
 
+    /// Return the allocated query-state record count.
     [[nodiscard]] std::size_t protocol_query_state_capacity_() const noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_exact_counts_.count;
@@ -475,6 +512,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return protocol_query_records_.capacity();
     }
 
+    /// Return bytes owned by query counts, offsets, and write cursors.
     [[nodiscard]] std::uint64_t protocol_query_state_capacity_bytes_() const noexcept {
         if constexpr (!p_traits::global_controls_then_positions) {
             return bioseq::common::saturating_mul(
@@ -491,6 +529,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return saturating_add(bytes, protocol_query_written_.capacity_bytes());
     }
 
+    /// Return bytes owned by the active query-hash representation.
     [[nodiscard]] std::uint64_t protocol_query_hash_capacity_bytes_() const noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
             return protocol_query_suffixes_.capacity_bytes();
@@ -499,6 +538,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
             static_cast<std::uint64_t>(protocol_query_hashes_.capacity()), sizeof(hash_type));
     }
 
+    /// Return the authenticated occurrence count accumulated for one query.
     [[nodiscard]] std::uint64_t
     protocol_query_exact_count_(std::size_t query_index) const noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
@@ -509,6 +549,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                    : 0u;
     }
 
+    /// Add to one grouped-SoA query count without exceeding manifest bounds.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     add_protocol_query_exact_count_(std::size_t query_index, std::uint64_t delta) noexcept {
         if constexpr (!p_traits::global_controls_then_positions) {
@@ -521,6 +562,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return {};
     }
 
+    /// Return whether one query owns a range in the final position image.
     [[nodiscard]] bool protocol_query_retained_(std::size_t query_index) const noexcept {
         return query_index < protocol_query_position_offset_count_ &&
                protocol_query_position_offsets_ &&
@@ -547,6 +589,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
         std::uint64_t bytes = this->core_owned_capacity_bytes();
+        /// Add one capacity-times-width owner to the oracle total.
         const auto add = [&bytes](std::size_t capacity, std::size_t width) noexcept {
             bytes =
                 saturating_add(bytes, saturating_mul(static_cast<std::uint64_t>(capacity), width));
@@ -572,10 +615,12 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return bytes;
     }
 
+    /// Return the constant-time cached total of protocol-owned bytes.
     [[nodiscard]] std::uint64_t protocol_owned_capacity_bytes() const noexcept {
         return protocol_owned_bytes_.total_bytes;
     }
 
+    /// Replace one ledger component while preserving an overflow-checked total.
     [[nodiscard]] bool replace_ledger_field_(std::uint64_t& field,
                                              std::uint64_t new_bytes) noexcept {
         const std::uint64_t old_bytes = field;
@@ -586,6 +631,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return true;
     }
 
+    /// Reconcile one extent's nested allocation against the aggregate ledger.
     [[nodiscard]] bool replace_selected_extent_owner_(selected_extent& extent,
                                                       std::uint64_t new_bytes) noexcept {
         if (extent.owned_capacity_bytes > protocol_owned_bytes_.selected_extent_owner_bytes) {
@@ -604,21 +650,25 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return true;
     }
 
+    /// Compare the constant-time ledger with a full allocation-owner walk.
     [[nodiscard]] bool protocol_ledger_matches_oracle_() const noexcept {
         return protocol_owned_bytes_.field_sum_holds() &&
                protocol_owned_capacity_bytes_oracle_() == protocol_owned_capacity_bytes();
     }
 
+    /// Releases all protocol storage if a permit growth is not reconciled.
     class permit_growth_guard {
       private:
         trait_driven_prepared_query_core* owner_ = nullptr;
         bool committed_ = false;
 
       public:
+        /// Begin guarding a growth transaction for one prepared reader.
         explicit permit_growth_guard(trait_driven_prepared_query_core& owner) noexcept
             : owner_(&owner) {}
         permit_growth_guard(const permit_growth_guard&) = delete;
         permit_growth_guard& operator=(const permit_growth_guard&) = delete;
+        /// Roll back protocol ownership after an uncommitted growth attempt.
         ~permit_growth_guard() {
             if (!committed_ && owner_ != nullptr && owner_->permit_) {
                 // A failed allocation/reconciliation cannot leave newly
@@ -629,12 +679,14 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                 owner_->protocol_release_noexcept();
             }
         }
+        /// Grow the active permit to the projected total.
         [[nodiscard]] bool
         grow(std::uint64_t projected,
              bioseq::parallelism::memory_admission_failure* failure = nullptr) noexcept {
             return projected != (std::numeric_limits<std::uint64_t>::max)() &&
                    owner_->permit_.grow_to(projected, failure);
         }
+        /// Shrink the permit to actual ownership and commit the transaction.
         [[nodiscard]] bool reconcile() noexcept {
             const std::uint64_t actual = owner_->protocol_owned_capacity_bytes();
             if (actual == (std::numeric_limits<std::uint64_t>::max)() ||
@@ -647,6 +699,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     };
 
+    /// Release control scratch and remove it from the ownership ledger.
     [[nodiscard]] bool release_control_scratch_noexcept_() noexcept {
         {
             std::vector<std::byte> empty;
@@ -655,6 +708,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return replace_ledger_field_(protocol_owned_bytes_.control_scratch_bytes, 0u);
     }
 
+    /// Destroy every protocol-owned allocation before releasing the core permit.
     void protocol_release_noexcept() noexcept {
         protocol_session_.reset();
         {
@@ -705,6 +759,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return std::unexpected(protocol_failure_);
     }
 
+    /// Mark a moved-from reader as permanently failed without releasing transferred owners.
     void mark_protocol_moved_from() noexcept {
         protocol_session_.reset();
         std::vector<std::byte>{}.swap(protocol_control_scratch_);
@@ -730,6 +785,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         protocol_failure_ = minimizer_generation_encoding_error::row_order;
     }
 
+    /// Increment a diagnostic counter and record saturation.
     void increment_memory_stats_(std::uint64_t& counter) const noexcept {
         if (counter == (std::numeric_limits<std::uint64_t>::max)()) {
             protocol_memory_stats_.saturated = true;
@@ -738,6 +794,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     }
 
+    /// Add to a diagnostic counter with saturating semantics.
     void add_memory_stats_(std::uint64_t& counter, std::uint64_t delta) const noexcept {
         if (counter > (std::numeric_limits<std::uint64_t>::max)() - delta) {
             counter = (std::numeric_limits<std::uint64_t>::max)();
@@ -747,6 +804,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         }
     }
 
+    /// Consume a configured deterministic failure for one admission substage.
     [[nodiscard]] bool
     inject_admission_failure_(grouped_soa_query_admission_stage substage) noexcept {
         if constexpr (!p_traits::global_controls_then_positions) {
@@ -759,6 +817,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
         return true;
     }
 
+    /// Freeze the first admission failure with its live ownership snapshot.
     void capture_admission_failure_(
         grouped_soa_query_admission_stage substage,
         std::uint64_t projected_bytes,
@@ -837,6 +896,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     prepare_global_position_storage();
 
+    /// Target mean query count per high-bit radix bucket.
     static constexpr std::size_t query_radix_target_mean_ = 4u;
 
     /// Describes the admitted high-bit query directory and retained suffix width.
@@ -865,6 +925,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     [[nodiscard]] std::size_t
     query_index_for_hash_impl_(std::uint64_t hash, std::uint32_t* hash_probes) const noexcept;
 
+    /// Resolve one prepared query hash without collecting probe statistics.
     [[nodiscard]] std::size_t query_index_for_hash(std::uint64_t hash) const noexcept;
 
     /// Resolves a control hash and reports its exact-route probe count.
@@ -881,6 +942,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     /// Advances the physical reader across control and position stages.
     void advance_physical_cursor() noexcept;
 
+    /// Validate and admit immutable generation identity and copied directory state.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     initialize_identity_core(bioseq::parallelism::memory_admission_controller& admission,
                              const minimizer_generation_head& head,
@@ -890,8 +952,10 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                              std::span<const std::byte> encoded_directory,
                              std::uint64_t additional_logical_bytes = 0);
 
+    /// Return an already canonical scalar query hash.
     [[nodiscard]] static constexpr std::uint64_t query_hash_value_(std::uint64_t hash) noexcept;
 
+    /// Extract the canonical hash from one minimizer sketch record.
     [[nodiscard]] static std::uint64_t
     query_hash_value_(const minimap_sketch_data& minimizer) noexcept;
 
@@ -935,6 +999,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     accept_protocol_row_impl(const minimizer_generation_row_view& row,
                              bool row_checksum_prevalidated);
 
+    /// Validate the checksum of a callback-scoped row and consume it in physical order.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row(const minimizer_generation_row_view& row);
 
@@ -959,6 +1024,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     /// Counts retained positions across the active storage layout.
     [[nodiscard]] std::size_t protocol_retained_position_count() const noexcept;
 
+    /// Return the first captured admission-failure snapshot.
     [[nodiscard]] const grouped_soa_query_admission_stats&
     protocol_admission_failure_stats() const noexcept;
 };

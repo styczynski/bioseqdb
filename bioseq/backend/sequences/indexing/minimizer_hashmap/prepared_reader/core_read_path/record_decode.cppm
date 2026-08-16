@@ -50,7 +50,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
     std::uint64_t transient = bioseq::common::saturating_mul(
         entry.control_element_count, sizeof(typename wire_ops::control_type));
     // Keep every boundary in an intersected extent for strict per-control
-    // position-order validation. grouped-SoA stores query routes sparsely;
+    // position-order validation. grouped-SoA stores query routes sparsely.
     // admit the conservative all-routes peak before the one decode pass.
     const std::uint64_t retained_control_count =
         selected_index == no_route ? 0u : entry.control_element_count;
@@ -73,6 +73,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
     const std::uint64_t additional = bioseq::common::saturating_add(transient, retained);
     const std::uint64_t transient_headroom = bioseq::common::saturating_mul(
         transient, bioseq::parallelism::k_vector_preallocation_headroom_factor);
+    /// Select exact-array or vector-growth headroom for retained control state.
     const std::uint64_t retained_headroom = [&retained]() noexcept {
         if constexpr (p_traits::global_controls_then_positions) {
             // grouped-SoA ends and route images are exact arrays. Their
@@ -124,6 +125,7 @@ trait_driven_prepared_query_core<p_traits>::observe_control_extent(
                                    true);
         return std::unexpected(minimizer_generation_encoding_error::admission);
     }
+    /// Decode controls and publish their query routes as one allocation transaction.
     const auto decoded_result = [this, &bytes, &entry, &selected_index, &projected, &headroom]()
         -> std::expected<void, minimizer_generation_encoding_error> {
         try {

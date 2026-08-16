@@ -370,6 +370,7 @@ receive_grouped_soa_plan_event(void* context, const canonical_minimizer_event& e
 }
 
 /// Check that replay retains the planned scheme and producer identity.
+/// @tparam p_producer Replayable canonical event source.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline bool producer_identity_matches(const p_producer& producer,
                                                     minimizer_scheme_identity scheme,
@@ -938,6 +939,7 @@ struct grouped_soa_position_emit_pass {
 /// Replays planned control and position extents in payload order.
 struct grouped_soa_emit_pass {
     /// Emit both payload planes and return the ordered row-checksum digest.
+    /// @tparam p_producer Replayable canonical event source.
     template <grouped_soa_event_producer p_producer>
     [[nodiscard]] static std::expected<std::uint64_t, minimizer_generation_encoding_error>
     run(p_producer& producer,
@@ -1022,6 +1024,7 @@ struct grouped_soa_emit_pass {
 };
 
 /// Plan grouped-SoA geometry by replaying a stable producer.
+/// @tparam p_producer Replayable canonical event source.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<grouped_soa_generation_plan, minimizer_generation_encoding_error>
 plan_grouped_soa_minimizer_generation(p_producer& producer,
@@ -1132,6 +1135,7 @@ plan_grouped_soa_minimizer_generation(p_producer& producer,
 }
 
 /// Emit a planned grouped-SoA payload through the selected sink.
+/// @tparam p_producer Replayable canonical event source.
 template <grouped_soa_event_producer p_producer>
 [[nodiscard]] inline std::expected<std::uint64_t, minimizer_generation_encoding_error>
 emit_grouped_soa_minimizer_generation(p_producer& producer,

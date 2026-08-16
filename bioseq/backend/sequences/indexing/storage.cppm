@@ -464,6 +464,7 @@ struct crc64_ecma182_accumulator {
     } else {
         std::array<std::byte, 28> encoded{};
         std::size_t offset = 0u;
+        // Appends one fixed-width field to the authenticated row prefix.
         const auto append_little_endian =
             [&encoded, &offset]<class p_unsigned_integer>(p_unsigned_integer input) {
                 for (std::size_t byte = 0u; byte < sizeof(p_unsigned_integer); ++byte) {
@@ -720,16 +721,19 @@ concept index_chunk_reader_fn = requires (
 
 /** @brief Verifies the unqualified range callback signature. */
 struct index_chunk_range_probe {
+    /// @brief Accepts one transient unqualified chunk payload.
     void operator()(index_sub_key_t, const char*, std::size_t) const noexcept {}
 };
 
 /** @brief Verifies the qualified range callback signature. */
 struct index_qualified_chunk_range_probe {
+    /// @brief Accepts one transient chunk payload with its persisted address.
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
 
 /** @brief Verifies the sub-key visitor signature. */
 struct index_sub_key_probe {
+    /// @brief Accepts one logical persisted sub-key.
     void operator()(index_sub_key_t) const noexcept {}
 };
 
@@ -739,6 +743,7 @@ struct index_sub_key_probe {
  */
 template <class p_value>
 struct index_chunk_writer_probe {
+    /// @brief Accepts one writable typed chunk buffer and returns its visit ordinal.
     std::size_t operator()(
             std::size_t, p_value*, std::size_t) const noexcept {
         return std::size_t{0};
@@ -747,11 +752,16 @@ struct index_chunk_writer_probe {
 
 /** @brief Verifies the merged-position batch callback signature. */
 struct index_merge_batch_probe {
+    /// @brief Accepts one chronological batch from the run merger.
     void operator()(std::span<const std::uint64_t>) const noexcept {}
 };
 
 /** @brief Verifies the external-run merge callback signature. */
 struct index_merge_runs_probe {
+    /**
+     * @brief Traverses every batch in one merged hash-position range.
+     * @tparam p_positions Merged-position range supplied by storage
+     */
     template <class p_positions>
     void operator()(std::uint64_t, p_positions&& positions) const {
         (void)positions.total_count();
@@ -761,6 +771,10 @@ struct index_merge_runs_probe {
 
 /** @brief Verifies the table-storage sequence loader signature. */
 struct index_sequence_loader_probe {
+    /**
+     * @brief Accepts one lazy sequence and its table-local coordinates.
+     * @tparam p_lazy_sequence Lazy sequence type supplied by storage
+     */
     template <class p_lazy_sequence>
     void operator()(
             p_lazy_sequence&, std::size_t, std::size_t) const noexcept {}
@@ -800,7 +814,7 @@ constexpr inline bool is_index_chunked_storage_for_v<
             -> std::same_as<void>;
         { s.clear_entity()                        } -> std::same_as<void>;
         { s.clear(std::string_view{})             } -> std::same_as<void>;
-        // EXTERNAL-SORT SPILL (the §10.4 minimizers_per_sequence build).
+        // External sorting retains admitted runs until the merge completes.
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.spill_sorted_run_owned_admitted(

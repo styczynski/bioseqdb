@@ -40,9 +40,13 @@ export namespace bioseq::indexing {
 
 /// Decoded grouped-SoA control with its half-open position interval.
 struct grouped_soa_decoded_control {
+    /// Minimizer hash represented by this control.
     std::uint64_t hash = 0;
+    /// Inclusive ordinal into the extent's decoded position array.
     std::uint64_t position_begin = 0;
+    /// Exclusive ordinal into the extent's decoded position array.
     std::uint64_t position_end = 0;
+    /// Occurrence count capped at the persisted profile limit plus one.
     std::uint64_t saturated_count = 0;
 
     [[nodiscard]] bool operator==(const grouped_soa_decoded_control&) const = default;
@@ -153,16 +157,22 @@ struct grouped_soa_query_admission_stats {
 /// this at `none`. Tests select one exact substage without attempting a huge
 /// allocation or depending on an operating-system overcommit policy.
 struct grouped_soa_query_reader_options {
+    /// Admission substage at which tests request a deterministic failure.
     grouped_soa_query_admission_stage fail_admission_substage =
         grouped_soa_query_admission_stage::none;
 };
 
 /// Exact reservation and ownership plan for the retained position image.
 struct grouped_soa_position_image_plan {
+    /// Number of decoded positions to retain.
     std::uint64_t retained_position_count = 0;
+    /// Exact bytes required by the final position array.
     std::uint64_t retained_position_bytes = 0;
+    /// Temporary allocation headroom beyond the exact array bytes.
     std::uint64_t allocation_headroom_bytes = 0;
+    /// Bytes already owned before allocating the position image.
     std::uint64_t owned_capacity_bytes = 0;
+    /// Permit size required after the final allocation.
     std::uint64_t projected_bytes = 0;
 };
 
@@ -171,28 +181,42 @@ struct grouped_soa_position_image_plan {
 /// allocation owner, and `total_bytes` is updated in constant time whenever
 /// that owner changes.
 struct protocol_owned_bytes_ledger {
+    /// Encoded and decoded directory bytes.
     std::uint64_t directory_bytes = 0;
+    /// Compact query-hash image bytes.
     std::uint64_t query_hash_bytes = 0;
+    /// Compact per-query state bytes.
     std::uint64_t query_record_bytes = 0;
+    /// High-bit radix-offset bytes.
     std::uint64_t radix_offset_bytes = 0;
+    /// Final decoded global-position bytes.
     std::uint64_t global_position_bytes = 0;
+    /// Directory-ordinal routing map bytes.
     std::uint64_t ordinal_map_bytes = 0;
+    /// Selected-extent vector bytes.
     std::uint64_t selected_extent_vector_bytes = 0;
+    /// Selected-control owner bytes.
     std::uint64_t selected_extent_owner_bytes = 0;
+    /// Per-query position-offset bytes.
     std::uint64_t query_record_position_bytes = 0;
+    /// Active control-payload scratch bytes.
     std::uint64_t control_scratch_bytes = 0;
+    /// Bytes retained by an in-progress row session.
     std::uint64_t active_session_bytes = 0;
+    /// Cached sum of every named owner.
     std::uint64_t total_bytes = 0;
 
     protocol_owned_bytes_ledger() = default;
     protocol_owned_bytes_ledger(const protocol_owned_bytes_ledger&) = default;
     protocol_owned_bytes_ledger& operator=(const protocol_owned_bytes_ledger&) = default;
 
+    /// Transfer the ledger and clear the source accounting state.
     protocol_owned_bytes_ledger(protocol_owned_bytes_ledger&& other) noexcept
         : protocol_owned_bytes_ledger(static_cast<const protocol_owned_bytes_ledger&>(other)) {
         other.reset();
     }
 
+    /// Replace this ledger by transfer and clear the source accounting state.
     protocol_owned_bytes_ledger& operator=(protocol_owned_bytes_ledger&& other) noexcept {
         if (this != &other) {
             *this = static_cast<const protocol_owned_bytes_ledger&>(other);
@@ -284,8 +308,11 @@ plan_grouped_soa_position_image(std::uint64_t retained_position_count,
 }
 namespace minimizer_prepared_reader_detail {
 
+/// Defines persisted scalar and ordering properties for one storage layout.
+/// @tparam p_layout Persisted generation layout represented by the traits.
 template <minimizer_generation_layout p_layout> struct codec_traits;
 
+/// Traits for the segment-local grouped-SoA image.
 template <> struct codec_traits<minimizer_generation_layout::grouped_soa_segment_local> {
     static constexpr minimizer_generation_layout layout =
         minimizer_generation_layout::grouped_soa_segment_local;
@@ -298,6 +325,7 @@ template <> struct codec_traits<minimizer_generation_layout::grouped_soa_segment
 /// Shared move-only admitted identity/directory owner used by both prepared
 /// grouped readers. codec_traits is the storage-layout authority. Callers
 /// cannot decode a directory under a different layout and relabel the facade.
+/// @tparam p_traits Layout traits controlling admission and validation.
 template <class p_traits> class admitted_prepared_reader_core {
   protected:
     bioseq::parallelism::memory_permit permit_{};
@@ -315,6 +343,10 @@ template <class p_traits> class admitted_prepared_reader_core {
     admitted_prepared_reader_core(const admitted_prepared_reader_core&) = delete;
     admitted_prepared_reader_core& operator=(const admitted_prepared_reader_core&) = delete;
 
+    /// Validate identity and metadata, reserve ownership, and install a copied directory.
+    ///
+    /// The destination must be fresh. Failure leaves it uninitialized and releases
+    /// every temporary permit and allocation.
     [[nodiscard]] static std::expected<void, minimizer_generation_encoding_error>
     begin_admitted_core(
         admitted_prepared_reader_core& destination,
@@ -383,10 +415,12 @@ template <class p_traits> class admitted_prepared_reader_core {
         return {};
     }
 
+    /// Return bytes owned by the encoded and decoded directory.
     [[nodiscard]] std::uint64_t core_owned_capacity_bytes() const noexcept {
         return directory_.owned_capacity_bytes();
     }
 
+    /// Release the directory before returning its reservation to the controller.
     void release_core_noexcept() noexcept {
         directory_ = grouped_soa_directory_view{};
         permit_.release();

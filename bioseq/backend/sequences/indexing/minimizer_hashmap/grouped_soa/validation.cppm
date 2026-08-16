@@ -36,7 +36,9 @@ export namespace bioseq::indexing {
 
 /// Half-open logical-rank bounds for one persisted position segment.
 struct minimizer_position_segment_bounds {
+    /// Inclusive segment start in global base-pair coordinates.
     std::uint64_t begin_bp = 0u;
+    /// Exclusive segment end in global base-pair coordinates.
     std::uint64_t end_bp = 0u;
 
     [[nodiscard]] bool operator==(const minimizer_position_segment_bounds&) const = default;

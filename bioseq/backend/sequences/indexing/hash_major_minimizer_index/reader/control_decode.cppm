@@ -30,6 +30,10 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 
+/// Consume one authorized control block in source order and select matching query hashes.
+///
+/// The callback verifies directory authority, block authentication, count accounting, and
+/// monotone hash order before it records posting offsets. Any mismatch is latched in `opaque`.
 [[nodiscard]] inline bool hash_major_minimizer_selective_reader::consume_control_block_(
     void* opaque, std::uint32_t range_ordinal, std::span<const std::byte> encoded_control) {
     using namespace hash_major_minimizer_detail;

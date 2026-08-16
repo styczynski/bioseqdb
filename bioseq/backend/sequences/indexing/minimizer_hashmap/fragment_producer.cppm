@@ -69,7 +69,8 @@ struct minimizer_assembly_scratch {
 // ---- shared serialized-index walkers -------------------------------------
 
 /// Walk one persisted wire blob and emit each key/position pair.
-template <class p_function> // p_function: (uint64 kmer, uint64 encoded_pos) -> void
+/// @tparam p_function Callable accepting `(hash, encoded_position)`.
+template <class p_function>
 void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& emit) {
     using header = minimizer_hashmap_fragment_index::encoded_header;
     using bucket_record = minimizer_hashmap_fragment_index::encoded_bucket;
@@ -105,8 +106,9 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
 }
 
 /// Walk one persisted wire blob and emit each complete hash bucket.
-template <class p_function> // p_function: (uint64 kmer, uint32 pos_count, const uint64* gpos) ->
-                            // void
+/// The callback receives a pointer into `pos_scratch` that remains valid until the next bucket.
+/// @tparam p_function Callable accepting `(hash, position_count, positions)`.
+template <class p_function>
 void wire_for_each_bucket(const char* blob,
                           std::size_t blob_bytes,
                           std::vector<std::uint64_t>& pos_scratch,
@@ -302,18 +304,21 @@ class minimizer_fragment_generation_execution_receipt {
     }
 
   private:
+    /// Check stable backend, scheme, target, and parameter identity fields.
     [[nodiscard]] bool common_identity_accepted_() const noexcept {
         return backend_bound && !saturated && target_length != 0u && window_size != 0u &&
                kmer_size != 0u &&
                minimizer_scheme == minimizer_scheme_identity_for_backend(selected_backend);
     }
 
+    /// Test whether the target is long enough to require a minimizer backend invocation.
     [[nodiscard]] bool requires_backend_work_() const noexcept {
         const std::uint64_t minimum_work_bases =
             static_cast<std::uint64_t>(window_size) + kmer_size - 1u;
         return target_length >= minimum_work_bases;
     }
 
+    /// Validate that only the selected backend ran and that its native receipt is consistent.
     [[nodiscard]] bool selected_route_accepted_(bool require_backend_work) const noexcept {
         const bool no_exact = exact_simd_core_runs == 0 && !exact_simd_stats_present;
         const bool no_bounded = bounded_nthash_core_runs == 0 && !packed_bounded_stats_present;
@@ -354,6 +359,7 @@ class minimizer_fragment_generation_execution_receipt {
     template <sequence_alphabet p_alphabet>
     friend class minimizer_fragment_generation_replay_producer;
 
+    /// Immutable route fields captured before the publication binding is attached.
     struct route_snapshot {
         minimizer_sketch_backend selected_backend = minimizer_sketch_backend::scalar;
         minimizer_scheme_identity minimizer_scheme{};
@@ -383,6 +389,7 @@ class minimizer_fragment_generation_execution_receipt {
     minimizer_generation_publication_binding publication_binding_{};
     bool publication_binding_present_ = false;
 
+    /// Compare the Vulkan counters that participate in publication authority.
     [[nodiscard]] static bool same_vulkan_stats_(
         const bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats& left,
         const bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats& right) noexcept {
@@ -392,6 +399,7 @@ class minimizer_fragment_generation_execution_receipt {
                left.saturated == right.saturated;
     }
 
+    /// Freeze the complete route receipt before generation metadata is bound.
     void capture_route_snapshot_() noexcept {
         route_snapshot_ = route_snapshot{
             .selected_backend = selected_backend,
@@ -419,6 +427,7 @@ class minimizer_fragment_generation_execution_receipt {
         route_snapshot_present_ = true;
     }
 
+    /// Detect receipt mutation after the route snapshot was captured.
     [[nodiscard]] bool route_snapshot_matches_() const noexcept {
         const route_snapshot& value = route_snapshot_;
         return route_snapshot_present_ && selected_backend == value.selected_backend &&
@@ -441,6 +450,7 @@ class minimizer_fragment_generation_execution_receipt {
                backend_bound == value.backend_bound && saturated == value.saturated;
     }
 
+    /// Bind an unchanged route snapshot to one encoded grouped-SoA generation.
     void bind_publication_(const encoded_grouped_soa_generation& generation) noexcept {
         const minimizer_producer_identity backend =
             minimizer_producer_backend_identity_for_backend(selected_backend);
@@ -463,6 +473,8 @@ class minimizer_fragment_generation_execution_receipt {
 /// ordered index. A multi-run merge route is used only when a caller explicitly
 /// requests a persisted span wider than one
 /// physical fragment. The production minimizer-fragment publisher never does so.
+///
+/// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
 template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_replay_producer {
   private:
     using sequence_type = bioseq::storage::lazy_sequence_view<p_alphabet>;
@@ -497,6 +509,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats_{};
     bool route_stats_saturated_ = false;
 
+    /// Increment a route counter and latch saturation instead of wrapping.
     void increment_route_counter_(std::uint64_t& counter) noexcept {
         if (counter == (std::numeric_limits<std::uint64_t>::max)()) {
             route_stats_saturated_ = true;
@@ -505,6 +518,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         ++counter;
     }
 
+    /// Merge one bounded ntHash result into the producer-wide route receipt.
     void
     record_packed_bounded_result(const packed_bounded_nthash_index_bridge_result& result) noexcept {
         packed_bounded_status_ = result.status;
@@ -512,6 +526,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         packed_bounded_stats_present_ = true;
     }
 
+    /// Collect, globalize, sort, and deduplicate one disjoint fragment core with its halo.
     [[nodiscard]] std::expected<std::vector<canonical_minimizer_event>,
                                 minimizer_generation_encoding_error>
     collect_core_run(std::uint64_t core_lo, std::uint64_t core_hi) {
@@ -636,6 +651,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     }
 
   public:
+    /// Bind a borrowed sequence, selected backend, kernel table, and minimizer tuple.
+    /// The sequence storage and kernel table must outlive all producer replays.
     minimizer_fragment_generation_replay_producer(
         sequence_type sequence,
         minimizer_sketch_backend backend,
@@ -646,6 +663,7 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         : sequence_(sequence), backend_(backend), kernels_(kernels), alphabet_code_(alphabet_code),
           window_size_(window_size), kmer_size_(kmer_size) {}
 
+    /// Bind the required replay count from the persisted generation layout before scanning.
     void bind_generation_layout(minimizer_generation_layout layout) noexcept {
         const std::uint64_t required =
             layout == minimizer_generation_layout::grouped_soa_segment_local ? 3u
@@ -660,14 +678,20 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         generation_layout_ = layout;
     }
 
+    /// Return the persisted minimizer scheme selected by this producer backend.
     [[nodiscard]] minimizer_scheme_identity scheme_identity() const noexcept {
         return minimizer_scheme_identity_for_backend(backend_);
     }
 
+    /// Return the persisted producer identity selected by this backend.
     [[nodiscard]] minimizer_producer_identity producer_backend_identity() const noexcept {
         return minimizer_producer_backend_identity_for_backend(backend_);
     }
 
+    /// Replay canonical events in hash-major order for one persisted segment geometry.
+    ///
+    /// Each call rescans the borrowed source. A changed `persisted_span` is recorded as a
+    /// geometry retry, and receiver rejection stops the scan immediately.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t persisted_span, canonical_minimizer_event_receiver receiver) {
         constexpr std::uint64_t fragment_bp = 32'768u;
@@ -745,10 +769,12 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
                 continue;
             }
 
+            /// Current event ordinal within one independently sorted fragment run.
             struct cursor {
                 std::size_t run = 0;
                 std::size_t index = 0;
             };
+            // Order the merge heap by hash and encoded position.
             const auto after = [&runs](const cursor& lhs, const cursor& rhs) {
                 const auto& left = runs[lhs.run][lhs.index];
                 const auto& right = runs[rhs.run][rhs.index];
@@ -776,37 +802,48 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         return {};
     }
 
+    /// Return the number of attempted producer scans, including geometry retries.
     [[nodiscard]] std::uint64_t scan_count() const noexcept {
         return scan_count_;
     }
+    /// Return the maximum canonical events buffered for one persisted segment.
     [[nodiscard]] std::uint64_t peak_buffered_events() const noexcept {
         return peak_buffered_events_;
     }
+    /// Return the largest persisted segment width buffered in base pairs.
     [[nodiscard]] std::uint64_t peak_buffered_core_bp() const noexcept {
         return peak_buffered_core_bp_;
     }
+    /// Return the largest number of fragment runs merged concurrently.
     [[nodiscard]] std::uint64_t peak_active_fragment_runs() const noexcept {
         return peak_active_fragment_runs_;
     }
+    /// Return the largest bounded ntHash window materialized in base pairs.
     [[nodiscard]] std::uint64_t peak_bounded_materialized_window_bp() const noexcept {
         return peak_bounded_materialized_window_bp_;
     }
+    /// Test whether an exact SIMD core produced a native execution receipt.
     [[nodiscard]] bool exact_simd_stats_present() const noexcept {
         return exact_simd_stats_present_;
     }
+    /// Borrow the merged exact SIMD execution receipt.
     [[nodiscard]] const exact_simd_index_execution_stats& exact_simd_stats() const noexcept {
         return exact_simd_stats_;
     }
+    /// Test whether a bounded ntHash core produced a native execution receipt.
     [[nodiscard]] bool packed_bounded_stats_present() const noexcept {
         return packed_bounded_stats_present_;
     }
+    /// Return the most recently merged bounded ntHash status.
     [[nodiscard]] packed_bounded_nthash_index_status packed_bounded_status() const noexcept {
         return packed_bounded_status_;
     }
+    /// Borrow the merged bounded ntHash execution receipt.
     [[nodiscard]] const packed_bounded_nthash_index_execution_stats&
     packed_bounded_stats() const noexcept {
         return packed_bounded_stats_;
     }
+    /// Snapshot route counters and identities for publication validation.
     [[nodiscard]] minimizer_fragment_generation_execution_receipt execution_stats() const noexcept {
         minimizer_fragment_generation_execution_receipt stats;
         stats.selected_backend = backend_;
@@ -836,13 +873,18 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
 };
 
 /// Storage-bound per-fragment minimizer index operations.
+/// @tparam p_storage Chunked storage implementing the fragment-chunk index contract.
 template <class p_storage> struct minimizers_per_fragment_index {
     static_assert(is_index_chunked_storage_for<p_storage, sequence_index_layout::fragment_chunks>);
+    /// Registry layout used for one serialized blob per physical fragment.
     static constexpr sequence_index_layout index_type = sequence_index_layout::fragment_chunks;
+    /// Stable registry name inherited from the fragment hash-map representation.
     static constexpr std::string_view index_name = minimizer_hashmap_fragment_index::index_name;
+    /// Concrete chunked storage type bound to these operations.
     using storage_type = p_storage;
 
     /// Construct the replay producer used by grouped-SoA publication.
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static auto make_generation_replay_producer(
         bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
@@ -854,6 +896,12 @@ template <class p_storage> struct minimizers_per_fragment_index {
     }
 
     /// Encode a fragment image from the bounded producer selected by the caller.
+    ///
+    /// The sink receives the grouped-SoA generation rows. Route statistics are bound to the
+    /// resulting manifest and fail closed if backend identity or replay counts disagree.
+    ///
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
+    /// @tparam p_sink Row sink that accepts the encoded generation stream.
     template <sequence_alphabet p_alphabet, minimizer_generation_row_sink p_sink>
     [[nodiscard]] static std::expected<encoded_grouped_soa_generation,
                                        minimizer_generation_encoding_error>
@@ -903,6 +951,13 @@ template <class p_storage> struct minimizers_per_fragment_index {
         return encoded;
     }
 
+    /// Build and publish one native fragment blob per 32 KiBP target core.
+    ///
+    /// Positions in each blob are fragment-local and preserve the strand bit. The completeness
+    /// manifest is written after every fragment. Storage may be partially modified if collection
+    /// or a storage callback fails.
+    ///
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     static void
     build(p_storage& storage,
@@ -911,7 +966,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
           const bioseq::minimizers::minimizer_kernels* kernels,
           minimizer_fragment_generation_execution_receipt* execution_stats_out = nullptr,
           std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
-        constexpr std::size_t w = 10, k = 15; // pinned, == sidecar today
+        constexpr std::size_t w = 10, k = 15; // Persisted minimizer tuple.
         constexpr std::size_t frag_bp = 32'768u;
         constexpr std::size_t k_context_span = w + k; // backward context
         static_assert(
@@ -950,6 +1005,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
             std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> per_fragment(
                 fragments_per_batch);
             std::vector<char> blob;
+            // Replace one fragment chunk with its complete serialized blob.
             const auto write_fragment_blob = [&storage](std::size_t fragment_no,
                                                         const std::vector<char>& fragment_blob) {
                 const std::size_t bytes = fragment_blob.size();
@@ -1039,6 +1095,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
             return;
         }
 
+        // Collect one haloed core and serialize its fragment-local minimizer index.
         auto build_fragment_blob = [seq,
                                     backend,
                                     kernels,
@@ -1148,6 +1205,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
             frag_idx.serialize_to_binary(out_blob.data());
         };
 
+        // Replace one fragment chunk with its complete serialized blob.
         auto write_fragment_blob = [&storage](std::size_t fragment_no,
                                               const std::vector<char>& blob) {
             const std::size_t bytes = blob.size();
@@ -1165,6 +1223,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                 });
         };
 
+        // Run one fragment through reusable serial collection and immediate publication.
         auto build_and_write_serial = [&build_fragment_blob,
                                        &write_fragment_blob](std::size_t fragment_no) {
             sketch_collector collector;
@@ -1223,8 +1282,7 @@ template <class p_storage> struct minimizers_per_fragment_index {
                 wave_lo = wave_hi;
             }
         }
-        // COMPLETENESS MANIFEST (written LAST): a tiny chunk at k_directory_sub_key recording
-        // nfrag.
+        // Publish the fragment-count completeness manifest after every fragment blob.
         {
             const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
             storage.resize(k_directory_sub_key, sizeof(std::int64_t));
@@ -1237,6 +1295,8 @@ template <class p_storage> struct minimizers_per_fragment_index {
         }
     }
 
+    /// Build fragments with an explicit packed-alphabet code and no execution receipt.
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     static void build(p_storage& storage,
                       bioseq::storage::lazy_sequence_view<p_alphabet> seq,
@@ -1246,12 +1306,17 @@ template <class p_storage> struct minimizers_per_fragment_index {
         build(storage, seq, backend, kernels, nullptr, alphabet_code);
     }
 
-    // The scalar-default overload delegates to the explicit backend.
+    /// Build fragments with the scalar minimizer backend.
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     static void build(p_storage& storage, bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
         build(storage, seq, minimizer_sketch_backend::scalar, nullptr);
     }
 
+    /// Clear the entity and rebuild all fragment blobs with an explicit backend.
+    ///
+    /// Clearing happens before collection, so a later failure leaves the entity incomplete.
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     static void
     rebuild(p_storage& storage,
@@ -1274,12 +1339,17 @@ template <class p_storage> struct minimizers_per_fragment_index {
         build(storage, seq, backend, kernels, nullptr, alphabet_code);
     }
 
+    /// Clear the entity and rebuild all fragment blobs with the scalar backend.
+    /// @tparam p_alphabet Alphabet carried by the borrowed lazy sequence.
     template <sequence_alphabet p_alphabet>
     static void rebuild(p_storage& storage, bioseq::storage::lazy_sequence_view<p_alphabet> seq) {
         rebuild(storage, seq, minimizer_sketch_backend::scalar, nullptr);
     }
 
-    /// query-time: materialise the single pipeline IndexT for one target SEGMENT.
+    /// Assemble all persisted fragment buckets intersecting one target segment.
+    ///
+    /// Fragment-local positions are globalized, clipped to `[clip_lo_bp, clip_hi_bp)`, and
+    /// rebuilt into one target-wide hash map using caller-owned reusable scratch.
     static minimizer_hashmap_fragment_index assemble_segment(p_storage& storage,
                                                              std::size_t frag_lo,
                                                              std::size_t frag_hi,
@@ -1410,10 +1480,13 @@ template <class p_storage> struct minimizers_per_fragment_index {
 export namespace bioseq::indexing {
 /// Registry descriptor for the per-fragment minimizer index.
 template <> struct index_descriptor<minimizers_per_fragment_index> {
+    /// Registry layout used by all concrete storage specializations.
     static constexpr sequence_index_layout index_type = sequence_index_layout::fragment_chunks;
+    /// Stable registry name for per-fragment minimizer blobs.
     static constexpr std::string_view index_name = minimizer_hashmap_fragment_index::index_name;
+    /// Allow each newly inserted sequence fragment to build its own independent blob.
     static constexpr bool allows_update_on_insert =
-        true; // cheap per-fragment build; DEFAULT on-insert
+        true;
 };
 static_assert(
     requires { index_descriptor<minimizers_per_fragment_index>::index_name; },
