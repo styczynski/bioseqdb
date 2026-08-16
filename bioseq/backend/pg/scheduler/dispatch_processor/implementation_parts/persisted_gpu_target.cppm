@@ -4,7 +4,6 @@
  */
 #include <algorithm>
 #include <array>
-#include <bioseq/pg_build_profile.h>
 #include <bit>
 #include <cstdio>
 #include <cstring>

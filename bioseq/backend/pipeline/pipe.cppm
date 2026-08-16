@@ -30,7 +30,6 @@
  */
 module;
 
-#include <bioseq/pg_build_profile.h>
 
 // Production and package profiles compile the recursive dispatch cascade at
 // -O3, so its inlining contract is unconditional.

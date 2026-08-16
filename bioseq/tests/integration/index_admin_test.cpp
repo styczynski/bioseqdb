@@ -27,7 +27,6 @@
 //     integration-test index_table_row_count() wrapper.
 
 #include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
 #include <algorithm>
 #include <chrono>
 #include <libpq-fe.h>

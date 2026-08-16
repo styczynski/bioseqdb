@@ -11,7 +11,6 @@
  * as a cross-check, plus the column-rule and malformed-file error paths.
  */
 #include <algorithm>
-#include <bioseq/pg_build_profile.h>
 #include <cstdint>
 #include <cstdlib>
 #include <fmt/format.h>

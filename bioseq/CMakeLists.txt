@@ -33,46 +33,28 @@ if(BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS GREATER
     "BIOSEQ_VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL_MILLISECONDS cannot exceed "
     "BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS")
 endif()
-set(BIOSEQ_PG_BUILD_PROFILE_HEADER
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/include/bioseq/pg_build_profile.h")
+set(_bioseq_build_config_authored_input
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-  "${BIOSEQ_PG_BUILD_PROFILE_HEADER}")
-file(STRINGS "${BIOSEQ_PG_BUILD_PROFILE_HEADER}"
-  _bioseq_template_flatten_profile_line
-  REGEX "^#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE [a-z0-9_]+$")
-list(LENGTH _bioseq_template_flatten_profile_line
-  _bioseq_template_flatten_profile_line_count)
-if(NOT _bioseq_template_flatten_profile_line_count EQUAL 1)
-  message(FATAL_ERROR
-    "${BIOSEQ_PG_BUILD_PROFILE_HEADER} must contain exactly one literal "
-    "'#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE <semantic-profile>'")
-endif()
-string(REGEX REPLACE
-  "^#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE ([a-z0-9_]+)$" "\\1"
-  BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE
-  "${_bioseq_template_flatten_profile_line}")
+  "${_bioseq_build_config_authored_input}")
+_bioseq_build_config_template_flatten_default(
+  "${_bioseq_build_config_authored_input}"
+  _bioseq_default_template_flatten_profile_ordinal
+  BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE)
 _bioseq_build_config_profiles(BIOSEQ_TEMPLATE_FLATTEN_PROFILES)
-list(FIND BIOSEQ_TEMPLATE_FLATTEN_PROFILES
-  "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}"
-  _bioseq_default_template_flatten_profile_index)
-if(_bioseq_default_template_flatten_profile_index EQUAL -1)
-  message(FATAL_ERROR
-    "unsupported default BIOSEQ_TEMPLATE_FLATTEN_PROFILE "
-    "'${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}'")
-endif()
 
-# Keep the checked-in header literal as the everyday source of truth while
+# Keep the authored build-config declaration as the everyday source of truth while
 # allowing isolated qualification presets to compile the complete profile in
-# a separate build tree. An empty cache entry selects the checked-in default;
+# a separate build tree. An empty cache entry selects the authored default;
 # named qualification presets set the same public profile key explicitly.
 set(BIOSEQ_TEMPLATE_FLATTEN_PROFILE "" CACHE STRING
-  "Template-flatten specialization profile (empty selects header default)")
+  "Template-flatten specialization profile (empty selects authored default)")
 set_property(CACHE BIOSEQ_TEMPLATE_FLATTEN_PROFILE PROPERTY
   STRINGS "" ${BIOSEQ_TEMPLATE_FLATTEN_PROFILES})
 if("${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "")
   set(BIOSEQ_TEMPLATE_FLATTEN_PROFILE
     "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}")
-  set(_bioseq_template_flatten_profile_source "pg_build_profile.h default")
+  set(_bioseq_template_flatten_profile_source "authored build-config default")
 else()
   list(FIND BIOSEQ_TEMPLATE_FLATTEN_PROFILES
     "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
@@ -107,18 +89,18 @@ foreach(_bioseq_template_flatten_capability IN ITEMS
       "${_bioseq_template_flatten_capability}=1")
   endif()
 endforeach()
-# Generated Highway implementation units intentionally do not include the
-# PostgreSQL build-profile header. Publish the resolved semantic profile and
-# cumulative capabilities to every translation unit so generated partitions,
-# authored sources, and the owner manifest cannot disagree.
+# Publish the resolved semantic profile and cumulative capabilities to every
+# translation unit so generated partitions, authored sources, and the owner
+# manifest cannot disagree.
 add_compile_definitions(
   BIOSEQ_TEMPLATE_FLATTEN_PROFILE=${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
   ${_bioseq_template_flatten_capability_definitions})
 message(STATUS
   "bioseq: BIOSEQ_TEMPLATE_FLATTEN_PROFILE="
   "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE} "
-  "(${_bioseq_template_flatten_profile_source}; checked-in default="
-  "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE})")
+  "(${_bioseq_template_flatten_profile_source}; authored default="
+  "${BIOSEQ_DEFAULT_TEMPLATE_FLATTEN_PROFILE}, ordinal "
+  "${_bioseq_default_template_flatten_profile_ordinal})")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
@@ -136,8 +118,6 @@ file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 # The authored interface is generator input only. The generated target below
 # is the sole compiled provider of bioseq.build_config.
-set(_bioseq_build_config_authored_input
-  "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   "${_bioseq_build_config_authored_input}")
 _bioseq_build_config_bool(

@@ -1,7 +1,6 @@
 /** @file Async mmsearch index-policy worker recovery scenarios. */
 
 #include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
 
 #include <array>
 #include <bit>

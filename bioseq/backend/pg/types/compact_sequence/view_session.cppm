@@ -20,7 +20,6 @@ module;
 #include <type_traits>
 #include <utility>
 
-#include <bioseq/pg_build_profile.h>
 #include <bioseq/pg_compat.h>
 extern "C" {
 #include "utils/expandeddatum.h"

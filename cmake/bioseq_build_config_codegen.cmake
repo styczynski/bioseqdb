@@ -34,6 +34,127 @@ function(_bioseq_build_config_profiles output_variable)
     PARENT_SCOPE)
 endfunction()
 
+function(_bioseq_build_config_count_literal source_text needle output_variable)
+  if("${needle}" STREQUAL "")
+    _bioseq_build_config_fail("literal occurrence marker must not be empty")
+  endif()
+  string(LENGTH "${source_text}" _source_length)
+  string(LENGTH "${needle}" _needle_length)
+  string(REPLACE "${needle}" "" _source_without_needle "${source_text}")
+  string(LENGTH "${_source_without_needle}" _source_without_needle_length)
+  math(EXPR _occurrence_bytes
+    "${_source_length} - ${_source_without_needle_length}")
+  math(EXPR _occurrence_count
+    "${_occurrence_bytes} / ${_needle_length}")
+  set(${output_variable} "${_occurrence_count}" PARENT_SCOPE)
+endfunction()
+
+# Parse only the canonical profile declaration; this is not a general C++ parser.
+function(_bioseq_build_config_parse_template_flatten_default source_label
+    source_text ordinal_output profile_output)
+  set(_declaration_name "bioseq_template_flatten_profile")
+  set(_override_macro "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE")
+  _bioseq_build_config_count_literal(
+    "${source_text}" "${_declaration_name}" _declaration_name_count)
+  _bioseq_build_config_count_literal(
+    "${source_text}" "${_override_macro}" _override_macro_count)
+  if(_declaration_name_count EQUAL 0 AND _override_macro_count EQUAL 0)
+    _bioseq_build_config_fail(
+      "${source_label} is missing the canonical template-flatten profile declaration")
+  endif()
+  if(_declaration_name_count GREATER 1 OR _override_macro_count GREATER 1)
+    _bioseq_build_config_fail(
+      "${source_label} must contain exactly one canonical template-flatten "
+      "profile declaration; found ${_declaration_name_count} declaration names "
+      "and ${_override_macro_count} override macros")
+  endif()
+  if(NOT _declaration_name_count EQUAL 1 OR NOT _override_macro_count EQUAL 1)
+    _bioseq_build_config_fail(
+      "${source_label} has a malformed template-flatten profile declaration")
+  endif()
+
+  set(_line_anchored_source "\n${source_text}")
+  set(_declaration_start
+    "\ninline constexpr unsigned int ${_declaration_name}")
+  _bioseq_build_config_count_literal(
+    "${_line_anchored_source}" "${_declaration_start}" _declaration_start_count)
+  if(NOT _declaration_start_count EQUAL 1)
+    _bioseq_build_config_fail(
+      "${source_label} template-flatten profile must begin exactly one authored "
+      "declaration line with 'inline constexpr unsigned int'")
+  endif()
+
+  _bioseq_build_config_profiles(_profiles)
+  list(LENGTH _profiles _profile_count)
+  if(_profile_count EQUAL 0)
+    _bioseq_build_config_fail("the semantic profile catalog must not be empty")
+  endif()
+  math(EXPR _maximum_ordinal "${_profile_count} - 1")
+  string(REGEX REPLACE "[ \t\r\n]+" "" _compact_source "${source_text}")
+  string(CONCAT _declaration_prefix
+    "inlineconstexprunsignedint${_declaration_name}"
+    "[[bioseq::build_config(\"${_override_macro}\","
+    "\"profile_ordinal\",\"0..${_maximum_ordinal}\")]]=")
+  _bioseq_build_config_count_literal(
+    "${_compact_source}" "${_declaration_prefix}" _declaration_prefix_count)
+  if(NOT _declaration_prefix_count EQUAL 1)
+    _bioseq_build_config_fail(
+      "${source_label} template-flatten profile declaration must use unsigned int "
+      "and the exact build-config attribute macro, unit, and domain '0..${_maximum_ordinal}'")
+  endif()
+
+  string(FIND "${_compact_source}" "${_declaration_prefix}" _declaration_offset)
+  string(LENGTH "${_declaration_prefix}" _declaration_prefix_length)
+  math(EXPR _initializer_offset
+    "${_declaration_offset} + ${_declaration_prefix_length}")
+  string(SUBSTRING "${_compact_source}" "${_initializer_offset}" -1
+    _initializer_tail)
+  string(FIND "${_initializer_tail}" ";" _initializer_terminator)
+  if(_initializer_terminator LESS 0)
+    _bioseq_build_config_fail(
+      "${source_label} template-flatten profile declaration is missing its semicolon")
+  endif()
+  string(SUBSTRING "${_initializer_tail}" 0 "${_initializer_terminator}"
+    _initializer)
+  if(NOT "${_initializer}" MATCHES "^(0|[1-9][0-9]*)U$")
+    _bioseq_build_config_fail(
+      "${source_label} template-flatten profile default must use a canonical "
+      "decimal unsigned literal such as 0U; got '${_initializer}'")
+  endif()
+  string(REGEX REPLACE "U$" "" _default_ordinal "${_initializer}")
+
+  set(_default_profile "")
+  set(_catalog_ordinal 0)
+  foreach(_candidate_profile IN LISTS _profiles)
+    if("${_default_ordinal}" STREQUAL "${_catalog_ordinal}")
+      set(_default_profile "${_candidate_profile}")
+    endif()
+    math(EXPR _catalog_ordinal "${_catalog_ordinal} + 1")
+  endforeach()
+  if("${_default_profile}" STREQUAL "")
+    _bioseq_build_config_fail(
+      "${source_label} template-flatten profile default ordinal "
+      "'${_default_ordinal}' is outside the authored domain '0..${_maximum_ordinal}'")
+  endif()
+
+  set(${ordinal_output} "${_default_ordinal}" PARENT_SCOPE)
+  set(${profile_output} "${_default_profile}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_build_config_template_flatten_default source_path
+    ordinal_output profile_output)
+  if(NOT IS_ABSOLUTE "${source_path}" OR NOT EXISTS "${source_path}"
+      OR IS_DIRECTORY "${source_path}")
+    _bioseq_build_config_fail(
+      "authored build-config source must be an existing absolute file: '${source_path}'")
+  endif()
+  file(READ "${source_path}" _authored_source)
+  _bioseq_build_config_parse_template_flatten_default(
+    "${source_path}" "${_authored_source}" _default_ordinal _default_profile)
+  set(${ordinal_output} "${_default_ordinal}" PARENT_SCOPE)
+  set(${profile_output} "${_default_profile}" PARENT_SCOPE)
+endfunction()
+
 function(_bioseq_build_config_profile profile ordinal_output
     all_alphabets_output all_coordinates_output adaptive_lengths_output
     extended_coordinates_output full_specialization_output

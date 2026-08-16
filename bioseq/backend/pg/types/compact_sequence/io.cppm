@@ -17,7 +17,6 @@ module;
 #include <string_view>
 #include <variant>
 
-#include <bioseq/pg_build_profile.h>
 #include <bioseq/pg_compat.h>
 extern "C" {
 #pragma GCC diagnostic push

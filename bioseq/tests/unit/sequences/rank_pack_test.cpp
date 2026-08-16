@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <bioseq/pg_build_profile.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>

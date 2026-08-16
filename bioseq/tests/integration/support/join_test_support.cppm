@@ -4,7 +4,6 @@
  */
 module;
 #include <array>
-#include <bioseq/pg_build_profile.h>
 #include <chrono>
 #include <cstddef>
 #include <libpq-fe.h>

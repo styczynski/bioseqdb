@@ -5,7 +5,6 @@
 module;
 
 #include <bioseq/pg_compat.h>
-#include <bioseq/pg_build_profile.h>
 
 #include <algorithm>
 #include <concepts>

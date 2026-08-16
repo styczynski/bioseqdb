@@ -2,7 +2,6 @@
  * @file
  * @brief Exercises transformed-owner and parameterized Bioseq joins.
  */
-#include <bioseq/pg_build_profile.h>
 #include <chrono>
 #include <libpq-fe.h>
 #include <set>

@@ -2,7 +2,6 @@
  * @file
  * @brief Exercises EvalPlanQual, aggregate, and fail-closed Bioseq joins.
  */
-#include <bioseq/pg_build_profile.h>
 #include <chrono>
 #include <libpq-fe.h>
 #include <set>

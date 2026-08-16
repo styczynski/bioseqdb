@@ -2,7 +2,6 @@
  * @file
  * @brief Exercises base Bioseq join, projection, and rescan contracts.
  */
-#include <bioseq/pg_build_profile.h>
 #include <chrono>
 #include <libpq-fe.h>
 #include <set>

@@ -9,6 +9,39 @@ if(DEFINED BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE)
   if(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "profile")
     _bioseq_build_config_profile(
       invalid_profile ordinal alphabets coordinates adaptive extended full units)
+  elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_missing")
+    _bioseq_build_config_parse_template_flatten_default(
+      "missing fixture" "export module fixture;" ordinal profile)
+  elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_duplicate")
+    set(_profile_declaration [=[
+inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0U;
+]=])
+    string(CONCAT _duplicate_source
+      "${_profile_declaration}" "${_profile_declaration}")
+    _bioseq_build_config_parse_template_flatten_default(
+      "duplicate fixture" "${_duplicate_source}" ordinal profile)
+  elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_malformed")
+    set(_malformed_source [=[
+inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "ordinal", "0..5")]] = 0U;
+]=])
+    _bioseq_build_config_parse_template_flatten_default(
+      "malformed fixture" "${_malformed_source}" ordinal profile)
+  elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_nondecimal")
+    set(_nondecimal_source [=[
+inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 0x0U;
+]=])
+    _bioseq_build_config_parse_template_flatten_default(
+      "nondecimal fixture" "${_nondecimal_source}" ordinal profile)
+  elseif(BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE STREQUAL "default_out_of_range")
+    set(_out_of_range_source [=[
+inline constexpr unsigned int bioseq_template_flatten_profile [[bioseq::build_config(
+    "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE", "profile_ordinal", "0..5")]] = 6U;
+]=])
+    _bioseq_build_config_parse_template_flatten_default(
+      "out-of-range fixture" "${_out_of_range_source}" ordinal profile)
   else()
     message(FATAL_ERROR
       "Unknown build-config negative case '${BIOSEQ_BUILD_CONFIG_NEGATIVE_CASE}'")
@@ -27,6 +60,13 @@ function(_require_contains text needle context)
   string(FIND "${text}" "${needle}" _offset)
   if(_offset LESS 0)
     message(FATAL_ERROR "${context}: missing '${needle}'")
+  endif()
+endfunction()
+
+function(_require_not_contains text needle context)
+  string(FIND "${text}" "${needle}" _offset)
+  if(NOT _offset LESS 0)
+    message(FATAL_ERROR "${context}: unexpected '${needle}'")
   endif()
 endfunction()
 
@@ -159,6 +199,12 @@ endforeach()
 set(_authored_config
   "${_repository_root}/bioseq/backend/common/bioseq_build_config.cppm")
 file(READ "${_authored_config}" _authored_config_source)
+_bioseq_build_config_template_flatten_default(
+  "${_authored_config}" _authored_default_ordinal _authored_default_profile)
+_require_equal("${_authored_default_ordinal}" 0
+  "authored template-flatten default ordinal")
+_require_equal("${_authored_default_profile}" dna4_uint64
+  "authored template-flatten default profile")
 set(_authored_annotation_marker "[[bioseq::build_config(")
 string(LENGTH "${_authored_config_source}" _authored_source_length)
 string(LENGTH "${_authored_annotation_marker}" _authored_marker_length)
@@ -204,8 +250,8 @@ string(REGEX MATCHALL "BIOSEQ_BUILD_CONFIG_[A-Z0-9_]+"
   _build_config_generator_macro_uses "${_build_config_generator_source}")
 list(LENGTH _build_config_generator_macro_uses
   _build_config_generator_macro_use_count)
-_require_equal("${_build_config_generator_macro_use_count}" 12
-  "canonical build-config generator macro count")
+_require_equal("${_build_config_generator_macro_use_count}" 13
+  "12 generator overrides plus authored-default contract macro reference")
 
 foreach(_canonical_build_config_entry IN LISTS _canonical_build_config_entries)
   string(REPLACE "^" ";" _canonical_build_config_fields
@@ -236,9 +282,20 @@ foreach(_canonical_build_config_entry IN LISTS _canonical_build_config_entries)
   _require_occurrence_count("${_authored_config_source}"
     "${_canonical_build_config_macro}" 1
     "canonical authored macro ${_canonical_build_config_macro}")
+  set(_canonical_generator_macro_count 1)
+  if(_canonical_build_config_macro STREQUAL
+      "BIOSEQ_BUILD_CONFIG_TEMPLATE_FLATTEN_PROFILE")
+    set(_canonical_generator_macro_count 2)
+  endif()
   _require_occurrence_count("${_build_config_generator_source}"
-    "${_canonical_build_config_macro}" 1
-    "canonical generator override ${_canonical_build_config_macro}")
+    "${_canonical_build_config_macro}" "${_canonical_generator_macro_count}"
+    "canonical generator/contract reference ${_canonical_build_config_macro}")
+endforeach()
+
+foreach(_canonical_profile IN LISTS _profiles)
+  _require_occurrence_count("${_build_config_generator_source}"
+    "    ${_canonical_profile}\n" 1
+    "single semantic-profile catalog entry ${_canonical_profile}")
 endforeach()
 
 file(READ "${_repository_root}/bioseq/CMakeLists.txt" _bioseq_cmake_source)
@@ -246,8 +303,18 @@ _require_contains("${_bioseq_cmake_source}"
   "_bioseq_build_config_profiles(BIOSEQ_TEMPLATE_FLATTEN_PROFILES)"
   "canonical template-profile catalog")
 _require_contains("${_bioseq_cmake_source}"
+  "_bioseq_build_config_template_flatten_default("
+  "authored template-profile default derivation")
+_require_contains("${_bioseq_cmake_source}"
+  "authored build-config default"
+  "authored template-profile default status")
+_require_contains("${_bioseq_cmake_source}"
   "_bioseq_build_config_profile("
   "canonical template-profile mapping")
+_require_not_contains("${_bioseq_cmake_source}" "dna4_uint64"
+  "bioseq CMake must not duplicate the authored default profile")
+_require_not_contains("${_bioseq_cmake_source}" "pg_build_profile.h"
+  "bioseq CMake must not reference the removed profile header")
 if("${_bioseq_cmake_source}" MATCHES
     "BIOSEQ_TEMPLATE_FLATTEN_PROFILE[ \t\r\n]+STREQUAL")
   message(FATAL_ERROR
@@ -321,12 +388,28 @@ _require_contains("${_bioseq_cmake_source}"
   SOURCE "${_bioseq_build_config_authored_input}"]=]
   "canonical generated build-config provider")
 
-file(READ
-  "${_repository_root}/bioseq/backend/pg/include/bioseq/pg_build_profile.h"
-  _profile_header_source)
-_require_contains("${_profile_header_source}"
-  "#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64"
-  "checked-in template-flatten default")
+set(_profile_header
+  "${_repository_root}/bioseq/backend/pg/include/bioseq/pg_build_profile.h")
+if(EXISTS "${_profile_header}")
+  message(FATAL_ERROR
+    "Removed PostgreSQL build-profile header still exists: ${_profile_header}")
+endif()
+file(GLOB_RECURSE _bioseq_authored_cpp_sources LIST_DIRECTORIES FALSE
+  "${_repository_root}/bioseq/*.c"
+  "${_repository_root}/bioseq/*.cc"
+  "${_repository_root}/bioseq/*.cpp"
+  "${_repository_root}/bioseq/*.cppm"
+  "${_repository_root}/bioseq/*.h"
+  "${_repository_root}/bioseq/*.hpp")
+foreach(_bioseq_authored_cpp_source IN LISTS _bioseq_authored_cpp_sources)
+  file(READ "${_bioseq_authored_cpp_source}" _bioseq_authored_cpp_text)
+  _require_not_contains("${_bioseq_authored_cpp_text}"
+    "#include <bioseq/pg_build_profile.h>"
+    "removed profile-header include in ${_bioseq_authored_cpp_source}")
+  _require_not_contains("${_bioseq_authored_cpp_text}"
+    "#define BIOSEQ_TEMPLATE_FLATTEN_PROFILE dna4_uint64"
+    "removed profile-header default literal in ${_bioseq_authored_cpp_source}")
+endforeach()
 file(READ "${_repository_root}/bioseq_caching/CMakeLists.txt"
   _cache_cmake_source)
 _require_contains("${_cache_cmake_source}"
@@ -339,22 +422,33 @@ _require_contains("${_root_cmake_source}"
   \"Configure generated external API clients and their integration tests\" OFF)"
   "external-API compatibility option")
 
-execute_process(
-  COMMAND "${CMAKE_COMMAND}"
-    -DBIOSEQ_BUILD_CONFIG_NEGATIVE_CASE=profile
-    -P "${CMAKE_CURRENT_LIST_FILE}"
-  RESULT_VARIABLE _negative_result
-  OUTPUT_VARIABLE _negative_output
-  ERROR_VARIABLE _negative_error)
-if(_negative_result EQUAL 0)
-  message(FATAL_ERROR "Invalid build-config profile was accepted")
-endif()
-string(CONCAT _negative_diagnostics
-  "${_negative_output}" "${_negative_error}")
-if(NOT _negative_diagnostics MATCHES "unsupported semantic profile")
-  message(FATAL_ERROR
-    "Invalid-profile rejection omitted its diagnostic: "
-    "${_negative_diagnostics}")
-endif()
+set(_negative_cases
+  "profile|unsupported semantic profile"
+  "default_missing|missing the canonical template-flatten profile declaration"
+  "default_duplicate|found 2 declaration names"
+  "default_malformed|exact build-config attribute"
+  "default_nondecimal|canonical decimal unsigned literal"
+  "default_out_of_range|outside the authored domain")
+foreach(_negative_case IN LISTS _negative_cases)
+  string(REPLACE "|" ";" _negative_fields "${_negative_case}")
+  list(GET _negative_fields 0 _negative_name)
+  list(GET _negative_fields 1 _negative_expected_diagnostic)
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      "-DBIOSEQ_BUILD_CONFIG_NEGATIVE_CASE=${_negative_name}"
+      -P "${CMAKE_CURRENT_LIST_FILE}"
+    RESULT_VARIABLE _negative_result
+    OUTPUT_VARIABLE _negative_output
+    ERROR_VARIABLE _negative_error)
+  if(_negative_result EQUAL 0)
+    message(FATAL_ERROR
+      "Build-config negative case '${_negative_name}' was accepted")
+  endif()
+  string(CONCAT _negative_diagnostics
+    "${_negative_output}" "${_negative_error}")
+  _require_contains("${_negative_diagnostics}"
+    "${_negative_expected_diagnostic}"
+    "build-config negative case ${_negative_name}")
+endforeach()
 
 message(STATUS "Bioseq build-config CMake mapping contract passed")

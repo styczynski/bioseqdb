@@ -1,7 +1,6 @@
 /** @file Per-call mmsearch backend and Vulkan policy scenarios. */
 
 #include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
 
 #include <array>
 #include <bit>

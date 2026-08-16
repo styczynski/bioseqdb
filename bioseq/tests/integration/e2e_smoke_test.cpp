@@ -10,7 +10,6 @@
  *        normalization (N resets, T valid) end-to-end through the SQL surface.
  */
 #include <tests/support/common.hpp>
-#include <bioseq/pg_build_profile.h>
 #include <fmt/format.h>
 
 #include <array>

@@ -6,7 +6,6 @@
  * casts. The template matrix takes alphabet names from the production pack.
  */
 
-#include <bioseq/pg_build_profile.h>
 #include <tests/support/postgres.hpp>
 import bioseq.tests.integration.support;
 
