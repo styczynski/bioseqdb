@@ -33,7 +33,7 @@ from publication import durable_replace_bytes
 
 
 SUBAGENT_SCHEMA_VERSION = 1
-SUBAGENT_BUDGET = 1300
+SUBAGENT_BUDGET = 4000
 QUOTA_REFRESH_SECONDS = 5 * 60
 QUOTA_PROBE_LEASE_SECONDS = 30
 QUOTA_CREATE_FLOOR_PERCENT = 3.0
@@ -50,6 +50,7 @@ SUBAGENT_STATE_DIR = (
     Path.home() / ".cache" / "bioseq-build" / "subagents" / _REPOSITORY_KEY
 )
 SUBAGENT_STATE_FILE = SUBAGENT_STATE_DIR / "state.json"
+SUBAGENT_STATE_BACKUP_FILE = SUBAGENT_STATE_DIR / "state.backup.json"
 SUBAGENT_BUS_FILE = SUBAGENT_STATE_DIR / "bus.json"
 SUBAGENT_LOCK_FILE = SUBAGENT_STATE_DIR / "registry.lock"
 SUBAGENT_LOG_DIR = SUBAGENT_STATE_DIR / "logs"
@@ -91,7 +92,7 @@ TIER_CONFIG: dict[str, dict[str, Any]] = {
         "model": "composer-2.5",
         "model_display": "Composer 2.5",
         "reasoning": None,
-        "cost": 10,
+        "cost": 1,
     },
     "intern": {
         "provider": "codex",
@@ -219,17 +220,39 @@ def _read_json_locked(path: Path, factory) -> dict[str, Any]:
     return value
 
 
-def _load_state_locked() -> dict[str, Any]:
-    state = _read_json_locked(SUBAGENT_STATE_FILE, _new_state)
+def _record_state_recovery(
+    state: dict[str, Any],
+    *,
+    kind: str,
+    details: Mapping[str, Any],
+) -> None:
+    history = state.setdefault("recovery_history", [])
+    if not isinstance(history, list):
+        history = []
+        state["recovery_history"] = history
+    history.append({
+        "at": time.time(),
+        "kind": kind,
+        "details": dict(details),
+    })
+    del history[:-50]
+
+
+def _validate_and_repair_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate durable identity data and repair fields derived from agent tiers."""
     if (
         not isinstance(state.get("agents"), dict)
         or not isinstance(state.get("accounts"), dict)
+        or not isinstance(state.get("revision"), int)
+        or isinstance(state.get("revision"), bool)
+        or state["revision"] < 0
         or not isinstance(state.get("next_agent_id"), int)
         or isinstance(state.get("next_agent_id"), bool)
         or state["next_agent_id"] < 1
     ):
         raise SubagentError("STATE_CORRUPT", "subagent registry invariants are invalid")
     numeric_ids: list[int] = []
+    repairs: list[dict[str, Any]] = []
     for raw_id, agent in state["agents"].items():
         if (
             not isinstance(raw_id, str)
@@ -256,17 +279,15 @@ def _load_state_locked() -> dict[str, Any]:
             raise SubagentError("STATE_CORRUPT", "subagent registry lifecycle/tier data is invalid")
         if numeric_id != 0:
             config = TIER_CONFIG[str(agent["tier"])]
-            if (
-                agent.get("provider") != config["provider"]
-                or agent.get("model") != config["model"]
-                or agent.get("reasoning") != config["reasoning"]
-                or isinstance(agent.get("cost"), bool)
-                or agent.get("cost") != config["cost"]
+            changed_fields: list[str] = []
+            for field in (
+                "provider", "model", "model_display", "reasoning", "cost",
             ):
-                raise SubagentError(
-                    "STATE_CORRUPT",
-                    "subagent registry contains noncanonical provider/model/cost data",
-                )
+                if agent.get(field) != config[field]:
+                    changed_fields.append(field)
+                    agent[field] = config[field]
+            if changed_fields:
+                repairs.append({"agent_id": numeric_id, "fields": changed_fields})
         numeric_ids.append(numeric_id)
     if numeric_ids and state["next_agent_id"] <= max(numeric_ids):
         raise SubagentError("STATE_CORRUPT", "next_agent_id would reuse a persisted numeric ID")
@@ -275,16 +296,68 @@ def _load_state_locked() -> dict[str, Any]:
         raise SubagentError("STATE_CORRUPT", "ROOT record and ROOT identity are inconsistent")
     if any(not isinstance(account, dict) for account in state["accounts"].values()):
         raise SubagentError("STATE_CORRUPT", "subagent registry contains an invalid account record")
+    return repairs
+
+
+def _quarantine_corrupt_state_locked() -> str | None:
+    """Preserve an unreadable primary registry before restoring its backup."""
+    try:
+        payload = SUBAGENT_STATE_FILE.read_bytes()
+    except OSError:
+        return None
+    digest = hashlib.sha256(payload).hexdigest()[:16]
+    destination = SUBAGENT_STATE_DIR / f"state.corrupt.{digest}.json"
+    if not destination.exists():
+        durable_replace_bytes(destination, payload, mode=0o600)
+    return destination.name
+
+
+def _load_state_locked() -> dict[str, Any]:
+    recovered_from_backup = False
+    primary_error: SubagentError | None = None
+    if not SUBAGENT_STATE_FILE.exists() and SUBAGENT_STATE_BACKUP_FILE.exists():
+        recovered_from_backup = True
+        state = _read_json_locked(SUBAGENT_STATE_BACKUP_FILE, _new_state)
+        repairs = _validate_and_repair_state(state)
+    else:
+        try:
+            state = _read_json_locked(SUBAGENT_STATE_FILE, _new_state)
+            repairs = _validate_and_repair_state(state)
+        except SubagentError as exc:
+            if exc.code != "STATE_CORRUPT" or not SUBAGENT_STATE_BACKUP_FILE.exists():
+                raise
+            primary_error = exc
+            recovered_from_backup = True
+            state = _read_json_locked(SUBAGENT_STATE_BACKUP_FILE, _new_state)
+            repairs = _validate_and_repair_state(state)
+
+    if recovered_from_backup:
+        quarantined = _quarantine_corrupt_state_locked()
+        _record_state_recovery(
+            state,
+            kind="backup_restore",
+            details={
+                "primary_error": str(primary_error) if primary_error else "primary missing",
+                "quarantined_file": quarantined,
+            },
+        )
+    if repairs:
+        _record_state_recovery(
+            state,
+            kind="canonical_tier_metadata",
+            details={"agents": repairs},
+        )
+    if recovered_from_backup or repairs:
+        _save_state_locked(state)
     return state
 
 
 def _save_state_locked(state: dict[str, Any]) -> None:
     state["revision"] = int(state.get("revision", 0)) + 1
-    durable_replace_bytes(
-        SUBAGENT_STATE_FILE,
-        (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-        mode=0o600,
-    )
+    payload = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    durable_replace_bytes(SUBAGENT_STATE_FILE, payload, mode=0o600)
+    with contextlib.suppress(OSError):
+        durable_replace_bytes(SUBAGENT_STATE_BACKUP_FILE, payload, mode=0o600)
 
 
 def _load_bus_locked() -> dict[str, Any]:
@@ -3009,7 +3082,7 @@ def _status_payload(state: Mapping[str, Any], caller_id: int) -> tuple[dict[str,
             "used": _live_budget(state),
             "limit": SUBAGENT_BUDGET,
             "remaining": SUBAGENT_BUDGET - _live_budget(state),
-            "note": "The 1300 limit is fixed safety policy and must not be altered to force allocation.",
+            "note": "The 4000 limit is fixed safety policy and must not be altered to force allocation.",
         },
         "accounts": projected_accounts,
         "agents": projected_agents,

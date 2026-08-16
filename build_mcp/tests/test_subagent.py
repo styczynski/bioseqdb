@@ -35,6 +35,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
         path_values = {
             "SUBAGENT_STATE_DIR": root,
             "SUBAGENT_STATE_FILE": root / "state.json",
+            "SUBAGENT_STATE_BACKUP_FILE": root / "state.backup.json",
             "SUBAGENT_BUS_FILE": root / "bus.json",
             "SUBAGENT_LOCK_FILE": root / "registry.lock",
             "SUBAGENT_LOG_DIR": root / "logs",
@@ -276,7 +277,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
                 for tier, config in subject.TIER_CONFIG.items()
             },
             {
-                "contractor-intern": ("cursor", "composer-2.5", None, 10),
+                "contractor-intern": ("cursor", "composer-2.5", None, 1),
                 "intern": ("codex", "gpt-5.6-terra", "medium", 22),
                 "mid": ("codex", "gpt-5.6-terra", "high", 50),
                 "senior": ("codex", "gpt-5.6-sol", "high", 70),
@@ -593,7 +594,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
             [(100, "specialist")] * 38
             + [(70, "senior")]
             + [(22, "intern")] * 4
-            + [(10, "contractor-intern")] * 2
+            + [(1, "contractor-intern")] * 20
         )
         self.assertEqual(sum(cost for cost, _ in costs_and_tiers), 3978)
 
@@ -822,11 +823,11 @@ class PersistentSubagentContractTest(unittest.TestCase):
                 state["agents"][str(agent_id)] = self._agent_record(
                     agent_id, tier="intern", cost=22,
                 )
-            for agent_id in range(44, 46):
+            for agent_id in range(44, 64):
                 state["agents"][str(agent_id)] = self._agent_record(
-                    agent_id, tier="contractor-intern", account="cursor", cost=10,
+                    agent_id, tier="contractor-intern", account="cursor", cost=1,
                 )
-            state["next_agent_id"] = 46
+            state["next_agent_id"] = 64
 
         self._mutate_state(populate)
         create_arguments = {
@@ -1383,7 +1384,7 @@ with subagent._registry_lock():
         self.assertEqual(record["status"], "INTERRUPTED")
         self.assertEqual(record["operation_state"], "RECOVERED_SESSION_ONLY")
         self.assertFalse(record.get("operation_cleanup_required"))
-        self.assertEqual(subject._live_budget(self._state()), 10)
+        self.assertEqual(subject._live_budget(self._state()), 1)
 
     def test_codex_killed_resume_vendor_starting_is_bounded_and_killable(self) -> None:
         self._initialize_root()
@@ -1663,7 +1664,7 @@ with subagent._registry_lock():
         record = self._state()["agents"]["1"]
         self.assertEqual(record["status"], "INTERRUPTED")
         self.assertEqual(record["operation_state"], "TURN_COMPLETED")
-        self.assertEqual(subject._live_budget(self._state()), 10)
+        self.assertEqual(subject._live_budget(self._state()), 1)
 
     def test_reconcile_recovers_stale_cursor_interrupt_as_idle_not_working(self) -> None:
         self._initialize_root()
@@ -2011,17 +2012,48 @@ with subagent._registry_lock():
         self.assertEqual(response["error_code"], "ACCOUNT_QUOTA_EXHAUSTED")
         self.interrupt_runtime.assert_not_called()
 
-    def test_noncanonical_cost_state_fails_closed_before_budget_math(self) -> None:
+    def test_noncanonical_tier_metadata_is_repaired_before_budget_math(self) -> None:
         self._initialize_root()
 
         def populate(state) -> None:
-            state["agents"]["1"] = self._agent_record(1, cost=-100)
+            agent = self._agent_record(1, cost=-100)
+            agent.update({
+                "provider": "obsolete-provider",
+                "model": "obsolete-model",
+                "model_display": "Obsolete model",
+                "reasoning": "obsolete-reasoning",
+            })
+            state["agents"]["1"] = agent
             state["next_agent_id"] = 2
 
         self._mutate_state(populate)
         response = self._call(command="status")
-        self.assertFalse(response["ok"])
-        self.assertEqual(response["error_code"], "STATE_CORRUPT")
+        self.assertTrue(response["ok"], response)
+        state = self._state()
+        agent = state["agents"]["1"]
+        config = subject.TIER_CONFIG[str(agent["tier"])]
+        for field in ("provider", "model", "model_display", "reasoning", "cost"):
+            self.assertEqual(agent[field], config[field])
+        self.assertEqual(
+            state["recovery_history"][-1]["kind"],
+            "canonical_tier_metadata",
+        )
+
+    def test_unreadable_primary_is_quarantined_and_restored_from_backup(self) -> None:
+        self._initialize_root()
+        expected = subject.SUBAGENT_STATE_BACKUP_FILE.read_bytes()
+        corrupt = b'{"schema_version": 1, definitely-not-json'
+        subject.SUBAGENT_STATE_FILE.write_bytes(corrupt)
+
+        response = self._call(command="status")
+
+        self.assertTrue(response["ok"], response)
+        restored = json.loads(subject.SUBAGENT_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(restored["recovery_history"][-1]["kind"], "backup_restore")
+        quarantined = list(subject.SUBAGENT_STATE_DIR.glob("state.corrupt.*.json"))
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_bytes(), corrupt)
+        self.assertNotEqual(subject.SUBAGENT_STATE_FILE.read_bytes(), expected)
 
     def test_corrupt_state_fails_closed_without_overwriting_evidence(self) -> None:
         subject.SUBAGENT_STATE_DIR.mkdir(parents=True, exist_ok=True)
