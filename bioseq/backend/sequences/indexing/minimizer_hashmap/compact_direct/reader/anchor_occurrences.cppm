@@ -3,6 +3,10 @@
  * @brief Materialization and hash ordering of query minimizer occurrences.
  */
 
+module;
+
+#include <libassert/assert.hpp>
+
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_anchor_occurrences;
 
 import :compact_direct.reader_contract;

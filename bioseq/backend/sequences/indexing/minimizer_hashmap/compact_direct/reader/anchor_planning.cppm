@@ -3,6 +3,10 @@
  * @brief Query-wave planning, admission, grouped execution, and final anchors.
  */
 
+module;
+
+#include <libassert/assert.hpp>
+
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_anchor_planning;
 
 import :compact_direct.reader_contract;

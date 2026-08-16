@@ -3,6 +3,10 @@
  * @brief Compact-direct reader state, nested contracts, and member declarations.
  */
 
+module;
+
+#include <libassert/assert.hpp>
+
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_contract;
 
 import :compact_direct.query_contracts;

@@ -3,6 +3,10 @@
  * @brief Compact-direct control, position, matcher, and grouped leaf codecs.
  */
 
+module;
+
+#include <libassert/assert.hpp>
+
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_codec;
 
 import :compact_direct.reader_contract;

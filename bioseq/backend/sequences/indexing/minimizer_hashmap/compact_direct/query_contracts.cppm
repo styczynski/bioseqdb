@@ -3,6 +3,10 @@
  * @brief Compact-direct query contracts and public value types.
  */
 
+module;
+
+#include <libassert/assert.hpp>
+
 export module bioseq.indexing.minimizer_hashmap:compact_direct.query_contracts;
 
 import std;
