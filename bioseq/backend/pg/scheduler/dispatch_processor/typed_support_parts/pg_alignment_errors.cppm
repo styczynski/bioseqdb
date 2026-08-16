@@ -106,6 +106,7 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
     pg_unreachable();
 }
 
+/** Reports that a row requires a compatible persisted minimizer index and none is wired. */
 [[noreturn]] inline void
 raise_required_persisted_index_error(const batch_processor::scanner_pg_context* scanner_pg_ctx,
                                      const std::int64_t target_row,
@@ -135,6 +136,7 @@ raise_required_persisted_index_error(const batch_processor::scanner_pg_context* 
         "rebuild and recompute fallbacks are forbidden.");
 }
 
+/** Increments persisted, recomputed, and missing-persisted row counters for one target lookup. */
 inline void
 record_target_index_outcome(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                             const ::bioseq::pipeline_stats::target_index_source requested_source,
@@ -151,6 +153,7 @@ record_target_index_outcome(::bioseq::pipeline_stats::pipeline_execution_stats& 
     }
 }
 
+/** Appends rank-encoded symbols for [start_bp, end_bp) into @p destination for GPU simple CIGAR. */
 template <class p_sequence>
 [[nodiscard]] std::span<const std::uint32_t>
 append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
@@ -236,6 +239,7 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
     return std::span<const std::uint32_t>{destination.data() + destination_offset, window_length};
 }
 
+/** Lazy-sequence overload of append_gpu_alignment_symbols using a byte scratch buffer. */
 template <sequence_alphabet p_alphabet>
 [[nodiscard]] std::span<const std::uint32_t>
 append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
@@ -279,6 +283,7 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
     return std::span<const std::uint32_t>{destination.data() + output_offset, length};
 }
 
+/** Returns the length of the equal-symbol prefix from aligned query and target offsets. */
 [[nodiscard]] inline std::uint32_t
 gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
                                std::span<const std::uint32_t> target_symbols,
@@ -292,6 +297,7 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
     return run;
 }
 
+/** True when spans differ only by unit insertions or deletions within simple CIGAR gap limits. */
 [[nodiscard]] inline bool gpu_alignment_unit_gap_walk_cigar_candidate(
     std::span<const std::uint32_t> query_symbols,
     std::span<const std::uint32_t> target_symbols) noexcept {
@@ -357,6 +363,7 @@ gpu_alignment_common_match_run(std::span<const std::uint32_t> query_symbols,
     return gap_count != 0u;
 }
 
+/** Decodes packed GPU CIGAR words into @p destination and merges adjacent identical opcodes. */
 inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
                                       std::span<const std::uint32_t> packed) {
     for (std::uint32_t entry : packed) {
@@ -373,6 +380,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
     }
 }
 
+/** Maps a Vulkan aligner failure to ERRCODE_INTERNAL_ERROR with no CPU fallback hint. */
 [[noreturn]] inline void raise_vulkan_pg_error(std::string_view stage, std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
     raise_typed_dispatch_pg_error_as_cpp(
@@ -383,6 +391,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
         "runtime or select a non-Vulkan algorithm before dispatch.");
 }
 
+/** Maps an exact SIMD minimizer failure to ERRCODE_FEATURE_NOT_SUPPORTED. */
 [[noreturn]] inline void raise_exact_simd_pg_error(std::string_view stage,
                                                    std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
@@ -395,6 +404,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
         "algorithm tuple explicitly.");
 }
 
+/** Maps a bounded ntHash SIMD failure to ERRCODE_FEATURE_NOT_SUPPORTED. */
 [[noreturn]] inline void raise_bounded_nthash_pg_error(std::string_view stage,
                                                        std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
@@ -407,6 +417,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
         "admissible range, or select another algorithm explicitly.");
 }
 
+/** Maps SIMD chaining failure to invalid-parameter or unsupported-feature PostgreSQL errors. */
 [[noreturn]] inline void raise_simd_chaining_pg_error(std::string_view stage,
                                                       pipe::simd_chaining_status status,
                                                       std::string_view detail) {
@@ -428,6 +439,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
         "different chaining algorithm before dispatch.");
 }
 
+/** Maps inconsistent persisted minimizer lookup to ERRCODE_DATA_CORRUPTED. */
 [[noreturn]] inline void raise_persisted_minimizer_lookup_pg_error(std::string_view stage,
                                                                    std::string_view detail) {
     const std::string diagnostic = fmt::format("{}: {}", stage, detail);
@@ -439,6 +451,7 @@ inline void append_packed_cigar_slice(std::vector<cigar_operation>& destination,
         "recompute or scalar fallback.");
 }
 
+/** Copies @p source into @p destination without exceeding capacity and returns the byte length. */
 template <std::size_t p_capacity>
 [[nodiscard]] inline std::size_t copy_pg_error_detail(std::array<char, p_capacity>& destination,
                                                       const char* source) noexcept {
@@ -456,9 +469,11 @@ template <std::size_t p_capacity>
     return size;
 }
 
+/** Runs an aligner callable and re-raises typed runtime failures as PostgreSQL ERROR. */
 template <class p_function>
 [[nodiscard]] match_result_collection run_aligner_pg_checked(std::string_view stage,
                                                              p_function&& fn) {
+    /** Classifies which raise_*_pg_error path follows a caught aligner exception. */
     enum class failure_kind : std::uint8_t {
         none,
         vulkan,
@@ -513,6 +528,7 @@ template <class p_function>
     __builtin_unreachable();
 }
 
+/** PostgreSQL-checked wrapper around minimap_port_raw_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_raw_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked("minimap_port", [&args...]() -> match_result_collection {
@@ -520,6 +536,7 @@ template <class... p_arguments>
     });
 }
 
+/** PostgreSQL-checked wrapper around minimap_port_segmented_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_segmented_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -528,6 +545,7 @@ template <class... p_arguments>
         });
 }
 
+/** PostgreSQL-checked wrapper around minimap_port_fragment_index_vector_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection
 minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
@@ -537,6 +555,7 @@ minimap_port_fragment_index_vector_pg_checked(p_arguments&&... args) {
         });
 }
 
+/** PostgreSQL-checked wrapper around minimap_port_hash_major_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_hash_major_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -545,6 +564,7 @@ template <class... p_arguments>
         });
 }
 
+/** PostgreSQL-checked wrapper around minimap_port_grouped_soa_owned. */
 template <class... p_arguments>
 [[nodiscard]] match_result_collection minimap_port_grouped_soa_pg_checked(p_arguments&&... args) {
     return run_aligner_pg_checked(
@@ -553,6 +573,7 @@ template <class... p_arguments>
         });
 }
 
+/** Runs @p function on fragment storage and closes or abandons the reader on exit or error. */
 template <class p_storage, class p_function>
 inline void with_checked_minimizer_fragment_reader(p_storage& storage, p_function&& function) {
     try {

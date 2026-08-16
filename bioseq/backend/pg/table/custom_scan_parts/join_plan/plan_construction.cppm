@@ -93,6 +93,18 @@ export {
      *
      * The plan preserves child target identities required by setrefs while assigning each
      * current-owner match helper to one descriptor-only scan column.
+     *
+     * @param root Planner context used for plan-only helper ownership validation.
+     * @param rel Join relation whose relids are copied onto the custom scan.
+     * @param best_path Winning path whose custom_private carries the versioned batch-join recipe.
+     * @param tlist Callback target list from setrefs, extended with missing resjunk helper carriers.
+     * @param clauses Join restriction list from which owned mmsearch occurrences are stripped.
+     * @param custom_plans Two child plans in order: locator-owned target column scan, then query scan.
+     * @return CustomScan plan with combined child targetlist, rewritten output expressions, and
+     *         executor ABI in custom_private.
+     * @throws PostgreSQL ERROR when planner inputs, private ABI fields, locator child wiring,
+     *         projection slots, helper site registration, setrefs rewrite, or owned mmsearch
+     *         identity are invalid.
      */
     Plan* bioseq_batch_join_plan_custom_path(PlannerInfo* root,
                                              RelOptInfo* rel,

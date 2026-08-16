@@ -91,6 +91,7 @@ export {
      * is a PostgreSQL Node, so copy/equal/out/read and setrefs remain core-owned.
      * ====================================================================== */
 
+    /** @brief Opcode tag for one node in the lazy SliceProject expression tree. */
     enum class slice_project_opcode : std::uint8_t {
         source_expr = 1,
         literal_expr = 2,
@@ -105,12 +106,18 @@ export {
         materialize = 11,
     };
 
+    /** @brief Magic integer written to the first SliceProject plan header field (BSP1). */
     inline constexpr int k_bioseq_slice_project_magic = 0x42535031; /* BSP1 */
+    /** @brief Serialized SliceProject codec version carried in the plan header. */
     inline constexpr int k_bioseq_slice_project_codec_version = 3;
+    /** @brief Expected field count for the SliceProject plan header list. */
     inline constexpr int k_bioseq_slice_project_header_fields = 10;
+    /** @brief Expected field count for each SliceProject producer node record. */
     inline constexpr int k_bioseq_slice_project_node_fields = 11;
+    /** @brief Expected field count for each SliceProject materialization boundary record. */
     inline constexpr int k_bioseq_slice_project_record_fields = 9;
 
+    /** @brief Field index within the serialized SliceProject plan header list. */
     enum slice_project_header_index : int {
         k_slice_header_magic = 0,
         k_slice_header_version = 1,
@@ -124,6 +131,7 @@ export {
         k_slice_header_fallback_reason = 9,
     };
 
+    /** @brief Field index within one SliceProject materialization boundary record. */
     enum slice_project_record_index : int {
         k_slice_record_boundary_id = 0,
         k_slice_record_producer_id = 1,
@@ -136,6 +144,7 @@ export {
         k_slice_record_cache_scope = 8,
     };
 
+    /** @brief Field index within one SliceProject producer node record. */
     enum slice_project_node_index : int {
         k_slice_node_stable_id = 0,
         k_slice_node_opcode = 1,
@@ -150,11 +159,15 @@ export {
         k_slice_node_flags = 10,
     };
 
+    /** @brief Bit flags attached to a SliceProject IR node. */
     enum slice_project_node_flags : int {
+        /** @brief Node may change per evaluation and cannot be cached across calls. */
         k_slice_node_volatile = 1 << 0,
+        /** @brief Expression shape is not represented in the lazy codec. */
         k_slice_node_opaque = 1 << 1,
     };
 
+    /** @brief Builds a non-null INT8 Const for codec fields, clamping @p value to INT8 range. */
     [[nodiscard]] Const* slice_project_int8_const(std::uint64_t value) {
         const std::uint64_t clamped =
             std::min<std::uint64_t>(
@@ -169,6 +182,7 @@ export {
                          true);
     }
 
+    /** @brief Decodes a non-negative uint64 from an INT8 Const node and errors on corruption. */
     [[nodiscard]] std::uint64_t slice_project_int8_value(Node* node) {
         Const* value = try_cast_pg_node<Const>(node);
         if (value == nullptr || value->constisnull || value->consttype != INT8OID) {
@@ -185,6 +199,7 @@ export {
         return static_cast<std::uint64_t>(decoded);
     }
 
+    /** @brief Returns a stable EXPLAIN label for @p mechanism. */
     [[nodiscard]] const char*
     slice_project_mechanism_name(materialization_mechanism mechanism) noexcept {
         switch (mechanism) {
@@ -204,6 +219,7 @@ export {
         return "invalid";
     }
 
+    /** @brief Returns a stable EXPLAIN label for @p reason. */
     [[nodiscard]] const char* slice_project_reason_name(materialization_reason reason) noexcept {
         switch (reason) {
         case materialization_reason::executor_copy:
@@ -226,6 +242,7 @@ export {
         return "invalid";
     }
 
+    /** @brief Returns the encoding family name shown in EXPLAIN for @p mechanism. */
     [[nodiscard]] const char*
     slice_project_encoding_name(materialization_mechanism mechanism) noexcept {
         switch (mechanism) {
@@ -244,6 +261,7 @@ export {
         return "unknown";
     }
 
+    /** @brief True when @p oid is a registered sequence concat function variant. */
     [[nodiscard]] bool slice_project_concat_oid(Oid oid, const bioseq_stub_oids& oids) noexcept {
         return oid == oids.seq_concat_oid || oid == oids.seq_array_cat_oid ||
                oid == oids.seq_concat_text_oid || oid == oids.text_concat_seq_oid ||
@@ -252,6 +270,7 @@ export {
                oid == oids.seq_concat_letter_array_oid || oid == oids.letter_array_concat_seq_oid;
     }
 
+    /** @brief Maps a FuncExpr to a slice opcode when it implements a known lazy operator. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_function_opcode(FuncExpr* function, const bioseq_stub_oids& oids) noexcept {
         if (function == nullptr)
@@ -283,6 +302,7 @@ export {
         return std::nullopt;
     }
 
+    /** @brief Maps an expression node to a slice opcode when shape and OIDs match. */
     [[nodiscard]] std::optional<slice_project_opcode>
     slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
         if (node == nullptr)
@@ -325,6 +345,7 @@ export {
         return std::nullopt;
     }
 
+    /** @brief Returns FuncExpr or OpExpr argument lists, or NIL for other node kinds. */
     [[nodiscard]] List* slice_project_call_arguments(Node* node) noexcept {
         if (FuncExpr* function = try_cast_pg_node<FuncExpr>(node)) {
             return function->args;
@@ -377,6 +398,7 @@ export {
         return reinterpret_cast<Node*>(linitial(expressions));
     }
 
+    /** @brief Estimates output symbol count for planner costing and returns 4096 when unknown. */
     [[nodiscard]] std::uint64_t slice_project_estimated_symbols(Node* node,
                                                                 const bioseq_stub_oids& oids) {
         if (node == nullptr)
@@ -395,6 +417,7 @@ export {
             }
             Node* lower = slice_project_subscript_bound(subscript->reflowerindexpr);
             Node* upper = slice_project_subscript_bound(subscript->refupperindexpr);
+            /** @brief Returns a compile-time INT8 bound when @p expression is a non-null constant. */
             auto constant_bound = [](Node* expression) -> std::optional<std::int64_t> {
                 Const* constant = try_cast_pg_node<Const>(expression);
                 if (constant == nullptr || constant->constisnull || constant->consttype != INT8OID)
@@ -458,6 +481,7 @@ export {
         return 4096u;
     }
 
+    /** @brief Startup and per-input-tuple planner costs for an owning mmsearch path. */
     struct owned_mmsearch_cost {
         Cost startup = 0;
         Cost per_input_tuple = 0;
@@ -483,6 +507,7 @@ export {
         return operands;
     }
 
+    /** @brief Estimates symbol count for one mmsearch operand expression. */
     [[nodiscard]] std::uint64_t estimate_mmsearch_operand_symbols(Node* expression,
                                                                   bioseq_stub_oids const& oids) {
         if (expression == nullptr)
@@ -501,6 +526,7 @@ export {
         return 4096u;
     }
 
+    /** @brief Computes planner startup and per-tuple costs from length, batch, and byte estimates. */
     [[nodiscard]] owned_mmsearch_cost
     estimate_owned_mmsearch_cost(std::uint64_t target_length_estimate,
                                  std::uint64_t query_length_estimate,
@@ -509,6 +535,7 @@ export {
                                  std::uint32_t planned_batch_size,
                                  std::uint64_t planned_materialized_bytes) noexcept {
         constexpr Cost maximum = std::numeric_limits<Cost>::max() / 32.0;
+        /** @brief Clamps a non-negative planner cost to a finite ceiling. */
         auto finite_cost = [](long double value) noexcept -> Cost {
             constexpr long double limit =
                 static_cast<long double>(std::numeric_limits<Cost>::max() / 32.0);
@@ -549,6 +576,7 @@ export {
         return result;
     }
 
+    /** @brief Mutable accumulator for SliceProject IR nodes, records, and plan totals during planning. */
     struct slice_project_ir_builder {
         const bioseq_stub_oids* oids = nullptr;
         CmdType command_type = CMD_UNKNOWN;

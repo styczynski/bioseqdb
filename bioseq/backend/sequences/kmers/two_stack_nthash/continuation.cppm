@@ -34,6 +34,7 @@ namespace hn = hwy::HWY_NAMESPACE;
  * @param runtime_k Requested k-mer length in biological symbols.
  * @param emitted_position_base Offset added to emitted sequence coordinates.
  * @return Admission status retained in @p state.
+ * @note Successful reset selects the generic u64 exact kernel in @p state.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 [[nodiscard]] inline two_stack_continuation_status reset_two_stack_nthash(
@@ -127,6 +128,9 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
  * @param consume_begin_bp Global coordinate where consumption begins.
  * @param consume_end_bp One past the final global coordinate to consume.
  * @return Continuation status, with failures retained in @p state.
+ * @note After the first fragment, @p consume_begin_bp must equal @c state.next_input_position.
+ * @note DNA4 input may switch to the exact K15/W10 fast block kernel when compile-time sizes,
+ *       storage traits, minimizer representation, and @p state kernel selection all match.
  */
 template<
     std::size_t p_window_size,
@@ -449,6 +453,7 @@ consume_two_stack_nthash_packed_fragment(
  * @param consume_begin_bp Global coordinate where consumption begins.
  * @param consume_end_bp One past the final global coordinate to consume.
  * @return Continuation status, with failures retained in @p state.
+ * @note Forwards to the packed-fragment consumer and inherits its contiguity and kernel rules.
  */
 template<
     std::size_t p_window_size,
@@ -495,6 +500,7 @@ consume_two_stack_nthash_fragment(
  * @param state Continuation state to finalize.
  * @param collector Destination for pending and final minimizers.
  * @return Final status and accumulated execution evidence.
+ * @note Marks @p state finalized on success and rejects later consume or finalize calls.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits, class p_collector_type>
 [[nodiscard]] inline two_stack_finalize_result finalize_two_stack_nthash(

@@ -107,6 +107,7 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqPerRowMmsearch planner state is incomplete")));
         }
+        /** @brief Reads one Integer field from the path private list by index and errors on an invalid slot. */
         auto private_integer = [best_path](const int index) -> int {
             Node* node = reinterpret_cast<Node*>(list_nth(best_path->custom_private, index));
             if (node == nullptr || !IsA(node, Integer)) {

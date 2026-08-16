@@ -38,6 +38,14 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/**
+ * Validate grouped-SoA segment-local profile geometry, generation identity, and compact-direct image
+ * against the expected storage contract.
+ * Returns profile and hash-domain bit width when layout, max_occ, checksums, and direct header geometry
+ * match the manifest and owned image span.
+ * Otherwise returns storage_contract_mismatch, identity_mismatch, checksum, or the storage-contract
+ * validation error.
+ */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader::direct_open_contract,
                                    minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::validate_direct_open_contract_(
@@ -169,6 +177,15 @@ prepared_minimizer_fragment_reader::open_compact_direct(
     return reader;
 }
 
+/**
+ * Open a grouped-SoA minimizer fragment reader over a mapped payload and encoded directory.
+ * Optionally attaches a compact-direct index view validated with the same identity and geometry checks
+ * as validate_direct_open_contract_.
+ * Decodes the directory under admission, builds per-entry control and position address plans, and packs
+ * fragment block plans that never split a position-segment run.
+ * Returns admission, arithmetic_overflow, directory_size, position_segment, byte_count, bp_range,
+ * directory_order, or decode errors when mapping sizes, payload layout, or segment ordering disagree.
+ */
 [[nodiscard]] inline std::expected<prepared_minimizer_fragment_reader,
                                    minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::open(
@@ -528,6 +545,10 @@ prepared_minimizer_fragment_reader::open(
     return reader;
 }
 
+/**
+ * Report open-side retained capacity for the decoded directory, entry plans, and fragment block plans.
+ * Query-wave counters and payload span fields stay zero until prepare_fragment_anchor_batch runs.
+ */
 [[nodiscard]] inline grouped_soa_query_reader_memory_stats
 prepared_minimizer_fragment_reader::memory_stats() const noexcept {
     const std::uint64_t directory_bytes = directory_.owned_capacity_bytes();
