@@ -93,9 +93,17 @@ void batch_processor::prepare_gpu_persisted_grouped_soa_target(
     const minimap2_parameters& params,
     const bioseq::storage::indexing::borrowed_executor_read_context& executor_read,
     gpu_prepared_grouped_soa_target& prepared_target) {
-    using namespace bioseq::storage::indexing;
     using bioseq::indexing::gpu_grouped_soa_ingest_error;
     using bioseq::indexing::minimizer_generation_layout;
+    using bioseq::storage::indexing::authorize_minimizer_generation_catalog_source_pg;
+    using bioseq::storage::indexing::format_seqidx_name;
+    using bioseq::storage::indexing::index_storage_fragment_generation_read_session;
+    using bioseq::storage::indexing::minimizer_generation_administration_identity;
+    using bioseq::storage::indexing::minimizer_generation_catalog_source_stats;
+    using bioseq::storage::indexing::minimizer_generation_read_stats;
+    using bioseq::storage::indexing::minimizer_generation_relation_kind;
+    using bioseq::storage::indexing::minimizer_generation_source_locator;
+    using bioseq::storage::indexing::open_exact_minimizer_generation_read_session_pg;
     const auto fail = [](const int sqlstate, std::string message) -> void {
         bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, &message] {
             ereport(

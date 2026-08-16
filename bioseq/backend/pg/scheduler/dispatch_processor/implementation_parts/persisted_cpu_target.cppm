@@ -103,9 +103,25 @@ void batch_processor::prepare_cpu_persisted_native_target(
         throw std::logic_error{
             "persisted CPU preparation typmod operations disagree with the request"};
     }
-    using namespace bioseq::storage::indexing;
     using bioseq::indexing::minimizer_generation_encoding_error;
     using bioseq::indexing::minimizer_generation_layout;
+    using bioseq::storage::indexing::authorize_minimizer_generation_catalog_source_pg;
+    using bioseq::storage::indexing::format_seqidx_name;
+    using bioseq::storage::indexing::index_storage_fragment_generation_read_session;
+    using bioseq::storage::indexing::index_storage_hash_major_minimizer_read_session;
+    using bioseq::storage::indexing::minimizer_fragment_image_mapped_open_validation;
+    using bioseq::storage::indexing::minimizer_generation_administration_identity;
+    using bioseq::storage::indexing::minimizer_generation_catalog_source_stats;
+    using bioseq::storage::indexing::minimizer_generation_head;
+    using bioseq::storage::indexing::minimizer_generation_manifest;
+    using bioseq::storage::indexing::minimizer_generation_read_metadata;
+    using bioseq::storage::indexing::minimizer_generation_read_stats;
+    using bioseq::storage::indexing::minimizer_generation_relation_kind;
+    using bioseq::storage::indexing::minimizer_generation_schema_error_name;
+    using bioseq::storage::indexing::minimizer_generation_source_locator;
+    using bioseq::storage::indexing::open_exact_hash_major_minimizer_read_session_pg;
+    using bioseq::storage::indexing::open_exact_minimizer_fragment_image_pg;
+    using bioseq::storage::indexing::open_exact_minimizer_generation_read_session_pg;
     const auto fail = [](std::string message) -> void {
         bioseq::postgres::support::invoke_pg_as_cpp([&message] {
             ereport(ERROR,
