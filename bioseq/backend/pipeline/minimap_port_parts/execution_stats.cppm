@@ -1153,7 +1153,7 @@ struct match_result_collection {
     }
 
     /// Return the number of alignment results.
-    [[nodiscard]] size_t size() const {
+    [[nodiscard]] std::size_t size() const {
         return results.size();
     }
 

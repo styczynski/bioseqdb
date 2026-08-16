@@ -55,8 +55,7 @@ import bioseq.storage.size;
 
 export namespace bioseq::indexing {
 
-/// query-time: load ONLY the buckets containing any query kmer (§10.5).
-    static minimizer_hashmap_fragment_index assemble_for_query(
+/// Load only the persisted buckets referenced by the query minimizers.
 template <class p_storage>
 inline minimizer_hashmap_fragment_index
 direct_minimizer_bucket_index<p_storage>::assemble_for_query(
@@ -67,10 +66,10 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query(
     minimizer_assembly_scratch& scratch) {
     return assemble_for_query_segment(
         storage, query_minimizers, target_len, max_occ, 0, target_len, scratch);
-    }
+}
 
-    /// query-time: load query-touched buckets but keep only positions in one
-    /// target collection range. Occurrence filtering remains global.
+/// Load query-touched buckets and retain positions in one target range.
+/// Occurrence filtering still uses the complete persisted bucket counts.
 template <class p_storage>
 inline minimizer_hashmap_fragment_index
 direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
@@ -162,6 +161,6 @@ direct_minimizer_bucket_index<p_storage>::assemble_for_query_segment(
     minimizer_hashmap_fragment_index idx;
     idx.build_from_pairs(pairs, target_len);
     return idx;
-    }
+}
 
-    } // namespace bioseq::indexing
+} // namespace bioseq::indexing
