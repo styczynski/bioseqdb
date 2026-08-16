@@ -82,6 +82,9 @@ static_assert(std::is_standard_layout_v<
               bioseq_highway_hashers_probe_receipt>);
 static_assert(std::is_standard_layout_v<
               bioseq_highway_two_stack_probe_receipt>);
+static_assert(std::is_trivial_v<bioseq_highway_two_stack_probe_receipt>);
+static_assert(
+    std::is_trivially_copyable_v<bioseq_highway_two_stack_probe_receipt>);
 static_assert(std::is_standard_layout_v<
               bioseq_highway_two_stack_reference_output_pair>);
 static_assert(std::is_standard_layout_v<
@@ -93,7 +96,8 @@ static_assert(std::is_trivially_copyable_v<
 static_assert(sizeof(bioseq_highway_simd_utils_probe_receipt) == 40U);
 static_assert(sizeof(bioseq_highway_sequence_ops_probe_receipt) == 24U);
 static_assert(sizeof(bioseq_highway_hashers_probe_receipt) == 24U);
-static_assert(sizeof(bioseq_highway_two_stack_probe_receipt) == 40U);
+static_assert(alignof(bioseq_highway_two_stack_probe_receipt) == 8U);
+static_assert(sizeof(bioseq_highway_two_stack_probe_receipt) == 48U);
 static_assert(sizeof(bioseq_highway_two_stack_reference_output_pair) == 16U);
 static_assert(
     sizeof(bioseq_highway_two_stack_reference_output_receipt) == 1056U);
