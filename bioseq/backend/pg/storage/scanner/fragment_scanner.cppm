@@ -1,5 +1,5 @@
 /**
- * @file fragment_scanner.cppm
+ * @file scanner/fragment_scanner.cppm
  * @brief PostgreSQL fragmented sequence scanning and cleanup.
  */
 module;

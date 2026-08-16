@@ -1,5 +1,5 @@
 /**
- * @file admin.cppm
+ * @file admin/index.cppm
  * @brief Stable facade for PostgreSQL indexing administration partitions.
  *
  * Re-exports policy, publisher, rebuild and integration support contracts.

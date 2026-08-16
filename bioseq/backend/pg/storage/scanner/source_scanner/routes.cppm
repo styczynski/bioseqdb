@@ -1,5 +1,5 @@
 /**
- * @file routes.cppm
+ * @file scanner/source_scanner/routes.cppm
  * @brief Authenticated source-route storage and lookup.
  */
 module;

@@ -1,5 +1,5 @@
 /**
- * @file policy_catalog.cppm
+ * @file admin/policy_catalog.cppm
  * @brief Index policy, catalog and shared publication failure contracts.
  */
 module;
@@ -176,7 +176,13 @@ struct policy_row { std::string name; bool enabled; bool update_on_insert; };
     pg_unreachable();
 }
 
-/// Load every policy override for one physical sequence column.
+/**
+ * @brief Load every policy override for one physical sequence column.
+ * @param user_relid Source Bioseq relation.
+ * @param relfn Current relation storage incarnation.
+ * @param attno Sequence attribute number.
+ * @return Enabled and update-on-insert policy rows in catalog order.
+ */
 [[nodiscard]] inline std::vector<policy_row> load_table_policy(
         Oid user_relid,
         Oid relfn,
@@ -296,9 +302,10 @@ inline void note_policy_on_insert_writes(
 // Persisted minimizer semantics do not depend on the later chaining/alignment
 // choices: changing either stage must not silently relabel an explicitly
 // selected exact SIMD or bounded_nthash_simd index as scalar.
-// Defined before its first caller (index_build_on_insert); the spec placed it
-// near layout_of_name, which is below index_build_on_insert.
-/// Resolve the exact persisted minimizer producer selected by current GUCs.
+/**
+ * @brief Resolve the exact persisted minimizer producer selected by current GUCs.
+ * @return The producer backend whose identity is persisted with the generation.
+ */
 [[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
 resolve_index_sketch_backend_from_gucs() noexcept
 {

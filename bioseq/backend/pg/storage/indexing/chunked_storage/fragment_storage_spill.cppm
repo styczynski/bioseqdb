@@ -243,8 +243,8 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
             segment_run_entry_type{position_segment, sorted_pair_run_store{}});
     }
     // sorted_pair_run_store may compact/demote physical runs internally. Those
-    // transformations preserve the exact canonical pair stream; this one
-    // The mutation revision increment names the logical run injection, not its
+    // transformations preserve the exact canonical pair stream. The mutation
+    // revision increment names the logical run injection, not its
     // eventual memory-vs-BufFile representation.
     try {
         const std::size_t run = iterator->second.spill_sorted_run(sorted);

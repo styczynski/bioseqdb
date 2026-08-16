@@ -1,5 +1,5 @@
 /**
- * @file generation_fixture_read.cppm
+ * @file admin/generation_fixture_read.cppm
  * @brief PostgreSQL grouped-SoA generation fixture read and failure support.
  */
 module;
@@ -98,9 +98,17 @@ struct minimizer_generation_full_payload_fixture_result {
     minimizer_generation_read_stats read_stats{};
 };
 
-/// Reopen and consume the active fixture generation under one independently
-/// registered MVCC snapshot. The selected wire format chooses the qualified
-/// host reader only. This path does not participate in mmsearch.
+/**
+ * @brief Reopen and consume one active fixture generation under an independent MVCC snapshot.
+ * @param rel_oid Source Bioseq relation.
+ * @param index_name Registered logical index name.
+ * @param sequence_rowno Visible source-row ordinal and query key.
+ * @param kmer_size Required persisted k-mer size.
+ * @param window_size Required persisted minimizer window.
+ * @param layout Current generation layout selecting the qualified host reader.
+ * @param backend Required producer backend; no fallback is permitted.
+ * @return Authenticated fixture metadata and read receipts.
+ */
 [[nodiscard]] inline minimizer_generation_integration_fixture_result
 read_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,

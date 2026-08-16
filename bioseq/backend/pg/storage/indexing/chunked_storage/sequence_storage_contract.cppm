@@ -200,7 +200,6 @@ struct sequence_index_storage {
         decoded_ = nullptr;
     }
     /// Delete the owned MemoryContext through the translated PG boundary.
-    /// Delete the owned MemoryContext through the translated PG boundary.
     void close_checked() {
         if (own_mctx_ != nullptr) {
             MemoryContext finished_context = std::exchange(own_mctx_, nullptr);
@@ -209,7 +208,6 @@ struct sequence_index_storage {
                 [finished_context] { MemoryContextDelete(finished_context); });
         }
     }
-    /// Forget aliases whose storage now belongs to transaction-abort cleanup.
     /// Forget aliases whose storage now belongs to transaction-abort cleanup.
     void abandon_after_pg_error_noexcept() noexcept {
         own_mctx_ = nullptr;

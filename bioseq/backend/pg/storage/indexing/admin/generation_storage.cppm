@@ -1,5 +1,5 @@
 /**
- * @file generation_storage.cppm
+ * @file admin/generation_storage.cppm
  * @brief PostgreSQL generation storage residency and transaction fixtures.
  */
 module;
@@ -169,11 +169,17 @@ struct cache_keys {
 
 } // namespace minimizer_generation_storage_test_detail
 
-/// Integration seam for storage invariants that SQL alone cannot validate:
-/// explicit clear/create rollback must rebind C++ handles, committed
-/// clear/create must evict both residency forms in another backend, normal
-/// ensure must fail closed on noncanonical relations, and generation clear
-/// must invalidate its initiating OID handle.
+/**
+ * @brief Exercise storage lifecycle invariants that SQL alone cannot observe.
+ * @param rel_oid Source Bioseq relation.
+ * @param index_name Registered logical index name.
+ * @param sequence_rowno Source-row ordinal used for cache identities.
+ * @param operation Exact fixture lifecycle operation.
+ * @return OID, schema, handle-rebind, and residency observations.
+ *
+ * Clear/create rollback must rebind handles; committed changes must evict both residency forms;
+ * ensure fails on noncanonical relations; generation clear invalidates its initiating OID.
+ */
 [[nodiscard]] inline minimizer_generation_storage_state_fixture_result
 exercise_minimizer_generation_storage_state_impl(Oid rel_oid,
                                                  std::string_view index_name,

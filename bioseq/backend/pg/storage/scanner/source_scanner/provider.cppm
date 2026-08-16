@@ -1,5 +1,5 @@
 /**
- * @file provider.cppm
+ * @file scanner/source_scanner/provider.cppm
  * @brief Source-provider and registry-lease lifecycle.
  */
 module;

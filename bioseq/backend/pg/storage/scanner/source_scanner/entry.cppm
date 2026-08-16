@@ -1,5 +1,5 @@
 /**
- * @file entry.cppm
+ * @file scanner/source_scanner/entry.cppm
  * @brief Representation-specific source-scanner entry lifecycle.
  */
 module;

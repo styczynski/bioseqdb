@@ -1,5 +1,5 @@
 /**
- * @file source_registry.cppm
+ * @file scanner/source_registry.cppm
  * @brief Transaction-scoped source registry and domain ownership.
  */
 module;

@@ -1,5 +1,5 @@
 /**
- * @file source_scanner.cppm
+ * @file scanner/source_scanner.cppm
  * @brief Exported source-scanner facade.
  */
 export module bioseq.postgres.storage.scanner:source_scanner;

@@ -1,5 +1,5 @@
 /**
- * @file hash_major.cppm
+ * @file admin/hash_major.cppm
  * @brief Hash-major minimizer generation encoding and publication.
  */
 module;
@@ -135,9 +135,65 @@ struct hash_major_minimizer_generation_inspection {
     std::array<hash_major_minimizer_generation_stream_inspection, 3> streams{};
 };
 
-/// Resolve the sole live sequence column required by inspection helpers.
-[[nodiscard]] inline std::int16_t
-single_seq_attno_for_inspection(Oid rel_oid);
+/**
+ * @brief Resolve the sole live Bioseq sequence column used by inspection helpers.
+ * @param rel_oid Relation whose non-dropped sequence attributes are inspected.
+ * @return The unique positive sequence attribute number.
+ */
+[[nodiscard]] inline std::int16_t single_seq_attno_for_inspection(Oid rel_oid) {
+    const std::string sql = fmt::format("SELECT a.attnum FROM pg_attribute a "
+                                        "JOIN pg_type t ON a.atttypid=t.oid "
+                                        "JOIN pg_namespace n ON t.typnamespace=n.oid "
+                                        "WHERE a.attrelid={}::oid AND t.typname='seq' "
+                                        "AND n.nspname IN ('bioseq','bioseq_internal') "
+                                        "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+                                        static_cast<unsigned>(rel_oid));
+    struct sequence_attribute_number_inspection_state {
+        int connect_status = 0;
+        int execute_status = 0;
+        int finish_status = 0;
+        std::uint64_t row_count = 0;
+        std::int16_t result = 0;
+        bool table_present = false;
+        bool is_null = true;
+    } state{};
+    const char* sql_data = sql.c_str();
+    bioseq::postgres::support::invoke_pg_as_cpp([&state, sql_data] noexcept {
+        state.connect_status = SPI_connect();
+        if (state.connect_status != SPI_OK_CONNECT)
+            return;
+        state.execute_status = SPI_execute(sql_data, true, 2);
+        state.row_count = SPI_processed;
+        state.table_present = SPI_tuptable != nullptr;
+        if (state.execute_status == SPI_OK_SELECT && state.table_present && state.row_count == 1) {
+            bool is_null = false;
+            const Datum value =
+                SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
+            state.is_null = is_null;
+            if (!is_null)
+                state.result = DatumGetInt16(value);
+        }
+        state.finish_status = SPI_finish();
+    });
+    if (state.connect_status != SPI_OK_CONNECT || state.finish_status != SPI_OK_FINISH) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INTERNAL_ERROR,
+            "bioseq minimizer generation inspection could not inspect the source schema",
+            fmt::format("SPI_connect_status={} SPI_finish_status={}",
+                        state.connect_status,
+                        state.finish_status));
+    }
+    if (state.execute_status != SPI_OK_SELECT || !state.table_present || state.row_count != 1 ||
+        state.is_null || state.result <= 0) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "bioseq minimizer generation inspection requires exactly one bioseq.seq column",
+            fmt::format("relation={} visible_seq_columns={}",
+                        static_cast<unsigned>(rel_oid),
+                        state.row_count));
+    }
+    return state.result;
+}
 
 /// The execution-receipt alternative is the tag. There is deliberately no independent
 /// mutable index-kind enum that a caller could relabel after an encoder returns.
@@ -741,11 +797,23 @@ struct ready_hash_major_minimizer_publication {
     bool published = false;
 };
 
-/// Build and atomically publish one sequence-wide hash-major minimizer generation
-/// from a fragmented PostgreSQL source. Native minimizers are collected into
-/// PostgreSQL-owned sorted spill runs. Two bounded replays then satisfy the
-/// encoder's exact-count-before-postings contract. Fragment indexes are
-/// intentionally excluded: their physical indexes must never cross this merge seam.
+/**
+ * @brief Build and atomically publish one sequence-wide hash-major generation.
+ * @tparam p_sequence_range Compact source sequence range.
+ * @param user_relid Source Bioseq relation.
+ * @param column_attno Source sequence attribute.
+ * @param index_name Registered sequence-wide minimizer index.
+ * @param sequence_rowno Source-row ordinal and query key.
+ * @param storage PostgreSQL generation storage authority.
+ * @param sequence Snapshot-bound lazy sequence view.
+ * @param source_binding Locator and source-snapshot binding.
+ * @param backend Exact producer backend.
+ * @param kernels Required backend kernel table.
+ * @return Published hash-major metadata and replacement identity.
+ *
+ * PostgreSQL-owned spill runs are replayed twice to satisfy exact-count-before-postings.
+ * Fragment indexes remain outside this sequence-wide merge seam.
+ */
 template <class p_sequence_range>
 [[nodiscard]] inline ready_hash_major_minimizer_publication
 build_and_publish_hash_major_minimizer_generation_pg(

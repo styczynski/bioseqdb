@@ -1,5 +1,5 @@
 /**
- * @file test_contracts.cppm
+ * @file scanner/source_scanner/test_contracts.cppm
  * @brief Deterministic source-scanner failure and lifecycle contracts.
  */
 module;

@@ -1,5 +1,5 @@
 /**
- * @file core.cppm
+ * @file admin/rebuild/core.cppm
  * @brief Index rebuild routes and PostgreSQL error translation.
  */
 module;
@@ -84,19 +84,33 @@ import :grouped_soa;
 export namespace bioseq::storage::indexing {
 
 // ---- admin update_index ---------------------------------------------------
-/// Check whether an index name is present in the compiled registry.
+/**
+ * @brief Check whether an index name is present in the compiled registry.
+ * @param name Logical index name.
+ * @return True only for a registered name.
+ */
 [[nodiscard]] inline bool name_is_registered(std::string_view name) {
     for (auto& t : pg_supported_indexes::list_types())
         if (t.first == name)
             return true;
     return false;
 }
-/// Return the physical layout registered for one index name.
+/**
+ * @brief Return the physical layout registered for one index name.
+ * @param name Registered logical index name.
+ * @return Its compile-time registry layout.
+ */
 [[nodiscard]] inline sequence_index_layout layout_of_name(std::string_view name) {
     return pg_supported_indexes::layout_of(name);
 }
 
-/// Run one storage build and preserve its checked success or abort cleanup.
+/**
+ * @brief Run one storage build and preserve its checked success or abort cleanup.
+ * @tparam p_storage Storage adapter owning spill and close state.
+ * @tparam p_build_function Build callable.
+ * @param storage Adapter whose runs and close state are finalized.
+ * @param build_fn Callable that performs the build.
+ */
 template <class p_storage, class p_build_function>
 inline void run_pg_index_build_with_cleanup(p_storage& storage, p_build_function&& build_fn) {
     auto release_runs = [&storage]() noexcept {
@@ -277,9 +291,21 @@ inline void with_promoted_pg_sequence_view(Datum promoted_datum,
     }
 }
 
-/// Opt-in locator-backed minimizer hash-major publication path. The persistence
-/// GUC selects this branch without introducing another
-/// feature flag. Grouped-SoA generations remain readable.
+/**
+ * @brief Publish through hash-major when the exact locator-backed profile is registered.
+ * @tparam p_sequence_range Compact source sequence range.
+ * @param user_relid Source Bioseq relation.
+ * @param column_attno Source sequence attribute.
+ * @param index_name Registered minimizer index.
+ * @param sequence_rowno Source-row ordinal and query key.
+ * @param storage PostgreSQL generation storage authority.
+ * @param sequence Snapshot-bound lazy sequence view.
+ * @param source_binding Locator and source-snapshot binding.
+ * @param backend Exact producer backend.
+ * @param kernels Required backend kernel table.
+ *
+ * The persistence GUC selects this branch; unregistered profiles retain grouped-SoA.
+ */
 template <class p_sequence_range>
 inline void build_and_verify_hash_major_minimizer_generation_pg(
     Oid user_relid,
@@ -292,22 +318,87 @@ inline void build_and_verify_hash_major_minimizer_generation_pg(
         sequence,
     bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
     bioseq::minimizers::minimizer_sketch_backend backend,
-    const bioseq::minimizers::minimizer_kernels* kernels);
-
-/// Publish one locator-backed grouped-SoA minimizer generation.
-template <class p_sequence_range>
-inline void build_and_verify_grouped_soa_minimizer_generation_pg(
-    Oid user_relid,
-    std::int16_t column_attno,
-    std::string_view index_name,
-    std::uint64_t sequence_rowno,
-    fragment_index_storage& storage,
-    bioseq::storage::lazy_sequence_view<
-        typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
-        sequence,
-    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
-    bioseq::minimizers::minimizer_sketch_backend backend,
-    const bioseq::minimizers::minimizer_kernels* kernels);
+    const bioseq::minimizers::minimizer_kernels* kernels) {
+    using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
+    const sequence_locator& locator = source_binding.locator();
+    constexpr std::uint16_t k_window_size = 10u;
+    constexpr std::uint16_t k_kmer_size = 15u;
+    constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
+    if (index_name == k_minimizers_per_fragment_index_name) {
+        // The fragment route owns one persisted index per physical source fragment. Never
+        // route it through the target-wide hash-major spill/merge publisher.
+        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
+                                                             column_attno,
+                                                             index_name,
+                                                             sequence_rowno,
+                                                             storage,
+                                                             sequence,
+                                                             source_binding,
+                                                             backend,
+                                                             kernels);
+        return;
+    }
+    if constexpr (k_alphabet_code != 0u) {
+        // Avoid instantiating the large hash-major publisher for alphabet
+        // specializations which are statically outside its registry.
+        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
+                                                             column_attno,
+                                                             index_name,
+                                                             sequence_rowno,
+                                                             storage,
+                                                             sequence,
+                                                             source_binding,
+                                                             backend,
+                                                             kernels);
+        return;
+    } else {
+        const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
+            backend, k_alphabet_code, k_kmer_size, k_window_size, locator.logical_length);
+        if (!profile) {
+            // Future DNA4 parameter profiles which are not in the hash-major
+            // registry continue on the grouped-SoA route.
+            build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
+                                                                 column_attno,
+                                                                 index_name,
+                                                                 sequence_rowno,
+                                                                 storage,
+                                                                 sequence,
+                                                                 source_binding,
+                                                                 backend,
+                                                                 kernels);
+            return;
+        }
+        const ready_hash_major_minimizer_publication publication =
+            build_and_publish_hash_major_minimizer_generation_pg(user_relid,
+                                                                 column_attno,
+                                                                 index_name,
+                                                                 sequence_rowno,
+                                                                 storage,
+                                                                 sequence,
+                                                                 source_binding,
+                                                                 backend,
+                                                                 kernels);
+        if (!publication.published || publication.generation_id == 0u ||
+            publication.query_key != sequence_rowno ||
+            publication.source_epoch != locator.source_epoch ||
+            publication.selected_backend != backend ||
+            publication.head.generation_id != publication.generation_id ||
+            publication.head.query_key != sequence_rowno ||
+            publication.head.source_epoch != locator.source_epoch ||
+            publication.manifest.generation_id != publication.generation_id ||
+            publication.manifest.source_epoch != locator.source_epoch ||
+            publication.manifest.target_length != locator.logical_length ||
+            publication.unique_hash_count != publication.manifest.unique_hash_count ||
+            publication.total_posting_count != publication.manifest.total_posting_count) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "normal hash-major minimizer rebuild publication validation was rejected",
+                fmt::format("index={} backend={}",
+                            index_name,
+                            bioseq::minimizers::minimizer_sketch_backend_name(backend)));
+        }
+    }
+}
 
 /// Reject a grouped-SoA rebuild before mixing inline and locator sources.
 [[noreturn]] inline void reject_grouped_soa_nonlocator_source_as_cpp(std::string_view index_name) {
@@ -1278,111 +1369,6 @@ update_index_pg_checked(Oid rel_oid, const char* name_data, std::size_t name_siz
                  errmsg("bioseq.update_index raised an unknown C++ exception")));
     }
     pg_unreachable();
-}
-
-// Rebuild every policy-enabled UPDATE_ON_INSERT index for
-// `main_relid` in ONE batched pass (one streaming rebuild per index, no per-row
-// advisory locks). bioseq.load calls this once after its streamed insert when
-// bioseq.index.insert_maintenance.enabled is on. It loads the same per-table
-// policy as
-// `index_build_on_insert`, honors every eligible UPDATE_ON_INSERT index, and
-// drives `update_index_impl`, which rebuilds across
-// every seq column and every row — so the observable index state matches a
-// normal INSERT (only faster: one tuple-lock-free streaming pass).
-/// Production caller-side seal: publication must preserve the requested
-/// backend and exact source/generation identities returned by the encoder.
-template <class p_sequence_range>
-inline void build_and_verify_hash_major_minimizer_generation_pg(
-    Oid user_relid,
-    std::int16_t column_attno,
-    std::string_view index_name,
-    std::uint64_t sequence_rowno,
-    fragment_index_storage& storage,
-    bioseq::storage::lazy_sequence_view<
-        typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
-        sequence,
-    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
-    bioseq::minimizers::minimizer_sketch_backend backend,
-    const bioseq::minimizers::minimizer_kernels* kernels) {
-    using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
-    const sequence_locator& locator = source_binding.locator();
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
-    constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
-    if (index_name == k_minimizers_per_fragment_index_name) {
-        // The fragment route owns one persisted index per physical source fragment. Never
-        // route it through the target-wide hash-major spill/merge publisher.
-        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                             column_attno,
-                                                             index_name,
-                                                             sequence_rowno,
-                                                             storage,
-                                                             sequence,
-                                                             source_binding,
-                                                             backend,
-                                                             kernels);
-        return;
-    }
-    if constexpr (k_alphabet_code != 0u) {
-        // Avoid instantiating the large hash-major publisher for alphabet
-        // specializations which are statically outside its registry.
-        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                             column_attno,
-                                                             index_name,
-                                                             sequence_rowno,
-                                                             storage,
-                                                             sequence,
-                                                             source_binding,
-                                                             backend,
-                                                             kernels);
-        return;
-    } else {
-        const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
-            backend, k_alphabet_code, k_kmer_size, k_window_size, locator.logical_length);
-        if (!profile) {
-            // Future DNA4 parameter profiles which are not in the hash-major
-            // registry continue on the grouped-SoA route.
-            build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                                 column_attno,
-                                                                 index_name,
-                                                                 sequence_rowno,
-                                                                 storage,
-                                                                 sequence,
-                                                                 source_binding,
-                                                                 backend,
-                                                                 kernels);
-            return;
-        }
-        const ready_hash_major_minimizer_publication publication =
-            build_and_publish_hash_major_minimizer_generation_pg(user_relid,
-                                                                 column_attno,
-                                                                 index_name,
-                                                                 sequence_rowno,
-                                                                 storage,
-                                                                 sequence,
-                                                                 source_binding,
-                                                                 backend,
-                                                                 kernels);
-        if (!publication.published || publication.generation_id == 0u ||
-            publication.query_key != sequence_rowno ||
-            publication.source_epoch != locator.source_epoch ||
-            publication.selected_backend != backend ||
-            publication.head.generation_id != publication.generation_id ||
-            publication.head.query_key != sequence_rowno ||
-            publication.head.source_epoch != locator.source_epoch ||
-            publication.manifest.generation_id != publication.generation_id ||
-            publication.manifest.source_epoch != locator.source_epoch ||
-            publication.manifest.target_length != locator.logical_length ||
-            publication.unique_hash_count != publication.manifest.unique_hash_count ||
-            publication.total_posting_count != publication.manifest.total_posting_count) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "normal hash-major minimizer rebuild publication validation was rejected",
-                fmt::format("index={} backend={}",
-                            index_name,
-                            bioseq::minimizers::minimizer_sketch_backend_name(backend)));
-        }
-    }
 }
 
 } // namespace bioseq::storage::indexing

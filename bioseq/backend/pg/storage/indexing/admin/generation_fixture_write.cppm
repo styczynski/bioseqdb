@@ -1,5 +1,5 @@
 /**
- * @file generation_fixture_write.cppm
+ * @file admin/generation_fixture_write.cppm
  * @brief PostgreSQL grouped-SoA generation fixture publication support.
  */
 module;
@@ -114,7 +114,11 @@ struct ready_minimizer_generation_coordinator_fixture_result {
     }
 };
 
-/// Parse one exact fixture backend name without fallback.
+/**
+ * @brief Parse one exact fixture backend name without fallback.
+ * @param name Persisted fixture spelling.
+ * @return The matching minimizer producer backend.
+ */
 [[nodiscard]] inline bioseq::minimizers::minimizer_sketch_backend
 ready_minimizer_fixture_backend_from_name(std::string_view name) {
     using backend_type = bioseq::minimizers::minimizer_sketch_backend;
@@ -316,10 +320,16 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
 #endif
 }
 
-/// Integration-only direct execution of the grouped-SoA coordinator.
-/// This bypasses the ordinary update route and does not touch
-/// metadata_age_log. The caller selects the biological backend
-/// explicitly. An unavailable SIMD/GPU route fails instead of falling back.
+/**
+ * @brief Execute the grouped-SoA coordinator through the integration-only direct route.
+ * @param rel_oid Source Bioseq relation.
+ * @param index_name Registered fragment or sequence minimizer index.
+ * @param sequence_rowno Visible source-row ordinal and query key.
+ * @param backend_name Exact requested producer backend.
+ * @return Published generation identity, metadata, and producer receipt.
+ *
+ * This route does not update metadata_age_log; unavailable SIMD/GPU backends fail closed.
+ */
 [[nodiscard]] inline ready_minimizer_generation_coordinator_fixture_result
 build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                                           std::string_view index_name,

@@ -1,5 +1,5 @@
 /**
- * @file scanner.cppm
+ * @file scanner/index.cppm
  * @brief Stable facade for PostgreSQL sequence scanner partitions.
  *
  * Re-exports fragmented scanning, lazy binding, source registry and

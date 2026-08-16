@@ -1,5 +1,5 @@
 /**
- * @file lazy_binding.cppm
+ * @file scanner/lazy_binding.cppm
  * @brief Callback-scoped PostgreSQL lazy sequence bindings.
  */
 module;

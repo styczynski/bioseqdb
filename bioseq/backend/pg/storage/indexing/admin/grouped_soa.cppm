@@ -1,5 +1,5 @@
 /**
- * @file grouped_soa.cppm
+ * @file admin/grouped_soa.cppm
  * @brief Grouped-SoA minimizer generation encoding and publication.
  */
 module;
@@ -81,19 +81,23 @@ import :hash_major;
 
 export namespace bioseq::storage::indexing {
 
-/// Build, completely reread, and atomically publish one grouped-SoA fragment
-/// or sequence minimizer generation from an authoritative PostgreSQL-backed
-/// lazy sequence.
-///
-/// Ordinary update_index uses this route for PostgreSQL-backed
-/// alphabet/parameter profiles not registered by hash-major. Grouped-SoA fixtures
-/// and readers use this route. DNA4/15/10 publication uses the hash-major
-/// coordinator.
-/// The caller retains both the registered source snapshot and metadata-age
-/// ownership. `storage.begin_generation_write()` creates a missing canonical
-/// sidecar or reuses an exact one. Noncanonical same-name relations require
-/// an explicit lifecycle clear before this route. Publication remains
-/// impossible until the sink has returned its private complete-reread token.
+/**
+ * @brief Build, completely reread, and atomically publish one grouped-SoA generation.
+ * @tparam p_sequence_range Compact source sequence range.
+ * @param user_relid Source Bioseq relation.
+ * @param column_attno Source sequence attribute.
+ * @param index_name Registered fragment or sequence minimizer index.
+ * @param sequence_rowno Source-row ordinal and query key.
+ * @param storage PostgreSQL generation storage authority.
+ * @param sequence Snapshot-bound lazy sequence view.
+ * @param source_binding Locator and source-snapshot binding.
+ * @param backend Exact producer backend.
+ * @param kernels Required backend kernel table.
+ * @return Published generation identity and execution receipt.
+ *
+ * The caller retains snapshot and metadata-age ownership. A canonical sidecar is created or
+ * reused, and head publication remains impossible before the private complete-reread token.
+ */
 template <class p_sequence_range>
 [[nodiscard]] inline ready_minimizer_generation_publication
 build_and_publish_grouped_soa_minimizer_generation_pg(

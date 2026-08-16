@@ -1,5 +1,5 @@
 /**
- * @file post_load.cppm
+ * @file admin/rebuild/post_load.cppm
  * @brief Post-load policy lookup and index maintenance.
  */
 module;
@@ -100,7 +100,15 @@ export namespace bioseq::storage::indexing {
     pg_unreachable();
 }
 
-/// Execute one SPI scalar query and require exactly one nonnull result.
+/**
+ * @brief Execute one SPI scalar query and require exactly one nonnull result.
+ * @tparam p_decoder Trivial noexcept Datum decoder.
+ * @param sql Complete scalar statement.
+ * @param read_only SPI read-only mode.
+ * @param operation Diagnostic operation name.
+ * @param decode Decoder invoked before SPI_finish.
+ * @return The decoded scalar value.
+ */
 template <class p_decoder>
 [[nodiscard]] inline auto strict_spi_select_one(const std::string& sql,
                                                 bool read_only,
@@ -264,7 +272,11 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
     return result;
 }
 
-/// Rebuild every enabled update-on-insert index after a streamed table load.
+/**
+ * @brief Rebuild every enabled update-on-insert index after a streamed table load.
+ * @param main_relid Loaded Bioseq relation.
+ * @return Sum of rows reported by the invoked index rebuilds.
+ */
 [[nodiscard]] inline std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
     const relation_identity rid = index_relation_identity(main_relid);
     pg_supported_indexes idx;
@@ -298,16 +310,8 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
             continue;
         if (idx.policy[i] != index_update_policy::update_on_insert)
             continue;
-        // Invoke the index build through the SQL executor (SPI) rather
-        // than calling update_index_impl() directly. The direct call ran the
-        // builder inside bioseq.load's own executor frame; the relcache/typcache
-        // churn from creating the seqidx sidecar relations (CREATE TABLE ...
-        // bioseq.seq via internal subtransactions) then leaked into the next
-        // command in the same backend (fetch_att "unsupported byval length: -1"
-        // / custom-scan SIGSEGV). Routing through SPI gives the build its own
-        // portal/executor frame with clean snapshot + invalidation handling —
-        // exactly what a separate `bioseq.update_index` statement gets, which is
-        // why the manual reindex never left residue.
+        // Use a distinct SPI portal/executor frame so sidecar DDL, snapshot
+        // changes, and relcache invalidations are contained before bioseq.load resumes.
         const std::string index_name{k_index_types[i].first};
         const char* quoted_name = bioseq::postgres::support::invoke_pg_as_cpp(
             [&index_name] { return quote_literal_cstr(index_name.c_str()); });

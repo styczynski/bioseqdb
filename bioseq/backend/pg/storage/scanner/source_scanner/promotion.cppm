@@ -1,5 +1,5 @@
 /**
- * @file promotion.cppm
+ * @file scanner/source_scanner/promotion.cppm
  * @brief Locator promotion through authenticated source routes.
  */
 module;
