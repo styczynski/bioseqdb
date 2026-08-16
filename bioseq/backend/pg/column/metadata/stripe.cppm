@@ -32,6 +32,11 @@ import :types;
 import :tuple_ops;
 import :core;
 
+/// @brief Writes chunk skip-list rows to bioseq.column_chunk for one stripe.
+/// @param relfilelocator Resolves storage_id for the encoded catalog rows.
+/// @param stripe Stripe number stored on each inserted chunk row.
+/// @param chunk_list Per-column chunk skip nodes and column or chunk counts.
+/// @param tuple_descriptor Column types used to encode optional min and max bytea values.
 export void save_stripe_skip_list(RelFileLocator relfilelocator,
                                   uint64_t stripe,
                                   stripe_skip_list* chunk_list,
@@ -129,6 +134,11 @@ save_chunk_groups(RelFileLocator relfilelocator, uint64_t stripe, List* chunk_gr
  * save_empty_row_mask saves the metadata for inserted rows in bioseq.mask_row
  */
 
+/// @brief Returns stripe metadata for the stripe whose first_row_number exceeds row_number.
+/// @param relation Column table whose stripe catalog rows are scanned.
+/// @param row_number Row number used as an exclusive lower bound on first_row_number.
+/// @param snapshot Visibility snapshot for the ordered index scan.
+/// @return Next stripe metadata, or nullptr when no later stripe exists.
 export stripe_metadata*
 find_next_stripe_by_row_number(Relation relation, uint64_t row_number, Snapshot snapshot) {
     return find_stripe_metadata_by_row_number(

@@ -95,6 +95,11 @@ sketch_uploaded_window_result(
             .kmer_size = kmer_size,
         };
     }
+    /**
+     * @brief Writes one rejection reason and optional capacity into decline_out.
+     * @param reason Decline identity.
+     * @param max_minimizers Planned minimizer capacity when relevant.
+     */
     const auto decline = [decline_out](
             vulkan_sketch_decline_reason reason,
             std::uint64_t max_minimizers = 0u) noexcept {
@@ -437,6 +442,10 @@ sketch_uploaded_window_result(
         std::uint64_t exact_host_capacity_bytes = 0u;
         bool host_permit_released_to_process_footprint = false;
         std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+        /**
+         * @brief Sizes the host minimizer vector and downloads one device slice.
+         * @throws vulkan_runtime_error If fixed-route capacity exceeds admitted headroom.
+         */
         const auto allocate_and_download = [
                 &host_minimizers,
                 &exact_host_capacity_bytes,

@@ -92,6 +92,14 @@ export {
      *
      * Successful admission replaces the join relation's competing paths with planner-context
      * CustomPaths that preserve the reconstructed child metadata and helper carriers.
+     * @param root Planner state used for path reconstruction, costing, and pathtarget edits.
+     * @param joinrel Inner join relation whose pathlist may be replaced on success.
+     * @param extra Join-path extras holding residual restrictions evaluated alongside the owned mmsearch clause.
+     * @param restriction RestrictInfo for the transformed mmsearch predicate transferred into the owner CustomPath.
+     * @param mmsearch Planner FuncExpr whose first and second arguments are the target and query sequence operands.
+     * @param executable_mmsearch Executable mmsearch FuncExpr used for aligner overrides and operand costing.
+     * @param requirement Index read policy, admission declines when persisted-compatible reads are required.
+     * @param oids Bioseq type OIDs used for typmod, helper, and alphabet validation.
      * @return True when at least one owner path was added to the join relation.
      * @throws PostgreSQL ERROR when reconstruction leaks the transferred RestrictInfo.
      */

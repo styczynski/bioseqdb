@@ -86,6 +86,8 @@ import :custom_scan_slice_execution_tuple_production;
 using namespace bioseq::postgres::support;
 
 export {
+    /** Deparses the custom scan expression at @p expression_index into EXPLAIN text. Returns a
+     *  pstrdup'd string or `<omitted>` when the index is out of range. */
     [[nodiscard]] char*
     slice_project_deparse_expression(CustomScan* scan, int expression_index, ExplainState* es) {
         if (expression_index < 0 || expression_index >= list_length(scan->custom_exprs)) {
@@ -95,6 +97,8 @@ export {
         return deparse_expression(expression, es->deparse_cxt, true, false);
     }
 
+    /** Maps @p opcode to the human-readable label used in EXPLAIN output. Returns `"invalid"` for
+     *  unknown values. */
     [[nodiscard]] const char* slice_project_opcode_name(slice_project_opcode opcode) noexcept {
         switch (opcode) {
         case slice_project_opcode::source_expr:
@@ -123,6 +127,8 @@ export {
         return "invalid";
     }
 
+    /** Builds a Postgres list of `value_{id}` names from the dependency field of a serialized
+     *  recipe @p node. Returns NIL when the node has no dependencies. */
     [[nodiscard]] List* slice_project_node_dependency_names(List* node) {
         List* names = NIL;
         Node* dependency_node = reinterpret_cast<Node*>(list_nth(node, k_slice_node_dependencies));
@@ -135,6 +141,8 @@ export {
         return names;
     }
 
+    /** Builds a Postgres list of `var_{id}` names from the dependency field of a serialized
+     *  materialization @p record. Returns NIL when the record has no dependencies. */
     [[nodiscard]] List* slice_project_dependency_names(List* record) {
         List* names = NIL;
         Node* dependency_node =
@@ -150,6 +158,8 @@ export {
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
+    /** Maps a DSM test fixture mode code to its EXPLAIN label. Returns `"none"` for unrecognized
+     *  modes. */
     [[nodiscard]] const char* slice_project_dsm_test_fixture_name(int mode) noexcept {
         switch (mode) {
         case k_slice_dsm_test_incomplete:
@@ -161,6 +171,8 @@ export {
         }
     }
 
+    /** Appends DSM test fixture diagnostics to @p es when @p state applied a fixture during
+     *  ANALYZE. No-op when @p state or @p es is null or no fixture ran. */
     void slice_project_explain_dsm_test_fixture(slice_project_state const* state,
                                                 ExplainState* es) {
         if (state == nullptr || es == nullptr || !state->runtime.dsm_test_fixture_applied)
@@ -168,6 +180,7 @@ export {
         auto const& runtime = state->runtime;
         const char* mode = slice_project_dsm_test_fixture_name(runtime.dsm_test_fixture_mode);
         if (es->format == EXPLAIN_FORMAT_TEXT) {
+            /** Writes one indented name/value line into the text EXPLAIN buffer. */
             auto property = [es](const char* name, const char* value) {
                 appendStringInfoSpaces(es->str, es->indent * 2);
                 appendStringInfo(es->str, "%s: %s\n", name, value);
@@ -177,6 +190,7 @@ export {
                      runtime.dsm_test_fixture_validated ? "true" : "false");
             property("DSM Async Lifecycle Validated",
                      runtime.dsm_test_async_validated ? "true" : "false");
+            /** Writes one indented unsigned integer property line into the text EXPLAIN buffer. */
             const auto integer_property = [es](const char* name, std::uint32_t value) {
                 appendStringInfoSpaces(es->str, es->indent * 2);
                 appendStringInfo(es->str, "%s: %u\n", name, value);
@@ -201,6 +215,8 @@ export {
     }
 #endif
 
+    /** Returns the ANALYZE-time DSM counter for materialization boundary @p index. Returns a static
+     *  zero counter when @p state is null, tracing is off, or @p index is out of range. */
     [[nodiscard]] slice_dsm_counter const&
     slice_project_explain_counter(slice_project_state const* state, std::uint32_t index) noexcept {
         static const slice_dsm_counter zero{};
@@ -210,6 +226,8 @@ export {
         return state->runtime.counters[index];
     }
 
+    /** Renders the slice recipe and materialization plan as indented text EXPLAIN output in @p es.
+     *  Uses @p scan for expression deparsing and @p state for ANALYZE counters when enabled. */
     void slice_project_explain_text(slice_project_state* state,
                                     CustomScan* scan,
                                     List* header,
@@ -278,6 +296,7 @@ export {
             char* expression = slice_project_deparse_expression(scan, expression_index, es);
             appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
             appendStringInfo(es->str, "var_%d = %s\n", boundary_id, expression);
+            /** Writes one indented nested property line under the current materialization record. */
             auto property = [es](const char* name, const char* value) {
                 appendStringInfoSpaces(es->str, (es->indent + 2) * 2);
                 appendStringInfo(es->str, "%s: %s\n", name, value);
@@ -317,6 +336,7 @@ export {
             }
             if (es->analyze) {
                 auto const& counter = slice_project_explain_counter(state, counter_index);
+                /** Writes one indented ANALYZE counter line, optionally suffixing @p unit. */
                 auto actual =
                     [es](const char* name, std::uint64_t value, const char* unit = nullptr) {
                         appendStringInfoSpaces(es->str, (es->indent + 2) * 2);
@@ -365,6 +385,8 @@ export {
         }
     }
 
+    /** Renders the slice recipe and materialization plan as structured EXPLAIN groups in @p es.
+     *  Uses @p scan for expression deparsing and @p state for ANALYZE counters when enabled. */
     void slice_project_explain_structured(slice_project_state* state,
                                           CustomScan* scan,
                                           List* nodes,
@@ -468,6 +490,8 @@ export {
         ExplainCloseGroup("Slice Materialization", "Slice Materialization", false, es);
     }
 
+    /** CustomScan EXPLAIN callback for SliceProject. Initializes trace state for ANALYZE, then
+     *  emits text or structured output from the serialized plan in @p custom. */
     void slice_project_explain(CustomScanState* custom, List*, ExplainState* es) {
         if (es->analyze)
             slice_project_ensure_trace_initialized(custom);
@@ -504,6 +528,8 @@ export {
         slice_project_explain_structured(state, scan, nodes, records, es);
     }
 
+    /** CustomScan shutdown hook that quiesces the slice async owner when parallel runtime
+     *  initialization completed. */
     void slice_project_shutdown(CustomScanState* custom) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
         if (state->runtime.owner_initialized) {
@@ -512,6 +538,7 @@ export {
         }
     }
 
+    /** Returns the static CustomExecMethods vtable wired for BioseqSliceProject scans. */
     [[nodiscard]] CustomExecMethods const& bioseq_slice_project_exec_methods() noexcept {
         static_assert(std::is_same_v<decltype(&slice_project_estimate_dsm),
                                      Size (*)(CustomScanState*, ParallelContext*)>);

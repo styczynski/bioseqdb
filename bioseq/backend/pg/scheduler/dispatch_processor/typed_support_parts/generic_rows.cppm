@@ -363,6 +363,10 @@ void process_generic_rows(
                 using row_alphabet =
                     typename compact_sequence_range<p_sequence>::traits::alphabet_type;
                 using row_view = bioseq::storage::lazy_sequence_view<row_alphabet>;
+                /**
+                 * Runs scanner_row for one query lazy view and optional target
+                 * view, sharing cached query minimizers when the batch allows.
+                 */
                 auto execute_scanner = [target_hdr,
                                         row_index,
                                         target_bp_size,
@@ -397,6 +401,10 @@ void process_generic_rows(
                                        pool,
                                        active_session);
                 };
+                /**
+                 * Dispatches one row after binding the target from inline
+                 * storage, a PG locator, or an expanded target recipe owner.
+                 */
                 auto execute_with_optional_target_recipe =
                     [has_target_recipe,
                      &collection,
