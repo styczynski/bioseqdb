@@ -171,6 +171,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
 template <class p_sequence_range, class p_scanner>
     requires(p_scanner::is_fragmented())
 struct lazy_sequence<p_sequence_range, p_scanner> {
+    static_assert(fragmented_sequence_scanner<p_scanner>);
+
     using range_type = p_sequence_range;
     using scanner_type = p_scanner;
     using traits = typename compact_sequence_range<p_sequence_range>::traits;
@@ -198,8 +200,16 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
     lazy_sequence(lazy_sequence&&) = delete;
     lazy_sequence& operator=(lazy_sequence&&) = delete;
 
-    explicit lazy_sequence(p_scanner&& scanner) noexcept : scanner_(std::move(scanner)) {}
-    ~lazy_sequence() = default;
+    explicit lazy_sequence(p_scanner&& scanner)
+        noexcept(std::is_nothrow_move_constructible_v<p_scanner>)
+        : scanner_(std::move(scanner)) {}
+    ~lazy_sequence() {
+        while (fragments_.valid_count() != 0u) {
+            fragments_.evict_oldest([this](fragment_type& fragment) noexcept {
+                scanner_.release_fragment(fragment.fragment_index);
+            });
+        }
+    }
 
     // ---- size / shape -------------------------------------------------
     [[nodiscard]] [[gnu::always_inline]]
