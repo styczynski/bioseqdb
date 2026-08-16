@@ -121,8 +121,8 @@ namespace bioseq::scheduler {
     {
         try {
             buffered_scan_entry& target = buffered_entries.front();
-            for (std::size_t i = 0; i < batch_size; ++i) {
-                const join_query_ref& query = join_queries[i];
+            for (std::size_t query_index = 0; query_index < batch_size; ++query_index) {
+                const join_query_ref& query = join_queries[query_index];
                 if (query.query_slot == nullptr ||
                     query.ordinal >
                         static_cast<std::uint64_t>((std::numeric_limits<std::int32_t>::max)())) {
@@ -145,13 +145,14 @@ namespace bioseq::scheduler {
                                                mmsearch_state.query_alphabet_code,
                                                mmsearch_state.query_storage_unit_byte_width,
                                                "query");
-                    join_query_hdrs[i] = nullptr;
-                    scanner_pg_ctx.query_recipe_datums[i] = query_datum;
-                    scanner_pg_ctx.query_recipe_descriptors[i] = descriptor;
-                    join_target_hdrs[i] = target.seq_hdr();
-                    scanner_pg_ctx.target_recipe_datums[i] = target.seq_recipe_datum;
-                    scanner_pg_ctx.target_recipe_descriptors[i] = target.seq_recipe_descriptor;
-                    join_query_ids[i] = static_cast<std::int32_t>(query.ordinal);
+                    join_query_hdrs[query_index] = nullptr;
+                    scanner_pg_ctx.query_recipe_datums[query_index] = query_datum;
+                    scanner_pg_ctx.query_recipe_descriptors[query_index] = descriptor;
+                    join_target_hdrs[query_index] = target.seq_hdr();
+                    scanner_pg_ctx.target_recipe_datums[query_index] = target.seq_recipe_datum;
+                    scanner_pg_ctx.target_recipe_descriptors[query_index] =
+                        target.seq_recipe_descriptor;
+                    join_query_ids[query_index] = static_cast<std::int32_t>(query.ordinal);
                     continue;
                 }
                 bioseq::pg_types::seq* query_hdr =
@@ -172,7 +173,7 @@ namespace bioseq::scheduler {
                 }
                 if (reinterpret_cast<void*>(query_hdr) !=
                     reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
-                    join_query_detoast_copies[i] = query_hdr;
+                    join_query_detoast_copies[query_index] = query_hdr;
                 }
                 const bioseq::pg_types::seq* dispatch_query_hdr = query_hdr;
                 if (query_hdr->storage_unit_byte_width != mmsearch_state.storage_unit_byte_width) {
@@ -188,18 +189,19 @@ namespace bioseq::scheduler {
                                         "alphabet")));
                     }
                     const std::size_t rewidth_bytes = static_cast<std::size_t>(VARSIZE(rewidth));
-                    join_query_rewidth_varlenas[i].assign(reinterpret_cast<const char*>(rewidth),
-                                                          reinterpret_cast<const char*>(rewidth) +
-                                                              rewidth_bytes);
+                    join_query_rewidth_varlenas[query_index].assign(
+                        reinterpret_cast<const char*>(rewidth),
+                        reinterpret_cast<const char*>(rewidth) + rewidth_bytes);
                     pfree(rewidth);
                     dispatch_query_hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
-                        join_query_rewidth_varlenas[i].data());
+                        join_query_rewidth_varlenas[query_index].data());
                 }
-                join_query_hdrs[i] = dispatch_query_hdr;
-                join_target_hdrs[i] = target.seq_hdr();
-                scanner_pg_ctx.target_recipe_datums[i] = target.seq_recipe_datum;
-                scanner_pg_ctx.target_recipe_descriptors[i] = target.seq_recipe_descriptor;
-                join_query_ids[i] = static_cast<std::int32_t>(query.ordinal);
+                join_query_hdrs[query_index] = dispatch_query_hdr;
+                join_target_hdrs[query_index] = target.seq_hdr();
+                scanner_pg_ctx.target_recipe_datums[query_index] = target.seq_recipe_datum;
+                scanner_pg_ctx.target_recipe_descriptors[query_index] =
+                    target.seq_recipe_descriptor;
+                join_query_ids[query_index] = static_cast<std::int32_t>(query.ordinal);
             }
 
             if (batch_payload_ctx == nullptr) {
@@ -283,10 +285,10 @@ namespace bioseq::scheduler {
             scanner_pg_ctx.gpu_prepared_grouped_soa_target =
                 join_gpu_prepared_grouped_soa_target.ready() ? &join_gpu_prepared_grouped_soa_target
                                                              : nullptr;
-            for (std::size_t i = 0; i < batch_size; ++i) {
-                scanner_pg_ctx.target_locators[i] = target.seq_loc;
-                scanner_pg_ctx.target_rownos[i] = target.sequence_rowno;
-                scanner_pg_ctx.query_ordinals[i] = join_queries[i].ordinal;
+            for (std::size_t query_index = 0; query_index < batch_size; ++query_index) {
+                scanner_pg_ctx.target_locators[query_index] = target.seq_loc;
+                scanner_pg_ctx.target_rownos[query_index] = target.sequence_rowno;
+                scanner_pg_ctx.query_ordinals[query_index] = join_queries[query_index].ordinal;
             }
             const bool wave_has_recipe_or_locator =
                 join_cpu_preparation_pending || target.seq_loc.has_value() ||
@@ -519,10 +521,10 @@ namespace bioseq::scheduler {
             join_scanner_pg_cache->close_all(/*commit=*/false);
             bioseq::storage::destroy_seq_caches(join_scanner_pg_cache);
             join_scanner_pg_cache = nullptr;
-            for (std::size_t i = 0; i < batch_size; ++i) {
-                if (join_query_detoast_copies[i] != nullptr) {
-                    pfree(join_query_detoast_copies[i]);
-                    join_query_detoast_copies[i] = nullptr;
+            for (std::size_t query_index = 0; query_index < batch_size; ++query_index) {
+                if (join_query_detoast_copies[query_index] != nullptr) {
+                    pfree(join_query_detoast_copies[query_index]);
+                    join_query_detoast_copies[query_index] = nullptr;
                 }
             }
 

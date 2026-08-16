@@ -72,8 +72,8 @@ void tuple_dispatch_buffer::hydrate_one_column(
                storage_manager_type::bucket_count>& per_bucket,
     std::vector<bioseq::pg_types::seq*>& out_payloads,
     bool is_query) {
-    for (auto& v : per_bucket) {
-        v.clear();
+    for (auto& bucket_requests : per_bucket) {
+        bucket_requests.clear();
     }
     // Compute letters_per_unit and storage_unit_byte_width from
     // the batch's (alphabet, width) typmod so the MaxAllocSize gate below
@@ -106,14 +106,14 @@ void tuple_dispatch_buffer::hydrate_one_column(
             static_cast<unsigned>(column_storage_unit_byte_width));
     }
     const size_t batch_size = buffered_entries.size();
-    bool any = false;
-    for (const size_t i : rows) {
-        if (i >= batch_size) {
+    bool has_requests = false;
+    for (const size_t row_index : rows) {
+        if (row_index >= batch_size) {
             continue;
         }
-        const auto& loc =
-            is_query ? buffered_entries[i].per_row_query_loc : buffered_entries[i].seq_loc;
-        if (!loc.has_value()) {
+        const auto& locator = is_query ? buffered_entries[row_index].per_row_query_loc
+                                       : buffered_entries[row_index].seq_loc;
+        if (!locator.has_value()) {
             continue;
         }
         // D-VARLENA bridge: skip hydration when the
@@ -129,7 +129,7 @@ void tuple_dispatch_buffer::hydrate_one_column(
         const std::uint64_t total_units =
             lpu_for_column == 0
                 ? std::uint64_t{0}
-                : (static_cast<std::uint64_t>(loc->logical_length) + lpu_for_column - 1) /
+                : (static_cast<std::uint64_t>(locator->logical_length) + lpu_for_column - 1) /
                       lpu_for_column;
         const std::uint64_t projected_payload_bytes =
             total_units * static_cast<std::uint64_t>(bytes_per_unit_for_col);
@@ -141,24 +141,27 @@ void tuple_dispatch_buffer::hydrate_one_column(
                 "[bioseq] pg: hydrate_one_column row={} attno={} too large "
                 "({} bp, lpu={}, byte_width={} ⇒ {} bytes > MaxAllocSize); "
                 "deferring to scanner_pg",
-                i,
+                row_index,
                 static_cast<int>(column_attno),
-                loc->logical_length,
+                locator->logical_length,
                 lpu_for_column,
                 bytes_per_unit_for_col,
                 projected_varlena);
             continue;
         }
-        per_bucket[loc->bucket_index].push_back(storage_manager_type::fetch_request{i, *loc});
-        any = true;
+        per_bucket[locator->bucket_index].push_back(
+            storage_manager_type::fetch_request{row_index, *locator});
+        has_requests = true;
     }
-    if (!any) {
+    if (!has_requests) {
         return;
     }
     out_payloads.assign(batch_size, nullptr);
-    for (std::uint8_t b = 0; b < storage_manager_type::bucket_count; ++b) {
-        auto& reqs = per_bucket[b];
-        if (reqs.empty()) {
+    for (std::uint8_t bucket_index = 0;
+         bucket_index < storage_manager_type::bucket_count;
+         ++bucket_index) {
+        auto& requests = per_bucket[bucket_index];
+        if (requests.empty()) {
             continue;
         }
         storage_manager_type::fetch_payload_bulk(
@@ -166,26 +169,26 @@ void tuple_dispatch_buffer::hydrate_one_column(
             user_main_tablespace_oid,
             user_main_relfilenode,
             column_attno,
-            static_cast<std::int16_t>(b),
-            std::span<const storage_manager_type::fetch_request>{reqs.data(), reqs.size()},
+            static_cast<std::int16_t>(bucket_index),
+            std::span<const storage_manager_type::fetch_request>{requests.data(), requests.size()},
             std::span<bioseq::pg_types::seq*>{out_payloads.data(), out_payloads.size()},
             std::span<storage_manager_type::fetch_request>{fetch_bulk_sort_scratch.data(),
                                                            fetch_bulk_sort_scratch.size()},
             scan_snapshot,
             batch_payload_ctx,
             cache);
-        explain_bucket_touched_mask |= (std::uint64_t{1} << b);
+        explain_bucket_touched_mask |= (std::uint64_t{1} << bucket_index);
         ++explain_storage_bulk_fetch_calls;
     }
-    for (const size_t i : rows) {
-        if (i >= batch_size) {
+    for (const size_t row_index : rows) {
+        if (row_index >= batch_size) {
             continue;
         }
-        if (out_payloads[i] == nullptr) {
+        if (out_payloads[row_index] == nullptr) {
             continue;
         }
         if (is_query) {
-            bioseq::pg_types::seq* source_query = out_payloads[i];
+            bioseq::pg_types::seq* source_query = out_payloads[row_index];
             if (source_query->alphabet_code != mmsearch_state.query_alphabet_code ||
                 source_query->storage_unit_byte_width !=
                     mmsearch_state.query_storage_unit_byte_width) {
@@ -209,20 +212,24 @@ void tuple_dispatch_buffer::hydrate_one_column(
                                     "incompatible alphabet")));
                 }
             }
-            buffered_entries[i].hydrated_per_row_query_hdr = dispatch_query;
+            buffered_entries[row_index].hydrated_per_row_query_hdr = dispatch_query;
         } else {
-            buffered_entries[i].hydrated_seq_hdr = out_payloads[i];
+            buffered_entries[row_index].hydrated_seq_hdr = out_payloads[row_index];
         }
-        TupleTableSlot* sslot = buffered_entries[i].scan_slot_copy;
+        TupleTableSlot* scan_slot_copy = buffered_entries[row_index].scan_slot_copy;
         const bool preserve_raw_output = is_query
-                                             ? buffered_entries[i].query_from_evaluated_expression
-                                             : buffered_entries[i].target_from_evaluated_expression;
-        if (sslot != nullptr && !preserve_raw_output) {
-            const int idx = column_attno - 1;
-            if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
-                bioseq::postgres::support::pg_slot_datums_view{sslot}.set_raw(
+                                             ? buffered_entries[row_index]
+                                                   .query_from_evaluated_expression
+                                             : buffered_entries[row_index]
+                                                   .target_from_evaluated_expression;
+        if (scan_slot_copy != nullptr && !preserve_raw_output) {
+            const int attribute_index = column_attno - 1;
+            if (attribute_index >= 0 &&
+                attribute_index < scan_slot_copy->tts_tupleDescriptor->natts) {
+                bioseq::postgres::support::pg_slot_datums_view{scan_slot_copy}.set_raw(
                     column_attno,
-                    bioseq::postgres::support::pg_datum::from_pointer(out_payloads[i]));
+                    bioseq::postgres::support::pg_datum::from_pointer(
+                        out_payloads[row_index]));
             }
         }
     }
@@ -233,12 +240,12 @@ void tuple_dispatch_buffer::hydrate_one_column(
 void tuple_dispatch_buffer::hydrate_locators_by_bucket(std::span<const size_t> rows) {
     const size_t batch_size = buffered_entries.size();
     bool any_locator = false;
-    for (const size_t i : rows) {
-        if (i >= batch_size) {
+    for (const size_t row_index : rows) {
+        if (row_index >= batch_size) {
             continue;
         }
-        if (buffered_entries[i].seq_loc.has_value() ||
-            buffered_entries[i].per_row_query_loc.has_value()) {
+        if (buffered_entries[row_index].seq_loc.has_value() ||
+            buffered_entries[row_index].per_row_query_loc.has_value()) {
             any_locator = true;
             break;
         }

@@ -142,7 +142,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     }
 
     /*
-     * We use the buffer entry index `i` as the batch_processor's
+     * We use the buffer entry index as the batch_processor's
      * key rather than the row's primary_key column. The PK from
      * the user's table is only available when the targetlist
      * includes a bioseq.<projection>(pk) FuncExpr (which is what
@@ -280,14 +280,15 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     };
     auto refresh_row_arrays =
         [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
-            for (const size_t i : rows) {
-                if (i >= buffered_entries.size() || i >= dispatch_batch_capacity) {
+            for (const size_t row_index : rows) {
+                if (row_index >= buffered_entries.size() ||
+                    row_index >= dispatch_batch_capacity) {
                     continue;
                 }
-                const buffered_scan_entry& entry = buffered_entries[i];
-                target_hdrs[i] = entry.seq_hdr(); // nullptr for NULL seq
-                per_row_query_hdrs[i] = entry.per_row_query_hdr();
-                query_ids[i] = static_cast<int32_t>(i);
+                const buffered_scan_entry& entry = buffered_entries[row_index];
+                target_hdrs[row_index] = entry.seq_hdr(); // nullptr for NULL seq
+                per_row_query_hdrs[row_index] = entry.per_row_query_hdr();
+                query_ids[row_index] = static_cast<int32_t>(row_index);
             }
         };
 
@@ -296,21 +297,22 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                                      .allocatable_after_reservations();
     std::uint64_t wave_bytes = 0;
     size_t wave_begin = 0;
-    for (size_t i = 0; i < batch_size; ++i) {
-        const std::uint64_t row_bytes = estimate_hydration_bytes(i);
+    for (size_t row_index = 0; row_index < batch_size; ++row_index) {
+        const std::uint64_t row_bytes = estimate_hydration_bytes(row_index);
         if (requires_flat_sequence_payloads &&
             row_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("selected dispatch cannot materialize sequence recipe"),
-                     errdetail("row=%zu requires an invalid or oversized flat payload", i)));
+                     errdetail("row=%zu requires an invalid or oversized flat payload",
+                               row_index)));
         }
         const bool split = budget != (std::numeric_limits<std::uint64_t>::max)() &&
                            wave_bytes != 0 && row_bytes > 0 &&
                            row_bytes > budget - std::min(wave_bytes, budget);
         if (split) {
-            waves.emplace_back(wave_begin, i);
-            wave_begin = i;
+            waves.emplace_back(wave_begin, row_index);
+            wave_begin = row_index;
             wave_bytes = 0;
         }
         if (row_bytes > (std::numeric_limits<std::uint64_t>::max)() - wave_bytes) {
@@ -371,27 +373,30 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     // scanner_pg path uses these. Last-fragment padding is recomputed
     // inside process_sequences where the template parameter p_sequence (and thus
     // its letters_per_unit) is available.
-    for (size_t i = 0; i < batch_size; ++i) {
-        const auto& seq_loc_opt = buffered_entries[i].seq_loc;
+    for (size_t row_index = 0; row_index < batch_size; ++row_index) {
+        const auto& seq_loc_opt = buffered_entries[row_index].seq_loc;
         if (seq_loc_opt.has_value()) {
-            scanner_pg_ctx.target_locators[i] = *seq_loc_opt;
+            scanner_pg_ctx.target_locators[row_index] = *seq_loc_opt;
         }
-        const auto& query_loc_opt = buffered_entries[i].per_row_query_loc;
+        const auto& query_loc_opt = buffered_entries[row_index].per_row_query_loc;
         if (query_loc_opt.has_value()) {
-            scanner_pg_ctx.query_locators[i] = *query_loc_opt;
+            scanner_pg_ctx.query_locators[row_index] = *query_loc_opt;
         }
-        if (buffered_entries[i].has_seq_recipe()) {
-            scanner_pg_ctx.target_recipe_datums[i] = buffered_entries[i].seq_recipe_datum;
-            scanner_pg_ctx.target_recipe_descriptors[i] = buffered_entries[i].seq_recipe_descriptor;
+        if (buffered_entries[row_index].has_seq_recipe()) {
+            scanner_pg_ctx.target_recipe_datums[row_index] =
+                buffered_entries[row_index].seq_recipe_datum;
+            scanner_pg_ctx.target_recipe_descriptors[row_index] =
+                buffered_entries[row_index].seq_recipe_descriptor;
         }
-        if (buffered_entries[i].has_per_row_query_recipe()) {
-            scanner_pg_ctx.query_recipe_datums[i] = buffered_entries[i].per_row_query_recipe_datum;
-            scanner_pg_ctx.query_recipe_descriptors[i] =
-                buffered_entries[i].per_row_query_recipe_descriptor;
+        if (buffered_entries[row_index].has_per_row_query_recipe()) {
+            scanner_pg_ctx.query_recipe_datums[row_index] =
+                buffered_entries[row_index].per_row_query_recipe_datum;
+            scanner_pg_ctx.query_recipe_descriptors[row_index] =
+                buffered_entries[row_index].per_row_query_recipe_descriptor;
         }
         // Surface the per-row columnar row number (the index
         // query_key) so the stored per-fragment index can be assembled.
-        scanner_pg_ctx.target_rownos[i] = buffered_entries[i].sequence_rowno;
+        scanner_pg_ctx.target_rownos[row_index] = buffered_entries[row_index].sequence_rowno;
     }
     scanner_pg_ctx.user_relid = user_relid;
     scanner_pg_ctx.index_read_requirement = index_read_requirement;
@@ -624,8 +629,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                  * an independent process_sequences pass over the same active
                  * wave, then logically AND the matches into the wave map.
                  */
-                for (size_t extra_idx = 0; extra_idx < extra_query_varlenas.size(); ++extra_idx) {
-                    const std::vector<char>& extra_bytes = extra_query_varlenas[extra_idx];
+                for (size_t extra_query_index = 0;
+                     extra_query_index < extra_query_varlenas.size();
+                     ++extra_query_index) {
+                    const std::vector<char>& extra_bytes =
+                        extra_query_varlenas[extra_query_index];
                     if (extra_bytes.empty()) {
                         continue;
                     }
@@ -642,22 +650,24 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                         query_ids,
                         base_params,
                         ::bioseq::simd::batch_invocation_role::extra_query,
-                        extra_broadcast_query_ordinal(per_row_mode(), batch_size, extra_idx),
+                        extra_broadcast_query_ordinal(
+                            per_row_mode(), batch_size, extra_query_index),
                         extra_stats,
                         scanner_pg_arg);
                     merge_stats(extra_stats);
                     bioseq_log<logging_level::debug>(
                         "[bioseq] pg: tuple_dispatch_buffer extra-query #{} wave [{}, {}) produced "
                         "matches for {} entries",
-                        extra_idx,
+                        extra_query_index,
                         wave.first,
                         wave.second,
                         extra_match_map.size());
-                    for (auto it = wave_match_map.begin(); it != wave_match_map.end();) {
-                        if (extra_match_map.find(it->first) == extra_match_map.end()) {
-                            it = wave_match_map.erase(it);
+                    for (auto match_entry = wave_match_map.begin();
+                         match_entry != wave_match_map.end();) {
+                        if (extra_match_map.find(match_entry->first) == extra_match_map.end()) {
+                            match_entry = wave_match_map.erase(match_entry);
                         } else {
-                            ++it;
+                            ++match_entry;
                         }
                     }
                 }
@@ -703,20 +713,21 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     }
 
     output_cursors.clear();
-    for (size_t i = 0; i < buffered_entries.size(); ++i) {
-        const buffered_scan_entry& entry = buffered_entries[i];
+    for (size_t entry_index = 0; entry_index < buffered_entries.size(); ++entry_index) {
+        const buffered_scan_entry& entry = buffered_entries[entry_index];
         /*
          * Match map is keyed on the entry index (see comment in
-         * the loop above that built `query_ids[i] = i`). Skip
+         * the loop above that built `query_ids[entry_index] = entry_index`). Skip
          * entries whose index is not in the map — those rows had
          * no usable target sequence (NULL seq column) or the
          * aligner produced zero matches; either way `WHERE
          * mmsearch(...)` evaluates to FALSE for them.
          */
-        auto hit = match_map.find(static_cast<int32_t>(i));
-        if (hit == match_map.end()) {
+        auto matches_for_entry = match_map.find(static_cast<int32_t>(entry_index));
+        if (matches_for_entry == match_map.end()) {
             bioseq_log<logging_level::debug>(
-                "[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE", i);
+                "[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE",
+                entry_index);
             continue;
         }
         /*
@@ -743,18 +754,20 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
          * the chainer surfaced because the chain itself is
          * meaningful (passed `min_seed_count` / `min_chain_score`).
          */
-        for (size_t m = 0; m < hit->second.size(); ++m) {
-            const ::bioseq::simd::match_result& match_candidate = hit->second[m];
+        for (size_t match_index = 0; match_index < matches_for_entry->second.size();
+             ++match_index) {
+            const ::bioseq::simd::match_result& match_candidate =
+                matches_for_entry->second[match_index];
             if (base_params.do_cigar &&
                 (!match_candidate.has_cigar || match_candidate.cigar.empty())) {
                 bioseq_log<logging_level::debug>(
                     "[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} "
                     "(do_cigar=true but cigar empty)",
-                    i,
-                    m);
+                    entry_index,
+                    match_index);
                 continue;
             }
-            output_cursors.push_back({i, m});
+            output_cursors.push_back({entry_index, match_index});
         }
     }
     output_position = 0;
