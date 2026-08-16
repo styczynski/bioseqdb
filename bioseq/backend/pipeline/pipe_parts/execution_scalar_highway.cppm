@@ -98,6 +98,7 @@ export {
         // specialised path calls `call_constexpr<p_window_size, p_kmer_size, p_minimizer>(...)` so
         // the (p_window_size, p_kmer_size) pair propagates as integer immediates through the
         // window-loop bounds and unrolls.
+        /// Sketch the captured query and emit its admitted minimizer batch.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& /*ignored*/, emit_token<p_sink>&& token) {
@@ -256,6 +257,7 @@ export {
                 std::span<const p_minimizer>{sketches_slab.data(), sketches_slab.size()});
         }
 
+        /// Describe the selected query-sketch kernel and output estimate.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -292,6 +294,7 @@ export {
         const p_index* index_;
         bioseq::indexing::gpu_index_cache_identity identity_{};
 
+        /// Pair the incoming minimizers with the borrowed target index.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& sketches, emit_token<p_sink>&& token) {
@@ -312,6 +315,7 @@ export {
             }
         }
 
+        /// Describe the target-index decoration stage.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -343,6 +347,7 @@ export {
         match_result_collection* host_timing_dst = nullptr;
         const ::bioseq::simd_dispatch::highway_kernel_table* highway_kernels = nullptr;
 
+        /// Collect seed hits and execute the selected chaining kernel.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& anchors_in, emit_token<p_sink>&& token) {
@@ -426,6 +431,7 @@ export {
                 std::span<anchor>{reordered_slab.data(), reordered_slab.size()});
         }
 
+        /// Describe the selected chaining kernel and parameters.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -473,6 +479,7 @@ export {
         sequence_size_t query_len = 0;
         match_result_collection* host_timing_dst = nullptr;
 
+        /// Convert chains into arena-owned alignment regions.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_chain_batch,
                   class p_anchor_batch,
@@ -496,6 +503,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe chain-to-region projection.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -526,6 +534,7 @@ export {
         int32_t mask_len;
         int32_t sub_diff_value;
 
+        /// Classify primary and secondary regions in place.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -544,6 +553,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe primary/secondary classification parameters.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -569,6 +579,7 @@ export {
         int32_t min_diff_value;
         int32_t best_n;
 
+        /// Filter secondary regions and emit the surviving prefix.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -589,6 +600,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe secondary-region filtering parameters.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -618,6 +630,7 @@ export {
         int32_t runtime_kmer_size;
         bool enabled;
 
+        /// Estimate divergence when enabled and preserve the paired batch.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -645,6 +658,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe the optional divergence-estimation stage.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -672,6 +686,7 @@ export {
 
         ::bioseq::simd::minimap2_parameters params;
 
+        /// Retain only exact-edit survivors and reset their classification fields.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -721,6 +736,7 @@ export {
                 std::span<const anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe the authoritative exact-edit predicate.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -758,6 +774,7 @@ export {
         match_result_collection* stats_dst_;
         match_result_collection* host_timing_dst_;
 
+        /// Execute the selected base-alignment kernel and record its statistics.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -855,6 +872,7 @@ export {
                 std::span<const ::bioseq::chaining::anchor>{anchors.data(), anchors.size()});
         }
 
+        /// Describe the enabled base-alignment kernel.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -884,6 +902,7 @@ export {
         ::bioseq::simd::minimap2_parameters params;
         bool enabled;
 
+        /// Compute mapping quality when enabled and emit the region batch.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_sink>
@@ -900,6 +919,7 @@ export {
         //: pair → single delegation.  The outer body has no
         // surviving `emit_token<p_sink>` after the inner call moves it, so a
         // second emit is structurally blocked.
+        /// Drop the paired anchor batch and delegate to the single-batch path.
         template <is_constexpr_aligner_params p_aligner_parameters,
                   class p_region_batch,
                   class p_anchor_batch,
@@ -912,6 +932,7 @@ export {
                                                  std::move(token));
         }
 
+        /// Describe the optional mapping-quality stage.
         template <is_constexpr_aligner_params p_aligner_parameters>
         [[nodiscard]] stage_description describe() const {
             stage_description desc;
@@ -936,6 +957,7 @@ export {
         sequence_size_t target_len = 0;
         match_result_collection* host_timing_dst_ = nullptr;
 
+        /// Convert regions into final match results and close host timing.
         [[gnu::always_inline]] inline void on_batch(std::span<alignment_region> regions) {
             dst_->results.reserve(dst_->results.size() + regions.size());
             // `region_slot` is move-consumed into the converted match_result; the
@@ -951,6 +973,7 @@ export {
             }
         }
 
+        /// Close host timing when upstream completes without a final batch.
         [[gnu::always_inline]] inline void on_completed() noexcept {
             if (host_timing_dst_ != nullptr &&
                 host_timing_dst_->is_alignment_result_host_stage_active) {
@@ -963,6 +986,7 @@ export {
     // Out-of-line pipeline-description walker
     // =============================================================================
 
+    /// Describe this stage and append the recursively described sink stages.
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     [[nodiscard]] pipeline_description
     stage<p_aligner_parameters, p_self, p_sink>::describe() const {

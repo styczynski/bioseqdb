@@ -424,6 +424,7 @@ export {
     // The runtime cascade is one `dispatch_chain<...>::run<>(...)` over the
     // bucket-width, k-mer-size, alignment, chaining, and minimizer dimensions.
 
+    /// Resolve every dynamic pipeline axis and execute its compile-time leaf.
     template <pipeline_entry_point p_entry_point,
               sequence_alphabet p_alphabet,
               class p_minimizer,
@@ -524,6 +525,7 @@ export {
     // `describe_leaf`; algorithm-specific query-sketch metadata is added through the neutral
     // enum-to-kernel mapping above.
 
+    /// Describe the typed pipeline selected for representative query and target values.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR pipeline_description describe_pipeline_for(
         const ::bioseq::simd::minimap2_parameters& params,
@@ -624,6 +626,7 @@ export {
                      allow_gpu_target_index_build);
     }
 
+    /// Run against a host/device minimizer batch and one prebuilt target index.
     template <class p_minimizer,
               sequence_alphabet p_alphabet,
               ::bioseq::indexing::minimizer_seed_index p_index>
@@ -655,7 +658,9 @@ export {
 
     namespace pipe_entry_detail {
 
+    /// Resolve every dynamic shape axis through the ordinary pipeline cascade.
     struct dynamic_shape_pipeline_dispatch {
+        /// Execute one fully typed dynamic-shape leaf.
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
                   sequence_alphabet p_alphabet,
                   class p_minimizer,
@@ -689,8 +694,10 @@ export {
         }
     };
 
+    /// Preserve an already-selected representation shape while dispatching algorithms.
     template <std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct pinned_shape_pipeline_dispatch {
+        /// Execute one fully typed leaf without redispatching k-mer or width.
         template <::bioseq::simd::pipe::pipeline_entry_point p_entry_point,
                   sequence_alphabet p_alphabet,
                   class p_minimizer,
@@ -732,6 +739,7 @@ export {
 
     } // namespace pipe_entry_detail
 
+    /// Run against caller-supplied query and target minimizer vectors.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
     minimap2_port(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -748,6 +756,7 @@ export {
 
     namespace pipe_entry_detail {
 
+    /// Preserve the adopted Vulkan target host owner through pipeline handoff.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection minimap2_port_with_fixed_vulkan_target_handoff(
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -761,6 +770,7 @@ export {
             query_seq, target_seq, query_minimizers, std::move(target_host), params);
     }
 
+    /// Dispatch one requested minimizer algorithm into its trait-owned kernel.
     template <class p_minimizer,
               class p_collector,
               class p_range,
@@ -969,6 +979,7 @@ export {
         return result;
     }
 
+    /// Execute the dynamic-shape from-sequence route for one representation.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] match_result_collection
     minimap_port_with_repr(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
@@ -988,6 +999,7 @@ export {
     // into the `minimizer_representation<p_bucket_width, p_kmer_size>` storage type and delegates
     // to `minimap_port_with_repr<p_minimizer>`.
 
+    /// Bind one dynamic from-sequence representation leaf.
     template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct minimap_port_repr_leaf {
         static_assert(
@@ -1007,11 +1019,13 @@ export {
         }
     };
 
+    /// Map the dynamic representation cascade onto its typed leaves.
     template <sequence_alphabet p_alphabet> struct minimap_port_traits {
         template <auto p_kmer_size, auto p_bucket_width>
         using leaf = minimap_port_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
     };
 
+    /// Bind one generated-owner representation leaf with its shape pinned.
     template <sequence_alphabet p_alphabet, std::size_t p_bucket_width, std::size_t p_kmer_size>
     struct minimap_port_owned_repr_leaf {
         static_assert(std::is_same_v<decltype(p_bucket_width), std::size_t>);
@@ -1030,11 +1044,13 @@ export {
         }
     };
 
+    /// Map the generated-owner representation cascade onto pinned leaves.
     template <sequence_alphabet p_alphabet> struct minimap_port_owned_traits {
         template <auto p_kmer_size, auto p_bucket_width>
         using leaf = minimap_port_owned_repr_leaf<p_alphabet, p_bucket_width, p_kmer_size>;
     };
 
+    /// Execute the raw generated-owner route without repeating shape dispatch.
     template <sequence_alphabet p_alphabet>
     BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR match_result_collection
     minimap_port_owned_pinned_shape(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
