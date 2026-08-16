@@ -102,7 +102,8 @@ template <sequence_alphabet p_alphabet>
                                             sequence_size_t position) noexcept {
     const auto& descriptor = *context.descriptor;
     const sequence_size_t letters_per_unit =
-        descriptor.storage_unit_width * CHAR_BIT / descriptor.bits_per_symbol;
+        descriptor.storage_unit_width * std::numeric_limits<unsigned char>::digits /
+        descriptor.bits_per_symbol;
     const sequence_size_t slot = descriptor.leading_symbol_offset + position;
     const std::size_t unit_index = static_cast<std::size_t>(slot / letters_per_unit);
     const auto shift =
@@ -176,7 +177,8 @@ template <sequence_alphabet p_alphabet>
     }
 
     const sequence_size_t letters_per_unit =
-        source.storage_unit_width * CHAR_BIT / source.bits_per_symbol;
+        source.storage_unit_width * std::numeric_limits<unsigned char>::digits /
+        source.bits_per_symbol;
     const auto absolute_slot = bioseq::common::checked_add(
         static_cast<sequence_size_t>(source.leading_symbol_offset), from);
     if (!absolute_slot.has_value()) {
