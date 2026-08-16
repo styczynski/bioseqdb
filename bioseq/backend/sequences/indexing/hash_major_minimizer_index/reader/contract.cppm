@@ -281,13 +281,14 @@ class hash_major_minimizer_selective_reader {
         return canonical_ordinal_(hash) != query_hashes_.size();
     }
 
-    [[nodiscard]] static inline bool consume_control_block_(
-        void* opaque, std::uint32_t range_ordinal, std::span<const std::byte> encoded_control);
+    [[nodiscard]] static bool consume_control_block_(void* opaque,
+                                                     std::uint32_t range_ordinal,
+                                                     std::span<const std::byte> encoded_control);
 
-    [[nodiscard]] static inline bool consume_posting_bytes_(void* opaque,
-                                                            std::uint32_t range_ordinal,
-                                                            std::uint64_t range_byte_offset,
-                                                            std::span<const std::byte> bytes);
+    [[nodiscard]] static bool consume_posting_bytes_(void* opaque,
+                                                     std::uint32_t range_ordinal,
+                                                     std::uint64_t range_byte_offset,
+                                                     std::span<const std::byte> bytes);
 
   public:
     hash_major_minimizer_selective_reader() = default;
@@ -320,8 +321,8 @@ class hash_major_minimizer_selective_reader {
      * keeps that image alive for the reader lifetime. No query hash is copied,
      * widened, sorted, or deduplicated here.
      */
-    [[nodiscard]] static inline std::expected<hash_major_minimizer_selective_reader,
-                                              hash_major_minimizer_error>
+    [[nodiscard]] static std::expected<hash_major_minimizer_selective_reader,
+                                       hash_major_minimizer_error>
     open(bioseq::parallelism::memory_admission_controller& admission,
          std::span<const std::byte> encoded_head,
          std::span<const std::byte> encoded_manifest,
