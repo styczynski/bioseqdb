@@ -20,21 +20,6 @@ import :initialization;
 using bioseq::postgres::support::allocate_zeroed_object;
 
 extern "C" {
-/* The state constructor and executor table form the method-table exception. */
-static const CustomExecMethods* vector_aggregate_exec_methods() noexcept;
-
-/** Allocates the PostgreSQL custom-scan state for vector aggregation. */
-static Node* create_vector_aggregate_state(CustomScan* custom_plan) {
-    (void)custom_plan;
-    auto* vector_state = allocate_zeroed_object<vector_aggregate_state>();
-    NodeSetTag(&vector_state->custom_scan_state, T_CustomScanState);
-
-    CustomScanState* custom_scan_state = &vector_state->custom_scan_state;
-    custom_scan_state->methods = vector_aggregate_exec_methods();
-
-    return reinterpret_cast<Node*>(custom_scan_state);
-}
-
 /** Initializes the copied AggState and connects it to the custom scan. */
 static void begin_vector_aggregate(CustomScanState* custom_scan_state,
                                    EState* executor_state,
@@ -83,6 +68,18 @@ static const CustomExecMethods* vector_aggregate_exec_methods() noexcept {
         .ExplainCustomScan = nullptr,
     };
     return &methods;
+}
+
+/** Allocates the PostgreSQL custom-scan state for vector aggregation. */
+static Node* create_vector_aggregate_state(CustomScan* custom_plan) {
+    (void)custom_plan;
+    auto* vector_state = allocate_zeroed_object<vector_aggregate_state>();
+    NodeSetTag(&vector_state->custom_scan_state, T_CustomScanState);
+
+    CustomScanState* custom_scan_state = &vector_state->custom_scan_state;
+    custom_scan_state->methods = vector_aggregate_exec_methods();
+
+    return reinterpret_cast<Node*>(custom_scan_state);
 }
 
 /** Returns the stable planner callback table for vector aggregation. */

@@ -85,6 +85,4 @@ export {
     /** Allocation-set chunk header included in entry estimates. */
     inline constexpr Size aggregate_chunk_header_bytes = 16;
 
-    /** Executes one vector aggregate plan step. */
-    TupleTableSlot* execute_aggregate_plan(PlanState* plan_state);
 }

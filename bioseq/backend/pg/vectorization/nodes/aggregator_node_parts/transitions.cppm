@@ -27,56 +27,6 @@ using bioseq::postgres::support::walk_pg_expression_including_root;
 
 import :support;
 
-/** Selects the active grouping set and its aggregate context. */
-export void select_current_set(AggState* aggregate_state, int set_index, bool is_hash);
-/** Starts one sorted or hash aggregate phase. */
-export void initialize_phase(AggState* aggregate_state, int new_phase);
-/** Fetches the next tuple from the child or active sort phase. */
-export TupleTableSlot* fetch_input_tuple(AggState* aggregate_state);
-/** Initializes every transition state for the active grouping sets. */
-export void initialize_aggregates(AggState* aggregate_state,
-                                  AggStatePerGroup* group_state_sets,
-                                  int reset_count);
-/** Invokes one transition function for the current input tuple. */
-static void advance_transition_function(AggState* aggregate_state,
-                                        AggStatePerTrans transition_state,
-                                        AggStatePerGroup per_group_state);
-/** Advances all compiled transitions for the current input tuple. */
-export void advance_aggregates(AggState* aggregate_state);
-/** Consumes one ordered single-input transition. */
-static void process_ordered_aggregate_single(AggState* aggregate_state,
-                                             AggStatePerTrans transition_state,
-                                             AggStatePerGroup per_group_state);
-/** Consumes one ordered multi-input transition. */
-static void process_ordered_aggregate_multi(AggState* aggregate_state,
-                                            AggStatePerTrans transition_state,
-                                            AggStatePerGroup per_group_state);
-/** Runs a final function for one aggregate result. */
-static void finalize_aggregate(AggState* aggregate_state,
-                               AggStatePerAgg aggregate_descriptor,
-                               AggStatePerGroup per_group_state,
-                               Datum* result_value,
-                               bool* result_is_null);
-/** Serializes one partial aggregate result. */
-static void finalize_partial_aggregate(AggState* aggregate_state,
-                                       AggStatePerAgg aggregate_descriptor,
-                                       AggStatePerGroup per_group_state,
-                                       Datum* result_value,
-                                       bool* result_is_null);
-/** Copies grouping columns into the hash lookup slot. */
-export inline void prepare_hash_slot(AggStatePerHash hash_state,
-                                     TupleTableSlot* input_slot,
-                                     TupleTableSlot* hash_slot);
-/** Populates grouping columns in the projection slot. */
-export void
-prepare_projection_slot(AggState* aggregate_state, TupleTableSlot* slot, int current_set);
-/** Finalizes every aggregate for the selected grouping set. */
-export void finalize_aggregates(AggState* aggregate_state,
-                                AggStatePerAgg aggregate_descriptor,
-                                AggStatePerGroup group_state);
-/** Projects one finalized aggregate row when its qualifier passes. */
-export TupleTableSlot* project_aggregates(AggState* aggregate_state);
-
 /**
  * Select the current grouping set. Affects current_set and
  * curaggcontext.

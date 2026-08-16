@@ -29,6 +29,7 @@ using bioseq::postgres::support::walk_pg_expression_including_root;
 import :support;
 import :transitions;
 import :hash_runtime;
+import :execution;
 
 /** Converts one catalog initializer to its transition type. */
 static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type);
