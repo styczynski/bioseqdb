@@ -290,10 +290,10 @@ void prepare_vulkan_query_route(
 
     query_sidecars.reserve(batch_size);
     batch_query_uploads.reserve(batch_size);
-    for (std::size_t i = 0; i < batch_size; ++i) {
+    for (std::size_t row_index = 0; row_index < batch_size; ++row_index) {
         const bioseq::pg_types::seq* row_query_hdr =
-            per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
-        const bool recipe_query = gpu_query_resident[i].has_value();
+            per_row_query_mode ? (*per_row_query_hdrs)[row_index] : query_hdr;
+        const bool recipe_query = gpu_query_resident[row_index].has_value();
         if (row_query_hdr != nullptr && recipe_query) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "Vulkan query recipe overlaps a flat query");
@@ -309,7 +309,7 @@ void prepare_vulkan_query_route(
         const std::uint32_t query_index = static_cast<std::uint32_t>(batch_query_uploads.size());
         sequence_size_t query_length = 0u;
         if (recipe_query) {
-            const auto owner_index = *gpu_query_resident[i];
+            const auto owner_index = *gpu_query_resident[row_index];
             if (owner_index >= gpu_query_admitted_owners.size()) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     "Vulkan query recipe owner index is invalid");
@@ -325,10 +325,10 @@ void prepare_vulkan_query_route(
             query_length = query_seq.bp_size();
         }
         query_sidecars.push_back(gpu_batch_query_sidecar{
-            .row_index = i,
+            .row_index = row_index,
             .query_len = query_length,
         });
-        row_to_query_index[i] = query_index;
+        row_to_query_index[row_index] = query_index;
     }
     if (!batch_query_uploads.empty()) {
         const auto rank_lut =

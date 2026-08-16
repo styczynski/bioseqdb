@@ -170,21 +170,22 @@ void process_vulkan_resident_route(
         hash = bioseq::common::hash_combine_64(hash, static_cast<std::uint64_t>(hdr->bp_size));
         return bioseq::common::hash_combine_64(hash, target_storage_bytes(hdr));
     };
-    for (std::size_t i = 0; i < batch_size; ++i) {
-        if (row_to_query_index[i] == std::numeric_limits<std::uint32_t>::max()) {
+    for (std::size_t row_index = 0; row_index < batch_size; ++row_index) {
+        if (row_to_query_index[row_index] == std::numeric_limits<std::uint32_t>::max()) {
             continue;
         }
-        const bioseq::pg_types::seq* target_hdr = target_hdrs[i];
-        const bool recipe_target = gpu_target_recipe_views[i].has_value();
+        const bioseq::pg_types::seq* target_hdr = target_hdrs[row_index];
+        const bool recipe_target = gpu_target_recipe_views[row_index].has_value();
         const Datum target_recipe_datum =
-            recipe_target ? scanner_pg_ctx->target_recipe_datums[i] : Datum{0};
+            recipe_target ? scanner_pg_ctx->target_recipe_datums[row_index] : Datum{0};
         if (target_hdr != nullptr && recipe_target) {
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "Vulkan target recipe overlaps a flat target");
         }
         if (target_hdr == nullptr && !recipe_target) {
-            if (scanner_pg_ctx != nullptr && scanner_pg_ctx->target_locators[i].has_value()) {
-                const auto& loc = *scanner_pg_ctx->target_locators[i];
+            if (scanner_pg_ctx != nullptr &&
+                scanner_pg_ctx->target_locators[row_index].has_value()) {
+                const auto& loc = *scanner_pg_ctx->target_locators[row_index];
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     fmt::format("selected Vulkan batch target row {} "
                                 "is only available as a PG locator "
@@ -192,7 +193,7 @@ void process_vulkan_resident_route(
                                 "materialized target payload and "
                                 "cannot use scanner_pg/MaxAllocSize "
                                 "streaming",
-                                static_cast<int>(query_ids[i]),
+                                static_cast<int>(query_ids[row_index]),
                                 static_cast<unsigned long long>(loc.logical_length)));
             }
             continue;
@@ -209,10 +210,10 @@ void process_vulkan_resident_route(
             const bool same_source_locator =
                 recipe_target && target_recipe_datum == Datum{0} &&
                 targets[existing].recipe_view.has_value() &&
-                scanner_pg_ctx->target_locators[i].has_value() &&
+                scanner_pg_ctx->target_locators[row_index].has_value() &&
                 scanner_pg_ctx->target_locators[targets[existing].source_row_index].has_value() &&
                 same_dispatch_target_locator(
-                    *scanner_pg_ctx->target_locators[i],
+                    *scanner_pg_ctx->target_locators[row_index],
                     *scanner_pg_ctx->target_locators[targets[existing].source_row_index]);
             if ((!recipe_target && targets[existing].hdr == target_hdr) || same_source_recipe ||
                 same_source_locator) {
@@ -235,17 +236,18 @@ void process_vulkan_resident_route(
                 break;
             }
         }
-        const sequence_size_t row_query_len = query_sidecars[row_to_query_index[i]].query_len;
+        const sequence_size_t row_query_len =
+            query_sidecars[row_to_query_index[row_index]].query_len;
         const sequence_size_t target_length =
-            recipe_target ? gpu_target_recipe_views[i]->bp_size()
+            recipe_target ? gpu_target_recipe_views[row_index]->bp_size()
                           : static_cast<sequence_size_t>(target_hdr->bp_size);
         if (target_index == std::numeric_limits<std::uint32_t>::max()) {
             target_index = static_cast<std::uint32_t>(targets.size());
             targets.push_back(target_sidecar_type{
                 .hdr = target_hdr,
-                .recipe_view = recipe_target ? gpu_target_recipe_views[i] : std::nullopt,
+                .recipe_view = recipe_target ? gpu_target_recipe_views[row_index] : std::nullopt,
                 .recipe_datum = target_recipe_datum,
-                .source_row_index = i,
+                .source_row_index = row_index,
                 .fingerprint = fingerprint,
                 .target_len = target_length,
                 .max_query_len = row_query_len,
@@ -258,7 +260,7 @@ void process_vulkan_resident_route(
             targets[target_index].max_query_len =
                 std::max(targets[target_index].max_query_len, row_query_len);
         }
-        row_to_target_index[i] = target_index;
+        row_to_target_index[row_index] = target_index;
     }
     const auto requested_source = requested_target_index_source(scanner_pg_ctx);
     const auto record_gpu_batch_outcomes = [batch_size,
@@ -747,9 +749,10 @@ void process_vulkan_resident_route(
             throw bioseq::gpu::vulkan::vulkan_runtime_error(
                 "GPU CIGAR extension result count mismatch");
         }
-        for (std::size_t i = 0; i < pending_cigar_matches.size(); ++i) {
-            const auto& cigar_result = cigar_run.results[i];
-            const auto& cigar_job = cigar_jobs[i];
+        for (std::size_t match_index = 0; match_index < pending_cigar_matches.size();
+             ++match_index) {
+            const auto& cigar_result = cigar_run.results[match_index];
+            const auto& cigar_job = cigar_jobs[match_index];
             if (cigar_result.cigar_length == 0u) {
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     "GPU CIGAR extension returned empty CIGAR");
@@ -761,7 +764,7 @@ void process_vulkan_resident_route(
                     "GPU CIGAR extension returned invalid CIGAR slice");
             }
 
-            gpu_cigar_pending_match& pending = pending_cigar_matches[i];
+            gpu_cigar_pending_match& pending = pending_cigar_matches[match_index];
             match_result& match = pending.match;
             match.dp_score = cigar_result.score;
             match.dp_max_score = cigar_result.max_score;
@@ -781,25 +784,28 @@ void process_vulkan_resident_route(
             std::uint32_t target_cursor = 0;
             for (std::uint32_t entry : packed) {
                 const std::uint32_t opcode = entry & 0xfU;
-                const std::uint32_t len = entry >> 4;
+                const std::uint32_t operation_length = entry >> 4;
                 if (opcode == cigar_match_opcode || opcode == cigar_equal_opcode ||
                     opcode == cigar_mismatch_opcode) {
-                    block_length += len;
-                    const std::uint32_t q_base = cigar_job.query_symbol_offset + query_cursor;
-                    const std::uint32_t t_base = cigar_job.target_symbol_offset + target_cursor;
-                    for (std::uint32_t j = 0; j < len; ++j) {
-                        if (cigar_query_symbols[q_base + j] == cigar_target_symbols[t_base + j]) {
+                    block_length += operation_length;
+                    const std::uint32_t query_base = cigar_job.query_symbol_offset + query_cursor;
+                    const std::uint32_t target_base =
+                        cigar_job.target_symbol_offset + target_cursor;
+                    for (std::uint32_t symbol_offset = 0; symbol_offset < operation_length;
+                         ++symbol_offset) {
+                        if (cigar_query_symbols[query_base + symbol_offset] ==
+                            cigar_target_symbols[target_base + symbol_offset]) {
                             ++num_matches;
                         }
                     }
-                    query_cursor += len;
-                    target_cursor += len;
+                    query_cursor += operation_length;
+                    target_cursor += operation_length;
                 } else if (opcode == cigar_insertion_opcode) {
-                    block_length += len;
-                    query_cursor += len;
+                    block_length += operation_length;
+                    query_cursor += operation_length;
                 } else if (opcode == cigar_deletion_opcode) {
-                    block_length += len;
-                    target_cursor += len;
+                    block_length += operation_length;
+                    target_cursor += operation_length;
                 }
             }
             match.block_length = block_length;
