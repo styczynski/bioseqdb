@@ -54,10 +54,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 _WEBSITE_ROOT = _TESTS_ROOT.parent
@@ -88,6 +91,17 @@ _EXPECTED_TUTORIALS = (
     "highway_runtime_dispatch",
     "reading_bioseq_explain",
 )
+_EXPECTED_RUNNABLE_COUNTS = {
+    "quick_read_search_write": 1,
+    "sequence_column_type": 2,
+    "slice_concat_reverse": 1,
+    "similarity_search": 1,
+    "multiple_sequence_columns_and_joins": 1,
+    "remote_provider_to_search": 1,
+    "query_cache": 3,
+    "highway_runtime_dispatch": 2,
+    "reading_bioseq_explain": 1,
+}
 _DESIGN_PALETTE = {
     "comment": "#6f8698",
     "keyword": "#4fb0d6",
@@ -98,31 +112,6 @@ _DESIGN_PALETTE = {
     "number": "#e0b04a",
     "macro": "#c99bd6",
     "operator": "#cbd8e4",
-}
-_BENCHMARK_FIXTURES = _TESTS_ROOT / "fixtures" / "benchmark_artifacts"
-_BENCHMARK_CONFIGURATION_SOURCES = {
-    "alignment_benchmark_configuration.json":
-        _REPOSITORY_ROOT / "bench" / "alignment_benchmark_configuration.json",
-    "bench_e2e_configuration.json":
-        _REPOSITORY_ROOT / "bench" / "bench_e2e_configuration.json",
-    "io_benchmark_configuration.json":
-        _REPOSITORY_ROOT / "bioseq" / "io" / "benchmark" / "configuration.json",
-}
-_BENCHMARK_REPORT_SOURCES = {
-    "report_138.json": _BENCHMARK_FIXTURES / "report_138.json",
-    "report_159.json": _BENCHMARK_FIXTURES / "report_159.json",
-    "report_154.json": _BENCHMARK_FIXTURES / "report_154.json",
-    "report_7.json": _BENCHMARK_FIXTURES / "report_7.json",
-}
-_BENCHMARK_ARTIFACT_SOURCES = {
-    **_BENCHMARK_CONFIGURATION_SOURCES,
-    **_BENCHMARK_REPORT_SOURCES,
-}
-_BENCHMARK_ARTIFACT_NAMES = tuple(_BENCHMARK_ARTIFACT_SOURCES)
-_BENCHMARK_SOURCE_ALIASES = {
-    **{name: name for name in _BENCHMARK_ARTIFACT_NAMES},
-    "bench_v10_configuration.json": "alignment_benchmark_configuration.json",
-    "io_bench_v10_configuration.json": "io_benchmark_configuration.json",
 }
 _BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
@@ -378,6 +367,107 @@ def _nodes_of_kind(nodes: list[dict], kind: str) -> list[dict]:
     return found
 
 
+def _parse_authored_runnable_fences(path: Path) -> list[str]:
+    """Parse runnable fences and enforce the authored phase/cleanup contract."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    runnable_ids: list[str] = []
+    line_index = 0
+    while line_index < len(lines):
+        opening = lines[line_index]
+        if not opening.startswith("```sql runnable"):
+            line_index += 1
+            continue
+        try:
+            tokens = shlex.split(opening[3:])
+        except ValueError as error:
+            raise AssertionFail(f"{path}:{line_index + 1}: invalid fence: {error}") from error
+        _check(tokens[:2] == ["sql", "runnable"],
+               f"{path}:{line_index + 1}: runnable fence has invalid grammar")
+        identifiers = [token[3:] for token in tokens[2:] if token.startswith("id=")]
+        _check(len(identifiers) == 1 and bool(identifiers[0]),
+               f"{path}:{line_index + 1}: runnable fence needs one nonempty id")
+
+        body_start = line_index + 1
+        line_index = body_start
+        while line_index < len(lines) and lines[line_index] != "```":
+            line_index += 1
+        _check(line_index < len(lines),
+               f"{path}:{body_start}: runnable fence is not closed")
+        body = lines[body_start:line_index]
+        markers = ("-- bioseq:setup", "-- bioseq:visible", "-- bioseq:teardown")
+        positions = [
+            [index for index, line in enumerate(body)
+             if line.rstrip(" \t\r") == marker]
+            for marker in markers
+        ]
+        _check(all(len(found) == 1 for found in positions)
+               and positions[0][0] < positions[1][0] < positions[2][0],
+               f"{path}:{body_start}: runnable phases must occur exactly once in order")
+        setup = "\n".join(body[positions[0][0] + 1:positions[1][0]]).strip()
+        visible = "\n".join(body[positions[1][0] + 1:positions[2][0]]).strip()
+        teardown = "\n".join(body[positions[2][0] + 1:]).strip()
+        _check(bool(setup) and bool(visible) and bool(teardown),
+               f"{path}:{body_start}: setup, visible, and teardown must be nonempty")
+        _check(re.search(r"\b(SELECT|SHOW|EXPLAIN|INSERT|UPDATE|DELETE)\b", visible,
+                         re.IGNORECASE) is not None,
+               f"{path}:{body_start}: visible phase has no user-facing SQL operation")
+
+        created_tables = re.findall(
+            r"\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+([a-z_][a-z0-9_]*)",
+            setup, re.IGNORECASE)
+        for table in created_tables:
+            _check(re.search(rf"\bDROP\s+TABLE(?:\s+IF\s+EXISTS)?\s+{re.escape(table)}\b",
+                             teardown, re.IGNORECASE) is not None,
+                   f"{path}:{body_start}: teardown does not drop setup table {table}")
+        prepared = re.findall(
+            r"\bPREPARE\s+([a-z_][a-z0-9_]*)", setup, re.IGNORECASE)
+        for statement in prepared:
+            _check(re.search(rf"\bDEALLOCATE\s+{re.escape(statement)}\b",
+                             teardown, re.IGNORECASE) is not None,
+                   f"{path}:{body_start}: teardown does not deallocate {statement}")
+        settings_sql = f"{setup};\n{visible}"
+        settings = sorted(set(re.findall(
+            r"(?im)(?:\A|;)(?:(?:[ \t]*--[^\n]*\n)|\s)*"
+            r"SET\s+(?:LOCAL\s+)?([a-z_][a-z0-9_.]*)\s*(?:=|\bTO\b)",
+            settings_sql,
+        )))
+        for setting in settings:
+            _check(re.search(rf"(?im)^\s*RESET\s+{re.escape(setting)}\s*;", teardown)
+                   is not None,
+                   f"{path}:{body_start}: teardown does not reset {setting}")
+        runnable_ids.append(identifiers[0])
+        line_index += 1
+    return runnable_ids
+
+
+def _runnable_output_groups(nodes: list[dict]) -> dict[str, list[dict]]:
+    """Associate each runnable code node with its injected result subtree."""
+    groups: dict[str, list[dict]] = {}
+    for index, node in enumerate(nodes):
+        info = node.get("attributes", {}).get("info", "")
+        if node.get("kind") == "code_block" and " runnable " in f" {info} ":
+            tokens = shlex.split(info)
+            identifiers = [token[3:] for token in tokens if token.startswith("id=")]
+            _check(len(identifiers) == 1,
+                   f"resolved runnable block has invalid info string: {info}")
+            result_nodes: list[dict] = []
+            for following in nodes[index + 1:]:
+                if following.get("kind") in {"code_block", "heading"}:
+                    break
+                result_nodes.append(following)
+                if "Executed against Bioseq extension" in _node_text(following):
+                    break
+            _check(identifiers[0] not in groups,
+                   f"resolved model repeats runnable id {identifiers[0]}")
+            groups[identifiers[0]] = result_nodes
+        nested = _runnable_output_groups(node.get("children", []))
+        for identifier, result_nodes in nested.items():
+            _check(identifier not in groups,
+                   f"resolved model repeats nested runnable id {identifier}")
+            groups[identifier] = result_nodes
+    return groups
+
+
 def _assert_authored_content_contract(version: str) -> None:
     tutorial_path = (
         _WEBSITE_ROOT / version / "tutorials" / "similarity_search.md"
@@ -404,6 +494,23 @@ def _assert_authored_content_contract(version: str) -> None:
     ):
         _check(path.is_file(), f"acceptance source is missing: {path}")
 
+    all_runnable_ids: list[str] = []
+    for slug in _EXPECTED_TUTORIALS:
+        path = _WEBSITE_ROOT / version / "tutorials" / f"{slug}.md"
+        _check(path.is_file(), f"tutorial source is missing: {path}")
+        runnable_ids = _parse_authored_runnable_fences(path)
+        _check(len(runnable_ids) == _EXPECTED_RUNNABLE_COUNTS[slug],
+               f"{slug} has {len(runnable_ids)} runnable examples, expected "
+               f"{_EXPECTED_RUNNABLE_COUNTS[slug]}")
+        source = path.read_text(encoding="utf-8")
+        links = re.findall(r"\[\[(sql:[^\]|]+)\]\]", source)
+        _check(bool(links), f"{slug} has no SQL reference links")
+        _check("[[sql:" not in re.sub(r"\[\[sql:[^\]|]+\]\]", "", source),
+               f"{slug} has a malformed or labelled SQL reference link")
+        all_runnable_ids.extend(runnable_ids)
+    _check(len(all_runnable_ids) == len(set(all_runnable_ids)),
+           "runnable ids must be unique across every tutorial")
+
     common = common_path.read_text(encoding="utf-8")
     fixture_match = re.search(
         r"export inline std::vector<seq_row> hoe_seed_rows\(\)\s*\{(.*?)\n\}",
@@ -428,11 +535,11 @@ def _assert_authored_content_contract(version: str) -> None:
            "similarity tutorial must use exact k_hoe_probe_sequence in its "
            "executed and visible SQL")
     for assertion in (
-        "EXPLAIN (FORMAT JSON)", "'{0,Plan,\"Node Type\"}'",
-        "'{0,Plan,\"Custom Plan Provider\"}'", "'Custom Scan'", "'BioseqScan'",
+        "EXPLAIN (VERBOSE, COSTS OFF)", "public.mmsearch(",
+        "The first result shows whether the planner selected `BioseqScan`",
     ):
         _check(assertion in tutorial,
-               f"similarity tutorial setup is missing planner assertion {assertion}")
+               f"similarity tutorial is missing visible plan contract {assertion}")
     _check("-- bioseq:expected" not in tutorial,
            "similarity tutorial must not author expected output rows")
 
@@ -467,21 +574,13 @@ def _assert_authored_content_contract(version: str) -> None:
 
 
 def _load_benchmark_fixture_contract(site: Path, base_path: str) -> dict:
-    """Bind browser checks to build-copied, source-owned benchmark artifacts.
-
-    The default manifest contains only relative entries and therefore resolves
-    beside the content-addressed manifest on the generated site's own origin.
-    A build may explicitly override that manifest with public raw HTTPS URLs;
-    browser acceptance remains offline by serving the exact local source bytes
-    for those optional endpoints.
-    """
-    for path in _BENCHMARK_ARTIFACT_SOURCES.values():
-        _check(path.is_file(), f"benchmark source artifact is missing: {path}")
-
+    """Bind browser checks to the generated content-classified benchmark bundle."""
     manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
     _check(len(manifest_paths) == 1,
            f"expected one published benchmarks-manifest.json, got {manifest_paths}")
     manifest_path = manifest_paths[0]
+    _check(not manifest_path.is_symlink() and manifest_path.is_file(),
+           f"published benchmark manifest is not a regular file: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if isinstance(manifest, list):
         sources = manifest
@@ -496,129 +595,341 @@ def _load_benchmark_fixture_contract(site: Path, base_path: str) -> dict:
         base_path, manifest_path.relative_to(site).as_posix())
     manifest_url = f"https://website.invalid{manifest_route}"
     site_root = site.resolve()
-    documents: dict[str, dict] = {}
+    repository_root = _REPOSITORY_ROOT.resolve()
+    repository_identity = tuple(
+        part for part in urlsplit(_REPOSITORY_URL).path.split("/") if part)
+    _check(len(repository_identity) == 2,
+           f"repository URL has no owner/repository identity: {_REPOSITORY_URL}")
+
+    def repository_source(relative: Path, context: str) -> Path:
+        _check(not relative.is_absolute() and bool(relative.parts)
+               and all(part not in {"", ".", ".."} for part in relative.parts),
+               f"{context} has an invalid repository path: {relative}")
+        lexical = repository_root
+        for part in relative.parts:
+            lexical = lexical / part
+            _check(not lexical.is_symlink(),
+                   f"{context} traverses a repository symlink: {relative}")
+        try:
+            resolved = lexical.resolve(strict=True)
+            resolved.relative_to(repository_root)
+        except (OSError, ValueError) as error:
+            raise AssertionFail(
+                f"{context} escapes or is absent from the repository: {relative}: "
+                f"{error}") from None
+        _check(resolved.is_file(),
+               f"{context} is not a regular repository file: {relative}")
+        return resolved
+
+    records: list[dict] = []
     local_source_routes: set[str] = set()
+    local_generated_paths: set[Path] = set()
+    local_source_sha256: dict[str, str] = {}
     remote_sources: set[str] = set()
     remote_artifacts: dict[str, bytes] = {}
-    canonical_names: list[str] = []
+    source_values: set[str] = set()
+    reserved = {"params", "test_cases", "regression_rules", "meta", "benchmarks"}
 
-    for source in sources:
-        value = (source if isinstance(source, str)
-                 else source.get("url", "") if isinstance(source, dict)
-                 else "")
+    for source_index, source in enumerate(sources):
+        if isinstance(source, str):
+            value = source
+        elif (isinstance(source, dict) and len(source) == 1
+              and set(source).issubset({"url", "path"})):
+            value = source.get("url", source.get("path", ""))
+        else:
+            value = ""
         _check(isinstance(value, str) and bool(value),
                f"benchmark manifest contains an invalid source: {source!r}")
+        _check(value not in source_values,
+               f"benchmark manifest repeats source {value!r}")
+        source_values.add(value)
         parsed = urlsplit(value)
-        source_name = Path(parsed.path).name
-        canonical_name = _BENCHMARK_SOURCE_ALIASES.get(source_name, "")
-        _check(bool(canonical_name),
-               f"benchmark manifest source is not a selected artifact: {value}")
-        _check(canonical_name not in documents,
-               f"benchmark manifest repeats artifact role {canonical_name}")
+        repository_relative: Path
+        generated_path: Path | None = None
 
         if parsed.scheme or parsed.netloc:
-            _check(parsed.scheme == "https"
-                   and parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
-                   f"benchmark override is not a supported public raw URL: {value}")
-            _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
-                   f"benchmark override uses a GitHub HTML blob URL: {value}")
-            body = _BENCHMARK_ARTIFACT_SOURCES[canonical_name].read_bytes()
+            decoded_path = unquote(parsed.path)
+            decoded_parts = tuple(
+                part for part in decoded_path.split("/") if part)
+            try:
+                port = parsed.port
+            except ValueError:
+                port = -1
+            _check(
+                parsed.scheme == "https"
+                and parsed.hostname in _BENCHMARK_REMOTE_HOSTS
+                and port is None
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+                and len(decoded_parts) >= 4
+                and tuple(decoded_parts[:2]) == repository_identity
+                and re.fullmatch(r"[0-9a-f]{40}", decoded_parts[2]) is not None
+                and decoded_path == "/" + "/".join(decoded_parts)
+                and quote(decoded_path, safe="/-._~") == parsed.path
+                and "%" not in decoded_path
+                and "\\" not in decoded_path
+                and ".." not in decoded_parts
+                and "/blob/" not in parsed.path,
+                f"benchmark override is not a safe immutable public raw URL: {value}",
+            )
+            revision = decoded_parts[2]
+            repository_relative = Path(*decoded_parts[3:])
+            try:
+                remote_blob = subprocess.run(
+                    ["git", "show", f"{revision}:{repository_relative.as_posix()}"],
+                    cwd=repository_root,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=15,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise AssertionFail(
+                    f"benchmark override Git lookup timed out: {value}") from error
+            _check(remote_blob.returncode == 0,
+                   f"benchmark override revision/path is unavailable locally: {value}")
+            body = remote_blob.stdout
             remote_sources.add(value)
             remote_artifacts[value] = body
         else:
-            _check(not parsed.path.startswith("/") and not parsed.query
-                   and not parsed.fragment,
-                   f"same-origin benchmark source must be a plain relative path: {value}")
-            _check(Path(parsed.path).parts == ("benchmark-data", canonical_name),
-                   f"same-origin benchmark source is outside benchmark-data: {value}")
-            generated_path = (manifest_path.parent / parsed.path).resolve()
+            decoded_path = unquote(parsed.path)
+            decoded_parts = Path(decoded_path).parts
+            _check(
+                not parsed.path.startswith("/")
+                and not parsed.query
+                and not parsed.fragment
+                and len(decoded_parts) >= 2
+                and decoded_parts[0] == "benchmark-data"
+                and decoded_path == "/".join(decoded_parts)
+                and quote(decoded_path, safe="/-._~") == parsed.path
+                and "%" not in decoded_path
+                and "\\" not in decoded_path
+                and ".." not in decoded_parts,
+                f"same-origin benchmark source is not a canonical contained path: {value}",
+            )
+            lexical_generated_path = manifest_path.parent.joinpath(*decoded_parts)
+            current = manifest_path.parent
+            for part in decoded_parts:
+                current = current / part
+                _check(not current.is_symlink(),
+                       f"same-origin benchmark source traverses a symlink: {value}")
             try:
+                generated_path = lexical_generated_path.resolve(strict=True)
                 generated_path.relative_to(site_root)
-            except ValueError:
+            except (OSError, ValueError):
                 raise AssertionFail(
-                    f"benchmark manifest escapes the generated site: {value}") from None
+                    f"benchmark manifest source escapes or is absent: {value}") from None
             _check(generated_path.is_file(),
                    f"same-origin benchmark artifact is missing: {generated_path}")
             body = generated_path.read_bytes()
+            repository_relative = Path(*decoded_parts[1:])
+            authoritative = repository_source(
+                repository_relative, f"same-origin benchmark source {value}")
+            _check(body == authoritative.read_bytes(),
+                   f"published benchmark artifact rewrote source bytes: "
+                   f"{repository_relative.as_posix()}")
             source_route = urlsplit(urljoin(manifest_url, value)).path
             local_source_routes.add(source_route)
+            local_generated_paths.add(generated_path)
+            generated_relative = generated_path.relative_to(site_root).as_posix()
+            local_source_sha256[generated_relative] = hashlib.sha256(body).hexdigest()
 
-        expected_body = _BENCHMARK_ARTIFACT_SOURCES[canonical_name].read_bytes()
-        _check(body == expected_body,
-               f"published benchmark artifact rewrote source bytes: {canonical_name}")
+        source_name = Path(unquote(parsed.path)).name
         try:
             document = json.loads(body)
         except json.JSONDecodeError as error:
             raise AssertionFail(
-                f"benchmark artifact {canonical_name} is invalid JSON: {error}") from error
+                f"benchmark artifact {value} is invalid JSON: {error}") from error
         _check(isinstance(document, dict),
-               f"benchmark artifact {canonical_name} must be a JSON object")
-        documents[canonical_name] = document
-        canonical_names.append(canonical_name)
+               f"benchmark artifact {value} must be a JSON object")
 
-    _check(tuple(canonical_names) == _BENCHMARK_ARTIFACT_NAMES,
-           f"benchmark manifest roles {canonical_names} do not match the selected "
-           f"artifact set {list(_BENCHMARK_ARTIFACT_NAMES)}")
-    for name in _BENCHMARK_CONFIGURATION_SOURCES:
-        config = documents[name]
-        _check("params" in config and "test_cases" in config,
-               f"benchmark source {name} is not a bench configuration")
-    for name in _BENCHMARK_REPORT_SOURCES:
-        report = documents[name]
-        _check(set(report) == {
-                   "meta", "raw_evidence", "paired_rule_evidence",
-                   "rule_violations", "regressions", "sanity_warnings", "benchmarks",
-               }, f"immutable benchmark report {name} has an unexpected top-level shape")
-        _check(isinstance(report.get("benchmarks"), dict)
-               and bool(report["benchmarks"]),
-               f"immutable benchmark report {name} has no benchmark results")
-        meta = report.get("meta", {})
-        _check(all(field in meta for field in (
-                   "commit", "dirty", "timestamp", "created", "fast")),
-               f"immutable benchmark report {name} lacks writer metadata")
+        configuration_keys = tuple(
+            key for key, block in document.items()
+            if key not in reserved
+            and isinstance(block, dict)
+            and isinstance(block.get("matrix"), dict)
+        )
+        configuration_claim = (
+            isinstance(document.get("params"), dict)
+            and bool(document["params"])
+            and isinstance(document.get("test_cases"), dict)
+            and bool(document["test_cases"])
+            and isinstance(document.get("regression_rules"), list)
+            and bool(configuration_keys)
+        )
+        report_claim = (
+            isinstance(document.get("benchmarks"), dict)
+            and bool(document["benchmarks"])
+            and isinstance(document.get("meta"), dict)
+        )
+        _check(configuration_claim != report_claim,
+               f"benchmark artifact {value} does not claim exactly one supported shape")
 
-    model_keys = {
-        key
-        for name in _BENCHMARK_CONFIGURATION_SOURCES
-        for key, value in documents[name].items()
-        if isinstance(value, dict) and isinstance(value.get("matrix"), dict)
-    }
-    for name in _BENCHMARK_REPORT_SOURCES:
-        model_keys.update(documents[name]["benchmarks"])
-    # Mirror the supplied Component's initial-selection rule: each report run is
-    # scored by execution tuples x distinct test cases, with the alphabetically
-    # first benchmark winning a tie after buildModel sorts measured keys.
-    candidates: list[tuple[int, str, dict]] = []
-    for name in _BENCHMARK_REPORT_SOURCES:
-        for key, benchmark in documents[name]["benchmarks"].items():
-            tuples = [
-                item for item in benchmark.get("execution_tuples", [])
-                if isinstance(item, dict)
-                and isinstance(item.get("tuple"), dict)
-                and bool(item["tuple"])
-            ]
-            cases = {
-                case
-                for item in tuples
-                for case in (item.get("test_cases") or {})
+        timestamp = 0
+        created = ""
+        if report_claim:
+            meta = document["meta"]
+            timestamp = meta.get("timestamp")
+            created = meta.get("created")
+            _check(type(timestamp) is int and timestamp >= 0
+                   and isinstance(created, str) and created.endswith("Z")
+                   and isinstance(meta.get("dirty"), bool)
+                   and meta.get("fast") is False
+                   and isinstance(meta.get("history_eligible"), bool),
+                   f"benchmark report {value} lacks current public writer metadata")
+            try:
+                parsed_created = datetime.fromisoformat(
+                    created.replace("Z", "+00:00"))
+                created_timestamp = int(parsed_created.timestamp())
+            except (OSError, OverflowError, ValueError) as error:
+                raise AssertionFail(
+                    f"benchmark report {value} has invalid created metadata: "
+                    f"{error}") from error
+            _check(parsed_created.tzinfo is not None
+                   and abs(created_timestamp - timestamp) <= 1,
+                   f"benchmark report {value} has inconsistent created/timestamp metadata")
+            for key, benchmark in document["benchmarks"].items():
+                _check(isinstance(key, str) and bool(key)
+                       and isinstance(benchmark, dict)
+                       and isinstance(benchmark.get("execution_tuples"), list)
+                       and bool(benchmark["execution_tuples"]),
+                       f"benchmark report {value} has an invalid benchmark block")
+
+        records.append({
+            "manifest_index": source_index,
+            "value": value,
+            "name": source_name,
+            "kind": "report" if report_claim else "configuration",
+            "document": document,
+            "repository_relative": repository_relative.as_posix(),
+            "configuration_keys": configuration_keys,
+            "timestamp": timestamp,
+            "created": created,
+        })
+
+    has_local_sources = bool(local_generated_paths)
+    _check(not (has_local_sources and remote_sources),
+           "benchmark manifest mixes same-origin data with remote overrides")
+    data_root = manifest_path.parent / "benchmark-data"
+    _check(not data_root.is_symlink(),
+           "published benchmark-data root must not be a symlink")
+    staged_files: set[Path] = set()
+    if data_root.exists():
+        _check(data_root.is_dir(),
+               "published benchmark-data root must be a directory")
+        for entry in sorted(data_root.rglob("*")):
+            _check(not entry.is_symlink(),
+                   f"published benchmark-data contains a symlink: {entry}")
+            if entry.is_dir():
+                continue
+            _check(entry.is_file(),
+                   f"published benchmark-data contains a special file: {entry}")
+            staged_files.add(entry.resolve())
+    if has_local_sources:
+        _check(staged_files == local_generated_paths,
+               "published benchmark-data inventory differs from manifest sources: "
+               f"staged={sorted(str(path) for path in staged_files)}, "
+               f"manifest={sorted(str(path) for path in local_generated_paths)}")
+    else:
+        _check(not staged_files,
+               "remote benchmark override retained same-origin benchmark data")
+
+    if has_local_sources:
+        expected_records = sorted(
+            (record for record in records if record["kind"] == "configuration"),
+            key=lambda record: record["repository_relative"],
+        ) + sorted(
+            (record for record in records if record["kind"] == "report"),
+            key=lambda record: (
+                -record["timestamp"], record["repository_relative"]),
+        )
+        _check(records == expected_records,
+               "same-origin benchmark manifest is not in deterministic "
+               "configuration/metadata-newest order")
+
+    benchmarks: dict[str, dict] = {}
+
+    def ensure_benchmark(key: str) -> dict:
+        if key not in benchmarks:
+            benchmarks[key] = {
+                "key": key,
+                "title": key,
+                "has_results": False,
+                "runs": [],
             }
-            candidates.append((len(tuples) * max(1, len(cases)), key, benchmark))
-    _check(bool(candidates), "benchmark report fixtures have no execution tuples")
-    benchmark_score, benchmark_key, benchmark = sorted(
-        candidates, key=lambda candidate: (-candidate[0], candidate[1]))[0]
-    _check(benchmark_score > 0,
-           f"richest benchmark fixture {benchmark_key} has no measured tuples")
+        return benchmarks[key]
+
+    for record in records:
+        if record["kind"] != "configuration":
+            continue
+        for key in record["configuration_keys"]:
+            ensure_benchmark(key)
+    for record in records:
+        if record["kind"] != "report":
+            continue
+        for key, benchmark in record["document"]["benchmarks"].items():
+            model_benchmark = ensure_benchmark(key)
+            model_benchmark["has_results"] = True
+            model_benchmark["title"] = benchmark.get("title") or model_benchmark["title"]
+            tuples = benchmark["execution_tuples"]
+            case_set = {
+                case
+                for execution_tuple in tuples
+                if isinstance(execution_tuple, dict)
+                for case in (execution_tuple.get("test_cases") or {})
+            }
+            model_benchmark["runs"].append({
+                "manifest_index": record["manifest_index"],
+                "name": record["name"],
+                "created": record["created"],
+                "timestamp": record["timestamp"],
+                "score": len(tuples) * max(1, len(case_set)),
+            })
+
+    _check(bool(benchmarks), "benchmark sources expose no configured benchmark keys")
+    model_order = sorted(
+        benchmarks,
+        key=lambda key: (
+            0 if benchmarks[key]["has_results"] else 1,
+            key,
+        ),
+    )
+    for benchmark in benchmarks.values():
+        benchmark["runs"].sort(key=lambda run: run["manifest_index"])
+        benchmark["runs"].sort(key=lambda run: run["created"], reverse=True)
+        benchmark["runs"].sort(key=lambda run: run["score"], reverse=True)
+    benchmark_key = sorted(
+        model_order,
+        key=lambda key: -(
+            benchmarks[key]["runs"][0]["score"]
+            if benchmarks[key]["runs"] else 0
+        ),
+    )[0]
+    benchmark = benchmarks[benchmark_key]
+    default_report = benchmark["runs"][0] if benchmark["runs"] else None
+    if default_report is not None:
+        equally_rich = [
+            run for run in benchmark["runs"]
+            if run["score"] == default_report["score"]
+        ]
+        _check(default_report["timestamp"] == max(
+                   run["timestamp"] for run in equally_rich),
+               "default report is not the metadata-newest equally rich run")
 
     return {
         "key": benchmark_key,
-        "title": benchmark.get("title") or benchmark_key,
-        "benchmark_count": len(model_keys),
+        "title": benchmark["title"],
+        "benchmark_count": len(benchmarks),
+        "default_report": default_report,
         "sources": sources,
         "manifest_route": manifest_route,
         "local_source_routes": local_source_routes,
+        "local_source_sha256": dict(sorted(local_source_sha256.items())),
         "remote_sources": remote_sources,
         "remote_artifacts": remote_artifacts,
-        "same_origin": not remote_sources,
+        "same_origin": has_local_sources,
     }
 
 
@@ -653,17 +964,22 @@ def _load_static_contract(site: Path, base_path: str, version: str,
            f"site model must contain the ordered tutorials "
            f"{_EXPECTED_TUTORIALS}, got {slugs}")
     by_slug = {item["slug"]: item for item in tutorials}
-    _check(len(by_slug["sequence_column_type"].get("sql_examples", [])) == 2,
-           "sequence_column_type must carry two runnable examples")
-    _check(len(by_slug["similarity_search"].get("sql_examples", [])) == 1,
-           "similarity_search must carry one runnable example")
-    _check(len(by_slug["query_cache"].get("sql_examples", [])) == 3,
-           "query_cache must carry three runnable examples")
-    _check(len(by_slug["highway_runtime_dispatch"].get("sql_examples", [])) == 2,
-           "highway_runtime_dispatch must carry two runnable examples")
-
+    model_runnable_ids: list[str] = []
     for tutorial in tutorials:
-        for example in tutorial.get("sql_examples", []):
+        slug = tutorial["slug"]
+        examples = tutorial.get("sql_examples", [])
+        _check(len(examples) == _EXPECTED_RUNNABLE_COUNTS[slug],
+               f"{slug} must carry {_EXPECTED_RUNNABLE_COUNTS[slug]} "
+               f"runnable example(s), got {len(examples)}")
+        groups = _runnable_output_groups(tutorial.get("content", []))
+        local_ids = [example.get("local_id", "") for example in examples]
+        _check(all(bool(identifier) for identifier in local_ids),
+               f"{slug}: resolved runnable example has no local id")
+        _check(set(groups) == set(local_ids),
+               f"{slug}: result groups {sorted(groups)} do not match examples "
+               f"{sorted(local_ids)}")
+
+        for example in examples:
             _check(not example.get("setup_sql") and not example.get("teardown_sql"),
                    f"resolved model leaked hidden SQL for {example.get('canonical_id')}")
             visible = example.get("visible_sql", "")
@@ -671,12 +987,47 @@ def _load_static_contract(site: Path, base_path: str, version: str,
                    f"runnable example {example.get('canonical_id')} has no visible SQL")
             _check("TEMPORARY" not in visible and "bioseq:setup" not in visible,
                    f"runnable example {example.get('canonical_id')} leaked disabled/setup text")
-        tables = _result_tables(tutorial.get("content", []))
-        expected_tables = 2 if tutorial["slug"] == "query_cache" else len(
-            tutorial.get("sql_examples", []))
-        _check(len(tables) == expected_tables,
-               f"{tutorial['slug']}: {len(tables)} captured result table(s), "
-               f"expected {expected_tables}")
+            canonical_id = example.get("canonical_id", "")
+            _check(canonical_id == f"{version}/tutorial/{slug}#{example['local_id']}",
+                   f"{slug}: malformed canonical runnable id {canonical_id!r}")
+            model_runnable_ids.append(canonical_id)
+
+            result_nodes = groups[example["local_id"]]
+            provenance_count = _node_text({"children": result_nodes}).count(
+                "Executed against Bioseq extension")
+            _check(provenance_count == 1,
+                   f"{canonical_id}: captured output needs one backend provenance line")
+            tables = _result_tables(result_nodes)
+            if example.get("expectation") == "error":
+                sqlstate = example.get("expected_sqlstate", "")
+                _check(not tables and bool(sqlstate)
+                       and f"SQLSTATE {sqlstate}:" in _node_text({"children": result_nodes}),
+                       f"{canonical_id}: expected error output lost SQLSTATE {sqlstate}")
+            else:
+                _check(bool(tables),
+                       f"{canonical_id}: successful runnable SQL has no result table")
+                for table in tables:
+                    _check(len(table) >= 2 and bool(table[0])
+                           and all(bool(cell.strip()) for cell in table[0]),
+                           f"{canonical_id}: result table lacks readable columns or rows")
+
+        source = (_WEBSITE_ROOT / version / "tutorials" / f"{slug}.md").read_text(
+            encoding="utf-8")
+        authored_links = set(re.findall(r"\[\[(sql:[^\]|]+)\]\]", source))
+        resolved_links = {
+            node.get("target", ""): node.get("attributes", {}).get("entity_id", "")
+            for node in _nodes_of_kind(tutorial.get("content", []), "entity_link")
+            if node.get("target", "").startswith("sql:")
+        }
+        _check(authored_links <= set(resolved_links),
+               f"{slug}: authored SQL links did not survive resolution: "
+               f"{sorted(authored_links - set(resolved_links))}")
+        _check(all(resolved_links[target].startswith("sql:")
+                   for target in authored_links),
+               f"{slug}: one or more SQL links resolved outside the SQL catalog")
+
+    _check(len(model_runnable_ids) == len(set(model_runnable_ids)),
+           "resolved runnable ids must be globally unique")
 
     sequence_annotations = _nodes_of_kind(
         by_slug["sequence_column_type"].get("content", []), "code_annotation")
@@ -696,6 +1047,15 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     for spelling in required_sql:
         _check(spelling in similarity_sql,
                f"similarity tutorial visible SQL is missing {spelling}")
+    similarity_tables = _result_tables(
+        by_slug["similarity_search"].get("content", []))
+    _check(len(similarity_tables) == 2
+           and similarity_tables[0][0][0].startswith("QUERY PLAN")
+           and len(similarity_tables[0]) > 1
+           and len(similarity_tables[1]) > 1
+           and "Custom Scan (BioseqScan)" in "\n".join(
+               row[0] for row in similarity_tables[0][1:]),
+           "similarity tutorial must capture its BioseqScan plan and result table")
 
     cache_examples = by_slug["query_cache"]["sql_examples"]
     _check("bioseq_cache.stats()" in cache_examples[0]["visible_sql"],
@@ -721,6 +1081,57 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     ):
         _check(label in highway_results,
                f"executed Highway plan is missing label {label}")
+
+    explain_example = by_slug["reading_bioseq_explain"]["sql_examples"][0]
+    _check("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS OFF)"
+           in explain_example["visible_sql"],
+           "EXPLAIN tutorial does not publish its analyzed text plan")
+    explain_tables = _result_tables(
+        by_slug["reading_bioseq_explain"].get("content", []))
+    _check(len(explain_tables) == 1
+           and explain_tables[0][0][0].startswith("QUERY PLAN")
+           and len(explain_tables[0]) > 2,
+           "EXPLAIN tutorial did not capture a formatted PostgreSQL plan table")
+    explain_output = "\n".join(row[0] for row in explain_tables[0][1:])
+    for label in (
+        "Custom Scan (BioseqScan)", "Bioseq Pipeline",
+        "Highway SIMD Dispatch", "Pipeline Stages",
+        "Bioseq Execution Statistics",
+    ):
+        _check(label in explain_output,
+               f"executed text plan is missing Bioseq section {label}")
+
+    remote_content = by_slug["remote_provider_to_search"].get("content", [])
+    remote_table_nodes = [
+        node for node in _nodes_of_kind(remote_content, "table")
+        if node.get("attributes", {}).get("class") == "result-table"
+    ]
+    _check(bool(remote_table_nodes)
+           and bool(remote_table_nodes[0].get("children")),
+           "remote-provider tutorial has no captured capability table model")
+    remote_header_contract: list[tuple[str, str]] = []
+    for cell in remote_table_nodes[0]["children"][0].get("children", []):
+        children = cell.get("children", [])
+        type_nodes = [child for child in children
+                      if child.get("kind") == "code_span"]
+        name = "".join(_node_text(child) for child in children
+                       if child.get("kind") not in {"code_span", "line_break"})
+        _check(len(type_nodes) == 1 and bool(name),
+               "remote-provider capability header lost its name/type model")
+        remote_header_contract.append((name, _node_text(type_nodes[0])))
+    _check(remote_header_contract == [
+               ("schema_ready", "boolean"),
+               ("table_am_ready", "boolean"),
+               ("relation_count", "bigint"),
+           ],
+           "remote-provider capability columns lost PostgreSQL format_type labels")
+    remote_tables = _result_tables(remote_content)
+    _check(len(remote_tables) == 2
+           and remote_tables[0][0] == [
+               name + type_name for name, type_name in remote_header_contract]
+           and len(remote_tables[0]) == 2
+           and len(remote_tables[1]) >= 2,
+           "remote-provider tutorial must show honest capability and search results")
 
     landing = {item.get("slot"): item for item in model.get("landing_examples", [])}
     expected_slots = {"hero_query", "sequence_storage", "similarity_search"}
@@ -1375,9 +1786,17 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
            f"{tutorial['slug']}: rendered {tables.count()} result tables, "
            f"model contains {len(expected)}")
     actual = [_table_matrix(tables.nth(index)) for index in range(tables.count())]
-    _check(actual == expected,
+    comparison_expected = expected
+    if tutorial["slug"] == "reading_bioseq_explain":
+        comparison_expected = [
+            [[cell.strip() for cell in row] for row in table]
+            for table in expected
+        ]
+    _check(actual == comparison_expected,
            f"{tutorial['slug']}: rendered SQL cells differ from real PostgreSQL model")
     for index, expected_table in enumerate(expected):
+        _check(len(expected_table) >= 2 and bool(expected_table[0]),
+               f"{tutorial['slug']}: captured result table has no data row")
         expected_columns = len(expected_table[0]) if expected_table else 0
         type_labels = tables.nth(index).locator("thead th code")
         _check(type_labels.count() == expected_columns
@@ -1387,6 +1806,22 @@ def _exercise_tutorial_results(page, tutorial: dict) -> None:
     _check(body_text.count("Executed against Bioseq extension")
            == len(tutorial.get("sql_examples", [])),
            f"{tutorial['slug']}: every runnable result must carry backend provenance")
+    if tutorial["slug"] == "reading_bioseq_explain":
+        _check(tables.count() == 1
+               and (tables.first.locator("thead th").first.text_content() or "")
+                   .startswith("QUERY PLAN"),
+               "EXPLAIN tutorial did not render the PostgreSQL plan table")
+        plan_cells = tables.first.locator("tbody td")
+        expected_plan_cells = [row[0] for row in expected[0][1:]]
+        _check(plan_cells.count() == len(expected_plan_cells)
+               and plan_cells.all_text_contents() == expected_plan_cells,
+               "EXPLAIN browser cells did not preserve model whitespace")
+        _check(any(cell != cell.lstrip() for cell in expected_plan_cells),
+               "EXPLAIN model has no indentation for the browser to preserve")
+        _check(plan_cells.evaluate_all(
+                   "cells => cells.every((cell) => "
+                   "getComputedStyle(cell).whiteSpace === 'pre-wrap')"),
+               "EXPLAIN plan rows lost indentation-preserving table rendering")
 
 
 def _exercise_markdown_callouts(page, slug: str) -> None:
@@ -1891,10 +2326,10 @@ def _release_benchmark_fetches(page) -> None:
 
 def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
                          base_path: str, version: str) -> None:
-    """Exercise the copied benchmark shell against build-copied real artifacts."""
+    """Exercise the copied shell against every dynamically discovered artifact."""
     benchmark = contract["benchmarks"]
     _check((page.locator("h1").inner_text()).strip() == benchmark["title"],
-           "benchmark heading is not derived from the supplied report artifact")
+           "benchmark heading is not derived from discovered benchmark content")
     _check(benchmark["key"] in page.locator("main").inner_text(),
            f"rendered benchmark model is missing real key {benchmark['key']}")
     _check(f"{benchmark['benchmark_count']} benchmarks" in
@@ -1922,35 +2357,70 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     for index in range(controls.count()):
         _check(controls.nth(index).locator("option").count() >= 1,
                f"benchmark filter {index} has no model-derived options")
-    metric = controls.nth(0)
-    _check(metric.locator("option").count() > 1,
-           "real benchmark report did not populate multiple metric filters")
-    metric_value = metric.locator("option").nth(1).get_attribute("value") or ""
-    metric.select_option(metric_value)
-    page.wait_for_function(
-        "metric => document.body.textContent.includes(metric)", metric_value)
-    _check(metric.input_value() == metric_value,
-           "benchmark metric filter did not retain its selected value")
     statistic = controls.nth(1)
     _check(statistic.locator("option[value='P01']").count() == 1,
            "benchmark statistic filter lost the P01 option")
-    statistic.select_option("P01")
-    page.wait_for_function(
-        "() => document.body.textContent.includes('P01 of')")
-    _check("P01 of" in page.locator("main").inner_text(),
-           "benchmark statistic filter did not update the rendered table note")
-    baseline = controls.nth(3)
-    if baseline.locator("option").count() > 1:
-        baseline_value = baseline.locator("option").nth(1).get_attribute("value") or ""
-        baseline.select_option(baseline_value)
+    default_report = benchmark["default_report"]
+    if default_report is not None:
+        report_chip = page.locator("#benchmark-main").get_by_text(
+            default_report["name"], exact=True)
+        _check(report_chip.count() == 1,
+               "benchmark page did not select the metadata-newest default report")
+        report_chip.hover()
+        report_tooltips: list[str] = []
+        for _ in range(120):
+            report_tooltips = page.evaluate(
+                """() => [...document.body.querySelectorAll('*')]
+                  .filter((node) => {
+                    const style = getComputedStyle(node);
+                    return style.position === 'fixed' &&
+                      style.pointerEvents === 'none' && Number(style.opacity) > 0;
+                  })
+                  .map((node) => (node.textContent || '').trim())
+                  .filter(Boolean)""")
+            if report_tooltips:
+                break
+            page.wait_for_timeout(25)
+        _check(any(default_report["created"] in text
+                   for text in report_tooltips),
+               "selected report tooltip does not expose its newest metadata")
+
+        metric = controls.nth(0)
+        metric_index = min(1, metric.locator("option").count() - 1)
+        metric_value = (
+            metric.locator("option").nth(metric_index).get_attribute("value") or "")
+        metric.select_option(metric_value)
         page.wait_for_function(
-            "value => document.body.textContent.includes('baseline ' + value)",
-            baseline_value)
-        _check(baseline.input_value() == baseline_value,
-               "benchmark baseline filter did not retain its selected value")
-    direction = page.get_by_role("button", name="↑ higher is better")
-    _check(direction.count() == 1, "benchmark direction filter is missing")
-    direction.click()
+            "metric => document.body.textContent.includes(metric)", metric_value)
+        _check(metric.input_value() == metric_value,
+               "benchmark metric filter did not retain its selected value")
+        statistic.select_option("P01")
+        page.wait_for_function(
+            "() => document.body.textContent.includes('P01 of')")
+        _check("P01 of" in page.locator("main").inner_text(),
+               "benchmark statistic filter did not update the rendered table note")
+        baseline = controls.nth(3)
+        if baseline.locator("option").count() > 1:
+            baseline_value = (
+                baseline.locator("option").nth(1).get_attribute("value") or "")
+            baseline.select_option(baseline_value)
+            page.wait_for_function(
+                "value => document.body.textContent.includes('baseline ' + value)",
+                baseline_value)
+            _check(baseline.input_value() == baseline_value,
+                   "benchmark baseline filter did not retain its selected value")
+        direction = page.get_by_role("button", name="↑ higher is better")
+        _check(direction.count() == 1, "benchmark direction filter is missing")
+        direction.click()
+    else:
+        statistic.select_option("P01")
+        _check(statistic.input_value() == "P01",
+               "configuration-only statistic filter did not retain its value")
+        _check("configuration only — no report published" in
+               page.locator("#benchmark-main").inner_text(),
+               "configuration-only benchmark state is not identifiable")
+        _check(page.get_by_role("button", name="↑ higher is better").count() == 0,
+               "configuration-only benchmark exposed report direction controls")
 
     test_cases = page.locator("[data-bnav] a", has_text="Test cases").first
     _check(test_cases.count() == 1, "benchmark Test cases navigation is missing")
@@ -1962,29 +2432,33 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     _check(page.locator("[data-ctrls]").count() == 1,
            "benchmark sidebar navigation did not restore the Comparison view")
 
-    # The first tbody cell can be the optional group-heading colspan cell. Pick
-    # a measured result cell, which is the surface carrying the distribution
-    # tooltip contract from the supplied component.
-    hover_target = page.locator("main table tbody tr td:nth-child(2)").first
-    _check(hover_target.count() == 1,
-           "benchmark comparison table has no model-derived cell to inspect")
-    hover_target.hover()
-    tooltip_texts: list[str] = []
-    for _ in range(120):
-        tooltip_texts = page.evaluate(
-            """() => [...document.body.querySelectorAll('*')]
-              .filter((node) => {
-                const style = getComputedStyle(node);
-                return style.position === 'fixed' &&
-                  style.pointerEvents === 'none' && Number(style.opacity) > 0;
-              })
-              .map((node) => (node.textContent || '').trim())
-              .filter(Boolean)""")
-        if tooltip_texts:
-            break
-        page.wait_for_timeout(25)
-    _check(bool(tooltip_texts),
-           "hovering a real benchmark cell did not expose its distribution tooltip")
+    if default_report is not None:
+        # The first tbody cell can be the optional group-heading colspan cell.
+        # A measured result cell carries the supplied distribution tooltip.
+        hover_target = page.locator("main table tbody tr td:nth-child(2)").first
+        _check(hover_target.count() == 1,
+               "benchmark comparison table has no model-derived cell to inspect")
+        hover_target.hover()
+        tooltip_texts: list[str] = []
+        for _ in range(120):
+            tooltip_texts = page.evaluate(
+                """() => [...document.body.querySelectorAll('*')]
+                  .filter((node) => {
+                    const style = getComputedStyle(node);
+                    return style.position === 'fixed' &&
+                      style.pointerEvents === 'none' && Number(style.opacity) > 0;
+                  })
+                  .map((node) => (node.textContent || '').trim())
+                  .filter(Boolean)""")
+            if tooltip_texts:
+                break
+            page.wait_for_timeout(25)
+        _check(bool(tooltip_texts),
+               "hovering a real benchmark cell did not expose its distribution tooltip")
+    else:
+        _check("No report published for this benchmark yet." in
+               page.locator("#benchmark-main").inner_text(),
+               "configuration-only comparison did not retain its empty-report note")
 
     page.evaluate("() => window.__closeBioseqBenchmarkFetchGate()")
     page.get_by_role("button", name="Reload").click()
@@ -2002,9 +2476,13 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     }
     _check(bool(manifest_requests),
            "benchmark browser run did not fetch its manifest over HTTP")
-    _check(all(urlsplit(url).scheme in {"http", "https"}
+    page_origin = urlsplit(page.url)
+    _check(all(
+               urlsplit(url).scheme in {"http", "https"}
+               and (urlsplit(url).scheme, urlsplit(url).netloc)
+               == (page_origin.scheme, page_origin.netloc)
                for url in manifest_requests),
-           "benchmark manifest was not fetched over HTTP")
+           "benchmark manifest was not fetched from the page origin over HTTP")
 
     requested_local_routes = {
         urlsplit(url).path for url in request_urls
@@ -2014,6 +2492,12 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
            f"benchmark loader requested local artifacts "
            f"{sorted(requested_local_routes)}, expected "
            f"{sorted(benchmark['local_source_routes'])}")
+    _check(all(
+               (urlsplit(url).scheme, urlsplit(url).netloc)
+               == (page_origin.scheme, page_origin.netloc)
+               for url in request_urls
+               if urlsplit(url).path in benchmark["local_source_routes"]),
+           "benchmark artifact request escaped the generated site's origin")
     requested_remote_sources = {
         url for url in request_urls if url in benchmark["remote_sources"]
     }
@@ -2022,10 +2506,8 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
            f"{sorted(requested_remote_sources)}, expected "
            f"{sorted(benchmark['remote_sources'])}")
     _check(all(urlsplit(url).scheme in {"http", "https"}
-               for url in request_urls
-               if urlsplit(url).path in benchmark["local_source_routes"]
-               or url in benchmark["remote_sources"]),
-           "benchmark artifacts were not fetched over HTTP")
+               for url in requested_remote_sources),
+           "benchmark remote overrides were not fetched over HTTP")
     if benchmark["same_origin"]:
         unexpected_remote = [
             url for url in request_urls
@@ -2317,6 +2799,14 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _assert_literal_design_structure(page, label, contract["design"])
                 _exercise_design_style_parity(page, label, contract["design"])
                 _assert_tutorial_sidebar(page, base_path, version)
+                tutorial_slug = {
+                    "tutorial_quick": "quick_read_search_write",
+                    "tutorial_slice": "slice_concat_reverse",
+                    "tutorial_columns": "multiple_sequence_columns_and_joins",
+                    "tutorial_remote": "remote_provider_to_search",
+                    "tutorial_explain": "reading_bioseq_explain",
+                }[label]
+                _exercise_tutorial_results(page, contract["tutorials"][tutorial_slug])
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=True)
             if label == "reference":
@@ -2459,10 +2949,8 @@ def main(argv: list[str] | None = None) -> int:
                             "support.js",
                         )
                     },
-                    "benchmark_source_sha256": {
-                        name: hashlib.sha256(path.read_bytes()).hexdigest()
-                        for name, path in _BENCHMARK_ARTIFACT_SOURCES.items()
-                    },
+                    "benchmark_source_sha256":
+                        contract["benchmarks"]["local_source_sha256"],
                 },
                 indent=2,
             ) + "\n",
