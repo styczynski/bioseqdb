@@ -25,6 +25,8 @@ _SOURCE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cppm", ".cxx"})
 _EXCLUDED_SOURCE_PREFIXES = (
     ".git/",
     "DOCS/",
+    "bench/tool_minimap2/minimap2/",
+    "bench/tool_sneakysnake/SneakySnake/",
     "main/papers/",
     "papers/",
     "vendor/",
@@ -38,13 +40,30 @@ _DIAGNOSTIC_PATTERN = re.compile(
     r"(?P<severity>warning|error): (?P<message>.*?)(?: \[(?P<check>[^]]+)\])?$"
 )
 _VERSION_PATTERN = re.compile(r"(?:clang|LLVM) version\s+(?P<major>\d+)")
+_GENERATOR_COMPILE_DATABASE_PATTERN = re.compile(
+    r"codegen/generator-build(?:-[a-z0-9][a-z0-9-]*)?/compile_commands\.json"
+)
+_NOLINT_COMMENT_PATTERN = re.compile(
+    r"^(?P<kind>NOLINT(?:NEXTLINE|BEGIN|END)?)"
+    r"\((?P<checks>[^)]*)\)\s*(?:--|:)\s*(?P<reason>\S.*?)\s*$"
+)
+_NOLINT_TOKEN_PATTERN = re.compile(r"\bNOLINT(?:NEXTLINE|BEGIN|END)?\b")
+_CHECK_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+$")
 
+_NAMED_MODULE_DISABLED_CHECKS = (
+    "misc-include-cleaner",
+    "misc-use-anonymous-namespace",
+    "misc-use-internal-linkage",
+)
 _POSTGRES_BOUNDARY_DISABLED_CHECKS = (
     "bugprone-macro-parentheses",
     "bugprone-macro-repeated-side-effects",
     "bugprone-multiple-statement-macro",
     "bugprone-reserved-identifier",
     "bugprone-unsafe-functions",
+    "cert-dcl37-c",
+    "cert-dcl50-cpp",
+    "cert-dcl51-cpp",
     "cppcoreguidelines-avoid-c-arrays",
     "cppcoreguidelines-avoid-non-const-global-variables",
     "cppcoreguidelines-macro-usage",
@@ -58,10 +77,13 @@ _POSTGRES_BOUNDARY_DISABLED_CHECKS = (
     "cppcoreguidelines-pro-type-vararg",
     "modernize-avoid-c-arrays",
     "modernize-avoid-variadic-functions",
+    "misc-unused-parameters",
     "readability-identifier-naming",
 )
 _GENERATED_HIGHWAY_DISABLED_CHECKS = (
     "bugprone-reserved-identifier",
+    "cert-dcl37-c",
+    "cert-dcl51-cpp",
     "cppcoreguidelines-avoid-c-arrays",
     "cppcoreguidelines-avoid-non-const-global-variables",
     "cppcoreguidelines-macro-usage",
@@ -69,31 +91,11 @@ _GENERATED_HIGHWAY_DISABLED_CHECKS = (
     "cppcoreguidelines-pro-bounds-array-to-pointer-decay",
     "cppcoreguidelines-pro-bounds-pointer-arithmetic",
     "modernize-avoid-c-arrays",
+    "misc-unused-parameters",
+    "portability-simd-intrinsics",
     "readability-identifier-length",
     "readability-identifier-naming",
     "readability-magic-numbers",
-)
-_FMTLOG_COMPATIBILITY_DISABLED_CHECKS = (
-    "bugprone-macro-parentheses",
-    "bugprone-macro-repeated-side-effects",
-    "bugprone-multiple-statement-macro",
-    "bugprone-reserved-identifier",
-    "bugprone-unsafe-functions",
-    "cppcoreguidelines-avoid-c-arrays",
-    "cppcoreguidelines-avoid-non-const-global-variables",
-    "cppcoreguidelines-macro-usage",
-    "cppcoreguidelines-no-malloc",
-    "cppcoreguidelines-owning-memory",
-    "cppcoreguidelines-pro-bounds-array-to-pointer-decay",
-    "cppcoreguidelines-pro-bounds-avoid-unchecked-container-access",
-    "cppcoreguidelines-pro-bounds-constant-array-index",
-    "cppcoreguidelines-pro-bounds-pointer-arithmetic",
-    "cppcoreguidelines-pro-type-const-cast",
-    "cppcoreguidelines-pro-type-cstyle-cast",
-    "cppcoreguidelines-pro-type-reinterpret-cast",
-    "cppcoreguidelines-pro-type-union-access",
-    "modernize-*",
-    "readability-*",
 )
 _HOT_PATH_DISABLED_CHECKS = (
     "cppcoreguidelines-avoid-c-arrays",
@@ -112,7 +114,6 @@ _HOT_PATH_DISABLED_CHECKS = (
     "modernize-min-max-use-initializer-list",
     "modernize-pass-by-value",
     "modernize-use-ranges",
-    "portability-simd-intrinsics",
     "readability-magic-numbers",
     "readability-use-anyofallof",
     "readability-use-std-min-max",
@@ -130,6 +131,8 @@ class CompileCommand:
     display_path: str
     is_generated: bool
     variant: int
+    compile_database: str = "compile_commands.json"
+    response_files: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +145,20 @@ class LintResult:
     output: str
     duration_seconds: float
     diagnostics: tuple[dict[str, object], ...]
-    owner_candidates: tuple[str, ...]
+    ninja_owner_candidates: tuple[str, ...]
+    heuristic_owner_candidates: tuple[str, ...]
+    owner_query_status: str | None
     generator_hint: str | None
+    source_suppressions: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedOwnerRouting:
+    """Describe generated-source routing and its Ninja-query evidence."""
+
+    ninja_candidates: tuple[str, ...]
+    heuristic_candidates: tuple[str, ...]
+    query_status: str
 
 
 class ClangTidyError(RuntimeError):
@@ -284,6 +299,107 @@ def _strip_driver_outputs(
     return compiler, tuple(result)
 
 
+def _expanded_response_arguments(
+    arguments: tuple[str, ...],
+    *,
+    directory: Path,
+    source_root: Path,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Expand authenticated Clang response files for profile validation."""
+
+    source_root = source_root.resolve(strict=True)
+    evidence: dict[Path, str] = {}
+
+    def expand(
+        nested_arguments: tuple[str, ...],
+        active_response_files: frozenset[Path],
+    ) -> list[str]:
+        expanded: list[str] = []
+        for argument in nested_arguments:
+            if not argument.startswith("@") or len(argument) == 1:
+                expanded.append(argument)
+                continue
+            response_path = Path(argument[1:])
+            if not response_path.is_absolute():
+                response_path = directory / response_path
+            try:
+                response_path = response_path.resolve(strict=True)
+            except OSError as error:
+                raise ClangTidyError(
+                    f"compile response file is unavailable: {argument}: {error}"
+                ) from error
+            if not _is_relative_to(response_path, source_root):
+                raise ClangTidyError(
+                    "compile response file escapes the repository: "
+                    f"{response_path}"
+                )
+            if not response_path.is_file():
+                raise ClangTidyError(
+                    f"compile response path is not a regular file: {response_path}"
+                )
+            if response_path in active_response_files:
+                raise ClangTidyError(
+                    f"compile response files contain a cycle at {response_path}"
+                )
+            try:
+                response_bytes = response_path.read_bytes()
+                response_text = response_bytes.decode("utf-8")
+                response_arguments = tuple(shlex.split(response_text, posix=True))
+            except (OSError, UnicodeDecodeError, ValueError) as error:
+                raise ClangTidyError(
+                    f"cannot parse compile response file {response_path}: {error}"
+                ) from error
+            evidence[response_path] = hashlib.sha256(response_bytes).hexdigest()
+            expanded.extend(
+                expand(
+                    response_arguments,
+                    active_response_files | frozenset({response_path}),
+                )
+            )
+        return expanded
+
+    expanded_arguments = tuple(expand(arguments, frozenset()))
+    response_evidence = tuple(
+        (path.relative_to(source_root).as_posix(), digest)
+        for path, digest in sorted(evidence.items())
+    )
+    return expanded_arguments, response_evidence
+
+
+def _validate_compile_profile(source: Path, arguments: tuple[str, ...]) -> None:
+    """Require the exact optimized, assertion-free profile used in production.
+
+    Lint is semantic analysis of the actual production/test module graph.  A
+    debug or otherwise deoptimized compile command can expose a different AST
+    and macro surface, so silently accepting one would invalidate the report.
+    """
+
+    optimization_flags = tuple(
+        argument for argument in arguments if argument.startswith("-O")
+    )
+    if optimization_flags != ("-O3",):
+        raise ClangTidyError(
+            "owned lint compile command must contain exactly one -O3 and no "
+            f"competing optimization flags: {source}: {optimization_flags}"
+        )
+    ndebug_flags = tuple(
+        argument
+        for argument in arguments
+        if argument == "-DNDEBUG" or argument.startswith("-DNDEBUG=")
+    )
+    ndebug_undefines = tuple(
+        argument
+        for argument in arguments
+        if argument == "-UNDEBUG" or argument.startswith("-UNDEBUG=")
+    )
+    if len(ndebug_flags) != 1 or ndebug_undefines:
+        raise ClangTidyError(
+            "owned lint compile command must contain exactly one NDEBUG definition "
+            f"and no NDEBUG undefinition: {source}: definitions={ndebug_flags} "
+            f"undefinitions={ndebug_undefines}"
+        )
+
+
 def _compile_database_paths(build_dir: Path) -> tuple[Path, ...]:
     """Return the parent and first-party nested generator databases."""
 
@@ -321,6 +437,7 @@ def _load_compile_commands(
     seen: set[tuple[Path, Path, Path, tuple[str, ...]]] = set()
     variant_counts: dict[Path, int] = {}
     for database_path in _compile_database_paths(build_dir):
+        database_relative_path = database_path.relative_to(build_dir).as_posix()
         try:
             document = json.loads(database_path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
@@ -361,8 +478,17 @@ def _load_compile_commands(
                     source=source,
                     directory=directory,
                 )
-            except ValueError:
-                continue
+            except ValueError as error:
+                raise ClangTidyError(
+                    "owned compile command cannot be replayed by clang-tidy: "
+                    f"{source} in {database_path}: {error}"
+                ) from error
+            expanded_arguments, response_files = _expanded_response_arguments(
+                compiler_arguments,
+                directory=directory,
+                source_root=source_root,
+            )
+            _validate_compile_profile(source, expanded_arguments)
             identity = (source, directory, compiler, compiler_arguments)
             if identity in seen:
                 continue
@@ -380,11 +506,23 @@ def _load_compile_commands(
                     ),
                     is_generated=classification,
                     variant=variant,
+                    compile_database=database_relative_path,
+                    response_files=response_files,
                 )
             )
-    return tuple(
+    ordered = tuple(
         sorted(commands, key=lambda command: (command.display_path, command.variant))
     )
+    display_owners: dict[str, tuple[Path, bool]] = {}
+    for command in ordered:
+        owner = (command.source, command.is_generated)
+        previous = display_owners.setdefault(command.display_path, owner)
+        if previous != owner:
+            raise ClangTidyError(
+                "owned compile commands have an ambiguous report path: "
+                f"{command.display_path}: {previous} versus {owner}"
+            )
+    return ordered
 
 
 def _validate_focused_path(raw_path: str) -> str:
@@ -523,11 +661,13 @@ def _path_has_fragment(path: str, fragments: tuple[str, ...]) -> bool:
     return any(fragment in surrounded for fragment in fragments)
 
 
-def _disabled_checks(command: CompileCommand) -> tuple[str, ...]:
-    """Return narrow policy exceptions required by the source boundary."""
+def _suppression_profiles(command: CompileCommand) -> tuple[str, ...]:
+    """Name every narrow exception profile applied to one compile unit."""
 
     path = command.display_path
-    disabled: set[str] = set()
+    profiles: list[str] = []
+    if command.source.suffix == ".cppm":
+        profiles.append("named_module")
     if _path_has_fragment(
         path,
         (
@@ -538,14 +678,11 @@ def _disabled_checks(command: CompileCommand) -> tuple[str, ...]:
             "/generated/bioseq_cache/sql/",
         ),
     ):
-        disabled.update(_POSTGRES_BOUNDARY_DISABLED_CHECKS)
+        profiles.append("postgres_abi")
     if command.is_generated and (
         "/generated/highway/" in f"/{path}" or "highway-clang-canary/generated" in path
     ):
-        disabled.update(_GENERATED_HIGHWAY_DISABLED_CHECKS)
-        disabled.update(_HOT_PATH_DISABLED_CHECKS)
-    if path == "bioseq/backend/common/logging/fmtlog_backend.cppm":
-        disabled.update(_FMTLOG_COMPATIBILITY_DISABLED_CHECKS)
+        profiles.extend(("generated_highway", "zero_cost_hot_path"))
     if _path_has_fragment(
         path,
         (
@@ -567,14 +704,184 @@ def _disabled_checks(command: CompileCommand) -> tuple[str, ...]:
             "/backend/sequences/rank_pack",
             "/backend/sequences/simd",
             "/backend/vector_compare/",
+            "/generated/template_flatten/",
         ),
     ):
-        disabled.update(_HOT_PATH_DISABLED_CHECKS)
+        profiles.append("zero_cost_hot_path")
+    return tuple(dict.fromkeys(profiles))
+
+
+def _disabled_checks(command: CompileCommand) -> tuple[str, ...]:
+    """Return narrow policy exceptions required by the source boundary."""
+
+    profile_checks = {
+        "named_module": _NAMED_MODULE_DISABLED_CHECKS,
+        "postgres_abi": _POSTGRES_BOUNDARY_DISABLED_CHECKS,
+        "generated_highway": _GENERATED_HIGHWAY_DISABLED_CHECKS,
+        "zero_cost_hot_path": _HOT_PATH_DISABLED_CHECKS,
+    }
+    disabled = {
+        check
+        for profile in _suppression_profiles(command)
+        for check in profile_checks[profile]
+    }
     # The C++ vectorization layer keeps the PostgreSQL ABI exceptions but owns
     # its identifiers and remains subject to the repository naming convention.
-    if _path_has_fragment(path, ("/backend/pg/vectorization/",)):
+    if _path_has_fragment(command.display_path, ("/backend/pg/vectorization/",)):
         disabled.discard("readability-identifier-naming")
     return tuple(sorted(disabled))
+
+
+def _normalized_comment_line(line: str) -> str:
+    """Remove ordinary line/block documentation decoration from one comment."""
+
+    normalized = line.strip()
+    if normalized.startswith(("*", "/", "!")):
+        normalized = normalized[1:].lstrip()
+    return normalized
+
+
+def _raw_string_end(document: str, start: int) -> int | None:
+    """Return the exclusive end of a C++ raw string beginning at ``R\"``."""
+
+    if not document.startswith('R"', start):
+        return None
+    delimiter_start = start + 2
+    opening = document.find("(", delimiter_start, delimiter_start + 17)
+    if opening == -1:
+        return None
+    delimiter = document[delimiter_start:opening]
+    if any(character.isspace() or character in "\\()" for character in delimiter):
+        return None
+    terminator = f'){delimiter}"'
+    closing = document.find(terminator, opening + 1)
+    return len(document) if closing == -1 else closing + len(terminator)
+
+
+def _comment_lines(document: str) -> tuple[tuple[int, str], ...]:
+    """Lex C++ line and block comments while excluding string/character literals."""
+
+    comments: list[tuple[int, str]] = []
+    index = 0
+    line_number = 1
+    while index < len(document):
+        character = document[index]
+        if character == "\n":
+            line_number += 1
+            index += 1
+            continue
+        raw_end = _raw_string_end(document, index)
+        if raw_end is not None:
+            line_number += document[index:raw_end].count("\n")
+            index = raw_end
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            index += 1
+            while index < len(document):
+                current = document[index]
+                if current == "\n":
+                    line_number += 1
+                if current == "\\" and index + 1 < len(document):
+                    if document[index + 1] == "\n":
+                        line_number += 1
+                    index += 2
+                    continue
+                index += 1
+                if current == quote:
+                    break
+            continue
+        if document.startswith("//", index):
+            end = document.find("\n", index + 2)
+            if end == -1:
+                end = len(document)
+            comments.append(
+                (line_number, _normalized_comment_line(document[index + 2:end]))
+            )
+            index = end
+            continue
+        if document.startswith("/*", index):
+            end = document.find("*/", index + 2)
+            body_end = len(document) if end == -1 else end
+            body = document[index + 2:body_end]
+            for offset, line in enumerate(body.split("\n")):
+                comments.append(
+                    (line_number + offset, _normalized_comment_line(line))
+                )
+            line_number += body.count("\n")
+            index = len(document) if end == -1 else end + 2
+            continue
+        index += 1
+    return tuple(comments)
+
+
+def _source_suppressions(source: Path) -> tuple[dict[str, object], ...]:
+    """Return explicit, explained source suppressions and reject broad forms."""
+
+    suppressions: list[dict[str, object]] = []
+    try:
+        document = source.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise ClangTidyError(
+            f"cannot read selected compile unit {source}: {error}"
+        ) from error
+    region_stack: list[tuple[int, tuple[str, ...]]] = []
+    for line_number, comment in _comment_lines(document):
+        if _NOLINT_TOKEN_PATTERN.search(comment) is None:
+            continue
+        match = _NOLINT_COMMENT_PATTERN.fullmatch(comment)
+        if match is None:
+            raise ClangTidyError(
+                f"broad or malformed clang-tidy suppression in {source}:{line_number}; "
+                "name exact checks and explain the boundary"
+            )
+        checks = tuple(
+            check.strip() for check in match.group("checks").split(",")
+        )
+        if (
+            not checks
+            or any(not check for check in checks)
+            or len(set(checks)) != len(checks)
+            or any(
+                "*" in check or _CHECK_NAME_PATTERN.fullmatch(check) is None
+                for check in checks
+            )
+        ):
+            raise ClangTidyError(
+                f"clang-tidy suppression must name exact checks in "
+                f"{source}:{line_number}: {checks}"
+            )
+        reason = match.group("reason")
+        kind = match.group("kind")
+        if kind == "NOLINTBEGIN":
+            region_stack.append((line_number, checks))
+        elif kind == "NOLINTEND":
+            if not region_stack:
+                raise ClangTidyError(
+                    f"clang-tidy NOLINTEND has no matching NOLINTBEGIN in "
+                    f"{source}:{line_number}"
+                )
+            begin_line, begin_checks = region_stack.pop()
+            if checks != begin_checks:
+                raise ClangTidyError(
+                    "clang-tidy suppression region check lists differ in "
+                    f"{source}:{begin_line} and {source}:{line_number}"
+                )
+        suppressions.append(
+            {
+                "line": line_number,
+                "kind": kind,
+                "checks": list(checks),
+                "reason": reason,
+            }
+        )
+    if region_stack:
+        begin_line, _ = region_stack[-1]
+        raise ClangTidyError(
+            f"clang-tidy NOLINTBEGIN has no matching NOLINTEND in "
+            f"{source}:{begin_line}"
+        )
+    return tuple(suppressions)
 
 
 def _line_filter(source: Path) -> str:
@@ -651,8 +958,8 @@ def _generator_hint(source: Path) -> str | None:
     return None
 
 
-def _fallback_owner_candidates(display_path: str) -> tuple[str, ...]:
-    """Return semantic generator owners when Ninja has no direct source edge."""
+def _heuristic_owner_candidates(display_path: str) -> tuple[str, ...]:
+    """Return explicitly identified semantic generator owners as heuristics."""
 
     if "highway-clang-canary/generated/" in display_path:
         return (
@@ -671,6 +978,21 @@ def _fallback_owner_candidates(display_path: str) -> tuple[str, ...]:
         )
     if "/sql/" in f"/{display_path}":
         return ("cmake/bioseq_sql_codegen.cmake", "codegen/sql/index.cppm")
+    if "/build_config/" in f"/{display_path}":
+        return (
+            "cmake/bioseq_build_config_codegen.cmake",
+            "codegen/build_config/index.cppm",
+        )
+    if "namespace_materialization/tests/integration/module_canary/generated/" in display_path:
+        return (
+            "codegen/namespace_materialization/tests/integration/module_canary/CMakeLists.txt",
+            "codegen/namespace_materialization/index.cppm",
+        )
+    if "namespace_materialization/tests/integration/owner_canary/generated/" in display_path:
+        return (
+            "codegen/namespace_materialization/tests/integration/owner_canary/CMakeLists.txt",
+            "codegen/namespace_materialization/index.cppm",
+        )
     if (
         display_path.startswith("codegen/generator-build")
         and "/generated/" in display_path
@@ -699,14 +1021,19 @@ def _generated_owner_candidates(
     *,
     source_root: Path,
     build_dir: Path,
-) -> tuple[str, ...]:
+) -> GeneratedOwnerRouting:
     """Resolve generated diagnostics to direct authored Ninja dependencies."""
 
     if not command.is_generated:
-        return ()
-    fallback_candidates = _fallback_owner_candidates(command.display_path)
-    candidates = list(fallback_candidates)
-    seen = set(fallback_candidates)
+        return GeneratedOwnerRouting(
+            ninja_candidates=(),
+            heuristic_candidates=(),
+            query_status="not-generated",
+        )
+    heuristic_candidates = _heuristic_owner_candidates(command.display_path)
+    ninja_candidates: list[str] = []
+    seen: set[str] = set()
+    query_status = "not-run"
     try:
         ninja_build_dir = _ninja_build_directory(command, build_dir)
         relative_target = command.source.relative_to(ninja_build_dir).as_posix()
@@ -722,6 +1049,7 @@ def _generated_owner_candidates(
             timeout=30,
         )
         if completed.returncode == 0:
+            authored_input_count = 0
             in_inputs = False
             for raw_line in completed.stdout.splitlines():
                 stripped = raw_line.strip()
@@ -745,12 +1073,26 @@ def _generated_owner_candidates(
                 relative = candidate.relative_to(source_root).as_posix()
                 if _is_excluded_source_path(relative):
                     continue
+                authored_input_count += 1
                 if relative not in seen:
-                    candidates.append(relative)
+                    ninja_candidates.append(relative)
                     seen.add(relative)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return tuple(candidates[:_MAX_OWNER_CANDIDATES])
+            query_status = (
+                "ninja-authored-inputs"
+                if authored_input_count
+                else "ninja-no-authored-inputs"
+            )
+        else:
+            query_status = f"ninja-exit-{completed.returncode}"
+    except subprocess.TimeoutExpired:
+        query_status = "ninja-timeout"
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        query_status = f"ninja-error-{type(error).__name__}"
+    return GeneratedOwnerRouting(
+        ninja_candidates=tuple(ninja_candidates[:_MAX_OWNER_CANDIDATES]),
+        heuristic_candidates=heuristic_candidates,
+        query_status=query_status,
+    )
 
 
 def _run_one(
@@ -760,6 +1102,7 @@ def _run_one(
     source_root: Path,
     build_dir: Path,
     timeout_seconds: int,
+    source_suppressions: tuple[dict[str, object], ...],
 ) -> LintResult:
     """Run clang-tidy for one exact compilation and capture all output."""
 
@@ -789,6 +1132,15 @@ def _run_one(
     needs_generated_routing = command.is_generated and (
         exit_code != 0 or bool(diagnostics)
     )
+    owner_routing = (
+        _generated_owner_candidates(
+            command,
+            source_root=source_root,
+            build_dir=build_dir,
+        )
+        if needs_generated_routing
+        else None
+    )
     return LintResult(
         command=command,
         invocation=invocation,
@@ -796,18 +1148,17 @@ def _run_one(
         output=output,
         duration_seconds=duration,
         diagnostics=diagnostics,
-        owner_candidates=(
-            _generated_owner_candidates(
-                command,
-                source_root=source_root,
-                build_dir=build_dir,
-            )
-            if needs_generated_routing
-            else ()
+        ninja_owner_candidates=(
+            owner_routing.ninja_candidates if owner_routing else ()
         ),
+        heuristic_owner_candidates=(
+            owner_routing.heuristic_candidates if owner_routing else ()
+        ),
+        owner_query_status=(owner_routing.query_status if owner_routing else None),
         generator_hint=(
             _generator_hint(command.source) if needs_generated_routing else None
         ),
+        source_suppressions=source_suppressions,
     )
 
 
@@ -820,16 +1171,60 @@ def _result_document(result: LintResult) -> dict[str, object]:
         "generated": result.command.is_generated,
         "working_directory": str(result.command.directory),
         "compiler": str(result.command.compiler),
+        "compile_database": result.command.compile_database,
+        "response_files": [
+            {"path": path, "sha256": digest}
+            for path, digest in result.command.response_files
+        ],
+        "suppression_profiles": list(_suppression_profiles(result.command)),
         "disabled_checks": list(_disabled_checks(result.command)),
         "exit_code": result.exit_code,
         "duration_seconds": round(result.duration_seconds, 6),
         "diagnostics": list(result.diagnostics),
         "diagnostic_count": len(result.diagnostics),
-        "owner_candidates": list(result.owner_candidates),
+        "ninja_owner_candidates": list(result.ninja_owner_candidates),
+        "heuristic_owner_candidates": list(result.heuristic_owner_candidates),
+        "owner_query_status": result.owner_query_status,
         "generator_hint": result.generator_hint,
+        "source_suppressions": list(result.source_suppressions),
         "invocation": list(result.invocation),
         "output": result.output,
     }
+
+
+def _validate_full_inventory(
+    *,
+    database_evidence: list[dict[str, str]],
+    selected: tuple[CompileCommand, ...],
+    available_authored: tuple[CompileCommand, ...],
+    available_generated: tuple[CompileCommand, ...],
+) -> None:
+    """Require complete authored/generated and database-provenance coverage."""
+
+    if len(database_evidence) < 2:
+        raise ClangTidyError(
+            "full lint requires the primary and first-party generator compile databases"
+        )
+    if not available_authored or not available_generated:
+        raise ClangTidyError(
+            "full lint requires nonempty authored and generated compile-unit coverage"
+        )
+    evidence_paths = {evidence["path"] for evidence in database_evidence}
+    generator_database_paths = {
+        path
+        for path in evidence_paths
+        if _GENERATOR_COMPILE_DATABASE_PATTERN.fullmatch(path) is not None
+    }
+    selected_database_paths = {command.compile_database for command in selected}
+    if (
+        _COMPILE_DATABASE_NAME not in evidence_paths
+        or _COMPILE_DATABASE_NAME not in selected_database_paths
+        or not generator_database_paths.intersection(selected_database_paths)
+    ):
+        raise ClangTidyError(
+            "full lint requires nonempty selected contribution from the primary "
+            "and an authenticated first-party generator compile database"
+        )
 
 
 def run_clang_tidy(
@@ -876,6 +1271,19 @@ def run_clang_tidy(
     database_evidence = _compile_database_evidence(build_dir)
     commands = _load_compile_commands(source_root, build_dir)
     selected = _select_commands(commands, scope=scope, focused_paths=focused_paths)
+    available_authored = tuple(command for command in commands if not command.is_generated)
+    available_generated = tuple(command for command in commands if command.is_generated)
+    if scope == "full":
+        _validate_full_inventory(
+            database_evidence=database_evidence,
+            selected=selected,
+            available_authored=available_authored,
+            available_generated=available_generated,
+        )
+    source_suppression_inventory = {
+        source: _source_suppressions(source)
+        for source in sorted({command.source for command in selected})
+    }
     tidy, toolchain = _matching_clang_tidy(selected)
     toolchain["config_verification"] = _verify_config(tidy, config_path)
     print(
@@ -896,6 +1304,7 @@ def run_clang_tidy(
                 source_root=source_root,
                 build_dir=build_dir,
                 timeout_seconds=timeout_seconds,
+                source_suppressions=source_suppression_inventory[command.source],
             )
             for command in selected
         ]
@@ -906,10 +1315,28 @@ def run_clang_tidy(
             print(f"$ {shlex.join(result.invocation)}", file=output)
             if result.output:
                 print(result.output, end="" if result.output.endswith("\n") else "\n", file=output)
-            if result.command.is_generated and result.owner_candidates:
+            if result.command.is_generated and result.ninja_owner_candidates:
                 print(
-                    f"generated-owner: {result.command.display_path} <- "
-                    + ", ".join(result.owner_candidates),
+                    f"generated-owner-ninja[{result.owner_query_status}]: "
+                    f"{result.command.display_path} <- "
+                    + ", ".join(result.ninja_owner_candidates),
+                    file=output,
+                )
+            if result.command.is_generated and result.heuristic_owner_candidates:
+                print(
+                    f"generated-owner-heuristic: {result.command.display_path} <- "
+                    + ", ".join(result.heuristic_owner_candidates),
+                    file=output,
+                )
+            if (
+                result.command.is_generated
+                and result.owner_query_status is not None
+                and not result.ninja_owner_candidates
+                and not result.heuristic_owner_candidates
+            ):
+                print(
+                    f"generated-owner-unresolved[{result.owner_query_status}]: "
+                    f"{result.command.display_path}",
                     file=output,
                 )
             print(
@@ -922,8 +1349,14 @@ def run_clang_tidy(
 
     failed = [result for result in results if result.exit_code != 0]
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    compile_database_contributions = {
+        evidence["path"]: sum(
+            command.compile_database == evidence["path"] for command in commands
+        )
+        for evidence in database_evidence
+    }
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": scope,
         "source_root": str(source_root),
         "build_dir": str(build_dir),
@@ -931,9 +1364,52 @@ def run_clang_tidy(
         "policy_sha256": config_sha256,
         "toolchain": toolchain,
         "compile_databases": database_evidence,
+        "compile_database_contributions": compile_database_contributions,
+        "available_count": len(commands),
+        "available_path_count": len({command.display_path for command in commands}),
+        "available_authored_count": len(available_authored),
+        "available_authored_path_count": len(
+            {command.display_path for command in available_authored}
+        ),
+        "available_generated_count": len(available_generated),
+        "available_generated_path_count": len(
+            {command.display_path for command in available_generated}
+        ),
         "selected_count": len(results),
+        "selected_path_count": len(
+            {result.command.display_path for result in results}
+        ),
         "authored_count": sum(not result.command.is_generated for result in results),
+        "authored_path_count": len(
+            {
+                result.command.display_path
+                for result in results
+                if not result.command.is_generated
+            }
+        ),
         "generated_count": sum(result.command.is_generated for result in results),
+        "generated_path_count": len(
+            {
+                result.command.display_path
+                for result in results
+                if result.command.is_generated
+            }
+        ),
+        "optimization_verified_count": len(commands),
+        "optimization_policy": {
+            "optimization_flags": ["-O3"],
+            "ndebug_required": True,
+        },
+        "source_suppression_count": len(
+            {
+                (
+                    result.command.display_path,
+                    json.dumps(suppression, sort_keys=True, separators=(",", ":")),
+                )
+                for result in results
+                for suppression in result.source_suppressions
+            }
+        ),
         "diagnostic_count": sum(len(result.diagnostics) for result in results),
         "failure_count": len(failed),
         "results": [_result_document(result) for result in results],

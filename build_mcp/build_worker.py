@@ -972,12 +972,23 @@ def _clang_tidy_report_summary(
         ) from error
     except json.JSONDecodeError as error:
         raise RuntimeError(f"clang-tidy report is invalid JSON: {error}") from error
-    if not isinstance(report, dict) or report.get("schema_version") != 1:
+    if not isinstance(report, dict) or report.get("schema_version") != 2:
         raise RuntimeError("clang-tidy report has an unsupported schema")
     required_integer_fields = (
+        "available_count",
+        "available_path_count",
+        "available_authored_count",
+        "available_authored_path_count",
+        "available_generated_count",
+        "available_generated_path_count",
         "selected_count",
+        "selected_path_count",
         "authored_count",
+        "authored_path_count",
         "generated_count",
+        "generated_path_count",
+        "optimization_verified_count",
+        "source_suppression_count",
         "diagnostic_count",
         "failure_count",
     )
@@ -990,6 +1001,36 @@ def _clang_tidy_report_summary(
     if not isinstance(compile_databases, list) or not compile_databases:
         raise RuntimeError(
             "clang-tidy report must identify at least one compile database")
+    compile_database_paths: list[str] = []
+    for evidence in compile_databases:
+        if not isinstance(evidence, dict):
+            raise RuntimeError("clang-tidy compile database evidence is invalid")
+        path = evidence.get("path")
+        digest = evidence.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or ".." in Path(path).parts
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise RuntimeError("clang-tidy compile database evidence is invalid")
+        compile_database_paths.append(path)
+    if len(set(compile_database_paths)) != len(compile_database_paths):
+        raise RuntimeError("clang-tidy compile database evidence has duplicate paths")
+    contributions = report.get("compile_database_contributions")
+    if (
+        not isinstance(contributions, dict)
+        or set(contributions) != set(compile_database_paths)
+    ):
+        raise RuntimeError("clang-tidy compile database contributions are invalid")
+    for path, count in contributions.items():
+        if not isinstance(path, str) or type(count) is not int or count < 0:
+            raise RuntimeError("clang-tidy compile database contributions are invalid")
+    if sum(contributions.values()) != report["available_count"]:
+        raise RuntimeError(
+            "clang-tidy compile database contributions do not cover availability")
     report_scope = report.get("scope")
     if report_scope not in {"focused", "full"}:
         raise RuntimeError("clang-tidy report has an invalid scope")
@@ -999,16 +1040,329 @@ def _clang_tidy_report_summary(
             f"expected={expected_scope} observed={report_scope}"
         )
     if (
+        report["available_authored_count"] + report["available_generated_count"]
+        != report["available_count"]
+    ):
+        raise RuntimeError("clang-tidy report available unit counts are inconsistent")
+    if (
+        report["available_authored_path_count"]
+        + report["available_generated_path_count"]
+        != report["available_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report available path counts are inconsistent")
+    if (
+        report["available_count"] == 0
+        or report["available_path_count"] == 0
+        or report["available_path_count"] > report["available_count"]
+        or report["available_authored_path_count"]
+        > report["available_authored_count"]
+        or report["available_generated_path_count"]
+        > report["available_generated_count"]
+    ):
+        raise RuntimeError("clang-tidy report available coverage is empty or invalid")
+    if (
         report["authored_count"] + report["generated_count"]
         != report["selected_count"]
     ):
         raise RuntimeError("clang-tidy report unit counts are inconsistent")
+    if (
+        report["authored_path_count"] + report["generated_path_count"]
+        != report["selected_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected path counts are inconsistent")
+    if (
+        report["selected_count"] == 0
+        or report["selected_path_count"] == 0
+        or report["selected_path_count"] > report["selected_count"]
+        or report["authored_path_count"] > report["authored_count"]
+        or report["generated_path_count"] > report["generated_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected coverage is empty or invalid")
+    if (
+        report["selected_count"] > report["available_count"]
+        or report["selected_path_count"] > report["available_path_count"]
+        or report["authored_count"] > report["available_authored_count"]
+        or report["generated_count"] > report["available_generated_count"]
+        or report["authored_path_count"] > report["available_authored_path_count"]
+        or report["generated_path_count"] > report["available_generated_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected coverage exceeds availability")
+    if report["optimization_verified_count"] != report["available_count"]:
+        raise RuntimeError(
+            "clang-tidy report does not verify every available compile profile")
+    optimization_policy = report.get("optimization_policy")
+    if optimization_policy != {
+        "optimization_flags": ["-O3"],
+        "ndebug_required": True,
+    }:
+        raise RuntimeError("clang-tidy report has an invalid optimization policy")
     if report["failure_count"] > report["selected_count"]:
         raise RuntimeError("clang-tidy report failure count exceeds selected units")
+    results = report.get("results")
+    if not isinstance(results, list) or len(results) != report["selected_count"]:
+        raise RuntimeError("clang-tidy report result count is inconsistent")
+    result_identities: set[tuple[str, int]] = set()
+    result_paths: dict[bool, set[str]] = {False: set(), True: set()}
+    result_counts: dict[bool, int] = {False: 0, True: 0}
+    result_failures = 0
+    result_diagnostics = 0
+    result_suppressions: set[tuple[str, str]] = set()
+    result_database_counts = {path: 0 for path in compile_database_paths}
+    for result in results:
+        if not isinstance(result, dict):
+            raise RuntimeError("clang-tidy report result record is invalid")
+        path = result.get("path")
+        variant = result.get("variant")
+        generated = result.get("generated")
+        exit_code = result.get("exit_code")
+        diagnostic_count = result.get("diagnostic_count")
+        diagnostics = result.get("diagnostics")
+        source_suppressions = result.get("source_suppressions")
+        compile_database = result.get("compile_database")
+        response_files = result.get("response_files")
+        suppression_profiles = result.get("suppression_profiles")
+        disabled_checks = result.get("disabled_checks")
+        ninja_owners = result.get("ninja_owner_candidates")
+        heuristic_owners = result.get("heuristic_owner_candidates")
+        owner_query_status = result.get("owner_query_status")
+        working_directory = result.get("working_directory")
+        compiler = result.get("compiler")
+        duration_seconds = result.get("duration_seconds")
+        generator_hint = result.get("generator_hint")
+        invocation = result.get("invocation")
+        output = result.get("output")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or ".." in Path(path).parts
+            or type(variant) is not int
+            or variant < 0
+            or type(generated) is not bool
+            or type(exit_code) is not int
+            or type(diagnostic_count) is not int
+            or diagnostic_count < 0
+            or not isinstance(diagnostics, list)
+            or len(diagnostics) != diagnostic_count
+            or any(not isinstance(diagnostic, dict) for diagnostic in diagnostics)
+            or not isinstance(source_suppressions, list)
+            or not isinstance(compile_database, str)
+            or compile_database not in contributions
+            or not isinstance(response_files, list)
+            or not isinstance(suppression_profiles, list)
+            or any(
+                not isinstance(profile, str)
+                or profile not in {
+                    "named_module",
+                    "postgres_abi",
+                    "generated_highway",
+                    "zero_cost_hot_path",
+                }
+                for profile in suppression_profiles
+            )
+            or len(set(suppression_profiles)) != len(suppression_profiles)
+            or not isinstance(disabled_checks, list)
+            or any(
+                not isinstance(check, str) or not check or "*" in check
+                for check in disabled_checks
+            )
+            or len(set(disabled_checks)) != len(disabled_checks)
+            or not isinstance(ninja_owners, list)
+            or any(not isinstance(owner, str) or not owner for owner in ninja_owners)
+            or len(set(ninja_owners)) != len(ninja_owners)
+            or not isinstance(heuristic_owners, list)
+            or any(
+                not isinstance(owner, str) or not owner or owner == "CMakeLists.txt"
+                for owner in heuristic_owners
+            )
+            or len(set(heuristic_owners)) != len(heuristic_owners)
+            or (
+                owner_query_status is not None
+                and (
+                    not isinstance(owner_query_status, str)
+                    or re.fullmatch(
+                        r"ninja-(?:authored-inputs|no-authored-inputs|timeout|"
+                        r"exit--?\d+|error-[A-Za-z_][A-Za-z0-9_]*)",
+                        owner_query_status,
+                    ) is None
+                )
+            )
+            or not isinstance(working_directory, str)
+            or not Path(working_directory).is_absolute()
+            or not isinstance(compiler, str)
+            or not Path(compiler).is_absolute()
+            or (
+                not isinstance(duration_seconds, (int, float))
+                or isinstance(duration_seconds, bool)
+                or not math.isfinite(duration_seconds)
+                or duration_seconds < 0
+            )
+            or (generator_hint is not None and not isinstance(generator_hint, str))
+            or not isinstance(invocation, list)
+            or not invocation
+            or any(not isinstance(argument, str) for argument in invocation)
+            or not isinstance(output, str)
+        ):
+            raise RuntimeError("clang-tidy report result record is invalid")
+        if (
+            (not generated and (ninja_owners or heuristic_owners or owner_query_status))
+            or (
+                generated
+                and (exit_code != 0 or diagnostic_count != 0)
+                and not owner_query_status
+            )
+        ):
+            raise RuntimeError("clang-tidy generated-owner result record is invalid")
+        for response_file in response_files:
+            response_path = (
+                response_file.get("path")
+                if isinstance(response_file, dict)
+                else None
+            )
+            if (
+                not isinstance(response_file, dict)
+                or not isinstance(response_path, str)
+                or not response_path
+                or response_path.startswith("/")
+                or "\\" in response_path
+                or ".." in Path(response_path).parts
+                or not isinstance(response_file.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", response_file["sha256"]) is None
+            ):
+                raise RuntimeError("clang-tidy response-file evidence is invalid")
+        if len({item["path"] for item in response_files}) != len(response_files):
+            raise RuntimeError("clang-tidy response-file evidence has duplicate paths")
+        for diagnostic in diagnostics:
+            if (
+                not isinstance(diagnostic.get("path"), str)
+                or not diagnostic["path"]
+                or type(diagnostic.get("line")) is not int
+                or diagnostic["line"] <= 0
+                or type(diagnostic.get("column")) is not int
+                or diagnostic["column"] <= 0
+                or diagnostic.get("severity") not in {"warning", "error"}
+                or not isinstance(diagnostic.get("message"), str)
+                or not diagnostic["message"]
+                or (
+                    diagnostic.get("check") is not None
+                    and (
+                        not isinstance(diagnostic.get("check"), str)
+                        or not diagnostic["check"]
+                    )
+                )
+            ):
+                raise RuntimeError("clang-tidy diagnostic record is invalid")
+        identity = (path, variant)
+        if identity in result_identities:
+            raise RuntimeError("clang-tidy report has duplicate result identities")
+        result_identities.add(identity)
+        result_counts[generated] += 1
+        result_paths[generated].add(path)
+        result_failures += exit_code != 0
+        result_diagnostics += diagnostic_count
+        result_database_counts[compile_database] += 1
+        suppression_identities: set[str] = set()
+        for suppression in source_suppressions:
+            if not isinstance(suppression, dict):
+                raise RuntimeError("clang-tidy source suppression record is invalid")
+            line = suppression.get("line")
+            kind = suppression.get("kind")
+            checks = suppression.get("checks")
+            reason = suppression.get("reason")
+            if (
+                type(line) is not int
+                or line <= 0
+                or kind not in {
+                    "NOLINT",
+                    "NOLINTNEXTLINE",
+                    "NOLINTBEGIN",
+                    "NOLINTEND",
+                }
+                or not isinstance(checks, list)
+                or not checks
+                or any(
+                    not isinstance(check, str)
+                    or re.fullmatch(r"[a-z0-9_.-]+", check) is None
+                    for check in checks
+                )
+                or len(set(checks)) != len(checks)
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                raise RuntimeError("clang-tidy source suppression record is invalid")
+            suppression_identity = json.dumps(
+                suppression,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if suppression_identity in suppression_identities:
+                raise RuntimeError(
+                    "clang-tidy source suppression record is duplicated"
+                )
+            suppression_identities.add(suppression_identity)
+            result_suppressions.add((path, suppression_identity))
+    if any(
+        result_database_counts[path] > contributions[path]
+        for path in compile_database_paths
+    ):
+        raise RuntimeError(
+            "clang-tidy result database provenance exceeds availability"
+        )
+    if (
+        bool(result_paths[False] & result_paths[True])
+        or result_counts[False] != report["authored_count"]
+        or result_counts[True] != report["generated_count"]
+        or len(result_paths[False]) != report["authored_path_count"]
+        or len(result_paths[True]) != report["generated_path_count"]
+        or result_failures != report["failure_count"]
+        or result_diagnostics != report["diagnostic_count"]
+        or len(result_suppressions) != report["source_suppression_count"]
+    ):
+        raise RuntimeError("clang-tidy report result aggregates are inconsistent")
+    if report_scope == "full":
+        if (
+            report["selected_count"] != report["available_count"]
+            or report["selected_path_count"] != report["available_path_count"]
+        ):
+            raise RuntimeError(
+                "full clang-tidy report does not cover every available unit")
+        if (
+            report["available_authored_count"] == 0
+            or report["available_generated_count"] == 0
+        ):
+            raise RuntimeError(
+                "full clang-tidy report requires authored and generated coverage")
+        if len(compile_databases) < 2:
+            raise RuntimeError(
+                "full clang-tidy report requires primary and generator databases")
+        generator_database_paths = {
+            path
+            for path in compile_database_paths
+            if re.fullmatch(
+                r"codegen/generator-build(?:-[a-z0-9][a-z0-9-]*)?/"
+                r"compile_commands\.json",
+                path,
+            ) is not None
+        }
+        if result_database_counts != contributions:
+            raise RuntimeError(
+                "full clang-tidy result database provenance is inconsistent"
+            )
+        if (
+            contributions.get("compile_commands.json", 0) == 0
+            or not any(contributions[path] > 0 for path in generator_database_paths)
+        ):
+            raise RuntimeError(
+                "full clang-tidy report lacks primary or generator database "
+                "contribution"
+            )
     return {
         "scope": report_scope,
         **{field_name: report[field_name] for field_name in required_integer_fields},
         "compile_database_count": len(compile_databases),
+        "compile_database_contributions": contributions,
+        "optimization_policy": optimization_policy,
         "policy_sha256": report.get("policy_sha256"),
         "toolchain": report.get("toolchain"),
     }

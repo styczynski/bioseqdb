@@ -1,22 +1,22 @@
 ---
 # The broad families are intentional. Per-source exceptions are applied by
 # build_mcp/clang_tidy.py so PostgreSQL ABI code, generated Highway target
-# namespaces, zero-cost hot paths, and the exact embedded fmtlog compatibility
-# unit do not weaken checks for ordinary code.
-# The fmtlog unit keeps its imported implementation byte-compatible, so only
-# its path loses mechanical naming, array, pointer, and ownership rewrites.
+# namespaces, and zero-cost hot paths do not weaken checks for ordinary code.
 # bugprone-argument-comment is the sole toolchain crash exclusion: Clang 22.1.6
 # crashes while traversing an imported module before line filtering diagnostics.
 # Unsupported platform analyzer suites are excluded. Padding and public-member
-# advice conflicts with stable layouts and aggregate models. noexcept, trailing
+# advice conflict with stable layouts and aggregate models. noexcept, trailing
 # returns, std::print, and restricted includes require separate style, ABI,
-# output, or allowlist work.
+# output, or allowlist work. The runner disables module-unaware include-cleaner
+# and internal-linkage rewrites only for named-module compile units.
 Checks: >-
   -*,
   clang-analyzer-*,
   bugprone-*,
+  cert-*,
   concurrency-*,
   cppcoreguidelines-*,
+  misc-*,
   modernize-*,
   performance-*,
   portability-*,
@@ -29,6 +29,7 @@ Checks: >-
   -clang-analyzer-webkit.*,
   -clang-analyzer-optin.performance.Padding,
   -cppcoreguidelines-non-private-member-variables-in-classes,
+  -misc-non-private-member-variables-in-classes,
   -modernize-use-noexcept,
   -modernize-use-std-print,
   -modernize-use-trailing-return-type,
