@@ -69,7 +69,7 @@ struct dispatch_join_query_ref {
  * executor lifetime that supplied its borrowed relation and memory context.
  */
 class dispatch_buffer_runtime {
-public:
+  public:
     /** @brief Creates an empty runtime sized for the estimated tuple count. */
     explicit dispatch_buffer_runtime(std::size_t estimated_tuple_count);
     ~dispatch_buffer_runtime();
@@ -80,17 +80,16 @@ public:
     dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& other) noexcept;
 
     /** @brief Configures alignment, index-read, relation, snapshot, and memory owners. */
-    void configure_params(
-        const bioseq::simd::minimap2_parameters& params,
-        bioseq::indexing::index_read_requirement index_read_requirement,
-        bool read_sequence_index,
-        Oid scan_user_relid,
-        Oid scan_user_database_oid,
-        Oid scan_user_tablespace_oid,
-        Oid scan_user_main_relfilenode,
-        Relation executor_relation,
-        Snapshot executor_snapshot,
-        MemoryContext executor_query_context);
+    void configure_params(const bioseq::simd::minimap2_parameters& params,
+                          bioseq::indexing::index_read_requirement index_read_requirement,
+                          bool read_sequence_index,
+                          Oid scan_user_relid,
+                          Oid scan_user_database_oid,
+                          Oid scan_user_tablespace_oid,
+                          Oid scan_user_main_relfilenode,
+                          Relation executor_relation,
+                          Snapshot executor_snapshot,
+                          MemoryContext executor_query_context);
 
     /** @brief Replaces the borrowed executor snapshot used for later reads. */
     void replace_executor_snapshot(Snapshot executor_snapshot);
@@ -100,8 +99,7 @@ public:
      *
      * The runtime borrows the provider and never closes it independently.
      */
-    void bind_sequence_source_provider(
-        bioseq::storage::pg_sequence_source_provider* provider);
+    void bind_sequence_source_provider(bioseq::storage::pg_sequence_source_provider* provider);
     /** @brief Clears the borrowed sequence source provider without closing it. */
     void clear_sequence_source_provider_binding() noexcept;
 
@@ -117,25 +115,23 @@ public:
     void release_join_slice_async_owner_after_drain();
 
     /** @brief Configures a broadcast-query mmsearch scan. */
-    void configure_mmsearch(
-        AttrNumber seq_attno,
-        std::string column_name,
-        std::vector<char> query_varlena_bytes,
-        std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width,
-        AttrNumber primary_key_attno);
+    void configure_mmsearch(AttrNumber seq_attno,
+                            std::string column_name,
+                            std::vector<char> query_varlena_bytes,
+                            std::uint8_t alphabet_code,
+                            std::uint8_t storage_unit_byte_width,
+                            AttrNumber primary_key_attno);
 
     /** @brief Configures a per-row mmsearch scan backed by physical attributes. */
-    void configure_mmsearch_per_row(
-        AttrNumber seq_attno,
-        std::string column_name,
-        AttrNumber per_row_query_attno,
-        bool per_row_self_alignment,
-        std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width,
-        std::uint8_t query_alphabet_code,
-        std::uint8_t query_storage_unit_byte_width,
-        AttrNumber primary_key_attno);
+    void configure_mmsearch_per_row(AttrNumber seq_attno,
+                                    std::string column_name,
+                                    AttrNumber per_row_query_attno,
+                                    bool per_row_self_alignment,
+                                    std::uint8_t alphabet_code,
+                                    std::uint8_t storage_unit_byte_width,
+                                    std::uint8_t query_alphabet_code,
+                                    std::uint8_t query_storage_unit_byte_width,
+                                    AttrNumber primary_key_attno);
 
     /**
      * @brief Configures a per-row mmsearch whose operands are evaluated expressions.
@@ -143,14 +139,13 @@ public:
      * The sequence attribute still identifies source authority and preserves
      * raw output. It does not select either evaluated operand.
      */
-    void configure_mmsearch_per_row_evaluated(
-        AttrNumber seq_attno,
-        std::string column_name,
-        std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width,
-        std::uint8_t query_alphabet_code,
-        std::uint8_t query_storage_unit_byte_width,
-        AttrNumber primary_key_attno);
+    void configure_mmsearch_per_row_evaluated(AttrNumber seq_attno,
+                                              std::string column_name,
+                                              std::uint8_t alphabet_code,
+                                              std::uint8_t storage_unit_byte_width,
+                                              std::uint8_t query_alphabet_code,
+                                              std::uint8_t query_storage_unit_byte_width,
+                                              AttrNumber primary_key_attno);
 
     /** @brief Installs one coalesced query value for the active mmsearch. */
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes);
@@ -160,22 +155,20 @@ public:
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
 
     /** @brief Configures the target and query slot layout for a batch join. */
-    void configure_mmsearch_join(
-        Oid target_relation_oid,
-        AttrNumber target_storage_seq_attno,
-        AttrNumber target_slot_seq_resno,
-        AttrNumber target_slot_rowno_resno,
-        AttrNumber query_slot_seq_resno,
-        std::string target_column_name,
-        std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width,
-        std::uint8_t query_alphabet_code,
-        std::uint8_t query_storage_unit_byte_width);
+    void configure_mmsearch_join(Oid target_relation_oid,
+                                 AttrNumber target_storage_seq_attno,
+                                 AttrNumber target_slot_seq_resno,
+                                 AttrNumber target_slot_rowno_resno,
+                                 AttrNumber query_slot_seq_resno,
+                                 std::string target_column_name,
+                                 std::uint8_t alphabet_code,
+                                 std::uint8_t storage_unit_byte_width,
+                                 std::uint8_t query_alphabet_code,
+                                 std::uint8_t query_storage_unit_byte_width);
     /** @brief Starts buffering query batches for one borrowed join target slot. */
     void begin_join_target(TupleTableSlot* locator_passthrough_target);
     /** @brief Prepares all query references needed by the current join target. */
-    void prepare_join_target_queries(
-        std::span<const dispatch_join_query_ref> all_queries);
+    void prepare_join_target_queries(std::span<const dispatch_join_query_ref> all_queries);
     /** @brief Selects the next query batch for the current join target. */
     void set_join_query_batch(std::span<const dispatch_join_query_ref> queries);
     /**
@@ -193,13 +186,12 @@ public:
     /** @brief Copies one physical scan slot into the pending dispatch batch. */
     void submit_scan(TupleTableSlot* scan_slot);
     /** @brief Copies one scan slot together with evaluated target and query values. */
-    void submit_scan_evaluated(
-        TupleTableSlot* scan_slot,
-        Datum target,
-        bool target_is_null,
-        bool has_query_override,
-        Datum query,
-        bool query_is_null);
+    void submit_scan_evaluated(TupleTableSlot* scan_slot,
+                               Datum target,
+                               bool target_is_null,
+                               bool has_query_override,
+                               Datum query,
+                               bool query_is_null);
     /**
      * @brief Reports whether the current scan batch reached dispatch capacity.
      * @return True when the batch should be executed.
@@ -222,8 +214,7 @@ public:
      * @brief Returns accumulated pipeline statistics for the last dispatch.
      * @return A value snapshot independent of later buffer mutations.
      */
-    [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats
-    execution_stats() const;
+    [[nodiscard]] bioseq::pipeline_stats::pipeline_execution_stats execution_stats() const;
     /**
      * @brief Counts additional broadcast queries.
      * @return The number of queries beyond the primary query.
@@ -270,7 +261,7 @@ public:
      */
     [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept;
 
-private:
+  private:
     /** Opaque ownership pointer defined in the implementation module unit. */
     void* implementation = nullptr;
 };
