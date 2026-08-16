@@ -85,104 +85,6 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Add Bioseq scan paths for a base relation while preserving the prior hook. */
-    void bioseq_column_set_rel_pathlist_hook(PlannerInfo* root,
-                                             RelOptInfo* rel,
-                                             Index rti,
-                                             RangeTblEntry* rte) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnSetRelPathlistHook() entered");
-        /* call into previous hook if assigned */
-        if (previous_set_rel_pathlist_hook) {
-            previous_set_rel_pathlist_hook(root, rel, rti, rte);
-        }
-
-        if (!OidIsValid(rte->relid) || rte->rtekind != RTE_RELATION || rte->inh) {
-            /* some calls to the pathlist hook don't have a valid relation set. Do nothing */
-            return;
-        }
-
-        /*
-         * Here we want to inspect if this relation pathlist hook is accessing a columnar table.
-         * If that is the case we want to insert an extra path that pushes down the projection
-         * into the scan of the table to minimize the data read.
-         */
-        Relation relation = RelationIdGetRelation(rte->relid);
-        if (relation->rd_tableam == column_table_access_method()) {
-            if (rte->tablesample != nullptr) {
-                bioseq_report<logging_level::error, logging_target::postgres>()
-                    .with_sql_error_code(ERRCODE_FEATURE_NOT_SUPPORTED)
-                    .with_message("sample scans not supported on columnar tables");
-            }
-
-            /*
-             * There are cases where IndexPath is normally more preferrable over
-             * SeqPath for heapAM but not for columnarAM. In such cases, an
-             * IndexPath could wrongly dominate a SeqPath based on the costs
-             * estimated by postgres earlier. For this reason, here we manually
-             * create a SeqPath, estimate the cost based on columnarAM and append
-             * to pathlist.
-             *
-             * Before doing that, we first re-cost all the existing paths so that
-             * add_path makes correct cost comparisons when appending our SeqPath.
-             */
-            cost_bioseq_column_paths(root, rel, rte->relid);
-
-            Path* seq_path = create_bioseq_column_seq_scan_path(root, rel, rte->relid);
-            add_path(rel, seq_path);
-
-            if (bioseq::settings::planner::custom_scan::enabled) {
-                /*
-                 * When columnar custom scan is enabled
-                 * (bioseq.planner.custom_scan.enabled),
-                 * we only consider BioseqColumnScanPath's & IndexPath's. For this reason,
-                 * we remove other paths and re-estimate IndexPath costs to make accurate
-                 * comparisons between them.
-                 *
-                 * Even more, we might calculate an equal cost for a
-                 * BioseqColumnCustomScan and a SeqPath if we are reading all columns
-                 * of given table since we don't consider chunk group filtering
-                 * when costing BioseqColumnCustomScan.
-                 * In that case, if we don't remove SeqPath's, we might wrongly choose
-                 * SeqPath thinking that its cost would be equal to BioseqColumnCustomScan.
-                 */
-                remove_paths_by_predicate(rel, is_not_index_path);
-                add_bioseq_column_scan_paths(root, rel, rte);
-                slice_project_try_install_base_owner(root, rel, relation);
-            }
-        } else {
-            /* External logical relations use a distinct table AM. The
-             * always-owned slot returns false (this columnar hook simply falls
-             * through) unless the external provider stack is compiled in and has
-             * registered a path builder, in which case the builder replaces the
-             * physical scan with the external CustomScan. */
-            (void)bioseq::postgres::external::try_add_scan_paths(root, rel, rte, relation);
-        }
-        bioseq_log<logging_level::debug>(
-            "[bioseq] pg: BioseqColumnSetRelPathlistHook() relation_close");
-        RelationClose(relation);
-    }
-
-    /** @brief Apply table-AM planner capabilities after the prior relation-info hook. */
-    void bioseq_column_get_relation_info_hook(PlannerInfo* root,
-                                              Oid relation_object_id,
-                                              bool inhparent,
-                                              RelOptInfo* rel) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnGetRelationInfoHook() entered");
-        if (previous_get_relation_info_hook) {
-            previous_get_relation_info_hook(root, relation_object_id, inhparent, rel);
-        }
-
-        if (relation_oid_uses_column_table_access_method(relation_object_id)) {
-            /* disable parallel query */
-            rel->rel_parallel_workers = 0;
-
-            /* disable index-only scan */
-            for (auto index_opt_info : postgres_list<IndexOptInfo>(rel->indexlist)) {
-                memset(index_opt_info->canreturn, false, index_opt_info->ncolumns * sizeof(bool));
-            }
-        }
-    }
-
     void bioseq_batch_join_set_join_pathlist_hook(PlannerInfo* root,
                                                   RelOptInfo* joinrel,
                                                   RelOptInfo* outerrel,
@@ -915,24 +817,6 @@ export {
         joinrel->pathlist = retain_existing_owner(joinrel->pathlist);
         joinrel->partial_pathlist = retain_existing_owner(joinrel->partial_pathlist);
         add_path(joinrel, &join_path->path);
-    }
-
-    /** @brief Install Bioseq planner hooks and register custom-scan callback tables. */
-    void bioseq_customscan_init() {
-        previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
-        set_rel_pathlist_hook = bioseq_column_set_rel_pathlist_hook;
-        previous_set_join_pathlist_hook = set_join_pathlist_hook;
-        set_join_pathlist_hook = bioseq_batch_join_set_join_pathlist_hook;
-
-        previous_get_relation_info_hook = get_relation_info_hook;
-        get_relation_info_hook = bioseq_column_get_relation_info_hook;
-
-        RegisterCustomScanMethods(bioseq_column_scan_scan_methods());
-        RegisterCustomScanMethods(bioseq_batch_join_scan_methods());
-        RegisterCustomScanMethods(&bioseq_slice_project_scan_methods());
-        bioseq_register_slice_project_upper_path_provider(bioseq_slice_project_create_upper_paths);
-        bioseq_register_batch_sort_source_providers(batch_sort_tag_source_path,
-                                                    batch_sort_attach_source_routes);
     }
 
 } // export custom-scan partition declarations

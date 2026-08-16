@@ -107,7 +107,6 @@ export {
     };
 
     /* functions to cost paths in-place */
-    void cost_bioseq_column_paths(PlannerInfo* root, RelOptInfo* rel, Oid relation_id);
     void cost_bioseq_column_index_path(PlannerInfo* root,
                                        RelOptInfo* rel,
                                        Oid relation_id,
@@ -122,15 +121,12 @@ export {
                                  int n_clauses);
 
     /* functions to add new paths */
-    void add_bioseq_column_scan_paths(PlannerInfo* root, RelOptInfo* rel, RangeTblEntry* rte);
     Path* add_bioseq_column_scan_path(PlannerInfo* root,
                                       RelOptInfo* rel,
                                       RangeTblEntry* rte,
                                       Relids required_relids);
 
     /* helper functions to be used when costing paths or altering them */
-    void remove_paths_by_predicate(RelOptInfo* rel, path_predicate remove_path_predicate);
-    bool is_not_index_path(Path* path);
     Cost bioseq_column_index_scan_additional_cost(PlannerInfo* root,
                                                   RelOptInfo* rel,
                                                   Oid relation_id,
@@ -140,7 +136,6 @@ export {
                                             Oid relation_id,
                                             int number_of_columns_read);
     uint64_t bioseq_column_table_stripe_count(Oid relation_id);
-    Path* create_bioseq_column_seq_scan_path(PlannerInfo* root, RelOptInfo* rel, Oid relation_id);
     void add_bioseq_column_scan_paths_rec(PlannerInfo* root,
                                           RelOptInfo* rel,
                                           RangeTblEntry* rte,
