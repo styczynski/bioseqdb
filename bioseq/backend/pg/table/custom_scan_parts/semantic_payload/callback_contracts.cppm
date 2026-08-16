@@ -170,9 +170,6 @@ export {
                                                    List* tlist,
                                                    List* clauses,
                                                    List* custom_plans);
-    List* bioseq_column_scan_path_reparameterize_custom_path_by_child(PlannerInfo* root,
-                                                                      List* custom_private,
-                                                                      RelOptInfo* child_rel);
     Node* bioseq_column_scan_create_custom_scan_state(CustomScan* cscan);
     Plan* bioseq_batch_join_plan_custom_path(PlannerInfo* root,
                                              RelOptInfo* rel,
@@ -187,37 +184,15 @@ export {
                                                List* tlist,
                                                List* clauses,
                                                List* custom_plans);
-    List* bioseq_per_row_join_path_reparameterize_custom_path_by_child(PlannerInfo* root,
-                                                                       List* custom_private,
-                                                                       RelOptInfo* child_rel);
 
     void bioseq_column_scan_begin_custom_scan(CustomScanState* node, EState* estate, int eflags);
 
-    TupleTableSlot* custom_exec_scan(scan_state* node,
-                                     ExecScanAccessMtd access_mtd,
-                                     ExecScanRecheckMtd recheck_mtd);
     TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node);
     void bioseq_column_scan_end_custom_scan(CustomScanState* node);
     void bioseq_column_scan_rescan_custom_scan(CustomScanState* node);
     void bioseq_column_scan_explain_custom_scan(CustomScanState* node,
                                                 List* ancestors,
                                                 ExplainState* es);
-    Size bioseq_column_estimate_dsm_custom_scan(CustomScanState* node, ParallelContext* pcxt);
-    void bioseq_column_initialize_dsm_custom_scan(CustomScanState* node,
-                                                  ParallelContext* pcxt,
-                                                  void* coordinate);
-    void bioseq_column_reinitialize_dsm_custom_scan(CustomScanState* node,
-                                                    ParallelContext* pcxt,
-                                                    void* coordinate);
-    void bioseq_column_initialize_worker_custom_scan(CustomScanState* node,
-                                                     shm_toc* toc,
-                                                     void* coordinate);
-    void bioseq_batch_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags);
-    TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node);
-    void bioseq_batch_join_end_custom_scan(CustomScanState* node);
-    void bioseq_batch_join_rescan_custom_scan(CustomScanState* node);
-    void
-    bioseq_batch_join_explain_custom_scan(CustomScanState* node, List* ancestors, ExplainState* es);
     void bioseq_per_row_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags);
     TupleTableSlot* bioseq_per_row_join_exec_custom_scan(CustomScanState* node);
     void bioseq_per_row_join_end_custom_scan(CustomScanState* node);
