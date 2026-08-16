@@ -86,21 +86,38 @@ struct gpu_seed_coordinate_wave_state {
     bool has_ranges = false;
     bool chain_active = false;
 
+    /// @brief Views the complete primary anchor allocation.
+    /// @return Arena slice spanning `anchors_buf`.
     [[nodiscard]] gpu_arena_slice anchors_slice() noexcept {
         return gpu_arena_slice{&anchors_buf, 0, anchors_buf.bytes};
     }
+
+    /// @brief Views the complete primary anchor-key allocation.
+    /// @return Arena slice spanning `anchor_keys_buf`.
     [[nodiscard]] gpu_arena_slice anchor_keys_slice() noexcept {
         return gpu_arena_slice{&anchor_keys_buf, 0, anchor_keys_buf.bytes};
     }
+
+    /// @brief Views the complete scratch anchor allocation.
+    /// @return Arena slice spanning `anchors_scratch_buf`.
     [[nodiscard]] gpu_arena_slice anchors_scratch_slice() noexcept {
         return gpu_arena_slice{&anchors_scratch_buf, 0, anchors_scratch_buf.bytes};
     }
+
+    /// @brief Views the complete scratch anchor-key allocation.
+    /// @return Arena slice spanning `anchor_keys_scratch_buf`.
     [[nodiscard]] gpu_arena_slice anchor_keys_scratch_slice() noexcept {
         return gpu_arena_slice{&anchor_keys_scratch_buf, 0, anchor_keys_scratch_buf.bytes};
     }
+
+    /// @brief Views the complete radix histogram allocation.
+    /// @return Arena slice spanning `anchor_histogram_buf`.
     [[nodiscard]] gpu_arena_slice anchor_histogram_slice() noexcept {
         return gpu_arena_slice{&anchor_histogram_buf, 0, anchor_histogram_buf.bytes};
     }
+
+    /// @brief Views the complete compacted-anchor allocation.
+    /// @return Arena slice spanning `compacted_anchors_buf`.
     [[nodiscard]] gpu_arena_slice compacted_anchors_slice() noexcept {
         return gpu_arena_slice{&compacted_anchors_buf, 0, compacted_anchors_buf.bytes};
     }

@@ -80,26 +80,50 @@ template <class p_function_type>
 /// @brief Releases one retained Objective-C object unless ownership is transferred.
 class scoped_objc_release {
   public:
+    /// @brief Creates an empty Objective-C release guard.
     scoped_objc_release() = default;
+
+    /// @brief Adopts one retained Objective-C object.
+    /// @param[in] objc Resolved Objective-C runtime functions.
+    /// @param[in] release_selector Objective-C `release` selector.
+    /// @param[in] object Retained object to release unless transferred.
     scoped_objc_release(objc_runtime_functions* objc, void* release_selector, void* object) noexcept
         : objc_(objc), release_selector_(release_selector), object_(object) {}
+
+    /// @brief Prevents copying retained-object ownership.
     scoped_objc_release(const scoped_objc_release&) = delete;
+
+    /// @brief Prevents copy assignment of retained-object ownership.
     scoped_objc_release& operator=(const scoped_objc_release&) = delete;
+
+    /// @brief Transfers the retained object and runtime dispatch state.
+    /// @param[in,out] other Guard whose ownership is consumed.
     scoped_objc_release(scoped_objc_release&& other) noexcept
         : objc_(std::exchange(other.objc_, nullptr)),
           release_selector_(std::exchange(other.release_selector_, nullptr)),
           object_(std::exchange(other.object_, nullptr)) {}
+
+    /// @brief Prevents replacing an established release guard by assignment.
     scoped_objc_release& operator=(scoped_objc_release&&) = delete;
+
+    /// @brief Releases the retained object if ownership remains.
     ~scoped_objc_release() {
         reset();
     }
 
+    /// @brief Returns the retained object without transferring ownership.
+    /// @return Borrowed Objective-C object pointer.
     [[nodiscard]] void* get() const noexcept {
         return object_;
     }
+
+    /// @brief Transfers the retained object out of this guard.
+    /// @return Owned Objective-C object pointer.
     [[nodiscard]] void* release() noexcept {
         return std::exchange(object_, nullptr);
     }
+
+    /// @brief Releases the retained object through the resolved Objective-C runtime.
     void reset() noexcept {
         if (objc_ != nullptr && objc_->msg_send != nullptr && release_selector_ != nullptr &&
             object_ != nullptr) {
@@ -115,6 +139,13 @@ class scoped_objc_release {
     void* object_ = nullptr;
 };
 
+/// @brief Intercepts synchronous MoltenVK source-library creation.
+/// @param[in] self Objective-C receiver.
+/// @param[in] cmd Objective-C selector.
+/// @param[in] source Metal source string.
+/// @param[in] options Metal compile options.
+/// @param[out] error Receives the original Metal error object.
+/// @return Original or sealed replacement Metal library object.
 extern "C" void* bioseq_moltenvk_new_library_with_source(
     void* self, void* cmd, void* source, void* options, void** error) {
     auto& state = moltenvk_command_interpose_state();
@@ -214,6 +245,12 @@ void invoke_metal_pipeline_completion(void* completion,
     objc_msg_cast<invoke_function>(block->invoke)(completion, pipeline, reflection, error);
 }
 
+/// @brief Intercepts asynchronous MoltenVK source-library creation.
+/// @param[in] self Objective-C receiver.
+/// @param[in] cmd Objective-C selector.
+/// @param[in] source Metal source string.
+/// @param[in] options Metal compile options.
+/// @param[in] completion Original completion block.
 extern "C" void bioseq_moltenvk_new_library_with_source_async(
     void* self, void* cmd, void* source, void* options, void* completion) {
     auto& state = moltenvk_command_interpose_state();
@@ -546,6 +583,7 @@ struct command_interpose_device_binding {
 /// @brief Rare PSO-creation receipt: bind the receipt to the exact intercepted device
 /// and its live method table. Submit/wait gates consume cached scalar facts.
 /// this two-selector reflection runs only while creating a pipeline receipt.
+/// @param[in] device Objective-C Metal device to inspect.
 /// @return Intercepted device registry identity and available method mask.
 [[nodiscard]] command_interpose_device_binding
 capture_command_interpose_device_binding(void* device) noexcept {
@@ -631,6 +669,7 @@ struct metal_pipeline_archive_interpose {
     std::shared_ptr<active_metal_archive_pipeline_scope> active_scope;
     std::atomic<std::uint64_t> outside_scope_interceptions{0u};
 
+    /// @brief Releases the retained archive array and loader device in ownership order.
     ~metal_pipeline_archive_interpose() {
         if (sel_release != nullptr && objc.msg_send != nullptr) {
             using release_function = void (*)(void*, void*);
@@ -926,12 +965,27 @@ capture_metal_archive_file_snapshot(const std::filesystem::path& physical_path,
 /// @brief Owns and unlinks one private archive snapshot path.
 class private_metal_archive_snapshot {
   public:
+    /// @brief Creates an empty snapshot-path owner.
     private_metal_archive_snapshot() = default;
+
+    /// @brief Adopts one private snapshot path.
+    /// @param[in] path Snapshot path to unlink unless transferred.
     explicit private_metal_archive_snapshot(std::filesystem::path path) : path_(std::move(path)) {}
+
+    /// @brief Prevents copying private snapshot ownership.
     private_metal_archive_snapshot(const private_metal_archive_snapshot&) = delete;
+
+    /// @brief Prevents copy assignment of private snapshot ownership.
     private_metal_archive_snapshot& operator=(const private_metal_archive_snapshot&) = delete;
+
+    /// @brief Transfers private snapshot-path ownership.
+    /// @param[in,out] other Snapshot owner whose path is consumed.
     private_metal_archive_snapshot(private_metal_archive_snapshot&& other) noexcept
         : path_(std::exchange(other.path_, {})) {}
+
+    /// @brief Replaces this snapshot after unlinking it and transfers another path.
+    /// @param[in,out] other Snapshot owner whose path is consumed.
+    /// @return This snapshot owner.
     private_metal_archive_snapshot& operator=(private_metal_archive_snapshot&& other) noexcept {
         if (this != &other) {
             cleanup();
@@ -939,19 +993,26 @@ class private_metal_archive_snapshot {
         }
         return *this;
     }
+
+    /// @brief Unlinks the owned private snapshot path.
     ~private_metal_archive_snapshot() {
         cleanup();
     }
 
+    /// @brief Returns the owned private snapshot path.
+    /// @return Borrowed path view.
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return path_;
     }
 
+    /// @brief Transfers the private snapshot path out of this owner.
+    /// @return Owned snapshot path.
     [[nodiscard]] std::filesystem::path release_path() noexcept {
         return std::exchange(path_, {});
     }
 
   private:
+    /// @brief Best-effort unlinks and clears the owned snapshot path.
     void cleanup() noexcept {
         if (!path_.empty()) {
             (void)::unlink(path_.c_str());
@@ -966,22 +1027,36 @@ static_assert(std::is_nothrow_move_constructible_v<private_metal_archive_snapsho
 /// @brief Owns one private snapshot descriptor until transfer or close.
 class private_snapshot_file_descriptor {
   public:
+    /// @brief Adopts one private snapshot file descriptor.
+    /// @param[in] fd Descriptor to close unless transferred.
     explicit private_snapshot_file_descriptor(int fd) noexcept : fd_(fd) {}
+
+    /// @brief Prevents copying descriptor ownership.
     private_snapshot_file_descriptor(const private_snapshot_file_descriptor&) = delete;
+
+    /// @brief Prevents copy assignment of descriptor ownership.
     private_snapshot_file_descriptor& operator=(const private_snapshot_file_descriptor&) = delete;
+
+    /// @brief Closes the owned descriptor.
     ~private_snapshot_file_descriptor() noexcept {
         if (fd_ >= 0)
             (void)::close(fd_);
     }
 
+    /// @brief Returns the owned descriptor without transferring it.
+    /// @return Borrowed file descriptor.
     [[nodiscard]] int get() const noexcept {
         return fd_;
     }
 
+    /// @brief Transfers the descriptor out of this owner.
+    /// @return Owned file descriptor.
     [[nodiscard]] int release() noexcept {
         return std::exchange(fd_, -1);
     }
 
+    /// @brief Closes the descriptor immediately and preserves the close error.
+    /// @return Zero on success, otherwise the captured `errno` value.
     [[nodiscard]] int close_now() noexcept {
         const int fd = std::exchange(fd_, -1);
         if (fd < 0 || ::close(fd) == 0)
@@ -996,14 +1071,23 @@ class private_snapshot_file_descriptor {
 /// @brief Removes an incomplete snapshot path unless ownership is released.
 class private_snapshot_unlink_guard {
   public:
+    /// @brief Adopts one incomplete snapshot pathname.
+    /// @param[in] path Pathname to unlink unless released.
     explicit private_snapshot_unlink_guard(const char* path) noexcept : path_(path) {}
+
+    /// @brief Prevents copying unlink ownership.
     private_snapshot_unlink_guard(const private_snapshot_unlink_guard&) = delete;
+
+    /// @brief Prevents copy assignment of unlink ownership.
     private_snapshot_unlink_guard& operator=(const private_snapshot_unlink_guard&) = delete;
+
+    /// @brief Unlinks the incomplete snapshot when ownership remains.
     ~private_snapshot_unlink_guard() noexcept {
         if (path_ != nullptr)
             (void)::unlink(path_);
     }
 
+    /// @brief Relinquishes unlink responsibility after snapshot ownership transfers.
     void release() noexcept {
         path_ = nullptr;
     }
@@ -1090,24 +1174,42 @@ write_private_metal_archive_snapshot(std::string_view artifact_filename,
 /// @brief Owns the mode-restricted process directory for open archive files.
 class private_metal_archive_process_directory {
   public:
+    /// @brief Creates an empty private-directory owner.
     private_metal_archive_process_directory() = default;
+
+    /// @brief Adopts one mode-restricted private process directory.
+    /// @param[in] path Directory path to remove unless transferred.
     explicit private_metal_archive_process_directory(std::filesystem::path path)
         : path_(std::move(path)) {}
+
+    /// @brief Prevents copying private-directory ownership.
     private_metal_archive_process_directory(const private_metal_archive_process_directory&) =
         delete;
+
+    /// @brief Prevents copy assignment of private-directory ownership.
     private_metal_archive_process_directory&
     operator=(const private_metal_archive_process_directory&) = delete;
+
+    /// @brief Transfers private-directory ownership.
+    /// @param[in,out] other Directory owner whose path is consumed.
     private_metal_archive_process_directory(
         private_metal_archive_process_directory&& other) noexcept
         : path_(std::exchange(other.path_, {})) {}
+
+    /// @brief Removes the owned private directory when it is still present.
     ~private_metal_archive_process_directory() noexcept {
         if (!path_.empty())
             (void)::rmdir(path_.c_str());
     }
 
+    /// @brief Returns the owned private process directory.
+    /// @return Borrowed directory path.
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return path_;
     }
+
+    /// @brief Removes the directory immediately and captures any failure.
+    /// @return Zero on success, otherwise the captured `errno` value.
     [[nodiscard]] int remove_now() noexcept {
         if (path_.empty())
             return 0;
@@ -1159,16 +1261,31 @@ make_private_metal_archive_process_directory() {
 /// @brief Owns one still-open archive file and its immutable file identity.
 class open_private_metal_archive {
   public:
+    /// @brief Creates an empty open-archive owner.
     open_private_metal_archive() = default;
+
+    /// @brief Adopts one linked private archive descriptor and stable identity.
+    /// @param[in] fd Open archive descriptor.
+    /// @param[in] path Linked private archive path.
+    /// @param[in] identity Expected regular-file identity shared by path and descriptor.
     open_private_metal_archive(int fd,
                                std::filesystem::path path,
                                sealed_shader_cache_detail::regular_file_identity identity) noexcept
         : fd_(fd), path_(std::move(path)), identity_(identity) {}
+
+    /// @brief Prevents copying open archive ownership.
     open_private_metal_archive(const open_private_metal_archive&) = delete;
+
+    /// @brief Prevents copy assignment of open archive ownership.
     open_private_metal_archive& operator=(const open_private_metal_archive&) = delete;
+
+    /// @brief Transfers the descriptor, linked path, and immutable identity.
+    /// @param[in,out] other Archive owner whose resources are consumed.
     open_private_metal_archive(open_private_metal_archive&& other) noexcept
         : fd_(std::exchange(other.fd_, -1)), path_(std::exchange(other.path_, {})),
           identity_(other.identity_), linked_(std::exchange(other.linked_, false)) {}
+
+    /// @brief Unlinks any retained name and closes the descriptor.
     ~open_private_metal_archive() noexcept {
         if (linked_ && !path_.empty())
             (void)::unlink(path_.c_str());
@@ -1176,17 +1293,27 @@ class open_private_metal_archive {
             (void)::close(fd_);
     }
 
+    /// @brief Returns the open archive descriptor.
+    /// @return Borrowed file descriptor.
     [[nodiscard]] int fd() const noexcept {
         return fd_;
     }
+
+    /// @brief Returns the linked private archive path.
+    /// @return Borrowed path view.
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return path_;
     }
+
+    /// @brief Returns the immutable regular-file identity.
+    /// @return Borrowed identity view.
     [[nodiscard]] const sealed_shader_cache_detail::regular_file_identity&
     identity() const noexcept {
         return identity_;
     }
 
+    /// @brief Checks that the descriptor and linked pathname still name the same file.
+    /// @return Whether both live identities equal the sealed identity.
     [[nodiscard]] bool do_path_and_fd_identities_match() const noexcept {
         if (fd_ < 0 || path_.empty() || !linked_)
             return false;
@@ -1201,6 +1328,8 @@ class open_private_metal_archive {
                    identity_;
     }
 
+    /// @brief Verifies identity, unlinks the pathname, closes the descriptor, and proves absence.
+    /// @return Success or the first identity, unlink, absence, or close diagnostic.
     [[nodiscard]] std::expected<void, std::string> unlink_close_and_require_absent() {
         if (!do_path_and_fd_identities_match()) {
             return std::unexpected("private Metal archive identity changed before unlink");
@@ -1953,6 +2082,12 @@ enum class metal_pipeline_intercept_verdict : std::uint8_t {
     }
 }
 
+/// @brief Intercepts asynchronous Metal compute-pipeline creation inside an active scope.
+/// @param[in] self Objective-C Metal device receiver.
+/// @param[in] cmd Objective-C selector.
+/// @param[in] desc Compute pipeline descriptor.
+/// @param[in] options Original Metal pipeline options.
+/// @param[in] completion_handler Original completion block.
 extern "C" void bioseq_metal_new_compute_pipeline_state_async(
     void* self, void* cmd, void* desc, unsigned long options, void* completion_handler) {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -1976,6 +2111,14 @@ extern "C" void bioseq_metal_new_compute_pipeline_state_async(
         completion_handler);
 }
 
+/// @brief Intercepts synchronous Metal compute-pipeline creation inside an active scope.
+/// @param[in] self Objective-C Metal device receiver.
+/// @param[in] cmd Objective-C selector.
+/// @param[in] desc Compute pipeline descriptor.
+/// @param[in] options Original Metal pipeline options.
+/// @param[out] reflection Receives Metal reflection output.
+/// @param[out] error Receives the original Metal error object.
+/// @return Original pipeline object, or `nullptr` on fail-closed rejection.
 extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
     void* self, void* cmd, void* desc, unsigned long options, void** reflection, void** error) {
     auto& state = metal_pipeline_archive_interpose_state();
@@ -2213,6 +2356,11 @@ void install_metal_pipeline_archive_interpose(
 /// @brief Binds one Vulkan pipeline creation to an immutable Metal audit.
 class metal_archive_pipeline_create_scope {
   public:
+    /// @brief Opens one immutable Metal audit scope for a Vulkan pipeline creation.
+    /// @param[in] required Whether a provider-backed archive receipt is mandatory.
+    /// @param[in] runtime_device_uuid Selected Vulkan device UUID.
+    /// @param[in] shader_key Shader variant entering pipeline creation.
+    /// @param[in] expected_entry_name Expected Metal entry-point name.
     metal_archive_pipeline_create_scope(bool required,
                                         std::array<std::uint8_t, VK_UUID_SIZE> runtime_device_uuid,
                                         shader_variant_key shader_key,
@@ -2319,10 +2467,14 @@ class metal_archive_pipeline_create_scope {
         active_scope_ = true;
     }
 
+    /// @brief Prevents copying active audit-scope ownership.
     metal_archive_pipeline_create_scope(const metal_archive_pipeline_create_scope&) = delete;
+
+    /// @brief Prevents copy assignment of active audit-scope ownership.
     metal_archive_pipeline_create_scope&
     operator=(const metal_archive_pipeline_create_scope&) = delete;
 
+    /// @brief Fails closed when an active scope leaves without a consumed verdict.
     ~metal_archive_pipeline_create_scope() noexcept {
         if (!active_scope_ || active_ == nullptr)
             return;
@@ -2351,10 +2503,15 @@ class metal_archive_pipeline_create_scope {
         }
     }
 
+    /// @brief Checks whether setup admitted the next pipeline call.
+    /// @return Whether pipeline creation may proceed under this scope.
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return failure_.empty() && (active_scope_ || !required_);
     }
 
+    /// @brief Closes the scope and validates the complete immutable archive audit.
+    /// @param[in] outer_result Vulkan pipeline-creation result.
+    /// @return Optional accepted audit, or the exact fail-closed diagnostic.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult outer_result) {
         if (finished_) {
@@ -2448,16 +2605,26 @@ void install_metal_pipeline_archive_interpose(runtime_vulkan_device_identity) no
 /// @brief Rejects immutable archive requirements on non-Apple runtimes.
 class metal_archive_pipeline_create_scope {
   public:
+    /// @brief Records whether immutable archive proof is required on a non-Apple runtime.
+    /// @param[in] required Whether a provider-backed archive receipt is mandatory.
+    /// The remaining arguments preserve the cross-platform constructor contract
+    /// but are intentionally unnamed and ignored on this platform.
     metal_archive_pipeline_create_scope(bool required,
                                         std::array<std::uint8_t, VK_UUID_SIZE>,
                                         shader_variant_key,
                                         std::string) noexcept
         : required_(required || is_runtime_metal_archive_configuration_installed()) {}
 
+    /// @brief Checks whether no immutable Metal proof is required.
+    /// @return Whether pipeline creation may proceed on this non-Apple runtime.
     [[nodiscard]] bool is_ready_for_pipeline_call() const noexcept {
         return !required_;
     }
 
+    /// @brief Produces the non-Apple fail-closed verdict.
+    /// The Vulkan result is intentionally unnamed because the platform verdict
+    /// depends only on whether immutable Metal proof was required.
+    /// @return Empty audit when optional, otherwise the platform diagnostic.
     [[nodiscard]] std::expected<std::optional<runtime_metal_archive_pipeline_audit>, std::string>
     finish(VkResult) const {
         if (required_) {

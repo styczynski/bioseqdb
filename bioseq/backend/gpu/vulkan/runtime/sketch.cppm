@@ -366,6 +366,8 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     struct arena_rewind_guard {
         gpu_arena* arena = nullptr;
         gpu_arena_mark mark{};
+
+        /// @brief Rewinds the borrowed arena when the batch scope exits.
         ~arena_rewind_guard() {
             if (arena != nullptr)
                 arena->rewind(mark);

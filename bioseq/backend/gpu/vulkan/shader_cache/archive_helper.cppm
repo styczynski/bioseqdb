@@ -712,9 +712,17 @@ write_and_verify_exact_fd(int fd, std::span<const std::byte> bytes) {
 /// @brief Owns a private helper executable and inherited metallib descriptor.
 class staged_archive_helper_invocation {
   public:
+    /// @brief Creates an empty staging owner.
     staged_archive_helper_invocation() = default;
+
+    /// @brief Prevents copying private helper paths and descriptors.
     staged_archive_helper_invocation(const staged_archive_helper_invocation&) = delete;
+
+    /// @brief Prevents copy assignment of private helper resources.
     staged_archive_helper_invocation& operator=(const staged_archive_helper_invocation&) = delete;
+
+    /// @brief Transfers the private directory, helper, descriptors, and identity.
+    /// @param[in,out] other Staging owner whose resources are consumed.
     staged_archive_helper_invocation(staged_archive_helper_invocation&& other) noexcept
         : directory_(std::exchange(other.directory_, {})),
           helper_path_(std::exchange(other.helper_path_, {})),
@@ -722,6 +730,8 @@ class staged_archive_helper_invocation {
           metallib_fd_(std::exchange(other.metallib_fd_, -1)),
           helper_identity_(other.helper_identity_),
           helper_linked_(std::exchange(other.helper_linked_, false)) {}
+
+    /// @brief Removes any staged path and closes retained descriptors.
     ~staged_archive_helper_invocation() noexcept {
         cleanup();
     }
@@ -778,6 +788,7 @@ class staged_archive_helper_invocation {
     }
 
   private:
+    /// @brief Best-effort cleanup used by destruction and failed staging paths.
     void cleanup() noexcept {
         if (helper_linked_ && !helper_path_.empty()) {
             (void)::unlink(helper_path_.c_str());

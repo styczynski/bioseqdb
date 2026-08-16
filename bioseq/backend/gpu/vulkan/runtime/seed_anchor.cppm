@@ -405,6 +405,7 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
         gpu_arena_mark mark;
         bool released = false;
 
+        /// @brief Rewinds and trims the arena on exceptional exits.
         ~seed_arena_lifetime() noexcept {
             if (!released) {
                 // Exception cleanup must leave a retryable arena.  Destructors
@@ -415,6 +416,7 @@ seed_lookup_result runtime::run_seed_anchor_roundtrip(const gpu_seed_inputs& inp
             }
         }
 
+        /// @brief Rewinds, trims, and reports any live-slice invariant failure.
         void release_or_throw() {
             arena.rewind(mark);
             if (!arena.release_idle_capacity()) {

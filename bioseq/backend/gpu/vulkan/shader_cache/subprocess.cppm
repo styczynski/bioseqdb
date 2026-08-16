@@ -48,19 +48,34 @@ struct run_capture_inherited_fd {
 /// @brief Move-disabled owner for one subprocess file descriptor.
 class capture_file_descriptor {
   public:
+    /// @brief Adopts one subprocess-related descriptor.
+    /// @param[in] fd Descriptor to close unless transferred.
     explicit capture_file_descriptor(int fd = -1) noexcept : fd_(fd) {}
+
+    /// @brief Prevents copying descriptor ownership.
     capture_file_descriptor(const capture_file_descriptor&) = delete;
+
+    /// @brief Prevents copy assignment of descriptor ownership.
     capture_file_descriptor& operator=(const capture_file_descriptor&) = delete;
+
+    /// @brief Closes the owned descriptor.
     ~capture_file_descriptor() noexcept {
         close_now();
     }
 
+    /// @brief Returns the owned descriptor without transferring it.
+    /// @return Borrowed file descriptor.
     [[nodiscard]] int get() const noexcept {
         return fd_;
     }
+
+    /// @brief Transfers the descriptor out of this owner.
+    /// @return Owned file descriptor.
     [[nodiscard]] int release() noexcept {
         return std::exchange(fd_, -1);
     }
+
+    /// @brief Closes and clears the descriptor immediately.
     void close_now() noexcept {
         const int fd = std::exchange(fd_, -1);
         if (fd >= 0)
@@ -74,25 +89,46 @@ class capture_file_descriptor {
 /// @brief Owns initialized POSIX spawn file actions.
 class capture_spawn_file_actions {
   public:
+    /// @brief Creates an uninitialized spawn-actions owner.
     capture_spawn_file_actions() = default;
+
+    /// @brief Prevents copying POSIX spawn actions.
     capture_spawn_file_actions(const capture_spawn_file_actions&) = delete;
+
+    /// @brief Prevents copy assignment of POSIX spawn actions.
     capture_spawn_file_actions& operator=(const capture_spawn_file_actions&) = delete;
+
+    /// @brief Destroys initialized POSIX spawn actions.
     ~capture_spawn_file_actions() noexcept {
         if (initialized_)
             (void)::posix_spawn_file_actions_destroy(&actions_);
     }
 
+    /// @brief Initializes the POSIX spawn action list.
+    /// @return POSIX status code.
     [[nodiscard]] int initialize() noexcept {
         const int rc = ::posix_spawn_file_actions_init(&actions_);
         initialized_ = rc == 0;
         return rc;
     }
+
+    /// @brief Adds one descriptor duplication action.
+    /// @param[in] fd Source descriptor.
+    /// @param[in] target Child descriptor number.
+    /// @return POSIX status code.
     [[nodiscard]] int add_dup2(int fd, int target) noexcept {
         return ::posix_spawn_file_actions_adddup2(&actions_, fd, target);
     }
+
+    /// @brief Adds one child-side descriptor close action.
+    /// @param[in] fd Descriptor to close in the child.
+    /// @return POSIX status code.
     [[nodiscard]] int add_close(int fd) noexcept {
         return ::posix_spawn_file_actions_addclose(&actions_, fd);
     }
+
+    /// @brief Returns the initialized POSIX spawn action list.
+    /// @return Borrowed action-list pointer.
     [[nodiscard]] const posix_spawn_file_actions_t* get() const noexcept {
         return &actions_;
     }
@@ -105,14 +141,23 @@ class capture_spawn_file_actions {
 /// @brief Owns spawn attributes that isolate the child process group.
 class capture_spawn_attributes {
   public:
+    /// @brief Creates an uninitialized spawn-attribute owner.
     capture_spawn_attributes() = default;
+
+    /// @brief Prevents copying POSIX spawn attributes.
     capture_spawn_attributes(const capture_spawn_attributes&) = delete;
+
+    /// @brief Prevents copy assignment of POSIX spawn attributes.
     capture_spawn_attributes& operator=(const capture_spawn_attributes&) = delete;
+
+    /// @brief Destroys initialized POSIX spawn attributes.
     ~capture_spawn_attributes() noexcept {
         if (initialized_)
             (void)::posix_spawnattr_destroy(&attributes_);
     }
 
+    /// @brief Initializes attributes that place the child in its own process group.
+    /// @return POSIX status code.
     [[nodiscard]] int initialize_process_group() noexcept {
         int rc = ::posix_spawnattr_init(&attributes_);
         if (rc != 0)
@@ -123,6 +168,9 @@ class capture_spawn_attributes {
             return rc;
         return ::posix_spawnattr_setflags(&attributes_, POSIX_SPAWN_SETPGROUP);
     }
+
+    /// @brief Returns the initialized POSIX spawn attributes.
+    /// @return Borrowed attribute pointer.
     [[nodiscard]] const posix_spawnattr_t* get() const noexcept {
         return &attributes_;
     }
@@ -135,21 +183,31 @@ class capture_spawn_attributes {
 /// @brief Reaps a captured subprocess and terminates its group on early exit.
 class captured_child_process {
   public:
+    /// @brief Adopts the child PID and captured-output descriptor.
+    /// @param[in] read_fd Captured-output read descriptor.
+    /// @param[in] pid Direct child process identifier and process-group identifier.
     captured_child_process(int read_fd, pid_t pid) noexcept : read_fd_(read_fd), pid_(pid) {}
 
+    /// @brief Prevents copying child-process ownership.
     captured_child_process(const captured_child_process&) = delete;
+
+    /// @brief Prevents copy assignment of child-process ownership.
     captured_child_process& operator=(const captured_child_process&) = delete;
 
+    /// @brief Closes capture output and terminates unfinished child groups.
     ~captured_child_process() noexcept {
         close_read();
         if (!completed_)
             terminate_group_and_reap();
     }
 
+    /// @brief Returns the captured-output descriptor.
+    /// @return Borrowed read descriptor.
     [[nodiscard]] int read_fd() const noexcept {
         return read_fd_;
     }
 
+    /// @brief Closes the captured-output descriptor.
     void close_read() noexcept {
         if (read_fd_ >= 0) {
             (void)::close(read_fd_);
@@ -157,9 +215,12 @@ class captured_child_process {
         }
     }
 
+    /// @brief Records that the direct child has been reaped.
     void mark_reaped() noexcept {
         direct_child_reaped_ = true;
     }
+
+    /// @brief Records successful capture completion so destruction need not terminate the group.
     void mark_completed() noexcept {
         completed_ = true;
     }
@@ -173,6 +234,8 @@ class captured_child_process {
         error,
     };
 
+    /// @brief Attempts a nonblocking direct-child reap.
+    /// @return Current direct-child state.
     [[nodiscard]] reap_probe probe_reap() noexcept {
         if (direct_child_reaped_)
             return reap_probe::reaped;
@@ -195,6 +258,7 @@ class captured_child_process {
         }
     }
 
+    /// @brief Kills the child process group and performs a bounded direct-child reap.
     void terminate_group_and_reap() noexcept {
         if (pid_ <= 0)
             return;
