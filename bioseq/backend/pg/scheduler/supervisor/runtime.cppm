@@ -422,7 +422,18 @@ void restart_cluster() {
  * The external callback spelling and unnamed PostgreSQL argument are ABI-mandated.
  */
 extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
-    using namespace bioseq::postgres::scheduler;
+    using bioseq::postgres::scheduler::g_shared;
+    using bioseq::postgres::scheduler::got_sighup;
+    using bioseq::postgres::scheduler::got_sigterm;
+    using bioseq::postgres::scheduler::load_bioseq_runtime;
+    using bioseq::postgres::scheduler::pg_scheduler_stats;
+    using bioseq::postgres::scheduler::process_one_persist_job_if_ready;
+    using bioseq::postgres::scheduler::publish_runtime_init_result;
+    using bioseq::postgres::scheduler::reset_shared_stats;
+    using bioseq::postgres::scheduler::runtime_initialization_state;
+    using bioseq::postgres::scheduler::service_pending_shader_compiles;
+    using bioseq::postgres::scheduler::supervisor_sighup;
+    using bioseq::postgres::scheduler::supervisor_sigterm;
 
     pqsignal(SIGTERM, supervisor_sigterm);
     pqsignal(SIGHUP, supervisor_sighup);
