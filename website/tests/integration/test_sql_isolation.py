@@ -109,6 +109,31 @@ def check_m4_direct(generator: str) -> None:
             f"rc={result.returncode} results={len(row_lines)}\n{result.stdout.strip()}")
 
 
+def check_direct_cleanup_on_error(generator: str, pg_bin: Path) -> None:
+    """Direct execution runs author teardown after visible SQL fails."""
+    table = "website_direct_cleanup_probe"
+    _psql(pg_bin, os.environ["PGDATABASE"], f"DROP TABLE IF EXISTS {table}")
+    result = _run_generator(generator, [
+        "--conninfo", _direct_conninfo(os.environ["PGDATABASE"]),
+        "--setup", f"CREATE TABLE {table}(id integer)",
+        "--visible", "SELECT * FROM website_missing_relation",
+        "--teardown", f"DROP TABLE {table}",
+    ])
+    residue = _psql(
+        pg_bin,
+        os.environ["PGDATABASE"],
+        f"SELECT to_regclass('{table}') IS NULL",
+    )
+    clean = residue.returncode == 0 and residue.stdout.strip() == "t"
+    _report(
+        "M4 direct cleanup: visible failure still executes teardown",
+        result.returncode == 3 and clean,
+        f"rc={result.returncode} residue={residue.stdout.strip()!r}\n"
+        f"stderr:\n{result.stderr.strip()}",
+    )
+    _psql(pg_bin, os.environ["PGDATABASE"], f"DROP TABLE IF EXISTS {table}")
+
+
 def check_m4_isolated(generator: str) -> None:
     """An isolated multi-statement visible phase yields two results (M4 + M3)."""
     result = _run_generator(generator, [
@@ -300,6 +325,7 @@ def main() -> int:
         return 2
 
     check_m4_direct(args.generator)
+    check_direct_cleanup_on_error(args.generator, pg_bin)
     check_m4_isolated(args.generator)
     check_preflight_failure_skips_teardown(args.generator)
     check_m4_error_retention(args.generator)

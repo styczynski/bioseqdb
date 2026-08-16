@@ -83,7 +83,17 @@ public:
         sql_example const& example) {
         try {
             bioseq::libpq::client_connection connection(connection_info_);
-            return execute_on_connection(connection, example);
+            try {
+                std::expected<sql_example_result, diagnostic> outcome =
+                    execute_on_connection(
+                        connection, example, /*run_teardown=*/false);
+                run_direct_teardown(connection, example);
+                return outcome;
+            } catch (const bioseq::libpq::command_error& error) {
+                run_direct_teardown(connection, example);
+                return std::unexpected(make_command_diagnostic(
+                    diagnostic_operation::sql_execution, error));
+            }
         } catch (const bioseq::libpq::command_error& error) {
             return std::unexpected(make_command_diagnostic(
                 diagnostic_operation::sql_execution, error));
@@ -315,6 +325,31 @@ private:
             }
         }
         return outcome;
+    }
+
+    /// @brief Runs author teardown after every direct execution outcome.
+    ///
+    /// A failed visible statement can leave an explicit transaction aborted.
+    /// Roll it back before teardown so objects created by earlier autocommit
+    /// setup statements are still removed. Teardown stays best-effort because
+    /// the original execution diagnostic is the result callers need to see.
+    /// @param connection Direct tutorial connection that owns the session.
+    /// @param example Example whose teardown SQL should run.
+    static void run_direct_teardown(
+        bioseq::libpq::client_connection& connection,
+        sql_example const& example) {
+        if (example.teardown_sql.empty()) {
+            return;
+        }
+        const std::chrono::milliseconds deadline = execution_deadline(example);
+        try {
+            if (!connection.is_transaction_idle()) {
+                (void)connection.execute("ROLLBACK", deadline);
+            }
+            (void)connection.execute(example.teardown_sql, deadline);
+        } catch (const bioseq::libpq::command_error&) {
+            // Best-effort; preserve the original execution outcome.
+        }
     }
 
     /// @brief Returns the bounded client deadline for one tutorial SQL step.
