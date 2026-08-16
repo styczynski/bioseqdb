@@ -99,31 +99,31 @@ void publish_async_minimizer_sequence_build_stats(
     if (g_shared == nullptr) {
         return;
     }
-    pg_minimizer_sequence_build_stats& dst = g_shared->minimizer_sequence_build_stats;
-    pg_atomic_write_u64(&dst.backend_pid, stats.backend_pid);
-    pg_atomic_write_u64(&dst.db_oid, stats.db_oid);
-    pg_atomic_write_u64(&dst.relfilenode, stats.relfilenode);
-    pg_atomic_write_u64(&dst.sequence_rowno, stats.sequence_rowno);
-    pg_atomic_write_u64(&dst.total_run_count, stats.total_run_count);
-    pg_atomic_write_u64(&dst.resident_runs, stats.resident_runs);
-    pg_atomic_write_u64(&dst.file_runs, stats.file_runs);
-    pg_atomic_write_u64(&dst.resident_run_bytes, stats.resident_run_bytes);
-    pg_atomic_write_u64(&dst.resident_peak_bytes, stats.resident_peak_bytes);
-    pg_atomic_write_u64(&dst.spilled_run_bytes, stats.spilled_run_bytes);
-    pg_atomic_write_u64(&dst.postgres_temp_file_bytes, stats.postgres_temp_file_bytes);
-    pg_atomic_write_u64(&dst.postgres_temp_file_count, stats.postgres_temp_file_count);
-    pg_atomic_write_u64(&dst.merge_reader_buffer_bytes, stats.merge_reader_buffer_bytes);
-    pg_atomic_write_u64(&dst.merge_pass_count, stats.merge_pass_count);
-    pg_atomic_write_u64(&dst.spill_count_from_pressure, stats.spill_count_from_pressure);
-    pg_atomic_write_u64(&dst.resident_demotions, stats.resident_demotions);
-    pg_atomic_write_u64(&dst.position_spill_bytes, stats.position_spill_bytes);
-    pg_atomic_write_u64(&dst.position_spill_count, stats.position_spill_count);
-    pg_atomic_write_u64(&dst.worker_build_ns, worker_build_ns);
-    pg_atomic_write_u64(&dst.pipeline_mode, pipeline_mode);
-    pg_atomic_write_u64(&dst.max_concurrency, max_concurrency);
-    pg_atomic_write_u64(&dst.index_memory_cap_mb, index_memory_cap_mb);
-    pg_atomic_write_u64(&dst.shareable_lazy_workers, has_shareable_lazy_worker ? 1u : 0u);
-    pg_atomic_fetch_add_u64(&dst.generation, 1);
+    pg_minimizer_sequence_build_stats& shared_stats = g_shared->minimizer_sequence_build_stats;
+    pg_atomic_write_u64(&shared_stats.backend_pid, stats.backend_pid);
+    pg_atomic_write_u64(&shared_stats.db_oid, stats.db_oid);
+    pg_atomic_write_u64(&shared_stats.relfilenode, stats.relfilenode);
+    pg_atomic_write_u64(&shared_stats.sequence_rowno, stats.sequence_rowno);
+    pg_atomic_write_u64(&shared_stats.total_run_count, stats.total_run_count);
+    pg_atomic_write_u64(&shared_stats.resident_runs, stats.resident_runs);
+    pg_atomic_write_u64(&shared_stats.file_runs, stats.file_runs);
+    pg_atomic_write_u64(&shared_stats.resident_run_bytes, stats.resident_run_bytes);
+    pg_atomic_write_u64(&shared_stats.resident_peak_bytes, stats.resident_peak_bytes);
+    pg_atomic_write_u64(&shared_stats.spilled_run_bytes, stats.spilled_run_bytes);
+    pg_atomic_write_u64(&shared_stats.postgres_temp_file_bytes, stats.postgres_temp_file_bytes);
+    pg_atomic_write_u64(&shared_stats.postgres_temp_file_count, stats.postgres_temp_file_count);
+    pg_atomic_write_u64(&shared_stats.merge_reader_buffer_bytes, stats.merge_reader_buffer_bytes);
+    pg_atomic_write_u64(&shared_stats.merge_pass_count, stats.merge_pass_count);
+    pg_atomic_write_u64(&shared_stats.spill_count_from_pressure, stats.spill_count_from_pressure);
+    pg_atomic_write_u64(&shared_stats.resident_demotions, stats.resident_demotions);
+    pg_atomic_write_u64(&shared_stats.position_spill_bytes, stats.position_spill_bytes);
+    pg_atomic_write_u64(&shared_stats.position_spill_count, stats.position_spill_count);
+    pg_atomic_write_u64(&shared_stats.worker_build_ns, worker_build_ns);
+    pg_atomic_write_u64(&shared_stats.pipeline_mode, pipeline_mode);
+    pg_atomic_write_u64(&shared_stats.max_concurrency, max_concurrency);
+    pg_atomic_write_u64(&shared_stats.index_memory_cap_mb, index_memory_cap_mb);
+    pg_atomic_write_u64(&shared_stats.shareable_lazy_workers, has_shareable_lazy_worker ? 1u : 0u);
+    pg_atomic_fetch_add_u64(&shared_stats.generation, 1);
 }
 
 /**
@@ -132,36 +132,44 @@ void publish_async_minimizer_sequence_build_stats(
  */
 [[nodiscard]] async_minimizer_sequence_build_stats_snapshot
 snapshot_async_minimizer_sequence_build_stats() {
-    async_minimizer_sequence_build_stats_snapshot out{};
+    async_minimizer_sequence_build_stats_snapshot snapshot_result{};
     if (g_shared == nullptr) {
-        return out;
+        return snapshot_result;
     }
-    pg_minimizer_sequence_build_stats& src = g_shared->minimizer_sequence_build_stats;
-    out.generation = pg_atomic_read_u64(&src.generation);
-    out.stats.backend_pid = pg_atomic_read_u64(&src.backend_pid);
-    out.stats.db_oid = pg_atomic_read_u64(&src.db_oid);
-    out.stats.relfilenode = pg_atomic_read_u64(&src.relfilenode);
-    out.stats.sequence_rowno = pg_atomic_read_u64(&src.sequence_rowno);
-    out.stats.total_run_count = pg_atomic_read_u64(&src.total_run_count);
-    out.stats.resident_runs = pg_atomic_read_u64(&src.resident_runs);
-    out.stats.file_runs = pg_atomic_read_u64(&src.file_runs);
-    out.stats.resident_run_bytes = pg_atomic_read_u64(&src.resident_run_bytes);
-    out.stats.resident_peak_bytes = pg_atomic_read_u64(&src.resident_peak_bytes);
-    out.stats.spilled_run_bytes = pg_atomic_read_u64(&src.spilled_run_bytes);
-    out.stats.postgres_temp_file_bytes = pg_atomic_read_u64(&src.postgres_temp_file_bytes);
-    out.stats.postgres_temp_file_count = pg_atomic_read_u64(&src.postgres_temp_file_count);
-    out.stats.merge_reader_buffer_bytes = pg_atomic_read_u64(&src.merge_reader_buffer_bytes);
-    out.stats.merge_pass_count = pg_atomic_read_u64(&src.merge_pass_count);
-    out.stats.spill_count_from_pressure = pg_atomic_read_u64(&src.spill_count_from_pressure);
-    out.stats.resident_demotions = pg_atomic_read_u64(&src.resident_demotions);
-    out.stats.position_spill_bytes = pg_atomic_read_u64(&src.position_spill_bytes);
-    out.stats.position_spill_count = pg_atomic_read_u64(&src.position_spill_count);
-    out.worker_build_ns = pg_atomic_read_u64(&src.worker_build_ns);
-    out.pipeline_mode = pg_atomic_read_u64(&src.pipeline_mode);
-    out.max_concurrency = pg_atomic_read_u64(&src.max_concurrency);
-    out.index_memory_cap_mb = pg_atomic_read_u64(&src.index_memory_cap_mb);
-    out.shareable_lazy_workers = pg_atomic_read_u64(&src.shareable_lazy_workers);
-    return out;
+    pg_minimizer_sequence_build_stats& shared_stats = g_shared->minimizer_sequence_build_stats;
+    snapshot_result.generation = pg_atomic_read_u64(&shared_stats.generation);
+    snapshot_result.stats.backend_pid = pg_atomic_read_u64(&shared_stats.backend_pid);
+    snapshot_result.stats.db_oid = pg_atomic_read_u64(&shared_stats.db_oid);
+    snapshot_result.stats.relfilenode = pg_atomic_read_u64(&shared_stats.relfilenode);
+    snapshot_result.stats.sequence_rowno = pg_atomic_read_u64(&shared_stats.sequence_rowno);
+    snapshot_result.stats.total_run_count = pg_atomic_read_u64(&shared_stats.total_run_count);
+    snapshot_result.stats.resident_runs = pg_atomic_read_u64(&shared_stats.resident_runs);
+    snapshot_result.stats.file_runs = pg_atomic_read_u64(&shared_stats.file_runs);
+    snapshot_result.stats.resident_run_bytes = pg_atomic_read_u64(&shared_stats.resident_run_bytes);
+    snapshot_result.stats.resident_peak_bytes =
+        pg_atomic_read_u64(&shared_stats.resident_peak_bytes);
+    snapshot_result.stats.spilled_run_bytes = pg_atomic_read_u64(&shared_stats.spilled_run_bytes);
+    snapshot_result.stats.postgres_temp_file_bytes =
+        pg_atomic_read_u64(&shared_stats.postgres_temp_file_bytes);
+    snapshot_result.stats.postgres_temp_file_count =
+        pg_atomic_read_u64(&shared_stats.postgres_temp_file_count);
+    snapshot_result.stats.merge_reader_buffer_bytes =
+        pg_atomic_read_u64(&shared_stats.merge_reader_buffer_bytes);
+    snapshot_result.stats.merge_pass_count = pg_atomic_read_u64(&shared_stats.merge_pass_count);
+    snapshot_result.stats.spill_count_from_pressure =
+        pg_atomic_read_u64(&shared_stats.spill_count_from_pressure);
+    snapshot_result.stats.resident_demotions = pg_atomic_read_u64(&shared_stats.resident_demotions);
+    snapshot_result.stats.position_spill_bytes =
+        pg_atomic_read_u64(&shared_stats.position_spill_bytes);
+    snapshot_result.stats.position_spill_count =
+        pg_atomic_read_u64(&shared_stats.position_spill_count);
+    snapshot_result.worker_build_ns = pg_atomic_read_u64(&shared_stats.worker_build_ns);
+    snapshot_result.pipeline_mode = pg_atomic_read_u64(&shared_stats.pipeline_mode);
+    snapshot_result.max_concurrency = pg_atomic_read_u64(&shared_stats.max_concurrency);
+    snapshot_result.index_memory_cap_mb = pg_atomic_read_u64(&shared_stats.index_memory_cap_mb);
+    snapshot_result.shareable_lazy_workers =
+        pg_atomic_read_u64(&shared_stats.shareable_lazy_workers);
+    return snapshot_result;
 }
 
 /**
@@ -170,33 +178,37 @@ snapshot_async_minimizer_sequence_build_stats() {
  */
 [[nodiscard]] async_minimizer_sequence_worker_boundary_stats_snapshot
 snapshot_async_minimizer_sequence_worker_boundary_stats() noexcept {
-    async_minimizer_sequence_worker_boundary_stats_snapshot out{};
+    async_minimizer_sequence_worker_boundary_stats_snapshot snapshot_result{};
     if (g_shared == nullptr) {
-        return out;
+        return snapshot_result;
     }
-    pg_async_minimizer_sequence_worker_boundary_stats& src =
+    pg_async_minimizer_sequence_worker_boundary_stats& shared_stats =
         g_shared->async_minimizer_sequence_worker_boundary_stats;
-    out.relation_leaf_calls = pg_atomic_read_u64(&src.relation_leaf_calls);
-    out.spi_leaf_calls = pg_atomic_read_u64(&src.spi_leaf_calls);
-    out.materialize_interrupt_leaf_calls =
-        pg_atomic_read_u64(&src.materialize_interrupt_leaf_calls);
-    out.materialize_scanner_read_leaf_calls =
-        pg_atomic_read_u64(&src.materialize_scanner_read_leaf_calls);
-    out.pg_leaf_failures = pg_atomic_read_u64(&src.pg_leaf_failures);
-    out.injected_pg_leaf_failures = pg_atomic_read_u64(&src.injected_pg_leaf_failures);
-    out.materialize_admissions = pg_atomic_read_u64(&src.materialize_admissions);
-    out.materialize_failure_unwinds = pg_atomic_read_u64(&src.materialize_failure_unwinds);
-    out.materialize_admission_restored = pg_atomic_read_u64(&src.materialize_admission_restored);
-    out.materialize_admission_mismatches =
-        pg_atomic_read_u64(&src.materialize_admission_mismatches);
-    const std::uint32_t last_failure = pg_atomic_read_u32(&src.last_failure_point);
-    out.last_failure_point = static_cast<async_minimizer_sequence_worker_pg_failure>(
+    snapshot_result.relation_leaf_calls = pg_atomic_read_u64(&shared_stats.relation_leaf_calls);
+    snapshot_result.spi_leaf_calls = pg_atomic_read_u64(&shared_stats.spi_leaf_calls);
+    snapshot_result.materialize_interrupt_leaf_calls =
+        pg_atomic_read_u64(&shared_stats.materialize_interrupt_leaf_calls);
+    snapshot_result.materialize_scanner_read_leaf_calls =
+        pg_atomic_read_u64(&shared_stats.materialize_scanner_read_leaf_calls);
+    snapshot_result.pg_leaf_failures = pg_atomic_read_u64(&shared_stats.pg_leaf_failures);
+    snapshot_result.injected_pg_leaf_failures =
+        pg_atomic_read_u64(&shared_stats.injected_pg_leaf_failures);
+    snapshot_result.materialize_admissions =
+        pg_atomic_read_u64(&shared_stats.materialize_admissions);
+    snapshot_result.materialize_failure_unwinds =
+        pg_atomic_read_u64(&shared_stats.materialize_failure_unwinds);
+    snapshot_result.materialize_admission_restored =
+        pg_atomic_read_u64(&shared_stats.materialize_admission_restored);
+    snapshot_result.materialize_admission_mismatches =
+        pg_atomic_read_u64(&shared_stats.materialize_admission_mismatches);
+    const std::uint32_t last_failure = pg_atomic_read_u32(&shared_stats.last_failure_point);
+    snapshot_result.last_failure_point = static_cast<async_minimizer_sequence_worker_pg_failure>(
         last_failure & ~k_async_minimizer_sequence_worker_injected_failure_flag);
-    out.last_failure_injected =
+    snapshot_result.last_failure_injected =
         (last_failure & k_async_minimizer_sequence_worker_injected_failure_flag) != 0u;
-    out.armed_failure_point = static_cast<async_minimizer_sequence_worker_pg_failure>(
-        pg_atomic_read_u32(&src.armed_failure_point));
-    return out;
+    snapshot_result.armed_failure_point = static_cast<async_minimizer_sequence_worker_pg_failure>(
+        pg_atomic_read_u32(&shared_stats.armed_failure_point));
+    return snapshot_result;
 }
 
 /**

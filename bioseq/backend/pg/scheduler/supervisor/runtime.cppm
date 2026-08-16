@@ -351,25 +351,26 @@ void restart_cluster() {
 [[nodiscard]] scheduler_snapshot snapshot() {
     backend_sync();
     auto& pool = bioseq::parallelism::global_pool::instance();
-    scheduler_snapshot out{};
-    out.is_supervisor = g_shared != nullptr;
-    out.config_generation = g_shared != nullptr ? pg_atomic_read_u32(&g_shared->cfg_generation)
-                                                : pool.adopted_generation();
-    out.mode = pool.get_mode();
-    out.min_threads = 1;
-    out.max_threads = pool.maximum_concurrency();
-    out.current_threads = pool.live_worker_count();
-    out.index_memory_reserved_bytes =
+    scheduler_snapshot snapshot_result{};
+    snapshot_result.is_supervisor = g_shared != nullptr;
+    snapshot_result.config_generation = g_shared != nullptr
+                                            ? pg_atomic_read_u32(&g_shared->cfg_generation)
+                                            : pool.adopted_generation();
+    snapshot_result.mode = pool.get_mode();
+    snapshot_result.min_threads = 1;
+    snapshot_result.max_threads = pool.maximum_concurrency();
+    snapshot_result.current_threads = pool.live_worker_count();
+    snapshot_result.index_memory_reserved_bytes =
         bioseq::parallelism::memory_admission_controller::instance().reserved_bytes();
 
     const std::uint64_t now = static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
     if (g_shared != nullptr) {
         pg_scheduler_stats& stats = g_shared->stats;
-        out.batches_scheduled = pg_atomic_read_u64(&stats.batches_scheduled);
-        out.batches_processed = pg_atomic_read_u64(&stats.batches_processed);
-        out.batches_awaiting = pg_atomic_read_u64(&stats.batches_in_flight);
-        out.queries_waiting = pg_atomic_read_u64(&stats.queries_waiting);
-        out.queries_processed = pg_atomic_read_u64(&stats.queries_processed);
+        snapshot_result.batches_scheduled = pg_atomic_read_u64(&stats.batches_scheduled);
+        snapshot_result.batches_processed = pg_atomic_read_u64(&stats.batches_processed);
+        snapshot_result.batches_awaiting = pg_atomic_read_u64(&stats.batches_in_flight);
+        snapshot_result.queries_waiting = pg_atomic_read_u64(&stats.queries_waiting);
+        snapshot_result.queries_processed = pg_atomic_read_u64(&stats.queries_processed);
         std::uint64_t oldest = 0;
         for (std::size_t slot = 0; slot < pg_scheduler_stats::k_inflight_slots; ++slot) {
             const std::uint64_t submit_ns = pg_atomic_read_u64(&stats.inflight_submit_ns[slot]);
@@ -377,40 +378,40 @@ void restart_cluster() {
                 oldest = submit_ns;
             }
         }
-        out.oldest_waiting_batch_age_secs =
+        snapshot_result.oldest_waiting_batch_age_secs =
             oldest == 0 ? 0.0 : static_cast<double>(now - oldest) / 1'000'000'000.0;
         const std::uint64_t start_ns = pg_atomic_read_u64(&stats.rate_window_start_ns);
         const std::uint64_t start_queries = pg_atomic_read_u64(&stats.rate_window_start_queries);
         const double elapsed =
             start_ns == 0 ? 0.0 : static_cast<double>(now - start_ns) / 1'000'000'000.0;
-        if (elapsed > 0.0 && out.queries_processed >= start_queries) {
-            out.queries_per_sec =
-                static_cast<double>(out.queries_processed - start_queries) / elapsed;
+        if (elapsed > 0.0 && snapshot_result.queries_processed >= start_queries) {
+            snapshot_result.queries_per_sec =
+                static_cast<double>(snapshot_result.queries_processed - start_queries) / elapsed;
         }
         const std::uint64_t restart_ns = pg_atomic_read_u64(&stats.restart_ns);
-        out.uptime_secs =
+        snapshot_result.uptime_secs =
             restart_ns == 0 ? 0.0 : static_cast<double>(now - restart_ns) / 1'000'000'000.0;
         for (pg_persist_queue_slot& slot : g_shared->persist_queue) {
             const std::uint32_t state = pg_atomic_read_u32(&slot.state);
             if (state == 1 || state == 2) {
-                ++out.async_persist_jobs_waiting;
+                ++snapshot_result.async_persist_jobs_waiting;
             }
         }
-        return out;
+        return snapshot_result;
     }
 
     bioseq::parallelism::scheduler_stats& stats = pool.get_scheduler_stats();
-    out.batches_scheduled = stats.batches_scheduled.load(std::memory_order_acquire);
-    out.batches_processed = stats.batches_processed.load(std::memory_order_acquire);
-    out.batches_awaiting = static_cast<std::uint64_t>(
+    snapshot_result.batches_scheduled = stats.batches_scheduled.load(std::memory_order_acquire);
+    snapshot_result.batches_processed = stats.batches_processed.load(std::memory_order_acquire);
+    snapshot_result.batches_awaiting = static_cast<std::uint64_t>(
         std::max<std::int64_t>(0, stats.batches_in_flight.load(std::memory_order_acquire)));
-    out.queries_waiting = static_cast<std::uint64_t>(
+    snapshot_result.queries_waiting = static_cast<std::uint64_t>(
         std::max<std::int64_t>(0, stats.queries_waiting.load(std::memory_order_acquire)));
-    out.queries_processed = stats.queries_processed.load(std::memory_order_acquire);
+    snapshot_result.queries_processed = stats.queries_processed.load(std::memory_order_acquire);
     const std::uint64_t restart_ns = stats.restart_ns.load(std::memory_order_acquire);
-    out.uptime_secs =
+    snapshot_result.uptime_secs =
         restart_ns == 0 ? 0.0 : static_cast<double>(now - restart_ns) / 1'000'000'000.0;
-    return out;
+    return snapshot_result;
 }
 
 } // namespace bioseq::postgres::scheduler
