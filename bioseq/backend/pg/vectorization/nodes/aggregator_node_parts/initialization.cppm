@@ -41,10 +41,6 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                              bool initial_value_is_null,
                                              Oid* input_types,
                                              int argument_count);
-/** Builds the PostgreSQL aggregate state owned by the vector custom scan. */
-export AggState*
-initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int executor_flags);
-
 /**
  * Builds the PostgreSQL AggState used by the vector custom scan.
  */
@@ -54,7 +50,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     AggStatePerAgg aggregate_descriptors;
     AggStatePerTrans transition_state_storage;
     AggStatePerGroup* group_state_sets;
-    Plan* outer_plan;
+    Plan* child_plan;
     ExprContext* expression_context;
     TupleDesc scan_descriptor;
     int max_aggno;
@@ -63,14 +59,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     int aggregate_count;
     int transition_state_count;
     int phase;
-    int phase_index;
     Bitmapset* all_grouped_cols = nullptr;
     int grouping_set_count = 1;
     int phase_count;
     int hash_table_count;
-    int i = 0;
-    int j = 0;
-    bool use_hashing = (node->aggstrategy == AGG_HASHED || node->aggstrategy == AGG_MIXED);
+    const bool use_hashing = node->aggstrategy == AGG_HASHED || node->aggstrategy == AGG_MIXED;
 
     /* check for unsupported flags */
     Assert(!(executor_flags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
@@ -114,14 +107,15 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     if (node->groupingSets) {
         grouping_set_count = list_length(node->groupingSets);
 
-        for (auto agg : postgres_list<Agg>{node->chain}) {
-            grouping_set_count = std::max(grouping_set_count, list_length(agg->groupingSets));
+        for (Agg* chained_aggregate : postgres_list<Agg>{node->chain}) {
+            grouping_set_count =
+                std::max(grouping_set_count, list_length(chained_aggregate->groupingSets));
 
             /**
              * additional AGG_HASHED aggs become part of phase 0, but all
              * others add an extra phase.
              */
-            if (agg->aggstrategy != AGG_HASHED)
+            if (chained_aggregate->aggstrategy != AGG_HASHED)
                 ++phase_count;
             else
                 ++hash_table_count;
@@ -143,9 +137,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     ExecAssignExprContext(executor_state, &aggregate_state->ss.ps);
     aggregate_state->tmpcontext = aggregate_state->ss.ps.ps_ExprContext;
 
-    for (i = 0; i < grouping_set_count; ++i) {
+    for (int grouping_context_index = 0; grouping_context_index < grouping_set_count;
+         ++grouping_context_index) {
         ExecAssignExprContext(executor_state, &aggregate_state->ss.ps);
-        aggregate_state->aggcontexts[i] = aggregate_state->ss.ps.ps_ExprContext;
+        aggregate_state->aggcontexts[grouping_context_index] =
+            aggregate_state->ss.ps.ps_ExprContext;
     }
 
     if (use_hashing)
@@ -158,8 +154,8 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
      */
     if (node->aggstrategy == AGG_HASHED)
         executor_flags &= ~EXEC_FLAG_REWIND;
-    outer_plan = outer_plan(node);
-    outerPlanState(aggregate_state) = ExecInitNode(outer_plan, executor_state, executor_flags);
+    child_plan = outer_plan(node);
+    outerPlanState(aggregate_state) = ExecInitNode(child_plan, executor_state, executor_flags);
 
     /**
      * initialize source tuple type.
@@ -230,7 +226,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     }
 
     phase = 0;
-    for (phase_index = 0; phase_index <= list_length(node->chain); ++phase_index) {
+    for (int phase_index = 0; phase_index <= list_length(node->chain); ++phase_index) {
         Agg* aggregate_node;
         Sort* sort_node;
 
@@ -247,11 +243,11 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         if (aggregate_node->aggstrategy == AGG_HASHED || aggregate_node->aggstrategy == AGG_MIXED) {
             AggStatePerPhase phase_data = &aggregate_state->phases[0];
             AggStatePerHash hash_state;
-            Bitmapset* cols = nullptr;
+            Bitmapset* grouped_columns = nullptr;
 
             Assert(phase == 0);
-            i = phase_data->numsets++;
-            hash_state = &aggregate_state->perhash[i];
+            const int hash_set_index = phase_data->numsets++;
+            hash_state = &aggregate_state->perhash[hash_set_index];
 
             /* phase 0 always points to the "real" Agg in the hash case */
             phase_data->aggnode = node;
@@ -260,38 +256,44 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
             /* but the actual Agg node representing this hash is saved here */
             hash_state->aggnode = aggregate_node;
 
-            phase_data->gset_lengths[i] = hash_state->numCols = aggregate_node->numCols;
+            phase_data->gset_lengths[hash_set_index] = hash_state->numCols =
+                aggregate_node->numCols;
 
-            for (j = 0; j < aggregate_node->numCols; ++j)
-                cols = bms_add_member(cols, aggregate_node->grpColIdx[j]);
+            for (int group_column_index = 0; group_column_index < aggregate_node->numCols;
+                 ++group_column_index)
+                grouped_columns =
+                    bms_add_member(grouped_columns, aggregate_node->grpColIdx[group_column_index]);
 
-            phase_data->grouped_cols[i] = cols;
+            phase_data->grouped_cols[hash_set_index] = grouped_columns;
 
-            all_grouped_cols = bms_add_members(all_grouped_cols, cols);
+            all_grouped_cols = bms_add_members(all_grouped_cols, grouped_columns);
             continue;
         } else {
             AggStatePerPhase phase_data = &aggregate_state->phases[++phase];
-            int num_sets;
+            const int phase_grouping_set_count = list_length(aggregate_node->groupingSets);
 
-            phase_data->numsets = num_sets = list_length(aggregate_node->groupingSets);
+            phase_data->numsets = phase_grouping_set_count;
 
-            if (num_sets) {
-                phase_data->gset_lengths = allocate_zeroed_array<int>(num_sets);
-                phase_data->grouped_cols = allocate_zeroed_array<Bitmapset*>(num_sets);
+            if (phase_grouping_set_count > 0) {
+                phase_data->gset_lengths = allocate_zeroed_array<int>(phase_grouping_set_count);
+                phase_data->grouped_cols =
+                    allocate_zeroed_array<Bitmapset*>(phase_grouping_set_count);
 
-                i = 0;
-                for (auto phase_list : postgres_list<List>{aggregate_node->groupingSets}) {
-                    int current_length = list_length(phase_list);
-                    Bitmapset* cols = nullptr;
+                int grouping_set_index = 0;
+                for (List* grouping_set : postgres_list<List>{aggregate_node->groupingSets}) {
+                    const int grouping_column_count = list_length(grouping_set);
+                    Bitmapset* grouped_columns = nullptr;
 
                     /* planner forces this to be correct */
-                    for (j = 0; j < current_length; ++j)
-                        cols = bms_add_member(cols, aggregate_node->grpColIdx[j]);
+                    for (int group_column_index = 0; group_column_index < grouping_column_count;
+                         ++group_column_index)
+                        grouped_columns = bms_add_member(
+                            grouped_columns, aggregate_node->grpColIdx[group_column_index]);
 
-                    phase_data->grouped_cols[i] = cols;
-                    phase_data->gset_lengths[i] = current_length;
+                    phase_data->grouped_cols[grouping_set_index] = grouped_columns;
+                    phase_data->gset_lengths[grouping_set_index] = grouping_column_count;
 
-                    ++i;
+                    ++grouping_set_index;
                 }
 
                 all_grouped_cols = bms_add_members(all_grouped_cols, phase_data->grouped_cols[0]);
@@ -306,8 +308,6 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
              * If we are grouping, precompute fmgr lookup data for inner loop.
              */
             if (aggregate_node->aggstrategy == AGG_SORTED) {
-                i = 0;
-
                 Assert(aggregate_node->numCols > 0);
 
                 /**
@@ -318,20 +318,21 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
                     allocate_zeroed_array<ExprState*>(aggregate_node->numCols);
 
                 /* for each grouping set */
-                for (i = 0; i < phase_data->numsets; i++) {
-                    int length = phase_data->gset_lengths[i];
+                for (int grouping_set_index = 0; grouping_set_index < phase_data->numsets;
+                     ++grouping_set_index) {
+                    const int grouping_column_count = phase_data->gset_lengths[grouping_set_index];
 
                     /* nothing to do for empty grouping set */
-                    if (length == 0)
+                    if (grouping_column_count == 0)
                         continue;
 
                     /* if we already had one of this length, it'll do */
-                    if (phase_data->eqfunctions[length - 1] != nullptr)
+                    if (phase_data->eqfunctions[grouping_column_count - 1] != nullptr)
                         continue;
 
-                    phase_data->eqfunctions[length - 1] =
+                    phase_data->eqfunctions[grouping_column_count - 1] =
                         execTuplesMatchPrepare(scan_descriptor,
-                                               length,
+                                               grouping_column_count,
                                                aggregate_node->grpColIdx,
                                                aggregate_node->grpOperators,
                                                aggregate_node->grpCollations,
@@ -359,9 +360,10 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     /**
      * Convert all_grouped_cols to a descending-order list.
      */
-    i = -1;
-    while ((i = bms_next_member(all_grouped_cols, i)) >= 0)
-        aggregate_state->all_grouped_cols = lcons_int(i, aggregate_state->all_grouped_cols);
+    int grouped_column_number = -1;
+    while ((grouped_column_number = bms_next_member(all_grouped_cols, grouped_column_number)) >= 0)
+        aggregate_state->all_grouped_cols =
+            lcons_int(grouped_column_number, aggregate_state->all_grouped_cols);
 
     /**
      * Set up aggregate-result storage in the output expr context, and also
@@ -382,8 +384,10 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     group_state_sets = aggregate_state->all_pergroups;
 
     if (node->aggstrategy != AGG_HASHED) {
-        for (i = 0; i < grouping_set_count; i++) {
-            group_state_sets[i] = allocate_zeroed_array<AggStatePerGroupData>(aggregate_count);
+        for (int grouping_set_index = 0; grouping_set_index < grouping_set_count;
+             ++grouping_set_index) {
+            group_state_sets[grouping_set_index] =
+                allocate_zeroed_array<AggStatePerGroupData>(aggregate_count);
         }
 
         aggregate_state->pergroups = group_state_sets;
@@ -394,7 +398,6 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
      * Hashing can only appear in the initial phase.
      */
     if (use_hashing) {
-        Plan* outer_plan = outer_plan(node);
         uint64_t total_groups = 0;
 
         aggregate_state->hash_metacxt =
@@ -410,13 +413,14 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
         aggregate_state->hash_pergroup = group_state_sets;
 
         aggregate_state->hashentrysize = hash_agg_entry_size(
-            aggregate_state->numtrans, outer_plan->plan_width, node->transitionSpace);
+            aggregate_state->numtrans, child_plan->plan_width, node->transitionSpace);
 
         /**
          * Derives shared spill limits from the combined grouping-set estimate.
          */
-        for (i = 0; i < aggregate_state->num_hashes; i++)
-            total_groups += aggregate_state->perhash[i].aggnode->numGroups;
+        for (int hash_table_index = 0; hash_table_index < aggregate_state->num_hashes;
+             ++hash_table_index)
+            total_groups += aggregate_state->perhash[hash_table_index].aggnode->numGroups;
 
         hash_agg_set_limits(aggregate_state->hashentrysize,
                             total_groups,
@@ -453,7 +457,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
      * Perform lookups of aggregate function info, and initialize the
      * unchanging fields of the per-agg and per-trans data.
      */
-    for (auto aggregate_reference : postgres_list<Aggref>{aggregate_state->aggs}) {
+    for (Aggref* aggregate_reference : postgres_list<Aggref>{aggregate_state->aggs}) {
         AggStatePerAgg aggregate_descriptor;
         AggStatePerTrans transition_state;
         std::array<Oid, FUNC_MAX_ARGS> aggregate_transition_input_types;
@@ -750,13 +754,13 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     /**
      * Compiles one transition expression per phase for transition or combine mode.
      */
-    for (phase_index = 0; phase_index < aggregate_state->numphases; phase_index++) {
-        AggStatePerPhase state_per_phase = &aggregate_state->phases[phase_index];
+    for (int phase_index = 0; phase_index < aggregate_state->numphases; ++phase_index) {
+        AggStatePerPhase phase_state = &aggregate_state->phases[phase_index];
         bool process_hash = false;
         bool process_sorted = false;
 
         /* phase 0 doesn't necessarily exist */
-        if (!state_per_phase->aggnode)
+        if (!phase_state->aggnode)
             continue;
 
         if (aggregate_state->aggstrategy == AGG_MIXED && phase_index == 1) {
@@ -771,21 +775,21 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
              * Mixed phase zero reads hash tables already populated by phase one.
              */
             continue;
-        } else if (state_per_phase->aggstrategy == AGG_PLAIN ||
-                   state_per_phase->aggstrategy == AGG_SORTED) {
+        } else if (phase_state->aggstrategy == AGG_PLAIN ||
+                   phase_state->aggstrategy == AGG_SORTED) {
             process_hash = false;
             process_sorted = true;
-        } else if (state_per_phase->aggstrategy == AGG_HASHED) {
+        } else if (phase_state->aggstrategy == AGG_HASHED) {
             process_hash = true;
             process_sorted = false;
         } else
             Assert(false);
 
-        state_per_phase->evaltrans = ExecBuildAggTrans(
-            aggregate_state, state_per_phase, process_sorted, process_hash, false);
+        phase_state->evaltrans =
+            ExecBuildAggTrans(aggregate_state, phase_state, process_sorted, process_hash, false);
 
         /* cache compiled expression for outer slot without nullptr check */
-        state_per_phase->evaltrans_cache[0][0] = state_per_phase->evaltrans;
+        phase_state->evaltrans_cache[0][0] = phase_state->evaltrans;
     }
 
     return aggregate_state;
@@ -806,18 +810,16 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                              bool initial_value_is_null,
                                              Oid* input_types,
                                              int argument_count) {
-    int grouping_set_count = std::max(aggregate_state->maxsets, 1);
+    const int grouping_set_count = std::max(aggregate_state->maxsets, 1);
     Expr* transition_function_expression;
     int transition_argument_count;
     Expr* serialize_function_expression = nullptr;
     Expr* deserialize_function_expression = nullptr;
-    ListCell* cell;
     int input_count;
     int direct_argument_count;
     List* sort_list;
     int sort_column_count;
     int distinct_column_count;
-    int i;
 
     /* Begin filling in the transition_state data */
     transition_state->aggref = aggregate_reference;
@@ -965,47 +967,48 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
         transition_state->sortCollations = allocate_zeroed_array<Oid>(sort_column_count);
         transition_state->sortNullsFirst = allocate_zeroed_array<bool>(sort_column_count);
 
-        i = 0;
-        for (auto sort_clause : postgres_list<SortGroupClause>{sort_list}) {
-            TargetEntry* tle = get_sortgroupclause_tle(sort_clause, aggregate_reference->args);
+        int sort_column_index = 0;
+        for (SortGroupClause* sort_clause : postgres_list<SortGroupClause>{sort_list}) {
+            TargetEntry* target_entry =
+                get_sortgroupclause_tle(sort_clause, aggregate_reference->args);
 
             /* the parser should have made sure of this */
             Assert(OidIsValid(sort_clause->sortop));
 
-            transition_state->sortColIdx[i] = tle->resno;
-            transition_state->sortOperators[i] = sort_clause->sortop;
-            transition_state->sortCollations[i] = exprCollation(reinterpret_cast<Node*>(tle->expr));
-            transition_state->sortNullsFirst[i] = sort_clause->nulls_first;
-            i++;
+            transition_state->sortColIdx[sort_column_index] = target_entry->resno;
+            transition_state->sortOperators[sort_column_index] = sort_clause->sortop;
+            transition_state->sortCollations[sort_column_index] =
+                exprCollation(reinterpret_cast<Node*>(target_entry->expr));
+            transition_state->sortNullsFirst[sort_column_index] = sort_clause->nulls_first;
+            ++sort_column_index;
         }
-        Assert(i == sort_column_count);
+        Assert(sort_column_index == sort_column_count);
     }
 
     if (aggregate_reference->aggdistinct) {
-        Oid* ops;
-
         Assert(argument_count > 0);
         Assert(list_length(aggregate_reference->aggdistinct) == distinct_column_count);
 
-        ops = allocate_zeroed_array<Oid>(distinct_column_count);
+        Oid* equality_operators = allocate_zeroed_array<Oid>(distinct_column_count);
 
-        i = 0;
-        for (auto group_clause : postgres_list<SortGroupClause>{aggregate_reference->aggdistinct}) {
-            ops[i++] = group_clause->eqop;
+        int distinct_column_index = 0;
+        for (SortGroupClause* group_clause :
+             postgres_list<SortGroupClause>{aggregate_reference->aggdistinct}) {
+            equality_operators[distinct_column_index++] = group_clause->eqop;
         }
 
         /* lookup / build the necessary comparators */
         if (distinct_column_count == 1)
-            fmgr_info(get_opcode(ops[0]), &transition_state->equalfnOne);
+            fmgr_info(get_opcode(equality_operators[0]), &transition_state->equalfnOne);
         else
             transition_state->equalfnMulti =
                 execTuplesMatchPrepare(transition_state->sortdesc,
                                        distinct_column_count,
                                        transition_state->sortColIdx,
-                                       ops,
+                                       equality_operators,
                                        transition_state->sortCollations,
                                        &aggregate_state->ss.ps);
-        pfree(ops);
+        pfree(equality_operators);
     }
 
     transition_state->sortstates = allocate_zeroed_array<Tuplesortstate*>(grouping_set_count);
@@ -1013,7 +1016,8 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
 
 /** Converts a catalog text initializer to the aggregate transition type. */
 static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type) {
-    Oid type_input_function, type_io_parameter;
+    Oid type_input_function;
+    Oid type_io_parameter;
     char* initial_value_text;
     Datum initial_value;
 
@@ -1028,10 +1032,7 @@ static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transitio
 /** Releases the executor resources owned by a vector aggregate state. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL executor ABI name
 extern "C" void ExecEndAgg(AggState* node) {
-    PlanState* outer_plan;
-    int transition_index;
-    int grouping_set_count = std::max(node->maxsets, 1);
-    int set_index;
+    const int grouping_set_count = std::max(node->maxsets, 1);
 
     /**
      * Publishes worker aggregate statistics for EXPLAIN ANALYZE.
@@ -1060,17 +1061,17 @@ extern "C" void ExecEndAgg(AggState* node) {
         node->hash_metacxt = nullptr;
     }
 
-    for (transition_index = 0; transition_index < node->numtrans; transition_index++) {
+    for (int transition_index = 0; transition_index < node->numtrans; ++transition_index) {
         AggStatePerTrans transition_state = &node->pertrans[transition_index];
 
-        for (set_index = 0; set_index < grouping_set_count; set_index++) {
+        for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
             if (transition_state->sortstates[set_index])
                 tuplesort_end(transition_state->sortstates[set_index]);
         }
     }
 
     /* And ensure any agg shutdown callbacks have been called */
-    for (set_index = 0; set_index < grouping_set_count; set_index++)
+    for (int set_index = 0; set_index < grouping_set_count; ++set_index)
         ReScanExprContext(node->aggcontexts[set_index]);
     if (node->hashcontext)
         ReScanExprContext(node->hashcontext);
@@ -1078,19 +1079,17 @@ extern "C" void ExecEndAgg(AggState* node) {
     /* clean up tuple table */
     ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
-    outer_plan = outerPlanState(node);
-    ExecEndNode(outer_plan);
+    PlanState* child_plan_state = outerPlanState(node);
+    ExecEndNode(child_plan_state);
 }
 
 /** Restores a vector aggregate state to its PostgreSQL rescan boundary. */
 // NOLINTNEXTLINE(readability-identifier-naming) -- exact PostgreSQL executor ABI name
 extern "C" void ExecReScanAgg(AggState* node) {
     ExprContext* expression_context = node->ss.ps.ps_ExprContext;
-    PlanState* outer_plan = outerPlanState(node);
+    PlanState* child_plan_state = outerPlanState(node);
     Agg* aggregate_node = reinterpret_cast<Agg*>(node->ss.ps.plan);
-    int transition_index;
-    int grouping_set_count = std::max(node->maxsets, 1);
-    int set_index;
+    const int grouping_set_count = std::max(node->maxsets, 1);
 
     node->agg_done = false;
 
@@ -1105,7 +1104,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
          * Reuses an unspilled hash table when neither child nor aggregate inputs
          * have parameter changes.
          */
-        if (outer_plan->chgParam == nullptr && !node->hash_ever_spilled &&
+        if (child_plan_state->chgParam == nullptr && !node->hash_ever_spilled &&
             !bms_overlap(node->ss.ps.chgParam, aggregate_node->aggParams)) {
             ResetTupleHashIterator(node->perhash[0].hashtable, &node->perhash[0].hashiter);
             select_current_set(node, 0, true);
@@ -1114,8 +1113,8 @@ extern "C" void ExecReScanAgg(AggState* node) {
     }
 
     /* Make sure we have closed any open tuplesorts */
-    for (transition_index = 0; transition_index < node->numtrans; transition_index++) {
-        for (set_index = 0; set_index < grouping_set_count; set_index++) {
+    for (int transition_index = 0; transition_index < node->numtrans; ++transition_index) {
+        for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
             AggStatePerTrans transition_state = &node->pertrans[transition_index];
 
             if (transition_state->sortstates[set_index]) {
@@ -1129,7 +1128,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
      * Rescans grouping contexts so transition callbacks run before rebuilding.
      */
 
-    for (set_index = 0; set_index < grouping_set_count; set_index++) {
+    for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
         ReScanExprContext(node->aggcontexts[set_index]);
     }
 
@@ -1168,7 +1167,7 @@ extern "C" void ExecReScanAgg(AggState* node) {
         /**
          * Reset the per-group state (in particular, mark transvalues null)
          */
-        for (set_index = 0; set_index < grouping_set_count; set_index++) {
+        for (int set_index = 0; set_index < grouping_set_count; ++set_index) {
             MemSet(node->pergroups[set_index], 0, sizeof(AggStatePerGroupData) * node->numaggs);
         }
 
@@ -1179,8 +1178,8 @@ extern "C" void ExecReScanAgg(AggState* node) {
         node->projected_set = -1;
     }
 
-    if (outer_plan->chgParam == nullptr)
-        ExecReScan(outer_plan);
+    if (child_plan_state->chgParam == nullptr)
+        ExecReScan(child_plan_state);
 }
 
 /***********************************************************************
@@ -1196,9 +1195,9 @@ extern "C" void ExecReScanAgg(AggState* node) {
 extern "C" int AggCheckCallContext(FunctionCallInfo call_info, MemoryContext* aggregate_context) {
     if (AggState* aggregate_state = pg_node_view{call_info->context}.try_cast<AggState>()) {
         if (aggregate_context) {
-            ExprContext* cxt = aggregate_state->curaggcontext;
+            ExprContext* aggregate_expression_context = aggregate_state->curaggcontext;
 
-            *aggregate_context = cxt->ecxt_per_tuple_memory;
+            *aggregate_context = aggregate_expression_context->ecxt_per_tuple_memory;
         }
         return AGG_CONTEXT_AGGREGATE;
     }
