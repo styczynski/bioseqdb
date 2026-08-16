@@ -777,19 +777,20 @@ template <class p_sequence>
                             match_result_collection merged_collection;
                             std::vector<match_result>& merged = merged_collection.results;
                             const sequence_size_t query_len = query_bp_size;
-                            for (auto sr :
+                            for (const auto segment_range :
                                  pg_segment_unit_ranges(total_bp, query_len, a_lpu, idx_params)) {
                                 const sequence_size_t clip_lo_bp =
-                                    static_cast<sequence_size_t>(sr.cs_u) * a_lpu;
+                                    static_cast<sequence_size_t>(segment_range.cs_u) * a_lpu;
                                 const sequence_size_t clip_hi_bp = std::min(
-                                    static_cast<sequence_size_t>(sr.ce_u) * a_lpu, total_bp);
-                                match_result_collection seg_res = run_with_segment_index(
-                                    clip_lo_bp, clip_hi_bp, sr.cs_u, sr.ce_u);
-                                merged_collection.combine_execution_stats(seg_res);
-                                for (auto& r : seg_res.results) {
-                                    if (r.target_start >= sr.core_lo_bp &&
-                                        r.target_start < sr.core_hi_bp) {
-                                        merged.push_back(std::move(r));
+                                    static_cast<sequence_size_t>(segment_range.ce_u) * a_lpu,
+                                    total_bp);
+                                match_result_collection segment_collection = run_with_segment_index(
+                                    clip_lo_bp, clip_hi_bp, segment_range.cs_u, segment_range.ce_u);
+                                merged_collection.combine_execution_stats(segment_collection);
+                                for (auto& match : segment_collection.results) {
+                                    if (match.target_start >= segment_range.core_lo_bp &&
+                                        match.target_start < segment_range.core_hi_bp) {
+                                        merged.push_back(std::move(match));
                                     }
                                 }
                             }
@@ -990,24 +991,29 @@ template <class p_sequence>
                                                 std::vector<match_result>& merged =
                                                     merged_collection.results;
                                                 const sequence_size_t query_len = query_bp_size;
-                                                for (auto sr : pg_segment_unit_ranges(
+                                                for (const auto segment_range :
+                                                     pg_segment_unit_ranges(
                                                          total_bp, query_len, a_lpu, idx_params)) {
                                                     const sequence_size_t clip_lo_bp =
-                                                        static_cast<sequence_size_t>(sr.cs_u) *
+                                                        static_cast<sequence_size_t>(
+                                                            segment_range.cs_u) *
                                                         a_lpu;
-                                                    const sequence_size_t clip_hi_bp = std::min(
-                                                        static_cast<sequence_size_t>(sr.ce_u) *
-                                                            a_lpu,
-                                                        total_bp);
-                                                    match_result_collection seg_res =
+                                                    const sequence_size_t clip_hi_bp =
+                                                        std::min(static_cast<sequence_size_t>(
+                                                                     segment_range.ce_u) *
+                                                                     a_lpu,
+                                                                 total_bp);
+                                                    match_result_collection segment_collection =
                                                         run_minimizer_sequence_index(clip_lo_bp,
                                                                                      clip_hi_bp);
                                                     merged_collection.combine_execution_stats(
-                                                        seg_res);
-                                                    for (auto& r : seg_res.results) {
-                                                        if (r.target_start >= sr.core_lo_bp &&
-                                                            r.target_start < sr.core_hi_bp) {
-                                                            merged.push_back(std::move(r));
+                                                        segment_collection);
+                                                    for (auto& match : segment_collection.results) {
+                                                        if (match.target_start >=
+                                                                segment_range.core_lo_bp &&
+                                                            match.target_start <
+                                                                segment_range.core_hi_bp) {
+                                                            merged.push_back(std::move(match));
                                                         }
                                                     }
                                                 }
@@ -1201,19 +1207,23 @@ template <class p_sequence>
                                 match_result_collection merged_collection;
                                 std::vector<match_result>& merged = merged_collection.results;
                                 const sequence_size_t query_len = query_bp_size;
-                                for (auto sr : pg_segment_unit_ranges(
+                                for (const auto segment_range : pg_segment_unit_ranges(
                                          total_bp, query_len, a_lpu, idx_params)) {
                                     const sequence_size_t clip_lo_bp =
-                                        static_cast<sequence_size_t>(sr.cs_u) * a_lpu;
+                                        static_cast<sequence_size_t>(segment_range.cs_u) * a_lpu;
                                     const sequence_size_t clip_hi_bp = std::min(
-                                        static_cast<sequence_size_t>(sr.ce_u) * a_lpu, total_bp);
-                                    match_result_collection seg_res = run_with_ram_index(
-                                        clip_lo_bp, clip_hi_bp, sr.cs_u, sr.ce_u);
-                                    merged_collection.combine_execution_stats(seg_res);
-                                    for (auto& r : seg_res.results) {
-                                        if (r.target_start >= sr.core_lo_bp &&
-                                            r.target_start < sr.core_hi_bp) {
-                                            merged.push_back(std::move(r));
+                                        static_cast<sequence_size_t>(segment_range.ce_u) * a_lpu,
+                                        total_bp);
+                                    match_result_collection segment_collection =
+                                        run_with_ram_index(clip_lo_bp,
+                                                           clip_hi_bp,
+                                                           segment_range.cs_u,
+                                                           segment_range.ce_u);
+                                    merged_collection.combine_execution_stats(segment_collection);
+                                    for (auto& match : segment_collection.results) {
+                                        if (match.target_start >= segment_range.core_lo_bp &&
+                                            match.target_start < segment_range.core_hi_bp) {
+                                            merged.push_back(std::move(match));
                                         }
                                     }
                                 }

@@ -178,20 +178,23 @@ template <sequence_alphabet p_alphabet>
     if (total_bp_size <= postgres_segmentation_threshold_bp) {
         collection = run_minimizer_sequence_index(0, total_bp_size);
     } else {
-        const std::size_t lpu = target_letters_per_unit;
+        const std::size_t letters_per_unit = target_letters_per_unit;
         match_result_collection merged_collection;
         std::vector<match_result>& merged = merged_collection.results;
         const sequence_size_t query_len = lazy_query_view.bp_size();
-        for (auto sr :
-             pg_segment_unit_ranges(total_bp_size, query_len, lpu, minimizer_sequence_params)) {
-            const sequence_size_t clip_lo_bp = static_cast<sequence_size_t>(sr.cs_u) * lpu;
-            const sequence_size_t clip_hi_bp =
-                std::min(static_cast<sequence_size_t>(sr.ce_u) * lpu, total_bp_size);
-            match_result_collection seg_res = run_minimizer_sequence_index(clip_lo_bp, clip_hi_bp);
-            merged_collection.combine_execution_stats(seg_res);
-            for (auto& r : seg_res.results) {
-                if (r.target_start >= sr.core_lo_bp && r.target_start < sr.core_hi_bp) {
-                    merged.push_back(std::move(r));
+        for (const auto segment_range : pg_segment_unit_ranges(
+                 total_bp_size, query_len, letters_per_unit, minimizer_sequence_params)) {
+            const sequence_size_t clip_lo_bp =
+                static_cast<sequence_size_t>(segment_range.cs_u) * letters_per_unit;
+            const sequence_size_t clip_hi_bp = std::min(
+                static_cast<sequence_size_t>(segment_range.ce_u) * letters_per_unit, total_bp_size);
+            match_result_collection segment_collection =
+                run_minimizer_sequence_index(clip_lo_bp, clip_hi_bp);
+            merged_collection.combine_execution_stats(segment_collection);
+            for (auto& match : segment_collection.results) {
+                if (match.target_start >= segment_range.core_lo_bp &&
+                    match.target_start < segment_range.core_hi_bp) {
+                    merged.push_back(std::move(match));
                 }
             }
         }
