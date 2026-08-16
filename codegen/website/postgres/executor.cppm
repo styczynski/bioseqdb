@@ -348,7 +348,7 @@ private:
             }
             (void)connection.execute(example.teardown_sql, deadline);
         } catch (const bioseq::libpq::command_error&) {
-            // Best-effort; preserve the original execution outcome.
+            // Best effort preserves the original execution outcome.
         }
     }
 

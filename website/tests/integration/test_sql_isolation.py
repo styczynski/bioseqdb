@@ -110,28 +110,86 @@ def check_m4_direct(generator: str) -> None:
 
 
 def check_direct_cleanup_on_error(generator: str, pg_bin: Path) -> None:
-    """Direct execution runs author teardown after visible SQL fails."""
+    """Direct teardown clears tutorial state after visible SQL fails."""
     table = "website_direct_cleanup_probe"
-    _psql(pg_bin, os.environ["PGDATABASE"], f"DROP TABLE IF EXISTS {table}")
-    result = _run_generator(generator, [
-        "--conninfo", _direct_conninfo(os.environ["PGDATABASE"]),
-        "--setup", f"CREATE TABLE {table}(id integer)",
-        "--visible", "SELECT * FROM website_missing_relation",
-        "--teardown", f"DROP TABLE {table}",
-    ])
-    residue = _psql(
+    temp_table = "website_direct_cleanup_temp"
+    prepared = "website_direct_cleanup_plan"
+    audit = "website_direct_cleanup_audit"
+    database = os.environ["PGDATABASE"]
+    _psql(
         pg_bin,
-        os.environ["PGDATABASE"],
-        f"SELECT to_regclass('{table}') IS NULL",
+        database,
+        f"DROP TABLE IF EXISTS {table}; DROP TABLE IF EXISTS {audit}; "
+        f"CREATE TABLE {audit}(persistent_removed boolean, "
+        "temp_removed boolean, prepared_removed boolean, setting_reset boolean)",
     )
-    clean = residue.returncode == 0 and residue.stdout.strip() == "t"
+    result = _run_generator(generator, [
+        "--conninfo", _direct_conninfo(database),
+        "--setup", f"CREATE TABLE {table}(id integer); "
+                   f"CREATE TEMP TABLE {temp_table}(id integer); "
+                   "SET application_name = 'website_direct_cleanup'; "
+                   f"PREPARE {prepared} AS SELECT 1",
+        "--visible", "SELECT * FROM website_missing_relation",
+        "--teardown", f"DROP TABLE IF EXISTS {table}; "
+                      f"DROP TABLE IF EXISTS {temp_table}; "
+                      f"DEALLOCATE {prepared}; "
+                      "RESET application_name; "
+                      f"INSERT INTO {audit} "
+                      "SELECT "
+                      f"to_regclass('{table}') IS NULL, "
+                      f"to_regclass('pg_temp.{temp_table}') IS NULL, "
+                      "NOT EXISTS (SELECT 1 FROM pg_prepared_statements "
+                      f"WHERE name = '{prepared}'), "
+                      "current_setting('application_name') "
+                      "<> 'website_direct_cleanup'",
+    ])
+    cleanup_state = _psql(
+        pg_bin, database,
+        f"SELECT persistent_removed, temp_removed, prepared_removed, setting_reset "
+        f"FROM {audit}",
+    )
+    clean = (
+        cleanup_state.returncode == 0
+        and cleanup_state.stdout.strip() == "t|t|t|t"
+    )
     _report(
-        "M4 direct cleanup: visible failure still executes teardown",
+        "Direct cleanup: visible failure clears objects and session state",
         result.returncode == 3 and clean,
-        f"rc={result.returncode} residue={residue.stdout.strip()!r}\n"
+        f"rc={result.returncode} cleanup={cleanup_state.stdout.strip()!r}\n"
         f"stderr:\n{result.stderr.strip()}",
     )
-    _psql(pg_bin, os.environ["PGDATABASE"], f"DROP TABLE IF EXISTS {table}")
+    _psql(
+        pg_bin, database,
+        f"DROP TABLE IF EXISTS {table}; DROP TABLE IF EXISTS {audit}",
+    )
+
+
+def check_direct_cleanup_on_setup_error(generator: str, pg_bin: Path) -> None:
+    """Direct teardown runs when setup SQL fails."""
+    audit = "website_direct_setup_failure_audit"
+    database = os.environ["PGDATABASE"]
+    _psql(
+        pg_bin, database,
+        f"DROP TABLE IF EXISTS {audit}; CREATE TABLE {audit}(teardown_ran boolean)",
+    )
+    result = _run_generator(generator, [
+        "--conninfo", _direct_conninfo(database),
+        "--setup", "SELECT * FROM website_missing_setup_relation",
+        "--visible", "SELECT 1 AS must_not_run",
+        "--teardown", f"INSERT INTO {audit} VALUES (true)",
+    ])
+    teardown_state = _psql(
+        pg_bin, database,
+        f"SELECT teardown_ran FROM {audit}",
+    )
+    clean = teardown_state.returncode == 0 and teardown_state.stdout.strip() == "t"
+    _report(
+        "Direct cleanup: setup failure still executes teardown",
+        result.returncode == 3 and clean and "must_not_run" not in result.stdout,
+        f"rc={result.returncode} teardown={teardown_state.stdout.strip()!r}\n"
+        f"stderr:\n{result.stderr.strip()}",
+    )
+    _psql(pg_bin, database, f"DROP TABLE IF EXISTS {audit}")
 
 
 def check_m4_isolated(generator: str) -> None:
@@ -326,6 +384,7 @@ def main() -> int:
 
     check_m4_direct(args.generator)
     check_direct_cleanup_on_error(args.generator, pg_bin)
+    check_direct_cleanup_on_setup_error(args.generator, pg_bin)
     check_m4_isolated(args.generator)
     check_preflight_failure_skips_teardown(args.generator)
     check_m4_error_retention(args.generator)
