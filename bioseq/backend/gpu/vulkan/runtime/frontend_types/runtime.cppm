@@ -692,9 +692,9 @@ class runtime {
     std::array<prefilter_descriptor_binding_cache, 2> prefilter_descriptor_binding_cache_{};
     VkDescriptorPool dispatch_descriptor_pool_ = VK_NULL_HANDLE; // Fresh-set pool.
     using set_workgroup_size_mvk_function = void(VKAPI_PTR*)(VkShaderModule module,
-                                                             std::uint32_t x,
-                                                             std::uint32_t y,
-                                                             std::uint32_t z);
+                                                             std::uint32_t group_count_x,
+                                                             std::uint32_t group_count_y,
+                                                             std::uint32_t group_count_z);
     set_workgroup_size_mvk_function set_workgroup_size_mvk_ = nullptr;
     bool metallib_provider_capable_ = false;
 

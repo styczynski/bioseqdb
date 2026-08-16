@@ -104,8 +104,10 @@ buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
                             nullptr);
     for (std::uint64_t base = 0; base < push.total_chunks; base += tile_chunks) {
         push.chunk_base = static_cast<std::uint32_t>(base);
-        const std::uint64_t n = std::min<std::uint64_t>(tile_chunks, push.total_chunks - base);
-        const std::uint32_t groups = static_cast<std::uint32_t>((n + local - 1) / local);
+        const std::uint64_t chunk_count =
+            std::min<std::uint64_t>(tile_chunks, push.total_chunks - base);
+        const std::uint32_t groups =
+            static_cast<std::uint32_t>((chunk_count + local - 1) / local);
         vkCmdPushConstants(command_buffer_,
                            pipe.pipeline_layout,
                            VK_SHADER_STAGE_COMPUTE_BIT,
@@ -223,8 +225,9 @@ bool gpu_arena::release_idle_capacity() noexcept {
 
 /// @brief Bump-allocates one aligned device slice.
 gpu_arena_slice gpu_arena::allocate_device(std::uint64_t bytes, std::uint64_t alignment) {
-    const std::uint64_t a = std::max<std::uint64_t>(alignment, k_gpu_buffer_offset_alignment);
-    const std::uint64_t offset = align_up(device_cursor_, a);
+    const std::uint64_t effective_alignment =
+        std::max<std::uint64_t>(alignment, k_gpu_buffer_offset_alignment);
+    const std::uint64_t offset = align_up(device_cursor_, effective_alignment);
     if (offset + bytes > device_capacity_) {
         return gpu_arena_slice{}; // caller checks .is_valid()
     }

@@ -242,8 +242,8 @@ void ensure_homebrew_moltenvk_icd_visible() {
         "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
     };
     for (const char* path : candidates) {
-        if (std::FILE* f = std::fopen(path, "r")) {
-            std::fclose(f);
+        if (std::FILE* manifest_file = std::fopen(path, "r")) {
+            std::fclose(manifest_file);
             if (::setenv("VK_ICD_FILENAMES", path, 0) == 0) {
                 bioseq_log<logging_level::debug>("[vulkan_runtime] using MoltenVK ICD manifest {}",
                                                  path);
@@ -1135,16 +1135,16 @@ static_assert(sizeof(host_query_record) == 16);
 
 /// @brief Full compute→compute memory barrier between dependent GPU frontend dispatches.
 void record_compute_barrier(VkCommandBuffer cmd) {
-    VkMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    VkMemoryBarrier memory_barrier{};
+    memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memory_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    memory_barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0,
                          1,
-                         &b,
+                         &memory_barrier,
                          0,
                          nullptr,
                          0,
@@ -1153,16 +1153,16 @@ void record_compute_barrier(VkCommandBuffer cmd) {
 
 /// @brief Records host-write visibility before a shader consumes mapped bytes.
 void record_host_to_shader(VkCommandBuffer cmd) {
-    VkMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    b.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    VkMemoryBarrier memory_barrier{};
+    memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memory_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_HOST_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0,
                          1,
-                         &b,
+                         &memory_barrier,
                          0,
                          nullptr,
                          0,
@@ -1171,41 +1171,46 @@ void record_host_to_shader(VkCommandBuffer cmd) {
 
 /// @brief Records shader-write visibility before the host reads mapped bytes.
 void record_shader_to_host(VkCommandBuffer cmd) {
-    VkMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    VkMemoryBarrier memory_barrier{};
+    memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memory_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memory_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_HOST_BIT,
                          0,
                          1,
-                         &b,
+                         &memory_barrier,
                          0,
                          nullptr,
                          0,
                          nullptr);
 }
 
-/// @brief Pick (num_workgroups, elems_per_wg) for a device sort/scan over `n` elements,
+/// @brief Picks `(num_workgroups, elems_per_wg)` for a device sort or scan,
 /// keeping the workgroup count under the device dispatch limit.
+/// @param[in] element_count Number of elements covered by the dispatch.
+/// @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
+/// @return Dispatch workgroup count and elements assigned per workgroup.
 struct workgroup_plan {
     std::uint32_t num_workgroups;
     std::uint32_t elems_per_wg;
 };
-[[nodiscard]] workgroup_plan plan_workgroups(std::uint64_t n, std::uint32_t max_wg) {
-    if (n == 0)
+[[nodiscard]] workgroup_plan plan_workgroups(std::uint64_t element_count,
+                                             std::uint32_t maximum_workgroup_count) {
+    if (element_count == 0)
         return workgroup_plan{0u, 1u};
     // Small per-workgroup chunks maximise concurrency for the 1-lane histogram
     // and stable scatter; the parallel scan keeps the per-bin reduction cheap
     // even with many workgroups.
-    std::uint32_t elems_per_wg = 512u;
-    std::uint32_t num_wg = bioseq::common::ceil_div(n, elems_per_wg);
-    if (num_wg > max_wg) {
-        num_wg = max_wg;
-        elems_per_wg = bioseq::common::ceil_div(n, num_wg);
+    std::uint32_t elements_per_workgroup = 512u;
+    std::uint32_t workgroup_count =
+        bioseq::common::ceil_div(element_count, elements_per_workgroup);
+    if (workgroup_count > maximum_workgroup_count) {
+        workgroup_count = maximum_workgroup_count;
+        elements_per_workgroup = bioseq::common::ceil_div(element_count, workgroup_count);
     }
-    return workgroup_plan{num_wg, elems_per_wg};
+    return workgroup_plan{workgroup_count, elements_per_workgroup};
 }
 
 /// @brief Next power-of-two open-addressed slot capacity for `distinct` buckets,
