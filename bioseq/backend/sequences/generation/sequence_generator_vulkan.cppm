@@ -1,6 +1,10 @@
 /**
  * @file sequence_generator_vulkan.cppm
  * @brief Thin Vulkan wrapper for the generic sequence generator.
+ *
+ * This module validates packed-trait and dispatch geometry, estimates the
+ * roundtrip's admitted memory, and forwards accepted work to the shared Vulkan
+ * runtime. Rejected shapes return without selecting a CPU implementation.
  */
 module;
 
@@ -17,14 +21,28 @@ import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::sequences::generation::vulkan {
 
-/// True when packed traits fit the Vulkan generation shader contract.
+/**
+ * @brief Report whether packed traits fit the generation shader contract.
+ * @tparam p_traits Compact-sequence traits describing alphabet and packed storage.
+ * @return `true` for shader-representable alphabet, rank-width, and storage-unit sizes.
+ */
 template <typename p_traits>
 inline constexpr bool gpu_generatable =
     p_traits::alphabet_size >= 2 && p_traits::alphabet_size <= 256 &&
     p_traits::bits_per_char >= 1 && p_traits::bits_per_char <= 32 &&
     (sizeof(typename p_traits::storage_unit) == 4 || sizeof(typename p_traits::storage_unit) == 8);
 
-/// @brief Builds validated push constants for a generation dispatch.
+/**
+ * @brief Build the validated push constants for one generation dispatch.
+ * @tparam p_traits Compact-sequence traits supplying packing geometry.
+ * @param symbols_per_seq Logical symbols generated for each sequence.
+ * @param seq_count Number of independent sequences in the dispatch.
+ * @param seed Deterministic 64-bit generator seed.
+ * @param chunk_units Packed storage units produced by one logical chunk.
+ * @return Complete push constants, or `std::nullopt` when a derived dispatch
+ * dimension cannot be represented by the shader's 32-bit ABI.
+ * @pre `chunk_units` is nonzero.
+ */
 template <typename p_traits>
 [[nodiscard]] std::optional<bioseq::gpu::vulkan::generate_units_push> make_generate_units_push(
     std::uint64_t symbols_per_seq,
@@ -57,7 +75,17 @@ template <typename p_traits>
     return push;
 }
 
-/// @brief Reports whether a hardware Vulkan device can run the requested shape.
+/**
+ * @brief Report whether a hardware Vulkan device can run a requested shape.
+ * @tparam p_traits Compact-sequence traits supplying shader packing geometry.
+ * @param symbols_per_seq Logical symbols generated for each sequence.
+ * @param seq_count Number of independent sequences in the dispatch.
+ * @param seed Deterministic 64-bit generator seed.
+ * @param chunk_units Packed storage units produced by one logical chunk.
+ * @return `true` when the traits and derived push constants are representable
+ * and the shared runtime owns a hardware Vulkan device.
+ * @pre `chunk_units` is nonzero.
+ */
 template <typename p_traits>
 [[nodiscard]] bool can_generate_units_vulkan(
     std::uint64_t symbols_per_seq,
@@ -74,7 +102,14 @@ template <typename p_traits>
     }
 }
 
-/// @brief Estimates admitted host and device bytes for one generation roundtrip.
+/**
+ * @brief Estimate admitted host and device bytes for one generation roundtrip.
+ * @tparam p_traits Compact-sequence traits defining the output storage unit.
+ * @param out_units Number of packed output units.
+ * @param cdf Alphabet cumulative-distribution table uploaded with the dispatch.
+ * @return Twice the packed-output byte count plus the CDF byte count, saturated
+ * at `std::uint64_t` maximum.
+ */
 template <typename p_traits>
 [[nodiscard]] std::uint64_t estimate_generate_units_peak_bytes(
     std::uint64_t out_units,
@@ -89,7 +124,25 @@ template <typename p_traits>
             static_cast<std::uint64_t>(sizeof(std::uint32_t))));
 }
 
-/// @brief Generates packed units on Vulkan when the complete contract is valid.
+/**
+ * @brief Generate packed units when the complete Vulkan contract is valid.
+ * @tparam p_traits Compact-sequence traits defining alphabet and packed storage.
+ * @param out_units Exact destination span for every generated packed unit.
+ * @param symbols_per_seq Logical symbols generated for each sequence.
+ * @param seq_count Number of independent sequences in the dispatch.
+ * @param cdf Alphabet cumulative-distribution table consumed by the shader.
+ * @param seed Deterministic 64-bit generator seed.
+ * @param chunk_units Packed storage units produced by one logical chunk.
+ * @param memory_already_admitted Whether the caller already owns memory
+ * admission covering the complete roundtrip estimate.
+ * @return `false` before dispatch when traits, hardware, output extent, push
+ * constants, or memory admission reject the request; otherwise `true` after
+ * the downloaded packed bytes fill @p out_units.
+ * @pre `chunk_units` is nonzero.
+ *
+ * Runtime dispatch and transfer failures retain the shared Vulkan runtime's
+ * error semantics. This boundary never substitutes CPU generation.
+ */
 template <typename p_traits>
 [[nodiscard]] bool try_generate_units_vulkan(
     std::span<typename p_traits::storage_unit> out_units,
