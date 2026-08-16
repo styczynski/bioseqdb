@@ -76,8 +76,8 @@ public:
 
     dispatch_buffer_runtime(const dispatch_buffer_runtime&) = delete;
     dispatch_buffer_runtime& operator=(const dispatch_buffer_runtime&) = delete;
-    dispatch_buffer_runtime(dispatch_buffer_runtime&& rhs) noexcept;
-    dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& rhs) noexcept;
+    dispatch_buffer_runtime(dispatch_buffer_runtime&& other) noexcept;
+    dispatch_buffer_runtime& operator=(dispatch_buffer_runtime&& other) noexcept;
 
     /** @brief Configures alignment, index-read, relation, snapshot, and memory owners. */
     void configure_params(
@@ -272,7 +272,7 @@ public:
 
 private:
     /** Opaque ownership pointer defined in the implementation module unit. */
-    void* impl = nullptr;
+    void* implementation = nullptr;
 };
 
 } // namespace bioseq::scheduler
