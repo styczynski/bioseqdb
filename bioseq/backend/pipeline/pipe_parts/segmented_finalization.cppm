@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/segmented_finalization.cppm
  * @brief Merges fragment emissions and finalizes persisted fragments.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:segmented_finalization;
 
 import std;

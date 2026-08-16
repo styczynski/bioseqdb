@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/entry_points.cppm
  * @brief Target-neutral index handoff and sketching entry-point support.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:entry_points;
 
 import std;

@@ -5,6 +5,7 @@
 module;
 
 #include <hwy/highway.h>
+#include <new>
 #include <sys/mman.h>
 #include <catch2/catch_test_macros.hpp>
 

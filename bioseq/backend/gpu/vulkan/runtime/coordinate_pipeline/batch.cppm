@@ -6,6 +6,7 @@ module;
 
 #include <cstdint>
 #include <libassert/assert.hpp>
+#include <new>
 
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>

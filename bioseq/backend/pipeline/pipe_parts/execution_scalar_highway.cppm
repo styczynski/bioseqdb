@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/execution_scalar_highway.cppm
  * @brief Runs scalar and Highway pipeline stages.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:execution_scalar_highway;
 
 import std;
@@ -84,8 +88,8 @@ export {
         static constexpr std::string_view stage_name = "minimizer_stage";
 
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
-        int32_t runtime_w;
-        int32_t runtime_k;
+        std::int32_t runtime_w;
+        std::int32_t runtime_k;
         // Runtime parameters let the Vulkan kernel inspect `vulkan_enabled`;
         // CPU kernels ignore them.
         ::bioseq::simd::minimap2_parameters params;
@@ -160,7 +164,7 @@ export {
 
             auto sketches_slab = make_arena_slab<p_minimizer>();
             sketches_slab.reserve(detail::estimated_sketch_count(
-                query_seq_.bp_size(), static_cast<int32_t>(window_size)));
+                query_seq_.bp_size(), static_cast<std::int32_t>(window_size)));
 
             sketch_collector_arena_adapter<p_minimizer> collector{&sketches_slab};
 
@@ -530,8 +534,8 @@ export {
         static constexpr std::string_view stage_name = "primary_secondary_stage";
 
         float mask_level;
-        int32_t mask_len;
-        int32_t sub_diff_value;
+        std::int32_t mask_len;
+        std::int32_t sub_diff_value;
 
         /// Classify primary and secondary regions in place.
         template <is_constexpr_aligner_params p_aligner_parameters,
@@ -575,8 +579,8 @@ export {
         static constexpr std::string_view stage_name = "secondary_filter_stage";
 
         float pri_ratio;
-        int32_t min_diff_value;
-        int32_t best_n;
+        std::int32_t min_diff_value;
+        std::int32_t best_n;
 
         /// Filter secondary regions and emit the surviving prefix.
         template <is_constexpr_aligner_params p_aligner_parameters,
@@ -626,7 +630,7 @@ export {
         const p_query_minimizers* query_minimizers_;
         sequence_size_t query_len;
         sequence_size_t target_len;
-        int32_t runtime_kmer_size;
+        std::int32_t runtime_kmer_size;
         bool enabled;
 
         /// Estimate divergence when enabled and preserve the paired batch.
@@ -639,10 +643,10 @@ export {
                                            p_anchor_batch&& anchors,
                                            emit_token<p_sink>&& token) {
             if (enabled) {
-                const int32_t kmer_size =
+                const std::int32_t kmer_size =
                     p_aligner_parameters::generic_fallback
                         ? runtime_kmer_size
-                        : static_cast<int32_t>(p_aligner_parameters::kmer_len);
+                        : static_cast<std::int32_t>(p_aligner_parameters::kmer_len);
                 estimate_divergence_from_seeds<p_minimizer>(
                     std::span<alignment_region>{regions.data(), regions.size()},
                     std::span<const p_minimizer>{query_minimizers_->data(),

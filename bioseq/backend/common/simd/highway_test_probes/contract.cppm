@@ -82,7 +82,6 @@ static_assert(std::is_standard_layout_v<
               bioseq_highway_hashers_probe_receipt>);
 static_assert(std::is_standard_layout_v<
               bioseq_highway_two_stack_probe_receipt>);
-static_assert(std::is_trivial_v<bioseq_highway_two_stack_probe_receipt>);
 static_assert(
     std::is_trivially_copyable_v<bioseq_highway_two_stack_probe_receipt>);
 static_assert(std::is_standard_layout_v<

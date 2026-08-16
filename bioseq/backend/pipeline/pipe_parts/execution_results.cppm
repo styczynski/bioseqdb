@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/execution_results.cppm
  * @brief Assembles pipeline results and operation statistics.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:execution_results;
 
 import std;

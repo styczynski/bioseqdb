@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/segmented_planning.cppm
  * @brief Plans segment geometry and admitted sketch storage.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:segmented_planning;
 
 import std;

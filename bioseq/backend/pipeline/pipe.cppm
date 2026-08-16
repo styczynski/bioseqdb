@@ -179,7 +179,7 @@ export {
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
             // Both parameter specializations are available; the runtime condition
             // selects the matching specialization.
-            if (params.window_size == 10 && params.kmer_size == static_cast<int32_t>(p_kmer_size)) {
+            if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
                 return pipeline_run_impl<specialized_parameters,
                                          p_alignment_algorithm,
                                          p_chaining_algorithm,
@@ -361,8 +361,8 @@ export {
         static pipeline_description call(const ::bioseq::simd::minimap2_parameters& params,
                                          bioseq::storage::lazy_sequence_view<p_alphabet> q,
                                          bioseq::storage::lazy_sequence_view<p_alphabet> t,
-                                         const int32_t& query_len,
-                                         const int32_t& target_len,
+                                         const std::int32_t& query_len,
+                                         const std::int32_t& target_len,
                                          const query_sketch_route& query_sketch_route) {
             using specialized_parameters =
                 static_aligner_parameters<10u, p_kmer_size, p_bucket_width>;
@@ -381,7 +381,7 @@ export {
                 "sites if the p_minimizer_algorithm default ever changes.");
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_FULL_SPECIALIZATION)
-            if (params.window_size == 10 && params.kmer_size == static_cast<int32_t>(p_kmer_size)) {
+            if (params.window_size == 10 && params.kmer_size == static_cast<std::int32_t>(p_kmer_size)) {
                 return describe_pipeline_leaf<specialized_parameters,
                                               p_alignment_algorithm,
                                               p_chaining_algorithm,

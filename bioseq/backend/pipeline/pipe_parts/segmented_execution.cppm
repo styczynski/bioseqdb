@@ -5,6 +5,7 @@
 module;
 
 #include <boost/unordered/unordered_flat_set.hpp>
+#include <new>
 
 export module bioseq.pipeline.pipe:segmented_execution;
 

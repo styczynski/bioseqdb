@@ -14,11 +14,6 @@ import bioseq.gpu.vulkan.runtime;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 
-// Merge libc++'s aligned allocation declaration into this module attachment.
-static_assert(requires {
-    ::operator new(std::size_t{}, std::align_val_t{});
-});
-
 export namespace bioseq::pipeline_stats {
 
 /// Fixed publication equation checked by the PostgreSQL owner before one

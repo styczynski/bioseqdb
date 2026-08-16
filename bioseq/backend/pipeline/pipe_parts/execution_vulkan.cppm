@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/execution_vulkan.cppm
  * @brief Runs Vulkan stages and validates device route identity.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:execution_vulkan;
 
 import std;
@@ -115,9 +119,9 @@ export {
                            emit_token<p_sink>&& token) {
             const std::uint64_t host_stage_started =
                 host_timing_dst == nullptr ? 0u : host_stage_now_ns();
-            const int32_t kmer_size = p_aligner_parameters::generic_fallback
+            const std::int32_t kmer_size = p_aligner_parameters::generic_fallback
                                           ? params.kmer_size
-                                          : static_cast<int32_t>(p_aligner_parameters::kmer_len);
+                                          : static_cast<std::int32_t>(p_aligner_parameters::kmer_len);
 
             using p_minimizer =
                 std::remove_const_t<typename std::remove_cvref_t<p_batch>::value_type>;

@@ -5,6 +5,7 @@
 module;
 
 #include <libassert/assert.hpp>
+#include <new>
 
 export module bioseq.pipeline.pipe:stage_graph;
 

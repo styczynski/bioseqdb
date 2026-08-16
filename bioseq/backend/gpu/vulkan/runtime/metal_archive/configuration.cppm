@@ -5,6 +5,7 @@
 module;
 
 #include <cstdint>
+#include <new>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>

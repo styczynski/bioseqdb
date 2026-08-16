@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/minimizer_request_admission.cppm
  * @brief Defines minimizer requests, admission rules, and segment geometry.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:minimizer_request_admission;
 
 import std;

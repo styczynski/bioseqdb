@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/minimizer_vulkan.cppm
  * @brief Collects Vulkan minimizers through the strict device route.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:minimizer_vulkan;
 
 import std;

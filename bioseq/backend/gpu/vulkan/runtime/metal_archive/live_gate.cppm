@@ -5,6 +5,7 @@
 module;
 
 #include <fcntl.h>
+#include <new>
 #include <unistd.h>
 
 export module bioseq.gpu.vulkan.runtime:metal_archive.live_gate;

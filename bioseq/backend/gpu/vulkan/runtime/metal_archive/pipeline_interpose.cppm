@@ -8,6 +8,7 @@ module;
 #include <cstdio>
 #include <dlfcn.h>
 #include <libassert/assert.hpp>
+#include <new>
 
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>

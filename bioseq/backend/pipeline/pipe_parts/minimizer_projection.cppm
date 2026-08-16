@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/minimizer_projection.cppm
  * @brief Projects algorithm choices, receipts, and stage statistics.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:minimizer_projection;
 
 import std;
@@ -220,9 +224,9 @@ export {
                                                 std::vector<named_property>& out) {
                 detail::push_base_affine_params(p, out);
                 out.push_back(
-                    {"block_min_size", std::to_string(static_cast<int32_t>(p.block_min_size))});
+                    {"block_min_size", std::to_string(static_cast<std::int32_t>(p.block_min_size))});
                 out.push_back(
-                    {"block_max_size", std::to_string(static_cast<int32_t>(p.block_max_size))});
+                    {"block_max_size", std::to_string(static_cast<std::int32_t>(p.block_max_size))});
             }
 
             template <is_constexpr_aligner_params p_aligner_parameters>
@@ -502,7 +506,7 @@ export {
     }
 
     [[nodiscard]] constexpr std::size_t estimated_sketch_count(std::size_t bp_size,
-                                                               int32_t window_size) noexcept {
+                                                               std::int32_t window_size) noexcept {
         if (window_size <= 0)
             return bp_size + 64u;
         return bp_size / static_cast<std::size_t>(window_size) + 64u;
@@ -519,7 +523,7 @@ export {
     [[nodiscard]] constexpr std::size_t estimated_anchor_count(std::size_t sketch_count,
                                                                std::size_t query_bp,
                                                                std::size_t target_bp,
-                                                               int32_t kmer_size) noexcept {
+                                                               std::int32_t kmer_size) noexcept {
         const std::size_t shared_ceiling =
             std::min(query_bp, target_bp) > static_cast<std::size_t>(kmer_size)
                 ? std::min(query_bp, target_bp) - static_cast<std::size_t>(kmer_size) + 1u
@@ -529,14 +533,14 @@ export {
     }
 
     [[nodiscard]] constexpr std::size_t estimated_chain_count(std::size_t anchor_count,
-                                                              int32_t min_seed_count) noexcept {
+                                                              std::int32_t min_seed_count) noexcept {
         if (min_seed_count <= 0)
             return anchor_count;
         return anchor_count / static_cast<std::size_t>(min_seed_count) + 1u;
     }
 
     [[nodiscard]] constexpr std::size_t estimated_region_count(std::size_t chain_count,
-                                                               int32_t best_n) noexcept {
+                                                               std::int32_t best_n) noexcept {
         return std::min(chain_count, static_cast<std::size_t>(best_n) + 16u);
     }
 
@@ -549,10 +553,10 @@ export {
      * `(block_length, block_length)` as a coarse approximation — the value is
      * only a render hint, never an actual reservation.
      */
-    [[nodiscard]] constexpr std::size_t estimated_cigar_op_count(int32_t query_extent,
-                                                                 int32_t ref_extent) noexcept {
-        const int32_t q = query_extent > 0 ? query_extent : 0;
-        const int32_t r = ref_extent > 0 ? ref_extent : 0;
+    [[nodiscard]] constexpr std::size_t estimated_cigar_op_count(std::int32_t query_extent,
+                                                                 std::int32_t ref_extent) noexcept {
+        const std::int32_t q = query_extent > 0 ? query_extent : 0;
+        const std::int32_t r = ref_extent > 0 ? ref_extent : 0;
         return static_cast<std::size_t>(q) + static_cast<std::size_t>(r) + 16u;
     }
 
@@ -571,12 +575,12 @@ export {
     // Derived helpers
     // =============================================================================
 
-    [[nodiscard]] constexpr int32_t
+    [[nodiscard]] constexpr std::int32_t
     sub_diff(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return params.match_score * 2 + params.mismatch_pen;
     }
 
-    [[nodiscard]] constexpr int32_t
+    [[nodiscard]] constexpr std::int32_t
     min_diff(const ::bioseq::simd::minimap2_parameters& params) noexcept {
         return params.kmer_size * 2;
     }
@@ -589,14 +593,14 @@ export {
     template <sequence_alphabet p_alphabet>
     [[nodiscard, gnu::always_inline]] inline const scoring_matrix<p_alphabet>&
     thread_local_scoring_matrix(const ::bioseq::simd::minimap2_parameters& params) {
-        thread_local int8_t cached_match = std::numeric_limits<int8_t>::min();
-        thread_local int8_t cached_mismatch = std::numeric_limits<int8_t>::min();
-        thread_local int8_t cached_ambi = std::numeric_limits<int8_t>::min();
+        thread_local std::int8_t cached_match = std::numeric_limits<std::int8_t>::min();
+        thread_local std::int8_t cached_mismatch = std::numeric_limits<std::int8_t>::min();
+        thread_local std::int8_t cached_ambi = std::numeric_limits<std::int8_t>::min();
         thread_local scoring_matrix<p_alphabet> cached_matrix{};
 
-        const int8_t want_match = static_cast<int8_t>(params.match_score);
-        const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
-        const int8_t want_ambi = static_cast<int8_t>(params.sc_ambi);
+        const std::int8_t want_match = static_cast<std::int8_t>(params.match_score);
+        const std::int8_t want_mismatch = static_cast<std::int8_t>(params.mismatch_pen);
+        const std::int8_t want_ambi = static_cast<std::int8_t>(params.sc_ambi);
         if (cached_match != want_match || cached_mismatch != want_mismatch ||
             cached_ambi != want_ambi) {
             cached_matrix =

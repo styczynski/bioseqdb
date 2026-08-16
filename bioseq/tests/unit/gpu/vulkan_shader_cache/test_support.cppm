@@ -7,6 +7,7 @@ module;
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <new>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>

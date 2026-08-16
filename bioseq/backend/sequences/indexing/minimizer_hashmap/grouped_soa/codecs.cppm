@@ -35,12 +35,6 @@ import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import :grouped_soa_contracts;
 
-// Own libc++'s aligned allocation declaration in this global fragment.
-// Reduced-BMI compilation must not see a second implicit declaration.
-static_assert(requires {
-    ::operator new(std::size_t{}, std::align_val_t{});
-});
-
 namespace bioseq::indexing::minimizer_generation_wire_detail {
 
 /// Write an unsigned scalar to a fixed little-endian byte range.

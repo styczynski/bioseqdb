@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/minimizer_scalar_highway.cppm
  * @brief Collects scalar and Highway minimizers through the selected route.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:minimizer_scalar_highway;
 
 import std;

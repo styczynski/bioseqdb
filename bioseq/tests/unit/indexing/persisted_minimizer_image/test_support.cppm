@@ -4,6 +4,7 @@
  */
 module;
 
+#include <new>
 #include <sys/mman.h>
 #include <unistd.h>
 

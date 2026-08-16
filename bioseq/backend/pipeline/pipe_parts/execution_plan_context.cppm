@@ -2,6 +2,10 @@
  * @file pipeline/pipe_parts/execution_plan_context.cppm
  * @brief Defines execution plans, ownership contexts, and lifetime contracts.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.pipe:execution_plan_context;
 
 import std;

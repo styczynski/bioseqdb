@@ -5,6 +5,7 @@
 module;
 
 #include <cstring>
+#include <new>
 
 #include <vulkan/vulkan_core.h>
 
