@@ -198,23 +198,36 @@ foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
 endforeach()
 
 # Lazy-facade representation-erasure invariant: sequence consumers must not
-# reach through the facade into a concrete scanner/range implementation. These files
-# are the complete implementation-owner allowlist:
-#   * lazy_sequence.cppm owns the canonical facade adapters;
-#   * sequence_scanner*.cppm own scanner implementations and PG leases.
+# reach through the facade into a concrete scanner/range implementation. These
+# files are the complete implementation-owner allowlist:
+#   * lazy_sequence_parts/{owners,adapters}.cppm own the facade adapters;
+#   * backend/storage/scanner.cppm owns concrete scanner implementations.
 # Any new concrete dependency outside those ownership boundaries fails CMake
 # configuration, making the allowlist a repository-enforced invariant.
 set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence_parts/owners.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_sequence_parts/adapters.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/scanner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage/scanner.cppm)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/scanner.cppm)
 
 # Named unit fixtures may deliberately construct concrete scanners to exercise
 # the representation-erasure boundary.  Keep this list explicit: a new test is
 # not implicitly exempt merely because its filename ends in `_test.cpp`.
 set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/alignment/block_aligner_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/boundary_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer/replay_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap/fragment_producer_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_hashmap_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/minimizer_sequence_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/indexing/symbol_counts_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/lazy_minimizer_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/two_stack_exact_checked_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_sequence_test.cpp)
 file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp
@@ -228,23 +241,77 @@ file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.hpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/*.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/**/*.cpp)
+list(REMOVE_DUPLICATES BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
+list(SORT BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
+
+set(_bioseq_lazy_all_allowlisted_sources
+  ${BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST}
+  ${BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST})
+list(LENGTH _bioseq_lazy_all_allowlisted_sources
+  _bioseq_lazy_allowlisted_source_count)
+list(REMOVE_DUPLICATES _bioseq_lazy_all_allowlisted_sources)
+list(LENGTH _bioseq_lazy_all_allowlisted_sources
+  _bioseq_lazy_unique_allowlisted_source_count)
+if(NOT _bioseq_lazy_allowlisted_source_count EQUAL
+    _bioseq_lazy_unique_allowlisted_source_count)
+  message(FATAL_ERROR
+    "Lazy-concrete allowlists must not contain duplicate source paths")
+endif()
+
+foreach(_bioseq_lazy_boundary_source IN LISTS
+    BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST)
+  file(RELATIVE_PATH _bioseq_lazy_boundary_relative
+    "${CMAKE_CURRENT_LIST_DIR}" "${_bioseq_lazy_boundary_source}")
+  string(REPLACE "\\" "/" _bioseq_lazy_boundary_relative
+    "${_bioseq_lazy_boundary_relative}")
+  if(NOT _bioseq_lazy_boundary_relative MATCHES
+      "^backend/.+\\.cppm$")
+    message(FATAL_ERROR
+      "Lazy-concrete production owner must be one exact backend .cppm: "
+      "${_bioseq_lazy_boundary_source}")
+  endif()
+endforeach()
+foreach(_bioseq_lazy_fixture_source IN LISTS
+    BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST)
+  file(RELATIVE_PATH _bioseq_lazy_fixture_relative
+    "${CMAKE_CURRENT_LIST_DIR}" "${_bioseq_lazy_fixture_source}")
+  string(REPLACE "\\" "/" _bioseq_lazy_fixture_relative
+    "${_bioseq_lazy_fixture_relative}")
+  if(NOT _bioseq_lazy_fixture_relative MATCHES
+      "^tests/unit/.+_test\\.cpp$")
+    message(FATAL_ERROR
+      "Lazy-concrete fixture must be one exact unit-test source: "
+      "${_bioseq_lazy_fixture_source}")
+  endif()
+endforeach()
+foreach(_bioseq_lazy_allowlisted_source IN LISTS
+    _bioseq_lazy_all_allowlisted_sources)
+  if(NOT EXISTS "${_bioseq_lazy_allowlisted_source}"
+      OR IS_DIRECTORY "${_bioseq_lazy_allowlisted_source}")
+    message(FATAL_ERROR
+      "Lazy-concrete allowlisted source does not exist: "
+      "${_bioseq_lazy_allowlisted_source}")
+  endif()
+  list(FIND BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES
+    "${_bioseq_lazy_allowlisted_source}"
+    _bioseq_lazy_allowlisted_inventory_index)
+  if(_bioseq_lazy_allowlisted_inventory_index EQUAL -1)
+    message(FATAL_ERROR
+      "Lazy-concrete allowlisted source is outside the guarded inventory: "
+      "${_bioseq_lazy_allowlisted_source}")
+  endif()
+endforeach()
+
 string(CONCAT _bioseq_lazy_concrete_pattern
   "(\\.scanner[ \t]*\\("
   "|\\.underlying[ \t]*\\("
   "|(^|[^A-Za-z0-9_])lazy_sequence[ \t]*<"
   "|chunked_span_sequence_scanner[ \t]*<)")
+set(_bioseq_lazy_matched_production_sources)
+set(_bioseq_lazy_matched_fixture_sources)
 foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
-  list(FIND BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
-    "${_bioseq_lazy_source}" _bioseq_lazy_allowlist_index)
-  if(NOT _bioseq_lazy_allowlist_index EQUAL -1)
-    continue()
-  endif()
-  list(FIND BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
-    "${_bioseq_lazy_source}" _bioseq_lazy_fixture_index)
-  if(NOT _bioseq_lazy_fixture_index EQUAL -1)
-    continue()
-  endif()
   file(STRINGS "${_bioseq_lazy_source}" _bioseq_lazy_source_lines)
+  set(_bioseq_lazy_source_first_match "")
   foreach(_bioseq_lazy_source_line IN LISTS _bioseq_lazy_source_lines)
     set(_bioseq_lazy_code_line "${_bioseq_lazy_source_line}")
     string(FIND "${_bioseq_lazy_code_line}" "//"
@@ -260,14 +327,79 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
     endif()
     if(_bioseq_lazy_code_line MATCHES
         "${_bioseq_lazy_concrete_pattern}")
-      message(FATAL_ERROR
-        "Lazy-facade representation-erasure violation in ${_bioseq_lazy_source}; "
-        "consume lazy_sequence_view or update the documented ownership boundary; "
-        "matched code: ${_bioseq_lazy_code_line}")
+      if(_bioseq_lazy_source_first_match STREQUAL "")
+        set(_bioseq_lazy_source_first_match "${_bioseq_lazy_code_line}")
+      endif()
     endif()
   endforeach()
+  if(_bioseq_lazy_source_first_match STREQUAL "")
+    continue()
+  endif()
+
+  list(FIND BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
+    "${_bioseq_lazy_source}" _bioseq_lazy_allowlist_index)
+  list(FIND BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
+    "${_bioseq_lazy_source}" _bioseq_lazy_fixture_index)
+  if(NOT _bioseq_lazy_allowlist_index EQUAL -1)
+    list(APPEND _bioseq_lazy_matched_production_sources
+      "${_bioseq_lazy_source}")
+  elseif(NOT _bioseq_lazy_fixture_index EQUAL -1)
+    list(APPEND _bioseq_lazy_matched_fixture_sources
+      "${_bioseq_lazy_source}")
+  else()
+    message(FATAL_ERROR
+      "Lazy-facade representation-erasure violation in "
+      "${_bioseq_lazy_source}; consume lazy_sequence_view or update the "
+      "documented ownership boundary; matched code: "
+      "${_bioseq_lazy_source_first_match}")
+  endif()
 endforeach()
+
+set(_bioseq_lazy_expected_production_sources
+  ${BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST})
+set(_bioseq_lazy_expected_fixture_sources
+  ${BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST})
+list(SORT _bioseq_lazy_expected_production_sources)
+list(SORT _bioseq_lazy_expected_fixture_sources)
+list(SORT _bioseq_lazy_matched_production_sources)
+list(SORT _bioseq_lazy_matched_fixture_sources)
+if(NOT "${_bioseq_lazy_matched_production_sources}" STREQUAL
+    "${_bioseq_lazy_expected_production_sources}")
+  message(FATAL_ERROR
+    "Lazy-concrete production-owner allowlist contains a source without a "
+    "guarded construct: expected '${_bioseq_lazy_expected_production_sources}', "
+    "matched '${_bioseq_lazy_matched_production_sources}'")
+endif()
+if(NOT "${_bioseq_lazy_matched_fixture_sources}" STREQUAL
+    "${_bioseq_lazy_expected_fixture_sources}")
+  message(FATAL_ERROR
+    "Lazy-concrete unit-fixture allowlist contains a source without a guarded "
+    "construct: expected '${_bioseq_lazy_expected_fixture_sources}', matched "
+    "'${_bioseq_lazy_matched_fixture_sources}'")
+endif()
+
 unset(_bioseq_lazy_concrete_pattern)
+unset(_bioseq_lazy_all_allowlisted_sources)
+unset(_bioseq_lazy_allowlisted_source_count)
+unset(_bioseq_lazy_unique_allowlisted_source_count)
+unset(_bioseq_lazy_boundary_source)
+unset(_bioseq_lazy_boundary_relative)
+unset(_bioseq_lazy_fixture_source)
+unset(_bioseq_lazy_fixture_relative)
+unset(_bioseq_lazy_allowlisted_source)
+unset(_bioseq_lazy_allowlisted_inventory_index)
+unset(_bioseq_lazy_source)
+unset(_bioseq_lazy_source_lines)
+unset(_bioseq_lazy_source_line)
+unset(_bioseq_lazy_code_line)
+unset(_bioseq_lazy_line_comment_offset)
+unset(_bioseq_lazy_source_first_match)
+unset(_bioseq_lazy_allowlist_index)
+unset(_bioseq_lazy_fixture_index)
+unset(_bioseq_lazy_expected_production_sources)
+unset(_bioseq_lazy_expected_fixture_sources)
+unset(_bioseq_lazy_matched_production_sources)
+unset(_bioseq_lazy_matched_fixture_sources)
 
 # Lazy-facade completion gate. The broad boundary gate above prevents a
 # concrete lazy/scanner type from escaping anywhere in backend code; this
