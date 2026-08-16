@@ -1,6 +1,10 @@
 /**
  * @file reservation.cppm
  * @brief Exact host, device, and retained-output seed reservations.
+ *
+ * Reservation plans combine driver-reported Vulkan allocation requirements
+ * with host prefix/result storage and caller-retained anchor growth. Every sum
+ * saturates so an overflowed plan is rejected before memory admission.
  */
 module;
 
@@ -37,29 +41,44 @@ export namespace bioseq::seeding {
 // Memory reservation
 // ===========================================================================
 
-/// Exact host, device, and retained-output reservation for one lookup.
+/** @brief Exact host, device, and retained-output reservation for one lookup. */
 struct vulkan_seed_reservation_plan {
+    /** Saturated sum of every reservation component. */
     std::uint64_t total_bytes = 0u;
+    /** Driver-accounted device allocation requirements. */
     std::uint64_t vulkan_allocation_requirement_bytes = 0u;
+    /** Host bytes retaining the exclusive prefix array. */
     std::uint64_t host_prefix_bytes = 0u;
+    /** Host bytes receiving the complete lookup result. */
     std::uint64_t host_result_bytes = 0u;
+    /** Additional bytes retained when the caller's anchor slab must grow. */
     std::uint64_t anchors_out_growth_bytes = 0u;
+    /** Whether no component sum saturated at `std::uint64_t` maximum. */
     bool is_arithmetic_valid = false;
 };
 
-/// Driver-accounted Vulkan buffer allocation requirements by purpose.
+/** @brief Driver-accounted Vulkan buffer allocation requirements by purpose. */
 struct vulkan_seed_buffer_allocation_requirements {
+    /** Shared count/scan scratch buffer requirement. */
     std::uint64_t scratch_bytes = 0u;
+    /** Uploaded minimizer buffer requirement, or zero for device-resident input. */
     std::uint64_t uploaded_minimizer_bytes = 0u;
+    /** Exclusive-prefix buffer requirement. */
     std::uint64_t prefix_bytes = 0u;
+    /** Anchor payload buffer requirement. */
     std::uint64_t anchors_bytes = 0u;
+    /** Anchor-sort key buffer requirement. */
     std::uint64_t anchor_keys_bytes = 0u;
+    /** Bitonic sort-range buffer requirement. */
     std::uint64_t sort_ranges_bytes = 0u;
+    /** Radix-sort anchor scratch requirement. */
     std::uint64_t anchors_scratch_bytes = 0u;
+    /** Radix-sort key scratch requirement. */
     std::uint64_t anchor_keys_scratch_bytes = 0u;
+    /** Radix histogram buffer requirement. */
     std::uint64_t histogram_bytes = 0u;
 
-    /// Return the saturated sum of all buffer requirements.
+    /** @return Saturated sum of all driver-accounted buffer requirements. */
     [[nodiscard]] constexpr std::uint64_t total_bytes() const noexcept {
         std::uint64_t value = 0u;
         value = bioseq::common::saturating_add(value, scratch_bytes);
@@ -76,7 +95,14 @@ struct vulkan_seed_buffer_allocation_requirements {
     }
 };
 
-/// Compose a complete lookup reservation from device and host requirements.
+/**
+ * @brief Compose a complete lookup reservation from device and host requirements.
+ * @param requirements Driver-accounted Vulkan buffer requirements by purpose.
+ * @param host_prefix_bytes Host bytes retaining the exclusive prefix array.
+ * @param host_result_bytes Host bytes receiving downloaded lookup results.
+ * @param anchors_out_growth_bytes Additional caller-retained anchor capacity.
+ * @return Component-preserving plan whose validity is false after saturation.
+ */
 [[nodiscard]] inline constexpr vulkan_seed_reservation_plan
 make_vulkan_seed_reservation_plan(
     const vulkan_seed_buffer_allocation_requirements& requirements,
@@ -102,7 +128,12 @@ make_vulkan_seed_reservation_plan(
     };
 }
 
-/// Return whether @p plan is arithmetically valid and fits @p allocatable_bytes.
+/**
+ * @brief Report whether a reservation is valid and fits an allocation budget.
+ * @param plan Complete host, device, and retained-output reservation.
+ * @param allocatable_bytes Bytes available after existing reservations.
+ * @return `true` when arithmetic stayed finite and the total fits the budget.
+ */
 [[nodiscard]] inline constexpr bool vulkan_seed_reservation_fits(
     const vulkan_seed_reservation_plan& plan,
     std::uint64_t allocatable_bytes) noexcept
@@ -110,13 +141,25 @@ make_vulkan_seed_reservation_plan(
     return plan.is_arithmetic_valid && plan.total_bytes <= allocatable_bytes;
 }
 
+/** Storage and bidirectional-transfer usage shared by seed-lookup buffers. */
 inline constexpr VkBufferUsageFlags k_vulkan_seed_buffer_usage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
     | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
     | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-/// Plan a prefix-driven Vulkan seed lookup.
-/// @tparam p_minimizer_type Minimizer record type.
+/**
+ * @brief Plan a prefix-driven Vulkan seed lookup.
+ * @tparam p_minimizer_type Minimizer record type and device wire representation.
+ * @param vulkan_runtime Shared runtime used to query driver allocation requirements.
+ * @param minimizer_count Query minimizers consumed by the lookup.
+ * @param sort_plan Validated anchor-count and selected-sort geometry.
+ * @param has_device_minimizers Whether query minimizers already reside on the device.
+ * @param anchors_out_capacity Existing retained anchor capacity, in anchor records.
+ * @return Exact component plan, marked invalid when any size arithmetic saturates.
+ *
+ * The driver is queried independently for every nonempty buffer because its
+ * allocation requirement can exceed the logical payload byte count.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_reservation_plan plan_vulkan_seed_lookup_reservation(
     bioseq::gpu::vulkan::runtime& vulkan_runtime,
@@ -169,7 +212,14 @@ template <class p_minimizer_type>
         anchors_out_growth);
 }
 
-/// Return the saturated transient reservation for fused GPU seed counting.
+/**
+ * @brief Compute the saturated transient reservation for fused GPU seed counting.
+ * @tparam p_minimizer_type Minimizer record type and device wire representation.
+ * @param minimizer_count Query minimizers consumed by the fused lookup.
+ * @param has_device_minimizers Whether query minimizers already reside on the device.
+ * @return Saturated bytes for count, prefix, scan-block, query-record,
+ * optional minimizer upload, and arena-alignment storage.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] std::uint64_t vulkan_fused_seed_lookup_reservation_bytes(
     std::uint64_t minimizer_count,
