@@ -19,48 +19,304 @@ import :support;
 import :transitions;
 import :hash_runtime;
 
-/** Retrieves the next sorted or plain aggregate row. */
-static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_state);
-/** Consumes the child plan into the initial hash tables. */
-static void fill_aggregate_hash_table(AggState* aggregate_state);
-/** Loads and aggregates the next queued spill batch. */
-static bool refill_aggregate_hash_table(AggState* aggregate_state);
-/** Retrieves the next row across in-memory and spilled hash batches. */
-static TupleTableSlot* retrieve_aggregate_hash_table(AggState* aggregate_state);
-/** Retrieves the next row from the current in-memory hash table. */
-static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggregate_state);
+/** Consumes the child plan into the initial aggregate hash tables. */
+static void fill_aggregate_hash_table(AggState* aggregate_state) {
+    TupleTableSlot* outer_slot;
+    ExprContext* temporary_context = aggregate_state->tmpcontext;
+
+    /**
+     * Process each outer-plan tuple, and then fetch the next one, until we
+     * exhaust the outer plan.
+     */
+    for (;;) {
+        outer_slot = fetch_input_tuple(aggregate_state);
+        if (TupIsNull(outer_slot))
+            break;
+
+        /* set up for lookup_hash_entries and advance_aggregates */
+        temporary_context->ecxt_outertuple = outer_slot;
+
+        /* Find or build hash_table entries */
+        lookup_hash_entries(aggregate_state);
+
+        /* Advance the aggregates (or combine functions) */
+        advance_aggregates(aggregate_state);
+
+        /**
+         * Reset per-input-tuple context after each tuple, but note that the
+         * hash lookups do this too
+         */
+        ResetExprContext(aggregate_state->tmpcontext);
+    }
+
+    /* finalize spills, if any */
+    finish_initial_hash_aggregate_spills(aggregate_state);
+
+    aggregate_state->table_filled = true;
+    /* Initialize to walk the first hash table */
+    select_current_set(aggregate_state, 0, true);
+    ResetTupleHashIterator(aggregate_state->perhash[0].hashtable,
+                           &aggregate_state->perhash[0].hashiter);
+}
 
 /**
- * Executes grouped or plain aggregation and projects each qualifying result.
+ * Rebuilds the hash tables from the next spilled batch.
+ *
+ * Returns false after both in-memory and spilled work are exhausted.
  */
-export TupleTableSlot* execute_aggregate_plan(PlanState* plan_state) {
-    vector_aggregate_state* vector_state = reinterpret_cast<vector_aggregate_state*>(plan_state);
-    AggState* aggregate_state = vector_state->aggregate_state;
-    TupleTableSlot* result = nullptr;
+static bool refill_aggregate_hash_table(AggState* aggregate_state) {
+    hash_aggregate_batch* batch;
+    AggStatePerHash hash_state;
+    hash_aggregate_spill spill;
+    LogicalTapeSet* tape_set = aggregate_state->hash_tapeset;
+    bool spill_initialized = false;
 
-    CHECK_FOR_INTERRUPTS();
+    if (aggregate_state->hash_batches == NIL)
+        return false;
 
-    if (!aggregate_state->agg_done) {
-        /* Dispatch based on strategy */
-        switch (aggregate_state->phase->aggstrategy) {
-        case AGG_HASHED:
-            if (!aggregate_state->table_filled)
-                fill_aggregate_hash_table(aggregate_state);
-            /* FALLTHROUGH */
-        case AGG_MIXED:
-            result = retrieve_aggregate_hash_table(aggregate_state);
+    /* hash_batches is a stack, with the top item at the end of the list */
+    batch = static_cast<hash_aggregate_batch*>(llast(aggregate_state->hash_batches));
+    aggregate_state->hash_batches = list_delete_last(aggregate_state->hash_batches);
+
+    hash_agg_set_limits(aggregate_state->hashentrysize,
+                        batch->input_card,
+                        batch->used_bits,
+                        &aggregate_state->hash_mem_limit,
+                        &aggregate_state->hash_ngroups_limit,
+                        nullptr);
+
+    /**
+     * Enables only the grouping set represented by the current spilled batch.
+     */
+    MemSet(
+        aggregate_state->hash_pergroup, 0, sizeof(AggStatePerGroup) * aggregate_state->num_hashes);
+
+    /* free memory and reset hash tables */
+    ReScanExprContext(aggregate_state->hashcontext);
+    for (int set_index = 0; set_index < aggregate_state->num_hashes; set_index++)
+        ResetTupleHashTable(aggregate_state->perhash[set_index].hashtable);
+
+    aggregate_state->hash_ngroups_current = 0;
+
+    /**
+     * Runs mixed-mode batch input in phase one and restores hash output phase zero.
+     */
+    Assert(aggregate_state->current_phase == 0);
+    if (aggregate_state->phase->aggstrategy == AGG_MIXED) {
+        aggregate_state->current_phase = 1;
+        aggregate_state->phase = &aggregate_state->phases[aggregate_state->current_phase];
+    }
+
+    select_current_set(aggregate_state, batch->set_index, true);
+
+    hash_state = &aggregate_state->perhash[aggregate_state->current_set];
+
+    /**
+     * Recompiles transition expressions for MinimalTuple input and nullable
+     * inactive grouping sets.
+     */
+    recompile_hash_aggregate_expressions(aggregate_state, true, true);
+
+    for (;;) {
+        TupleTableSlot* spill_slot = aggregate_state->hash_spill_rslot;
+        TupleTableSlot* hash_slot = hash_state->hashslot;
+        TupleHashEntry entry;
+        MinimalTuple spilled_tuple;
+        uint32_t hash_value;
+        bool entry_is_new = false;
+        bool* const entry_is_new_out = aggregate_state->hash_spill_mode ? nullptr : &entry_is_new;
+
+        CHECK_FOR_INTERRUPTS();
+
+        spilled_tuple = read_hash_aggregate_batch(batch, &hash_value);
+        if (spilled_tuple == nullptr)
             break;
-        case AGG_PLAIN:
-        case AGG_SORTED:
-            result = retrieve_direct_aggregate(vector_state);
-            break;
+
+        ExecStoreMinimalTuple(spilled_tuple, spill_slot, true);
+        aggregate_state->tmpcontext->ecxt_outertuple = spill_slot;
+
+        prepare_hash_slot(hash_state, aggregate_state->tmpcontext->ecxt_outertuple, hash_slot);
+        entry = LookupTupleHashEntryHash(
+            hash_state->hashtable, hash_slot, entry_is_new_out, hash_value);
+
+        if (entry != nullptr) {
+            if (entry_is_new)
+                initialize_hash_entry(aggregate_state, hash_state->hashtable, entry);
+            aggregate_state->hash_pergroup[batch->set_index] = static_cast<AggStatePerGroupData*>(
+                bioseq_tuple_hash_entry_additional(hash_state->hashtable, entry));
+            advance_aggregates(aggregate_state);
+        } else {
+            if (!spill_initialized) {
+                /**
+                 * Avoid initializing the spill until we actually need it so
+                 * that we don't assign tapes that will never be used.
+                 */
+                spill_initialized = true;
+                initialize_hash_aggregate_spill(&spill,
+                                                tape_set,
+                                                batch->used_bits,
+                                                batch->input_card,
+                                                aggregate_state->hashentrysize);
+            }
+            /* no memory for a new group, spill */
+            spill_hash_aggregate_tuple(aggregate_state, &spill, spill_slot, hash_value);
+
+            aggregate_state->hash_pergroup[batch->set_index] = nullptr;
         }
 
-        if (!TupIsNull(result))
+        /**
+         * Reset per-input-tuple context after each tuple, but note that the
+         * hash lookups do this too
+         */
+        ResetExprContext(aggregate_state->tmpcontext);
+    }
+
+    LogicalTapeClose(batch->input_tape);
+
+    /* change back to phase 0 */
+    aggregate_state->current_phase = 0;
+    aggregate_state->phase = &aggregate_state->phases[aggregate_state->current_phase];
+
+    if (spill_initialized) {
+        finish_hash_aggregate_spill(aggregate_state, &spill, batch->set_index);
+        update_hash_aggregate_metrics(aggregate_state, true, spill.npartitions);
+    } else
+        update_hash_aggregate_metrics(aggregate_state, true, 0);
+
+    aggregate_state->hash_spill_mode = false;
+
+    /* prepare to walk the first hash table */
+    select_current_set(aggregate_state, batch->set_index, true);
+    ResetTupleHashIterator(aggregate_state->perhash[batch->set_index].hashtable,
+                           &aggregate_state->perhash[batch->set_index].hashiter);
+
+    pfree(batch);
+
+    return true;
+}
+
+/**
+ * Retrieve the groups from the in-memory hash tables without considering any
+ * spilled tuples.
+ */
+static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggregate_state) {
+    ExprContext* expression_context;
+    AggStatePerAgg aggregate_descriptor;
+    AggStatePerGroup group_state;
+    TupleHashEntryData* entry;
+    TupleTableSlot* first_slot;
+    TupleTableSlot* result;
+    AggStatePerHash hash_state;
+
+    /**
+     * Selects the output expression context for hash-group projection.
+     */
+    expression_context = aggregate_state->ss.ps.ps_ExprContext;
+    aggregate_descriptor = aggregate_state->peragg;
+    first_slot = aggregate_state->ss.ss_ScanTupleSlot;
+
+    /**
+     * Note that hash_state (and therefore anything accessed through it) can
+     * change inside the loop, as we change between grouping sets.
+     */
+    hash_state = &aggregate_state->perhash[aggregate_state->current_set];
+
+    /**
+     * We loop retrieving groups until we find one satisfying
+     * aggregate_state->ss.ps.qual
+     */
+    for (;;) {
+        TupleTableSlot* hash_slot = hash_state->hashslot;
+
+        CHECK_FOR_INTERRUPTS();
+
+        /**
+         * Find the next entry in the hash table
+         */
+        entry = ScanTupleHashTable(hash_state->hashtable, &hash_state->hashiter);
+        if (entry == nullptr) {
+            const int next_set = aggregate_state->current_set + 1;
+
+            if (next_set < aggregate_state->num_hashes) {
+                /**
+                 * Switch to next grouping set, reinitialize, and restart the
+                 * loop.
+                 */
+                select_current_set(aggregate_state, next_set, true);
+
+                hash_state = &aggregate_state->perhash[aggregate_state->current_set];
+
+                ResetTupleHashIterator(hash_state->hashtable, &hash_state->hashiter);
+
+                continue;
+            } else {
+                return nullptr;
+            }
+        }
+
+        /**
+         * Resets output storage without firing aggregate shutdown callbacks early.
+         */
+        ResetExprContext(expression_context);
+
+        /**
+         * Transform representative tuple back into one with the right
+         * columns.
+         */
+        ExecStoreMinimalTuple(entry->firstTuple, hash_slot, false);
+        slot_getallattrs(hash_slot);
+
+        ExecClearTuple(first_slot);
+        memset(first_slot->tts_isnull, true, first_slot->tts_tupleDescriptor->natts * sizeof(bool));
+
+        for (int hash_column_index = 0; hash_column_index < hash_state->numhashGrpCols;
+             ++hash_column_index) {
+            const int variable_index = hash_state->hashGrpColIdxInput[hash_column_index] - 1;
+
+            first_slot->tts_values[variable_index] = hash_slot->tts_values[hash_column_index];
+            first_slot->tts_isnull[variable_index] = hash_slot->tts_isnull[hash_column_index];
+        }
+        ExecStoreVirtualTuple(first_slot);
+
+        group_state = static_cast<AggStatePerGroup>(
+            bioseq_tuple_hash_entry_additional(hash_state->hashtable, entry));
+
+        /**
+         * Use the representative input tuple for any references to
+         * non-aggregated input columns in the qual and tlist.
+         */
+        expression_context->ecxt_outertuple = first_slot;
+
+        prepare_projection_slot(
+            aggregate_state, expression_context->ecxt_outertuple, aggregate_state->current_set);
+
+        finalize_aggregates(aggregate_state, aggregate_descriptor, group_state);
+
+        result = project_aggregates(aggregate_state);
+        if (result)
             return result;
     }
 
+    /* No more groups */
     return nullptr;
+}
+/**
+ * Projects qualifying hash groups, refilling from spilled batches as needed.
+ */
+static TupleTableSlot* retrieve_aggregate_hash_table(AggState* aggregate_state) {
+    TupleTableSlot* result = nullptr;
+
+    while (result == nullptr) {
+        result = retrieve_aggregate_hash_table_in_memory(aggregate_state);
+        if (result == nullptr) {
+            if (!refill_aggregate_hash_table(aggregate_state)) {
+                aggregate_state->agg_done = true;
+                break;
+            }
+        }
+    }
+
+    return result;
 }
 
 /** Retrieves the next result from sorted or plain aggregation. */
@@ -363,303 +619,35 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
     return nullptr;
 }
 
-/** Consumes the child plan into the initial aggregate hash tables. */
-static void fill_aggregate_hash_table(AggState* aggregate_state) {
-    TupleTableSlot* outer_slot;
-    ExprContext* temporary_context = aggregate_state->tmpcontext;
-
-    /**
-     * Process each outer-plan tuple, and then fetch the next one, until we
-     * exhaust the outer plan.
-     */
-    for (;;) {
-        outer_slot = fetch_input_tuple(aggregate_state);
-        if (TupIsNull(outer_slot))
-            break;
-
-        /* set up for lookup_hash_entries and advance_aggregates */
-        temporary_context->ecxt_outertuple = outer_slot;
-
-        /* Find or build hash_table entries */
-        lookup_hash_entries(aggregate_state);
-
-        /* Advance the aggregates (or combine functions) */
-        advance_aggregates(aggregate_state);
-
-        /**
-         * Reset per-input-tuple context after each tuple, but note that the
-         * hash lookups do this too
-         */
-        ResetExprContext(aggregate_state->tmpcontext);
-    }
-
-    /* finalize spills, if any */
-    finish_initial_hash_aggregate_spills(aggregate_state);
-
-    aggregate_state->table_filled = true;
-    /* Initialize to walk the first hash table */
-    select_current_set(aggregate_state, 0, true);
-    ResetTupleHashIterator(aggregate_state->perhash[0].hashtable,
-                           &aggregate_state->perhash[0].hashiter);
-}
-
 /**
- * Rebuilds the hash tables from the next spilled batch.
- *
- * Returns false after both in-memory and spilled work are exhausted.
+ * Executes grouped or plain aggregation and projects each qualifying result.
  */
-static bool refill_aggregate_hash_table(AggState* aggregate_state) {
-    hash_aggregate_batch* batch;
-    AggStatePerHash hash_state;
-    hash_aggregate_spill spill;
-    LogicalTapeSet* tape_set = aggregate_state->hash_tapeset;
-    bool spill_initialized = false;
-
-    if (aggregate_state->hash_batches == NIL)
-        return false;
-
-    /* hash_batches is a stack, with the top item at the end of the list */
-    batch = static_cast<hash_aggregate_batch*>(llast(aggregate_state->hash_batches));
-    aggregate_state->hash_batches = list_delete_last(aggregate_state->hash_batches);
-
-    hash_agg_set_limits(aggregate_state->hashentrysize,
-                        batch->input_card,
-                        batch->used_bits,
-                        &aggregate_state->hash_mem_limit,
-                        &aggregate_state->hash_ngroups_limit,
-                        nullptr);
-
-    /**
-     * Enables only the grouping set represented by the current spilled batch.
-     */
-    MemSet(
-        aggregate_state->hash_pergroup, 0, sizeof(AggStatePerGroup) * aggregate_state->num_hashes);
-
-    /* free memory and reset hash tables */
-    ReScanExprContext(aggregate_state->hashcontext);
-    for (int set_index = 0; set_index < aggregate_state->num_hashes; set_index++)
-        ResetTupleHashTable(aggregate_state->perhash[set_index].hashtable);
-
-    aggregate_state->hash_ngroups_current = 0;
-
-    /**
-     * Runs mixed-mode batch input in phase one and restores hash output phase zero.
-     */
-    Assert(aggregate_state->current_phase == 0);
-    if (aggregate_state->phase->aggstrategy == AGG_MIXED) {
-        aggregate_state->current_phase = 1;
-        aggregate_state->phase = &aggregate_state->phases[aggregate_state->current_phase];
-    }
-
-    select_current_set(aggregate_state, batch->set_index, true);
-
-    hash_state = &aggregate_state->perhash[aggregate_state->current_set];
-
-    /**
-     * Recompiles transition expressions for MinimalTuple input and nullable
-     * inactive grouping sets.
-     */
-    recompile_hash_aggregate_expressions(aggregate_state, true, true);
-
-    for (;;) {
-        TupleTableSlot* spill_slot = aggregate_state->hash_spill_rslot;
-        TupleTableSlot* hash_slot = hash_state->hashslot;
-        TupleHashEntry entry;
-        MinimalTuple spilled_tuple;
-        uint32_t hash_value;
-        bool entry_is_new = false;
-        bool* const entry_is_new_out = aggregate_state->hash_spill_mode ? nullptr : &entry_is_new;
-
-        CHECK_FOR_INTERRUPTS();
-
-        spilled_tuple = read_hash_aggregate_batch(batch, &hash_value);
-        if (spilled_tuple == nullptr)
-            break;
-
-        ExecStoreMinimalTuple(spilled_tuple, spill_slot, true);
-        aggregate_state->tmpcontext->ecxt_outertuple = spill_slot;
-
-        prepare_hash_slot(hash_state, aggregate_state->tmpcontext->ecxt_outertuple, hash_slot);
-        entry = LookupTupleHashEntryHash(
-            hash_state->hashtable, hash_slot, entry_is_new_out, hash_value);
-
-        if (entry != nullptr) {
-            if (entry_is_new)
-                initialize_hash_entry(aggregate_state, hash_state->hashtable, entry);
-            aggregate_state->hash_pergroup[batch->set_index] = static_cast<AggStatePerGroupData*>(
-                bioseq_tuple_hash_entry_additional(hash_state->hashtable, entry));
-            advance_aggregates(aggregate_state);
-        } else {
-            if (!spill_initialized) {
-                /**
-                 * Avoid initializing the spill until we actually need it so
-                 * that we don't assign tapes that will never be used.
-                 */
-                spill_initialized = true;
-                initialize_hash_aggregate_spill(&spill,
-                                                tape_set,
-                                                batch->used_bits,
-                                                batch->input_card,
-                                                aggregate_state->hashentrysize);
-            }
-            /* no memory for a new group, spill */
-            spill_hash_aggregate_tuple(aggregate_state, &spill, spill_slot, hash_value);
-
-            aggregate_state->hash_pergroup[batch->set_index] = nullptr;
-        }
-
-        /**
-         * Reset per-input-tuple context after each tuple, but note that the
-         * hash lookups do this too
-         */
-        ResetExprContext(aggregate_state->tmpcontext);
-    }
-
-    LogicalTapeClose(batch->input_tape);
-
-    /* change back to phase 0 */
-    aggregate_state->current_phase = 0;
-    aggregate_state->phase = &aggregate_state->phases[aggregate_state->current_phase];
-
-    if (spill_initialized) {
-        finish_hash_aggregate_spill(aggregate_state, &spill, batch->set_index);
-        update_hash_aggregate_metrics(aggregate_state, true, spill.npartitions);
-    } else
-        update_hash_aggregate_metrics(aggregate_state, true, 0);
-
-    aggregate_state->hash_spill_mode = false;
-
-    /* prepare to walk the first hash table */
-    select_current_set(aggregate_state, batch->set_index, true);
-    ResetTupleHashIterator(aggregate_state->perhash[batch->set_index].hashtable,
-                           &aggregate_state->perhash[batch->set_index].hashiter);
-
-    pfree(batch);
-
-    return true;
-}
-
-/**
- * Projects qualifying hash groups, refilling from spilled batches as needed.
- */
-static TupleTableSlot* retrieve_aggregate_hash_table(AggState* aggregate_state) {
+export TupleTableSlot* execute_aggregate_plan(PlanState* plan_state) {
+    vector_aggregate_state* vector_state = reinterpret_cast<vector_aggregate_state*>(plan_state);
+    AggState* aggregate_state = vector_state->aggregate_state;
     TupleTableSlot* result = nullptr;
 
-    while (result == nullptr) {
-        result = retrieve_aggregate_hash_table_in_memory(aggregate_state);
-        if (result == nullptr) {
-            if (!refill_aggregate_hash_table(aggregate_state)) {
-                aggregate_state->agg_done = true;
-                break;
-            }
-        }
-    }
+    CHECK_FOR_INTERRUPTS();
 
-    return result;
-}
-
-/**
- * Retrieve the groups from the in-memory hash tables without considering any
- * spilled tuples.
- */
-static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggregate_state) {
-    ExprContext* expression_context;
-    AggStatePerAgg aggregate_descriptor;
-    AggStatePerGroup group_state;
-    TupleHashEntryData* entry;
-    TupleTableSlot* first_slot;
-    TupleTableSlot* result;
-    AggStatePerHash hash_state;
-
-    /**
-     * Selects the output expression context for hash-group projection.
-     */
-    expression_context = aggregate_state->ss.ps.ps_ExprContext;
-    aggregate_descriptor = aggregate_state->peragg;
-    first_slot = aggregate_state->ss.ss_ScanTupleSlot;
-
-    /**
-     * Note that hash_state (and therefore anything accessed through it) can
-     * change inside the loop, as we change between grouping sets.
-     */
-    hash_state = &aggregate_state->perhash[aggregate_state->current_set];
-
-    /**
-     * We loop retrieving groups until we find one satisfying
-     * aggregate_state->ss.ps.qual
-     */
-    for (;;) {
-        TupleTableSlot* hash_slot = hash_state->hashslot;
-
-        CHECK_FOR_INTERRUPTS();
-
-        /**
-         * Find the next entry in the hash table
-         */
-        entry = ScanTupleHashTable(hash_state->hashtable, &hash_state->hashiter);
-        if (entry == nullptr) {
-            const int next_set = aggregate_state->current_set + 1;
-
-            if (next_set < aggregate_state->num_hashes) {
-                /**
-                 * Switch to next grouping set, reinitialize, and restart the
-                 * loop.
-                 */
-                select_current_set(aggregate_state, next_set, true);
-
-                hash_state = &aggregate_state->perhash[aggregate_state->current_set];
-
-                ResetTupleHashIterator(hash_state->hashtable, &hash_state->hashiter);
-
-                continue;
-            } else {
-                return nullptr;
-            }
+    if (!aggregate_state->agg_done) {
+        /* Dispatch based on strategy */
+        switch (aggregate_state->phase->aggstrategy) {
+        case AGG_HASHED:
+            if (!aggregate_state->table_filled)
+                fill_aggregate_hash_table(aggregate_state);
+            /* FALLTHROUGH */
+        case AGG_MIXED:
+            result = retrieve_aggregate_hash_table(aggregate_state);
+            break;
+        case AGG_PLAIN:
+        case AGG_SORTED:
+            result = retrieve_direct_aggregate(vector_state);
+            break;
         }
 
-        /**
-         * Resets output storage without firing aggregate shutdown callbacks early.
-         */
-        ResetExprContext(expression_context);
-
-        /**
-         * Transform representative tuple back into one with the right
-         * columns.
-         */
-        ExecStoreMinimalTuple(entry->firstTuple, hash_slot, false);
-        slot_getallattrs(hash_slot);
-
-        ExecClearTuple(first_slot);
-        memset(first_slot->tts_isnull, true, first_slot->tts_tupleDescriptor->natts * sizeof(bool));
-
-        for (int hash_column_index = 0; hash_column_index < hash_state->numhashGrpCols;
-             ++hash_column_index) {
-            const int variable_index = hash_state->hashGrpColIdxInput[hash_column_index] - 1;
-
-            first_slot->tts_values[variable_index] = hash_slot->tts_values[hash_column_index];
-            first_slot->tts_isnull[variable_index] = hash_slot->tts_isnull[hash_column_index];
-        }
-        ExecStoreVirtualTuple(first_slot);
-
-        group_state = static_cast<AggStatePerGroup>(
-            bioseq_tuple_hash_entry_additional(hash_state->hashtable, entry));
-
-        /**
-         * Use the representative input tuple for any references to
-         * non-aggregated input columns in the qual and tlist.
-         */
-        expression_context->ecxt_outertuple = first_slot;
-
-        prepare_projection_slot(
-            aggregate_state, expression_context->ecxt_outertuple, aggregate_state->current_set);
-
-        finalize_aggregates(aggregate_state, aggregate_descriptor, group_state);
-
-        result = project_aggregates(aggregate_state);
-        if (result)
+        if (!TupIsNull(result))
             return result;
     }
 
-    /* No more groups */
     return nullptr;
 }
