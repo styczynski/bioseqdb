@@ -1,5 +1,5 @@
 /**
- * @file vector_compare.cppm
+ * @file index.cppm
  * @brief Type-generic comparison and Boolean-mask operations for column vectors.
  *
  * The comparison kernel relies on the language's usual arithmetic conversions

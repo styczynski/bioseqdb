@@ -163,8 +163,8 @@ public:
             size_t region_end,
             size_t block_size) {
         length_ = region_end - region_begin;
-        const size_t total = 1 + length_ + block_size;
-        data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
+        const size_t storage_size = 1 + length_ + block_size;
+        data_ = context::current().alloc_align_array<uint8_t, 64>(storage_size + 64);
         const uint8_t null_byte = static_cast<uint8_t>(p_alphabet_dimension);
         data_[0] = null_byte;
         sequence.template copy_ranks<
@@ -176,7 +176,7 @@ public:
     /// Return the byte at a one-based padded index. Index zero is the sentinel.
     [[nodiscard]] uint8_t byte_at(size_t index) const { return data_[index]; }
 
-    /// Pointer for SIMD loads at position i in padded buffer.
+    /// Pointer for SIMD loads at the requested padded-buffer index.
     [[nodiscard]] const uint8_t* data_at(size_t index) const {
         return data_.data() + index;
     }
@@ -209,8 +209,8 @@ public:
     void clear(p_simd_tag simd_tag, size_t count) {
         const auto minimum_scores = hn::Set(simd_tag, k_block_score_minimum);
         const size_t lane_count = hn::Lanes(simd_tag);
-        for (size_t i = 0; i < count; i += lane_count) {
-            hn::Store(minimum_scores, simd_tag, storage_.data() + i);
+        for (size_t buffer_index = 0; buffer_index < count; buffer_index += lane_count) {
+            hn::Store(minimum_scores, simd_tag, storage_.data() + buffer_index);
         }
     }
 
@@ -279,14 +279,14 @@ public:
             size_t reference_length,
             size_t maximum_block_size)
         : query_length_(query_length), reference_length_(reference_length) {
-        const size_t len = query_length + reference_length + 2;
+        const size_t combined_length = query_length + reference_length + 2;
         const size_t lane_count = hn::Lanes(block_aligner_simd_tag{});
         if (maximum_block_size > (std::numeric_limits<size_t>::max)() / 2
-            || len > (std::numeric_limits<size_t>::max)()
+            || combined_length > (std::numeric_limits<size_t>::max)()
                 - maximum_block_size * 2) {
             abort_block_aligner_invariant("trace capacity arithmetic overflow");
         }
-        const size_t trace_columns = len + maximum_block_size * 2;
+        const size_t trace_columns = combined_length + maximum_block_size * 2;
         const size_t trace_rows = maximum_block_size / lane_count;
         if (trace_rows != 0
             && trace_columns > (std::numeric_limits<size_t>::max)() / trace_rows) {
@@ -297,16 +297,16 @@ public:
                 > (std::numeric_limits<size_t>::max)() - 64) {
             abort_block_aligner_invariant("trace capacity guard overflow");
         }
-        const size_t trace_cap = trace_capacity_ + 64;
-        const size_t right_cap = divide_block_extent_round_up(len * 2, 64);
-        const size_t block_cap = len * 4;
-        auto& ctx = context::current();
-        primary_trace_words_       = ctx.alloc_align_array<trace_type>(trace_cap);
-        secondary_trace_words_      = ctx.alloc_align_array<trace_type>(trace_cap);
-        block_directions_       = ctx.alloc_align_array<uint64_t>(right_cap);
-        block_origins_ = ctx.alloc_align_array<uint32_t>(block_cap);
-        block_extents_  = ctx.alloc_align_array<uint16_t>(block_cap);
-        std::memset(block_directions_.data(), 0, right_cap * sizeof(uint64_t));
+        const size_t trace_storage_capacity = trace_capacity_ + 64;
+        const size_t direction_word_capacity = divide_block_extent_round_up(combined_length * 2, 64);
+        const size_t block_coordinate_capacity = combined_length * 4;
+        auto& alignment_context = context::current();
+        primary_trace_words_       = alignment_context.alloc_align_array<trace_type>(trace_storage_capacity);
+        secondary_trace_words_      = alignment_context.alloc_align_array<trace_type>(trace_storage_capacity);
+        block_directions_       = alignment_context.alloc_align_array<uint64_t>(direction_word_capacity);
+        block_origins_ = alignment_context.alloc_align_array<uint32_t>(block_coordinate_capacity);
+        block_extents_  = alignment_context.alloc_align_array<uint16_t>(block_coordinate_capacity);
+        std::memset(block_directions_.data(), 0, direction_word_capacity * sizeof(uint64_t));
     }
 
     /** Reset counters and dimensions while retaining allocated storage. */
@@ -346,8 +346,8 @@ public:
             && block_extents_.size() >= 2
             && block_count_ <= (block_origins_.size() - 2) / 2
             && block_count_ <= (block_extents_.size() - 2) / 2;
-        const size_t word = block_count_ / 64;
-        if (!is_block_slot_valid || word >= block_directions_.size()
+        const size_t direction_word_index = block_count_ / 64;
+        if (!is_block_slot_valid || direction_word_index >= block_directions_.size()
             || row_start > std::numeric_limits<std::uint32_t>::max()
             || column_start > std::numeric_limits<std::uint32_t>::max()
             || width > std::numeric_limits<std::uint16_t>::max()
@@ -360,9 +360,9 @@ public:
             static_cast<uint32_t>(column_start);
         block_extents_[block_count_ * 2]      = static_cast<uint16_t>(height);
         block_extents_[block_count_ * 2 + 1]  = static_cast<uint16_t>(width);
-        const size_t bit  = block_count_ % 64;
-        block_directions_[word] = (block_directions_[word] & ~(1ULL << bit))
-                     | (static_cast<uint64_t>(is_right_block) << bit);
+        const size_t direction_bit_index  = block_count_ % 64;
+        block_directions_[direction_word_index] = (block_directions_[direction_word_index] & ~(1ULL << direction_bit_index))
+                     | (static_cast<uint64_t>(is_right_block) << direction_bit_index);
         ++block_count_;
     }
 
@@ -514,7 +514,7 @@ struct block_aligner_scratch {
     block_trace trace;  ///< Optional packed traceback storage.
     block_aligned_buffer diagonal_column, gap_column, diagonal_row, gap_row;  ///< Active borders.
     block_aligned_buffer diagonal_column_checkpoint, gap_column_checkpoint, diagonal_row_checkpoint, gap_row_checkpoint;  ///< Restorable borders.
-    block_aligned_buffer temporary_buffer_one, temporary_buffer_two;  ///< SIMD shift scratch.
+    block_aligned_buffer diagonal_shift_buffer, gap_shift_buffer;  ///< SIMD shift scratch.
 
     /** Allocate working storage for an admitted block geometry. */
     block_aligner_scratch(
@@ -533,7 +533,7 @@ struct block_aligner_scratch {
         , gap_column_checkpoint(maximum_block_size)
         , diagonal_row_checkpoint(maximum_block_size)
         , gap_row_checkpoint(maximum_block_size)
-        , temporary_buffer_one(64), temporary_buffer_two(64) {}
+        , diagonal_shift_buffer(64), gap_shift_buffer(64) {}
 
     /** Reset all active borders and optional trace positions. */
     template<class p_simd_tag>
@@ -555,8 +555,8 @@ struct block_aligner_scratch {
         diagonal_row_checkpoint.clear(simd_tag, maximum_block_size);
         gap_row_checkpoint.clear(simd_tag, maximum_block_size);
         const size_t lane_count = hn::Lanes(simd_tag);
-        temporary_buffer_one.clear(simd_tag, lane_count);
-        temporary_buffer_two.clear(simd_tag, lane_count);
+        diagonal_shift_buffer.clear(simd_tag, lane_count);
+        gap_shift_buffer.clear(simd_tag, lane_count);
     }
 };
 
@@ -588,12 +588,12 @@ auto make_block_prefix_scan_constants(
         hn::Store(four_lane_costs, simd_tag, lane_values);
         const int16_t half_last = lane_values[lane_count / 2 - 1];
         HWY_ALIGN int16_t corrected_costs[hn::MaxLanes(simd_tag)];
-        for (size_t i = 0; i < lane_count / 2; ++i) {
-            corrected_costs[i] = lane_values[i];
+        for (size_t lane_index = 0; lane_index < lane_count / 2; ++lane_index) {
+            corrected_costs[lane_index] = lane_values[lane_index];
         }
-        for (size_t i = lane_count / 2; i < lane_count; ++i) {
-            corrected_costs[i] = clamp_block_score_to_int16(
-                static_cast<int32_t>(half_last) + static_cast<int32_t>(lane_values[i]));
+        for (size_t lane_index = lane_count / 2; lane_index < lane_count; ++lane_index) {
+            corrected_costs[lane_index] = clamp_block_score_to_int16(
+                static_cast<int32_t>(half_last) + static_cast<int32_t>(lane_values[lane_index]));
         }
         return {hn::Load(simd_tag, corrected_costs), four_lane_costs};
     }
@@ -635,11 +635,11 @@ HWY_INLINE hn::Vec<p_simd_tag> scan_block_prefix(
         HWY_ALIGN int16_t lane_offset_values[hn::MaxLanes(simd_tag)];
         hn::Store(lane_offsets, simd_tag, lane_offset_values);
         HWY_ALIGN int16_t corrected_values[hn::MaxLanes(simd_tag)];
-        for (size_t i = 0; i < lane_count / 2; ++i) corrected_values[i] = k_block_score_minimum;
-        for (size_t i = lane_count / 2; i < lane_count; ++i) {
-            corrected_values[i] = clamp_block_score_to_int16(
+        for (size_t lane_index = 0; lane_index < lane_count / 2; ++lane_index) corrected_values[lane_index] = k_block_score_minimum;
+        for (size_t lane_index = lane_count / 2; lane_index < lane_count; ++lane_index) {
+            corrected_values[lane_index] = clamp_block_score_to_int16(
                 static_cast<int32_t>(lower_last)
-                + static_cast<int32_t>(lane_offset_values[i]));
+                + static_cast<int32_t>(lane_offset_values[lane_index]));
         }
         return hn::Max(
             four_lane_scores,
@@ -768,22 +768,22 @@ HWY_INLINE auto place_alignment_block(
     const bool can_have_origin = (row_start == 0 && column_start == 0);
 
     size_t processed_columns = 0;
-    for (size_t j = 0; j < width; ++j) {
+    for (size_t column_offset = 0; column_offset < width; ++column_offset) {
         auto previous_row_gap_scores = minimum_scores;
         diagonal_scores = minimum_scores;
         row_gap_scores = minimum_scores;
         [[maybe_unused]] auto previous_row_trace = minimum_scores;
 
-        const uint8_t reference_rank = reference.byte_at(column_start + j);
+        const uint8_t reference_rank = reference.byte_at(column_start + column_offset);
         const auto score_lookup = load_score_lookup_tables<p_alphabet>(
             score_matrix, simd_tag, reference_rank);
 
-        // Origin can only land on j == 0 when can_have_origin is true.
-        const bool column_contains_origin = can_have_origin && (j == 0);
+        // The origin can only land in the first processed column.
+        const bool column_contains_origin = can_have_origin && (column_offset == 0);
 
-        for (size_t i = 0; i < height; i += lane_count) {
-            auto previous_diagonal_scores = hn::Load(simd_tag, diagonal_column + i);
-            auto previous_column_gap_scores = hn::Load(simd_tag, gap_column + i);
+        for (size_t row_offset = 0; row_offset < height; row_offset += lane_count) {
+            auto previous_diagonal_scores = hn::Load(simd_tag, diagonal_column + row_offset);
+            auto previous_column_gap_scores = hn::Load(simd_tag, gap_column + row_offset);
 
             // Diagonal: shift previous_diagonal_scores left by 1, borrow from diagonal_corner
             auto diagonal_predecessor_scores = shift_lanes_left_with_predecessor(simd_tag, previous_diagonal_scores, diagonal_corner);
@@ -794,15 +794,14 @@ HWY_INLINE auto place_alignment_block(
                 score_matrix,
                 simd_tag,
                 score_lookup,
-                query.data_at(row_start + i));
+                query.data_at(row_start + row_offset));
 
             // Match/mismatch
             diagonal_scores = hn::SaturatedAdd(diagonal_predecessor_scores, scores);
 
-            // Origin cell: insert relative_zero at lane 0 — the inner
-            // condition is only reachable when `i == 0` (since
-            // row_start + i == 0 requires both row_start == 0 and i == 0).
-            if (column_contains_origin && i == 0) {
+            // Origin cell: insert relative_zero at lane 0. The inner condition
+            // is only reachable in the first row vector.
+            if (column_contains_origin && row_offset == 0) {
                 diagonal_scores = replace_first_lanes(simd_tag, diagonal_scores, relative_zero);
             }
 
@@ -846,27 +845,27 @@ HWY_INLINE auto place_alignment_block(
                 auto update_mask = hn::MaskFromVec(
                     hn::VecFromMask(simd_tag, hn::Eq(maximum_scores, diagonal_scores)));
                 maximum_row_offsets = hn::IfThenElse(update_mask,
-                    hn::Set(simd_tag, static_cast<int16_t>(i)), maximum_row_offsets);
+                    hn::Set(simd_tag, static_cast<int16_t>(row_offset)), maximum_row_offsets);
                 maximum_column_offsets = hn::IfThenElse(update_mask,
-                    hn::Set(simd_tag, static_cast<int16_t>(j)), maximum_column_offsets);
+                    hn::Set(simd_tag, static_cast<int16_t>(column_offset)), maximum_column_offsets);
             }
 
             // Store updated column borders
-            hn::Store(diagonal_scores, simd_tag, diagonal_column + i);
-            hn::Store(column_gap_scores, simd_tag, gap_column + i);
+            hn::Store(diagonal_scores, simd_tag, diagonal_column + row_offset);
+            hn::Store(column_gap_scores, simd_tag, gap_column + row_offset);
         }
 
         // End of column — update bottom border
         diagonal_corner = hn::Set(simd_tag, k_block_score_minimum);
-        diagonal_row[j] = extract_last_lane(simd_tag, diagonal_scores);
-        gap_row[j] = extract_last_lane(simd_tag, row_gap_scores);
-        processed_columns = j + 1;
+        diagonal_row[column_offset] = extract_last_lane(simd_tag, diagonal_scores);
+        gap_row[column_offset] = extract_last_lane(simd_tag, row_gap_scores);
+        processed_columns = column_offset + 1;
 
         // Early exit past both sequence ends (global alignment only)
         if constexpr (!p_is_x_drop_enabled) {
-            if (row_start + height > query.length() && column_start + j >= reference.length()) {
+            if (row_start + height > query.length() && column_start + column_offset >= reference.length()) {
                 if constexpr (p_is_trace_enabled) {
-                    trace.skip_trace_words((width - 1 - j) * (height / lane_count));
+                    trace.skip_trace_words((width - 1 - column_offset) * (height / lane_count));
                 }
                 break;
             }
@@ -897,44 +896,44 @@ template<class p_simd_tag>
 HWY_INLINE hn::Vec<p_simd_tag> shift_block_scores_and_offset(
         p_simd_tag simd_tag,
         size_t block_size,
-        block_aligned_buffer& first_buffer,
-        block_aligned_buffer& second_buffer,
-        block_aligned_buffer& first_temporary_buffer,
-        block_aligned_buffer& second_temporary_buffer,
+        block_aligned_buffer& diagonal_buffer,
+        block_aligned_buffer& gap_buffer,
+        block_aligned_buffer& diagonal_shift_buffer,
+        block_aligned_buffer& gap_shift_buffer,
         hn::Vec<p_simd_tag> score_offset_adjustment)
 {
     const size_t lane_count = hn::Lanes(simd_tag);
-    auto current_first_scores = hn::SaturatedAdd(hn::Load(simd_tag, first_buffer.data()), score_offset_adjustment);
-    auto current_second_scores = hn::SaturatedAdd(hn::Load(simd_tag, second_buffer.data()), score_offset_adjustment);
+    auto current_diagonal_scores = hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data()), score_offset_adjustment);
+    auto current_gap_scores = hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data()), score_offset_adjustment);
 
     HWY_ALIGN int16_t lane_values[hn::MaxLanes(simd_tag)];
-    hn::Store(current_first_scores, simd_tag, lane_values);
+    hn::Store(current_diagonal_scores, simd_tag, lane_values);
     const auto diagonal_corner = hn::Set(simd_tag, lane_values[k_block_shift_step - 1]);
 
     if (lane_count == k_block_shift_step) {
         // lane_count == STEP: shift by one full SIMD vector
-        for (size_t i = 0; i + lane_count < block_size; i += lane_count) {
-            auto next_first_scores = hn::SaturatedAdd(hn::Load(simd_tag, first_buffer.data() + i + lane_count), score_offset_adjustment);
-            auto next_second_scores = hn::SaturatedAdd(hn::Load(simd_tag, second_buffer.data() + i + lane_count), score_offset_adjustment);
-            hn::Store(next_first_scores, simd_tag, first_buffer.data() + i);
-            hn::Store(next_second_scores, simd_tag, second_buffer.data() + i);
-            current_first_scores = next_first_scores; current_second_scores = next_second_scores;
+        for (size_t buffer_index = 0; buffer_index + lane_count < block_size; buffer_index += lane_count) {
+            auto next_diagonal_scores = hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
+            auto next_gap_scores = hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
+            hn::Store(next_diagonal_scores, simd_tag, diagonal_buffer.data() + buffer_index);
+            hn::Store(next_gap_scores, simd_tag, gap_buffer.data() + buffer_index);
+            current_diagonal_scores = next_diagonal_scores; current_gap_scores = next_gap_scores;
         }
-        hn::Store(hn::Load(simd_tag, first_temporary_buffer.data()), simd_tag, first_buffer.data() + block_size - lane_count);
-        hn::Store(hn::Load(simd_tag, second_temporary_buffer.data()), simd_tag, second_buffer.data() + block_size - lane_count);
+        hn::Store(hn::Load(simd_tag, diagonal_shift_buffer.data()), simd_tag, diagonal_buffer.data() + block_size - lane_count);
+        hn::Store(hn::Load(simd_tag, gap_shift_buffer.data()), simd_tag, gap_buffer.data() + block_size - lane_count);
     } else {
         // lane_count > STEP: use ConcatLowerUpper (shifts by lane_count/2 = STEP)
-        for (size_t i = 0; i + lane_count < block_size; i += lane_count) {
-            auto next_first_scores = hn::SaturatedAdd(hn::Load(simd_tag, first_buffer.data() + i + lane_count), score_offset_adjustment);
-            auto next_second_scores = hn::SaturatedAdd(hn::Load(simd_tag, second_buffer.data() + i + lane_count), score_offset_adjustment);
-            hn::Store(shift_block_vector_half(simd_tag, next_first_scores, current_first_scores), simd_tag, first_buffer.data() + i);
-            hn::Store(shift_block_vector_half(simd_tag, next_second_scores, current_second_scores), simd_tag, second_buffer.data() + i);
-            current_first_scores = next_first_scores; current_second_scores = next_second_scores;
+        for (size_t buffer_index = 0; buffer_index + lane_count < block_size; buffer_index += lane_count) {
+            auto next_diagonal_scores = hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
+            auto next_gap_scores = hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data() + buffer_index + lane_count), score_offset_adjustment);
+            hn::Store(shift_block_vector_half(simd_tag, next_diagonal_scores, current_diagonal_scores), simd_tag, diagonal_buffer.data() + buffer_index);
+            hn::Store(shift_block_vector_half(simd_tag, next_gap_scores, current_gap_scores), simd_tag, gap_buffer.data() + buffer_index);
+            current_diagonal_scores = next_diagonal_scores; current_gap_scores = next_gap_scores;
         }
-        hn::Store(shift_block_vector_half(simd_tag, hn::Load(simd_tag, first_temporary_buffer.data()), current_first_scores),
-                  simd_tag, first_buffer.data() + block_size - lane_count);
-        hn::Store(shift_block_vector_half(simd_tag, hn::Load(simd_tag, second_temporary_buffer.data()), current_second_scores),
-                  simd_tag, second_buffer.data() + block_size - lane_count);
+        hn::Store(shift_block_vector_half(simd_tag, hn::Load(simd_tag, diagonal_shift_buffer.data()), current_diagonal_scores),
+                  simd_tag, diagonal_buffer.data() + block_size - lane_count);
+        hn::Store(shift_block_vector_half(simd_tag, hn::Load(simd_tag, gap_shift_buffer.data()), current_gap_scores),
+                  simd_tag, gap_buffer.data() + block_size - lane_count);
     }
     return diagonal_corner;
 }
@@ -944,16 +943,16 @@ template<class p_simd_tag>
 HWY_INLINE void offset_block_scores(
         p_simd_tag simd_tag,
         size_t block_size,
-        block_aligned_buffer& first_buffer,
-        block_aligned_buffer& second_buffer,
+        block_aligned_buffer& diagonal_buffer,
+        block_aligned_buffer& gap_buffer,
         hn::Vec<p_simd_tag> score_offset_adjustment)
 {
     const size_t lane_count = hn::Lanes(simd_tag);
-    for (size_t i = 0; i < block_size; i += lane_count) {
-        hn::Store(hn::SaturatedAdd(hn::Load(simd_tag, first_buffer.data() + i), score_offset_adjustment),
-                  simd_tag, first_buffer.data() + i);
-        hn::Store(hn::SaturatedAdd(hn::Load(simd_tag, second_buffer.data() + i), score_offset_adjustment),
-                  simd_tag, second_buffer.data() + i);
+    for (size_t buffer_index = 0; buffer_index < block_size; buffer_index += lane_count) {
+        hn::Store(hn::SaturatedAdd(hn::Load(simd_tag, diagonal_buffer.data() + buffer_index), score_offset_adjustment),
+                  simd_tag, diagonal_buffer.data() + buffer_index);
+        hn::Store(hn::SaturatedAdd(hn::Load(simd_tag, gap_buffer.data() + buffer_index), score_offset_adjustment),
+                  simd_tag, gap_buffer.data() + buffer_index);
     }
 }
 
@@ -965,7 +964,7 @@ HWY_INLINE int16_t block_prefix_maximum(
     HWY_ALIGN int16_t lane_values[hn::MaxLanes(simd_tag)];
     hn::Store(hn::Load(simd_tag, buffer), simd_tag, lane_values);
     int16_t result = k_block_score_minimum;
-    for (size_t i = 0; i < k_block_shift_step; ++i) result = std::max(result, lane_values[i]);
+    for (size_t lane_index = 0; lane_index < k_block_shift_step; ++lane_index) result = std::max(result, lane_values[lane_index]);
     return result;
 }
 
@@ -982,8 +981,8 @@ HWY_INLINE int16_t block_suffix_maximum(
         simd_tag,
         lane_values);
     int16_t result = k_block_score_minimum;
-    for (size_t i = lane_count - k_block_shrink_suffix_length; i < lane_count; ++i)
-        result = std::max(result, lane_values[i]);
+    for (size_t lane_index = lane_count - k_block_shrink_suffix_length; lane_index < lane_count; ++lane_index)
+        result = std::max(result, lane_values[lane_index]);
     return result;
 }
 
@@ -1068,14 +1067,14 @@ void align_block_core(
                     block_row_start, block_column_start + block_size - k_block_shift_step,
                     k_block_shift_step, block_size,
                     scratch.diagonal_column.data(), scratch.gap_column.data(),
-                    scratch.temporary_buffer_one.data(), scratch.temporary_buffer_two.data(),
+                    scratch.diagonal_shift_buffer.data(), scratch.gap_shift_buffer.data(),
                     diagonal_corner_input, clamp_block_score_to_int16(-score_offset + k_block_score_bias), true,
                     core_stats);
 
             right_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_column.data());
             diagonal_corner = shift_block_scores_and_offset(simd_tag, block_size,
                 scratch.diagonal_row, scratch.gap_row,
-                scratch.temporary_buffer_one, scratch.temporary_buffer_two, score_offset_adjustment);
+                scratch.diagonal_shift_buffer, scratch.gap_shift_buffer, score_offset_adjustment);
             down_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_row.data());
             break;
         }
@@ -1102,14 +1101,14 @@ void align_block_core(
                     block_column_start, block_row_start + block_size - k_block_shift_step,
                     k_block_shift_step, block_size,
                     scratch.diagonal_row.data(), scratch.gap_row.data(),
-                    scratch.temporary_buffer_one.data(), scratch.temporary_buffer_two.data(),
+                    scratch.diagonal_shift_buffer.data(), scratch.gap_shift_buffer.data(),
                     diagonal_corner_input, clamp_block_score_to_int16(-score_offset + k_block_score_bias), false,
                     core_stats);
 
             down_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_row.data());
             diagonal_corner = shift_block_scores_and_offset(simd_tag, block_size,
                 scratch.diagonal_column, scratch.gap_column,
-                scratch.temporary_buffer_one, scratch.temporary_buffer_two, score_offset_adjustment);
+                scratch.diagonal_shift_buffer, scratch.gap_shift_buffer, score_offset_adjustment);
             right_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_column.data());
             break;
         }
@@ -1124,8 +1123,8 @@ void align_block_core(
             }
 
             // Grow DOWN: previous_block_size cols x grow_step rows
-            hn::Vec<p_simd_tag> first_maximum_scores, first_row_offsets, first_column_offsets;
-            std::tie(first_maximum_scores, first_row_offsets, first_column_offsets) =
+            hn::Vec<p_simd_tag> down_growth_maximum_scores, down_growth_row_offsets, down_growth_column_offsets;
+            std::tie(down_growth_maximum_scores, down_growth_row_offsets, down_growth_column_offsets) =
                 place_alignment_block<p_is_trace_enabled, p_is_x_drop_enabled, p_should_collect_stats, p_alphabet>(
                     simd_tag, score_matrix, negative_gap_open, negative_gap_extension,
                     reference, query, scratch.trace,
@@ -1136,8 +1135,8 @@ void align_block_core(
                     scratch.gap_column.data() + previous_block_size,
                     hn::Set(simd_tag, k_block_score_minimum), clamp_block_score_to_int16(-score_offset + k_block_score_bias), false,
                     core_stats);
-            growth_maximum_row_offsets = first_row_offsets;
-            growth_maximum_column_offsets = first_column_offsets;
+            growth_maximum_row_offsets = down_growth_row_offsets;
+            growth_maximum_column_offsets = down_growth_column_offsets;
 
             if constexpr (p_is_trace_enabled) {
                 scratch.trace.append_block(block_row_start, block_column_start + previous_block_size,
@@ -1145,8 +1144,8 @@ void align_block_core(
             }
 
             // Grow RIGHT: grow_step cols x block_size rows
-            hn::Vec<p_simd_tag> second_maximum_scores, second_row_offsets, second_column_offsets;
-            std::tie(second_maximum_scores, second_row_offsets, second_column_offsets) =
+            hn::Vec<p_simd_tag> right_growth_maximum_scores, right_growth_row_offsets, right_growth_column_offsets;
+            std::tie(right_growth_maximum_scores, right_growth_row_offsets, right_growth_column_offsets) =
                 place_alignment_block<p_is_trace_enabled, p_is_x_drop_enabled, p_should_collect_stats, p_alphabet>(
                     simd_tag, score_matrix, negative_gap_open, negative_gap_extension,
                     query, reference, scratch.trace,
@@ -1160,18 +1159,18 @@ void align_block_core(
 
             right_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_column.data());
             down_border_maximum  = block_prefix_maximum(simd_tag, scratch.diagonal_row.data());
-            growth_maximum_scores = first_maximum_scores;
+            growth_maximum_scores = down_growth_maximum_scores;
 
             // Save checkpoint after grow
-            for (size_t i = 0; i < block_size; i += lane_count) {
-                scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, i);
-                scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, i);
-                scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, i);
-                scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, i);
+            for (size_t buffer_index = 0; buffer_index < block_size; buffer_index += lane_count) {
+                scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, buffer_index);
+                scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, buffer_index);
+                scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, buffer_index);
+                scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, buffer_index);
             }
             if constexpr (p_is_trace_enabled) { scratch.trace.save_checkpoint(); }
 
-            maximum_scores = second_maximum_scores; maximum_row_offsets = second_row_offsets; maximum_column_offsets = second_column_offsets;
+            maximum_scores = right_growth_maximum_scores; maximum_row_offsets = right_growth_row_offsets; maximum_column_offsets = right_growth_column_offsets;
             break;
         }
         } // switch
@@ -1231,11 +1230,11 @@ void align_block_core(
 
             if (block_size < maximum_block_size) {
                 checkpoint_row_start = block_row_start; checkpoint_column_start = block_column_start; checkpoint_score_offset = score_offset;
-                for (size_t i = 0; i < block_size; i += lane_count) {
-                    scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, i);
-                    scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, i);
-                    scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, i);
-                    scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, i);
+                for (size_t buffer_index = 0; buffer_index < block_size; buffer_index += lane_count) {
+                    scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, buffer_index);
+                    scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, buffer_index);
+                    scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, buffer_index);
+                    scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, buffer_index);
                 }
                 if constexpr (p_is_trace_enabled) { scratch.trace.save_checkpoint(); }
                 should_grow_without_maximum = false;
@@ -1282,11 +1281,11 @@ void align_block_core(
                     core_stats.add(core_stats.grow_events);
                 }
                 block_row_start = checkpoint_row_start; block_column_start = checkpoint_column_start; score_offset = checkpoint_score_offset;
-                for (size_t i = 0; i < previous_block_size; i += lane_count) {
-                    scratch.diagonal_column.copy_vector_from(simd_tag, scratch.diagonal_column_checkpoint, i);
-                    scratch.gap_column.copy_vector_from(simd_tag, scratch.gap_column_checkpoint, i);
-                    scratch.diagonal_row.copy_vector_from(simd_tag, scratch.diagonal_row_checkpoint, i);
-                    scratch.gap_row.copy_vector_from(simd_tag, scratch.gap_row_checkpoint, i);
+                for (size_t buffer_index = 0; buffer_index < previous_block_size; buffer_index += lane_count) {
+                    scratch.diagonal_column.copy_vector_from(simd_tag, scratch.diagonal_column_checkpoint, buffer_index);
+                    scratch.gap_column.copy_vector_from(simd_tag, scratch.gap_column_checkpoint, buffer_index);
+                    scratch.diagonal_row.copy_vector_from(simd_tag, scratch.diagonal_row_checkpoint, buffer_index);
+                    scratch.gap_row.copy_vector_from(simd_tag, scratch.gap_row_checkpoint, buffer_index);
                 }
                 if constexpr (p_is_trace_enabled) { scratch.trace.restore_checkpoint(); }
                 growth_delay_iterations = 0;
@@ -1306,19 +1305,19 @@ void align_block_core(
                     if constexpr (p_should_collect_stats) {
                         core_stats.add(core_stats.shrink_events);
                     }
-                    for (size_t i = 0; i < block_size; i += lane_count) {
-                        scratch.diagonal_column.copy_vector(simd_tag, i, i + block_size);
-                        scratch.gap_column.copy_vector(simd_tag, i, i + block_size);
-                        scratch.diagonal_row.copy_vector(simd_tag, i, i + block_size);
-                        scratch.gap_row.copy_vector(simd_tag, i, i + block_size);
+                    for (size_t buffer_index = 0; buffer_index < block_size; buffer_index += lane_count) {
+                        scratch.diagonal_column.copy_vector(simd_tag, buffer_index, buffer_index + block_size);
+                        scratch.gap_column.copy_vector(simd_tag, buffer_index, buffer_index + block_size);
+                        scratch.diagonal_row.copy_vector(simd_tag, buffer_index, buffer_index + block_size);
+                        scratch.gap_row.copy_vector(simd_tag, buffer_index, buffer_index + block_size);
                     }
                     block_row_start += block_size; block_column_start += block_size;
                     checkpoint_row_start = block_row_start; checkpoint_column_start = block_column_start; checkpoint_score_offset = score_offset;
-                    for (size_t i = 0; i < block_size; i += lane_count) {
-                        scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, i);
-                        scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, i);
-                        scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, i);
-                        scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, i);
+                    for (size_t buffer_index = 0; buffer_index < block_size; buffer_index += lane_count) {
+                        scratch.diagonal_column_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_column, buffer_index);
+                        scratch.gap_column_checkpoint.copy_vector_from(simd_tag, scratch.gap_column, buffer_index);
+                        scratch.diagonal_row_checkpoint.copy_vector_from(simd_tag, scratch.diagonal_row, buffer_index);
+                        scratch.gap_row_checkpoint.copy_vector_from(simd_tag, scratch.gap_row, buffer_index);
                     }
                     right_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_column.data());
                     down_border_maximum = block_prefix_maximum(simd_tag, scratch.diagonal_row.data());

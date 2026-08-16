@@ -204,17 +204,17 @@ bucket_fills_by_geometry(::bioseq::chaining::arena_slab<fill_descriptor>& fills,
     buckets.reserve(16);
 
     std::size_t bucket_start = 0;
-    fill_bucket_key current = bucket_key_for(fills.data()[0], default_bandwidth);
-    for (std::size_t i = 1; i < fills.size(); ++i) {
-        const fill_bucket_key key = bucket_key_for(fills.data()[i], default_bandwidth);
-        if (!(key == current)) {
-            buckets.push_back({current,
-                std::span<fill_descriptor>{fills.data() + bucket_start, i - bucket_start}});
-            current = key;
-            bucket_start = i;
+    fill_bucket_key current_bucket_key = bucket_key_for(fills.data()[0], default_bandwidth);
+    for (std::size_t fill_index = 1; fill_index < fills.size(); ++fill_index) {
+        const fill_bucket_key candidate_bucket_key = bucket_key_for(fills.data()[fill_index], default_bandwidth);
+        if (!(candidate_bucket_key == current_bucket_key)) {
+            buckets.push_back({current_bucket_key,
+                std::span<fill_descriptor>{fills.data() + bucket_start, fill_index - bucket_start}});
+            current_bucket_key = candidate_bucket_key;
+            bucket_start = fill_index;
         }
     }
-    buckets.push_back({current,
+    buckets.push_back({current_bucket_key,
         std::span<fill_descriptor>{
             fills.data() + bucket_start, fills.size() - bucket_start}});
     return buckets;
@@ -241,7 +241,7 @@ align_single_fill(fill_descriptor& fill,
                   bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
                   const scoring_matrix<p_alphabet>& scoring_matrix,
                   const minimap2_parameters& params,
-                  std::int32_t align_bandwidth,
+                  std::int32_t alignment_bandwidth,
                   ksw2_batched_execution_stats* execution_stats,
                   bool is_long_fill) -> void {
     if (fill.query_length <= 0 || fill.target_length <= 0) {
@@ -271,15 +271,15 @@ align_single_fill(fill_descriptor& fill,
         flags.approx_max     = true;
     }
 
-    const std::size_t qs = static_cast<std::size_t>(fill.query_offset);
-    const std::size_t qe = qs + static_cast<std::size_t>(fill.query_length);
-    const std::size_t rs = static_cast<std::size_t>(fill.target_offset);
-    const std::size_t re = rs + static_cast<std::size_t>(fill.target_length);
+    const std::size_t query_start = static_cast<std::size_t>(fill.query_offset);
+    const std::size_t query_end = query_start + static_cast<std::size_t>(fill.query_length);
+    const std::size_t target_start = static_cast<std::size_t>(fill.target_offset);
+    const std::size_t target_end = target_start + static_cast<std::size_t>(fill.target_length);
 
     const int effective_bandwidth =
         params.compute_edit_distance && fill.kind == fill_kind::gap_between
             ? -1
-            : align_bandwidth;
+            : alignment_bandwidth;
     const int effective_zdrop =
         params.compute_edit_distance && fill.kind == fill_kind::gap_between
             ? -1
@@ -288,7 +288,7 @@ align_single_fill(fill_descriptor& fill,
     if (params.gap_open1 == params.gap_open2
         && params.gap_ext1 == params.gap_ext2) {
         result = align_ksw2_single_affine<p_alphabet>(
-            p_is_reversed, query_seq, target_seq, qs, qe, rs, re,
+            p_is_reversed, query_seq, target_seq, query_start, query_end, target_start, target_end,
             scoring_matrix,
             ksw_single_affine_parameters{
                 .gap_open = static_cast<std::int8_t>(params.gap_open1),
@@ -300,7 +300,7 @@ align_single_fill(fill_descriptor& fill,
             });
     } else {
         result = align_ksw2_dual_affine<p_alphabet>(
-            p_is_reversed, query_seq, target_seq, qs, qe, rs, re,
+            p_is_reversed, query_seq, target_seq, query_start, query_end, target_start, target_end,
             scoring_matrix,
             ksw_dual_affine_parameters{
                 .gap_open_short = static_cast<std::int8_t>(params.gap_open1),
@@ -345,8 +345,8 @@ align_single_fill(fill_descriptor& fill,
     }
 
     if (params.compute_edit_distance) {
-        std::size_t exact_query_start = qs;
-        std::size_t exact_target_start = rs;
+        std::size_t exact_query_start = query_start;
+        std::size_t exact_target_start = target_start;
         std::size_t exact_query_end = static_cast<std::size_t>(
             fill.final_query_offset);
         std::size_t exact_target_end = static_cast<std::size_t>(
@@ -356,8 +356,8 @@ align_single_fill(fill_descriptor& fill,
                 fill.final_query_offset);
             exact_target_start = static_cast<std::size_t>(
                 fill.final_reference_offset);
-            exact_query_end = qe;
-            exact_target_end = re;
+            exact_query_end = query_end;
+            exact_target_end = target_end;
         }
         fill.fill_edit_distance =
             exact_edit_distance_from_packed_cigar<p_is_reversed>(
@@ -385,11 +385,10 @@ align_single_fill(fill_descriptor& fill,
 /**
  * @brief Dispatch one target-lane-sized fill group.
  *
- * Per-lane scalar dispatcher — sequences whose query/target lengths
- * fit in the bucket bracket are processed lane-by-lane via the
- * existing intra-sequence striped KSW2 kernel.  The structural
- * batching is preserved so a future fused-lanes DP can substitute
- * here without touching the bucketing or stitching infrastructure.
+ * Sequences whose query and target lengths fit the bucket bracket are
+ * processed lane-by-lane through the existing intra-sequence striped KSW2
+ * kernel. The structural batching preserves descriptor layout, bucket order,
+ * and stitching semantics.
  */
 template <std::size_t p_lane_count, bool p_is_reversed, sequence_alphabet p_alphabet>
 auto align_ksw2_fill_batch(fill_descriptor* fills,
@@ -722,29 +721,29 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         std::int32_t outer_query_end   = seed_query_end;
 
         if (seed_query_start > 0 && seed_ref_start > 0) {
-            std::int32_t extension_len = std::min(seed_query_start, params.max_gap);
-            outer_query_start = seed_query_start - extension_len;
+            std::int32_t extension_length = std::min(seed_query_start, params.max_gap);
+            outer_query_start = seed_query_start - extension_length;
             const std::int32_t bonus_extension =
-                (extension_len * params.match_score > params.gap_open1)
-                    ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+                (extension_length * params.match_score > params.gap_open1)
+                    ? (extension_length * params.match_score - params.gap_open1) / params.gap_ext1
                     : 0;
-            extension_len += bonus_extension;
-            extension_len = std::min(extension_len, params.max_gap);
-            extension_len = std::min(extension_len, seed_ref_start);
-            outer_ref_start = seed_ref_start - extension_len;
+            extension_length += bonus_extension;
+            extension_length = std::min(extension_length, params.max_gap);
+            extension_length = std::min(extension_length, seed_ref_start);
+            outer_ref_start = seed_ref_start - extension_length;
         }
         if (seed_query_end < query_length && seed_ref_end < target_length) {
-            std::int32_t extension_len =
+            std::int32_t extension_length =
                 std::min(query_length - seed_query_end, params.max_gap);
-            outer_query_end = seed_query_end + extension_len;
+            outer_query_end = seed_query_end + extension_length;
             const std::int32_t bonus_extension =
-                (extension_len * params.match_score > params.gap_open1)
-                    ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+                (extension_length * params.match_score > params.gap_open1)
+                    ? (extension_length * params.match_score - params.gap_open1) / params.gap_ext1
                     : 0;
-            extension_len += bonus_extension;
-            extension_len = std::min(extension_len, params.max_gap);
-            extension_len = std::min(extension_len, target_length - seed_ref_end);
-            outer_ref_end = seed_ref_end + extension_len;
+            extension_length += bonus_extension;
+            extension_length = std::min(extension_length, params.max_gap);
+            extension_length = std::min(extension_length, target_length - seed_ref_end);
+            outer_ref_end = seed_ref_end + extension_length;
         }
         if (outer_query_end > query_length) outer_query_end = query_length;
 
@@ -775,12 +774,12 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
 
         std::int32_t fill_order = 0;
 
-        // --- Stage 1: left extension ---
+        // Collect the optional left-extension fill.
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
             cigar_scratch_pool.push_back(
                 ::bioseq::chaining::make_arena_slab<cigar_operation>());
-            auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-            scratch_back->reserve(static_cast<std::size_t>(
+            auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+            fill_cigar_scratch->reserve(static_cast<std::size_t>(
                 std::max(seed_query_start - outer_query_start,
                          seed_ref_start   - outer_ref_start)) + 16u);
             fill_descriptor* fill =
@@ -795,10 +794,10 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                                                  seed_query_start - outer_query_start,
                                                  seed_ref_start - outer_ref_start,
                                                  alignment_bandwidth);
-            fill->cigar_scratch = scratch_back;
+            fill->cigar_scratch = fill_cigar_scratch;
         }
 
-        // --- Stage 2: gap-fills ---
+        // Collect fills between successive anchors.
         if (region.seed_count > 1) {
             std::int32_t gap_query_start = seed_query_start;
             std::int32_t gap_reference_start = seed_ref_start;
@@ -809,10 +808,10 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                     static_cast<std::int32_t>(current_anchor.query_position) + 1;
                 const std::int32_t gap_reference_end =
                     static_cast<std::int32_t>(current_anchor.ref_position) + 1;
-                const bool is_last = (seed_index == region.seed_count - 1);
+                const bool is_last_seed = (seed_index == region.seed_count - 1);
                 const std::int32_t gap_query_length = gap_query_end - gap_query_start;
                 const std::int32_t gap_reference_length = gap_reference_end - gap_reference_start;
-                if (!is_last && (gap_query_length < params.min_ksw_len ||
+                if (!is_last_seed && (gap_query_length < params.min_ksw_len ||
                                  gap_reference_length < params.min_ksw_len)) {
                     continue;
                 }
@@ -823,8 +822,8 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                 }
                 cigar_scratch_pool.push_back(
                     ::bioseq::chaining::make_arena_slab<cigar_operation>());
-                auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-                scratch_back->reserve(
+                auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+                fill_cigar_scratch->reserve(
                     static_cast<std::size_t>(std::max(gap_query_length, gap_reference_length)) +
                     16u);
                 fill_descriptor* fill =
@@ -839,18 +838,18 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                                                      gap_query_length,
                                                      gap_reference_length,
                                                      alignment_bandwidth);
-                fill->cigar_scratch = scratch_back;
+                fill->cigar_scratch = fill_cigar_scratch;
                 gap_query_start = gap_query_end;
                 gap_reference_start = gap_reference_end;
             }
         }
 
-        // --- Stage 3: right extension ---
+        // Collect the optional right-extension fill.
         if (seed_query_end < outer_query_end && seed_ref_end < outer_ref_end) {
             cigar_scratch_pool.push_back(
                 ::bioseq::chaining::make_arena_slab<cigar_operation>());
-            auto* scratch_back = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
-            scratch_back->reserve(static_cast<std::size_t>(
+            auto* fill_cigar_scratch = &cigar_scratch_pool[cigar_scratch_pool.size() - 1];
+            fill_cigar_scratch->reserve(static_cast<std::size_t>(
                 std::max(outer_query_end - seed_query_end,
                          outer_ref_end   - seed_ref_end)) + 16u);
             fill_descriptor* fill =
@@ -865,7 +864,7 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
                                                  outer_query_end - seed_query_end,
                                                  outer_ref_end - seed_ref_end,
                                                  alignment_bandwidth);
-            fill->cigar_scratch = scratch_back;
+            fill->cigar_scratch = fill_cigar_scratch;
         }
     }
 
@@ -903,9 +902,9 @@ auto align_regions_with_batched_ksw2(std::span<alignment_region> regions,
         }
         if (cigar_match_count > 0) {
             region.match_length = cigar_match_count;
-            const std::int32_t effective_block =
+            const std::int32_t effective_block_length =
                 (cigar_block_count > 0) ? cigar_block_count : region.block_length;
-            region.block_length = effective_block;
+            region.block_length = effective_block_length;
         }
     }
 }

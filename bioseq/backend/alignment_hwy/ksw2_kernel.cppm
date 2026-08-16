@@ -110,76 +110,76 @@ template<
         return result;
     }
 
-    const size_t query_len  = query_end - query_start;
-    const size_t target_len = target_end - target_start;
-    if (query_len == 0 || target_len == 0) return result;
+    const size_t query_length  = query_end - query_start;
+    const size_t target_length = target_end - target_start;
+    if (query_length == 0 || target_length == 0) return result;
 
-    const int qlen = static_cast<int>(query_len);
-    const int tlen = static_cast<int>(target_len);
+    const int query_length_i32 = static_cast<int>(query_length);
+    const int target_length_i32 = static_cast<int>(target_length);
 
     const int gap_open_plus_extend = gap_open + gap_extend;
-    const bool compute_cigar = !flags.score_only;
-    const bool use_approx_max = flags.approx_max;
+    const bool should_compute_cigar = !flags.score_only;
+    const bool should_use_approximate_maximum = flags.approx_max;
 
     // --- SIMD constant vectors ---------------------------------------------
-    const auto zero_vec          = hn::Zero(simd_tag);
-    const auto match_score_vec   = hn::Set(simd_tag, scoring_matrix.match_score());
-    const auto mismatch_score_vec = hn::Set(simd_tag, scoring_matrix.mismatch_score());
-    const auto wildcard_rank_vec = hn::Set(simd_tag, static_cast<p_partial_score_type>(p_alphabet_dimension - 1));
+    const auto zero_scores          = hn::Zero(simd_tag);
+    const auto match_scores   = hn::Set(simd_tag, scoring_matrix.match_score());
+    const auto mismatch_scores = hn::Set(simd_tag, scoring_matrix.mismatch_score());
+    const auto wildcard_ranks = hn::Set(simd_tag, static_cast<p_partial_score_type>(p_alphabet_dimension - 1));
 
-    const auto double_gap_cost_vec = hn::Set(simd_tag,
+    const auto double_gap_costs = hn::Set(simd_tag,
         static_cast<p_partial_score_type>((gap_open + gap_extend) * 2));
-    const auto gap_open_vec = hn::Set(simd_tag, gap_open);
-    const auto max_plausible_score_vec = hn::Set(simd_tag,
+    const auto gap_open_scores = hn::Set(simd_tag, gap_open);
+    const auto maximum_plausible_scores = hn::Set(simd_tag,
         static_cast<p_partial_score_type>(scoring_matrix.match_score() + (gap_open + gap_extend) * 2));
 
-    const auto gap_open_short_vec = hn::Set(simd_tag, gap_open);
-    const auto gap_open_long_vec  = hn::Set(simd_tag, gap_open_long);
-    const auto short_gap_cost_vec = hn::Set(simd_tag,
+    const auto short_gap_open_scores = hn::Set(simd_tag, gap_open);
+    const auto long_gap_open_scores  = hn::Set(simd_tag, gap_open_long);
+    const auto short_gap_costs = hn::Set(simd_tag,
         static_cast<p_partial_score_type>(gap_open + gap_extend));
-    const auto long_gap_cost_vec  = hn::Set(simd_tag,
+    const auto long_gap_costs  = hn::Set(simd_tag,
         static_cast<p_partial_score_type>(gap_open_long + gap_extend_long));
 
     const int8_t wildcard_score = scoring_matrix.wildcard_score();
-    auto wildcard_score_vec = hn::Set(
+    auto wildcard_scores = hn::Set(
         simd_tag, static_cast<p_partial_score_type>(wildcard_score));
     if (wildcard_score == 0) {
         if constexpr (k_is_dual_affine) {
-            wildcard_score_vec = hn::Set(
+            wildcard_scores = hn::Set(
                 simd_tag, static_cast<p_partial_score_type>(-gap_extend_long));
         } else {
-            wildcard_score_vec = hn::Set(
+            wildcard_scores = hn::Set(
                 simd_tag, static_cast<p_partial_score_type>(-gap_extend));
         }
     }
 
     // Backtrack direction constants
-    const auto bt_dir_1 = hn::Set(simd_tag, static_cast<p_partial_score_type>(1));
-    const auto bt_dir_2 = hn::Set(simd_tag, static_cast<p_partial_score_type>(2));
-    const auto bt_dir_3 = hn::Set(simd_tag, static_cast<p_partial_score_type>(3));
-    const auto bt_dir_4 = hn::Set(simd_tag, static_cast<p_partial_score_type>(4));
-    const auto bt_e_cont  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x08));
-    const auto bt_f_cont  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x10));
-    const auto bt_e2_cont = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x20));
-    const auto bt_f2_cont = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x40));
+    const auto short_horizontal_gap_direction = hn::Set(simd_tag, static_cast<p_partial_score_type>(1));
+    const auto short_vertical_gap_direction = hn::Set(simd_tag, static_cast<p_partial_score_type>(2));
+    const auto long_horizontal_gap_direction = hn::Set(simd_tag, static_cast<p_partial_score_type>(3));
+    const auto long_vertical_gap_direction = hn::Set(simd_tag, static_cast<p_partial_score_type>(4));
+    const auto short_horizontal_gap_continuation  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x08));
+    const auto short_vertical_gap_continuation  = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x10));
+    const auto long_horizontal_gap_continuation = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x20));
+    const auto long_vertical_gap_continuation = hn::Set(simd_tag, static_cast<p_partial_score_type>(0x40));
 
     // --- Band width --------------------------------------------------------
     const int band_width = configured_band_width < 0
-        ? std::max(tlen, qlen) : configured_band_width;
+        ? std::max(target_length_i32, query_length_i32) : configured_band_width;
     const int left_band  = band_width;
     const int right_band = band_width;
 
     // --- Score range sanity check ------------------------------------------
-    int matrix_min = scoring_matrix.mismatch_score();
-    for (size_t i = 1; i < scoring_matrix.entries.size(); ++i) {
-        if (scoring_matrix.entries[i] < matrix_min)
-            matrix_min = scoring_matrix.entries[i];
+    int minimum_matrix_score = scoring_matrix.mismatch_score();
+    for (size_t score_index = 1; score_index < scoring_matrix.entries.size(); ++score_index) {
+        if (scoring_matrix.entries[score_index] < minimum_matrix_score)
+            minimum_matrix_score = scoring_matrix.entries[score_index];
     }
-    if (-matrix_min > 2 * (gap_open + gap_extend)) return result;
+    if (-minimum_matrix_score > 2 * (gap_open + gap_extend)) return result;
 
     // --- Dual-affine long-gap threshold ------------------------------------
     [[maybe_unused]] int long_gap_threshold = 0;
-    [[maybe_unused]] int long_gap_diff = 0;
+    [[maybe_unused]] int long_gap_difference = 0;
     if constexpr (k_is_dual_affine) {
         if (gap_extend != gap_extend_long) {
             long_gap_threshold = (gap_open_long - gap_open)
@@ -190,19 +190,19 @@ template<
                 ++long_gap_threshold;
             }
         }
-        long_gap_diff = long_gap_threshold * (gap_extend - gap_extend_long)
+        long_gap_difference = long_gap_threshold * (gap_extend - gap_extend_long)
                         - (gap_open_long - gap_open) - gap_extend_long;
     }
 
     // --- Block dimensions --------------------------------------------------
-    int band_vector_capacity = qlen < tlen ? qlen : tlen;
+    int band_vector_capacity = query_length_i32 < target_length_i32 ? query_length_i32 : target_length_i32;
     band_vector_capacity = ((band_vector_capacity < band_width + 1
                             ? band_vector_capacity : band_width + 1)
                          + static_cast<int>(byte_lane_count) - 1)
                         / static_cast<int>(byte_lane_count) + 1;
 
     // --- State arena -------------------------------------------------------
-    ksw_state_for<p_mode> state(target_len, query_len, byte_lane_count);
+    ksw_state_for<p_mode> state(target_length, query_length, byte_lane_count);
 
     if constexpr (k_is_dual_affine) {
         state.fill_leading_arrays(4,
@@ -217,10 +217,10 @@ template<
     // Exact-score row goes in the align arena; it's re-read every anti-
     // diagonal but never survives the call.
     p_full_score_type* exact_score_row = nullptr;
-    if (!use_approx_max) {
-        const size_t exact_row_len = static_cast<size_t>(state.target_vector_count()) * byte_lane_count;
+    if (!should_use_approximate_maximum) {
+        const size_t exact_score_row_length = static_cast<size_t>(state.target_vector_count()) * byte_lane_count;
         auto exact_row_span =
-            context::current().alloc_align_array<p_full_score_type>(exact_row_len);
+            context::current().alloc_align_array<p_full_score_type>(exact_score_row_length);
         std::fill(exact_row_span.begin(), exact_row_span.end(),
                   static_cast<p_full_score_type>(k_ksw_negative_infinity));
         exact_score_row = exact_row_span.data();
@@ -228,12 +228,12 @@ template<
 
     // --- Backtrack storage -------------------------------------------------
     ksw_backtrack_matrix backtrack;
-    std::span<int32_t> anti_diag_band_start{};
-    std::span<int32_t> anti_diag_band_end{};
-    if (compute_cigar) {
-        backtrack.allocate(qlen + tlen - 1, band_vector_capacity, byte_lane_count);
-        anti_diag_band_start = backtrack.band_starts();
-        anti_diag_band_end   = backtrack.band_ends();
+    std::span<int32_t> anti_diagonal_band_starts{};
+    std::span<int32_t> anti_diagonal_band_ends{};
+    if (should_compute_cigar) {
+        backtrack.allocate(query_length_i32 + target_length_i32 - 1, band_vector_capacity, byte_lane_count);
+        anti_diagonal_band_starts = backtrack.band_starts();
+        anti_diagonal_band_ends   = backtrack.band_ends();
     }
 
     // --- Prepare sequences -------------------------------------------------
@@ -248,47 +248,47 @@ template<
     // The strand-template p_is_reversed flips the query letters (rc); the
     // write_reversed flag flips the destination ordering. Both axes
     // are independently controlled by the strand and ordering parameters.
-    std::span<uint8_t> query_dst(state.query_reversed, query_len);
-    std::span<uint8_t> target_dst(state.target_bytes, target_len);
+    std::span<uint8_t> query_destination(state.query_reversed, query_length);
+    std::span<uint8_t> target_destination(state.target_bytes, target_length);
     if (flags.reverse_cigar) {
         // qr stays in source order — no extra mirror.
         query_seq.template copy_ranks<p_is_reversed, false>(
-            query_dst, query_start, query_end);
+            query_destination, query_start, query_end);
         // Target is reversed; no rc on target, so the second template arg is
         // the only orientation flip.
         target_seq.template copy_ranks<false, true>(
-            target_dst, target_start, target_end);
+            target_destination, target_start, target_end);
     } else {
         // qr = reverse(encoded query). For a reversed strand the
         // existing <true, false> path produced rc(query); we want rc then
         // reverse-again, which is just complement-only. Captured as
         // <true, true> (see overload comment).
         query_seq.template copy_ranks<p_is_reversed, true>(
-            query_dst, query_start, query_end);
+            query_destination, query_start, query_end);
         target_seq.template copy_ranks<false, false>(
-            target_dst, target_start, target_end);
+            target_destination, target_start, target_end);
     }
 
     // --- Approximate max tracking ------------------------------------------
     p_full_score_type approx_score = 0;
-    int approx_score_target_pos = 0;
+    int approximate_score_target_position = 0;
 
     // --- Determine fusion eligibility (non-generic-score path) -------------
-    const bool use_fused_score = !flags.generic_score;
+    const bool should_use_fused_score = !flags.generic_score;
 
     // ====================================================================
     // Main DP loop
     // ====================================================================
-    const int bl = static_cast<int>(byte_lane_count);
-    int prev_band_start = -1;
-    int prev_band_end   = -1;
+    const int byte_lane_count_i32 = static_cast<int>(byte_lane_count);
+    int previous_band_start = -1;
+    int previous_band_end   = -1;
 
-    for (int anti_diagonal = 0; anti_diagonal < qlen + tlen - 1; ++anti_diagonal) {
+    for (int anti_diagonal = 0; anti_diagonal < query_length_i32 + target_length_i32 - 1; ++anti_diagonal) {
         int band_start = 0;
-        int band_end   = tlen - 1;
+        int band_end   = target_length_i32 - 1;
 
-        if (band_start < anti_diagonal - qlen + 1)
-            band_start = anti_diagonal - qlen + 1;
+        if (band_start < anti_diagonal - query_length_i32 + 1)
+            band_start = anti_diagonal - query_length_i32 + 1;
         if (band_end > anti_diagonal)
             band_end = anti_diagonal;
         if (band_start < (anti_diagonal - right_band + 1) >> 1)
@@ -299,61 +299,61 @@ template<
             result.is_z_dropped = true;
             break;
         }
-        const int band_start_raw = band_start;
-        const int band_end_raw   = band_end;
-        band_start = (band_start / bl) * bl;
-        band_end   = ((band_end + bl) / bl) * bl - 1;
+        const int unaligned_band_start = band_start;
+        const int unaligned_band_end   = band_end;
+        band_start = (band_start / byte_lane_count_i32) * byte_lane_count_i32;
+        band_end   = ((band_end + byte_lane_count_i32) / byte_lane_count_i32) * byte_lane_count_i32 - 1;
 
         // --- Boundary conditions -------------------------------------------
-        int8_t boundary_x_carry;
-        int8_t boundary_v_carry;
-        [[maybe_unused]] int8_t boundary_x2_carry = 0;
+        int8_t horizontal_gap_boundary_carry;
+        int8_t horizontal_difference_boundary_carry;
+        [[maybe_unused]] int8_t long_horizontal_gap_boundary_carry = 0;
         uint8_t* HWY_RESTRICT query_reversed_aligned = state.query_reversed
-            + (qlen - 1 - anti_diagonal);
+            + (query_length_i32 - 1 - anti_diagonal);
 
         if constexpr (!k_is_dual_affine) {
-            uint8_t* diff_up_u   = reinterpret_cast<uint8_t*>(state.diff_up_base);
-            uint8_t* diff_left_u = reinterpret_cast<uint8_t*>(state.diff_left_base);
-            uint8_t* gap_e_u     = reinterpret_cast<uint8_t*>(state.gap_e_offset_base);
-            uint8_t* gap_f_u     = reinterpret_cast<uint8_t*>(state.gap_f_offset_base);
+            uint8_t* unsigned_up_differences   = reinterpret_cast<uint8_t*>(state.diff_up_base);
+            uint8_t* unsigned_left_differences = reinterpret_cast<uint8_t*>(state.diff_left_base);
+            uint8_t* unsigned_horizontal_gap_offsets     = reinterpret_cast<uint8_t*>(state.gap_e_offset_base);
+            uint8_t* unsigned_vertical_gap_offsets     = reinterpret_cast<uint8_t*>(state.gap_f_offset_base);
 
             if (band_start > 0) {
-                if (band_start - 1 >= prev_band_start && band_start - 1 <= prev_band_end) {
-                    boundary_x_carry = gap_e_u[band_start - 1];
-                    boundary_v_carry = diff_left_u[band_start - 1];
+                if (band_start - 1 >= previous_band_start && band_start - 1 <= previous_band_end) {
+                    horizontal_gap_boundary_carry = unsigned_horizontal_gap_offsets[band_start - 1];
+                    horizontal_difference_boundary_carry = unsigned_left_differences[band_start - 1];
                 } else {
-                    boundary_x_carry = 0;
-                    boundary_v_carry = 0;
+                    horizontal_gap_boundary_carry = 0;
+                    horizontal_difference_boundary_carry = 0;
                 }
             } else {
-                boundary_x_carry = 0;
-                boundary_v_carry = anti_diagonal ? static_cast<int8_t>(gap_open) : 0;
+                horizontal_gap_boundary_carry = 0;
+                horizontal_difference_boundary_carry = anti_diagonal ? static_cast<int8_t>(gap_open) : 0;
             }
             if (band_end >= anti_diagonal) {
-                gap_f_u[anti_diagonal] = 0;
-                diff_up_u[anti_diagonal] = anti_diagonal
+                unsigned_vertical_gap_offsets[anti_diagonal] = 0;
+                unsigned_up_differences[anti_diagonal] = anti_diagonal
                     ? static_cast<uint8_t>(gap_open) : 0;
             }
         } else {
             if (band_start > 0) {
-                if (band_start - 1 >= prev_band_start && band_start - 1 <= prev_band_end) {
-                    boundary_x_carry  = state.gap_e_offset_base[band_start - 1];
-                    boundary_x2_carry = state.gap_e2_offset_base[band_start - 1];
-                    boundary_v_carry  = state.diff_left_base[band_start - 1];
+                if (band_start - 1 >= previous_band_start && band_start - 1 <= previous_band_end) {
+                    horizontal_gap_boundary_carry  = state.gap_e_offset_base[band_start - 1];
+                    long_horizontal_gap_boundary_carry = state.gap_e2_offset_base[band_start - 1];
+                    horizontal_difference_boundary_carry  = state.diff_left_base[band_start - 1];
                 } else {
-                    boundary_x_carry  = static_cast<int8_t>(-gap_open - gap_extend);
-                    boundary_x2_carry = static_cast<int8_t>(-gap_open_long - gap_extend_long);
-                    boundary_v_carry  = static_cast<int8_t>(-gap_open - gap_extend);
+                    horizontal_gap_boundary_carry  = static_cast<int8_t>(-gap_open - gap_extend);
+                    long_horizontal_gap_boundary_carry = static_cast<int8_t>(-gap_open_long - gap_extend_long);
+                    horizontal_difference_boundary_carry  = static_cast<int8_t>(-gap_open - gap_extend);
                 }
             } else {
-                boundary_x_carry  = static_cast<int8_t>(-gap_open - gap_extend);
-                boundary_x2_carry = static_cast<int8_t>(-gap_open_long - gap_extend_long);
-                boundary_v_carry  = anti_diagonal == 0
+                horizontal_gap_boundary_carry  = static_cast<int8_t>(-gap_open - gap_extend);
+                long_horizontal_gap_boundary_carry = static_cast<int8_t>(-gap_open_long - gap_extend_long);
+                horizontal_difference_boundary_carry  = anti_diagonal == 0
                     ? static_cast<int8_t>(-gap_open - gap_extend)
                     : anti_diagonal < long_gap_threshold
                         ? static_cast<int8_t>(-gap_extend)
                         : anti_diagonal == long_gap_threshold
-                            ? static_cast<int8_t>(long_gap_diff)
+                            ? static_cast<int8_t>(long_gap_difference)
                             : static_cast<int8_t>(-gap_extend_long);
             }
             if (band_end >= anti_diagonal) {
@@ -366,7 +366,7 @@ template<
                     : anti_diagonal < long_gap_threshold
                         ? static_cast<int8_t>(-gap_extend)
                         : anti_diagonal == long_gap_threshold
-                            ? static_cast<int8_t>(long_gap_diff)
+                            ? static_cast<int8_t>(long_gap_difference)
                             : static_cast<int8_t>(-gap_extend_long);
             }
         }
@@ -375,280 +375,280 @@ template<
         // When !generic_score the scores are computed inline inside the DP
         // loop (diag_score fusion optimisation).
         if (flags.generic_score) {
-            for (int tp = band_start_raw; tp <= band_end_raw; ++tp) {
-                state.diag_score_base[tp] = scoring_matrix.at(
-                    state.target_bytes[tp], query_reversed_aligned[tp]);
+            for (int target_position = unaligned_band_start; target_position <= unaligned_band_end; ++target_position) {
+                state.diag_score_base[target_position] = scoring_matrix.at(
+                    state.target_bytes[target_position], query_reversed_aligned[target_position]);
             }
         }
 
         // --- Boundary vectors ----------------------------------------------
-        auto bx_vec  = set_lane_zero(simd_tag, boundary_x_carry);
-        auto bv_vec  = set_lane_zero(simd_tag, boundary_v_carry);
-        [[maybe_unused]] auto bx2_vec = set_lane_zero(simd_tag, boundary_x2_carry);
-        const int band_start_vec = band_start / bl;
-        const int band_end_vec   = band_end / bl;
+        auto horizontal_gap_carry  = set_lane_zero(simd_tag, horizontal_gap_boundary_carry);
+        auto horizontal_difference_carry  = set_lane_zero(simd_tag, horizontal_difference_boundary_carry);
+        [[maybe_unused]] auto long_horizontal_gap_carry = set_lane_zero(simd_tag, long_horizontal_gap_boundary_carry);
+        const int first_band_vector = band_start / byte_lane_count_i32;
+        const int last_band_vector   = band_end / byte_lane_count_i32;
 
         // ================================================================
         // Core DP inner loop — three paths depending on CIGAR / alignment
         // ================================================================
 
-        if (!compute_cigar) {
+        if (!should_compute_cigar) {
             // ---- Score-only path ------------------------------------------
-            for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
-                const int off = bvi * bl;
-                auto c = use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
-                reduce_ksw_dp_maximum<p_mode>(simd_tag, c, max_plausible_score_vec,
-                    match_score_vec);
-                store_ksw_dp_cell<p_mode>(simd_tag, off, c, state,
-                    gap_open_vec, gap_open_short_vec, gap_open_long_vec,
-                    short_gap_cost_vec, long_gap_cost_vec, zero_vec);
+            for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
+                const int state_offset = band_vector_index * byte_lane_count_i32;
+                auto cell = should_use_fused_score
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks)
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks);
+                reduce_ksw_dp_maximum<p_mode>(simd_tag, cell, maximum_plausible_scores,
+                    match_scores);
+                store_ksw_dp_cell<p_mode>(simd_tag, state_offset, cell, state,
+                    gap_open_scores, short_gap_open_scores, long_gap_open_scores,
+                    short_gap_costs, long_gap_costs, zero_scores);
             }
         } else if (!flags.right_align) {
             // ---- CIGAR, gap left-alignment ---------------------------------
-            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
-            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
-            for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
-                const int off = bvi * bl;
-                auto c = use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
+            anti_diagonal_band_starts[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diagonal_band_ends  [static_cast<size_t>(anti_diagonal)] = band_end;
+            for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
+                const int state_offset = band_vector_index * byte_lane_count_i32;
+                auto cell = should_use_fused_score
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks)
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks);
 
                 // Direction tracking — left-align tie-break
-                auto dir = hn::IfThenElseZero(
-                    hn::Gt(c.diag_chain, c.score_max_cell), bt_dir_1);
-                c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
+                auto backtrack_directions = hn::IfThenElseZero(
+                    hn::Gt(cell.short_horizontal_gap_candidates, cell.selected_scores), short_horizontal_gap_direction);
+                cell.selected_scores = hn::Max(cell.selected_scores, cell.short_horizontal_gap_candidates);
 
                 if constexpr (!k_is_dual_affine) {
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.vert_chain, c.score_max_cell), bt_dir_2, dir);
-                    c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
-                    c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.short_vertical_gap_candidates, cell.selected_scores), short_vertical_gap_direction, backtrack_directions);
+                    cell.selected_scores = maximum_unsigned_bytes(simd_tag, cell.selected_scores, cell.short_vertical_gap_candidates);
+                    cell.selected_scores = minimum_unsigned_bytes(simd_tag, cell.selected_scores, maximum_plausible_scores);
                 } else {
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.vert_chain, c.score_max_cell), bt_dir_2, dir);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain);
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.diag_chain2, c.score_max_cell), bt_dir_3, dir);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain2);
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.vert_chain2, c.score_max_cell), bt_dir_4, dir);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain2);
-                    c.score_max_cell = hn::Min(c.score_max_cell, match_score_vec);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.short_vertical_gap_candidates, cell.selected_scores), short_vertical_gap_direction, backtrack_directions);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.short_vertical_gap_candidates);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.long_horizontal_gap_candidates, cell.selected_scores), long_horizontal_gap_direction, backtrack_directions);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.long_horizontal_gap_candidates);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.long_vertical_gap_candidates, cell.selected_scores), long_vertical_gap_direction, backtrack_directions);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.long_vertical_gap_candidates);
+                    cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
                 }
 
                 // Store diff + gap states
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
-                          state.diff_up_base + off);
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
-                          state.diff_left_base + off);
+                hn::Store(hn::Sub(cell.selected_scores, cell.shifted_left_differences), simd_tag,
+                          state.diff_up_base + state_offset);
+                hn::Store(hn::Sub(cell.selected_scores, cell.current_up_differences), simd_tag,
+                          state.diff_left_base + state_offset);
 
                 if constexpr (!k_is_dual_affine) {
-                    auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
-                    c.diag_chain = hn::Sub(c.diag_chain, smq);
-                    c.vert_chain = hn::Sub(c.vert_chain, smq);
+                    auto single_gap_open_threshold = hn::Sub(cell.selected_scores, gap_open_scores);
+                    cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, single_gap_open_threshold);
+                    cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, single_gap_open_threshold);
 
-                    auto dp = hn::Gt(c.diag_chain, zero_vec);
-                    hn::Store(hn::IfThenElseZero(dp, c.diag_chain), simd_tag,
-                              state.gap_e_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(dp, bt_e_cont));
+                    auto short_horizontal_gap_mask = hn::Gt(cell.short_horizontal_gap_candidates, zero_scores);
+                    hn::Store(hn::IfThenElseZero(short_horizontal_gap_mask, cell.short_horizontal_gap_candidates), simd_tag,
+                              state.gap_e_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(short_horizontal_gap_mask, short_horizontal_gap_continuation));
 
-                    auto vp = hn::Gt(c.vert_chain, zero_vec);
-                    hn::Store(hn::IfThenElseZero(vp, c.vert_chain), simd_tag,
-                              state.gap_f_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(vp, bt_f_cont));
+                    auto short_vertical_gap_mask = hn::Gt(cell.short_vertical_gap_candidates, zero_scores);
+                    hn::Store(hn::IfThenElseZero(short_vertical_gap_mask, cell.short_vertical_gap_candidates), simd_tag,
+                              state.gap_f_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(short_vertical_gap_mask, short_vertical_gap_continuation));
                 } else {
-                    auto sms = hn::Sub(c.score_max_cell, gap_open_short_vec);
-                    c.diag_chain = hn::Sub(c.diag_chain, sms);
-                    c.vert_chain = hn::Sub(c.vert_chain, sms);
-                    auto sml = hn::Sub(c.score_max_cell, gap_open_long_vec);
-                    c.diag_chain2 = hn::Sub(c.diag_chain2, sml);
-                    c.vert_chain2 = hn::Sub(c.vert_chain2, sml);
+                    auto short_gap_open_threshold = hn::Sub(cell.selected_scores, short_gap_open_scores);
+                    cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, short_gap_open_threshold);
+                    cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, short_gap_open_threshold);
+                    auto long_gap_open_threshold = hn::Sub(cell.selected_scores, long_gap_open_scores);
+                    cell.long_horizontal_gap_candidates = hn::Sub(cell.long_horizontal_gap_candidates, long_gap_open_threshold);
+                    cell.long_vertical_gap_candidates = hn::Sub(cell.long_vertical_gap_candidates, long_gap_open_threshold);
 
-                    auto dp = hn::Gt(c.diag_chain, zero_vec);
-                    hn::Store(hn::Sub(hn::IfThenElseZero(dp, c.diag_chain),
-                                       short_gap_cost_vec),
-                              simd_tag, state.gap_e_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(dp, bt_e_cont));
+                    auto short_horizontal_gap_mask = hn::Gt(cell.short_horizontal_gap_candidates, zero_scores);
+                    hn::Store(hn::Sub(hn::IfThenElseZero(short_horizontal_gap_mask, cell.short_horizontal_gap_candidates),
+                                       short_gap_costs),
+                              simd_tag, state.gap_e_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(short_horizontal_gap_mask, short_horizontal_gap_continuation));
 
-                    auto vp = hn::Gt(c.vert_chain, zero_vec);
-                    hn::Store(hn::Sub(hn::IfThenElseZero(vp, c.vert_chain),
-                                       short_gap_cost_vec),
-                              simd_tag, state.gap_f_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(vp, bt_f_cont));
+                    auto short_vertical_gap_mask = hn::Gt(cell.short_vertical_gap_candidates, zero_scores);
+                    hn::Store(hn::Sub(hn::IfThenElseZero(short_vertical_gap_mask, cell.short_vertical_gap_candidates),
+                                       short_gap_costs),
+                              simd_tag, state.gap_f_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(short_vertical_gap_mask, short_vertical_gap_continuation));
 
-                    auto d2p = hn::Gt(c.diag_chain2, zero_vec);
-                    hn::Store(hn::Sub(hn::IfThenElseZero(d2p, c.diag_chain2),
-                                       long_gap_cost_vec),
-                              simd_tag, state.gap_e2_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(d2p, bt_e2_cont));
+                    auto long_horizontal_gap_mask = hn::Gt(cell.long_horizontal_gap_candidates, zero_scores);
+                    hn::Store(hn::Sub(hn::IfThenElseZero(long_horizontal_gap_mask, cell.long_horizontal_gap_candidates),
+                                       long_gap_costs),
+                              simd_tag, state.gap_e2_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(long_horizontal_gap_mask, long_horizontal_gap_continuation));
 
-                    auto v2p = hn::Gt(c.vert_chain2, zero_vec);
-                    hn::Store(hn::Sub(hn::IfThenElseZero(v2p, c.vert_chain2),
-                                       long_gap_cost_vec),
-                              simd_tag, state.gap_f2_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenElseZero(v2p, bt_f2_cont));
+                    auto long_vertical_gap_mask = hn::Gt(cell.long_vertical_gap_candidates, zero_scores);
+                    hn::Store(hn::Sub(hn::IfThenElseZero(long_vertical_gap_mask, cell.long_vertical_gap_candidates),
+                                       long_gap_costs),
+                              simd_tag, state.gap_f2_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenElseZero(long_vertical_gap_mask, long_vertical_gap_continuation));
                 }
 
-                hn::Store(dir, simd_tag,
-                    backtrack.vector_slot_bytes(anti_diagonal, bvi - band_start_vec));
+                hn::Store(backtrack_directions, simd_tag,
+                    backtrack.vector_slot_bytes(anti_diagonal, band_vector_index - first_band_vector));
             }
         } else {
             // ---- CIGAR, gap right-alignment --------------------------------
-            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
-            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
-            for (int bvi = band_start_vec; bvi <= band_end_vec; ++bvi) {
-                const int off = bvi * bl;
-                auto c = use_fused_score
-                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec)
-                    : load_ksw_dp_cell<p_mode, false>(simd_tag, off, state,
-                        query_reversed_aligned, bx_vec, bv_vec, bx2_vec,
-                        double_gap_cost_vec, match_score_vec,
-                        mismatch_score_vec, wildcard_score_vec,
-                        wildcard_rank_vec);
+            anti_diagonal_band_starts[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diagonal_band_ends  [static_cast<size_t>(anti_diagonal)] = band_end;
+            for (int band_vector_index = first_band_vector; band_vector_index <= last_band_vector; ++band_vector_index) {
+                const int state_offset = band_vector_index * byte_lane_count_i32;
+                auto cell = should_use_fused_score
+                    ? load_ksw_dp_cell<p_mode, true>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks)
+                    : load_ksw_dp_cell<p_mode, false>(simd_tag, state_offset, state,
+                        query_reversed_aligned, horizontal_gap_carry, horizontal_difference_carry, long_horizontal_gap_carry,
+                        double_gap_costs, match_scores,
+                        mismatch_scores, wildcard_scores,
+                        wildcard_ranks);
 
                 // Direction tracking — right-align tie-break
-                auto dir = hn::IfThenZeroElse(
-                    hn::Gt(c.score_max_cell, c.diag_chain), bt_dir_1);
-                c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
+                auto backtrack_directions = hn::IfThenZeroElse(
+                    hn::Gt(cell.selected_scores, cell.short_horizontal_gap_candidates), short_horizontal_gap_direction);
+                cell.selected_scores = hn::Max(cell.selected_scores, cell.short_horizontal_gap_candidates);
 
                 if constexpr (!k_is_dual_affine) {
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.score_max_cell, c.vert_chain), dir, bt_dir_2);
-                    c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
-                    c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.selected_scores, cell.short_vertical_gap_candidates), backtrack_directions, short_vertical_gap_direction);
+                    cell.selected_scores = maximum_unsigned_bytes(simd_tag, cell.selected_scores, cell.short_vertical_gap_candidates);
+                    cell.selected_scores = minimum_unsigned_bytes(simd_tag, cell.selected_scores, maximum_plausible_scores);
                 } else {
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.score_max_cell, c.vert_chain), dir, bt_dir_2);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain);
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.score_max_cell, c.diag_chain2), dir, bt_dir_3);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain2);
-                    dir = hn::IfThenElse(
-                        hn::Gt(c.score_max_cell, c.vert_chain2), dir, bt_dir_4);
-                    c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain2);
-                    c.score_max_cell = hn::Min(c.score_max_cell, match_score_vec);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.selected_scores, cell.short_vertical_gap_candidates), backtrack_directions, short_vertical_gap_direction);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.short_vertical_gap_candidates);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.selected_scores, cell.long_horizontal_gap_candidates), backtrack_directions, long_horizontal_gap_direction);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.long_horizontal_gap_candidates);
+                    backtrack_directions = hn::IfThenElse(
+                        hn::Gt(cell.selected_scores, cell.long_vertical_gap_candidates), backtrack_directions, long_vertical_gap_direction);
+                    cell.selected_scores = hn::Max(cell.selected_scores, cell.long_vertical_gap_candidates);
+                    cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
                 }
 
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
-                          state.diff_up_base + off);
-                hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
-                          state.diff_left_base + off);
+                hn::Store(hn::Sub(cell.selected_scores, cell.shifted_left_differences), simd_tag,
+                          state.diff_up_base + state_offset);
+                hn::Store(hn::Sub(cell.selected_scores, cell.current_up_differences), simd_tag,
+                          state.diff_left_base + state_offset);
 
                 if constexpr (!k_is_dual_affine) {
-                    auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
-                    c.diag_chain = hn::Sub(c.diag_chain, smq);
-                    c.vert_chain = hn::Sub(c.vert_chain, smq);
+                    auto single_gap_open_threshold = hn::Sub(cell.selected_scores, gap_open_scores);
+                    cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, single_gap_open_threshold);
+                    cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, single_gap_open_threshold);
 
-                    auto dn = hn::Gt(zero_vec, c.diag_chain);
-                    hn::Store(hn::IfThenZeroElse(dn, c.diag_chain), simd_tag,
-                              state.gap_e_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(dn, bt_e_cont));
+                    auto short_horizontal_gap_is_negative = hn::Gt(zero_scores, cell.short_horizontal_gap_candidates);
+                    hn::Store(hn::IfThenZeroElse(short_horizontal_gap_is_negative, cell.short_horizontal_gap_candidates), simd_tag,
+                              state.gap_e_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(short_horizontal_gap_is_negative, short_horizontal_gap_continuation));
 
-                    auto vn = hn::Gt(zero_vec, c.vert_chain);
-                    hn::Store(hn::IfThenZeroElse(vn, c.vert_chain), simd_tag,
-                              state.gap_f_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(vn, bt_f_cont));
+                    auto short_vertical_gap_is_negative = hn::Gt(zero_scores, cell.short_vertical_gap_candidates);
+                    hn::Store(hn::IfThenZeroElse(short_vertical_gap_is_negative, cell.short_vertical_gap_candidates), simd_tag,
+                              state.gap_f_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(short_vertical_gap_is_negative, short_vertical_gap_continuation));
                 } else {
-                    auto sms = hn::Sub(c.score_max_cell, gap_open_short_vec);
-                    c.diag_chain = hn::Sub(c.diag_chain, sms);
-                    c.vert_chain = hn::Sub(c.vert_chain, sms);
-                    auto sml = hn::Sub(c.score_max_cell, gap_open_long_vec);
-                    c.diag_chain2 = hn::Sub(c.diag_chain2, sml);
-                    c.vert_chain2 = hn::Sub(c.vert_chain2, sml);
+                    auto short_gap_open_threshold = hn::Sub(cell.selected_scores, short_gap_open_scores);
+                    cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, short_gap_open_threshold);
+                    cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, short_gap_open_threshold);
+                    auto long_gap_open_threshold = hn::Sub(cell.selected_scores, long_gap_open_scores);
+                    cell.long_horizontal_gap_candidates = hn::Sub(cell.long_horizontal_gap_candidates, long_gap_open_threshold);
+                    cell.long_vertical_gap_candidates = hn::Sub(cell.long_vertical_gap_candidates, long_gap_open_threshold);
 
-                    auto dn = hn::Gt(zero_vec, c.diag_chain);
-                    hn::Store(hn::Sub(hn::IfThenZeroElse(dn, c.diag_chain),
-                                       short_gap_cost_vec),
-                              simd_tag, state.gap_e_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(dn, bt_e_cont));
+                    auto short_horizontal_gap_is_negative = hn::Gt(zero_scores, cell.short_horizontal_gap_candidates);
+                    hn::Store(hn::Sub(hn::IfThenZeroElse(short_horizontal_gap_is_negative, cell.short_horizontal_gap_candidates),
+                                       short_gap_costs),
+                              simd_tag, state.gap_e_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(short_horizontal_gap_is_negative, short_horizontal_gap_continuation));
 
-                    auto vn = hn::Gt(zero_vec, c.vert_chain);
-                    hn::Store(hn::Sub(hn::IfThenZeroElse(vn, c.vert_chain),
-                                       short_gap_cost_vec),
-                              simd_tag, state.gap_f_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(vn, bt_f_cont));
+                    auto short_vertical_gap_is_negative = hn::Gt(zero_scores, cell.short_vertical_gap_candidates);
+                    hn::Store(hn::Sub(hn::IfThenZeroElse(short_vertical_gap_is_negative, cell.short_vertical_gap_candidates),
+                                       short_gap_costs),
+                              simd_tag, state.gap_f_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(short_vertical_gap_is_negative, short_vertical_gap_continuation));
 
-                    auto d2n = hn::Gt(zero_vec, c.diag_chain2);
-                    hn::Store(hn::Sub(hn::IfThenZeroElse(d2n, c.diag_chain2),
-                                       long_gap_cost_vec),
-                              simd_tag, state.gap_e2_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(d2n, bt_e2_cont));
+                    auto long_horizontal_gap_is_negative = hn::Gt(zero_scores, cell.long_horizontal_gap_candidates);
+                    hn::Store(hn::Sub(hn::IfThenZeroElse(long_horizontal_gap_is_negative, cell.long_horizontal_gap_candidates),
+                                       long_gap_costs),
+                              simd_tag, state.gap_e2_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(long_horizontal_gap_is_negative, long_horizontal_gap_continuation));
 
-                    auto v2n = hn::Gt(zero_vec, c.vert_chain2);
-                    hn::Store(hn::Sub(hn::IfThenZeroElse(v2n, c.vert_chain2),
-                                       long_gap_cost_vec),
-                              simd_tag, state.gap_f2_offset_base + off);
-                    dir = hn::Or(dir, hn::IfThenZeroElse(v2n, bt_f2_cont));
+                    auto long_vertical_gap_is_negative = hn::Gt(zero_scores, cell.long_vertical_gap_candidates);
+                    hn::Store(hn::Sub(hn::IfThenZeroElse(long_vertical_gap_is_negative, cell.long_vertical_gap_candidates),
+                                       long_gap_costs),
+                              simd_tag, state.gap_f2_offset_base + state_offset);
+                    backtrack_directions = hn::Or(backtrack_directions, hn::IfThenZeroElse(long_vertical_gap_is_negative, long_vertical_gap_continuation));
                 }
 
-                hn::Store(dir, simd_tag,
-                    backtrack.vector_slot_bytes(anti_diagonal, bvi - band_start_vec));
+                hn::Store(backtrack_directions, simd_tag,
+                    backtrack.vector_slot_bytes(anti_diagonal, band_vector_index - first_band_vector));
             }
         }
 
         // ================================================================
         // Max score tracking and Z-drop
         // ================================================================
-        const int8_t zdrop_gap = k_is_dual_affine
+        const int8_t z_drop_gap_extend = k_is_dual_affine
             ? gap_extend_long
             : gap_extend;
 
-        if (!use_approx_max) {
-            p_full_score_type anti_diag_max_score;
-            int anti_diag_max_target_pos;
+        if (!should_use_approximate_maximum) {
+            p_full_score_type anti_diagonal_maximum_score;
+            int anti_diagonal_maximum_target_position;
             if (anti_diagonal > 0) {
                 if constexpr (!k_is_dual_affine) {
-                    const auto* du = reinterpret_cast<const uint8_t*>(state.diff_up_base);
-                    const auto* dl = reinterpret_cast<const uint8_t*>(state.diff_left_base);
-                    anti_diag_max_score = exact_score_row[band_end_raw] = band_end_raw > 0
-                        ? exact_score_row[band_end_raw - 1]
-                          + static_cast<p_full_score_type>(du[band_end_raw]) - gap_open_plus_extend
-                        : exact_score_row[band_end_raw]
-                          + static_cast<p_full_score_type>(dl[band_end_raw]) - gap_open_plus_extend;
+                    const auto* unsigned_up_differences = reinterpret_cast<const uint8_t*>(state.diff_up_base);
+                    const auto* unsigned_left_differences = reinterpret_cast<const uint8_t*>(state.diff_left_base);
+                    anti_diagonal_maximum_score = exact_score_row[unaligned_band_end] = unaligned_band_end > 0
+                        ? exact_score_row[unaligned_band_end - 1]
+                          + static_cast<p_full_score_type>(unsigned_up_differences[unaligned_band_end]) - gap_open_plus_extend
+                        : exact_score_row[unaligned_band_end]
+                          + static_cast<p_full_score_type>(unsigned_left_differences[unaligned_band_end]) - gap_open_plus_extend;
                 } else {
-                    anti_diag_max_score = exact_score_row[band_end_raw] = band_end_raw > 0
-                        ? exact_score_row[band_end_raw - 1]
-                          + static_cast<p_full_score_type>(state.diff_up_base[band_end_raw])
-                        : exact_score_row[band_end_raw]
-                          + static_cast<p_full_score_type>(state.diff_left_base[band_end_raw]);
+                    anti_diagonal_maximum_score = exact_score_row[unaligned_band_end] = unaligned_band_end > 0
+                        ? exact_score_row[unaligned_band_end - 1]
+                          + static_cast<p_full_score_type>(state.diff_up_base[unaligned_band_end])
+                        : exact_score_row[unaligned_band_end]
+                          + static_cast<p_full_score_type>(state.diff_left_base[unaligned_band_end]);
                 }
-                anti_diag_max_target_pos = band_end_raw;
+                anti_diagonal_maximum_target_position = unaligned_band_end;
 
                 auto maximum_score_vector =
-                    hn::Set(full_score_tag, anti_diag_max_score);
+                    hn::Set(full_score_tag, anti_diagonal_maximum_score);
                 auto maximum_position_vector = hn::Set(
                     full_score_tag,
                     static_cast<p_full_score_type>(
-                        anti_diag_max_target_pos));
+                        anti_diagonal_maximum_target_position));
                 [[maybe_unused]] auto gap_open_extend_vector = hn::Set(full_score_tag,
                     static_cast<p_full_score_type>(gap_open_plus_extend));
 
-                const int block_end = band_start_raw
-                    + (band_end_raw - band_start_raw) / static_cast<int>(score_lane_count)
+                const int block_end = unaligned_band_start
+                    + (unaligned_band_end - unaligned_band_start) / static_cast<int>(score_lane_count)
                       * static_cast<int>(score_lane_count);
-                int target_position = band_start_raw;
+                int target_position = unaligned_band_start;
                 for (;
                      target_position < block_end;
                      target_position += static_cast<int>(score_lane_count)) {
@@ -723,15 +723,15 @@ template<
                 for (size_t lane_index = 0;
                      lane_index < score_lane_count;
                      ++lane_index) {
-                    if (anti_diag_max_score < maximum_scores[lane_index]) {
-                        anti_diag_max_score = maximum_scores[lane_index];
-                        anti_diag_max_target_pos =
+                    if (anti_diagonal_maximum_score < maximum_scores[lane_index]) {
+                        anti_diagonal_maximum_score = maximum_scores[lane_index];
+                        anti_diagonal_maximum_target_position =
                             static_cast<int>(maximum_positions[lane_index])
                             + static_cast<int>(lane_index);
                     }
                 }
                 for (;
-                     target_position < band_end_raw;
+                     target_position < unaligned_band_end;
                      ++target_position) {
                     if constexpr (!k_is_dual_affine) {
                         exact_score_row[target_position] +=
@@ -745,9 +745,9 @@ template<
                                 state.diff_left_base[target_position]);
                     }
                     if (exact_score_row[target_position]
-                        > anti_diag_max_score) {
-                        anti_diag_max_score = exact_score_row[target_position];
-                        anti_diag_max_target_pos = target_position;
+                        > anti_diagonal_maximum_score) {
+                        anti_diagonal_maximum_score = exact_score_row[target_position];
+                        anti_diagonal_maximum_target_position = target_position;
                     }
                 }
             } else {
@@ -759,83 +759,83 @@ template<
                     exact_score_row[0] = static_cast<p_full_score_type>(
                         state.diff_left_base[0]) - gap_open_plus_extend;
                 }
-                anti_diag_max_score = exact_score_row[0];
-                anti_diag_max_target_pos = 0;
+                anti_diagonal_maximum_score = exact_score_row[0];
+                anti_diagonal_maximum_target_position = 0;
             }
-            if (band_end_raw == tlen - 1 && exact_score_row[band_end_raw] > result.mte) {
-                result.mte = exact_score_row[band_end_raw];
-                result.mte_q = anti_diagonal - band_end_raw;
+            if (unaligned_band_end == target_length_i32 - 1 && exact_score_row[unaligned_band_end] > result.mte) {
+                result.mte = exact_score_row[unaligned_band_end];
+                result.mte_q = anti_diagonal - unaligned_band_end;
             }
-            if (anti_diagonal - band_start_raw == qlen - 1
-                && exact_score_row[band_start_raw] > result.mqe)
+            if (anti_diagonal - unaligned_band_start == query_length_i32 - 1
+                && exact_score_row[unaligned_band_start] > result.mqe)
             {
-                result.mqe = exact_score_row[band_start_raw];
-                result.mqe_t = band_start_raw;
+                result.mqe = exact_score_row[unaligned_band_start];
+                result.mqe_t = unaligned_band_start;
             }
             if (apply_z_drop_heuristic(result, true,
-                                       anti_diag_max_score, anti_diagonal,
-                                       anti_diag_max_target_pos,
-                                       z_drop, zdrop_gap))
+                                       anti_diagonal_maximum_score, anti_diagonal,
+                                       anti_diagonal_maximum_target_position,
+                                       z_drop, z_drop_gap_extend))
             {
                 break;
             }
-            if (anti_diagonal == qlen + tlen - 2 && band_end_raw == tlen - 1) {
-                result.score = exact_score_row[tlen - 1];
+            if (anti_diagonal == query_length_i32 + target_length_i32 - 2 && unaligned_band_end == target_length_i32 - 1) {
+                result.score = exact_score_row[target_length_i32 - 1];
             }
         } else {
             // --- Approximate max -------------------------------------------
             if (anti_diagonal > 0) {
-                if (approx_score_target_pos >= band_start_raw
-                    && approx_score_target_pos <= band_end_raw
-                    && approx_score_target_pos + 1 >= band_start_raw
-                    && approx_score_target_pos + 1 <= band_end_raw)
+                if (approximate_score_target_position >= unaligned_band_start
+                    && approximate_score_target_position <= unaligned_band_end
+                    && approximate_score_target_position + 1 >= unaligned_band_start
+                    && approximate_score_target_position + 1 <= unaligned_band_end)
                 {
                     p_full_score_type delta_left, delta_up;
                     if constexpr (!k_is_dual_affine) {
                         delta_left = static_cast<p_full_score_type>(
-                            reinterpret_cast<const uint8_t*>(state.diff_left_base)[approx_score_target_pos])
+                            reinterpret_cast<const uint8_t*>(state.diff_left_base)[approximate_score_target_position])
                             - gap_open_plus_extend;
                         delta_up = static_cast<p_full_score_type>(
-                            reinterpret_cast<const uint8_t*>(state.diff_up_base)[approx_score_target_pos + 1])
+                            reinterpret_cast<const uint8_t*>(state.diff_up_base)[approximate_score_target_position + 1])
                             - gap_open_plus_extend;
                     } else {
-                        delta_left = state.diff_left_base[approx_score_target_pos];
-                        delta_up   = state.diff_up_base[approx_score_target_pos + 1];
+                        delta_left = state.diff_left_base[approximate_score_target_position];
+                        delta_up   = state.diff_up_base[approximate_score_target_position + 1];
                     }
                     if (delta_left > delta_up) {
                         approx_score += delta_left;
                     } else {
                         approx_score += delta_up;
-                        ++approx_score_target_pos;
+                        ++approximate_score_target_position;
                     }
-                } else if (approx_score_target_pos >= band_start_raw
-                           && approx_score_target_pos <= band_end_raw)
+                } else if (approximate_score_target_position >= unaligned_band_start
+                           && approximate_score_target_position <= unaligned_band_end)
                 {
                     if constexpr (!k_is_dual_affine) {
                         approx_score += static_cast<p_full_score_type>(
-                            reinterpret_cast<const uint8_t*>(state.diff_left_base)[approx_score_target_pos])
+                            reinterpret_cast<const uint8_t*>(state.diff_left_base)[approximate_score_target_position])
                             - gap_open_plus_extend;
                     } else {
                         approx_score += static_cast<p_full_score_type>(
-                            state.diff_left_base[approx_score_target_pos]);
+                            state.diff_left_base[approximate_score_target_position]);
                     }
                 } else {
-                    ++approx_score_target_pos;
+                    ++approximate_score_target_position;
                     if constexpr (!k_is_dual_affine) {
                         approx_score += static_cast<p_full_score_type>(
-                            reinterpret_cast<const uint8_t*>(state.diff_up_base)[approx_score_target_pos])
+                            reinterpret_cast<const uint8_t*>(state.diff_up_base)[approximate_score_target_position])
                             - gap_open_plus_extend;
                     } else {
                         approx_score += static_cast<p_full_score_type>(
-                            state.diff_up_base[approx_score_target_pos]);
+                            state.diff_up_base[approximate_score_target_position]);
                     }
                 }
                 if constexpr (!k_is_dual_affine) {
                     if (flags.approx_zdrop
                         && apply_z_drop_heuristic(result, true,
                                                   approx_score, anti_diagonal,
-                                                  approx_score_target_pos,
-                                                  z_drop, zdrop_gap))
+                                                  approximate_score_target_position,
+                                                  z_drop, z_drop_gap_extend))
                     {
                         break;
                     }
@@ -849,42 +849,42 @@ template<
                     approx_score = static_cast<p_full_score_type>(
                         state.diff_left_base[0]) - gap_open_plus_extend;
                 }
-                approx_score_target_pos = 0;
+                approximate_score_target_position = 0;
             }
             if constexpr (k_is_dual_affine) {
                 if (flags.approx_zdrop
                     && apply_z_drop_heuristic(result, true,
                                               approx_score, anti_diagonal,
-                                              approx_score_target_pos,
-                                              z_drop, zdrop_gap))
+                                              approximate_score_target_position,
+                                              z_drop, z_drop_gap_extend))
                 {
                     break;
                 }
             }
-            if (anti_diagonal == qlen + tlen - 2 && band_end_raw == tlen - 1) {
+            if (anti_diagonal == query_length_i32 + target_length_i32 - 2 && unaligned_band_end == target_length_i32 - 1) {
                 result.score = approx_score;
             }
         }
-        prev_band_start = band_start;
-        prev_band_end   = band_end;
+        previous_band_start = band_start;
+        previous_band_end   = band_end;
     }
 
     // ====================================================================
     // Backtrack
     // ====================================================================
-    if (compute_cigar) {
-        const bool rev = flags.reverse_cigar;
+    if (should_compute_cigar) {
+        const bool output_reversed = flags.reverse_cigar;
         if (!result.is_z_dropped && !flags.extz_only) {
-            ksw_backtrack_cigar(backtrack, true, rev, 0,
-                                tlen - 1, qlen - 1, result.cigar);
+            ksw_backtrack_cigar(backtrack, true, output_reversed, 0,
+                                target_length_i32 - 1, query_length_i32 - 1, result.cigar);
         } else if (!result.is_z_dropped && flags.extz_only
                    && result.mqe + end_bonus > result.max)
         {
             result.has_reached_end = true;
-            ksw_backtrack_cigar(backtrack, true, rev, 0,
-                                result.mqe_t, qlen - 1, result.cigar);
+            ksw_backtrack_cigar(backtrack, true, output_reversed, 0,
+                                result.mqe_t, query_length_i32 - 1, result.cigar);
         } else if (result.max_t >= 0 && result.max_q >= 0) {
-            ksw_backtrack_cigar(backtrack, true, rev, 0,
+            ksw_backtrack_cigar(backtrack, true, output_reversed, 0,
                                 result.max_t, result.max_q, result.cigar);
         }
     }

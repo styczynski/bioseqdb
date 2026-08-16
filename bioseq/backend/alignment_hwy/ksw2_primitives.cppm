@@ -144,12 +144,12 @@ template <class p_simd_tag, class p_vector_type = hn::Vec<p_simd_tag>>
     if (target_position >= result.max_t
         && anti_diagonal - target_position >= result.max_q)
     {
-        const int td = target_position - result.max_t;
-        const int qd = (anti_diagonal - target_position) - result.max_q;
-        const int cd = td > qd ? td - qd : qd - td;
+        const int target_distance = target_position - result.max_t;
+        const int query_distance = (anti_diagonal - target_position) - result.max_q;
+        const int diagonal_distance = target_distance > query_distance ? target_distance - query_distance : query_distance - target_distance;
         if (z_drop_threshold >= 0
             && result.max - current_score
-               > z_drop_threshold + cd * gap_extension_penalty)
+               > z_drop_threshold + diagonal_distance * gap_extension_penalty)
         {
             result.is_z_dropped = true;
             return true;
@@ -177,8 +177,8 @@ public:
     ksw_dp_state() = default;
 
     /** Allocate single-affine state for the requested sequence extents. */
-    ksw_dp_state(size_t target_len, size_t query_len, size_t vector_bytes)
-        : ksw_dp_state(target_len, query_len, vector_bytes, 5, /*zero_state_arrays=*/true) {}
+    ksw_dp_state(size_t target_length, size_t query_length, size_t vector_bytes)
+        : ksw_dp_state(target_length, query_length, vector_bytes, 5, /*zero_state_arrays=*/true) {}
 
     /** Return the number of vector slots in one target row. */
     [[nodiscard]] int target_vector_count() const noexcept { return target_vec_count_; }
@@ -190,8 +190,8 @@ public:
     }
 
     /** Fill the first state arrays with one byte value. */
-    void fill_leading_arrays(int n, uint8_t value) noexcept {
-        std::memset(diff_up_base, value, static_cast<size_t>(n) * array_byte_count());
+    void fill_leading_arrays(int array_count, uint8_t value) noexcept {
+        std::memset(diff_up_base, value, static_cast<size_t>(array_count) * array_byte_count());
     }
 
     /** Fill one state array with one byte value. */
@@ -212,41 +212,42 @@ protected:
     // diag_score array (the last DP-state slot) is still zero-filled
     // because the generic-score code path may read it before writing,
     // and it's only one stride wide.
-    ksw_dp_state(size_t target_len, size_t query_len, size_t vector_bytes,
-               int state_count, bool zero_state_arrays)
-        : target_vec_count_(static_cast<int>((target_len + vector_bytes - 1) / vector_bytes))
-        , query_vec_count_(static_cast<int>((query_len + vector_bytes - 1) / vector_bytes))
+    ksw_dp_state(size_t target_length, size_t query_length, size_t vector_bytes,
+               int state_array_count, bool zero_state_arrays)
+        : target_vec_count_(static_cast<int>((target_length + vector_bytes - 1) / vector_bytes))
+        , query_vec_count_(static_cast<int>((query_length + vector_bytes - 1) / vector_bytes))
         , vec_bytes_(vector_bytes)
     {
-        const size_t stride = static_cast<size_t>(target_vec_count_) * vector_bytes;
-        const size_t total  = (static_cast<size_t>(state_count + 1) * target_vec_count_
+        const size_t state_array_byte_count = static_cast<size_t>(target_vec_count_) * vector_bytes;
+        const size_t storage_byte_count  = (static_cast<size_t>(state_array_count + 1) * target_vec_count_
                               + static_cast<size_t>(query_vec_count_) + 1) * vector_bytes;
-        storage_ = context::current().alloc_align_array<int8_t, 64>(total);
-        const size_t dp_bytes = static_cast<size_t>(state_count) * stride;
+        storage_ = context::current().alloc_align_array<int8_t, 64>(storage_byte_count);
+        const size_t initialized_state_bytes = static_cast<size_t>(state_array_count) * state_array_byte_count;
         if (zero_state_arrays) {
-            std::memset(storage_.data(), 0, dp_bytes);
+            std::memset(storage_.data(), 0, initialized_state_bytes);
         } else {
             // Only zero the diag_score slot (the last state slab). Arrays
-            // 0..(state_count-2) are filled by the caller before first read.
-            std::memset(storage_.data() + static_cast<size_t>(state_count - 1) * stride,
-                        0, stride);
+            // 0..(state_array_count-2) are filled by the caller before first
+            // read.
+            std::memset(storage_.data() + static_cast<size_t>(state_array_count - 1) * state_array_byte_count,
+                        0, state_array_byte_count);
         }
         // Wipe the single extra byte read just past the DP-state arrays through
         // diag_score_base so the boundary remains deterministic.
-        if (storage_.size() > dp_bytes) {
-            storage_[dp_bytes] = 0;
+        if (storage_.size() > initialized_state_bytes) {
+            storage_[initialized_state_bytes] = 0;
         }
 
-        int8_t* base = storage_.data();
-        diff_up_base      = base;
-        diff_left_base    = diff_up_base      + stride;
-        gap_e_offset_base = diff_left_base    + stride;
-        gap_f_offset_base = gap_e_offset_base + stride;
-        diag_score_base   = base + static_cast<size_t>(state_count - 1) * stride;
+        int8_t* storage_base = storage_.data();
+        diff_up_base      = storage_base;
+        diff_left_base    = diff_up_base      + state_array_byte_count;
+        gap_e_offset_base = diff_left_base    + state_array_byte_count;
+        gap_f_offset_base = gap_e_offset_base + state_array_byte_count;
+        diag_score_base   = storage_base + static_cast<size_t>(state_array_count - 1) * state_array_byte_count;
         target_bytes      = reinterpret_cast<uint8_t*>(
-            base + static_cast<size_t>(state_count) * stride);
+            storage_base + static_cast<size_t>(state_array_count) * state_array_byte_count);
         query_reversed    = reinterpret_cast<uint8_t*>(
-            base + static_cast<size_t>(state_count + 1) * stride);
+            storage_base + static_cast<size_t>(state_array_count + 1) * state_array_byte_count);
     }
 
     [[nodiscard]] int8_t* array_pointer(int index) noexcept {
@@ -270,13 +271,13 @@ public:
     ksw_dual_affine_dp_state() = default;
 
     /** Allocate dual-affine state for the requested sequence extents. */
-    ksw_dual_affine_dp_state(size_t target_len, size_t query_len, size_t vector_bytes)
+    ksw_dual_affine_dp_state(size_t target_length, size_t query_length, size_t vector_bytes)
         // Skip the broad zero-fill: align_ksw2_core fills arrays 0..5
         // explicitly via fill_leading_arrays(4, -q-e) +
         // fill_array(x2|y2, -q2-e2) right after construction. The
         // diag_score slot (array 6) still gets a one-stride zero-fill
         // inside the parent constructor.
-        : ksw_dp_state(target_len, query_len, vector_bytes, 7,
+        : ksw_dp_state(target_length, query_length, vector_bytes, 7,
                      /*zero_state_arrays=*/false)
     {
         gap_e2_offset_base = array_pointer(4);
@@ -309,9 +310,9 @@ public:
         total_vector_slots_ =
             static_cast<size_t>(anti_diagonal_count) * cols_in_vectors_ + 1;
         const size_t total_bytes = total_vector_slots_ * vector_bytes;
-        auto& ctx = context::current();
-        storage_ = ctx.alloc_align_array<int8_t, 64>(total_bytes);
-        band_range_ = ctx.alloc_align_array<int32_t>(
+        auto& alignment_context = context::current();
+        storage_ = alignment_context.alloc_align_array<int8_t, 64>(total_bytes);
+        band_range_ = alignment_context.alloc_align_array<int32_t>(
             2 * static_cast<size_t>(anti_diagonal_count));
     }
 
@@ -388,49 +389,49 @@ inline void ksw_backtrack_cigar(
     const size_t cell_estimate = static_cast<size_t>(starting_row + starting_column + 1);
     output_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
 
-    const uint8_t* bt = matrix.bytes();
-    const std::span<const int32_t> off = matrix.band_starts();
-    const std::span<const int32_t> off_end = matrix.band_ends();
-    const int n_col = matrix.byte_columns_per_row();
+    const uint8_t* traceback_bytes = matrix.bytes();
+    const std::span<const int32_t> band_starts = matrix.band_starts();
+    const std::span<const int32_t> band_ends = matrix.band_ends();
+    const int byte_columns_per_row = matrix.byte_columns_per_row();
 
-    int i = starting_row, k = starting_column, state = 0;
-    while (i >= 0 && k >= 0) {
-        int force = -1;
-        uint32_t bv = 0;
+    int row_position = starting_row, column_position = starting_column, traceback_state = 0;
+    while (row_position >= 0 && column_position >= 0) {
+        int forced_state = -1;
+        uint32_t traceback_value = 0;
         if (use_rotated_coordinates) {
-            const int r = i + k;
-            if (i < off[static_cast<size_t>(r)]) force = 2;
-            if (i > off_end[static_cast<size_t>(r)]) force = 1;
-            if (force < 0)
-                bv = bt[static_cast<size_t>(r) * n_col
-                        + static_cast<size_t>(i - off[static_cast<size_t>(r)])];
+            const int anti_diagonal = row_position + column_position;
+            if (row_position < band_starts[static_cast<size_t>(anti_diagonal)]) forced_state = 2;
+            if (row_position > band_ends[static_cast<size_t>(anti_diagonal)]) forced_state = 1;
+            if (forced_state < 0)
+                traceback_value = traceback_bytes[static_cast<size_t>(anti_diagonal) * byte_columns_per_row
+                        + static_cast<size_t>(row_position - band_starts[static_cast<size_t>(anti_diagonal)])];
         } else {
-            if (k < off[static_cast<size_t>(i)]) force = 2;
-            if (k > off_end[static_cast<size_t>(i)]) force = 1;
-            if (force < 0)
-                bv = bt[static_cast<size_t>(i) * n_col
-                        + static_cast<size_t>(k - off[static_cast<size_t>(i)])];
+            if (column_position < band_starts[static_cast<size_t>(row_position)]) forced_state = 2;
+            if (column_position > band_ends[static_cast<size_t>(row_position)]) forced_state = 1;
+            if (forced_state < 0)
+                traceback_value = traceback_bytes[static_cast<size_t>(row_position) * byte_columns_per_row
+                        + static_cast<size_t>(column_position - band_starts[static_cast<size_t>(row_position)])];
         }
 
-        if (state == 0) state = static_cast<int>(bv & 7U);
-        else if (!((bv >> (state + 2)) & 1U)) state = 0;
-        if (state == 0) state = static_cast<int>(bv & 7U);
-        if (force >= 0) state = force;
+        if (traceback_state == 0) traceback_state = static_cast<int>(traceback_value & 7U);
+        else if (!((traceback_value >> (traceback_state + 2)) & 1U)) traceback_state = 0;
+        if (traceback_state == 0) traceback_state = static_cast<int>(traceback_value & 7U);
+        if (forced_state >= 0) traceback_state = forced_state;
 
-        if (state == 0)      { push_packed_cigar(output_cigar, cigar_match_opcode, 1); --i; --k; }
-        else if (state == 1 || (state == 3 && minimum_intron_length <= 0))
-                             { push_packed_cigar(output_cigar, cigar_deletion_opcode, 1); --i; }
-        else if (state == 3 && minimum_intron_length > 0)
-                             { push_packed_cigar(output_cigar, cigar_reference_skip_opcode, 1); --i; }
-        else                 { push_packed_cigar(output_cigar, cigar_insertion_opcode, 1); --k; }
+        if (traceback_state == 0)      { push_packed_cigar(output_cigar, cigar_match_opcode, 1); --row_position; --column_position; }
+        else if (traceback_state == 1 || (traceback_state == 3 && minimum_intron_length <= 0))
+                             { push_packed_cigar(output_cigar, cigar_deletion_opcode, 1); --row_position; }
+        else if (traceback_state == 3 && minimum_intron_length > 0)
+                             { push_packed_cigar(output_cigar, cigar_reference_skip_opcode, 1); --row_position; }
+        else                 { push_packed_cigar(output_cigar, cigar_insertion_opcode, 1); --column_position; }
     }
 
-    if (i >= 0) {
-        const uint32_t op = (minimum_intron_length > 0 && i >= minimum_intron_length)
+    if (row_position >= 0) {
+        const uint32_t operation = (minimum_intron_length > 0 && row_position >= minimum_intron_length)
             ? cigar_reference_skip_opcode : cigar_deletion_opcode;
-        push_packed_cigar(output_cigar, op, static_cast<uint32_t>(i + 1));
+        push_packed_cigar(output_cigar, operation, static_cast<uint32_t>(row_position + 1));
     }
-    if (k >= 0) push_packed_cigar(output_cigar, cigar_insertion_opcode, static_cast<uint32_t>(k + 1));
+    if (column_position >= 0) push_packed_cigar(output_cigar, cigar_insertion_opcode, static_cast<uint32_t>(column_position + 1));
     if (!output_reversed) std::reverse(output_cigar.begin(), output_cigar.end());
 }
 
@@ -441,13 +442,13 @@ inline void ksw_backtrack_cigar(
 /** Vector state returned by one KSW2 DP load step. */
 template <class p_simd_tag>
 struct ksw_dp_cell {
-    hn::Vec<p_simd_tag> score_max_cell;  ///< Selected score for every lane.
-    hn::Vec<p_simd_tag> diff_left_sh;    ///< Shifted horizontal differences.
-    hn::Vec<p_simd_tag> diff_up_cur;     ///< Current vertical differences.
-    hn::Vec<p_simd_tag> diag_chain;      ///< Short horizontal-gap candidates.
-    hn::Vec<p_simd_tag> vert_chain;      ///< Short vertical-gap candidates.
-    hn::Vec<p_simd_tag> diag_chain2;     ///< Long horizontal-gap candidates.
-    hn::Vec<p_simd_tag> vert_chain2;     ///< Long vertical-gap candidates.
+    hn::Vec<p_simd_tag> selected_scores;  ///< Selected score for every lane.
+    hn::Vec<p_simd_tag> shifted_left_differences;    ///< Shifted horizontal differences.
+    hn::Vec<p_simd_tag> current_up_differences;     ///< Current vertical differences.
+    hn::Vec<p_simd_tag> short_horizontal_gap_candidates;      ///< Short horizontal-gap candidates.
+    hn::Vec<p_simd_tag> short_vertical_gap_candidates;      ///< Short vertical-gap candidates.
+    hn::Vec<p_simd_tag> long_horizontal_gap_candidates;     ///< Long horizontal-gap candidates.
+    hn::Vec<p_simd_tag> long_vertical_gap_candidates;     ///< Long vertical-gap candidates.
 
     // A project-declared body gives the generator a callable on which to put
     // HWY_ATTR. Default-initialization still leaves every vector uninitialized.
@@ -470,65 +471,65 @@ template <
     class p_simd_tag,
     class p_state_type>
 [[always_inline]] inline ksw_dp_cell<p_simd_tag> load_ksw_dp_cell(
-    p_simd_tag simd_tag, int off,
+    p_simd_tag simd_tag, int state_offset,
     p_state_type& HWY_RESTRICT state,
     const uint8_t* HWY_RESTRICT query_reversed_aligned,
-    hn::Vec<p_simd_tag>& bx_vec, hn::Vec<p_simd_tag>& bv_vec,
-    [[maybe_unused]] hn::Vec<p_simd_tag>& bx2_vec,
-    hn::Vec<p_simd_tag> double_gap_cost_vec,
-    hn::Vec<p_simd_tag> match_score_vec,
-    hn::Vec<p_simd_tag> mismatch_score_vec,
-    hn::Vec<p_simd_tag> wildcard_score_vec,
-    hn::Vec<p_simd_tag> wildcard_rank_vec) noexcept
+    hn::Vec<p_simd_tag>& horizontal_gap_carry, hn::Vec<p_simd_tag>& horizontal_difference_carry,
+    [[maybe_unused]] hn::Vec<p_simd_tag>& long_horizontal_gap_carry,
+    hn::Vec<p_simd_tag> double_gap_costs,
+    hn::Vec<p_simd_tag> match_scores,
+    hn::Vec<p_simd_tag> mismatch_scores,
+    hn::Vec<p_simd_tag> wildcard_scores,
+    hn::Vec<p_simd_tag> wildcard_ranks) noexcept
 {
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
     using partial_score_type = hn::TFromD<p_simd_tag>;
-    ksw_dp_cell<p_simd_tag> c;
+    ksw_dp_cell<p_simd_tag> cell;
 
     // --- Cell score ---
     if constexpr (p_is_fused_score) {
-        auto tl = hn::LoadU(simd_tag,
-            reinterpret_cast<const partial_score_type*>(&state.target_bytes[off]));
-        auto ql = hn::LoadU(simd_tag,
-            reinterpret_cast<const partial_score_type*>(&query_reversed_aligned[off]));
-        auto wm = hn::Or(
-            hn::VecFromMask(simd_tag, hn::Eq(tl, wildcard_rank_vec)),
-            hn::VecFromMask(simd_tag, hn::Eq(ql, wildcard_rank_vec)));
-        auto eq = hn::VecFromMask(simd_tag, hn::Eq(tl, ql));
-        c.score_max_cell = hn::IfThenElse(
-            hn::MaskFromVec(eq), match_score_vec, mismatch_score_vec);
-        c.score_max_cell = hn::IfThenElse(
-            hn::MaskFromVec(wm), wildcard_score_vec, c.score_max_cell);
+        auto target_ranks = hn::LoadU(simd_tag,
+            reinterpret_cast<const partial_score_type*>(&state.target_bytes[state_offset]));
+        auto query_ranks = hn::LoadU(simd_tag,
+            reinterpret_cast<const partial_score_type*>(&query_reversed_aligned[state_offset]));
+        auto wildcard_lanes = hn::Or(
+            hn::VecFromMask(simd_tag, hn::Eq(target_ranks, wildcard_ranks)),
+            hn::VecFromMask(simd_tag, hn::Eq(query_ranks, wildcard_ranks)));
+        auto equal_lanes = hn::VecFromMask(simd_tag, hn::Eq(target_ranks, query_ranks));
+        cell.selected_scores = hn::IfThenElse(
+            hn::MaskFromVec(equal_lanes), match_scores, mismatch_scores);
+        cell.selected_scores = hn::IfThenElse(
+            hn::MaskFromVec(wildcard_lanes), wildcard_scores, cell.selected_scores);
     } else {
-        c.score_max_cell = hn::Load(simd_tag, state.diag_score_base + off);
+        cell.selected_scores = hn::Load(simd_tag, state.diag_score_base + state_offset);
     }
 
     if constexpr (!k_is_dual_affine) {
-        c.score_max_cell = hn::Add(c.score_max_cell, double_gap_cost_vec);
+        cell.selected_scores = hn::Add(cell.selected_scores, double_gap_costs);
     }
 
     // --- Gap / diff state ---
-    auto gap_e_sh = hn::Load(simd_tag, state.gap_e_offset_base + off);
-    gap_e_sh = shift_left_insert(simd_tag, gap_e_sh, bx_vec);
-    c.diff_left_sh = hn::Load(simd_tag, state.diff_left_base + off);
-    c.diff_left_sh = shift_left_insert(simd_tag, c.diff_left_sh, bv_vec);
-    c.diag_chain = hn::Add(gap_e_sh, c.diff_left_sh);
-    c.diff_up_cur = hn::Load(simd_tag, state.diff_up_base + off);
-    c.vert_chain = hn::Add(
-        hn::Load(simd_tag, state.gap_f_offset_base + off), c.diff_up_cur);
+    auto shifted_horizontal_gap_offsets = hn::Load(simd_tag, state.gap_e_offset_base + state_offset);
+    shifted_horizontal_gap_offsets = shift_left_insert(simd_tag, shifted_horizontal_gap_offsets, horizontal_gap_carry);
+    cell.shifted_left_differences = hn::Load(simd_tag, state.diff_left_base + state_offset);
+    cell.shifted_left_differences = shift_left_insert(simd_tag, cell.shifted_left_differences, horizontal_difference_carry);
+    cell.short_horizontal_gap_candidates = hn::Add(shifted_horizontal_gap_offsets, cell.shifted_left_differences);
+    cell.current_up_differences = hn::Load(simd_tag, state.diff_up_base + state_offset);
+    cell.short_vertical_gap_candidates = hn::Add(
+        hn::Load(simd_tag, state.gap_f_offset_base + state_offset), cell.current_up_differences);
 
-    c.diag_chain2 = hn::Zero(simd_tag);
-    c.vert_chain2 = hn::Zero(simd_tag);
+    cell.long_horizontal_gap_candidates = hn::Zero(simd_tag);
+    cell.long_vertical_gap_candidates = hn::Zero(simd_tag);
     if constexpr (k_is_dual_affine) {
-        auto ge2_sh = hn::Load(simd_tag, state.gap_e2_offset_base + off);
-        ge2_sh = shift_left_insert(simd_tag, ge2_sh, bx2_vec);
-        c.diag_chain2 = hn::Add(ge2_sh, c.diff_left_sh);
-        c.vert_chain2 = hn::Add(
-            hn::Load(simd_tag, state.gap_f2_offset_base + off), c.diff_up_cur);
+        auto shifted_long_horizontal_gap_offsets = hn::Load(simd_tag, state.gap_e2_offset_base + state_offset);
+        shifted_long_horizontal_gap_offsets = shift_left_insert(simd_tag, shifted_long_horizontal_gap_offsets, long_horizontal_gap_carry);
+        cell.long_horizontal_gap_candidates = hn::Add(shifted_long_horizontal_gap_offsets, cell.shifted_left_differences);
+        cell.long_vertical_gap_candidates = hn::Add(
+            hn::Load(simd_tag, state.gap_f2_offset_base + state_offset), cell.current_up_differences);
     }
 
-    return c;
+    return cell;
 }
 
 // =============================================================================
@@ -538,22 +539,22 @@ template <
 /** Reduce one vector of recurrence candidates to the selected cell scores. */
 template <ksw_aligner_mode p_mode, class p_simd_tag>
 [[always_inline]] inline void reduce_ksw_dp_maximum(
-    p_simd_tag simd_tag, ksw_dp_cell<p_simd_tag>& c,
-    hn::Vec<p_simd_tag> max_plausible_score_vec,
-    hn::Vec<p_simd_tag> match_score_vec) noexcept
+    p_simd_tag simd_tag, ksw_dp_cell<p_simd_tag>& cell,
+    hn::Vec<p_simd_tag> maximum_plausible_scores,
+    hn::Vec<p_simd_tag> match_scores) noexcept
 {
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
 
-    c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain);
+    cell.selected_scores = hn::Max(cell.selected_scores, cell.short_horizontal_gap_candidates);
     if constexpr (!k_is_dual_affine) {
-        c.score_max_cell = maximum_unsigned_bytes(simd_tag, c.score_max_cell, c.vert_chain);
-        c.score_max_cell = minimum_unsigned_bytes(simd_tag, c.score_max_cell, max_plausible_score_vec);
+        cell.selected_scores = maximum_unsigned_bytes(simd_tag, cell.selected_scores, cell.short_vertical_gap_candidates);
+        cell.selected_scores = minimum_unsigned_bytes(simd_tag, cell.selected_scores, maximum_plausible_scores);
     } else {
-        c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain);
-        c.score_max_cell = hn::Max(c.score_max_cell, c.diag_chain2);
-        c.score_max_cell = hn::Max(c.score_max_cell, c.vert_chain2);
-        c.score_max_cell = hn::Min(c.score_max_cell, match_score_vec);
+        cell.selected_scores = hn::Max(cell.selected_scores, cell.short_vertical_gap_candidates);
+        cell.selected_scores = hn::Max(cell.selected_scores, cell.long_horizontal_gap_candidates);
+        cell.selected_scores = hn::Max(cell.selected_scores, cell.long_vertical_gap_candidates);
+        cell.selected_scores = hn::Min(cell.selected_scores, match_scores);
     }
 }
 
@@ -567,47 +568,47 @@ template <
     class p_simd_tag,
     class p_state_type>
 [[always_inline]] inline void store_ksw_dp_cell(
-    p_simd_tag simd_tag, int off,
-    ksw_dp_cell<p_simd_tag>& c,
+    p_simd_tag simd_tag, int state_offset,
+    ksw_dp_cell<p_simd_tag>& cell,
     p_state_type& HWY_RESTRICT state,
-    hn::Vec<p_simd_tag> gap_open_vec,
-    hn::Vec<p_simd_tag> gap_open_short_vec,
-    hn::Vec<p_simd_tag> gap_open_long_vec,
-    hn::Vec<p_simd_tag> short_gap_cost_vec,
-    hn::Vec<p_simd_tag> long_gap_cost_vec,
-    hn::Vec<p_simd_tag> zero_vec) noexcept
+    hn::Vec<p_simd_tag> gap_open_scores,
+    hn::Vec<p_simd_tag> short_gap_open_scores,
+    hn::Vec<p_simd_tag> long_gap_open_scores,
+    hn::Vec<p_simd_tag> short_gap_costs,
+    hn::Vec<p_simd_tag> long_gap_costs,
+    hn::Vec<p_simd_tag> zero_scores) noexcept
 {
     constexpr bool k_is_dual_affine =
         p_mode == ksw_aligner_mode::dual_affine;
 
-    hn::Store(hn::Sub(c.score_max_cell, c.diff_left_sh), simd_tag,
-              state.diff_up_base + off);
-    hn::Store(hn::Sub(c.score_max_cell, c.diff_up_cur), simd_tag,
-              state.diff_left_base + off);
+    hn::Store(hn::Sub(cell.selected_scores, cell.shifted_left_differences), simd_tag,
+              state.diff_up_base + state_offset);
+    hn::Store(hn::Sub(cell.selected_scores, cell.current_up_differences), simd_tag,
+              state.diff_left_base + state_offset);
 
     if constexpr (!k_is_dual_affine) {
-        auto smq = hn::Sub(c.score_max_cell, gap_open_vec);
-        c.diag_chain = hn::Sub(c.diag_chain, smq);
-        c.vert_chain = hn::Sub(c.vert_chain, smq);
-        hn::Store(hn::Max(c.diag_chain, zero_vec), simd_tag,
-                  state.gap_e_offset_base + off);
-        hn::Store(hn::Max(c.vert_chain, zero_vec), simd_tag,
-                  state.gap_f_offset_base + off);
+        auto single_gap_open_threshold = hn::Sub(cell.selected_scores, gap_open_scores);
+        cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, single_gap_open_threshold);
+        cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, single_gap_open_threshold);
+        hn::Store(hn::Max(cell.short_horizontal_gap_candidates, zero_scores), simd_tag,
+                  state.gap_e_offset_base + state_offset);
+        hn::Store(hn::Max(cell.short_vertical_gap_candidates, zero_scores), simd_tag,
+                  state.gap_f_offset_base + state_offset);
     } else {
-        auto sms = hn::Sub(c.score_max_cell, gap_open_short_vec);
-        c.diag_chain = hn::Sub(c.diag_chain, sms);
-        c.vert_chain = hn::Sub(c.vert_chain, sms);
-        auto sml = hn::Sub(c.score_max_cell, gap_open_long_vec);
-        c.diag_chain2 = hn::Sub(c.diag_chain2, sml);
-        c.vert_chain2 = hn::Sub(c.vert_chain2, sml);
-        hn::Store(hn::Sub(hn::Max(c.diag_chain, zero_vec), short_gap_cost_vec),
-                  simd_tag, state.gap_e_offset_base + off);
-        hn::Store(hn::Sub(hn::Max(c.vert_chain, zero_vec), short_gap_cost_vec),
-                  simd_tag, state.gap_f_offset_base + off);
-        hn::Store(hn::Sub(hn::Max(c.diag_chain2, zero_vec), long_gap_cost_vec),
-                  simd_tag, state.gap_e2_offset_base + off);
-        hn::Store(hn::Sub(hn::Max(c.vert_chain2, zero_vec), long_gap_cost_vec),
-                  simd_tag, state.gap_f2_offset_base + off);
+        auto short_gap_open_threshold = hn::Sub(cell.selected_scores, short_gap_open_scores);
+        cell.short_horizontal_gap_candidates = hn::Sub(cell.short_horizontal_gap_candidates, short_gap_open_threshold);
+        cell.short_vertical_gap_candidates = hn::Sub(cell.short_vertical_gap_candidates, short_gap_open_threshold);
+        auto long_gap_open_threshold = hn::Sub(cell.selected_scores, long_gap_open_scores);
+        cell.long_horizontal_gap_candidates = hn::Sub(cell.long_horizontal_gap_candidates, long_gap_open_threshold);
+        cell.long_vertical_gap_candidates = hn::Sub(cell.long_vertical_gap_candidates, long_gap_open_threshold);
+        hn::Store(hn::Sub(hn::Max(cell.short_horizontal_gap_candidates, zero_scores), short_gap_costs),
+                  simd_tag, state.gap_e_offset_base + state_offset);
+        hn::Store(hn::Sub(hn::Max(cell.short_vertical_gap_candidates, zero_scores), short_gap_costs),
+                  simd_tag, state.gap_f_offset_base + state_offset);
+        hn::Store(hn::Sub(hn::Max(cell.long_horizontal_gap_candidates, zero_scores), long_gap_costs),
+                  simd_tag, state.gap_e2_offset_base + state_offset);
+        hn::Store(hn::Sub(hn::Max(cell.long_vertical_gap_candidates, zero_scores), long_gap_costs),
+                  simd_tag, state.gap_f2_offset_base + state_offset);
     }
 }
 

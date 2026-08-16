@@ -1,5 +1,5 @@
 /**
- * @file vector_compare.cppm
+ * @file implementation.cppm
  * @brief Highway implementation of Boolean column-mask composition.
  */
 module;
