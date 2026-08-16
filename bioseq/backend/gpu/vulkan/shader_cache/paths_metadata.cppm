@@ -14,6 +14,7 @@ module;
 export module bioseq.gpu.vulkan.shader_cache:paths_metadata;
 
 import bioseq.common.checked_arithmetic;
+import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.parallelism.memory_admission;
 import std;
@@ -306,7 +307,7 @@ class sealed_shader_cache_seed_image {
     std::vector<sealed_shader_cache_artifact_image> artifacts_;
     sealed_shader_cache_seed_receipt receipt_;
 
-    friend inline std::expected<sealed_shader_cache_seed_image, std::string>
+    friend std::expected<sealed_shader_cache_seed_image, std::string>
     load_validated_sealed_shader_cache_seed(const std::filesystem::path&,
                                             std::string_view,
                                             std::span<const shader_variant_key>);

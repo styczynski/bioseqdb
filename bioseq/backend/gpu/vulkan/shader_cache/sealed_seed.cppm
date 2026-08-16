@@ -870,7 +870,7 @@ canonical_sealed_shader_cache_keys(std::span<const shader_variant_key> requested
 /// @param[in] cache_digest Expected cache-build digest.
 /// @param[in] expected_keys Expected shader key membership.
 /// @return Immutable process image or the first validation or admission diagnostic.
-[[nodiscard]] inline std::expected<sealed_shader_cache_seed_image, std::string>
+[[nodiscard]] std::expected<sealed_shader_cache_seed_image, std::string>
 load_validated_sealed_shader_cache_seed(const std::filesystem::path& cache_dir,
                                         std::string_view cache_digest,
                                         std::span<const shader_variant_key> expected_keys) {
