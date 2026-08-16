@@ -255,8 +255,8 @@ namespace {
     __builtin_unreachable();
 }
 
-template<class p_instance, class p_view>
 /// Pack a logical rank view into an exact-size flat compact-sequence payload.
+template<class p_instance, class p_view>
 void pack_view_into(bioseq::pg_types::seq& destination, p_view view, std::uint64_t length)
 {
     using range = compact_sequence_range<p_instance>;
@@ -541,8 +541,8 @@ export inline void pending_root_reset(void* argument) noexcept
     guard->destination_arena = nullptr;
 }
 
-template<class p_build>
 /// Invoke a root builder and verify that its result is ledger-owned.
+template<class p_build>
 [[nodiscard]] inline tracked_piece_edge invoke_piece_root_build(
     p_build&& build,
     piece_tree_arena& arena,
@@ -634,8 +634,8 @@ inline void replace_root_error_safe(
  * the height-guided concat path, so validation remains O(log pieces) while
  * preserving the same publish-after-validation and unwind ownership contract
  * as replace_root_error_safe. */
-template<class p_build>
 /// Publish a join after bounded validation of its newly allocated closure.
+template<class p_build>
 inline void replace_root_trusted_join_error_safe(
     pg_sequence_expanded& value,
     compact_sequence_stdc_type_params type,

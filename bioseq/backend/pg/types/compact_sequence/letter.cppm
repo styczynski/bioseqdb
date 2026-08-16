@@ -37,18 +37,24 @@ import bioseq.postgres.support.sql_boundary;
 import :flat_abi;
 import :io;
 
+/* SQL operator members are declared on letter before their shared comparison
+ * and hash implementations. These pointer-free declarations break that
+ * type/operation ordering cycle; the definitions remain below the type. */
 export namespace bioseq::pg_types {
 struct letter;
 }
 
+/// Compare alphabet-qualified ranks in their stable physical order.
 [[nodiscard]] int compare_letters(
     bioseq::pg_types::letter left,
     bioseq::pg_types::letter right) noexcept;
+/// Return the two ABI bytes consumed by PostgreSQL hash support.
 [[nodiscard]] std::array<unsigned char, 2> letter_hash_bytes(
     bioseq::pg_types::letter value) noexcept;
 
 export namespace bioseq::pg_types {
 
+/// Two-byte alphabet-qualified rank passed by value through PostgreSQL.
 struct [[bioseq_sql::type({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .internal_length = 2,
@@ -255,6 +261,7 @@ struct [[bioseq_sql::type({
     }
 };
 
+/// Raw parser token accepted only by the same-type typmod cast.
 struct letter_typmod_input {
     letter value;
 };
@@ -268,6 +275,7 @@ static_assert(std::is_trivially_copyable_v<
 static_assert(std::is_standard_layout_v<
               bioseq::pg_types::letter_typmod_input>);
 
+/// Encode an alphabet-qualified rank in PostgreSQL's by-value Datum bits.
 export [[nodiscard]] inline Datum make_letter_datum(
     std::uint8_t alphabet_code,
     std::uint8_t rank) noexcept
@@ -277,6 +285,7 @@ export [[nodiscard]] inline Datum make_letter_datum(
     return UInt16GetDatum(bits);
 }
 
+/// Decode PostgreSQL's by-value Datum bits without validating the rank.
 export [[nodiscard]] inline bioseq::pg_types::letter datum_get_letter(Datum datum) noexcept
 {
     const std::uint16_t bits = DatumGetUInt16(datum);
@@ -483,6 +492,9 @@ void guard_letter_ctas_output(
     }
 }
 
+/* Query traversal calls the node walker, while nested Query nodes call back
+ * into query-level validation. This declaration is the required recursion
+ * seam; the definition follows the node walker. */
 void validate_and_guard_letter_query(
     Query* query,
     unresolved_letter_query_context* context);
@@ -639,6 +651,7 @@ void bioseq_letter_post_parse_analyze(
 
 } // namespace
 
+/// Install the chain-preserving parser hook for unresolved letter literals.
 export void install_letter_literal_validation_hook() noexcept
 {
     if (post_parse_analyze_hook == &bioseq_letter_post_parse_analyze) {
@@ -664,6 +677,7 @@ std::int64_t letter_hook_chain_calls() noexcept
 
 }  // namespace bioseq::pg_types::sql_routines
 
+/// Encode an alphabet code as PostgreSQL's positive letter typmod.
 export [[nodiscard]] inline int32_t encode_letter_typmod(
     std::uint8_t alphabet_code)
 {
@@ -676,6 +690,7 @@ export [[nodiscard]] inline int32_t encode_letter_typmod(
     return static_cast<int32_t>(alphabet_code) + 1;
 }
 
+/// Decode and validate a positive PostgreSQL letter typmod.
 export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     int32_t typmod)
 {
@@ -689,6 +704,7 @@ export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     return static_cast<std::uint8_t>(typmod - 1);
 }
 
+/// Derive a letter typmod from a compact-sequence typmod.
 export [[nodiscard]] inline int32_t letter_typmod_from_seq_typmod(
     int32_t seq_typmod)
 {
@@ -699,6 +715,7 @@ export [[nodiscard]] inline int32_t letter_typmod_from_seq_typmod(
         decode_seq_typmod_checked(seq_typmod).alphabet_code);
 }
 
+/// Resolve the installed bioseq.letter OID or raise undefined-object.
 export [[nodiscard]] inline Oid bioseq_letter_oid()
 {
     const Oid oid = bioseq_letter_type_oid_missing_ok();
@@ -710,6 +727,7 @@ export [[nodiscard]] inline Oid bioseq_letter_oid()
     return oid;
 }
 
+/// Decode a physical letter Datum and reject unresolved or invalid ranks.
 export [[nodiscard]] inline bioseq::pg_types::letter validate_letter_datum(Datum datum)
 {
     const bioseq::pg_types::letter value = datum_get_letter(datum);

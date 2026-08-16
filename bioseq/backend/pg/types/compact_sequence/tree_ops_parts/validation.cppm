@@ -29,6 +29,7 @@ import bioseq.storage.layout;
 
 namespace {
 
+/// Recomputed logical metadata for one validated subtree.
 struct validated_tree_fields {
     std::uint64_t length;
     std::uint32_t pieces;
@@ -340,12 +341,14 @@ static_assert((bounded_join_source_multiset_capacity
     return static_cast<std::size_t>(value);
 }
 
+/// Required and matched multiplicity for one arena dependency.
 struct bounded_join_arena_multiset_slot {
     piece_tree_arena* key{};
     std::uint32_t required{};
     std::uint32_t matched{};
 };
 
+/// Required and matched multiplicity for one source dependency.
 struct bounded_join_source_multiset_slot {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};

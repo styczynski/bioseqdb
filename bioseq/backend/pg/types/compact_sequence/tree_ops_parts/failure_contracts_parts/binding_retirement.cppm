@@ -94,8 +94,8 @@ struct binding_output_audit {
     bool exact;
 };
 
-template <class p_instance>
 /// Inspect binding output without changing ownership.
+template <class p_instance>
 [[nodiscard]] inline binding_output_audit audit_binding_output(piece_edge edge,
                                                                std::uint8_t expected_rank) {
     if (!edge)

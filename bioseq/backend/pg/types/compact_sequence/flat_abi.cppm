@@ -28,6 +28,7 @@ import bioseq.postgres.support.sql_boundary;
 import bioseq.sequences;
 import bioseq.storage.layout;
 
+/// Alphabet set compiled into compact-sequence dispatch.
 export using pgseq_supported_alphabets =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
     supported_alphabets<alphabet_entry<seq::dna4, "dna4">>;
@@ -37,6 +38,7 @@ export using pgseq_supported_alphabets =
         alphabet_entry<seq::dna5, "dna5">>;
 #endif
 
+/// Storage-unit widths compiled into compact-sequence dispatch.
 export using pgseq_supported_storage_unit_byte_widths =
 #if !defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
     supported_storage_unit_byte_widths<8u>;
@@ -66,6 +68,7 @@ using seq [[bioseq_sql::type({
 
 export namespace bioseq::postgres::support::detail {
 
+/// Encode and decode the opaque sequence pointer carried by a Datum.
 template<>
 struct scalar_codec<bioseq::pg_types::seq*> final {
     static constexpr const char* key = "bioseq.seq/opaque_pointer";
@@ -84,8 +87,11 @@ struct scalar_codec<bioseq::pg_types::seq*> final {
 
 }  // namespace bioseq::postgres::support::detail
 
+/// Alphabet tag reserved for canonical unbound ASCII values.
 export inline constexpr std::uint8_t pgseq_unbound_alphabet_code = 0xffu;
+/// Width tag reserved for canonical unbound ASCII values.
 export inline constexpr std::uint8_t pgseq_unbound_width_tag = 0x40u;
+/// Mask selecting a bound value's physical storage width.
 export inline constexpr std::uint8_t pgseq_physical_width_mask = 0x0fu;
 
 static_assert((pgseq_unbound_width_tag
@@ -112,12 +118,14 @@ static_assert(
         == std::string_view{"dna5"});
 #endif
 
+/// Return whether an alphabet code is present in the compiled dispatch set.
 export [[nodiscard]] constexpr bool
 is_supported_alphabet_code(std::uint8_t code) noexcept
 {
     return code < pgseq_supported_alphabets::alphabet_count;
 }
 
+/// Normalize a requested storage width to the compiled coordinate profile.
 export [[nodiscard]] constexpr std::uint8_t
 pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 {
@@ -129,6 +137,7 @@ pgseq_normalize_storage_unit_byte_width(std::uint8_t requested) noexcept
 #endif
 }
 
+/// Normalize both physical type parameters to the compiled profile.
 export [[nodiscard]] constexpr compact_sequence_stdc_type_params
 pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
 {
@@ -138,6 +147,7 @@ pgseq_normalize_type_params(compact_sequence_stdc_type_params params) noexcept
     return params;
 }
 
+/// Physical representation carried by one flat compact-sequence Datum.
 export enum class pg_sequence_flat_kind : std::uint8_t {
     bound,
     unbound,
@@ -145,11 +155,16 @@ export enum class pg_sequence_flat_kind : std::uint8_t {
     invalid,
 };
 
+/* The parser-safe constructor is implemented by :io, whose packing and SQL
+ * dependencies consume this core ABI. Keeping only its declaration here
+ * breaks that partition dependency cycle without duplicating ownership. */
+/// Allocate a self-contained unbound sequence from canonicalizable ASCII.
 export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     char const* input,
     std::size_t length,
     bool require_already_canonical = false);
 
+/// Classify flat representation tags without detoasting or allocating.
 export [[nodiscard]] inline pg_sequence_flat_kind
 classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
 {
@@ -176,6 +191,7 @@ classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
     return pg_sequence_flat_kind::bound;
 }
 
+/// Borrow the logical ASCII payload of a const unbound value.
 export [[nodiscard]] inline std::span<std::byte const>
 pgseq_unbound_ascii(bioseq::pg_types::seq const& value) noexcept
 {
@@ -185,6 +201,7 @@ pgseq_unbound_ascii(bioseq::pg_types::seq const& value) noexcept
     };
 }
 
+/// Borrow the logical ASCII payload of a mutable unbound value.
 export [[nodiscard]] inline std::span<std::byte>
 pgseq_unbound_ascii(bioseq::pg_types::seq& value) noexcept
 {
@@ -194,6 +211,7 @@ pgseq_unbound_ascii(bioseq::pg_types::seq& value) noexcept
     };
 }
 
+/// Result of strict symbol validation and canonicalization.
 export struct pgseq_canonical_symbol {
     bool valid;
     char value;
@@ -202,6 +220,7 @@ export struct pgseq_canonical_symbol {
 /* Strict lexical helpers shared by unbound input, letter I/O, literal
  * adoption, and array/text bridges.  SeqAn assignment is performed only after
  * char_is_valid_for succeeds, so invalid input is never mapped to rank zero. */
+/// Canonicalize one symbol for a specific compiled alphabet.
 export [[nodiscard]] inline pgseq_canonical_symbol
 pgseq_canonical_symbol_for_alphabet(
     std::uint8_t alphabet_code,
@@ -225,6 +244,7 @@ pgseq_canonical_symbol_for_alphabet(
     return result;
 }
 
+/// Canonicalize a symbol only when every accepting alphabet agrees.
 export [[nodiscard]] inline pgseq_canonical_symbol
 pgseq_canonical_unbound_symbol(unsigned char input) noexcept
 {
@@ -245,6 +265,7 @@ pgseq_canonical_unbound_symbol(unsigned char input) noexcept
     return result;
 }
 
+/// Decode one symbol rank and optionally return its canonical character.
 export [[nodiscard]] inline bool pgseq_rank_for_symbol(
     std::uint8_t alphabet_code,
     unsigned char input,
@@ -273,6 +294,7 @@ export [[nodiscard]] inline bool pgseq_rank_for_symbol(
     return valid;
 }
 
+/// Encode one valid alphabet rank as its canonical character.
 export [[nodiscard]] inline bool pgseq_symbol_for_rank(
     std::uint8_t alphabet_code,
     std::uint8_t rank,
@@ -296,6 +318,7 @@ export [[nodiscard]] inline bool pgseq_symbol_for_rank(
     return valid;
 }
 
+/// Allocate a zeroed flat sequence without raising on allocation failure.
 export inline constexpr auto pg_alloc =
     [](std::size_t byte_count) -> bioseq::pg_types::seq* {
         if (byte_count > static_cast<std::size_t>(MaxAllocSize)) {
@@ -310,6 +333,7 @@ static_assert(stdc_allocator<decltype(pg_alloc), bioseq::pg_types::seq>);
 
 /* Missing-ok and deliberately uncached: integration tests DROP/CREATE the
  * extension in one backend and PostgreSQL assigns fresh type OIDs. */
+/// Resolve a type in the bioseq schema without caching or raising if absent.
 export [[nodiscard]] inline Oid bioseq_type_oid_missing_ok(
     char const* type_name) noexcept
 {
@@ -325,11 +349,13 @@ export [[nodiscard]] inline Oid bioseq_type_oid_missing_ok(
         ObjectIdGetDatum(namespace_oid));
 }
 
+/// Resolve bioseq.seq without caching or raising if absent.
 export [[nodiscard]] inline Oid bioseq_seq_type_oid_missing_ok() noexcept
 {
     return bioseq_type_oid_missing_ok("seq");
 }
 
+/// Resolve bioseq.letter without caching or raising if absent.
 export [[nodiscard]] inline Oid bioseq_letter_type_oid_missing_ok() noexcept
 {
     return bioseq_type_oid_missing_ok("letter");
