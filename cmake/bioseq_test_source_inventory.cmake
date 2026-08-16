@@ -76,6 +76,8 @@ target_sources(bioseq_integration_test_support
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     FILES ${BIOSEQ_INTEGRATION_TEST_SUPPORT_MODULES})
 unset(BIOSEQ_INTEGRATION_TEST_SUPPORT_MODULES)
+target_include_directories(bioseq_integration_test_support PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(bioseq_integration_test_support
   PUBLIC
     fmt
