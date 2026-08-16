@@ -236,7 +236,18 @@ canonical_vulkan_driver_identity(const vulkan_feature_set& features) noexcept {
 /// @brief RAII owner for one (VkBuffer, VkDeviceMemory) pair. Move-only. Destruction
 /// routes through `runtime::destroy_buffer` (the single cleanup path).
 struct buffer {
+    /// @brief Creates an empty buffer owner.
     buffer() = default;
+
+    /// @brief Adopts one Vulkan buffer allocation and its accounting state.
+    /// @param[in] owner Runtime responsible for releasing the allocation.
+    /// @param[in] buffer_handle Vulkan buffer handle.
+    /// @param[in] memory Vulkan device-memory handle backing the buffer.
+    /// @param[in] bytes Logical buffer extent.
+    /// @param[in] allocation_bytes Allocator-reported memory extent.
+    /// @param[in] memory_properties Vulkan properties of the selected memory type.
+    /// @param[in] process_footprint_reflected Whether process accounting includes the allocation.
+    /// @param[in] mapped Persistent host mapping, or `nullptr` for device-only memory.
     buffer(runtime* owner,
            VkBuffer buffer_handle,
            VkDeviceMemory memory,
@@ -248,11 +259,22 @@ struct buffer {
         : owner(owner), buffer_handle(buffer_handle), memory(memory), bytes(bytes),
           allocation_bytes(allocation_bytes), memory_properties(memory_properties),
           process_footprint_reflected(process_footprint_reflected), mapped(mapped) {}
+
+    /// @brief Prevents two owners from releasing the same Vulkan allocation.
     buffer(const buffer&) = delete;
+
+    /// @brief Prevents copy assignment of Vulkan allocation ownership.
     buffer& operator=(const buffer&) = delete;
+
+    /// @brief Transfers Vulkan allocation ownership from another buffer.
+    /// @param[in,out] other Buffer whose handles and accounting state are consumed.
     buffer(buffer&& other) noexcept {
         move_from(other);
     }
+
+    /// @brief Releases the current allocation and transfers another buffer into this owner.
+    /// @param[in,out] other Buffer whose handles and accounting state are consumed.
+    /// @return This buffer owner.
     buffer& operator=(buffer&& other) noexcept {
         if (this != &other) {
             reset();
@@ -260,14 +282,23 @@ struct buffer {
         }
         return *this;
     }
+
+    /// @brief Releases the owned Vulkan allocation through the runtime owner.
     ~buffer() {
         reset();
     }
 
+    /// @brief Releases any owned Vulkan handles and clears their accounting state.
     void reset() noexcept;
+
+    /// @brief Checks whether this owner contains a Vulkan buffer handle.
+    /// @return Whether `buffer_handle` is non-null.
     [[nodiscard]] bool is_valid() const noexcept {
         return buffer_handle != VK_NULL_HANDLE;
     }
+
+    /// @brief Checks whether host accesses need neither explicit mapping nor cache maintenance.
+    /// @return Whether the memory is both host-visible and host-coherent.
     [[nodiscard]] bool is_host_visible_coherent() const noexcept {
         constexpr VkMemoryPropertyFlags required =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -284,6 +315,8 @@ struct buffer {
     void* mapped = nullptr;
 
   private:
+    /// @brief Moves every handle and accounting field, then clears the source.
+    /// @param[in,out] other Buffer state to transfer into this owner.
     void move_from(buffer& other) noexcept {
         owner = other.owner;
         buffer_handle = other.buffer_handle;

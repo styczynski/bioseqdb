@@ -39,6 +39,8 @@ struct runtime_metal_archive_spec {
     std::string negative_error_domain;
     std::int64_t negative_error_code = 0;
 
+    /// @brief Checks the ordinal, filename, digest, and negative-control identity.
+    /// @return Whether this specification can identify one sealed archive artifact.
     [[nodiscard]] bool is_valid() const noexcept {
         return artifact_ordinal != (std::numeric_limits<std::uint32_t>::max)() &&
                !artifact_filename.empty() && size != 0u && !negative_error_domain.empty() &&
@@ -47,6 +49,8 @@ struct runtime_metal_archive_spec {
                std::any_of(
                    sha256.begin(), sha256.end(), [](std::uint8_t byte) { return byte != 0u; });
     }
+
+    /// @brief Compares every persisted archive identity field.
     [[nodiscard]] bool operator==(const runtime_metal_archive_spec&) const noexcept = default;
 };
 
@@ -70,6 +74,8 @@ struct runtime_metal_archive_configuration {
     std::uint64_t helper_metal_registry_id = 0u;
     std::vector<runtime_metal_archive_spec> archives;
 
+    /// @brief Validates the accepted seed, helper identity, ordered artifacts, and receipts.
+    /// @return Whether the complete installed archive configuration is self-consistent.
     [[nodiscard]] bool is_valid() const noexcept {
         if (!seed_image || !seed_image->is_accepted() || archives.empty() ||
             qualification_wire_revision != 2u || qualification_receipt_count != archives.size() ||
@@ -131,6 +137,8 @@ struct runtime_metal_archive_configuration {
         }
         return true;
     }
+
+    /// @brief Compares every installed archive-configuration field.
     [[nodiscard]] bool
     operator==(const runtime_metal_archive_configuration&) const noexcept = default;
 };
@@ -140,24 +148,42 @@ struct runtime_metal_archive_configuration {
 /// and strings are moved into this image without a second allocation or copy.
 class runtime_metal_archive_configuration_image {
   public:
+    /// @brief Prevents copying an admitted archive-configuration owner.
     runtime_metal_archive_configuration_image(const runtime_metal_archive_configuration_image&) =
         delete;
+
+    /// @brief Prevents copy assignment of admitted configuration ownership.
     runtime_metal_archive_configuration_image&
     operator=(const runtime_metal_archive_configuration_image&) = delete;
+
+    /// @brief Transfers the admitted immutable configuration image.
     runtime_metal_archive_configuration_image(
         runtime_metal_archive_configuration_image&&) noexcept = default;
+
+    /// @brief Prevents replacing the lifetime-bound admission permit by assignment.
     runtime_metal_archive_configuration_image&
     operator=(runtime_metal_archive_configuration_image&&) noexcept = delete;
 
+    /// @brief Returns the immutable installed configuration.
+    /// @return Borrowed configuration view valid for this image's lifetime.
     [[nodiscard]] const runtime_metal_archive_configuration& configuration() const noexcept {
         return configuration_;
     }
+
+    /// @brief Returns the memory still owned after capacity reconciliation.
+    /// @return Retained capacity in bytes.
     [[nodiscard]] std::uint64_t retained_capacity_bytes() const noexcept {
         return retained_capacity_bytes_;
     }
+
+    /// @brief Returns the peak admission acquired while constructing the image.
+    /// @return Peak admitted byte count.
     [[nodiscard]] std::uint64_t peak_admitted_bytes() const noexcept {
         return peak_admitted_bytes_;
     }
+
+    /// @brief Checks configuration validity and exact retained-permit accounting.
+    /// @return Whether configuration identity and admission state are consistent.
     [[nodiscard]] bool is_valid() const noexcept {
         return configuration_.is_valid() && permit_ && retained_capacity_bytes_ != 0u &&
                retained_capacity_bytes_ <= peak_admitted_bytes_ &&
@@ -165,12 +191,18 @@ class runtime_metal_archive_configuration_image {
     }
 
   private:
+    /// @brief Adopts validated configuration storage and its admission permit.
+    /// @param[in] configuration Configuration whose owned storage is transferred.
+    /// @param[in] peak_admitted_bytes Original peak admission size.
+    /// @param[in] permit Admission permit covering the transferred storage.
     runtime_metal_archive_configuration_image(runtime_metal_archive_configuration configuration,
                                               std::uint64_t peak_admitted_bytes,
                                               bioseq::parallelism::memory_permit permit) noexcept
         : permit_(std::move(permit)), configuration_(std::move(configuration)),
           peak_admitted_bytes_(peak_admitted_bytes) {}
 
+    /// @brief Measures every capacity owned directly by the immutable image.
+    /// @return Saturating owned-capacity total in bytes.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -192,6 +224,8 @@ class runtime_metal_archive_configuration_image {
         return owned;
     }
 
+    /// @brief Shrinks the admission permit to the retained owned capacity.
+    /// @return Whether retained capacity is finite and covered by the permit.
     [[nodiscard]] bool reconcile() noexcept {
         const std::uint64_t retained = owned_capacity_bytes();
         if (retained == (std::numeric_limits<std::uint64_t>::max)() || !permit_ ||
@@ -245,6 +279,9 @@ capture_runtime_metal_archive_live_gate_result() noexcept;
 void probe_immutable_metal_policy_live_for_test();
 
 /// @brief Validates a private archive snapshot against supplied immutable bytes.
+/// @param[in] artifact_filename Stable archive artifact filename.
+/// @param[in] bytes Immutable expected archive bytes.
+/// @param[in] temp_parent Parent directory for the private validation snapshot.
 /// @return Snapshot validation counters or a platform or I/O diagnostic.
 [[nodiscard]] std::expected<runtime_private_archive_snapshot_test_result, std::string>
 verify_runtime_private_archive_snapshot_for_test(std::string_view artifact_filename,
@@ -257,9 +294,13 @@ struct runtime_metal_archive_set_identity {
     std::uint64_t total_size = 0u;
     std::uint64_t ordered_checksum = 0u;
 
+    /// @brief Checks the aggregate archive count, extent, and checksum.
+    /// @return Whether all identity components are nonzero.
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return archive_count != 0u && total_size != 0u && ordered_checksum != 0u;
     }
+
+    /// @brief Compares every ordered archive-set identity field.
     [[nodiscard]] constexpr bool
     operator==(const runtime_metal_archive_set_identity&) const noexcept = default;
 };
@@ -273,6 +314,8 @@ struct runtime_vulkan_device_identity {
     std::uint32_t device_id = 0u;
     std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
 
+    /// @brief Checks required Vulkan version and UUID identity fields.
+    /// @return Whether both UUIDs and required versions are populated.
     [[nodiscard]] bool is_valid() const noexcept {
         return api_version != 0u && driver_version != 0u &&
                std::any_of(device_uuid.begin(),
@@ -282,15 +325,18 @@ struct runtime_vulkan_device_identity {
                            pipeline_cache_uuid.end(),
                            [](std::uint8_t value) { return value != 0u; });
     }
+
+    /// @brief Compares every device and pipeline-cache compatibility field.
     [[nodiscard]] bool operator==(const runtime_vulkan_device_identity&) const noexcept = default;
 };
 
 /// @brief Immutable qualification issued for the process-resident Metal archive set.
 struct runtime_metal_archive_process_qualification;
 /// @brief Computes the stable identity of a process Metal archive qualification.
+/// @param[in] qualification Process qualification to identify.
 /// @return Stable nonzero qualification identity.
 [[nodiscard]] std::uint64_t runtime_metal_archive_process_qualification_identity(
-    const runtime_metal_archive_process_qualification&) noexcept;
+    const runtime_metal_archive_process_qualification& qualification) noexcept;
 
 /// @brief Immutable process qualification created once while exact seed bytes are
 /// installed into live Metal archive objects. Pipeline scopes borrow this
@@ -325,6 +371,8 @@ struct runtime_metal_archive_process_qualification {
     std::uint64_t manifest_checksum = 0u;
     bool saturated = true;
 
+    /// @brief Checks the stable identity, archive lifecycle, helper, device, and seed fields.
+    /// @return Whether the process qualification is complete and unsaturated.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         return wire_revision == 2u && identity != 0u &&
                identity == runtime_metal_archive_process_qualification_identity(*this) &&
@@ -355,10 +403,15 @@ struct runtime_metal_archive_process_qualification {
                            [](std::uint8_t value) { return value != 0u; }) &&
                !saturated;
     }
+
+    /// @brief Compares every immutable process-qualification field.
     [[nodiscard]] bool
     operator==(const runtime_metal_archive_process_qualification&) const noexcept = default;
 };
 
+/// @brief Hashes every immutable process-qualification field in wire order.
+/// @param[in] value Process qualification to identify.
+/// @return Stable nonzero FNV-based qualification identity.
 [[nodiscard]] inline std::uint64_t runtime_metal_archive_process_qualification_identity(
     const runtime_metal_archive_process_qualification& value) noexcept {
     constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
@@ -415,6 +468,9 @@ struct runtime_metal_archive_process_qualification {
     return identity == 0u ? fnv_offset : identity;
 }
 
+/// @brief Hashes an ordered archive specification set and accumulates its extent.
+/// @param[in] archives Ordered archive specifications.
+/// @return Aggregate count, size, and stable ordered checksum.
 [[nodiscard]] inline runtime_metal_archive_set_identity make_runtime_metal_archive_set_identity(
     std::span<const runtime_metal_archive_spec> archives) noexcept {
     constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
@@ -527,6 +583,8 @@ struct runtime_metal_archive_pipeline_audit {
     bool sticky_failure = false;
     bool outer_vulkan_pipeline_succeeded = false;
 
+    /// @brief Checks the complete seed, archive, device, interception, and miss-control record.
+    /// @return Whether the pipeline call proved immutable archive-only execution.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         const std::uint64_t actual_calls = actual_sync_calls + actual_async_calls;
         return receipt_identity != 0u && scope_identity != 0u &&
@@ -599,13 +657,25 @@ class runtime_gpu_cache_metrics_claim_plan;
 /// entry. Cache views share that same object. They cannot mint another receipt.
 class runtime_metal_archive_pipeline_receipt {
   public:
+    /// @brief Creates an empty invalid receipt.
     runtime_metal_archive_pipeline_receipt() = default;
+
+    /// @brief Prevents duplicating one-shot metrics authority by copying.
     runtime_metal_archive_pipeline_receipt(const runtime_metal_archive_pipeline_receipt&) = delete;
+
+    /// @brief Prevents copy assignment of one-shot metrics authority.
     runtime_metal_archive_pipeline_receipt&
     operator=(const runtime_metal_archive_pipeline_receipt&) = delete;
+
+    /// @brief Transfers the audit and one-shot metrics claim state.
+    /// @param[in,out] other Receipt whose audit and claim state are consumed.
     runtime_metal_archive_pipeline_receipt(runtime_metal_archive_pipeline_receipt&& other) noexcept
         : audit_(std::exchange(other.audit_, {})),
           metrics_claimed_(std::exchange(other.metrics_claimed_, false)) {}
+
+    /// @brief Replaces this receipt by transferring another receipt's authority.
+    /// @param[in,out] other Receipt whose audit and claim state are consumed.
+    /// @return This receipt.
     runtime_metal_archive_pipeline_receipt&
     operator=(runtime_metal_archive_pipeline_receipt&& other) noexcept {
         if (this != &other) {
@@ -615,13 +685,20 @@ class runtime_metal_archive_pipeline_receipt {
         return *this;
     }
 
+    /// @brief Checks the immutable pipeline audit.
+    /// @return Whether every pipeline archive proof is internally consistent.
     [[nodiscard]] bool is_valid() const noexcept {
         return audit_.is_internally_consistent();
     }
+
+    /// @brief Returns the immutable pipeline audit.
+    /// @return Borrowed audit view valid for this receipt's lifetime.
     [[nodiscard]] const runtime_metal_archive_pipeline_audit& audit() const noexcept {
         return audit_;
     }
 
+    /// @brief Measures storage owned directly by this receipt.
+    /// @return Saturating owned-capacity total in bytes.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         using bioseq::common::saturating_add;
         std::uint64_t owned = sizeof(runtime_metal_archive_pipeline_receipt);
@@ -634,6 +711,7 @@ class runtime_metal_archive_pipeline_receipt {
     }
 
     /// @brief Checks move invalidation and shared retention of one accepted receipt.
+    /// @param[in] audit Valid audit used to mint the test receipt.
     /// @return `true` when the move and shared-retention contract holds.
     [[nodiscard]] static bool
     self_test_move_and_reuse_contract(runtime_metal_archive_pipeline_audit audit) {
@@ -653,6 +731,8 @@ class runtime_metal_archive_pipeline_receipt {
     }
 
   private:
+    /// @brief Mints one receipt from a completed immutable pipeline audit.
+    /// @param[in] audit Pipeline audit transferred into the receipt.
     explicit runtime_metal_archive_pipeline_receipt(
         runtime_metal_archive_pipeline_audit audit) noexcept
         : audit_(std::move(audit)) {}
@@ -669,11 +749,15 @@ static_assert(std::is_nothrow_move_constructible_v<runtime_metal_archive_pipelin
 
 /// @brief Install-once production seam.  The supervisor calls this from its runtime
 /// prepare hook, before the first runtime singleton construction.
+/// @param[in] configuration Validated immutable configuration image to install.
 /// @return Success or a configuration identity or admission diagnostic.
 [[nodiscard]] std::expected<void, std::string> install_runtime_metal_archive_configuration(
     std::shared_ptr<const runtime_metal_archive_configuration_image> configuration);
 
 /// @brief Builds an immutable runtime archive configuration from a sealed seed image.
+/// @param[in] seed_image Accepted process-resident shader-cache seed image.
+/// @param[in] vulkan_device_uuid Optional additional Vulkan-device identity constraint.
+/// @param[in] metal_device_registry_id Optional additional Metal registry constraint.
 /// @return Shared validated configuration or its exact validation diagnostic.
 [[nodiscard]] std::expected<std::shared_ptr<const runtime_metal_archive_configuration_image>,
                             std::string>
@@ -683,6 +767,7 @@ make_runtime_metal_archive_configuration_image(
     std::uint64_t metal_device_registry_id = 0u);
 
 /// @brief Reports whether the process-wide archive configuration passed installation.
+/// @return Whether an accepted immutable configuration is installed.
 [[nodiscard]] bool is_runtime_metal_archive_configuration_installed() noexcept;
 
 } // namespace bioseq::gpu::vulkan
