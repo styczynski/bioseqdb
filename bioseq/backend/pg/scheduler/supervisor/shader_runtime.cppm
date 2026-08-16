@@ -625,7 +625,19 @@ struct compile_claim {
  * @brief Clears one owned shader slot and publishes it as free.
  * @param[in] slot_index Shared compile-queue index.
  */
-void release_shader_compile_slot(std::size_t slot_index) noexcept;
+void release_shader_compile_slot(std::size_t slot_index) noexcept {
+    if (g_shared == nullptr || slot_index >= scheduler_shared_state::k_compile_queue_size) {
+        return;
+    }
+    shader_compile_slot& slot = g_shared->compile_queue[slot_index];
+    slot.key = bioseq::gpu::vulkan::shader_variant_key{};
+    slot.requester_pid = 0;
+    slot.errc = static_cast<std::uint32_t>(bioseq::gpu::vulkan::shader_cache_error::ok);
+    pg_atomic_fetch_add_u32(&slot.generation, 1);
+    pg_write_barrier();
+    pg_atomic_write_u32(&slot.state, static_cast<std::uint32_t>(compile_slot_state::free));
+}
+
 /**
  * @brief Claims terminal slot ownership before returning it to the queue.
  * @param[in] slot_index Shared compile-queue index.
@@ -633,8 +645,22 @@ void release_shader_compile_slot(std::size_t slot_index) noexcept;
  * @return True when this caller released the matching terminal slot.
  */
 [[nodiscard]] bool
-try_release_completed_shader_compile_slot(std::size_t slot_index,
-                                          compile_slot_state completed_state) noexcept;
+try_release_completed_shader_compile_slot(const std::size_t slot_index,
+                                          const compile_slot_state completed_state) noexcept {
+    if (g_shared == nullptr || slot_index >= scheduler_shared_state::k_compile_queue_size ||
+        (completed_state != compile_slot_state::done_ok &&
+         completed_state != compile_slot_state::done_error)) {
+        return false;
+    }
+    shader_compile_slot& slot = g_shared->compile_queue[slot_index];
+    std::uint32_t expected = static_cast<std::uint32_t>(completed_state);
+    if (!pg_atomic_compare_exchange_u32(
+            &slot.state, &expected, static_cast<std::uint32_t>(compile_slot_state::filling))) {
+        return false;
+    }
+    release_shader_compile_slot(slot_index);
+    return true;
+}
 
 /**
  * @brief Publishes one shader compilation result and wakes slot ownership cleanup.
@@ -663,37 +689,6 @@ void finish_shader_compile_slot(const compile_claim& claim,
         (void)try_release_completed_shader_compile_slot(
             claim.slot_index, ok ? compile_slot_state::done_ok : compile_slot_state::done_error);
     }
-}
-
-void release_shader_compile_slot(std::size_t slot_index) noexcept {
-    if (g_shared == nullptr || slot_index >= scheduler_shared_state::k_compile_queue_size) {
-        return;
-    }
-    shader_compile_slot& slot = g_shared->compile_queue[slot_index];
-    slot.key = bioseq::gpu::vulkan::shader_variant_key{};
-    slot.requester_pid = 0;
-    slot.errc = static_cast<std::uint32_t>(bioseq::gpu::vulkan::shader_cache_error::ok);
-    pg_atomic_fetch_add_u32(&slot.generation, 1);
-    pg_write_barrier();
-    pg_atomic_write_u32(&slot.state, static_cast<std::uint32_t>(compile_slot_state::free));
-}
-
-[[nodiscard]] bool
-try_release_completed_shader_compile_slot(const std::size_t slot_index,
-                                          const compile_slot_state completed_state) noexcept {
-    if (g_shared == nullptr || slot_index >= scheduler_shared_state::k_compile_queue_size ||
-        (completed_state != compile_slot_state::done_ok &&
-         completed_state != compile_slot_state::done_error)) {
-        return false;
-    }
-    shader_compile_slot& slot = g_shared->compile_queue[slot_index];
-    std::uint32_t expected = static_cast<std::uint32_t>(completed_state);
-    if (!pg_atomic_compare_exchange_u32(
-            &slot.state, &expected, static_cast<std::uint32_t>(compile_slot_state::filling))) {
-        return false;
-    }
-    release_shader_compile_slot(slot_index);
-    return true;
 }
 
 /**
