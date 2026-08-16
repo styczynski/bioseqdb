@@ -125,6 +125,11 @@ import :hash_major_session;
 export import :storage_adapter_contract;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Reserves admitted capacity for per-segment sorted-run metadata.
+ * @param[in] required Minimum number of segment entries required.
+ * @return `true` when vector capacity and its memory permit cover the request.
+ */
 [[nodiscard]] inline bool
 fragment_index_storage::ensure_segment_run_metadata_capacity_(std::size_t required) {
     const std::uint64_t retained =
@@ -171,6 +176,14 @@ fragment_index_storage::ensure_segment_run_metadata_capacity_(std::size_t requir
     return true;
 }
 
+/**
+ * @brief Transfers every resource and identity field from another handle.
+ *
+ * The source is left unbound and PostgreSQL-free so its destructor cannot
+ * access the transferred memory context, cache state, or run stores.
+ *
+ * @param[in,out] o Handle whose complete state is consumed.
+ */
 inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept {
     db_oid_ = o.db_oid_;
     tablespace_oid_ = o.tablespace_oid_;
@@ -238,6 +251,12 @@ inline void fragment_index_storage::steal_(fragment_index_storage&& o) noexcept 
         o.segment_sorted_runs_, o.segment_sorted_runs_metadata_permit_);
 }
 
+/**
+ * @brief Drops memory-resident run payloads without invoking PostgreSQL.
+ *
+ * This invalidates segment replay because logical memory-only runs are not
+ * preserved by the release.
+ */
 inline void fragment_index_storage::release_resident_runs_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->release_resident_runs_noexcept();
@@ -252,6 +271,12 @@ inline void fragment_index_storage::release_resident_runs_noexcept() noexcept {
     record_segment_spill_mutation_();
 }
 
+/**
+ * @brief Finalizes a handle that has already closed or abandoned PostgreSQL state.
+ *
+ * Destruction requires the owning memory context and run stores to have been
+ * discharged by an explicit lifecycle operation.
+ */
 inline void fragment_index_storage::release_() noexcept {
     DEBUG_ASSERT(own_mctx_ == nullptr,
                  "fragment_index_storage must be close_checked or abandoned before destruction");
@@ -270,6 +295,10 @@ inline void fragment_index_storage::release_() noexcept {
     scratch_ = nullptr;
 }
 
+/**
+ * @brief Raises a PostgreSQL data-corruption error for invalid index state.
+ * @param[in] message Bounded diagnostic text copied into the PostgreSQL error.
+ */
 [[noreturn]] inline void fragment_index_storage::index_error(std::string_view message) const {
     const char* message_data = message.empty() ? "" : message.data();
     const int message_size = static_cast<int>(
@@ -282,6 +311,11 @@ inline void fragment_index_storage::release_() noexcept {
     pg_unreachable();
 }
 
+/**
+ * @brief Validates the fixed header of a serialized minimizer directory.
+ * @param[in] p Start of the serialized directory bytes.
+ * @param[in] bytes Available byte count.
+ */
 inline void fragment_index_storage::validate_minimizer_directory_or_error(const char* p,
                                                                           std::size_t bytes) const {
     if (bytes < 40)
@@ -295,6 +329,12 @@ inline void fragment_index_storage::validate_minimizer_directory_or_error(const 
     }
 }
 
+/**
+ * @brief Validates the minimum persisted size of one minimizer chunk.
+ * @param[in] sk Logical stream containing the chunk.
+ * @param[in] chunk_no Zero-based chunk number.
+ * @param[in] min_bytes Required minimum payload size in bytes.
+ */
 inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
     index_sub_key_t sk,
     std::size_t chunk_no,
@@ -304,6 +344,10 @@ inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
         index_error("chunk metadata below minimum size");
 }
 
+/**
+ * @brief Formats the canonical direct-fragment relation name for this handle.
+ * @return Extension-internal relation name derived from the physical identity.
+ */
 [[nodiscard]] inline std::string fragment_index_storage::this_table_name() const {
     return format_seqidx_name(index_name_,
                               db_oid_,
@@ -314,6 +358,12 @@ inline void fragment_index_storage::validate_minimizer_chunk_metadata_or_error(
                               shard_idx_);
 }
 
+/**
+ * @brief Clears handle-local and shared residency for the generation identity.
+ *
+ * The operation invalidates decoded-buffer identity and broadcasts the full
+ * physical index key to the shared residency owner.
+ */
 inline void fragment_index_storage::evict_generation_storage_residency_() {
     chunk_cache_.clear();
     chunk_cache_bytes_ = 0;
@@ -330,6 +380,7 @@ inline void fragment_index_storage::evict_generation_storage_residency_() {
         index_name_hash(db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, index_name_));
 }
 
+/// @brief Returns the immutable spill-storage binding selected for this handle.
 [[nodiscard]] inline direct_minimizer_spill_storage_binding
 fragment_index_storage::segment_spill_storage_binding() const noexcept {
     return segment_spill_binding_;

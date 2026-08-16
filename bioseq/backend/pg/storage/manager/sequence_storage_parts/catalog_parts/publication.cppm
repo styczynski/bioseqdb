@@ -105,6 +105,9 @@ class pending_sequence_source;
 /// allowed in a validated reader.
 struct sequence_source_version_manager {
     /// Allocate the next positive immutable source epoch.
+    /// @return Newly allocated epoch in the positive signed 64-bit domain.
+    /// @throws PostgreSQL ERROR when the owned sequence contract is absent,
+    /// altered, or exhausted.
     [[nodiscard]] static std::uint64_t allocate_epoch() {
         const Oid namespace_oid = source_version_detail::internal_namespace_oid();
         const Oid sequence_oid =
@@ -151,6 +154,10 @@ struct sequence_source_version_manager {
     }
 
     /// Insert one validated source identity in unpublished state.
+    /// @param input Complete source row whose locator and epoch agree.
+    /// @throws PostgreSQL ERROR when validation, catalog insertion, or cleanup fails.
+    ///
+    /// The catalog is held with `RowExclusiveLock` only for this insertion.
     static void insert_unpublished(const sequence_source_version_row& input) {
         if (input.source_epoch == 0 ||
             input.source_epoch >
@@ -194,6 +201,7 @@ struct sequence_source_version_manager {
         } catch (...) {
             failure = std::current_exception();
         }
+        // Run each release step while retaining the first insertion failure.
         const auto cleanup = [&failure](auto&& operation) {
             try {
                 operation();
@@ -219,6 +227,16 @@ struct sequence_source_version_manager {
     }
 
     /// Look up one source epoch through the exact primary index and snapshot.
+    /// @param epoch Positive source epoch in the signed 64-bit catalog domain.
+    /// @param snapshot Explicit caller-owned snapshot used by the ordered scan.
+    /// @param require_ready Whether non-ready rows are filtered from the result.
+    /// @param exact_primary_index_scan Optional proof flag set after a completed scan.
+    /// @param telemetry Optional counters updated for relation and lock operations.
+    /// @return Decoded row, or no value for invalid input, absence, or a filtered state.
+    /// @throws PostgreSQL ERROR when the bound catalog or primary-index contract differs.
+    ///
+    /// The snapshot is borrowed only for the scan. Both relations and their
+    /// `AccessShareLock` locks are released before return.
     [[nodiscard]] static std::optional<sequence_source_version_row>
     lookup(std::uint64_t epoch,
            Snapshot snapshot,
@@ -280,6 +298,10 @@ struct sequence_source_version_manager {
 
   private:
     /// Apply one allowed terminal source-state transition.
+    /// @param epoch Existing positive source epoch.
+    /// @param requested_state Ready or terminal-invalid state.
+    /// @throws PostgreSQL ERROR when the row is absent, the transition is
+    /// forbidden, or catalog update and cleanup fail.
     static void set_state(std::uint64_t epoch, std::int16_t requested_state) {
         if (epoch == 0 ||
             epoch > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) ||
@@ -323,6 +345,7 @@ struct sequence_source_version_manager {
         } catch (...) {
             failure = std::current_exception();
         }
+        // Run each release step while retaining the first transition failure.
         const auto cleanup = [&failure](auto&& operation) {
             try {
                 operation();
@@ -354,6 +377,8 @@ struct sequence_source_version_manager {
     }
 
     /// Publish an unpublished source epoch as ready.
+    /// @param epoch Existing unpublished source epoch.
+    /// @throws PostgreSQL ERROR when the terminal transition is not allowed.
     static void publish_ready(std::uint64_t epoch) {
         set_state(epoch, k_sequence_source_state_ready);
     }
@@ -362,6 +387,8 @@ struct sequence_source_version_manager {
 
   public:
     /// Irreversibly invalidate one existing source epoch.
+    /// @param epoch Source epoch, with zero treated as no work.
+    /// @throws PostgreSQL ERROR when lookup or state transition fails.
     static void invalidate_epoch(std::uint64_t epoch) {
         if (epoch == 0)
             return;
@@ -372,6 +399,13 @@ struct sequence_source_version_manager {
     }
 
     /// Delete source-catalog rows owned by one main physical relation.
+    /// @param database_oid Database component of the main-relation identity.
+    /// @param tablespace_oid Tablespace component of the main-relation identity.
+    /// @param main_relfilenode File component of the main-relation identity.
+    /// @param allow_missing_during_extension_teardown Whether catalog absence is benign.
+    /// @throws PostgreSQL ERROR for absence outside teardown or an invalid catalog.
+    ///
+    /// Matching `SnapshotSelf` tuples are deleted while holding `RowExclusiveLock`.
     static void delete_for_main(Oid database_oid,
                                 Oid tablespace_oid,
                                 Oid main_relfilenode,
@@ -412,6 +446,11 @@ struct sequence_source_version_manager {
     }
 
     /// Invalidate every source epoch referencing one fragment relation.
+    /// @param fragment_relation_oid Fragment relation to invalidate, or invalid for no work.
+    /// @param allow_missing_during_extension_teardown Whether catalog absence is benign.
+    /// @throws PostgreSQL ERROR for absence outside teardown or an invalid catalog.
+    ///
+    /// The heap scan and updates use `SnapshotSelf` under `RowExclusiveLock`.
     static void invalidate_for_fragment(Oid fragment_relation_oid,
                                         bool allow_missing_during_extension_teardown = false) {
         if (!OidIsValid(fragment_relation_oid))
@@ -465,10 +504,15 @@ struct sequence_source_version_manager {
     }
 };
 
+/// Forward declaration of the manager allowed to mint publication authority.
+/// @tparam p_length_type Unsigned type used for configured sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
 template <class p_length_type,
           std::size_t p_bucket_minimum_length_bits,
           std::size_t p_bucket_maximum_length_bits>
 struct sequence_storage_manager;
+/// Forward declaration of the incremental writer allowed to mint authority.
 struct sequence_stream_writer;
 
 /// Move-only publication authority. Fragment/catalog creation returns this
@@ -480,6 +524,7 @@ class pending_sequence_source {
     bool pending_ = false;
 
     /// Capture sole publication authority for one newly persisted locator.
+    /// @param locator Locator carrying the unpublished source epoch.
     explicit pending_sequence_source(sequence_locator locator) noexcept
         : locator_(locator), pending_(locator.source_epoch != 0) {}
 
@@ -494,19 +539,23 @@ class pending_sequence_source {
     pending_sequence_source(const pending_sequence_source&) = delete;
     pending_sequence_source& operator=(const pending_sequence_source&) = delete;
     /// Transfer sole source-publication authority.
+    /// @param other Token made non-pending by the transfer.
     pending_sequence_source(pending_sequence_source&& other) noexcept
         : locator_(other.locator_), pending_(std::exchange(other.pending_, false)) {}
     pending_sequence_source& operator=(pending_sequence_source&&) = delete;
     ~pending_sequence_source() = default;
 
+    /// @return Locator reference valid for this token's lifetime.
     [[nodiscard]] const sequence_locator& locator() const noexcept {
         return locator_;
     }
+    /// @return Whether this token still owns an unpublished transition.
     [[nodiscard]] bool pending() const noexcept {
         return pending_;
     }
 
     /// Publish the source only after its parent row is visible to the writer.
+    /// @throws PostgreSQL ERROR when the token was consumed or publication fails.
     void publish_after_parent_row() {
         if (!pending_) {
             storage_error_as_cpp(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -519,6 +568,7 @@ class pending_sequence_source {
     /// Consume a speculative-insert authority whose parent row was rejected.
     /// This is intentionally token-owned: the losing path cannot retain a raw
     /// epoch and later manufacture ready-state publication authority.
+    /// @throws PostgreSQL ERROR when the token was consumed or invalidation fails.
     void invalidate_without_parent_row() {
         if (!pending_) {
             storage_error_as_cpp(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,

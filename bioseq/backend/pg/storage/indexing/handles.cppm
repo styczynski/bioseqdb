@@ -37,13 +37,26 @@ export namespace bioseq::storage::indexing {
 using bioseq::indexing::sequence_index_layout;
 using bioseq::indexing::index_sub_key_t;
 using bioseq::indexing::k_directory_sub_key;
+/// @brief Row codec for the extension-owned index policy catalog.
 using index_policy_codec =
     bioseq::postgres::storage::indexing::sql_row_codecs::
         index_policy_codec;
+/// @brief Decoded representation of one persisted index policy row.
 using index_policy_row = index_policy_codec::row_type;
 
+/// @brief Physical identity used to bind index storage to a PostgreSQL relation.
 struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
 
+/**
+ * @brief Reads the current physical identity of a user relation.
+ *
+ * The relation is held under `AccessShareLock` only while its tablespace and
+ * relfilenode are copied. Invalid physical fields are returned when the
+ * relation cannot be opened.
+ *
+ * @param[in] user_relid OID of the relation to inspect.
+ * @return Database, tablespace, and relfilenode identity for the relation.
+ */
 [[nodiscard]] inline relation_identity index_relation_identity(Oid user_relid) {
     relation_identity id{ MyDatabaseId, InvalidOid, InvalidOid };
     Relation r = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -60,6 +73,13 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     return id;
 }
 
+/**
+ * @brief Creates the child memory context owned by an index handle.
+ *
+ * @param[in] parent Parent context, or null to use the current context.
+ * @return A newly allocated PostgreSQL memory context that the handle must
+ * close or abandon before destruction.
+ */
 [[nodiscard]] inline MemoryContext make_handle_ctx(MemoryContext parent, const char* /*tag*/) {
     const MemoryContext owning_parent = parent ? parent : CurrentMemoryContext;
     return bioseq::postgres::support::invoke_pg_as_cpp([owning_parent] {
@@ -68,6 +88,22 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     });
 }
 
+/**
+ * @brief Opens a fragment-scoped index storage handle for one locator.
+ *
+ * @param[in] user_relid User relation whose index metadata is addressed.
+ * @param[in] db Database OID in the physical storage identity.
+ * @param[in] spc Tablespace OID in the physical storage identity.
+ * @param[in] relfn Main relation relfilenode in the storage identity.
+ * @param[in] attno One-based PostgreSQL column number.
+ * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
+ * @param[in] loc Locator that selects the fragment bucket and shard.
+ * @param[in] sequence_rowno Logical sequence row number used as the query key.
+ * @param[in] caches Borrowed relation cache state, which must outlive the handle.
+ * @param[in] mctx Parent for the handle-owned child memory context.
+ * @return A handle that requires checked close on success or explicit
+ * abandonment after a PostgreSQL error.
+ */
 [[nodiscard]] inline fragment_index_storage open_fragment_storage(
         Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
         const sequence_locator& loc, std::uint64_t sequence_rowno, seq_caches* caches, MemoryContext mctx) {
@@ -89,6 +125,22 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     return s;
 }
 
+/**
+ * @brief Opens a sequence-scoped index storage handle for one locator.
+ *
+ * @param[in] user_relid User relation whose index metadata is addressed.
+ * @param[in] db Database OID in the physical storage identity.
+ * @param[in] spc Tablespace OID in the physical storage identity.
+ * @param[in] relfn Main relation relfilenode in the storage identity.
+ * @param[in] attno One-based PostgreSQL column number.
+ * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
+ * @param[in] loc Locator that selects the sequence bucket and shard.
+ * @param[in] sequence_rowno Logical sequence row number used as the query key.
+ * @param[in] caches Borrowed relation cache state, which must outlive the handle.
+ * @param[in] mctx Parent for the handle-owned child memory context.
+ * @return A handle that requires checked close on success or explicit
+ * abandonment after a PostgreSQL error.
+ */
 [[nodiscard]] inline sequence_index_storage open_sequence_storage(
         Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
         const sequence_locator& loc, std::uint64_t sequence_rowno, seq_caches* caches, MemoryContext mctx) {
@@ -104,6 +156,20 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     return s;
 }
 
+/**
+ * @brief Opens a table-scoped index storage handle.
+ *
+ * @param[in] user_relid User relation whose index metadata is addressed.
+ * @param[in] db Database OID in the physical storage identity.
+ * @param[in] spc Tablespace OID in the physical storage identity.
+ * @param[in] relfn Main relation relfilenode in the storage identity.
+ * @param[in] attno One-based PostgreSQL column number.
+ * @param[in] index_name Stable index policy name borrowed for the handle lifetime.
+ * @param[in] caches Borrowed relation cache state, which must outlive the handle.
+ * @param[in] mctx Parent for the handle-owned child memory context.
+ * @return A handle that requires checked close on success or explicit
+ * abandonment after a PostgreSQL error.
+ */
 [[nodiscard]] inline table_index_storage open_table_storage(
         Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
         seq_caches* caches, MemoryContext mctx) {
@@ -116,6 +182,7 @@ struct relation_identity { Oid db_oid, tablespace_oid, relfilenode; };
     return s;
 }
 
+/// @brief Origin of the active-read index selected for a relation column.
 enum class active_read_policy_source : std::uint8_t {
 	unresolved,
 	non_relation,
@@ -123,6 +190,11 @@ enum class active_read_policy_source : std::uint8_t {
     authoritative_no_row_default,
 };
 
+/**
+ * @brief Returns the stable diagnostic name for a policy source.
+ * @param[in] source Policy source to name.
+ * @return A static string view, or `invalid` for an unknown enumerator.
+ */
 [[nodiscard]] constexpr std::string_view
 active_read_policy_resolution_source_name(
 		const active_read_policy_source source) noexcept {
@@ -149,24 +221,28 @@ static_assert(active_read_policy_resolution_source_name(
 	active_read_policy_source::authoritative_no_row_default)
 	== "authoritative_no_row_default");
 
+/// @brief Selected active-read index and the authority that selected it.
 struct active_read_policy_resolution {
     std::string index_name;
     active_read_policy_source source =
 		active_read_policy_source::unresolved;
 };
 
+/// @brief Backend-local counts of active-read policy resolution outcomes.
 struct active_read_policy_resolution_counters {
 	std::uint64_t non_relation = 0;
     std::uint64_t configured_rows = 0;
     std::uint64_t authoritative_defaults = 0;
 };
 
+/// @brief Backend-local counts of batches dispatched by policy source.
 struct active_read_policy_dispatch_counters {
 	std::uint64_t configured_batches = 0;
 	std::uint64_t authoritative_default_batches = 0;
 	std::uint64_t non_relation_batches = 0;
 };
 
+/// @brief Entry counters for the compile-disabled external-file producer.
 struct prohibited_external_file_producer_counters {
 	std::uint64_t constructor_entries = 0;
 	std::uint64_t writer_entries = 0;
@@ -192,6 +268,7 @@ inline active_read_policy_source
 	g_last_active_read_policy_dispatch_source =
 		active_read_policy_source::unresolved;
 
+/// @brief Clears backend-local policy diagnostics between integration checks.
 inline void reset_active_read_policy_debug_state() noexcept {
 	g_active_read_policy_resolution_counters = {};
 	g_active_read_policy_dispatch_stats = {};
@@ -199,6 +276,11 @@ inline void reset_active_read_policy_debug_state() noexcept {
 		active_read_policy_source::unresolved;
 }
 
+/**
+ * @brief Raises an internal PostgreSQL error for an invalid policy state.
+ * @param[in] message Primary diagnostic text.
+ * @param[in] detail Optional diagnostic detail.
+ */
 [[noreturn]] inline void active_read_policy_error_as_cpp(
         std::string_view message,
         std::string_view detail = {}) {
@@ -219,12 +301,26 @@ inline void reset_active_read_policy_debug_state() noexcept {
     pg_unreachable();
 }
 
+/// @brief Effective enablement and insert-maintenance policy for minimizer indexes.
 struct minimizer_persistence_policy_resolution {
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()> enabled{};
     std::array<bool, bioseq::indexing::k_minimizer_index_names.size()>
         update_on_insert{};
 };
 
+/**
+ * @brief Resolves persisted minimizer policy under a registered MVCC snapshot.
+ *
+ * The extension catalog and its primary index are held under `AccessShareLock`
+ * for the bounded scan and are closed before return. Missing minimizer rows use
+ * their declared defaults.
+ *
+ * @param[in] user_relid User relation named by the policy rows.
+ * @param[in] relfilenode Current main-relation relfilenode.
+ * @param[in] attno One-based PostgreSQL column number.
+ * @param[in] registered_snapshot Registered MVCC snapshot used for the scan.
+ * @return Effective enablement and insert-maintenance flags for each minimizer index.
+ */
 [[nodiscard]] inline minimizer_persistence_policy_resolution
 resolve_minimizer_persistence_policy(
         Oid user_relid,
@@ -253,6 +349,7 @@ resolve_minimizer_persistence_policy(
             bioseq::indexing::is_default_update_on_insert_index(minimizers[i]);
     }
 
+    // Tracks PostgreSQL resources that require best-effort closure if the scan fails.
     struct policy_scan_state {
         Relation volatile relation = nullptr;
         Relation volatile primary = nullptr;
@@ -430,6 +527,18 @@ resolve_minimizer_persistence_policy(
     return result;
 }
 
+/**
+ * @brief Resolves the active read index for an executor-owned relation column.
+ *
+ * The policy heap and primary index are read under `AccessShareLock` with the
+ * executor's registered MVCC snapshot. A single enabled active row selects its
+ * index, while an authoritative empty result selects the declared default.
+ *
+ * @param[in] executor_read Borrowed executor relation and snapshot context.
+ * @param[in] attno One-based PostgreSQL column number.
+ * @param[in,out] cold_stats Optional counters updated for catalog and lock work.
+ * @return Selected index name and its policy source.
+ */
 [[nodiscard]] inline active_read_policy_resolution
 resolve_active_read_index_outcome(
         const borrowed_executor_read_context& executor_read,
@@ -454,6 +563,7 @@ resolve_active_read_index_outcome(
     // executor through SPI. Besides removing parse/plan/ExecutorStart latency,
     // the direct catalog scan is safe while the outer Bioseq CustomScan is
     // already inside ExecutorRun and retains the same authoritative relation.
+    // Holds the bounded result copied out of the PostgreSQL catalog scan.
     struct policy_scan_result {
         std::uint64_t rows = 0;
         std::array<char, 256> index_name{};

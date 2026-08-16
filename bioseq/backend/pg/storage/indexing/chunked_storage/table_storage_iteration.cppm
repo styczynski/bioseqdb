@@ -127,6 +127,16 @@ export import :fragment_storage_spill;
 export namespace bioseq::storage::indexing {
 
 // ---- table_index_storage::for_each_sequence (test-only CHUNKED_PER_TABLE) ---
+/**
+ * @brief Visits every non-null sequence in the handle's table column.
+ *
+ * The main relation remains under `AccessShareLock` and the function owns a
+ * registered transaction snapshot for the full traversal. The callback view
+ * borrows per-row storage and must not escape its invocation.
+ *
+ * @tparam p_callback Callable accepting `(sequence_view, row_number, total_rows)`.
+ * @param[in] loader Callback invoked for each inline or locator-backed sequence.
+ */
 template <class p_callback>
 inline void table_index_storage::for_each_sequence(p_callback&& loader) {
     Relation main = table_open(user_relid_, AccessShareLock);
@@ -166,6 +176,7 @@ inline void table_index_storage::for_each_sequence(p_callback&& loader) {
             const sequence_locator loc = decode_locator_from_stub(hdr);
             bioseq::pg_types::seq::dispatch_instance(
                 alpha, bw, [this, &loader, loc, rowno, total, rs, inner]<class p_sequence_type>() {
+                    // Binds the locator to the traversal snapshot and per-row context.
                     using source_binding =
                         bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
                     const source_binding bound_source{

@@ -124,6 +124,11 @@ export import :generation_session_metadata;
 export import :generation_session_payload;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Closes a session used only to inspect the active generation head.
+ *
+ * The head must have been read exactly once and no ordered scan may remain open.
+ */
 inline void index_storage_fragment_generation_read_session::close_head_read() {
     try {
         if (state_ != operation_state::head_read || active_scan_ != nullptr ||
@@ -143,6 +148,14 @@ inline void index_storage_fragment_generation_read_session::close_head_read() {
     }
 }
 
+/**
+ * @brief Finishes a mapped grouped-SoA payload read after metadata authorization.
+ *
+ * This path requires that PostgreSQL payload rows were not read because the
+ * caller consumed the relation-backed mapping instead.
+ *
+ * @return Final metadata and source-authorization statistics.
+ */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish_mapped_minimizer_fragment_payload() {
     try {
@@ -188,6 +201,14 @@ index_storage_fragment_generation_read_session::finish_mapped_minimizer_fragment
     }
 }
 
+/**
+ * @brief Finishes a compact direct mapping after a manifest-only read.
+ *
+ * The completion contract rejects any directory allocation, payload scan, or
+ * selective/full-generation counter because mapped compact access bypasses them.
+ *
+ * @return Final manifest and source-authorization statistics.
+ */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish_mapped_compact_direct() {
     try {
@@ -264,6 +285,12 @@ index_storage_fragment_generation_read_session::finish_mapped_compact_direct() {
     }
 }
 
+/**
+ * @brief Closes a session after metadata inspection without payload delivery.
+ *
+ * The session may close before or after source authorization, provided no
+ * payload scan or section plan is active.
+ */
 inline void index_storage_fragment_generation_read_session::close_metadata_read() {
     try {
         if ((state_ != operation_state::metadata_pending_source &&
@@ -284,6 +311,15 @@ inline void index_storage_fragment_generation_read_session::close_metadata_read(
     }
 }
 
+/**
+ * @brief Validates completed payload accounting and closes the read session.
+ *
+ * Full-generation sessions use their dedicated accounting path. Selective
+ * sessions require both control and position sections to be complete, with no
+ * remaining scans, admitted plans, or authorization state.
+ *
+ * @return Final read statistics after every row, byte, checksum, and timing equation passes.
+ */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish() {
     minimizer_generation_read_stats result{};

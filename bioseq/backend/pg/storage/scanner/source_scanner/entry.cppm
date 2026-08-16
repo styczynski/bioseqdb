@@ -53,6 +53,9 @@ import :source_registry;
 export namespace bioseq::storage {
 
 /// Compute packed-unit padding for one locator and sequence representation.
+/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
+/// @param locator Locator whose logical length is measured in letters.
+/// @return Number of unused letters in the final packed unit.
 template <class p_sequence_instance>
 [[nodiscard]] constexpr std::uint16_t
 locator_padding_letters(const sequence_locator& locator) noexcept {
@@ -63,6 +66,11 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
 }
 
 /// Validate locator revision, fragment count and optional trailing padding.
+/// @param locator Locator whose physical geometry is checked.
+/// @param stored_type Persisted alphabet and packed-unit width.
+/// @param last_padding_letters Observed unused-letter count.
+/// @param validate_padding Whether the observed padding participates in validation.
+/// @return Whether type dispatch succeeded and every selected invariant holds.
 [[nodiscard]] inline bool locator_geometry_is_valid(const sequence_locator& locator,
                                                     compact_sequence_stdc_type_params stored_type,
                                                     std::uint16_t last_padding_letters,
@@ -96,6 +104,13 @@ locator_padding_letters(const sequence_locator& locator) noexcept {
 }
 
 /// Decode one rank interval from cached packed fragments.
+/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
+/// @param entry Type-erased entry containing the matching concrete scanner.
+/// @param transform Identity, reverse, complement, or reverse-complement mapping.
+/// @param source_from Zero-based logical-letter offset in the source.
+/// @param output Destination rank bytes written completely on success.
+/// @throws PostgreSQL ERROR for truncated fragments, invalid ranks, or an
+/// unsupported complement operation.
 template <class p_sequence_instance>
 inline void typed_scanner_read_ranks(source_scanner_entry& entry,
                                      sequence_transform transform,
@@ -164,6 +179,9 @@ inline void typed_scanner_read_ranks(source_scanner_entry& entry,
 }
 
 /// Finish and destroy one successfully used concrete scanner.
+/// @tparam p_sequence_instance Concrete scanner representation.
+/// @param entry Entry whose PostgreSQL resources and object lifetime are ended.
+/// @throws A translated PostgreSQL error when resource finalization fails.
 template <class p_sequence_instance>
 inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
     using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
@@ -178,6 +196,8 @@ inline void finish_typed_scanner_entry(source_scanner_entry& entry) {
 }
 
 /// Abandon and destroy one concrete scanner after failure.
+/// @tparam p_sequence_instance Concrete scanner representation.
+/// @param entry Entry made inert without propagating cleanup errors.
 template <class p_sequence_instance>
 inline void abort_typed_scanner_entry_noexcept(source_scanner_entry& entry) noexcept {
     using scanner_type = postgres_sequence_scanner<p_sequence_instance>;
@@ -192,6 +212,7 @@ inline void abort_typed_scanner_entry_noexcept(source_scanner_entry& entry) noex
 }
 
 /// Abort a type-erased scanner entry and release its domain retain.
+/// @param opaque Pointer to a `source_scanner_entry`, or null for no work.
 inline void abort_source_scanner_entry_noexcept(void* opaque) noexcept {
     auto* entry = static_cast<source_scanner_entry*>(opaque);
     if (entry == nullptr) {
@@ -208,6 +229,8 @@ inline void abort_source_scanner_entry_noexcept(void* opaque) noexcept {
 }
 
 /// Finish a type-erased scanner entry before releasing its domain retain.
+/// @param opaque Pointer to a `source_scanner_entry`, or null for no work.
+/// @throws PostgreSQL ERROR when concrete finalization reports any failure.
 inline void finish_source_scanner_entry(void* opaque, bool) {
     auto* entry = static_cast<source_scanner_entry*>(opaque);
     if (entry == nullptr) {
@@ -254,6 +277,11 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
 }
 
 /// Construct a representation-specific scanner in the read-session context.
+/// @param opaque Borrowed `source_scanner_factory_argument` valid for this call.
+/// @param payload_context Memory context owning the entry and concrete scanner.
+/// @return Type-erased scanner entry allocated in `payload_context`.
+/// @throws PostgreSQL ERROR when representation dispatch, domain retain, or
+/// concrete scanner construction fails.
 [[nodiscard]] inline void* create_source_scanner_entry(void* opaque,
                                                        MemoryContext payload_context) {
     auto const& factory = *static_cast<const source_scanner_factory_argument*>(opaque);
@@ -347,6 +375,16 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
 }
 
 /// Execute one backend-thread rank read after validating domain and range.
+/// @param domain Live domain owned by the current backend thread.
+/// @param session Backend-thread read session that caches scanner entries.
+/// @param locator Verified source locator.
+/// @param stored_type Persisted alphabet and packed-unit width.
+/// @param transform Requested logical orientation.
+/// @param source_from Zero-based source offset in letters.
+/// @param output Destination rank bytes.
+/// @return `ok` after filling the requested interval.
+/// @throws PostgreSQL ERROR when the domain ended, the range is invalid, or
+/// scanner creation and reading fails.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
                              pg_sequence_read_session& session,
@@ -457,6 +495,9 @@ read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
 }
 
 /// Reject cross-thread calls before entering any PostgreSQL boundary.
+/// @param opaque Type-erased source domain.
+/// @param session Read session whose backend token must match the domain.
+/// @return `wrong_thread` for a mismatched backend, otherwise the checked read status.
 [[nodiscard]] inline pg_sequence_source_read_status
 read_domain_ranks(const void* opaque,
                   pg_sequence_read_session& session,
@@ -485,6 +526,7 @@ read_domain_ranks(const void* opaque,
 }
 
 /// Return the immutable type-erased source-domain backend table.
+/// @return Process-lifetime callback table.
 [[nodiscard]] inline const pg_sequence_source_backend_ops& source_backend_ops() noexcept {
     static const pg_sequence_source_backend_ops ops{
         .retain = retain_domain,

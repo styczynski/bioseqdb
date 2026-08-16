@@ -106,12 +106,15 @@ export namespace bioseq::storage {
 // live in the PG-free `bioseq.storage.layout` module so the unit-test TU can
 // link them. They are re-exported above, so every use below resolves unchanged.
 
+/// Physical size in bytes of the canonical locator-stub varlena.
 constexpr std::size_t k_locator_stub_varlena_bytes =
     bioseq::pg_types::seq::header_bytes() + sizeof(sequence_locator);
 static_assert(k_locator_stub_varlena_bytes == 56,
               "sequence locator stub must be exactly 56 bytes");
 
 /// Check whether a sequence varlena carries the canonical locator width marker.
+/// @param hdr Borrowed varlena pointer, which may be null.
+/// @return Whether `hdr` is non-null and has the locator marker.
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const bioseq::pg_types::seq* hdr) noexcept {
     return hdr != nullptr
@@ -120,6 +123,8 @@ inline bool is_locator_stub(const bioseq::pg_types::seq* hdr) noexcept {
 }
 
 /// Remove the locator marker and return the logical packed-unit byte width.
+/// @param hdr Borrowed non-null sequence header.
+/// @return Packed storage-unit width in bytes.
 [[nodiscard]] [[gnu::always_inline]]
 inline std::uint8_t logical_storage_unit_byte_width(const bioseq::pg_types::seq* hdr) noexcept {
     return static_cast<std::uint8_t>(
@@ -127,6 +132,9 @@ inline std::uint8_t logical_storage_unit_byte_width(const bioseq::pg_types::seq*
 }
 
 /// Decode and validate the canonical locator payload from one stub.
+/// @param hdr Borrowed sequence header containing a locator stub.
+/// @return Decoded locator value.
+/// @throws PostgreSQL ERROR if the marker, varlena size, or wire payload is invalid.
 [[nodiscard]] [[gnu::always_inline]]
 inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hdr) {
     if (!is_locator_stub(hdr)) {
@@ -156,6 +164,9 @@ inline sequence_locator decode_locator_from_stub(const bioseq::pg_types::seq* hd
  * narrowing and row-range violation before opening a shard, doing allocation
  * arithmetic, or converting catalog-width fields. */
 /// Validate that one locator can be safely flattened and addressed in SQL.
+/// @param loc Locator whose lengths and row range are checked.
+/// @throws PostgreSQL ERROR when any value exceeds its SQL or allocation domain
+/// or the fragment geometry is inconsistent.
 [[gnu::always_inline]]
 inline void validate_locator_flat_materialization_length(
     const sequence_locator& loc)
@@ -201,6 +212,10 @@ inline void validate_locator_flat_materialization_length(
 }
 
 /// Validate one fragment varlena frame against its expected physical size.
+/// @param raw_bytes Observed varlena size in bytes.
+/// @param expected_bytes Required varlena size in bytes.
+/// @param row_no Physical fragment row number used for diagnostics.
+/// @throws PostgreSQL ERROR when the frame is short or has the wrong size.
 [[gnu::always_inline]]
 inline void validate_sequence_fragment_frame(
     Size raw_bytes, Size expected_bytes, std::uint64_t row_no)
@@ -231,6 +246,13 @@ inline void validate_sequence_fragment_frame(
 }
 
 /// Validate one fragment's packed type, logical length and padding.
+/// @param raw Borrowed fragment header.
+/// @param expected_alphabet Required alphabet code.
+/// @param expected_width Required packed-unit width in bytes.
+/// @param expected_bp_size Required logical length in letters.
+/// @param expected_padding Required unused-letter count.
+/// @param row_no Physical fragment row number used for diagnostics.
+/// @throws PostgreSQL ERROR when persisted metadata differs from the locator geometry.
 [[gnu::always_inline]]
 inline void validate_sequence_fragment_metadata(
     const bioseq::pg_types::seq* raw,
@@ -281,6 +303,13 @@ inline void validate_sequence_fragment_metadata(
 }
 
 /// Encode one canonical locator stub without changing its wire geometry.
+/// @param dst Writable storage for exactly `k_locator_stub_varlena_bytes` bytes.
+/// @param logical_alphabet_code Sequence alphabet stored in the varlena header.
+/// @param logical_byte_width Packed storage-unit width in bytes.
+/// @param padding_letters Unused letters in the final packed unit.
+/// @param total_bp_size Logical sequence length in letters.
+/// @param loc Canonical locator encoded into the payload.
+/// @throws PostgreSQL ERROR when an input is outside the locator wire domain.
 [[gnu::always_inline]]
 inline void encode_locator_into_stub(
     bioseq::pg_types::seq* dst,
@@ -316,6 +345,9 @@ inline void encode_locator_into_stub(
 }
 
 /// Allocate and encode one canonical locator stub in a memory context.
+/// @param mctx Memory context that owns the returned varlena.
+/// @return Encoded locator stub owned by `mctx`.
+/// @throws PostgreSQL ERROR when allocation or encoding fails.
 [[nodiscard]] [[gnu::always_inline]]
 inline bioseq::pg_types::seq* alloc_locator_stub_in(
     MemoryContext mctx,
@@ -352,44 +384,62 @@ inline bioseq::pg_types::seq* alloc_locator_stub_in(
 struct seq_caches {
     /// One cached shard relation with mutually exclusive read or write state.
     struct entry {
+        /// Cache-owned open relation reference.
         Relation rel = nullptr;
+        /// Column writer owned by this entry when the cache is write-side.
         column_write_state* write_state = nullptr;
+        /// Column reader owned by this entry when the cache is read-side.
         column_read_state*  read_state  = nullptr;
         // Exact caller-owned snapshot used to create read_state. Registered
         // MVCC snapshots and permanent SnapshotAny may be retained; shorter-
         // lived special snapshots are served by a per-call reader instead.
         Snapshot read_snapshot_source = nullptr;
+        /// Unpublished physical bytes accumulated by the writer.
         sequence_size_t pending_bytes_delta = 0;
+        /// Unpublished logical-payload bytes accumulated by the writer.
         sequence_size_t pending_total_payload_delta = 0;
     };
 
     /// Sorted-vector map providing deterministic cache iteration and cleanup.
     struct entry_map {
+        /// Packed cache key paired with its owned entry.
         using value_type = std::pair<std::uint64_t, entry>;
+        /// Contiguous storage that preserves ascending key order.
         using storage_type = std::vector<value_type>;
+        /// Mutable entry iterator.
         using iterator = storage_type::iterator;
+        /// Immutable entry iterator.
         using const_iterator = storage_type::const_iterator;
 
+        /// @return Iterator to the first cached entry.
         [[nodiscard]] iterator begin() noexcept { return entries_.begin(); }
+        /// @return Past-the-end iterator for mutable traversal.
         [[nodiscard]] iterator end() noexcept { return entries_.end(); }
+        /// @return Iterator to the first cached entry.
         [[nodiscard]] const_iterator begin() const noexcept { return entries_.begin(); }
+        /// @return Past-the-end iterator for immutable traversal.
         [[nodiscard]] const_iterator end() const noexcept { return entries_.end(); }
+        /// @return Number of cached shards.
         [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+        /// Remove entries after their PostgreSQL resources have been closed.
         void clear() noexcept { entries_.clear(); }
 
         /// Find one mutable cache entry by its packed shard key.
+        /// @return Matching iterator, or `end()` when absent.
         [[nodiscard]] iterator find(std::uint64_t key) noexcept {
             auto it = lower_bound(key);
             return it != entries_.end() && it->first == key ? it : entries_.end();
         }
 
         /// Find one immutable cache entry by its packed shard key.
+        /// @return Matching iterator, or `end()` when absent.
         [[nodiscard]] const_iterator find(std::uint64_t key) const noexcept {
             auto it = lower_bound(key);
             return it != entries_.end() && it->first == key ? it : entries_.end();
         }
 
         /// Return or insert one cache entry while preserving key order.
+        /// @return Mutable entry associated with `key`.
         entry& operator[](std::uint64_t key) {
             auto it = lower_bound(key);
             if (it == entries_.end() || it->first != key) {
@@ -399,18 +449,22 @@ struct seq_caches {
         }
 
     private:
+        /// Compare a stored key with a lookup key.
         struct less_by_key {
+            /// @return Whether the stored key is less than `rhs`.
             [[nodiscard]] constexpr bool operator()(const value_type& lhs,
                                                    std::uint64_t rhs) const noexcept {
                 return lhs.first < rhs;
             }
         };
 
+        /// @return First mutable entry whose key is not less than `key`.
         [[nodiscard]] iterator lower_bound(std::uint64_t key) noexcept {
             return std::lower_bound(
                 entries_.begin(), entries_.end(), key, less_by_key{});
         }
 
+        /// @return First immutable entry whose key is not less than `key`.
         [[nodiscard]] const_iterator lower_bound(std::uint64_t key) const noexcept {
             return std::lower_bound(
                 entries_.begin(), entries_.end(), key, less_by_key{});
@@ -423,13 +477,16 @@ struct seq_caches {
     // allocation, deterministic sorted iteration order for close_all, and
     // cache-friendly for the typical <50-entry working set. The hot paths only
     // do find / operator[] / clear, and never hold an `entry&` across an insert.
+    /// Entries keyed by packed column, bucket, and shard identity.
     entry_map entries{};
+    /// Relation lock mode used consistently by this cache.
     LOCKMODE lock_mode = AccessShareLock;
 
     /// Exclusive read-side or write-side cache ownership mode.
     enum class access_side { read, write };
     access_side side = access_side::read;
 
+    /// Memory context owning cached reader state.
     MemoryContext read_state_mctx = nullptr;
 
     // Optional explicit owner for read-side caches whose lifetime is longer
@@ -439,6 +496,7 @@ struct seq_caches {
     // expanded datum can finish reading after the provider scan has ended.
     ResourceOwner read_resource_owner = nullptr;
 
+    /// Write-side shard capacity snapshot in bytes.
     sequence_size_t cap_bytes_snapshot = std::numeric_limits<sequence_size_t>::max();
 
     Oid main_database_oid   = InvalidOid;
@@ -446,6 +504,7 @@ struct seq_caches {
     Oid main_relfilenode    = InvalidOid;
 
     /// Pack a sequence column, bucket and shard into one deterministic key.
+    /// @return Unsigned key containing the three fixed-width fields.
     [[nodiscard]] [[gnu::always_inline]]
     static constexpr std::uint64_t key_for(std::int16_t column_attno,
                                            std::int16_t bucket_idx,
@@ -459,6 +518,7 @@ struct seq_caches {
     }
 
     /// Close all cached state through the commit or abort cleanup path.
+    /// @param commit Whether pending writer metadata should be committed.
     void close_all(bool commit) noexcept;
 };
 
@@ -472,6 +532,8 @@ struct seq_caches {
 // create a module cycle with bioseq_table). Out-of-line gives it external
 // linkage so the linker resolves the forward declaration.
 /// Allocate and construct one cache set inside a PostgreSQL memory context.
+/// @param mctx Memory context that owns the returned allocation.
+/// @return Constructed cache set owned by `mctx`.
 [[nodiscard]] inline seq_caches* alloc_seq_caches(MemoryContext mctx) {
     bioseq::postgres::support::memory_context_scope ctx_guard{mctx};
     void* raw = palloc0(sizeof(seq_caches));
@@ -479,15 +541,20 @@ struct seq_caches {
 }
 
 /// Destroy a cache set after all owned PostgreSQL state has been closed.
+/// @param caches Cache previously constructed by `alloc_seq_caches`.
 void destroy_seq_caches(seq_caches* caches) noexcept;
 
 /// Close every cache entry without destroying its enclosing allocation.
+/// @param caches Cache whose owned PostgreSQL state is closed.
+/// @param commit Whether pending writer metadata should be committed.
 [[gnu::always_inline]] inline void close_seq_caches(seq_caches& caches,
                                                     bool commit) noexcept {
     caches.close_all(commit);
 }
 
 /// Close and destroy one separately allocated cache set.
+/// @param caches Cache to close and destroy, or null.
+/// @param commit Whether pending writer metadata should be committed.
 void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
 
 // Public alias for the per-fragment storage-unit count
@@ -503,6 +570,8 @@ inline constexpr std::size_t k_sequence_fragment_storage_units =
 // this only flushes pending columnar writes (it does NOT pop/close the write
 // state); the central xact-commit teardown still owns lifecycle.
 /// Flush cached write states without transferring their cleanup ownership.
+/// @param caches Caller-owned write cache, or null for no work.
+/// @param current_sub_xid Subtransaction that owns the writer state.
 void flush_seq_cache_write_states(seq_caches* caches,
                                   SubTransactionId current_sub_xid);
 
@@ -587,37 +656,50 @@ export namespace bioseq::storage {
 
 /// Compact-sequence type parameters resolved from one parent column typmod.
 struct sequence_column_type_parameters {
+    /// Registered logical alphabet name.
     std::string alphabet_name;
+    /// Packed storage-unit width in bits.
     int storage_unit_bit_width = 0;
 };
 
 /// Resolve and validate the compact-sequence typmod at one attribute number.
+/// @param parent_tupdesc Borrowed parent tuple descriptor.
+/// @param column_attno One-based attribute number.
+/// @return Logical alphabet and packed-unit bit width.
+/// @throws PostgreSQL ERROR when the attribute or typmod is invalid.
 [[nodiscard]] sequence_column_type_parameters
 column_typmod_at(TupleDesc parent_tupdesc, std::int16_t column_attno);
 
 /// Return the relation-persistence keyword inherited by a sequence shard.
+/// @return Static SQL keyword describing the parent relation persistence.
 [[nodiscard]] const char*
 persistence_keyword_for_relfilenode(Oid main_database_oid,
                                     Oid main_tablespace_oid,
                                     Oid main_relfilenode);
 
 /// Format the canonical physical sequence-shard relation name.
+/// @return Unqualified relation name derived from the physical identity.
 [[nodiscard]] std::string
 format_sub_table_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                       std::int16_t column_attno, std::int16_t bucket_idx,
                       std::int32_t shard_idx);
 
 /// Format the canonical sidecar relation name paired with a sequence shard.
+/// @return Unqualified relation name derived from the physical identity.
 [[nodiscard]] std::string
 format_sidecar_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                     std::int16_t column_attno, std::int16_t bucket_idx,
                     std::int32_t shard_idx);
 
 /// Stateless shard manager for one sequence-length bucket geometry.
+/// @tparam p_length_type Unsigned type used for configured sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
 template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 struct sequence_storage_manager {
+    /// Configured logical-length type.
     using len_t = p_length_type;
     static constexpr std::size_t bucket_min_len_bits =
         p_bucket_minimum_length_bits;
@@ -638,6 +720,8 @@ struct sequence_storage_manager {
     // the unit-test TU resolve to identical bucketing code (the LUT itself is
     // sequence_bucket_lookup in bioseq.storage.layout).
     /// Select the configured sequence-length bucket for one logical length.
+    /// @param seq_size Logical sequence length in letters.
+    /// @return Zero-based configured bucket index.
     [[nodiscard]] [[gnu::always_inline]] static constexpr std::size_t
     sequence_bucket_index(sequence_size_t seq_size) noexcept {
         return bioseq::storage::sequence_bucket_index<
@@ -660,6 +744,7 @@ struct sequence_storage_manager {
     // use: it slices an already-materialised `bioseq::pg_types::seq*` into fragments
     // via `insert_sequence_streamed`.
     /// Stream producer-filled fragments into one shard and return publication authority.
+    /// @tparam p_fragment_producer Callable that fills one destination fragment.
     template<class p_fragment_producer>
     [[nodiscard]] static pending_sequence_source
     insert_sequence_streamed(Oid user_relid,
@@ -701,7 +786,9 @@ struct sequence_storage_manager {
     // Read path: bulk per-bucket.
     /// Caller output slot paired with one locator for sorted bulk reads.
     struct fetch_request {
+        /// Destination index in the caller-provided output span.
         std::size_t out_slot = 0;
+        /// Locator to materialize into `out_slot`.
         sequence_locator locator{};
     };
 
@@ -730,6 +817,7 @@ struct sequence_storage_manager {
         bool allow_missing_during_extension_teardown = false);
 };
 
+/// Default sequence-storage bucket geometry used by PostgreSQL integration.
 using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
 
@@ -737,6 +825,10 @@ using bioseq_default_storage_manager =
 // can resolve a sub-table relation via the
 // per-scan `seq_caches`. Implementation lives below in the .cppm body.
 /// Open a locator's shard through the caller-owned relation cache.
+/// @param lock_mode PostgreSQL relation lock acquired for a new cache entry.
+/// @param cache Caller-owned cache retaining the relation reference and lock.
+/// @return Open relation reference owned by `cache`.
+/// @throws PostgreSQL ERROR when the shard cannot be resolved or opened.
 [[nodiscard]] Relation
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                            std::int16_t column_attno, const sequence_locator& loc,
@@ -745,6 +837,7 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 /// True only when `relid` is the sub-table relation of an installed
 /// seq_sub_table catalog row.  VACUUM and mutation guards use catalog
 /// registration rather than trusting the relation-name convention.
+/// @return Whether the catalog contains the relation identity.
 [[nodiscard]] bool is_registered_sequence_fragment_relation(
     Oid relid,
     bool allow_missing_during_extension_teardown = false);
@@ -753,13 +846,14 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 // Sidecar I/O. Per-shard heap relations co-sharded with sub-tables.
 // ---------------------------------------------------------------------------
 
-/// Replace one locator's sidecar blob inside its co-sharded relation.
+/// Insert one locator's sidecar blob into its co-sharded relation.
 void
 sidecar_write_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                    std::int16_t column_attno, const sequence_locator& loc,
                    std::span<const std::uint8_t> blob, seq_caches* cache);
 
 /// Read one locator's sidecar blob when present.
+/// @return Owning byte vector, or no value when no blob can be found.
 [[nodiscard]] std::optional<std::vector<char>>
 sidecar_read_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                   std::int16_t column_attno, const sequence_locator& loc,
@@ -785,6 +879,7 @@ sidecar_read_blob_bulk(
 // ---------------------------------------------------------------------------
 
 /// Read the current maximum physical sequence-shard payload cap.
+/// @return Capacity in bytes.
 [[nodiscard]] sequence_size_t read_max_sub_table_cap_bytes();
 
 }  // namespace bioseq::storage
@@ -802,6 +897,8 @@ inline constexpr std::size_t k_fragment_storage_units =
 // Look-up bits_per_char via the supported-alphabet pack so a future alphabet
 // addition does not silently produce wrong fragment_bp values.
 /// Resolve packed bits per letter for one registered alphabet code.
+/// @param alpha Registered alphabet code.
+/// @return Bits per logical letter, or zero when the code is unsupported.
 [[nodiscard]] inline std::size_t bits_per_char_for_alphabet_code(
     bioseq::pg_types::seq::alphabet_code_t alpha) noexcept {
     std::size_t bits_per_char = 0;
@@ -817,6 +914,9 @@ inline constexpr std::size_t k_fragment_storage_units =
 
 // letters_per_unit = (storage_unit_byte_width * 8) / bits_per_char.
 /// Resolve logical letters per packed storage unit.
+/// @param alpha Registered alphabet code.
+/// @param logical_byte_width Packed-unit width in bytes.
+/// @return Letters per unit, or zero when the alphabet is unsupported.
 [[nodiscard]] inline std::size_t letters_per_unit_for(
     bioseq::pg_types::seq::alphabet_code_t alpha, std::uint8_t logical_byte_width) noexcept {
     const std::size_t bpc = bits_per_char_for_alphabet_code(alpha);

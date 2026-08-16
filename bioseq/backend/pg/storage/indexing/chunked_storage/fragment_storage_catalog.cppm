@@ -126,6 +126,15 @@ export import :storage_adapter_contract;
 export import :fragment_storage_lifecycle;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Resolves or creates the canonical minimizer-generation sidecar relation.
+ *
+ * The source relation is validated under `AccessShareLock`. A valid existing
+ * sidecar keeps its relation lock until transaction end, and creation is
+ * serialized by the index advisory transaction lock.
+ *
+ * @return OID of the validated unlogged generation relation.
+ */
 [[nodiscard]] inline Oid fragment_index_storage::ensure_minimizer_generation_storage() {
     if (index_name_ != k_minimizers_per_fragment_index_name &&
         index_name_ != k_minimizers_per_sequence_index_name) {
@@ -251,14 +260,26 @@ export namespace bioseq::storage::indexing {
     return relation_oid;
 }
 
+/**
+ * @brief Drops every owned generation sidecar and clears its age metadata.
+ *
+ * Candidate relations are accepted only after canonical-name, shard-ownership,
+ * physical-identity, and schema checks. Each accepted relation is locked with
+ * `AccessExclusiveLock` before deletion, and cleanup contains PostgreSQL errors
+ * so no live C++ owner crosses the longjmp boundary.
+ *
+ * @return Counts of dropped relations and deleted metadata rows.
+ */
 [[nodiscard]] inline minimizer_generation_clear_result
 fragment_index_storage::clear_minimizer_generation_storage() {
+    // Identifies one discovered sidecar before it is admitted for deletion.
     struct physical_relation {
         Oid oid = InvalidOid;
         std::string name;
         std::uint8_t bucket_idx = 0;
         std::uint32_t shard_idx = 0;
     };
+    // Owns SPI, relation, allocation, and exception state across PG_TRY cleanup.
     struct clear_state {
         bool spi_active = false;
         Relation locked_relation = nullptr;
@@ -747,6 +768,13 @@ fragment_index_storage::clear_minimizer_generation_storage() {
     return result;
 }
 
+/**
+ * @brief Opens a snapshot-bound reader for the handle's generation key.
+ * @param[in] query_key Logical key fixed when this storage handle was opened.
+ * @param[in] executor_snapshot Registered executor snapshot borrowed by the session.
+ * @param[in] expected Expected immutable generation identity.
+ * @return A read session that borrows this handle and the registered snapshot.
+ */
 [[nodiscard]] inline generation_read_session fragment_index_storage::begin_generation_read(
     std::uint64_t query_key,
     Snapshot executor_snapshot,
@@ -762,6 +790,12 @@ fragment_index_storage::clear_minimizer_generation_storage() {
                                    minimizer_generation_snapshot_registration::borrow_registered};
 }
 
+/**
+ * @brief Opens a grouped-SoA row sink for one new generation.
+ * @param[in] query_key Logical key fixed when this storage handle was opened.
+ * @param[in] generation_id Immutable identifier assigned to the generation.
+ * @return A sink bound to the validated canonical generation relation.
+ */
 [[nodiscard]] inline generation_row_sink
 fragment_index_storage::begin_generation_write(std::uint64_t query_key,
                                                std::uint64_t generation_id) {
@@ -782,6 +816,12 @@ fragment_index_storage::begin_generation_write(std::uint64_t query_key,
                                generation_id};
 }
 
+/**
+ * @brief Opens a hash-major writer for one new minimizer generation.
+ * @param[in] query_key Logical key fixed when this storage handle was opened.
+ * @param[in] generation_id Immutable identifier assigned to the generation.
+ * @return A writer bound to the validated canonical generation relation.
+ */
 [[nodiscard]] inline hash_major_minimizer_generation_writer
 fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_t query_key,
                                                                     std::uint64_t generation_id) {
@@ -802,6 +842,16 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
                                                   generation_id};
 }
 
+/**
+ * @brief Resolves the direct-fragment relation and optionally creates it.
+ *
+ * Cached OIDs are accepted only when the current namespace lookup still maps
+ * the canonical name to the same OID, which keeps handles valid across
+ * subtransaction rollback.
+ *
+ * @param[in] create_if_missing Whether an absent relation may be created.
+ * @return Current relation OID, or `InvalidOid` when absent and creation is disabled.
+ */
 [[nodiscard]] inline Oid fragment_index_storage::resolve_relid_(bool create_if_missing) const {
     const std::string nm = this_table_name();
     const Oid ns = bioseq_internal_ns();
@@ -861,6 +911,16 @@ fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_
     return rid;
 }
 
+/**
+ * @brief Opens and validates the direct-fragment heap relation.
+ *
+ * The caller owns the returned relation and its requested lock. On any schema
+ * or identity mismatch this function closes the relation before raising an error.
+ *
+ * @param[in] create_if_missing Whether an absent direct relation may be created.
+ * @param[in] lock PostgreSQL lock mode acquired for the returned relation.
+ * @return Open relation, or null when it is absent and creation is disabled.
+ */
 [[nodiscard]] inline Relation fragment_index_storage::open_index_relation_(bool create_if_missing,
                                                                            LOCKMODE lock) const {
     const Oid rid = resolve_relid_(create_if_missing);

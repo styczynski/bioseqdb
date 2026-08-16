@@ -69,6 +69,7 @@ inline thread_local scanner_leaf_failure g_scanner_pg_leaf_failure =
     scanner_leaf_failure::none;
 
 /// Arm one scanner PostgreSQL leaf failure for the next matching call.
+/// @param point One-shot failure site, or `none` to disable injection.
 inline void arm_scanner_pg_leaf_failure(scanner_leaf_failure point) noexcept {
     g_scanner_pg_leaf_failure = point;
 }
@@ -79,11 +80,14 @@ inline void disarm_scanner_pg_leaf_failure() noexcept {
 }
 
 /// Report whether one scanner PostgreSQL leaf failure remains armed.
+/// @return Whether a failure site is selected.
 [[nodiscard]] inline bool scanner_pg_leaf_failure_is_armed() noexcept {
     return g_scanner_pg_leaf_failure != scanner_leaf_failure::none;
 }
 
 /// Raise the armed scanner failure at its selected PostgreSQL leaf.
+/// @param point Failure site being entered.
+/// @throws PostgreSQL ERROR when `point` is armed.
 inline void inject_scanner_pg_leaf_failure(scanner_leaf_failure point) {
     if (g_scanner_pg_leaf_failure != point) {
         return;
@@ -101,6 +105,9 @@ inline void inject_scanner_pg_leaf_failure(scanner_leaf_failure point) {
  * Every PostgreSQL leaf used by load_fragment is now converted locally with
  * bioseq::postgres::support::invoke_pg_as_cpp, so this function must not place a broad setjmp
  * boundary around a callback that refers to caller-owned vectors.
+ * @param callback_context Opaque context forwarded to `read_body`.
+ * @param read_body Fragment-read callback, or null for no work.
+ * @param cleanup_after_error Compatibility callback that is not invoked.
  */
 #if defined(__GNUC__) && !defined(__clang__)
 [[gnu::noinline, gnu::noipa]]
@@ -120,41 +127,58 @@ void scanner_pg_run_fragment_reads_with_error_cleanup(
 /// Fragment-streaming scanner for either PostgreSQL shard rows or borrowed
 /// in-memory packed units. PostgreSQL mode owns a bounded fragment cache in a
 /// caller-selected MemoryContext, while in-memory mode never allocates.
+/// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
+///
+/// PostgreSQL-backed instances are confined to their creating backend thread.
 template <class p_sequence_instance>
 struct postgres_sequence_scanner final {
+    /// Packed unit used by this sequence representation.
     using storage_unit   = typename p_sequence_instance::storage_unit;
+    /// Non-owning packed-unit view returned for fragments.
     using base_container = std::span<const storage_unit>;
+    /// Compile-time packing traits for this representation.
     using traits         = typename compact_sequence_range<p_sequence_instance>::traits;
 
+    /// Packed-unit capacity of one physical fragment row.
     static constexpr std::size_t fragment_storage_units =
         default_fragment_storage_units;
 
+    /// @return Always `true` for this fragment-oriented scanner.
     [[nodiscard]] [[gnu::always_inline]]
     static constexpr bool is_fragmented() noexcept { return true; }
 
+    /// @return Logical sequence length in letters.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t bp_size() const noexcept { return logical_length_; }
+    /// @return Packed units needed for the logical sequence length.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t storage_unit_count() const noexcept {
         constexpr std::size_t lpu = traits::letters_per_unit;
         return (logical_length_ + lpu - 1) / lpu;
     }
+    /// @return Packed payload size in bytes.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t storage_byte_count() const noexcept {
         return storage_unit_count() * sizeof(storage_unit);
     }
+    /// @return Number of physical or virtual fragments.
     [[nodiscard]] [[gnu::always_inline]]
     std::size_t fragment_count() const noexcept { return fragment_count_; }
+    /// @return Exact logical length estimate in letters.
     [[nodiscard]] [[gnu::always_inline]]
     sequence_size_t estimated_bp_size() const noexcept { return logical_length_; }
+    /// @return Unused letters in the final packed unit.
     [[nodiscard]] [[gnu::always_inline]]
     std::size_t trailing_padding() const noexcept {
         return trailing_padding_;
     }
 
     /// Load one packed fragment into a bounded scanner slot.
-    /// The returned view remains valid until that fragment is released or the
-    /// scanner finishes its PostgreSQL resources.
+    /// @param fragment_no Zero-based fragment number.
+    /// @return Non-owning packed-unit view. It remains valid until release,
+    /// scanner finalization, or eviction after all sixteen slots are occupied.
+    /// @throws PostgreSQL ERROR for an invalid number, absent or corrupt row,
+    /// cancellation, or allocation failure.
     [[nodiscard]] [[gnu::always_inline]]
     base_container load_fragment(std::size_t fragment_no) const;
 
@@ -167,10 +191,14 @@ struct postgres_sequence_scanner final {
      * one random-access lookup, one checked PostgreSQL boundary and one scanner
      * slot copy for every 8 KiB fragment when a large target is admitted for
      * query/segment workers.
+     * @param destination Caller-owned span whose size equals `storage_unit_count()`.
+     * @throws PostgreSQL ERROR when destination geometry or persisted fragment
+     * continuity and framing are invalid.
      */
     void copy_packed_to(std::span<storage_unit> destination) const;
 
     /// Release one cached fragment slot without entering PostgreSQL.
+    /// @param fragment_no Zero-based fragment whose view is no longer used.
     [[gnu::always_inline]]
     void release_fragment(std::size_t fragment_no) const noexcept;
 
@@ -180,12 +208,18 @@ struct postgres_sequence_scanner final {
      * still owned by its parent MemoryContext and must be abandoned to normal
      * statement/transaction cleanup.  A caller that completed successfully
      * calls this method so MemoryContextDelete failures remain authoritative.
+     * @throws PostgreSQL ERROR when the scanner memory context cannot be deleted.
      */
     void finish_pg_resources_as_cpp() const;
 
-    /** Drop local handles without issuing a PostgreSQL call. */
+    /**
+     * @brief Drop local handles without issuing a PostgreSQL call.
+     *
+     * The parent memory context and `ResourceOwner` retain cleanup authority.
+     */
     void abandon_pg_resources_noexcept() const noexcept;
 
+    /// Type-erased callback used by the generic packed-range adapter.
     using fragment_read_callback = scanner_pg_fragment_read_callback;
 
     /**
@@ -195,6 +229,9 @@ struct postgres_sequence_scanner final {
      * longer called. PostgreSQL leaves inside load_fragment are converted
      * to C++ exceptions before they can cross the caller, so ordinary C++
      * unwinding owns destruction of caller materialization state.
+     * @param callback_context Opaque context forwarded to `read_body`.
+     * @param read_body Fragment-read callback, or null for no work.
+     * @param cleanup_after_error Compatibility callback that is not invoked.
      */
     [[gnu::always_inline]] static void run_fragment_reads_with_error_cleanup(
             void* callback_context,
@@ -206,6 +243,17 @@ struct postgres_sequence_scanner final {
 
     /// Bind a locator-backed scanner to one registered MVCC snapshot and
     /// caller-owned read cache.
+    /// @param db_oid Database component of the fragment-shard identity.
+    /// @param tablespace_oid Tablespace component of the shard identity.
+    /// @param main_relfilenode File component of the parent identity.
+    /// @param column_attno One-based sequence attribute number.
+    /// @param locator Physical fragment range and logical length.
+    /// @param last_fragment_padding Unused letters in the final packed unit.
+    /// @param registered_snapshot Borrowed registered MVCC snapshot that must
+    /// outlive the scanner.
+    /// @param caches Borrowed read-side cache that must outlive the scanner.
+    /// @param parent_mctx Parent context owning the scanner's bounded slot context.
+    /// @throws PostgreSQL ERROR when any ownership or snapshot precondition fails.
     explicit postgres_sequence_scanner(
         Oid db_oid, Oid tablespace_oid, Oid main_relfilenode,
         std::int16_t column_attno, const sequence_locator& locator,
@@ -265,6 +313,9 @@ struct postgres_sequence_scanner final {
 
     /// Borrow packed in-memory units without allocating PostgreSQL resources.
     /// The backing span must outlive this scanner.
+    /// @param in_memory_data Borrowed packed units.
+    /// @param total_bp_size Logical sequence length in letters.
+    /// @param last_fragment_padding Unused letters in the final packed unit.
     explicit postgres_sequence_scanner(
         base_container in_memory_data,
         sequence_size_t total_bp_size,
@@ -294,6 +345,7 @@ struct postgres_sequence_scanner final {
     postgres_sequence_scanner& operator=(const postgres_sequence_scanner&) = delete;
 
     /// Transfer scanner slots and PostgreSQL cleanup responsibility.
+    /// @param other Scanner made inert by the move.
     postgres_sequence_scanner(postgres_sequence_scanner&& other) noexcept
         : db_oid_(other.db_oid_),
           tablespace_oid_(other.tablespace_oid_),
@@ -321,6 +373,8 @@ struct postgres_sequence_scanner final {
         }
     }
     /// Transfer scanner slots and PostgreSQL cleanup responsibility.
+    /// @param other Scanner made inert by the move.
+    /// @return This scanner after transfer.
     postgres_sequence_scanner& operator=(postgres_sequence_scanner&& other) noexcept {
         if (this == &other) return *this;
         this->~postgres_sequence_scanner();
@@ -328,14 +382,17 @@ struct postgres_sequence_scanner final {
         return *this;
     }
 
+    /// Abandon local PostgreSQL handles to parent-context cleanup.
     ~postgres_sequence_scanner() { abandon_pg_resources_noexcept(); }
 
+    /// @return Whether this scanner borrows an in-memory packed span.
     [[nodiscard]] [[gnu::always_inline]]
     bool is_in_memory_mode() const noexcept { return mctx_ == nullptr; }
 
     /// Validate that this scanner was constructed for the supplied PostgreSQL
     /// source binding. No raw identity field is exposed: an administrative
     /// writer can only compare the relation, snapshot, and locator axes.
+    /// @return Whether every physical, snapshot, locator, and cache field matches.
     [[nodiscard]] [[gnu::always_inline]]
     bool matches_pg_binding(
             Oid db_oid,
@@ -373,7 +430,9 @@ struct postgres_sequence_scanner final {
 private:
     /// One reusable packed-fragment slot owned by the scanner memory context.
     struct slot_t {
+        /// Resident fragment number, or the maximum value when unused.
         std::size_t   fragment_no = std::numeric_limits<std::size_t>::max();
+        /// Context-owned fixed-size fragment buffer.
         storage_unit* bytes       = nullptr;
     };
 
@@ -406,6 +465,9 @@ private:
     mutable std::array<slot_t, 16>                       slots_{};
 
     /// Return the logical unit count exposed by one validated fragment.
+    /// @param fragment_no Zero-based fragment number.
+    /// @return Packed units belonging to the logical sequence.
+    /// @throws PostgreSQL ERROR when fragment arithmetic exceeds the sequence.
     [[nodiscard]] std::size_t exposed_fragment_storage_units_(
             std::size_t fragment_no) const {
         const auto offset = bioseq::common::checked_mul(
@@ -444,6 +506,7 @@ private:
     };
 
     /// Find a populated cache slot for one fragment number.
+    /// @return Matching mutable slot, or null on a cache miss.
     [[nodiscard]] slot_t* find_slot_(std::size_t fragment_no) const noexcept {
         for (auto& slot : slots_) {
             if (slot.fragment_no == fragment_no && slot.bytes != nullptr) {
@@ -454,6 +517,8 @@ private:
     }
 
     /// Select an empty slot or evict the lowest-numbered resident fragment.
+    /// @param fragment_no Requested fragment number, used only to describe selection.
+    /// @return Mutable slot whose buffer may be reused.
     [[nodiscard]] slot_t* allocate_slot_for_(std::size_t fragment_no) const noexcept {
         for (auto& slot : slots_) {
             if (slot.fragment_no == std::numeric_limits<std::size_t>::max()) {
@@ -825,13 +890,21 @@ inline void postgres_sequence_scanner<p_sequence_instance>::copy_packed_to(
         });
     }
 
+    /// POD state shared with the single checked PostgreSQL bulk-read leaf.
     struct bulk_copy_state {
+        /// Caller-owned destination storage.
         storage_unit* destination = nullptr;
+        /// Destination capacity in bytes.
         std::size_t destination_bytes = 0;
+        /// Number of fragment rows copied successfully.
         std::size_t copied_fragments = 0;
+        /// Next required physical row number.
         std::uint64_t expected_row = 0;
+        /// Most recently observed physical row number.
         std::uint64_t observed_row = 0;
+        /// Most recently observed payload size in bytes.
         std::size_t observed_payload_bytes = 0;
+        /// Closed result of the bulk-read leaf.
         bulk_copy_status status = bulk_copy_status::ok;
     } state{
         .destination = destination.data(),

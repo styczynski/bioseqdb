@@ -127,6 +127,10 @@ export import :fragment_storage_lifecycle;
 export import :fragment_storage_catalog;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Ensures the handle-owned decode buffer can hold the requested units.
+ * @param[in] units Number of 64-bit units required.
+ */
 inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
     if (decoded_units_ >= units && decoded_ != nullptr)
         return;
@@ -152,6 +156,11 @@ inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
     decoded_units_ = units;
 }
 
+/**
+ * @brief Ensures and returns the handle-owned write scratch buffer.
+ * @param[in] units Minimum number of 64-bit units required.
+ * @return Mutable buffer valid until the next resize or handle cleanup.
+ */
 [[nodiscard]] inline std::int64_t* fragment_index_storage::scratch_buffer_(std::size_t units) {
     const std::size_t required_units = std::max<std::size_t>(units, 1u);
     if (scratch_units_ >= required_units && scratch_ != nullptr) {
@@ -180,10 +189,17 @@ inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
     return scratch_;
 }
 
+/// @brief Returns the allocated write scratch capacity in bytes.
 [[nodiscard]] inline std::size_t fragment_index_storage::scratch_buffer_bytes_() const {
     return scratch_units_ * sizeof(std::int64_t);
 }
 
+/**
+ * @brief Builds the transaction-aware cache key for one fragment chunk.
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ * @return Complete physical and logical identity for the cached chunk.
+ */
 [[nodiscard]] inline index_chunk_key
 fragment_index_storage::chunk_cache_key_(index_sub_key_t sub_key,
                                          std::size_t chunk_no) const noexcept {
@@ -203,6 +219,13 @@ fragment_index_storage::chunk_cache_key_(index_sub_key_t sub_key,
     };
 }
 
+/**
+ * @brief Offers a serialized chunk to the shared residency cache.
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ * @param[in] payload Serialized bytes copied by the cache on admission.
+ * @param[in] written_in_current_xact Whether the row was written by this transaction.
+ */
 inline void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
                                                         std::size_t chunk_no,
                                                         std::span<const char> payload,
@@ -210,6 +233,16 @@ inline void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
     (void)store_cached_chunk(chunk_cache_key_(sub_key, chunk_no), payload, written_in_current_xact);
 }
 
+/**
+ * @brief Loads one serialized fragment chunk into the handle-owned decode buffer.
+ *
+ * Residency is consulted first. A catalog miss opens the validated direct
+ * relation under `AccessShareLock`, copies the detoasted payload, and admits
+ * the copied bytes to residency before releasing PostgreSQL resources.
+ *
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ */
 inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
                                                             std::size_t chunk_no) const {
     const index_chunk_key key = chunk_cache_key_(sub_key, chunk_no);
@@ -325,6 +358,10 @@ inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_
     }
 }
 
+/**
+ * @brief Counts distinct data sub-keys stored for the handle's query key.
+ * @return Number of distinct non-temporary sub-keys, or zero when the relation is absent.
+ */
 [[nodiscard]] inline std::size_t fragment_index_storage::number_of_sub_keys() const {
     fragment_read_resources resources{AccessShareLock};
     try {
@@ -391,6 +428,11 @@ inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_
     }
 }
 
+/**
+ * @brief Counts persisted chunks for one sub-key.
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @return Number of matching rows, or zero when the relation is absent.
+ */
 [[nodiscard]] inline std::size_t
 fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
     fragment_read_resources resources{AccessShareLock};
@@ -434,6 +476,12 @@ fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
     }
 }
 
+/**
+ * @brief Reads the declared payload size of one persisted chunk.
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ * @return Payload size in bytes, or zero when the relation or row is absent.
+ */
 [[nodiscard]] inline std::size_t
 fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key, std::size_t chunk_no) const {
     if (chunk_no > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())) {
@@ -505,6 +553,11 @@ fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key, std::size_t chu
     }
 }
 
+/**
+ * @brief Plans uniformly bounded chunk sizes for a serialized byte stream.
+ * @param[in] sub_key Logical stream to resize.
+ * @param[in] bytes_count Total serialized payload size in bytes.
+ */
 inline void fragment_index_storage::resize(index_sub_key_t sub_key, std::size_t bytes_count) {
     const std::size_t n =
         bytes_count == 0 ? 1 : 1 + (bytes_count - 1) / k_max_index_chunk_size_bytes;
@@ -518,6 +571,11 @@ inline void fragment_index_storage::resize(index_sub_key_t sub_key, std::size_t 
     chunk_payload_bytes_[sub_key] = std::move(plan);
 }
 
+/**
+ * @brief Installs an explicit per-chunk payload-size plan.
+ * @param[in] sub_key Logical stream to resize.
+ * @param[in] per_chunk_bytes Payload size in bytes for each zero-based chunk.
+ */
 inline void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
                                                   std::span<const std::size_t> per_chunk_bytes) {
     std::vector<std::size_t> plan(per_chunk_bytes.begin(), per_chunk_bytes.end());
@@ -529,6 +587,11 @@ inline void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
     chunk_payload_bytes_[sub_key] = std::move(plan);
 }
 
+/**
+ * @brief Makes one chunk available through the handle's decode buffer.
+ * @param[in] sub_key Logical stream within the handle's query key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ */
 inline void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
     if (decoded_sub_ == sub_key && decoded_chunk_ == chunk_no) {
         return;
@@ -536,6 +599,16 @@ inline void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std:
     load_chunk_into_buffer_(sub_key, chunk_no);
 }
 
+/**
+ * @brief Replaces one direct-fragment heap row with a serialized payload.
+ *
+ * @param[in,out] resources Open `RowExclusiveLock` relation and row resources.
+ * @param[in] query_key Logical sequence or fragment key stored as `BIGINT`.
+ * @param[in] sub_key Logical stream stored as `BIGINT`.
+ * @param[in] chunk_no Zero-based chunk number stored as PostgreSQL `INT`.
+ * @param[in] chunk_bytes Declared payload size in bytes.
+ * @param[in] payload Bytes copied into a new PostgreSQL `bytea` tuple.
+ */
 inline void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& resources,
                                                       std::uint64_t query_key,
                                                       index_sub_key_t sub_key,
@@ -629,6 +702,14 @@ inline void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& 
     resources.finish_row_checked();
 }
 
+/**
+ * @brief Persists one serialized chunk and updates transaction-aware residency.
+ * @param[in] query_key Logical key to store.
+ * @param[in] sub_key Logical stream within the key.
+ * @param[in] chunk_no Zero-based chunk number within the stream.
+ * @param[in] payload Serialized bytes copied into PostgreSQL storage.
+ * @param[in] written_in_current_xact Whether the row belongs to this transaction.
+ */
 inline void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t query_key,
                                                                    index_sub_key_t sub_key,
                                                                    std::size_t chunk_no,
@@ -651,6 +732,10 @@ inline void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t
     }
 }
 
+/**
+ * @brief Deletes direct-fragment rows for the handle's query key.
+ * @param[in] inclusive_sub_key_range Optional inclusive sub-key range, or no value for all rows.
+ */
 inline void fragment_index_storage::delete_where_(
     std::optional<std::pair<index_sub_key_t, index_sub_key_t>> inclusive_sub_key_range) {
     if (inclusive_sub_key_range &&
@@ -738,6 +823,7 @@ inline void fragment_index_storage::delete_where_(
     evict_generation_storage_residency_();
 }
 
+/// @brief Deletes every direct-fragment row and invalidates the decode-buffer identity.
 inline void fragment_index_storage::clear_entity() {
     delete_where_(std::nullopt);
     decoded_sub_ = k_directory_sub_key;
@@ -745,10 +831,19 @@ inline void fragment_index_storage::clear_entity() {
     decoded_bytes_ = 0;
 }
 
+/**
+ * @brief Deletes direct-fragment rows in an inclusive sub-key range.
+ * @param[in] lo First sub-key to delete.
+ * @param[in] hi Last sub-key to delete.
+ */
 inline void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_sub_key_t hi) {
     delete_where_(std::pair{lo, hi});
 }
 
+/**
+ * @brief Computes the in-memory sorted-run budget for this handle.
+ * @return Budget in bytes after the process and index-memory caps are applied.
+ */
 [[nodiscard]] inline std::size_t fragment_index_storage::run_buffer_bytes() const {
     if (run_buffer_override_bytes_ > 0)
         return run_buffer_override_bytes_;
@@ -765,6 +860,7 @@ inline void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_s
     return static_cast<std::size_t>(capped);
 }
 
+/// @brief Returns the lazily constructed sorted-run store owned by this handle.
 [[nodiscard]] inline sorted_pair_run_store& fragment_index_storage::sorted_runs_ensure_() {
     if (!sorted_runs_.has_value()) {
         sorted_runs_.emplace();

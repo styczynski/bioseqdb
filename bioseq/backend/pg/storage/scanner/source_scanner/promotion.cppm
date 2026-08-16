@@ -54,6 +54,8 @@ export import :source_scanner_routes;
 
 export namespace bioseq::storage {
 /// Check whether a registry lease belongs to the current backend thread.
+/// @param lease Lease whose backend token is inspected.
+/// @return Whether it names a registry bound to this thread.
 [[nodiscard]] inline bool pg_sequence_source_registry_is_current_thread(
     const pg_sequence_source_registry_lease& lease) noexcept {
     return lease.registry != nullptr && lease.registry->backend_thread.is_current();
@@ -61,6 +63,18 @@ export namespace bioseq::storage {
 
 /// Validate a locator against its immutable source and return a source-backed
 /// value allocated in the requested result context.
+/// @param lease Live authenticated registry lease for the parent relation.
+/// @param column_attno One-based sequence attribute number.
+/// @param locator_datum Locator-stub datum to validate.
+/// @param result_context Memory context that owns the returned expanded datum.
+/// @param trace Optional trace attachment forwarded to the expanded value.
+/// @param producer_value_id Optional trace identity for the source value.
+/// @return Source-backed PostgreSQL datum owned by `result_context`.
+/// @throws PostgreSQL ERROR when lease, locator geometry, snapshot-visible
+/// source identity, or physical storage identity fails validation.
+///
+/// The expanded datum retains its source domain, but reads remain confined to
+/// the registry's backend thread and authoritative transaction snapshot.
 [[nodiscard]] inline Datum
 promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                                  AttrNumber column_attno,
@@ -138,6 +152,8 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
 }
 
 /// Promote a locator through one authenticated registry lease.
+/// @return Source-backed datum owned by `result_context`.
+/// @throws PostgreSQL ERROR when promotion validation fails.
 [[nodiscard]] inline Datum
 promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                             AttrNumber column_attno,
@@ -153,6 +169,9 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
 }
 
 /// Promote a locator through an open source provider.
+/// @param provider Open provider owned by the current backend thread.
+/// @return Source-backed datum owned by `result_context`.
+/// @throws PostgreSQL ERROR when the provider is closed or promotion fails.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(pg_sequence_source_provider* provider,
                                                        AttrNumber column_attno,
                                                        Datum locator_datum,
@@ -176,6 +195,11 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
 }
 
 /// Promote a locator through the route selected by relation and generation.
+/// @param routes Borrowed authenticated route set.
+/// @param relation_oid Parent relation identity.
+/// @param provider_generation Exact scan-binding generation.
+/// @return Source-backed datum owned by `result_context`.
+/// @throws PostgreSQL ERROR when no exact live route exists or promotion fails.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,
                                                        Oid relation_oid,
                                                        std::uint64_t provider_generation,
@@ -209,6 +233,11 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
 }
 
 /// Promote a locator only when its relation has one unambiguous live route.
+/// @param routes Borrowed authenticated route set.
+/// @param relation_oid Parent relation identity.
+/// @return Source-backed datum owned by `result_context`.
+/// @throws PostgreSQL ERROR when the relation has zero or multiple live routes
+/// or promotion fails.
 [[nodiscard]] inline Datum promote_pg_sequence_locator(const pg_sequence_source_route_set& routes,
                                                        Oid relation_oid,
                                                        AttrNumber column_attno,

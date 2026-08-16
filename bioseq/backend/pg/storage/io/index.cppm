@@ -100,6 +100,19 @@ export namespace bioseq::storage::load_pg::sql_routines {
 })]]
 /**
  * @brief Loads FASTA or FASTQ records into a Bioseq table.
+ *
+ * The target relation is opened for writes by the load runtime. Header fields
+ * are routed through the selected parser, parent and fragment writes are
+ * flushed before index maintenance, and the row count is returned as a SQL
+ * `BIGINT` value.
+ *
+ * @param[in] target_table Target relation OID. SQL `NULL` is rejected.
+ * @param[in] file_path Filesystem path to the input. SQL `NULL` is rejected.
+ * @param[in] header_format Parser name, or `auto` when omitted.
+ * @param[in] columns Optional array mapping parsed header fields to table columns.
+ * @return Number of complete sequence records inserted.
+ * @throws PostgreSQL ERROR for invalid arguments, unsupported table shape,
+ * reader failure, row persistence, or post-load index maintenance failure.
  */
 [[nodiscard]] std::int64_t load([[bioseq_sql::param({
                                     .sql_type = bioseq::sql::pg::regclass,

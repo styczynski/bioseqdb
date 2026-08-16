@@ -106,6 +106,7 @@ namespace bioseq::storage {
 constexpr std::int64_t k_sequence_storage_advisory_lock_class = 0x42105260LL;
 
 /// Derive the transaction lock key serializing one bucket's shard allocation.
+/// @return Signed advisory-lock key for the database, relation, column, and bucket.
 [[nodiscard]] static std::int64_t
 shard_alloc_lock_key(Oid db_oid, Oid main_relfilenode,
                      std::int16_t column_attno, std::int16_t bucket_idx) noexcept {
@@ -117,6 +118,11 @@ shard_alloc_lock_key(Oid db_oid, Oid main_relfilenode,
                 static_cast<std::uint16_t>(bucket_idx));
 }
 
+/// Decode the compact-sequence typmod for one parent attribute.
+/// @param parent_tupdesc Borrowed parent tuple descriptor.
+/// @param column_attno One-based attribute number.
+/// @return Alphabet name and packed-unit width in bits.
+/// @throws A translated PostgreSQL error when the attribute or typmod is invalid.
 sequence_column_type_parameters column_typmod_at(TupleDesc parent_tupdesc, std::int16_t column_attno) {
     if (column_attno <= 0 || column_attno > parent_tupdesc->natts) {
         storage_error_as_cpp(
@@ -154,6 +160,10 @@ sequence_column_type_parameters column_typmod_at(TupleDesc parent_tupdesc, std::
     return out;
 }
 
+/// Resolve the SQL persistence modifier inherited by a new shard.
+/// @param main_relfilenode Parent relation file identity.
+/// @return Static `UNLOGGED` or `TEMPORARY` keyword, or an empty string for a
+/// permanent or missing parent.
 const char*
 persistence_keyword_for_relfilenode(Oid /*db_oid*/, Oid /*spc_oid*/,
                                     Oid main_relfilenode) {
@@ -174,6 +184,8 @@ persistence_keyword_for_relfilenode(Oid /*db_oid*/, Oid /*spc_oid*/,
     }
 }
 
+/// Format the unqualified fragment-relation name for one shard identity.
+/// @return Owning relation name.
 std::string format_sub_table_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                   std::int16_t column_attno, std::int16_t bucket_idx,
                                   std::int32_t shard_idx) {
@@ -186,6 +198,8 @@ std::string format_sub_table_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                        static_cast<int>(shard_idx));
 }
 
+/// Format the unqualified sidecar-relation name for one shard identity.
+/// @return Owning relation name.
 std::string format_sidecar_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 std::int16_t column_attno, std::int16_t bucket_idx,
                                 std::int32_t shard_idx) {
@@ -198,6 +212,8 @@ std::string format_sidecar_name(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                        static_cast<int>(shard_idx));
 }
 
+/// Read the configured per-shard size ceiling.
+/// @return Capacity in bytes, or zero when no byte ceiling is configured.
 sequence_size_t read_max_sub_table_cap_bytes() {
     const int guc = std::atomic_ref<int>(bioseq::storage::settings::sequence_shard::max_size_gib)
                         .load(std::memory_order_relaxed);
@@ -211,6 +227,8 @@ sequence_size_t read_max_sub_table_cap_bytes() {
 
 namespace bioseq::storage {
 
+/// Destroy a cache whose PostgreSQL resources have already been closed.
+/// @param caches Separately allocated cache, or null for no work.
 void destroy_seq_caches(seq_caches* caches) noexcept {
     if (caches == nullptr) {
         return;
@@ -219,6 +237,9 @@ void destroy_seq_caches(seq_caches* caches) noexcept {
     pfree(caches);
 }
 
+/// Close cached PostgreSQL resources and destroy their C++ owner.
+/// @param caches Separately allocated cache, or null for no work.
+/// @param commit Whether pending shard-byte metadata should be committed.
 void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
     if (caches == nullptr) {
         return;
@@ -227,6 +248,12 @@ void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
     destroy_seq_caches(caches);
 }
 
+/// Close every cached relation and reader through commit or abort cleanup.
+/// @param commit Whether write-side pending-byte deltas are applied first.
+///
+/// Write states remain owned by the transaction write-state cache. Read states
+/// and relation references are closed under the resource owner used to open
+/// them, and `lock_mode` is released for each cached relation.
 void seq_caches::close_all(bool commit) noexcept {
     ErrorData* exact_error = nullptr;
     bool cpp_error = false;
@@ -341,6 +368,11 @@ void seq_caches::close_all(bool commit) noexcept {
 // Flush, but do not pop or close, every open sub-table write state
 // so a same-statement index scan sees the just-written fragment rows.
 // `flush_relation_write_state` is keyed on the shard relation's relfilenode.
+/// Flush write buffers so later reads in the same statement can see their rows.
+/// @param caches Caller-owned write cache, or null for no work.
+/// @param current_sub_xid Subtransaction owning the open write states.
+///
+/// This does not close write states, relation references, or relation locks.
 void flush_seq_cache_write_states(seq_caches* caches,
                                   SubTransactionId current_sub_xid) {
     if (caches == nullptr || caches->side != seq_caches::access_side::write) return;
@@ -358,6 +390,12 @@ void flush_seq_cache_write_states(seq_caches* caches,
 // ---------------------------------------------------------------------------
 
 /// Open and optionally retain one shard relation under the cache's owner.
+/// @param sub_table_relid Physical fragment relation OID.
+/// @param lock_mode Lock acquired when the relation is not already cached.
+/// @param cache Optional owner of the relation reference and lock.
+/// @return Open relation. When `cache` is null, the caller must close it with
+/// the same `lock_mode`.
+/// @throws A translated PostgreSQL error when the relation cannot be opened.
 [[nodiscard]] Relation
 open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
                      seq_caches* cache,
@@ -443,7 +481,13 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
     return rel;
 }
 
-/// Creates one lazy shard pair inside a rollback-safe SQL subtransaction.
+/// Create one fragment and sidecar relation pair in a SQL subtransaction.
+/// @param ddl SQL that creates both physical relations.
+/// @param sub_name Unqualified fragment relation name.
+/// @param sidecar_name Unqualified sidecar relation name.
+/// @param new_sub_relid Receives the committed fragment relation OID.
+/// @param new_sidecar_relid Receives the committed sidecar relation OID.
+/// @throws A translated PostgreSQL error when SPI, DDL, or OID resolution fails.
 void create_shard_relations_checked(
         StringInfo ddl,
         const char* sub_name,
@@ -509,6 +553,14 @@ void create_shard_relations_checked(
 }
 
 /// Serialize, allocate and open the next shard for one length bucket.
+/// @param starting_shard_idx First candidate shard index after lock revalidation.
+/// @param lock_mode Relation lock acquired for the selected shard.
+/// @param cache Optional cache retaining the relation reference and lock.
+/// @return Open active fragment relation.
+/// @throws A translated PostgreSQL error when DDL, catalog registration, or
+/// relation opening fails.
+///
+/// A transaction-scoped advisory lock serializes allocation for the bucket.
 [[nodiscard]] Relation
 allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                             std::int16_t column_attno, TupleDesc parent_tupdesc,
@@ -611,6 +663,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                 quote_identifier(sidecar_name.c_str()));
             return result;
         });
+        /// SPI statuses captured without throwing across the cleanup lambda.
         struct race_drop_spi_state {
             int connect_status = 0;
             int execute_status = 0;
@@ -645,6 +698,11 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 }
 
 /// Open the active shard or allocate the next legal shard index.
+/// @param parent_tupdesc Borrowed descriptor used only when a shard is created.
+/// @param lock_mode Relation lock acquired for the selected shard.
+/// @param cache Optional cache retaining the relation reference and lock.
+/// @return Open active fragment relation.
+/// @throws A translated PostgreSQL error when lookup or allocation fails.
 [[nodiscard]] Relation
 open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                      std::int16_t column_attno, TupleDesc parent_tupdesc,
@@ -688,6 +746,12 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                        lock_mode, cache);
 }
 
+/// Resolve and open the fragment relation named by a sequence locator.
+/// @param loc Locator supplying bucket and shard identity.
+/// @param lock_mode Relation lock acquired for a new cache entry.
+/// @param cache Optional cache retaining the relation reference and lock.
+/// @return Open fragment relation.
+/// @throws PostgreSQL ERROR when the registry row or relation is absent.
 [[nodiscard]] Relation
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                            std::int16_t column_attno, const sequence_locator& loc,
@@ -727,8 +791,11 @@ namespace fragment_registry_detail {
 
 /// Required ordinal, name and type for one fragment-registry attribute.
 struct attribute_contract {
+    /// One-based fixed catalog attribute number.
     AttrNumber attno = InvalidAttrNumber;
+    /// Required PostgreSQL attribute name.
     std::string_view name{};
+    /// Required PostgreSQL type OID.
     Oid type_oid = InvalidOid;
 };
 
@@ -747,6 +814,8 @@ inline constexpr std::array<attribute_contract, 11> k_attribute_contracts{{
 }};
 
 /// Raise one fragment-registry catalog contract violation.
+/// @param detail Diagnostic detail copied before entering PostgreSQL error handling.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] inline void contract_error(const std::string_view detail) {
     const std::string owned{detail};
     bioseq::postgres::support::invoke_pg_as_cpp([&owned] {
@@ -759,6 +828,10 @@ inline constexpr std::array<attribute_contract, 11> k_attribute_contracts{{
 }
 
 /// Validate the complete fixed fragment-registry relation descriptor.
+/// @param catalog Open registry relation whose descriptor is inspected.
+/// @param expected_catalog_oid Required relation OID.
+/// @param expected_namespace_oid Required namespace OID.
+/// @throws PostgreSQL ERROR when identity, storage, or attribute contracts differ.
 inline void validate_catalog(
         Relation catalog,
         const Oid expected_catalog_oid,
@@ -793,6 +866,10 @@ inline void validate_catalog(
 }
 
 /// Open and validate the fragment registry or permit teardown absence.
+/// @param allow_missing_during_extension_teardown Whether teardown may return null.
+/// @return Relation held with `AccessShareLock`, or null for permitted absence.
+/// The caller must close a non-null result with `AccessShareLock`.
+/// @throws PostgreSQL ERROR for absence outside teardown or an invalid schema.
 [[nodiscard]] inline Relation open_catalog(
         const bool allow_missing_during_extension_teardown) {
     const Oid namespace_oid = get_namespace_oid("bioseq_internal", true);
@@ -823,6 +900,11 @@ inline void validate_catalog(
 
 } // namespace fragment_registry_detail
 
+/// Test fragment-relation registration under `SnapshotSelf`.
+/// @param relid Candidate fragment relation OID.
+/// @param allow_missing_during_extension_teardown Whether registry absence is benign.
+/// @return Whether a visible registry tuple names `relid` as its fragment relation.
+/// @throws PostgreSQL ERROR when the registry is absent or invalid outside teardown.
 bool is_registered_sequence_fragment_relation(
         Oid relid,
         const bool allow_missing_during_extension_teardown) {

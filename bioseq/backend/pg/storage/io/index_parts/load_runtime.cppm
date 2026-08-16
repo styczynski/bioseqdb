@@ -90,7 +90,12 @@ import :typed_row_writer;
 import :stream_dispatch;
 import :load_catalog;
 
-/// Tear down the optional per-load executor state. This is idempotent.
+/**
+ * @brief Tears down optional executor state for a streamed load.
+ * @param[in,out] ctx Load context whose executor pointers are cleared.
+ * @param[in] stable_context Caller-owned context that survives executor deletion.
+ * @throws PostgreSQL ERROR when executor or trigger teardown fails.
+ */
 void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
     if (ctx.estate == nullptr) {
         return;
@@ -111,7 +116,17 @@ void teardown_load_executor(load_context& ctx, MemoryContext stable_context) {
     ctx.result_rel_info = nullptr;
 }
 
-/** @brief Releases invocation-owned executor, slot, and parent-relation state. */
+/**
+ * @brief Releases invocation-owned executor, slot, and parent-relation state.
+ *
+ * The parent relation was opened under `RowExclusiveLock`, but this cleanup
+ * closes it with `NoLock` so the transaction retains that lock until end.
+ *
+ * @param[in,out] ctx Load context to make inert.
+ * @param[in] commit Whether the load completed successfully.
+ * @param[in] stable_context Caller-owned context used during cleanup.
+ * @throws PostgreSQL ERROR when executor, slot, or relation cleanup fails.
+ */
 void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_context) {
     MemoryContextSwitchTo(stable_context);
     // Release the per-load executor state before
@@ -138,7 +153,22 @@ void cleanup_load_context(load_context& ctx, bool commit, MemoryContext stable_c
     }
 }
 
-/** @brief Owns the complete streamed-load lifecycle and converges cleanup. */
+/**
+ * @brief Owns the complete streamed-load lifecycle and converges cleanup.
+ *
+ * The parent table remains protected by `RowExclusiveLock` through the
+ * transaction. Fragment writes are flushed before policy-driven index rebuilds,
+ * and cleanup preserves the initiating exception if a secondary close fails.
+ *
+ * @param[in] relid Target table OID.
+ * @param[in] path Input path borrowed for the duration of the call.
+ * @param[in] kind Detected FASTA or FASTQ source kind.
+ * @param[in] requested_fmt Header parser selected by the SQL caller.
+ * @param[in] user_maps Parsed-column mappings borrowed for the load.
+ * @return Number of complete records inserted.
+ * @throws PostgreSQL ERROR when relation setup, parsing, persistence, index
+ * maintenance, or cleanup fails.
+ */
 [[nodiscard]] std::int64_t run_load(Oid relid,
                                     const char* path,
                                     bioseq::io::sequence_file_kind kind,

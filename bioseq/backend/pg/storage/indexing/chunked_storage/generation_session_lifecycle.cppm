@@ -121,6 +121,10 @@ import :fragment_image;
 export import :generation_session_contract;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Returns the single manifest currently bound to the read session.
+ * @return Borrowed manifest pointer, or null unless exactly one metadata form is active.
+ */
 [[nodiscard]] inline const minimizer_generation_manifest*
 index_storage_fragment_generation_read_session::active_manifest_() const noexcept {
     if (metadata_.has_value() == manifest_only_.has_value()) {
@@ -129,12 +133,22 @@ index_storage_fragment_generation_read_session::active_manifest_() const noexcep
     return metadata_ ? &metadata_->manifest : &*manifest_only_;
 }
 
+/**
+ * @brief Marks the session failed and raises a storage error.
+ * @param[in] message Diagnostic describing the violated generation contract.
+ */
 [[noreturn]] inline void
 index_storage_fragment_generation_read_session::fail_(std::string_view message) {
     state_ = operation_state::failed;
     minimizer_generation_storage_error_as_cpp(message);
 }
 
+/**
+ * @brief Adds to a session counter while rejecting unsigned overflow.
+ * @param[in,out] value Counter to update.
+ * @param[in] increment Amount to add.
+ * @param[in] message Diagnostic used when the addition would overflow.
+ */
 inline void index_storage_fragment_generation_read_session::checked_add_(std::uint64_t& value,
                                                                          std::uint64_t increment,
                                                                          std::string_view message) {
@@ -144,6 +158,10 @@ inline void index_storage_fragment_generation_read_session::checked_add_(std::ui
     value += increment;
 }
 
+/**
+ * @brief Classifies one payload tuple's heap-block movement for cold-read statistics.
+ * @param[in] tid PostgreSQL tuple identifier whose block number is sampled.
+ */
 inline void
 index_storage_fragment_generation_read_session::record_payload_tid_(ItemPointerData tid) noexcept {
     const std::uint64_t block = static_cast<std::uint64_t>(ItemPointerGetBlockNumber(&tid));
@@ -160,17 +178,23 @@ index_storage_fragment_generation_read_session::record_payload_tid_(ItemPointerD
     previous_payload_heap_block_ = block;
 }
 
+/**
+ * @brief Records heap-block movement for one payload tuple.
+ * @param[in] tuple Borrowed heap tuple read by the active scan.
+ */
 inline void index_storage_fragment_generation_read_session::record_payload_tid_(
     const HeapTuple tuple) noexcept {
     record_payload_tid_(tuple->t_self);
 }
 
+/// @brief Starts the payload-stage timer once for the current read stage.
 inline void index_storage_fragment_generation_read_session::start_payload_timing_() noexcept {
     if (!payload_stage_begin_ns_) {
         payload_stage_begin_ns_ = cold_index_now_ns();
     }
 }
 
+/// @brief Stops the payload-stage timer and adds saturated nanoseconds to statistics.
 inline void index_storage_fragment_generation_read_session::finalize_payload_timing_() noexcept {
     if (!payload_stage_begin_ns_)
         return;
@@ -186,6 +210,11 @@ inline void index_storage_fragment_generation_read_session::finalize_payload_tim
     payload_stage_begin_ns_.reset();
 }
 
+/**
+ * @brief Releases admitted vectors, metadata, and permits owned by the session.
+ *
+ * Container capacity is returned before its corresponding admission permit.
+ */
 inline void index_storage_fragment_generation_read_session::release_owned_state_() noexcept {
     // Free/reset every covered allocation before returning admission.
     std::vector<std::byte>{}.swap(directory_bytes_scratch_);
@@ -201,18 +230,25 @@ inline void index_storage_fragment_generation_read_session::release_owned_state_
     metadata_permit_.release();
 }
 
+/// @brief Releases the current extent plan and its admitted capacity.
 inline void index_storage_fragment_generation_read_session::release_section_plan_() noexcept {
     std::vector<planned_group>{}.swap(planned_groups_);
     next_group_ = 0;
     plan_permit_.release();
 }
 
+/// @brief Releases authorized position ordinals and their admitted capacity.
 inline void
 index_storage_fragment_generation_read_session::release_control_authorization_() noexcept {
     std::vector<std::uint32_t>{}.swap(authorized_position_ordinals_);
     control_authorization_permit_.release();
 }
 
+/**
+ * @brief Adds a payload-read statistics block with overflow checks.
+ * @param[in,out] destination Accumulated session statistics.
+ * @param[in] increment Statistics produced by one payload operation.
+ */
 inline void index_storage_fragment_generation_read_session::checked_add_read_stats_(
     index_chunk_read_stats& destination, const index_chunk_read_stats& increment) {
     checked_add_(destination.relation_opens,
@@ -263,6 +299,12 @@ inline void index_storage_fragment_generation_read_session::checked_add_read_sta
                  "payload delivered-byte counter overflow");
 }
 
+/**
+ * @brief Creates the fixed batch of buffer-backed tuple slots for full scans.
+ *
+ * Slots are owned by the session and remain valid until checked drop or
+ * PostgreSQL resource-owner cleanup after abandonment.
+ */
 inline void
 index_storage_fragment_generation_read_session::create_full_generation_batch_slots_checked_() {
     bioseq::postgres::support::invoke_pg_as_cpp([this] {
@@ -275,6 +317,7 @@ index_storage_fragment_generation_read_session::create_full_generation_batch_slo
     });
 }
 
+/// @brief Drops every session-owned full-generation tuple slot through PostgreSQL.
 inline void
 index_storage_fragment_generation_read_session::drop_full_generation_batch_slots_checked_() {
     if (full_generation_batch_slot_count_ == 0)
@@ -292,6 +335,12 @@ index_storage_fragment_generation_read_session::drop_full_generation_batch_slots
     });
 }
 
+/**
+ * @brief Forgets all PostgreSQL resources without calling cleanup functions.
+ *
+ * This is the destructor and PostgreSQL-error path. The active ResourceOwner
+ * retains responsibility for pins, scans, relations, and a registered snapshot.
+ */
 inline void index_storage_fragment_generation_read_session::abandon_relations_noexcept_() noexcept {
     // PostgreSQL cleanup is illegal from the noexcept destructor path.
     // On an exceptional PG cleanup failure, ResourceOwner owns any pins;
@@ -308,6 +357,13 @@ inline void index_storage_fragment_generation_read_session::abandon_relations_no
     release_owned_state_();
 }
 
+/**
+ * @brief Closes scans, slots, relations, and any session-registered snapshot.
+ *
+ * Relations and indexes are released with their matching `AccessShareLock`.
+ * A PostgreSQL cleanup error changes the session to failed and abandons the
+ * remaining aliases to the active ResourceOwner.
+ */
 inline void index_storage_fragment_generation_read_session::close_relations_checked_() {
     const std::uint64_t close_begin_ns = cold_index_now_ns();
     const BufferUsage close_buffer_begin = pgBufferUsage;
@@ -357,6 +413,12 @@ inline void index_storage_fragment_generation_read_session::close_relations_chec
     }
 }
 
+/**
+ * @brief Cleans up a failed session and rethrows the initiating exception.
+ *
+ * A secondary cleanup failure is suppressed so it cannot replace the original
+ * corruption or sink error.
+ */
 [[noreturn]] inline void
 index_storage_fragment_generation_read_session::cleanup_failed_session_and_rethrow_() {
     std::exception_ptr original_error = std::current_exception();
@@ -372,6 +434,11 @@ index_storage_fragment_generation_read_session::cleanup_failed_session_and_rethr
     std::rethrow_exception(original_error);
 }
 
+/**
+ * @brief Projects a stored sub-key range into one logical extent namespace.
+ * @param[in] range Half-open stored sub-key range.
+ * @return Logical half-open range and extent kind, or no value for an invalid or mixed range.
+ */
 [[nodiscard]] inline std::optional<projected_extent_range>
 index_storage_fragment_generation_read_session::project_extent_range_(
     const index_sub_key_range& range) noexcept {
@@ -395,6 +462,13 @@ index_storage_fragment_generation_read_session::project_extent_range_(
     return std::nullopt;
 }
 
+/**
+ * @brief Tests whether a request exactly names one directory extent.
+ * @param[in] request Requested sub-key, chunks, byte count, and checksum.
+ * @param[in] entry Directory entry being authorized.
+ * @param[in] position_extent Whether to compare the position rather than control extent.
+ * @return `true` when every persisted extent field matches.
+ */
 [[nodiscard]] inline bool index_storage_fragment_generation_read_session::request_matches_extent_(
     const index_sub_key_request& request,
     const grouped_soa_bucket_directory_entry& entry,
@@ -416,6 +490,22 @@ index_storage_fragment_generation_read_session::project_extent_range_(
     return control || positions;
 }
 
+/**
+ * @brief Binds a grouped-generation read session to one validated sidecar.
+ *
+ * The constructor validates expected layout identity, opens the heap and
+ * primary index under `AccessShareLock`, and optionally registers a snapshot
+ * copy owned by the session. Classification mode reports missing or malformed
+ * relations with `minimizer_generation_relation_open_failure`.
+ *
+ * @param[in] table_name Canonical extension-internal sidecar name.
+ * @param[in] query_key Generation query key stored as SQL `BIGINT`.
+ * @param[in] executor_snapshot Registered MVCC snapshot used for all reads.
+ * @param[in] expected Expected immutable generation and encoding identity.
+ * @param[in] expected_tablespace_oid Tablespace required for the sidecar.
+ * @param[in] snapshot_registration Whether to borrow or register a copy of the snapshot.
+ * @param[in] classification_index_name Nonempty when absence and malformed schema are classified.
+ */
 inline index_storage_fragment_generation_read_session::
     index_storage_fragment_generation_read_session(
         std::string_view table_name,
@@ -582,6 +672,10 @@ inline index_storage_fragment_generation_read_session::
     }
 }
 
+/**
+ * @brief Transfers all PostgreSQL and admitted state from another session.
+ * @param[in,out] other Session consumed and left in the moved state.
+ */
 inline index_storage_fragment_generation_read_session::
     index_storage_fragment_generation_read_session(
         index_storage_fragment_generation_read_session&& other) noexcept
@@ -616,6 +710,12 @@ inline index_storage_fragment_generation_read_session::
     other.state_ = operation_state::moved;
 }
 
+/**
+ * @brief Abandons any still-open PostgreSQL aliases to their ResourceOwner.
+ *
+ * Normal callers close the session explicitly. Destruction performs no
+ * PostgreSQL cleanup and is safe during error unwinding.
+ */
 inline index_storage_fragment_generation_read_session::
     ~index_storage_fragment_generation_read_session() {
     abandon_relations_noexcept_();

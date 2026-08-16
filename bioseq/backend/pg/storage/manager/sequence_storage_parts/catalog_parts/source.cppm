@@ -121,6 +121,7 @@ namespace orphan_reaper_test_support {
 inline thread_local std::optional<std::int64_t> drop_barrier_key;
 
 /** Arm a one-shot backend-local barrier before the next orphan DROP TABLE. */
+/// @param key Session advisory-lock key controlled by the test coordinator.
 inline void arm_drop_barrier(std::int64_t key) noexcept {
     drop_barrier_key = key;
 }
@@ -131,6 +132,8 @@ inline void disarm_drop_barrier() noexcept {
 }
 
 /** Wait for the controller's advisory lock, then release our acquired lock. */
+///
+/// The session-level advisory lock is released before this function returns.
 inline void pass_drop_barrier() {
     if (!drop_barrier_key.has_value())
         return;
@@ -148,16 +151,21 @@ inline void pass_drop_barrier() {
 namespace internal_catalog_detail {
 
 /// Check whether the Bioseq extension is present in this database.
+/// @return Whether PostgreSQL can resolve the extension OID.
 [[nodiscard]] inline bool bioseq_extension_installed() {
     return OidIsValid(get_extension_oid("bioseq", true));
 }
 
 /// Permit missing internal objects only during explicit extension teardown.
+/// @param allow_missing_during_extension_teardown Explicit teardown context flag.
+/// @return The supplied teardown permission.
 [[nodiscard]] inline bool absence_is_benign(const bool allow_missing_during_extension_teardown) {
     return allow_missing_during_extension_teardown;
 }
 
 /// Reject a missing extension-owned object outside teardown.
+/// @param object_name Fully qualified object name copied into the diagnostic.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] inline void missing_outside_teardown(const std::string_view object_name) {
     const std::string owned{object_name};
     bioseq::postgres::support::invoke_pg_as_cpp([&owned] {
@@ -177,6 +185,9 @@ inline constexpr std::int16_t k_sequence_source_state_ready = 1;
 inline constexpr std::int16_t k_sequence_source_state_invalid = 2;
 
 /// Raise a storage error through a checked PostgreSQL leaf.
+/// @param sqlstate PostgreSQL SQLSTATE code for the error.
+/// @param message Owning diagnostic text.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] inline void storage_error_as_cpp(int sqlstate, std::string message) {
     bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, &message] {
         ereport(ERROR, (errcode(sqlstate), errmsg("%s", message.c_str())));
@@ -187,6 +198,9 @@ inline constexpr std::int16_t k_sequence_source_state_invalid = 2;
 /// The source epoch state machine is deliberately one-way. In particular, a
 /// source invalidated by parent-row or fragment mutation can never be
 /// resurrected by manufacturing another publication token.
+/// @param current Current persistent state.
+/// @param requested Requested successor state.
+/// @return Whether the one-way state machine permits the transition.
 [[nodiscard]] constexpr bool
 sequence_source_state_transition_allowed(const std::int16_t current,
                                          const std::int16_t requested) noexcept {
@@ -208,20 +222,35 @@ static_assert(!sequence_source_state_transition_allowed(k_sequence_source_state_
 /// The checksum is the CRC-64/ECMA-182 of decoded logical symbols, calculated
 /// while the source is already streaming into fragment storage.
 struct sequence_source_version_row {
+    /// Positive immutable source epoch.
     std::uint64_t source_epoch = 0;
+    /// User-visible parent relation OID.
     Oid user_relid = InvalidOid;
+    /// Database component of the physical parent identity.
     Oid database_oid = InvalidOid;
+    /// Tablespace component of the physical parent identity.
     Oid tablespace_oid = InvalidOid;
+    /// File component of the physical parent identity.
     Oid main_relfilenode = InvalidOid;
+    /// Storage-generation identity of the parent relation.
     std::uint64_t main_storage_id = 0;
+    /// One-based parent sequence attribute number.
     std::int16_t column_attno = 0;
+    /// Fragment range and source epoch persisted in the parent stub.
     sequence_locator locator{};
+    /// Physical fragment relation OID, invalid only for an empty sequence.
     Oid fragment_relid = InvalidOid;
+    /// Storage-generation identity of `fragment_relid`.
     std::uint64_t fragment_storage_id = 0;
+    /// Persisted sequence alphabet code.
     std::uint8_t alphabet_code = 0;
+    /// Packed storage-unit width in bytes.
     std::uint8_t storage_unit_byte_width = 0;
+    /// Unused letters in the final packed unit.
     std::uint16_t padding_letters = 0;
+    /// CRC-64/ECMA-182 bits for decoded logical symbols.
     std::uint64_t source_content_checksum = 0;
+    /// Unpublished, ready, or terminal-invalid state.
     std::int16_t state = k_sequence_source_state_unpublished;
 };
 
@@ -238,6 +267,8 @@ struct sequence_source_lookup_telemetry {
 
 namespace source_version_detail {
 
+/// Resolve a generated catalog member to its fixed attribute number.
+/// @tparam p_member Pointer to a generated source-row member.
 template <auto p_member>
 inline constexpr AttrNumber source_attribute =
     sequence_source_version_codec::attribute_number<p_member>();
@@ -247,12 +278,14 @@ inline constexpr AttrNumber source_epoch =
     source_attribute<&sequence_source_version_catalog_row::source_epoch>;
 
 /// Resolve the extension-owned internal namespace without creating it.
+/// @return Namespace OID, or `InvalidOid` when absent.
 [[nodiscard]] inline Oid internal_namespace_oid() {
     return bioseq::postgres::support::invoke_pg_as_cpp(
         [] { return get_namespace_oid("bioseq_internal", true); });
 }
 
 /// Resolve the immutable sequence-source catalog relation.
+/// @return Relation OID, or `InvalidOid` when the namespace or relation is absent.
 [[nodiscard]] inline Oid relation_oid() {
     const Oid namespace_oid = internal_namespace_oid();
     return OidIsValid(namespace_oid) ? bioseq::postgres::support::invoke_pg_as_cpp([namespace_oid] {
@@ -262,6 +295,7 @@ inline constexpr AttrNumber source_epoch =
 }
 
 /// Resolve the immutable sequence-source primary index.
+/// @return Index OID, or `InvalidOid` when the namespace or index is absent.
 [[nodiscard]] inline Oid primary_index_oid() {
     const Oid namespace_oid = internal_namespace_oid();
     return OidIsValid(namespace_oid) ? bioseq::postgres::support::invoke_pg_as_cpp([namespace_oid] {
@@ -271,6 +305,8 @@ inline constexpr AttrNumber source_epoch =
 }
 
 /// Raise a fail-closed sequence-source catalog contract error.
+/// @param message Diagnostic copied before entering PostgreSQL error handling.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] inline void source_catalog_error(std::string_view message) {
     const std::string owned{message};
     bioseq::postgres::support::invoke_pg_as_cpp([&owned] {
@@ -281,10 +317,11 @@ inline constexpr AttrNumber source_epoch =
     pg_unreachable();
 }
 
-/// Validate the exact extension-owned source catalog and its one-column
-/// primary key before any fixed-ordinal tuple deformation. Besides making the
-/// timed lookup genuinely index-backed, this prevents a changed tuple
-/// descriptor from overflowing the fixed Datum/null arrays below.
+/// Validate the exact extension-owned source catalog descriptor before any
+/// fixed-ordinal tuple deformation.
+/// @param relation Open source catalog held by the caller.
+/// @throws PostgreSQL ERROR when relation identity, access method, or any
+/// fixed attribute contract differs.
 inline void validate_catalog_schema(Relation relation) {
     if (relation == nullptr || RelationGetRelid(relation) != relation_oid() ||
         RelationGetNamespace(relation) != internal_namespace_oid() ||
@@ -311,6 +348,13 @@ inline void validate_catalog_schema(Relation relation) {
 }
 
 /// Validate the catalog and discover its sole authoritative primary index.
+/// @param relation Open source catalog held by the caller.
+/// @param telemetry Optional counters updated for inspected indexes and locks.
+/// @return OID of the proven primary index.
+/// @throws PostgreSQL ERROR when relation or index contracts differ.
+///
+/// Every inspected index is opened and closed with `AccessShareLock` during
+/// this call. The caller retains ownership of `relation`.
 [[nodiscard]] inline Oid
 validate_catalog_contract(Relation relation,
                           sequence_source_lookup_telemetry* telemetry = nullptr) {
@@ -376,6 +420,10 @@ validate_catalog_contract(Relation relation,
 /// Validate the exact source-version primary index that is already open for a
 /// cold reader. The ordered scan reuses this descriptor, so validation and
 /// reading share one open primary-index relation.
+/// @param relation Open source catalog held by the caller.
+/// @param primary Open primary-index relation held by the caller.
+/// @param telemetry Optional counters updated for schema validation.
+/// @throws PostgreSQL ERROR when relation or index contracts differ.
 inline void validate_bound_read_catalog_contract(
     Relation relation, Relation primary, sequence_source_lookup_telemetry* telemetry = nullptr) {
     validate_catalog_schema(relation);
@@ -411,6 +459,9 @@ inline void validate_bound_read_catalog_contract(
 }
 
 /// Decode a catalog bigint that must be strictly positive.
+/// @param signed_value Catalog `BIGINT` value.
+/// @return Equivalent unsigned value.
+/// @throws PostgreSQL ERROR when the value is not positive.
 [[nodiscard]] inline std::uint64_t positive_bigint(const std::int64_t signed_value) {
     if (signed_value <= 0) {
         source_catalog_error("positive BIGINT field is invalid");
@@ -419,11 +470,17 @@ inline void validate_bound_read_catalog_contract(
 }
 
 /// Preserve all bigint bits when decoding an unsigned checksum.
+/// @param value Signed catalog storage for the checksum bits.
+/// @return Bit-identical unsigned checksum.
 [[nodiscard]] inline std::uint64_t bigint_bits(const std::int64_t value) noexcept {
     return std::bit_cast<std::uint64_t>(value);
 }
 
 /// Decode and validate one immutable source-catalog tuple.
+/// @param tuple Borrowed heap tuple visible under the caller's snapshot.
+/// @param descriptor Borrowed descriptor for the tuple's open relation.
+/// @return Owning C++ source record.
+/// @throws PostgreSQL ERROR when decoding or any wire-domain check fails.
 [[nodiscard]] inline sequence_source_version_row deform(HeapTuple tuple, TupleDesc descriptor) {
     std::optional<sequence_source_version_catalog_row> decoded;
     try {
@@ -496,6 +553,11 @@ inline void validate_bound_read_catalog_contract(
 }
 
 /// Encode one immutable source record as a catalog heap tuple.
+/// @param descriptor Borrowed descriptor for the destination catalog.
+/// @param row Validated source record to encode.
+/// @return Heap tuple allocated in `CurrentMemoryContext`. The caller owns it
+/// and must release it with `heap_freetuple`.
+/// @throws PostgreSQL ERROR when row encoding fails.
 [[nodiscard]] inline HeapTuple form(TupleDesc descriptor, const sequence_source_version_row& row) {
     const sequence_source_version_catalog_row catalog{
         .source_epoch = static_cast<std::int64_t>(row.source_epoch),

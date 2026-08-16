@@ -94,6 +94,11 @@ import :stream_dispatch;
 // --------------------------------------------------------------------------
 
 /** @brief Builds update-on-insert indexes after all streamed writes finish. */
+/// @param main_relid Open load target identified by relation OID.
+/// @throws PostgreSQL ERROR when configured index maintenance fails.
+///
+/// The caller must keep the portal's active snapshot installed and must flush
+/// parent and fragment write states before calling this function.
 void build_indexes_if_enabled(Oid main_relid) {
     if (!bioseq::settings::index::insert_maintenance::enabled) {
         return;
@@ -120,6 +125,9 @@ void build_indexes_if_enabled(Oid main_relid) {
 }
 
 /** @brief Clears sequence caches invalidated by post-load storage allocation. */
+///
+/// This resets PostgreSQL's backend-local sequence cache and does not alter
+/// persisted sequence values.
 void reset_sequence_caches_after_load_storage_alloc() {
     // Shard allocation advances an internal sequence. Clear its backend-local
     // cache before a same-command index scan and again before returning.
@@ -131,6 +139,10 @@ void reset_sequence_caches_after_load_storage_alloc() {
 // --------------------------------------------------------------------------
 
 /** @brief Flushes the current column stripe before post-load index work. */
+/// @param ctx Active load context owning parent and fragment writer state.
+/// @throws PostgreSQL ERROR when either writer cannot be flushed.
+///
+/// Writer state and relation locks remain owned by the load after this call.
 void flush_pending_load_writes(load_context& ctx) {
     // Parent rows go through ctx.write_state; fragment rows through per-subtable
     // write states opened from ctx.caches. update_index_impl uses raw columnar
@@ -148,6 +160,11 @@ void flush_pending_load_writes(load_context& ctx) {
 }
 
 /** @brief Finalizes parent and sequence-subtable write states exactly once. */
+/// @param ctx Active load context whose write-state pointers are cleared.
+/// @throws PostgreSQL ERROR when a parent or shard writer cannot commit.
+///
+/// Each write state is popped under `TopTransactionResourceOwner`. This does
+/// not end the surrounding SQL transaction.
 void finish_load_write_states(load_context& ctx) {
     std::vector<Oid> shard_relfilenodes;
     shard_relfilenodes.reserve(ctx.caches == nullptr ? 0 : ctx.caches->entries.size());
@@ -187,13 +204,20 @@ void finish_load_write_states(load_context& ctx) {
 
 /** @brief Minimal PostgreSQL type metadata retained for a mapped column. */
 struct column_attr {
+    /// One-based destination attribute number.
     std::int16_t attno;
+    /// PostgreSQL destination type OID.
     Oid atttypid;
+    /// Destination typmod passed to the type input function.
     std::int32_t atttypmod;
 };
 
 /// Decode bioseq.column_mapping[] using the element OID carried by the array.
 /// Returned string views remain in the caller's memory context for the load.
+/// @param arr Borrowed PostgreSQL array with a valid composite element type.
+/// @return Owning mapping vector whose string views refer to text copied into
+/// the current PostgreSQL memory context.
+/// @throws PostgreSQL ERROR when the descriptor or any array element is invalid.
 [[nodiscard]] std::vector<idp::user_column_mapping> parse_column_mapping_array(ArrayType* arr) {
     std::vector<idp::user_column_mapping> maps;
     const Oid mapping_type_oid = ARR_ELEMTYPE(arr);
@@ -252,6 +276,16 @@ struct column_attr {
 
 /// Resolve column mappings and prepare coercion, defaults, and constraints
 /// before streaming.
+/// @param ctx Active load context whose parser and executor state is populated.
+/// @param path Null-terminated input path used for optional header sampling.
+/// @param kind Detected file kind and compression metadata.
+/// @param requested_fmt User-selected or automatic header format.
+/// @param user_maps Borrowed mappings that remain valid for this call.
+/// @throws PostgreSQL ERROR for unsupported columns, invalid mapping, type
+/// metadata failure, or executor setup failure.
+///
+/// Any inspected primary index is held with `AccessShareLock` only during
+/// setup. Executor objects are retained in `ctx` until load cleanup.
 void setup_typed_column_mapping(load_context& ctx,
                                 const char* path,
                                 bioseq::io::sequence_file_kind kind,

@@ -36,6 +36,17 @@ export import :sorted_runs_storage;
 
 namespace bioseq::storage::indexing {
 
+/**
+ * @brief Merges sorted file runs into an arbitrary pair writer.
+ *
+ * Reader buffers and the merge heap are memory-admitted before use. Every
+ * input `BufFile` is rewound and remains owned by its run after the merge.
+ *
+ * @tparam p_writer Callable accepting one `sorted_pair_wire` value.
+ * @param[in,out] runs File runs to read in canonical pair order.
+ * @param[in,out] resources Checked readers and admission state for this merge.
+ * @param[in] writer Destination invoked once for each merged pair.
+ */
 template <class p_writer>
 void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_file_run> runs,
                                                               merge_resources& resources,
@@ -111,6 +122,12 @@ void sorted_pair_run_store::merge_sorted_file_runs_to_writer_(std::span<buffer_f
     }
 }
 
+/**
+ * @brief Compacts a half-open group of file runs into one PostgreSQL temporary file.
+ * @param[in] lo First input run index.
+ * @param[in] hi One-past-last input run index.
+ * @return New rewindable file run containing the merged pair stream.
+ */
 buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std::size_t lo,
                                                                             std::size_t hi) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -155,6 +172,10 @@ buffer_file_run sorted_pair_run_store::merge_file_run_group_to_new_buffile_(std:
     return out;
 }
 
+/**
+ * @brief Repeatedly compacts file runs to a bounded output count.
+ * @param[in] target_output_runs Maximum number of file runs to retain.
+ */
 void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t target_output_runs) {
     target_output_runs = std::max<std::size_t>(1, target_output_runs);
     while (file_runs_.size() > target_output_runs) {
@@ -202,6 +223,9 @@ void sorted_pair_run_store::compact_file_runs_to_output_count_(std::size_t targe
     }
 }
 
+/**
+ * @brief Compacts file runs until minimum reader buffers fit the merge budget.
+ */
 void sorted_pair_run_store::compact_file_runs_until_bounded_() {
     if (file_runs_.empty()) {
         return;
@@ -213,6 +237,11 @@ void sorted_pair_run_store::compact_file_runs_until_bounded_() {
     compact_file_runs_to_output_count_(max_output_runs);
 }
 
+/**
+ * @brief Merges memory and file runs into unique positions grouped by hash.
+ * @param[in] sink Type-erased callback receiving each hash and its position cursor.
+ * @param[in,out] resources Readers, heap state, and position accumulation owned by the merge.
+ */
 void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
                                                     merge_resources& resources) {
     compact_file_runs_until_bounded_();
@@ -291,6 +320,14 @@ void sorted_pair_run_store::merge_runs_erased_impl_(sorted_pair_kmer_sink sink,
     }
 }
 
+/**
+ * @brief Executes a rewindable merge through a type-erased hash callback.
+ *
+ * A successful merge leaves immutable file handles open for later replay.
+ * PostgreSQL or callback failure poisons the store until its owner abandons it.
+ *
+ * @param[in] sink Callback whose position cursor is valid only during the call.
+ */
 void sorted_pair_run_store::merge_runs_erased(sorted_pair_kmer_sink sink) {
     if (poisoned_) {
         report_sorted_run_error(sorted_run_error::poisoned_store_reused);
@@ -318,12 +355,16 @@ void sorted_pair_run_store::merge_runs_erased(sorted_pair_kmer_sink sink) {
     }
 }
 
+/// @brief Closes every temporary file after successful terminal use.
 void sorted_pair_run_store::finalize_file_handles_success_() {
     for (buffer_file_run& run : file_runs_) {
         close_buffile_checked_as_cpp(run.file);
     }
 }
 
+/**
+ * @brief Releases memory-run capacity and admission permits without PostgreSQL calls.
+ */
 void sorted_pair_run_store::release_resident_runs_noexcept() noexcept {
     for (memory_run& run : memory_runs_) {
         bioseq::parallelism::release_admitted_vector_capacity_before_permit(run.pairs, run.permit);
@@ -334,6 +375,11 @@ void sorted_pair_run_store::release_resident_runs_noexcept() noexcept {
     memory_run_peak_bytes_ = 0;
 }
 
+/**
+ * @brief Abandons temporary files and releases all admitted memory without PostgreSQL calls.
+ *
+ * The active PostgreSQL ResourceOwner remains responsible for temporary-file cleanup.
+ */
 void sorted_pair_run_store::release_runs_noexcept() noexcept {
     release_resident_runs_noexcept();
     bioseq::parallelism::release_admitted_vector_capacity_before_permit(write_buffer_,
@@ -350,6 +396,12 @@ void sorted_pair_run_store::release_runs_noexcept() noexcept {
     finalized_ = false;
 }
 
+/**
+ * @brief Closes temporary files and releases all admitted run memory.
+ *
+ * The operation rejects a poisoned store and performs checked PostgreSQL
+ * cleanup before resetting counters and reusable state.
+ */
 void sorted_pair_run_store::release_runs() {
     if (poisoned_) {
         report_sorted_run_error(sorted_run_error::poisoned_store_reused);

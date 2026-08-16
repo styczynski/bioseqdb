@@ -122,6 +122,11 @@ export import :generation_session_contract;
 export import :generation_session_lifecycle;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Reads and validates the unique active-generation head row.
+ * @param[in] bind_expected_layout Whether the decoded layout must equal the bound profile.
+ * @return Decoded immutable head identity copied into session state.
+ */
 [[nodiscard]] inline minimizer_generation_head
 index_storage_fragment_generation_read_session::read_active_head_impl_(bool bind_expected_layout) {
     minimizer_generation_head result{};
@@ -162,6 +167,7 @@ index_storage_fragment_generation_read_session::read_active_head_impl_(bool bind
             return systable_beginscan_ordered(
                 heap_relation_, primary_index_relation_, snapshot_, 5, keys);
         });
+        // Fetches the next tuple through the checked PostgreSQL boundary.
         const auto next_tuple = [this] {
             return bioseq::postgres::support::invoke_pg_as_cpp(
                 [this] { return systable_getnext_ordered(active_scan_, ForwardScanDirection); });
@@ -218,11 +224,16 @@ index_storage_fragment_generation_read_session::read_active_head_impl_(bool bind
     return result;
 }
 
+/// @brief Reads the active head once and requires the session's expected layout.
 [[nodiscard]] inline minimizer_generation_head
 index_storage_fragment_generation_read_session::read_active_head_once() {
     return read_active_head_impl_(/*bind_expected_layout=*/true);
 }
 
+/**
+ * @brief Discovers the active layout without binding it and closes the head-only session.
+ * @return Decoded active-generation head.
+ */
 [[nodiscard]] inline minimizer_generation_head
 index_storage_fragment_generation_read_session::discover_active_head_layout_and_close() {
     minimizer_generation_head result = read_active_head_impl_(
@@ -231,6 +242,15 @@ index_storage_fragment_generation_read_session::discover_active_head_layout_and_
     return result;
 }
 
+/**
+ * @brief Reads a grouped-SoA manifest when directory materialization is unnecessary.
+ *
+ * The manifest is checksum-bound to the previously read head and is retained
+ * by the session until cleanup.
+ *
+ * @param[in] expected_head Exact head returned by this session's head read.
+ * @return Reference to the session-owned decoded manifest.
+ */
 [[nodiscard]] inline const minimizer_generation_manifest&
 index_storage_fragment_generation_read_session::read_manifest_once_without_directory(
     const minimizer_generation_head& expected_head) {
@@ -275,6 +295,7 @@ index_storage_fragment_generation_read_session::read_manifest_once_without_direc
             return systable_beginscan_ordered(
                 heap_relation_, primary_index_relation_, snapshot_, 5, keys);
         });
+        // Fetches the next manifest tuple through the checked PostgreSQL boundary.
         const auto next_tuple = [this] {
             return bioseq::postgres::support::invoke_pg_as_cpp(
                 [this] { return systable_getnext_ordered(active_scan_, ForwardScanDirection); });
@@ -370,6 +391,15 @@ index_storage_fragment_generation_read_session::read_manifest_once_without_direc
     return *manifest_only_;
 }
 
+/**
+ * @brief Reads and validates the manifest plus its complete directory.
+ *
+ * Directory bytes and decoded entries are admitted before allocation. The
+ * resulting metadata remains owned by the session until cleanup.
+ *
+ * @param[in] expected_head Exact head returned by this session's head read.
+ * @return Reference to session-owned manifest and directory metadata.
+ */
 [[nodiscard]] inline const minimizer_generation_read_metadata&
 index_storage_fragment_generation_read_session::read_manifest_directory_once(
     const minimizer_generation_head& expected_head) {
@@ -406,6 +436,7 @@ index_storage_fragment_generation_read_session::read_manifest_directory_once(
             return systable_beginscan_ordered(
                 heap_relation_, primary_index_relation_, snapshot_, 4, keys);
         });
+        // Fetches ordered manifest and directory tuples through the checked boundary.
         const auto next_tuple = [this] {
             return bioseq::postgres::support::invoke_pg_as_cpp(
                 [this] { return systable_getnext_ordered(active_scan_, ForwardScanDirection); });
@@ -601,6 +632,15 @@ index_storage_fragment_generation_read_session::read_manifest_directory_once(
     return *metadata_;
 }
 
+/**
+ * @brief Consumes a full-source authorization and binds it to the active metadata.
+ *
+ * The move-only authorization is invalidated on success and failure. A match
+ * requires the same snapshot, query, source identity, content checksum, and
+ * storage contract as the active head and manifest.
+ *
+ * @param[in] authorization Validated source authorization transferred to this call.
+ */
 inline void index_storage_fragment_generation_read_session::consume_full_source_authorization(
     minimizer_generation_source_authorization&& authorization) {
     try {
@@ -646,6 +686,14 @@ inline void index_storage_fragment_generation_read_session::consume_full_source_
     }
 }
 
+/**
+ * @brief Consumes a catalog-source authorization and imports its read statistics.
+ *
+ * The move-only authorization is invalidated on success and failure. Its
+ * snapshot, source identity, checksum, and work equation must match the active metadata.
+ *
+ * @param[in] authorization Validated catalog authorization transferred to this call.
+ */
 inline void index_storage_fragment_generation_read_session::consume_source_authorization(
     minimizer_generation_catalog_source_authorization&& authorization) {
     try {
@@ -697,6 +745,15 @@ inline void index_storage_fragment_generation_read_session::consume_source_autho
     }
 }
 
+/**
+ * @brief Reads the live relation-backed storage descriptor for this generation.
+ *
+ * The descriptor heap and its live-row index are opened under
+ * `AccessShareLock` and retained by the session until checked close.
+ *
+ * @param[in] identity Administration identity expected to own the descriptor.
+ * @return Validated descriptor whose payload locator matches the open sidecar relation.
+ */
 [[nodiscard]] inline minimizer_generation_storage_descriptor
 index_storage_fragment_generation_read_session::read_live_storage_descriptor_once(
     const minimizer_generation_administration_identity& identity) {
@@ -764,6 +821,10 @@ index_storage_fragment_generation_read_session::read_live_storage_descriptor_onc
     }
 }
 
+/**
+ * @brief Validates full-generation accounting and closes the read session.
+ * @return Final read statistics after all metadata, payload, lock, and timing equations pass.
+ */
 [[nodiscard]] inline minimizer_generation_read_stats
 index_storage_fragment_generation_read_session::finish_full_generation_() {
     if (state_ != operation_state::full_generation_payload_complete || !metadata_ ||

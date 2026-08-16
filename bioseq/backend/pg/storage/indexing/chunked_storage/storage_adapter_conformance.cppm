@@ -127,6 +127,10 @@ export import :table_storage_iteration;
 export namespace bioseq::storage::indexing {
 
 // ---- conformance gates ---------------------------------------------------
+/**
+ * @brief Detects accidental public exposure of segment-spill lifecycle state.
+ * @tparam p_storage Storage adapter type examined by the compile-time gate.
+ */
 template <class p_storage>
 concept publicly_mutable_minimizer_sequence_segment_spill_state = requires(p_storage& storage) {
     storage.segment_sorted_runs_;
@@ -151,6 +155,11 @@ static_assert(bioseq::indexing::is_index_chunked_storage_for<table_index_storage
               "table_index_storage must satisfy CHUNKED_PER_TABLE");
 
 } // namespace bioseq::storage::indexing
+/**
+ * @brief Runs the dynamic-shared-memory hash-major parallel scan probe worker.
+ * @param[in] segment Attached PostgreSQL dynamic shared-memory segment.
+ * @param[in] toc Shared table of contents containing the validated probe state.
+ */
 extern "C" PGDLLEXPORT void bioseq_hash_major_parallel_scan_probe_worker_main(dsm_segment* segment,
                                                                               shm_toc* toc) {
     bioseq::storage::indexing::hash_major_minimizer_parallel_scan_probe_worker_main_pg(segment,

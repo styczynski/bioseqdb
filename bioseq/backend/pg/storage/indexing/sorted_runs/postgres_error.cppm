@@ -11,6 +11,8 @@ module bioseq.postgres.storage.indexing.sorted_runs;
 extern "C" {
 
 /** @brief Raises the PostgreSQL error selected by the sorted-run boundary code. */
+/// @param error_code Stable internal failure code supplied by the C++ module.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] void bioseq_sorted_run_error_pg_leaf(
         unsigned error_code) {
     const char* message = "bioseq sorted runs: unknown error";

@@ -123,6 +123,16 @@ export import :generation_session_lifecycle;
 export import :generation_session_metadata;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Validates and admits ordered payload requests for one read section.
+ *
+ * Requests must form sorted, disjoint groups and exactly match directory
+ * extents. Control delivery authorizes the corresponding later position
+ * requests. Plan and authorization capacities are reserved before allocation.
+ *
+ * @param[in] section Control or position payload section to plan.
+ * @param[in] groups Ordered groups whose spans remain borrowed until the section is consumed.
+ */
 inline void index_storage_fragment_generation_read_session::plan_section_groups_(
     payload_section section, std::span<const minimizer_generation_payload_read_group> groups) {
     try {
@@ -226,7 +236,9 @@ inline void index_storage_fragment_generation_read_session::plan_section_groups_
                 }
             }
             previous_range = range;
+            // Orders directory entries by physical segment and logical sub-key.
             using directory_key_type = std::pair<std::int32_t, index_sub_key_t>;
+            // Compares an encoded directory entry with the corresponding search key.
             const auto entry_less_than_key = [](const grouped_soa_bucket_directory_entry& entry,
                                                 const directory_key_type& key) noexcept {
                 return directory_key_type{entry.position_segment, entry.sub_key} < key;
@@ -370,11 +382,19 @@ inline void index_storage_fragment_generation_read_session::plan_section_groups_
     }
 }
 
+/**
+ * @brief Plans control extents after metadata and source authorization complete.
+ * @param[in] groups Sorted, disjoint control requests borrowed for the read section.
+ */
 inline void index_storage_fragment_generation_read_session::plan_control_groups(
     std::span<const minimizer_generation_payload_read_group> groups) {
     plan_section_groups_(payload_section::controls, groups);
 }
 
+/**
+ * @brief Plans position extents authorized by delivered control payloads.
+ * @param[in] groups Sorted, disjoint position requests borrowed for the read section.
+ */
 inline void index_storage_fragment_generation_read_session::plan_position_groups(
     std::span<const minimizer_generation_payload_read_group> groups) {
     plan_section_groups_(payload_section::positions, groups);

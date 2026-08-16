@@ -111,7 +111,18 @@ namespace bioseq::storage {
 // Orphan relation maintenance.
 // ---------------------------------------------------------------------------
 
-/** Sweeps stale catalog rows and unreferenced sequence-shard relations. */
+/**
+ * @brief Sweep stale shard rows and unreferenced fragment or sidecar relations.
+ * @return One event per deleted catalog row, dropped relation, or recoverable
+ * relation-drop failure.
+ * @throws A translated PostgreSQL error or `std::runtime_error` when catalog
+ * discovery, locking, SPI, or an unrecoverable drop fails.
+ *
+ * Catalog-row cleanup holds `ShareRowExclusiveLock` on the registry. Physical
+ * candidates are revalidated while holding `AccessExclusiveLock` on the
+ * candidate and `ShareRowExclusiveLock` on the registry. Each physical drop
+ * runs in a subtransaction so a recoverable PostgreSQL error can be reported.
+ */
 export [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -130,6 +141,7 @@ reap_orphan_seq_sub_tables() {
     bioseq::postgres::support::safety_runtime_probe::destructor_sentinel
         reaper_call_sentinel{"orphan_reaper_call"};
 #endif
+    // Append one owning result row while keeping fault injection at this boundary.
     const auto append_event =
         [&events](reaper_event event) {
 #if defined(BIOSEQ_SAFETY_RUNTIME_PROBES)
@@ -173,6 +185,7 @@ reap_orphan_seq_sub_tables() {
                 seq_sub_table_oid, ShareRowExclusiveLock);
         });
 
+    // Convert unexpected SPI statuses into the function's C++ error path.
     const auto require_status = [](
             int actual,
             int expected,
@@ -420,6 +433,7 @@ reap_orphan_seq_sub_tables() {
             });
     }
 
+    // Recheck the registry after both the physical and catalog locks are held.
     const auto relation_is_still_orphan =
         [&require_status](Oid relation_oid) {
             static constexpr char statement[] =
@@ -676,13 +690,27 @@ namespace {
 
 /// Sequence shard and sidecar relation pair selected for maintenance.
 struct vacuum_target_pair {
+    /// Fragment relation vacuumed before its co-sharded sidecar.
     Oid sub_relation = InvalidOid;
+    /// Sidecar relation paired with `sub_relation`.
     Oid sidecar_relation = InvalidOid;
 };
 
 }  // namespace
 
-/** Vacuums and analyzes each sequence-shard relation owned by a table. */
+/**
+ * @brief Vacuum and analyze every fragment and sidecar shard owned by a table.
+ * @param rel Parent relation OID. SQL NULL performs no maintenance.
+ * @param context Call context used to enforce non-atomic procedure execution
+ * and manage transaction boundaries.
+ * @throws A translated PostgreSQL error or `std::runtime_error` when the call
+ * is atomic, SPI state cannot be changed, or vacuum fails for a reason other
+ * than a concurrently removed relation.
+ *
+ * The procedure commits before each relation pair because PostgreSQL VACUUM
+ * cannot execute inside the caller's transaction. A concurrently dropped shard
+ * is skipped after rolling back the maintenance transaction.
+ */
 export [[bioseq_sql::procedure({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -755,6 +783,7 @@ void vacuum_seq_storage(
             "could not start a non-atomic SPI connection for shard vacuum"};
     }
 
+    // Build and execute PostgreSQL's VACUUM ANALYZE utility statement by OID.
     const auto vacuum_analyze = [](Oid relation_id) {
         auto* statement = makeNode(VacuumStmt);
         statement->options =

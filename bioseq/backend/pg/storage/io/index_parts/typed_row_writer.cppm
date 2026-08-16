@@ -94,6 +94,9 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
 /// Raise one loader error through the checked PG leaf seam. The owned message
 /// remains alive while PostgreSQL constructs/copies ErrorData, then ordinary
 /// C++ unwinding releases every caller-owned queue/string/writer object.
+/// @param sqlstate PostgreSQL SQLSTATE code for the error.
+/// @param message Owning diagnostic text.
+/// @throws PostgreSQL ERROR unconditionally.
 [[noreturn]] void raise_load_error_as_cpp(int sqlstate, std::string message) {
     bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, &message] {
         ereport(ERROR, (errcode(sqlstate), errmsg("bioseq.load: %s", message.c_str())));
@@ -105,6 +108,8 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
 // Column discovery
 // --------------------------------------------------------------------------
 
+/// Resolve the installed `bioseq.seq` type.
+/// @return Type OID, or `InvalidOid` when PostgreSQL cannot resolve the name.
 [[nodiscard]] Oid load_seq_type_oid() {
     return bioseq::postgres::support::invoke_pg_as_cpp([] {
         return bioseq::postgres::support::pg_datum::to_oid(
@@ -115,14 +120,20 @@ using column_mapping_codec = bioseq::postgres::storage::io::sql_row_codecs::colu
 
 /** @brief Resolved destination sequence column and its encoded typmod facts. */
 struct load_columns {
-    std::int16_t header_attno;  // 0 = none (header discarded)
-    std::int16_t seq_attno;     // the one bioseq.seq column (always required)
-    std::uint8_t alphabet_code; // from the seq column's typmod
-    std::uint8_t byte_width;    // 1/2/4/8, from the seq column's typmod
+    /// One-based header attribute, or zero when headers are discarded.
+    std::int16_t header_attno;
+    /// One-based attribute of the required sequence column.
+    std::int16_t seq_attno;
+    /// Alphabet code decoded from the sequence typmod.
+    std::uint8_t alphabet_code;
+    /// Packed storage-unit width in bytes decoded from the typmod.
+    std::uint8_t byte_width;
 };
 
 /**
  * @brief Finds the single `bioseq.seq` column and decodes its typmod.
+ * @param rel Open destination relation whose descriptor remains caller-owned.
+ * @return Resolved header and sequence attributes with sequence encoding.
  * @throws postgres_error If the relation has no usable unique sequence column.
  */
 [[nodiscard]] load_columns resolve_load_columns(Relation rel) {
@@ -180,30 +191,47 @@ namespace idp = bioseq::io::identifier_parser;
 // input function so the length is enforced (NOT the raw cstring_to_text path).
 /** @brief PostgreSQL coercion route selected for one destination column. */
 enum class dest_kind : std::uint8_t {
+    /// Unconstrained text accepted without invoking a type input function.
     text,
+    /// Text whose typmod must be enforced by its input function.
     text_with_typmod,
+    /// Scalar value parsed by its PostgreSQL input function.
     scalar,
+    /// Range value with optional loader shorthand conversion.
     range,
+    /// Multirange value with optional loader shorthand conversion.
     multirange,
 };
 
 /** @brief Cached input-function metadata for one mapped destination column. */
 struct dest_coercion {
-    std::int16_t attno;      // 1-based
-    std::string column_name; // copied once for the ErrorContextCallback
+    /// One-based destination attribute number.
+    std::int16_t attno;
+    /// Owning column name retained for PostgreSQL error context.
+    std::string column_name;
+    /// Selected input conversion route.
     dest_kind kind;
-    Oid input_fn;        // from getTypeInputInfo
-    Oid io_param;        // typioparam (enum type OID for enums)
-    std::int32_t typmod; // column atttypmod (varchar(n), numeric(p,s), …)
+    /// PostgreSQL input function resolved by `getTypeInputInfo`.
+    Oid input_fn;
+    /// Input-function type parameter, including the enum type OID for enums.
+    Oid io_param;
+    /// Destination typmod passed to the input function.
+    std::int32_t typmod;
 };
 
 /** @brief Compiled default expression for one destination attribute. */
 struct default_col {
+    /// One-based destination attribute number.
     std::int16_t attno;
+    /// Executor-owned compiled default expression.
     ExprState* state;
 };
 
 /// Two-byte substring scan without relying on the POSIX `memmem` extension.
+/// @param data Borrowed byte range that need not be null-terminated.
+/// @param len Length of `data` in bytes.
+/// @param needle Null-terminated substring to locate.
+/// @return Pointer into `data`, or null when no match exists.
 [[nodiscard]] const char* find_substr(const char* data, int len, const char* needle) {
     const int nlen = static_cast<int>(std::strlen(needle));
     if (nlen == 0 || len < nlen) {
@@ -221,6 +249,12 @@ struct default_col {
 /// range/multirange column with exactly one `..`, rewrite `lo..hi` to the
 /// canonical inclusive `[lo,hi]` (multirange: `{[lo,hi]}`). Otherwise the trimmed
 /// text is passed straight to `<type>range_in`/`<type>multirange_in`.
+/// @param data Borrowed input bytes that need not be null-terminated.
+/// @param len Input length in bytes.
+/// @param dc Destination conversion metadata.
+/// @param mctx Memory context that owns the returned string.
+/// @return Null-terminated input text allocated in `mctx`.
+/// @throws PostgreSQL ERROR when allocation fails.
 [[nodiscard]] char*
 make_cstr(const char* data, int len, const dest_coercion& dc, MemoryContext mctx) {
     while (len > 0 && data[0] == ' ') {
@@ -295,16 +329,27 @@ make_cstr(const char* data, int len, const dest_coercion& dc, MemoryContext mctx
 
 /** @brief Invocation-owned PostgreSQL and parser state for one streamed load. */
 struct load_context {
-    Oid main_relid; // parent table OID (for update_index)
+    /// Parent relation OID used by post-load index maintenance.
+    Oid main_relid;
+    /// Database and tablespace components of the parent identity.
     Oid db_oid, spc_oid;
+    /// File component of the parent identity.
     RelFileNumber main_relfilenode;
+    /// Storage-generation identity of the parent relation.
     std::uint64_t main_storage_id = 0;
+    /// Open parent relation owned by the load invocation.
     Relation parent_rel;
+    /// Descriptor borrowed from `parent_rel`.
     TupleDesc parent_td;
+    /// Resolved sequence-column encoding and destinations.
     load_columns cols;
+    /// Write-side shard cache owned by the load invocation.
     bioseq::storage::seq_caches* caches;
+    /// Parent column writer owned by PostgreSQL write-state management.
     column_write_state* write_state;
+    /// Per-shard capacity in bytes.
     sequence_size_t cap_bytes;
+    /// Executor tuple slot owned by this invocation.
     TupleTableSlot* slot;
 
     // Keep the PostgreSQL writer non-templated so identifier parsing is not
@@ -328,6 +373,7 @@ struct load_context {
 };
 
 /// Add bounded record context to coercion, default, or constraint failures.
+/// @param arg Pointer to the active `load_context`.
 void bioseq_load_error_context(void* arg) {
     auto* ctx = static_cast<load_context*>(arg);
     const std::string_view h = ctx->current_header;
@@ -348,9 +394,14 @@ void bioseq_load_error_context(void* arg) {
 
 /** @brief Installs bounded record context for the duration of one row write. */
 struct load_error_context_scope {
+    /// Context whose diagnostic fields and callback stack are managed.
     load_context& ctx;
+    /// Callback node linked into PostgreSQL's backend-local stack.
     ErrorContextCallback callback{};
 
+    /// Install record context until this scope is destroyed.
+    /// @param context Active load context that outlives the scope.
+    /// @param header Borrowed header that remains valid for the scope.
     load_error_context_scope(load_context& context, std::string_view header) : ctx(context) {
         ctx.current_header = header;
         ctx.current_column_name = nullptr;
@@ -360,6 +411,7 @@ struct load_error_context_scope {
         error_context_stack = &callback;
     }
 
+    /// Restore the prior PostgreSQL error-context callback and clear borrowed data.
     ~load_error_context_scope() noexcept {
         error_context_stack = callback.previous;
         ctx.current_header = {};
@@ -370,19 +422,30 @@ struct load_error_context_scope {
 /// PostgreSQL sink that routes each byte range through its column's cached
 /// input function.
 struct pg_identifier_writer {
+    /// Active load context that outlives this writer.
     load_context& ctx;
-    std::span<const dest_coercion> dest;   // index == slot
-    std::span<const default_col> defaults; // unmapped/unset columns w/ default
+    /// Slot-indexed coercion metadata borrowed for this writer's lifetime.
+    std::span<const dest_coercion> dest;
+    /// Default expressions for unmapped or unset destination columns.
+    std::span<const default_col> defaults;
 
+    /// Clear the destination slot to an all-NULL virtual tuple.
     void begin_tuple() {
         bioseq::postgres::support::invoke_pg_as_cpp([this] {
             bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.clear_all_to_null();
         });
     }
 
+    /// Set one parser destination to SQL NULL.
+    /// @param slot Zero-based identifier-parser destination slot.
     void set_null(idp::destination_slot slot) {
         bioseq::postgres::support::pg_slot_datums_view{ctx.slot}.set_null(dest[slot].attno);
     }
+    /// Convert and assign one parser destination field.
+    /// @param slot Zero-based identifier-parser destination slot.
+    /// @param data Borrowed field bytes that need not be null-terminated.
+    /// @param len Field length in bytes.
+    /// @throws PostgreSQL ERROR when input conversion or allocation fails.
     void set_field(idp::destination_slot slot, const char* data, std::int32_t len) {
         const dest_coercion& dc = dest[slot];
         ctx.current_column_name = dc.column_name.c_str(); // errcontext if input fn errors
@@ -409,6 +472,11 @@ struct pg_identifier_writer {
             dc.attno, bioseq::postgres::support::pg_datum::from_raw(v));
         ctx.current_column_name = nullptr;
     }
+    /// Apply defaults, enforce constraints, and write the completed parent row.
+    /// @throws PostgreSQL ERROR when evaluation, constraints, or persistence fail.
+    ///
+    /// Per-tuple memory is reset only after `write_column_row` has copied every
+    /// by-reference datum.
     void end_tuple() {
         // Defaults fill ONLY columns the parser left NULL — a mapped value always
         // wins over a column default. By-reference default datums live in the
@@ -442,6 +510,7 @@ struct pg_identifier_writer {
         bioseq::postgres::support::invoke_pg_as_cpp(
             [this] { MemoryContextReset(get_column_write_per_tuple_context(ctx.write_state)); });
     }
+    /// Complete the identifier-writer protocol. This sink has no buffered state.
     void finish() {}
 
     /** @return The number of identifier-parser destinations. */
@@ -453,6 +522,18 @@ static_assert(idp::identifier_destination_writer<pg_identifier_writer>);
 
 // The non-templated parent writer keeps identifier parsing outside the
 // alphabet, storage-width, and file-type dispatch matrix.
+/// Write one parent locator stub and publish its source epoch afterward.
+/// @param ctx Active load invocation owning relation and writer state.
+/// @param tuple_writer Identifier sink used to populate non-sequence columns.
+/// @param header Borrowed FASTA or FASTQ header for this record.
+/// @param alphabet_code Persisted sequence alphabet code.
+/// @param byte_width Packed storage-unit width in bytes.
+/// @param last_pad Unused letters in the final packed unit.
+/// @param total_bp Logical sequence length in letters.
+/// @param pending_source Sole publication authority consumed after the parent
+/// row has been written successfully.
+/// @throws PostgreSQL ERROR when header routing, row constraints, persistence,
+/// or publication fails.
 void write_parent_row(load_context& ctx,
                       pg_identifier_writer& tuple_writer,
                       std::string_view header,

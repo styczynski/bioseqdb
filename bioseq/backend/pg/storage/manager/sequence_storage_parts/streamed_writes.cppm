@@ -114,6 +114,8 @@ namespace detail {
 /// Feed the exact logical symbol bytes used by the existing revision-3
 /// independent checksum oracle. Fragment-sized decoding keeps memory bounded
 /// while moving the O(N) work to insertion rather than a cold index read.
+/// @param checksum Accumulator updated with decoded logical symbols.
+/// @param fragment Non-stub sequence fragment to decode.
 inline void update_canonical_source_checksum(
         bioseq::indexing::crc64_ecma182_accumulator& checksum,
         const bioseq::pg_types::seq* fragment) {
@@ -136,6 +138,33 @@ inline void update_canonical_source_checksum(
 
 }  // namespace detail
 
+/// Write one logical sequence as contiguous fragment rows in a single shard.
+/// @tparam p_length_type Unsigned type used for configured sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
+/// @tparam p_fragment_producer Callable that fills one fragment and receives
+/// its zero-based number, destination, scratch context, and last-fragment flag.
+/// @param user_relid Parent relation recorded in the source-version row.
+/// @param main_storage_id Storage identity recorded in the source-version row.
+/// @param db_oid Database component of the shard identity.
+/// @param spc_oid Tablespace component of the shard identity.
+/// @param main_relfilenode File component of the shard identity.
+/// @param column_attno One-based sequence column attribute number.
+/// @param parent_tupdesc Borrowed parent tuple descriptor used to create shards.
+/// @param logical_alphabet_code Persisted sequence alphabet code.
+/// @param logical_storage_unit_byte_width Bytes in each packed storage unit.
+/// @param total_bp_size Logical sequence length in letters.
+/// @param last_fragment_padding_letters Unused letters in the final storage unit.
+/// @param current_cap_bytes Per-shard capacity in bytes, or zero for no byte cap.
+/// @param cache Caller-owned write cache that retains opened shard state.
+/// @param producer Fragment producer. Its per-fragment allocations may use the
+/// supplied resettable context while cross-fragment state may use the scratch context.
+/// @return Locator and unpublished source epoch for later publication.
+/// @throws PostgreSQL ERROR or a translated C++ exception when metadata,
+/// capacity, fragment geometry, or physical row insertion fails.
+///
+/// A transaction-scoped advisory lock keeps the sequence's fragment row
+/// numbers contiguous. The cache and tuple descriptor must outlive the call.
 export template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -486,6 +515,7 @@ sequence_storage_manager<
         fragment_failure = std::current_exception();
     }
 
+    // Delete both temporary contexts while preserving the first failure.
     const auto delete_context =
         [&fragment_failure](MemoryContext& context) {
             const MemoryContext doomed =
@@ -553,6 +583,22 @@ sequence_storage_manager<
     return pending_sequence_source{out};
 }
 
+/// Split a flat sequence varlena into persisted fragment rows.
+/// @tparam p_length_type Unsigned type used for configured sequence lengths.
+/// @tparam p_bucket_minimum_length_bits Smallest configured bucket exponent.
+/// @tparam p_bucket_maximum_length_bits Largest configured bucket exponent.
+/// @param user_relid Parent relation recorded in the source-version row.
+/// @param main_storage_id Storage identity recorded in the source-version row.
+/// @param db_oid Database component of the shard identity.
+/// @param spc_oid Tablespace component of the shard identity.
+/// @param main_relfilenode File component of the shard identity.
+/// @param column_attno One-based sequence column attribute number.
+/// @param parent_tupdesc Borrowed parent tuple descriptor used to create shards.
+/// @param original_hdr Flat, non-stub sequence whose payload is copied.
+/// @param current_cap_bytes Per-shard capacity in bytes, or zero for no byte cap.
+/// @param cache Caller-owned write cache that retains opened shard state.
+/// @return Locator and unpublished source epoch for later publication.
+/// @throws PostgreSQL ERROR when input or fragment persistence is invalid.
 export template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
@@ -609,6 +655,7 @@ sequence_storage_manager<
     const std::size_t src_bytes =
         static_cast<std::size_t>(VARSIZE(original_hdr)) - bioseq::pg_types::seq::header_bytes();
 
+    // Copy the flat payload slice and assign metadata for one fragment row.
     auto producer = [src_data, src_bytes, fragment_bytes, frag_bp, total_bp_size,
                      last_fragment_padding](
         std::size_t fragment_no, bioseq::pg_types::seq* dst, MemoryContext /*scratch*/,
@@ -644,6 +691,19 @@ sequence_storage_manager<
 // sequence); a single sequence over the cap raises ERROR and the transaction
 // rollback cleans the partial fragment rows.
 // ---------------------------------------------------------------------------
+/// Initialize an incremental sequence write without opening a shard yet.
+/// @param user_relid Parent relation recorded with the source epoch.
+/// @param db_oid Database component of the shard identity.
+/// @param spc_oid Tablespace component of the shard identity.
+/// @param main_relfilenode File component of the shard identity.
+/// @param main_storage_id Storage identity recorded with the source epoch.
+/// @param seq_attno One-based sequence column attribute number.
+/// @param parent_td Borrowed tuple descriptor that must outlive the write.
+/// @param alphabet_code Persisted sequence alphabet code.
+/// @param byte_width Bytes in each packed storage unit.
+/// @param cap_bytes Per-shard capacity in bytes, or zero for no byte cap.
+/// @param caches Caller-owned write cache that must outlive the operation.
+/// @throws A translated PostgreSQL error for invalid state or sequence encoding.
 void sequence_stream_writer::begin(
     Oid user_relid, Oid db_oid, Oid spc_oid,
     RelFileNumber main_relfilenode, std::uint64_t main_storage_id,
@@ -709,6 +769,10 @@ void sequence_stream_writer::begin(
     active_ = true;
 }
 
+/// Open the top-bucket shard and acquire the transaction-scoped writer lock.
+///
+/// The caller-owned cache retains the relation and column writer state. Repeated
+/// calls are no-ops once the shard is open.
 void sequence_stream_writer::open_shard() {
     if (shard_ != nullptr) return;
     // All streamed sequences land in the top length bucket: the size is unknown
@@ -761,6 +825,14 @@ void sequence_stream_writer::open_shard() {
     });
 }
 
+/// Persist one packed fragment and extend the contiguous row range.
+/// @param payload Packed bytes copied into the fragment varlena.
+/// @param payload_bytes Number of bytes to copy. It must not exceed the
+/// configured fragment payload size.
+/// @param bp Logical letters represented by this fragment.
+/// @param pad Unused letters in the fragment's final storage unit.
+/// @throws A translated PostgreSQL error when the byte cap, checksum, or row
+/// contiguity contract fails.
 void sequence_stream_writer::write_fragment(
     const std::uint8_t* payload, std::size_t payload_bytes,
     sequence_size_t bp, std::uint16_t pad)
@@ -820,6 +892,11 @@ void sequence_stream_writer::write_fragment(
     total_varlena_bytes_ += frag_varlena_bytes_;
 }
 
+/// Append packed bytes and flush every fragment known not to be final.
+/// @param bytes Packed storage bytes copied into the writer buffer.
+/// @param bp_count Compatibility count. `finish` supplies the authoritative
+/// logical length.
+/// @throws A translated PostgreSQL error if no write is active or persistence fails.
 void sequence_stream_writer::append_packed_bytes(
     std::span<const std::uint8_t> bytes, sequence_size_t /*bp_count*/)
 {
@@ -845,6 +922,11 @@ void sequence_stream_writer::append_packed_bytes(
     }
 }
 
+/// Flush the final fragment and create an unpublished source-version row.
+/// @param total_bp Total logical sequence length in letters.
+/// @param last_pad Unused letters in the final storage unit.
+/// @return Locator and unpublished source epoch for later publication.
+/// @throws A translated PostgreSQL error if no write is active or persistence fails.
 pending_sequence_source sequence_stream_writer::finish(
     sequence_size_t total_bp, std::uint16_t last_pad)
 {
@@ -912,6 +994,10 @@ pending_sequence_source sequence_stream_writer::finish(
     return pending_sequence_source{out};
 }
 
+/// Discard in-memory stream state after the surrounding transaction is aborted.
+///
+/// This function does not delete fragment rows already written. Their removal
+/// depends on PostgreSQL transaction rollback.
 void sequence_stream_writer::abort() {
     // Transaction rollback reclaims any fragment rows already written; just drop
     // the in-flight buffer + state so a re-begin starts clean.

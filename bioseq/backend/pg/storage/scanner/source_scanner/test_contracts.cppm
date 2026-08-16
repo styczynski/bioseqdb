@@ -57,12 +57,14 @@ export namespace bioseq::storage {
 /**
  * Validate on a real TBB arena worker that the source callback rejects
  * before any PostgreSQL API, cache, snapshot, or logging side effect.
+ * @return Whether the worker observed the `wrong_thread` status.
  */
 [[nodiscard]] inline bool validate_pg_sequence_source_wrong_thread() {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.backend_thread = pg_sequence_backend_thread_token::capture();
     pg_sequence_read_session session{};
     session.backend_thread = pg_sequence_backend_thread_token::capture();
+    /// Backend-owned pointers passed opaquely to the worker probe.
     struct validation_argument {
         sequence_source_detail::pg_sequence_source_domain* domain;
         pg_sequence_read_session* session;
@@ -89,7 +91,10 @@ export namespace bioseq::storage {
     return rejected;
 }
 
-/** Exercise fail-closed retain accounting and merge rollback. */
+/**
+ * @brief Exercise fail-closed retain accounting and merge rollback.
+ * @return Whether overflow, transaction cleanup, and lifecycle counters agree.
+ */
 [[nodiscard]] inline bool validate_pg_sequence_source_fault_contract() noexcept {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.lifecycle = sequence_source_detail::domain_lifecycle::live;
@@ -315,7 +320,9 @@ export namespace bioseq::storage {
 }
 
 /** Validate that self-join aliases retain independent routes while the
- * relation-only lookup refuses to guess between them. */
+ * relation-only lookup refuses to guess between them.
+ * @return Whether generation-qualified lookup distinguishes both aliases.
+ */
 [[nodiscard]] inline bool validate_pg_sequence_source_route_aliases() noexcept {
     constexpr Oid relation_oid = static_cast<Oid>(1u);
     pg_sequence_source_registry first{};
@@ -360,7 +367,11 @@ export namespace bioseq::storage {
            find_pg_sequence_source_route(routes, relation_oid, 43u) == nullptr;
 }
 
-/** Install one inert-but-live token and drive the real PRE_PREPARE switch. */
+/**
+ * @brief Install one inert live token and drive the real PRE_PREPARE switch.
+ * @throws PostgreSQL ERROR when prepared-transaction rejection is observed or
+ * when the expected rejection does not occur.
+ */
 inline void validate_pg_sequence_source_pre_prepare() {
     using namespace sequence_source_detail;
     ensure_callbacks_registered();

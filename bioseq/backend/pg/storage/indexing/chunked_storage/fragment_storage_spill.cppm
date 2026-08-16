@@ -129,16 +129,33 @@ export import :fragment_storage_io;
 export import :storage_relation_cleanup;
 export namespace bioseq::storage::indexing {
 
+/**
+ * @brief Adds a sorted pair span to the handle's general run store.
+ * @param[in] sorted Hash-position pairs in canonical sorted order.
+ * @return Zero-based identifier of the added run.
+ */
 inline std::size_t fragment_index_storage::spill_sorted_run(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
     return sorted_runs_ensure_().spill_sorted_run(sorted);
 }
 
+/**
+ * @brief Transfers a sorted pair vector into the handle's general run store.
+ * @param[in] sorted Owned hash-position pairs in canonical sorted order.
+ * @return Zero-based identifier of the added run.
+ */
 inline std::size_t fragment_index_storage::spill_sorted_run_owned(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
     return sorted_runs_ensure_().spill_sorted_run_owned(std::move(sorted));
 }
 
+/**
+ * @brief Transfers an admitted sorted pair vector into the general run store.
+ * @param[in] sorted Owned hash-position pairs in canonical sorted order.
+ * @param[in] admitted_bytes Bytes covered by the supplied memory permit.
+ * @param[in] permit Admission token transferred with the vector capacity.
+ * @return Zero-based identifier of the added run.
+ */
 inline std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
     std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
     std::uint64_t admitted_bytes,
@@ -147,6 +164,10 @@ inline std::size_t fragment_index_storage::spill_sorted_run_owned_admitted(
         std::move(sorted), admitted_bytes, std::move(permit));
 }
 
+/**
+ * @brief Demotes resident general runs until the requested admission may fit.
+ * @param[in] bytes_needed Additional working-set bytes requested by the caller.
+ */
 inline void
 fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes_needed) {
     if (sorted_runs_.has_value()) {
@@ -154,6 +175,11 @@ fragment_index_storage::demote_resident_runs_until_available(std::uint64_t bytes
     }
 }
 
+/**
+ * @brief Merges all general runs and visits each hash with its position cursor.
+ * @tparam p_callback Callable accepting a hash and read-only position cursor.
+ * @param[in] on_kmer Callback invoked in canonical hash order.
+ */
 template <class p_callback> inline void fragment_index_storage::merge_runs(p_callback&& on_kmer) {
     if (!sorted_runs_.has_value()) {
         return;
@@ -163,6 +189,14 @@ template <class p_callback> inline void fragment_index_storage::merge_runs(p_cal
     sorted_runs_->merge_runs(std::forward<p_callback>(on_kmer));
 }
 
+/**
+ * @brief Starts a fresh logical generation for per-segment spill runs.
+ *
+ * Existing segment runs are closed before a new nonzero generation token is
+ * published. Token exhaustion invalidates the returned binding.
+ *
+ * @return Generation token and initial mutation revision for spill replay.
+ */
 inline direct_minimizer_spill_storage_binding
 fragment_index_storage::begin_segment_spill_generation() {
     if (segment_spill_pg_poisoned_) {
@@ -205,6 +239,7 @@ fragment_index_storage::begin_segment_spill_generation() {
     return segment_spill_binding_;
 }
 
+/// @brief Advances the spill mutation revision or invalidates it on overflow.
 inline void fragment_index_storage::record_segment_spill_mutation_() noexcept {
     if (!segment_spill_binding_.valid()) {
         return;
@@ -216,6 +251,12 @@ inline void fragment_index_storage::record_segment_spill_mutation_() noexcept {
     ++segment_spill_binding_.mutation_revision;
 }
 
+/**
+ * @brief Adds one sorted run to a position-segment spill store.
+ * @param[in] position_segment Zero-based target-position segment.
+ * @param[in] sorted Hash-position pairs in canonical sorted order.
+ * @return Zero-based identifier of the added run within the segment.
+ */
 inline std::size_t fragment_index_storage::spill_sorted_segment_run(
     std::uint32_t position_segment,
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
@@ -264,6 +305,17 @@ inline std::size_t fragment_index_storage::spill_sorted_segment_run(
     }
 }
 
+/**
+ * @brief Repartitions every segment run for a new target-position span.
+ *
+ * Replay is streaming and memory-admitted. The replacement is published only
+ * after every source store has merged and closed successfully.
+ *
+ * @param[in] old_span Previous segment width in target bases.
+ * @param[in] new_span Replacement segment width in target bases.
+ * @param[in] target_length Total target length in bases.
+ * @return `true` when all pairs were valid and the replacement was published.
+ */
 inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
                                                          std::uint64_t new_span,
                                                          std::uint64_t target_length) {
@@ -274,14 +326,17 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         }
         return false;
     }
+    // Couples replacement segment metadata with the permit covering its capacity.
     struct admitted_segment_runs {
         bioseq::parallelism::memory_permit permit;
         std::vector<segment_run_entry_type> values;
     } rerouted;
+    // Bounds transient replay ownership to one admitted pair batch.
     struct admitted_pair_batch {
         bioseq::parallelism::memory_permit permit;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> values;
     } routed_batch;
+    // Grows a vector only while its retained and peak capacity are admitted.
     const auto ensure_capacity = []<class p_value_type>(bioseq::parallelism::memory_permit& permit,
                                                         std::vector<p_value_type>& values,
                                                         std::size_t required) -> bool {
@@ -326,6 +381,7 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
         permit.shrink_to(exact);
         return true;
     };
+    // Finds or creates the sorted-run store for one replacement segment.
     const auto rerouted_store =
         [&rerouted, &ensure_capacity](std::uint32_t segment) -> sorted_pair_run_store& {
         auto iterator = std::lower_bound(rerouted.values.begin(),
@@ -456,6 +512,11 @@ inline bool fragment_index_storage::reroute_segment_runs(std::uint64_t old_span,
     return true;
 }
 
+/**
+ * @brief Merges per-segment runs and visits each segment/hash position cursor.
+ * @tparam p_callback Callable accepting segment, hash, and read-only position cursor.
+ * @param[in] on_segment_kmer Callback invoked in segment and canonical hash order.
+ */
 template <class p_callback>
 inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_kmer) {
     if (segment_spill_pg_poisoned_) {
@@ -493,10 +554,17 @@ inline void fragment_index_storage::merge_segment_runs(p_callback&& on_segment_k
     }
 }
 
+/// @brief Returns current resource and merge counters for the general run store.
 inline sorted_run_store_stats fragment_index_storage::sorted_run_stats() const noexcept {
     return sorted_runs_.has_value() ? sorted_runs_->stats() : sorted_run_store_stats{};
 }
 
+/**
+ * @brief Copies final general-run counters into backend-local build diagnostics.
+ *
+ * The snapshot is taken before run resources are released so file and resident
+ * byte counts describe the completed row build.
+ */
 inline void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
     if (!sorted_runs_.has_value()) {
         return;
@@ -550,6 +618,7 @@ inline void fragment_index_storage::snapshot_sorted_run_stats_before_release() {
         static_cast<unsigned long long>(st.position_spill_count));
 }
 
+/// @brief Releases every run without invoking a checked PostgreSQL boundary.
 inline void fragment_index_storage::release_runs_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->release_runs_noexcept();
@@ -563,6 +632,12 @@ inline void fragment_index_storage::release_runs_noexcept() noexcept {
     record_segment_spill_mutation_();
 }
 
+/**
+ * @brief Closes every general and segment run through checked PostgreSQL calls.
+ *
+ * A PostgreSQL error poisons the spill binding and abandons remaining handles
+ * so transaction abort can reclaim their PostgreSQL-owned resources.
+ */
 inline void fragment_index_storage::release_runs() {
     try {
         if (sorted_runs_.has_value()) {
@@ -591,6 +666,12 @@ inline void fragment_index_storage::release_runs() {
     }
 }
 
+/**
+ * @brief Abandons all PostgreSQL-owned handle state during error unwinding.
+ *
+ * No PostgreSQL cleanup function is called. The failing transaction remains
+ * responsible for memory contexts, relation references, and temporary files.
+ */
 inline void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
     if (sorted_runs_.has_value()) {
         sorted_runs_->abandon_after_pg_error_noexcept();
@@ -622,6 +703,7 @@ inline void fragment_index_storage::abandon_after_pg_error_noexcept() noexcept {
     chunk_payload_bytes_.clear();
 }
 
+/// @brief Closes run stores and deletes the handle-owned memory context.
 inline void fragment_index_storage::close_checked() {
     release_runs();
     chunk_cache_.clear();
@@ -636,6 +718,21 @@ inline void fragment_index_storage::close_checked() {
     }
 }
 
+/**
+ * @brief Writes one serialized index chunk through an isolated storage handle.
+ * @param[in] user_relid Owning user relation OID.
+ * @param[in] db_oid Database OID in the storage identity.
+ * @param[in] tablespace_oid Tablespace OID in the storage identity.
+ * @param[in] main_relfilenode Main relation relfilenode.
+ * @param[in] column_attno One-based PostgreSQL column number.
+ * @param[in] index_name Stable index policy name borrowed for this call.
+ * @param[in] bucket_idx Storage bucket number.
+ * @param[in] shard_idx Storage shard number.
+ * @param[in] sequence_rowno Logical sequence row number.
+ * @param[in] sub_key Logical stream within the sequence row.
+ * @param[in] chunk_no Zero-based chunk number.
+ * @param[in] bytes Serialized payload copied into PostgreSQL storage.
+ */
 inline void write_serialized_index_chunk_pg(Oid user_relid,
                                             Oid db_oid,
                                             Oid tablespace_oid,
@@ -684,6 +781,13 @@ inline void write_serialized_index_chunk_pg(Oid user_relid,
     }
 }
 
+/**
+ * @brief Records a successful serialized index refresh in the age catalog.
+ * @param[in] user_relid Owning user relation OID.
+ * @param[in] main_relfilenode Current main relation relfilenode.
+ * @param[in] column_attno One-based PostgreSQL column number.
+ * @param[in] index_name Refreshed index policy name.
+ */
 inline void mark_serialized_index_write_successful_pg(Oid user_relid,
                                                       Oid main_relfilenode,
                                                       std::int16_t column_attno,

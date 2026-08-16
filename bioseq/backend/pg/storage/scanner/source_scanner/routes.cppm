@@ -54,6 +54,9 @@ export import :source_scanner_provider;
 
 export namespace bioseq::storage {
 /// Initialize empty route storage in one query-lifetime memory context.
+/// @param routes Empty route set to initialize.
+/// @param allocation_context Context that owns any future dynamic route array.
+/// @throws PostgreSQL ERROR when the set is nonempty or the context is null.
 inline void initialize_pg_sequence_source_routes(pg_sequence_source_route_set& routes,
                                                  MemoryContext allocation_context) {
     if (routes.count != 0u || routes.dynamic_routes != nullptr || allocation_context == nullptr) {
@@ -65,30 +68,37 @@ inline void initialize_pg_sequence_source_routes(pg_sequence_source_route_set& r
 }
 
 /// Return inline or dynamic route capacity.
+/// @return Number of routes that fit without allocation.
 [[nodiscard]] inline std::size_t
 pg_sequence_source_route_capacity(const pg_sequence_source_route_set& routes) noexcept {
     return routes.dynamic_routes == nullptr ? routes.inline_routes.size() : routes.dynamic_capacity;
 }
 
 /// Return mutable contiguous route storage.
+/// @return Pointer valid until capacity grows or the allocation context resets.
 [[nodiscard]] inline pg_sequence_source_route*
 pg_sequence_source_routes_data(pg_sequence_source_route_set& routes) noexcept {
     return routes.dynamic_routes == nullptr ? routes.inline_routes.data() : routes.dynamic_routes;
 }
 
 /// Return immutable contiguous route storage.
+/// @return Pointer valid until capacity grows or the allocation context resets.
 [[nodiscard]] inline const pg_sequence_source_route*
 pg_sequence_source_routes_data(const pg_sequence_source_route_set& routes) noexcept {
     return routes.dynamic_routes == nullptr ? routes.inline_routes.data() : routes.dynamic_routes;
 }
 
 /// Return one mutable route lease by validated caller index.
+/// @param index Zero-based index that must be less than `routes.count`.
+/// @return Mutable lease reference invalidated by route-storage growth.
 [[nodiscard]] inline pg_sequence_source_registry_lease&
 pg_sequence_source_route_lease(pg_sequence_source_route_set& routes, std::size_t index) noexcept {
     return pg_sequence_source_routes_data(routes)[index].lease;
 }
 
 /// Return one immutable route lease by validated caller index.
+/// @param index Zero-based index that must be less than `routes.count`.
+/// @return Immutable lease reference invalidated by route-storage growth.
 [[nodiscard]] inline const pg_sequence_source_registry_lease&
 pg_sequence_source_route_lease(const pg_sequence_source_route_set& routes,
                                std::size_t index) noexcept {
@@ -96,6 +106,9 @@ pg_sequence_source_route_lease(const pg_sequence_source_route_set& routes,
 }
 
 /// Grow route storage geometrically inside its allocation context.
+/// @param routes Initialized route set whose entries are preserved.
+/// @param required Minimum required capacity in entries.
+/// @throws PostgreSQL ERROR for corrupt counts, allocation limits, or a missing context.
 inline void ensure_pg_sequence_source_route_capacity(pg_sequence_source_route_set& routes,
                                                      std::size_t required) {
     const std::size_t current = pg_sequence_source_route_capacity(routes);
@@ -134,6 +147,10 @@ inline void ensure_pg_sequence_source_route_capacity(pg_sequence_source_route_se
 }
 
 /// Retain and append one distinct registry route.
+/// @param routes Initialized destination route set.
+/// @param parent Live lease retained independently when not already present.
+/// @return Whether the parent was live and the route is present afterward.
+/// @throws PostgreSQL ERROR for corrupt counts, overflow, allocation, or lease failure.
 [[nodiscard]] inline bool
 add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
                              const pg_sequence_source_registry_lease& parent) {
@@ -168,6 +185,9 @@ add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
 }
 
 /// Append the route exposed by one open provider.
+/// @param routes Initialized destination route set.
+/// @param provider Provider whose lease is retained independently.
+/// @return Whether the provider was open and its route is present afterward.
 [[nodiscard]] inline bool
 add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
                              const pg_sequence_source_provider* provider) {
@@ -176,6 +196,8 @@ add_pg_sequence_source_route(pg_sequence_source_route_set& routes,
 }
 
 /// Release routes appended after one saved count.
+/// @param routes Route set modified by a partially completed operation.
+/// @param original_count Prefix length retained by the caller.
 inline void rollback_pg_sequence_source_routes_noexcept(pg_sequence_source_route_set& routes,
                                                         std::size_t original_count) noexcept {
     const std::size_t capacity = pg_sequence_source_route_capacity(routes);
@@ -191,7 +213,15 @@ inline void rollback_pg_sequence_source_routes_noexcept(pg_sequence_source_route
     }
 }
 
-/** Acquire an independent upper-owner copy of every opaque child route. */
+/**
+ * @brief Acquire an independent upper-owner copy of every opaque child route.
+ * @param destination Initialized route set receiving distinct leases.
+ * @param source Borrowed route set left unchanged.
+ * @return Whether every source route was live and merged.
+ * @throws PostgreSQL ERROR for corrupt counts, allocation, or lease failure.
+ *
+ * Failure rolls `destination` back to its original count.
+ */
 [[nodiscard]] inline bool
 merge_pg_sequence_source_routes(pg_sequence_source_route_set& destination,
                                 const pg_sequence_source_route_set& source) {
@@ -261,6 +291,10 @@ merge_pg_sequence_source_routes(pg_sequence_source_route_set& destination,
 }
 
 /// Find the unique live route matching a relation and provider generation.
+/// @param routes Borrowed route set.
+/// @param relation_oid Parent relation identity.
+/// @param provider_generation Exact scan-binding generation.
+/// @return Borrowed lease pointer, or null for invalid, absent, stale, or ambiguous routes.
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
 find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
                               Oid relation_oid,
@@ -292,7 +326,11 @@ find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
 
 /** Relation-only lookup for validated single-source upper nodes.
  * It deliberately fails closed when self-join aliases contribute multiple
- * live registries for the same physical relation. */
+ * live registries for the same physical relation.
+ * @param routes Borrowed route set.
+ * @param relation_oid Parent relation identity.
+ * @return Borrowed unique lease, or null for invalid, absent, stale, or ambiguous routes.
+ */
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
 find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
                               Oid relation_oid) noexcept {
@@ -320,6 +358,9 @@ find_pg_sequence_source_route(const pg_sequence_source_route_set& routes,
 }
 
 /// Release every route lease through the checked upper-owner boundary.
+/// @param routes Route set cleared after releasing each owned lease.
+/// @param is_commit Whether checked commit cleanup is permitted.
+/// @throws PostgreSQL ERROR for corrupt counts or lease accounting.
 inline void release_pg_sequence_source_routes(pg_sequence_source_route_set& routes,
                                               bool is_commit) {
     if (routes.count > pg_sequence_source_route_capacity(routes)) {
@@ -342,6 +383,7 @@ inline void release_pg_sequence_source_routes(pg_sequence_source_route_set& rout
 }
 
 /// Release every valid route prefix through the abort cleanup path.
+/// @param routes Route set cleared without propagating cleanup failures.
 inline void
 release_pg_sequence_source_routes_noexcept(pg_sequence_source_route_set& routes) noexcept {
     const std::size_t safe_count =

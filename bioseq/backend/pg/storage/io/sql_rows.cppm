@@ -19,7 +19,9 @@ export namespace bioseq::storage::load_pg::composite_rows {
 struct [[bioseq_sql::type({
             .schema = bioseq::sql::fixed_schema<"bioseq">,
         })]] column_mapping {
+    /// Destination column name as PostgreSQL text, or SQL NULL.
     std::optional<text*> column_name;
+    /// Identifier-parser source expression as PostgreSQL text, or SQL NULL.
     std::optional<text*> data_source;
 };
 
