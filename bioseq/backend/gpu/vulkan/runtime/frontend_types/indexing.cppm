@@ -132,6 +132,8 @@ struct gpu_index_gate_identity {
     std::uint64_t digest_hi = 0u;
     std::shared_ptr<const std::vector<std::uint32_t>> canonical_words{};
 
+    /// @brief Validates the disabled or fully populated gate representation.
+    /// @return `true` when fields and canonical storage agree with `enabled`.
     [[nodiscard]] bool is_well_formed() const noexcept {
         if (!enabled) {
             return word_count == 0u && mask == 0u && digest_lo == 0u && digest_hi == 0u &&
@@ -141,6 +143,8 @@ struct gpu_index_gate_identity {
                canonical_words && canonical_words->size() == word_count;
     }
 
+    /// @brief Compares complete immutable gate identities after digest prefiltering.
+    /// @return `true` when both identities represent exactly the same gate words.
     [[nodiscard]] bool is_exactly_equal_to(const gpu_index_gate_identity& other) const {
         if (enabled != other.enabled || word_count != other.word_count || mask != other.mask ||
             digest_lo != other.digest_lo || digest_hi != other.digest_hi) {
@@ -252,12 +256,18 @@ struct gpu_built_index {
     gpu_index_build_failure failure_reason = gpu_index_build_failure::none;
     bool valid = false;
 
+    /// @brief Constructs an empty invalid build result.
     gpu_built_index() = default;
+    /// @brief Prevents copying Vulkan buffer and permit ownership.
     gpu_built_index(const gpu_built_index&) = delete;
+    /// @brief Prevents copy-assignment of Vulkan buffer and permit ownership.
     gpu_built_index& operator=(const gpu_built_index&) = delete;
+    /// @brief Transfers all build-result ownership and invalidates the source.
     gpu_built_index(gpu_built_index&& other) noexcept {
         move_from(other);
     }
+    /// @brief Releases current ownership, then transfers another build result.
+    /// @return This build result.
     gpu_built_index& operator=(gpu_built_index&& other) noexcept {
         if (this != &other) {
             // The destination permit owns the destination buffers' admission.
@@ -272,6 +282,7 @@ struct gpu_built_index {
     }
 
   private:
+    /// @brief Moves every owned resource and metadata field from another result.
     void move_from(gpu_built_index& other) noexcept {
         permit = std::move(other.permit);
         slots = std::move(other.slots);
@@ -321,11 +332,15 @@ struct sorted_pair_device_views {
     bool keys_in_scratch = false;
 };
 
+/// @brief Selects the slice containing the final sorted keys.
+/// @return Key slice from the active ping-pong side.
 [[nodiscard]] inline const gpu_arena_slice&
 choose_sorted_keys(const sorted_pair_device_views& views) noexcept {
     return views.keys_in_scratch ? views.keys_scratch : views.keys;
 }
 
+/// @brief Selects the slice containing the final sorted values.
+/// @return Value slice from the active ping-pong side.
 [[nodiscard]] inline const gpu_arena_slice&
 choose_sorted_values(const sorted_pair_device_views& views) noexcept {
     return views.keys_in_scratch ? views.values_scratch : views.values;
