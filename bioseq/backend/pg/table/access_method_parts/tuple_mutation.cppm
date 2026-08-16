@@ -144,26 +144,28 @@ ensure_write_side_seq_caches(Relation relation, column_write_state* write_state)
  * ExecInsertIndexTuples — which reads from `slot->tts_values[]` to build
  * btree/hash/gin keys — never sees the storage-layout bytes.
  *
- * `out_per_col_locator[c]` is the locator for amc.sequence_attribute_numbers[c]. It remains
- * std::nullopt for null or already-stub values.
+ * `out_per_col_locator[sequence_column_index]` corresponds to
+ * `table_cache.sequence_attribute_numbers[sequence_column_index]`. It remains std::nullopt for
+ * null or already-stub values.
  */
 [[nodiscard]] static Datum* rewrite_seq_columns_to_stubs(
     Relation relation,
     TupleTableSlot* slot,
     column_write_state* write_state,
-    const bioseq::storage::table_access_cache& amc,
+    const bioseq::storage::table_access_cache& table_cache,
     Datum* detoasted_values,
     std::vector<std::optional<bioseq::storage::sequence_locator>>& out_per_col_locator,
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>& out_pending_sources) {
-    TupleDesc td = slot->tts_tupleDescriptor;
-    Datum* values_for_write = bioseq::postgres::support::invoke_pg_as_cpp(
-        [td] { return static_cast<Datum*>(palloc(sizeof(Datum) * td->natts)); });
-    std::memcpy(values_for_write, detoasted_values, sizeof(Datum) * td->natts);
+    TupleDesc tuple_descriptor = slot->tts_tupleDescriptor;
+    Datum* values_for_write = bioseq::postgres::support::invoke_pg_as_cpp([tuple_descriptor] {
+        return static_cast<Datum*>(palloc(sizeof(Datum) * tuple_descriptor->natts));
+    });
+    std::memcpy(values_for_write, detoasted_values, sizeof(Datum) * tuple_descriptor->natts);
 
-    out_per_col_locator.assign(amc.sequence_attribute_numbers.size(), std::nullopt);
+    out_per_col_locator.assign(table_cache.sequence_attribute_numbers.size(), std::nullopt);
     out_pending_sources.clear();
-    out_pending_sources.resize(amc.sequence_attribute_numbers.size());
-    if (amc.sequence_attribute_numbers.empty()) {
+    out_pending_sources.resize(table_cache.sequence_attribute_numbers.size());
+    if (table_cache.sequence_attribute_numbers.empty()) {
         return values_for_write;
     }
     // write_state_management.cppm cannot import bioseq_storage without a
@@ -174,49 +176,57 @@ ensure_write_side_seq_caches(Relation relation, column_write_state* write_state)
     const std::uint64_t main_storage_id = bioseq::postgres::support::invoke_pg_as_cpp(
         [relation] { return column_storage_id(relation, false); });
 
-    for (std::size_t c = 0; c < amc.sequence_attribute_numbers.size(); ++c) {
-        const std::int16_t attno = amc.sequence_attribute_numbers[c];
-        const int idx = attno - 1;
-        if (idx < 0 || idx >= td->natts)
+    for (std::size_t sequence_column_index = 0;
+         sequence_column_index < table_cache.sequence_attribute_numbers.size();
+         ++sequence_column_index) {
+        const std::int16_t attribute_number =
+            table_cache.sequence_attribute_numbers[sequence_column_index];
+        const int attribute_index = attribute_number - 1;
+        if (attribute_index < 0 || attribute_index >= tuple_descriptor->natts)
             continue;
-        if (slot->tts_isnull[idx])
+        if (slot->tts_isnull[attribute_index])
             continue;
-        auto* hdr =
-            reinterpret_cast<bioseq::pg_types::seq*>(DatumGetPointer(values_for_write[idx]));
-        if (bioseq::storage::is_locator_stub(hdr)) {
+        auto* sequence_header = reinterpret_cast<bioseq::pg_types::seq*>(
+            DatumGetPointer(values_for_write[attribute_index]));
+        if (bioseq::storage::is_locator_stub(sequence_header)) {
             bioseq::postgres::support::invoke_pg_as_cpp([] {
                 bioseq_log<logging_level::error, logging_target::postgres>(
                     "bioseq storage: a locator stub cannot be shared by a second parent row");
             });
         }
-        auto pending = bioseq::postgres::support::invoke_pg_as_cpp(
-            [relation, main_storage_id, attno, td, hdr, cap_bytes, caches] {
-                return bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
-                    RelationGetRelid(relation),
-                    main_storage_id,
-                    relation->rd_locator.dbOid,
-                    relation->rd_locator.spcOid,
-                    relation->rd_locator.relNumber,
-                    attno,
-                    td,
-                    hdr,
-                    cap_bytes,
-                    caches);
-            });
-        const auto loc = pending.locator();
-        out_per_col_locator[c] = loc;
-        out_pending_sources[c].emplace(std::move(pending));
-        bioseq::pg_types::seq* stub =
-            bioseq::postgres::support::invoke_pg_as_cpp([write_state, hdr, loc] {
+        auto pending = bioseq::postgres::support::invoke_pg_as_cpp([relation,
+                                                                    main_storage_id,
+                                                                    attribute_number,
+                                                                    tuple_descriptor,
+                                                                    sequence_header,
+                                                                    cap_bytes,
+                                                                    caches] {
+            return bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
+                RelationGetRelid(relation),
+                main_storage_id,
+                relation->rd_locator.dbOid,
+                relation->rd_locator.spcOid,
+                relation->rd_locator.relNumber,
+                attribute_number,
+                tuple_descriptor,
+                sequence_header,
+                cap_bytes,
+                caches);
+        });
+        const auto sequence_locator = pending.locator();
+        out_per_col_locator[sequence_column_index] = sequence_locator;
+        out_pending_sources[sequence_column_index].emplace(std::move(pending));
+        bioseq::pg_types::seq* locator_stub = bioseq::postgres::support::invoke_pg_as_cpp(
+            [write_state, sequence_header, sequence_locator] {
                 return bioseq::storage::alloc_locator_stub_in(
                     get_column_write_per_tuple_context(write_state),
-                    static_cast<std::uint8_t>(hdr->alphabet_code),
-                    static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
-                    hdr->padding_letters,
-                    /*total_bp_size=*/loc.logical_length,
-                    loc);
+                    static_cast<std::uint8_t>(sequence_header->alphabet_code),
+                    static_cast<std::uint8_t>(sequence_header->storage_unit_byte_width),
+                    sequence_header->padding_letters,
+                    /*total_bp_size=*/sequence_locator.logical_length,
+                    sequence_locator);
             });
-        values_for_write[idx] = PointerGetDatum(stub);
+        values_for_write[attribute_index] = PointerGetDatum(locator_stub);
     }
     return values_for_write;
 }
@@ -305,11 +315,11 @@ void bioseq_tuple_insert(
         });
         bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { validate_logical_replication_write(relation); });
-        const auto* amc = bioseq::postgres::support::invoke_pg_as_cpp(
+        const auto* table_cache = bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { return &bioseq::storage::get_table_access_cache(relation); });
 
         {
-            bioseq::postgres::support::memory_context_scope ctx_guard{
+            bioseq::postgres::support::memory_context_scope write_context_scope{
                 get_column_write_per_tuple_context(write_state)};
 
             bioseq::postgres::support::invoke_pg_as_cpp([slot] { slot_getallattrs(slot); });
@@ -323,7 +333,7 @@ void bioseq_tuple_insert(
             Datum* values_for_write = rewrite_seq_columns_to_stubs(relation,
                                                                    slot,
                                                                    write_state,
-                                                                   *amc,
+                                                                   *table_cache,
                                                                    detoasted_values,
                                                                    per_col_locator,
                                                                    pending_sources);
@@ -341,7 +351,7 @@ void bioseq_tuple_insert(
              * ORIGINAL payload (pre-stub) so the index sees the real bytes. */
             bioseq::storage::indexing::index_build_on_insert_columns(
                 RelationGetRelid(relation),
-                amc->sequence_attribute_numbers,
+                table_cache->sequence_attribute_numbers,
                 slot->tts_isnull,
                 detoasted_values,
                 per_col_locator,
@@ -398,11 +408,11 @@ void bioseq_tuple_insert_speculative(Relation relation,
         });
         bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { validate_logical_replication_write(relation); });
-        const auto* amc = bioseq::postgres::support::invoke_pg_as_cpp(
+        const auto* table_cache = bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { return &bioseq::storage::get_table_access_cache(relation); });
 
         {
-            bioseq::postgres::support::memory_context_scope ctx_guard{
+            bioseq::postgres::support::memory_context_scope write_context_scope{
                 get_column_write_per_tuple_context(write_state)};
 
             bioseq::postgres::support::invoke_pg_as_cpp([slot] { slot_getallattrs(slot); });
@@ -415,7 +425,7 @@ void bioseq_tuple_insert_speculative(Relation relation,
             Datum* values_for_write = rewrite_seq_columns_to_stubs(relation,
                                                                    slot,
                                                                    write_state,
-                                                                   *amc,
+                                                                   *table_cache,
                                                                    detoasted_values,
                                                                    per_col_locator,
                                                                    pending_sources);
@@ -546,15 +556,15 @@ void bioseq_multi_insert(Relation relation,
             });
         bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { validate_logical_replication_write(relation); });
-        const auto* amc = bioseq::postgres::support::invoke_pg_as_cpp(
+        const auto* table_cache = bioseq::postgres::support::invoke_pg_as_cpp(
             [relation] { return &bioseq::storage::get_table_access_cache(relation); });
 
         {
-            bioseq::postgres::support::memory_context_scope ctx_guard{
+            bioseq::postgres::support::memory_context_scope write_context_scope{
                 get_column_write_per_tuple_context(write_state)};
 
-            for (int i = 0; i < ntuples; i++) {
-                TupleTableSlot* tuple_slot = slots[i];
+            for (int tuple_index = 0; tuple_index < ntuples; tuple_index++) {
+                TupleTableSlot* tuple_slot = slots[tuple_index];
 
                 bioseq::postgres::support::invoke_pg_as_cpp(
                     [tuple_slot] { slot_getallattrs(tuple_slot); });
@@ -570,7 +580,7 @@ void bioseq_multi_insert(Relation relation,
                 Datum* values_for_write = rewrite_seq_columns_to_stubs(relation,
                                                                        tuple_slot,
                                                                        write_state,
-                                                                       *amc,
+                                                                       *table_cache,
                                                                        detoasted_values,
                                                                        per_col_locator,
                                                                        pending_sources);
@@ -584,7 +594,7 @@ void bioseq_multi_insert(Relation relation,
 
                 bioseq::storage::indexing::index_build_on_insert_columns(
                     RelationGetRelid(relation),
-                    amc->sequence_attribute_numbers,
+                    table_cache->sequence_attribute_numbers,
                     tuple_slot->tts_isnull,
                     detoasted_values,
                     per_col_locator,
@@ -646,8 +656,8 @@ void bioseq_multi_insert(Relation relation,
 static void invalidate_sequence_source_epochs_for_row(Relation relation,
                                                       std::uint64_t row_number,
                                                       Snapshot snapshot) {
-    const auto& amc = bioseq::storage::get_table_access_cache(relation);
-    if (amc.sequence_attribute_numbers.empty())
+    const auto& table_cache = bioseq::storage::get_table_access_cache(relation);
+    if (table_cache.sequence_attribute_numbers.empty())
         return;
     Snapshot read_snapshot = snapshot != nullptr ? snapshot : GetTransactionSnapshot();
     MemoryContext read_context = create_column_scan_memory_context();
@@ -669,8 +679,8 @@ static void invalidate_sequence_source_epochs_for_row(Relation relation,
         bool* nulls =
             static_cast<bool*>(palloc0(sizeof(bool) * static_cast<std::size_t>(descriptor->natts)));
         if (read_column_row_by_number(read_state, row_number, values, nulls)) {
-            for (const std::int16_t attno : amc.sequence_attribute_numbers) {
-                const int index = attno - 1;
+            for (const std::int16_t attribute_number : table_cache.sequence_attribute_numbers) {
+                const int index = attribute_number - 1;
                 if (index < 0 || index >= descriptor->natts || nulls[index])
                     continue;
                 const auto* header =

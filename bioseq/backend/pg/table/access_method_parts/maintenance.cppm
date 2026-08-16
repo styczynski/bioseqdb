@@ -553,13 +553,13 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     uint64_t new_data_reservation;
 
     if (list_length(stripe_metadata_list) > starting_stripe_list_position) {
-        stripe_metadata* mtd = static_cast<stripe_metadata*>(
+        stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position));
-        new_data_reservation = mtd->file_offset + mtd->data_length - 1;
+        new_data_reservation = boundary_stripe->file_offset + boundary_stripe->data_length - 1;
     } else {
-        stripe_metadata* mtd = static_cast<stripe_metadata*>(
+        stripe_metadata* boundary_stripe = static_cast<stripe_metadata*>(
             list_nth(stripe_metadata_list, starting_stripe_list_position - 1));
-        new_data_reservation = mtd->file_offset;
+        new_data_reservation = boundary_stripe->file_offset;
     }
 
     truncate_column_storage(rel, new_data_reservation);
@@ -568,9 +568,9 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel) {
     end_column_read(read_state);
     MemoryContextDelete(scan_context);
 
-    for (int i = 0; i < starting_stripe_list_position; i++) {
+    for (int stripe_index = 0; stripe_index < starting_stripe_list_position; stripe_index++) {
         stripe_metadata* metadata =
-            static_cast<stripe_metadata*>(list_nth(stripe_metadata_list, i));
+            static_cast<stripe_metadata*>(list_nth(stripe_metadata_list, stripe_index));
         delete_metadata_rows_for_stripe(rel->rd_locator, metadata->id);
     }
 
@@ -705,18 +705,19 @@ static void log_relation_statistics(Relation rel, int elevel) {
     uint64_t total_stripe_length = 0;
     uint64_t tuple_count = 0;
     uint64_t chunk_count = 0;
-    TupleDesc tupdesc = RelationGetDescr(rel);
+    TupleDesc tuple_descriptor = RelationGetDescr(rel);
     uint64_t dropped_chunks_with_data = 0;
     uint64_t total_decompressed_length = 0;
 
     List* stripe_list = list_stripes_for_relation(relfilelocator, ForwardScanDirection);
     int stripe_count = list_length(stripe_list);
 
-    MemoryContext relation_stats_ctx = AllocSetContextCreate(
+    MemoryContext relation_statistics_context = AllocSetContextCreate(
         CurrentMemoryContext, "Vacuum Relation Stats Context", ALLOCSET_SMALL_SIZES);
 
     {
-        bioseq::postgres::support::memory_context_scope ctx_guard{relation_stats_ctx};
+        bioseq::postgres::support::memory_context_scope statistics_context_scope{
+            relation_statistics_context};
 
         for (auto stripe : bioseq::postgres::support::postgres_list<stripe_metadata>(stripe_list)) {
             stripe_skip_list* skiplist = read_stripe_skip_list(relfilelocator,
@@ -725,7 +726,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
                                                                stripe->chunk_count,
                                                                GetTransactionSnapshot());
             for (uint32_t column = 0; column < skiplist->column_count; column++) {
-                bool attr_dropped = TupleDescAttr(tupdesc, column)->attisdropped;
+                bool attr_dropped = TupleDescAttr(tuple_descriptor, column)->attisdropped;
                 for (uint32_t chunk = 0; chunk < skiplist->chunk_count; chunk++) {
                     chunk_skip_node* skipnode = &skiplist->chunk_skip_nodes[column][chunk];
 
@@ -752,7 +753,7 @@ static void log_relation_statistics(Relation rel, int elevel) {
             tuple_count += stripe->row_count;
             total_stripe_length += stripe->data_length;
 
-            MemoryContextReset(relation_stats_ctx);
+            MemoryContextReset(relation_statistics_context);
         }
     }
 
@@ -971,8 +972,8 @@ uint64 bioseq_relation_size(Relation rel, ForkNumber fork_number) {
 
     /* InvalidForkNumber indicates returning the size for all forks */
     if (fork_number == InvalidForkNumber) {
-        for (int i = 0; i < MAX_FORKNUM; i++) {
-            nblocks += smgrnblocks(RelationGetSmgr(rel), static_cast<ForkNumber>(i));
+        for (int fork_index = 0; fork_index < MAX_FORKNUM; fork_index++) {
+            nblocks += smgrnblocks(RelationGetSmgr(rel), static_cast<ForkNumber>(fork_index));
         }
     } else {
         nblocks = smgrnblocks(RelationGetSmgr(rel), fork_number);
