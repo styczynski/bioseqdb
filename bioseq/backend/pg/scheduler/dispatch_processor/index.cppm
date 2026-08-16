@@ -142,9 +142,9 @@ module;
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 export module bioseq.postgres.scheduler.dispatch_processor;
 
