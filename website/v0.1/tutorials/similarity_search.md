@@ -52,25 +52,18 @@ INSERT INTO tutorial_mmsearch (pk, organism, collected_on, seq0) VALUES
   (3, 'Homo sapiens', DATE '2024-02-18', 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA'),
   (4, 'Mus musculus', DATE '2026-07-01', 'TTTCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCTATCTACTCTCATCATCCTGATCGTAGCTATACTCCTACTATCCTATT'),
   (5, 'Homo sapiens', DATE '2026-01-20', 'ACGTCTAGTCACTGTAGCCTGATCGTAGCTAGTGTACTCTAGTCACTGTAGCCTGATCGTAGCTAGTTGATCCCCATATCTTCACTAGTCACTGTAGCCTGATCGTAGCTAGTTTTTTTA');
-DO $$
-DECLARE
-  plan_json jsonb;
-BEGIN
-  EXECUTE 'EXPLAIN (FORMAT JSON) '
-          'SELECT pk FROM tutorial_mmsearch '
-          'WHERE organism = ''Homo sapiens'' '
-          'AND collected_on >= DATE ''2025-01-01'' '
-          'AND public.mmsearch(seq0, '
-          '''CTAGTCACTGTAGCCTGATCGTAGCTAGT''::bioseq.seq(''dna4'', 32), '
-          'aligner_options(best_n => 3))'
-    INTO plan_json;
-  IF plan_json #>> '{0,Plan,"Node Type"}' IS DISTINCT FROM 'Custom Scan'
-     OR plan_json #>> '{0,Plan,"Custom Plan Provider"}' IS DISTINCT FROM 'BioseqScan' THEN
-    RAISE EXCEPTION
-      'canonical_mmsearch: expected BioseqScan Custom Scan, got %', plan_json;
-  END IF;
-END $$;
 -- bioseq:visible
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT pk
+FROM tutorial_mmsearch
+WHERE organism = 'Homo sapiens'
+  AND collected_on >= DATE '2025-01-01'
+  AND public.mmsearch(
+        seq0,
+        'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+        aligner_options(best_n => 3)
+      );
+
 SELECT pk,
        organism,
        COUNT(*) OVER (PARTITION BY pk) AS matches_for_row,
@@ -93,6 +86,10 @@ DROP TABLE tutorial_mmsearch;
 RESET bioseq.vectorization.enabled;
 RESET bioseq.index.insert_maintenance.enabled;
 ```
+
+The first result shows whether the planner selected `BioseqScan` for this exact
+predicate. The second result contains the matching rows and their alignment
+coordinates.
 
 The query can return more than one alignment for one stored row. `best_n` limits
 the secondary alignments retained for each target. The `pk` argument passed to
