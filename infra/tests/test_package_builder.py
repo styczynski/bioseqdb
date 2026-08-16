@@ -4814,7 +4814,9 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         )
         expression = re.sub(
             r"contains\(github\.event\.head_commit\.message, '([^']+)'\)",
-            lambda match: str(match.group(1) in head_message),
+            lambda match: str(
+                match.group(1).casefold() in head_message.casefold()
+            ),
             expression,
         )
         expression = expression.replace("&&", " and ").replace("||", " or ")
@@ -5061,8 +5063,8 @@ save()
             (
                 "push",
                 "refs/heads/refactor/start-massive-refactor",
-                "[PACKAGE-RELEASE] is not the exact marker",
-                False,
+                "GitHub matches [PACKAGE-RELEASE] without case sensitivity",
+                True,
             ),
             ("workflow_dispatch", "refs/heads/main", "", True),
             (

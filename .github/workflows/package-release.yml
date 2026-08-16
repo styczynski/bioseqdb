@@ -4,8 +4,9 @@ name: Native package release
   push:
     branches:
       - main
-      # Expensive validation runs on this branch require the exact marker in
-      # the head commit message; ordinary refactor pushes only record a
+      # Expensive validation runs on this branch require the documented
+      # [package-release] marker in the head commit message. GitHub's contains
+      # function is case-insensitive; ordinary refactor pushes only record a
       # skipped workflow run.
       - refactor/start-massive-refactor
   workflow_dispatch:
