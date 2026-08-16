@@ -945,6 +945,261 @@ constexpr int indirect = 9;
         "token-slice raw lexer discarded a valid final token at the "
         "buffer end");
 
+    constexpr std::string_view trailing_return_source = R"CPP(
+export module fixture.trailing_return;
+namespace fixture::trailing_return {
+using value_type = int;
+
+[[bioseq::template_flatten_when("shape", "leaf")]]
+[[bioseq::template_flatten_entry("leaf")]]
+[[nodiscard]] auto leaf(const int abi_code, const int value) noexcept
+    -> value_type {
+    return abi_code + value;
+}
+
+template <class p_value>
+[[bioseq::template_flatten_entry("nested")]]
+auto nested(p_value value) noexcept(noexcept(value.operator->()))
+    [[maybe_unused]]
+    -> std::array<std::pair<int, long>, 2>
+    requires requires(p_value item) {
+        item.operator->();
+        []() -> int { return 0; }();
+    }
+{
+    return {};
+}
+
+auto deduced_auto() { return 1; }
+decltype(auto) deduced_decltype() { return (deduced_auto()); }
+
+auto nested_requires_type()
+    -> decltype(requires {
+        requires (sizeof(value_type) > 0);
+    }) {
+    return true;
+}
+
+auto arrow_noise() noexcept(noexcept(
+    []() -> int { return 1; }()
+    + pointer_like.operator->()))
+{
+    return 1;
+}
+
+auto lambda_holder = []() -> long { return 2L; };
+
+auto missing_type() -> requires true;
+auto unbalanced_type() -> std::array<int, 2;
+}
+)CPP";
+    const translation_unit trailing_return_slice = scan_token_slice(
+        "trailing_return_contract.cppm", trailing_return_source);
+    const auto trailing_declaration =
+        [&trailing_return_slice](std::string_view name)
+        -> const declaration_record& {
+        const auto found = std::ranges::find(
+            trailing_return_slice.declarations,
+            name,
+            &declaration_record::name);
+        if (found == trailing_return_slice.declarations.end()) {
+            throw std::runtime_error(
+                "PREPARE trailing-return fixture cannot find declaration '"
+                + std::string{name} + "'");
+        }
+        return *found;
+    };
+
+    const declaration_record& trailing_leaf =
+        trailing_declaration("leaf");
+    require(
+        trailing_leaf.kind == declaration_kind::function
+            && trailing_leaf.return_type == "value_type"
+            && trailing_leaf.explicit_declared_type == "value_type"
+            && trailing_leaf.specifiers.has_explicit_type
+            && !trailing_leaf.specifiers.has_deduced_type
+            && trailing_leaf.parameters.size() == 2
+            && trailing_leaf.parameters[0].name == "abi_code"
+            && trailing_leaf.parameters[0].cpp_type == "const int"
+            && trailing_leaf.parameters[1].name == "value"
+            && trailing_leaf.parameters[1].cpp_type == "const int"
+            && source_text(
+                   trailing_return_source,
+                   trailing_leaf.declaration_head_range)
+                == "[[bioseq::template_flatten_when(\"shape\", \"leaf\")]]\n"
+                   "[[bioseq::template_flatten_entry(\"leaf\")]]\n"
+                   "[[nodiscard]] auto leaf(const int abi_code, "
+                   "const int value) noexcept\n"
+                   "    -> value_type "
+            && source_text(
+                   trailing_return_source,
+                   trailing_leaf.body_or_initializer_range)
+                == "{\n    return abi_code + value;\n}"
+            && trailing_leaf.declaration_range.begin.byte_offset
+                == trailing_leaf.declaration_head_range.begin.byte_offset
+            && trailing_leaf.declaration_head_range.end.byte_offset
+                == trailing_leaf.body_or_initializer_range.begin.byte_offset
+            && trailing_leaf.declaration_range.end.byte_offset
+                == trailing_leaf.body_or_initializer_range.end.byte_offset,
+        "token-slice canary-shaped trailing return changed type, "
+        "parameters, or declaration geometry");
+
+    const declaration_record& nested_return =
+        trailing_declaration("nested");
+    require(
+        nested_return.return_type
+                == "std::array<std::pair<int, long>, 2>"
+            && nested_return.explicit_declared_type
+                == "std::array<std::pair<int, long>, 2>"
+            && nested_return.specifiers.has_explicit_type
+            && !nested_return.specifiers.has_deduced_type
+            && nested_return.parameters.size() == 1
+            && nested_return.parameters.front().name == "value"
+            && source_text(
+                   trailing_return_source,
+                   nested_return.declaration_head_range)
+                   .contains(
+                       "requires requires(p_value item) {\n"
+                       "        item.operator->();\n"
+                       "        []() -> int { return 0; }();\n"
+                       "    }")
+            && source_text(
+                   trailing_return_source,
+                   nested_return.body_or_initializer_range)
+                == "{\n    return {};\n}",
+        "token-slice trailing return did not preserve a nested template "
+        "type or stop before the top-level requires-clause");
+
+    const declaration_record& nested_requires_type =
+        trailing_declaration("nested_requires_type");
+    require(
+        nested_requires_type.return_type
+                == "decltype(requires {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "    })"
+            && nested_requires_type.explicit_declared_type
+                == nested_requires_type.return_type
+            && nested_requires_type.specifiers.has_explicit_type
+            && !nested_requires_type.specifiers.has_deduced_type,
+        "token-slice trailing return truncated a requires-expression "
+        "nested inside the type-id");
+
+    const declaration_record& deduced_auto =
+        trailing_declaration("deduced_auto");
+    const declaration_record& deduced_decltype =
+        trailing_declaration("deduced_decltype");
+    require(
+        deduced_auto.return_type == "auto"
+            && deduced_auto.explicit_declared_type == "auto"
+            && !deduced_auto.specifiers.has_explicit_type
+            && deduced_auto.specifiers.has_deduced_type
+            && deduced_decltype.return_type == "decltype(auto)"
+            && deduced_decltype.explicit_declared_type
+                == "decltype(auto)"
+            && !deduced_decltype.specifiers.has_explicit_type
+            && deduced_decltype.specifiers.has_deduced_type,
+        "token-slice genuinely deduced function returns became explicit");
+
+    const declaration_record& arrow_noise =
+        trailing_declaration("arrow_noise");
+    const declaration_record& lambda_holder =
+        trailing_declaration("lambda_holder");
+    require(
+        arrow_noise.return_type == "auto"
+            && arrow_noise.specifiers.has_deduced_type
+            && !arrow_noise.specifiers.has_explicit_type
+            && lambda_holder.kind == declaration_kind::variable
+            && lambda_holder.explicit_declared_type == "auto"
+            && lambda_holder.specifiers.has_deduced_type,
+        "nested lambda or operator-> tokens created a false trailing return");
+
+    for (const std::string_view malformed_name : {
+             std::string_view{"missing_type"},
+             std::string_view{"unbalanced_type"},
+         }) {
+        const declaration_record& malformed =
+            trailing_declaration(malformed_name);
+        require(
+            malformed.return_type.empty()
+                && malformed.explicit_declared_type.empty()
+                && !malformed.specifiers.has_explicit_type
+                && !malformed.specifiers.has_deduced_type,
+            "malformed trailing return invented a declared type for "
+                + std::string{malformed_name});
+    }
+
+    constexpr std::string_view structural_trailing_source = R"CPP(
+namespace fixture::structural_trailing {
+struct pointer_like {
+    [[bioseq_sql::function]]
+    auto operator->() const noexcept { return this; }
+
+    template <class p_value>
+    [[bioseq_sql::function]]
+    auto qualified(p_value value) const & noexcept(noexcept(value))
+        [[maybe_unused]]
+        -> std::array<std::pair<int, long>, 2>
+        requires (sizeof(p_value) > 0) {
+        return {};
+    }
+};
+
+[[bioseq_sql::function]]
+auto nested_arrow_noise() noexcept(noexcept(
+    []() -> int { return 0; }())) {
+    return 0;
+}
+
+[[bioseq_sql::function]]
+decltype(auto) source_deduced() { return (nested_arrow_noise()); }
+}
+)CPP";
+    const translation_unit structural_trailing = scan_translation_unit(
+        "structural_trailing_contract.cppm",
+        structural_trailing_source);
+    const auto structural_declaration =
+        [&structural_trailing](std::string_view name)
+        -> const declaration_record& {
+        const auto found = std::ranges::find(
+            structural_trailing.declarations,
+            name,
+            &declaration_record::name);
+        if (found == structural_trailing.declarations.end()) {
+            throw std::runtime_error(
+                "PREPARE structural trailing-return fixture cannot find '"
+                + std::string{name} + "'");
+        }
+        return *found;
+    };
+    const declaration_record& qualified =
+        structural_declaration("qualified");
+    const declaration_record& operator_arrow =
+        structural_declaration("operator");
+    const declaration_record& nested_arrow_noise =
+        structural_declaration("nested_arrow_noise");
+    const declaration_record& source_deduced =
+        structural_declaration("source_deduced");
+    require(
+        qualified.return_type
+                == "std::array<std::pair<int, long>, 2>"
+            && qualified.explicit_declared_type
+                == "std::array<std::pair<int, long>, 2>"
+            && qualified.specifiers.has_explicit_type
+            && !qualified.specifiers.has_deduced_type
+            && qualified.parameters.size() == 1
+            && qualified.parameters.front().name == "value"
+            && operator_arrow.return_type == "auto"
+            && operator_arrow.specifiers.has_deduced_type
+            && !operator_arrow.specifiers.has_explicit_type
+            && nested_arrow_noise.return_type == "auto"
+            && nested_arrow_noise.specifiers.has_deduced_type
+            && !nested_arrow_noise.specifiers.has_explicit_type
+            && source_deduced.return_type == "decltype(auto)"
+            && source_deduced.specifiers.has_deduced_type
+            && !source_deduced.specifiers.has_explicit_type,
+        "source-only structural entry points disagree on trailing-return "
+        "or deduced-return facts");
+
     constexpr std::string_view probe_source = R"CPP(
 export module fixture.declaration_probe;
 export namespace bioseq::fixture {

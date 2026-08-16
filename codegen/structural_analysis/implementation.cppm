@@ -938,7 +938,9 @@ inline void adjust_angle_depth(
         if (token == "(") {
             if (!first_parenthesis && !saw_initializer_equals
                 && parentheses == 0 && brackets == 0 && braces == 0
-                && angles == 0) {
+                && angles == 0
+                && (terminator == declaration_begin
+                    || tokens[terminator - 1].spelling != "decltype")) {
                 first_parenthesis = terminator;
             }
             ++parentheses;
@@ -2934,7 +2936,9 @@ slice_direct_declaration_bounds(
 
         if (spelling == "(") {
             if (type_top_level && !saw_initializer
-                && !result.first_parenthesis) {
+                && !result.first_parenthesis
+                && (cursor == begin
+                    || tokens[cursor - 1].spelling != "decltype")) {
                 result.first_parenthesis = cursor;
             }
             ++parentheses;
@@ -3066,6 +3070,312 @@ previous_identifier_token(
         tokens[name_token].range.begin.byte_offset;
     return std::string{trim_view(
         source.substr(byte_begin, byte_end - byte_begin))};
+}
+
+enum class trailing_return_scan_state {
+    absent,
+    valid,
+    malformed,
+};
+
+struct trailing_return_scan {
+    trailing_return_scan_state state{trailing_return_scan_state::absent};
+    std::size_t type_begin{};
+    std::size_t type_end{};
+};
+
+[[nodiscard]] constexpr trailing_return_scan
+malformed_trailing_return() noexcept {
+    return {
+        .state = trailing_return_scan_state::malformed,
+    };
+}
+
+struct return_arrow_scan {
+    std::optional<std::size_t> arrow;
+    bool balanced{true};
+};
+
+/// Finds only a delimiter-level arrow after a function parameter list. A
+/// top-level requires-clause ends the declarator prefix being searched.
+[[nodiscard]] inline return_arrow_scan find_return_arrow(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    int parentheses = 0;
+    int brackets = 0;
+    int braces = 0;
+    for (std::size_t cursor = parameter_close + 1;
+         cursor < declarator_end;
+         ++cursor) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > declarator_end) {
+                return {.balanced = false};
+            }
+            cursor = attribute_ends[cursor] - 1;
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        const bool top_level = parentheses == 0 && brackets == 0
+            && braces == 0;
+        if (top_level
+            && (spelling == "requires" || spelling == "="
+                || spelling == "try")) {
+            break;
+        }
+        if (top_level && spelling == "->") {
+            return {.arrow = cursor};
+        }
+        if (spelling == "(") {
+            ++parentheses;
+        } else if (spelling == ")") {
+            --parentheses;
+        } else if (spelling == "[") {
+            ++brackets;
+        } else if (spelling == "]") {
+            --brackets;
+        } else if (spelling == "{") {
+            ++braces;
+        } else if (spelling == "}") {
+            --braces;
+        }
+        if (parentheses < 0 || brackets < 0 || braces < 0) {
+            return {.balanced = false};
+        }
+    }
+    return {
+        .balanced = parentheses == 0 && brackets == 0 && braces == 0,
+    };
+}
+
+/// Accepts the closed qualifier grammar between parameters and `->`.
+[[nodiscard]] inline bool valid_trailing_return_prefix(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t arrow) {
+    enum class prefix_stage {
+        cv_qualifiers,
+        ref_qualifier,
+        exception_specification,
+    };
+    prefix_stage stage = prefix_stage::cv_qualifiers;
+    bool saw_const = false;
+    bool saw_volatile = false;
+    bool saw_ref_qualifier = false;
+    bool saw_exception_specification = false;
+    for (std::size_t cursor = parameter_close + 1;
+         cursor < arrow;) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > arrow) return false;
+            cursor = attribute_ends[cursor];
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        if (spelling == "const" || spelling == "volatile") {
+            bool& seen = spelling == "const" ? saw_const : saw_volatile;
+            if (stage != prefix_stage::cv_qualifiers || seen) return false;
+            seen = true;
+            ++cursor;
+            continue;
+        }
+        if (spelling == "&" || spelling == "&&") {
+            if (stage == prefix_stage::exception_specification
+                || saw_ref_qualifier) {
+                return false;
+            }
+            saw_ref_qualifier = true;
+            stage = prefix_stage::ref_qualifier;
+            ++cursor;
+            continue;
+        }
+        if (spelling != "noexcept"
+            || saw_exception_specification) {
+            return false;
+        }
+        saw_exception_specification = true;
+        stage = prefix_stage::exception_specification;
+        ++cursor;
+        if (cursor < arrow && tokens[cursor].spelling == "(") {
+            const std::optional<std::size_t> close = matching_token(
+                tokens, cursor, "(", ")");
+            if (!close || *close == cursor + 1 || *close >= arrow) {
+                return false;
+            }
+            cursor = *close + 1;
+        }
+    }
+    return true;
+}
+
+/// Updates the balanced type-id delimiter stack. Greater-than operators
+/// nested in expressions remain ordinary tokens unless they close `<`.
+[[nodiscard]] inline bool consume_trailing_type_delimiter(
+    std::string_view spelling,
+    std::vector<char>& delimiters) {
+    if (spelling == "(" || spelling == "[" || spelling == "{"
+        || spelling == "<") {
+        delimiters.push_back(spelling.front());
+        return true;
+    }
+    const auto close = [&delimiters](char expected) {
+        if (delimiters.empty() || delimiters.back() != expected) {
+            return false;
+        }
+        delimiters.pop_back();
+        return true;
+    };
+    if (spelling == ")") return close('(');
+    if (spelling == "]") return close('[');
+    if (spelling == "}") return close('{');
+    if (spelling == ">") {
+        if (!delimiters.empty() && delimiters.back() == '<') {
+            return close('<');
+        }
+        return !delimiters.empty();
+    }
+    if (spelling == ">>") {
+        if (delimiters.size() >= 2
+            && delimiters.back() == '<'
+            && delimiters[delimiters.size() - 2] == '<') {
+            delimiters.pop_back();
+            delimiters.pop_back();
+            return true;
+        }
+        return !delimiters.empty();
+    }
+    return true;
+}
+
+/// Parses the balanced type-id following a proven trailing-return arrow.
+[[nodiscard]] inline trailing_return_scan scan_trailing_type_id(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t arrow,
+    std::size_t declarator_end) {
+    const std::size_t type_begin = arrow + 1;
+    std::size_t type_end = declarator_end;
+    std::vector<char> delimiters;
+    std::optional<std::string_view> first_token;
+    std::optional<std::string_view> last_token;
+    for (std::size_t cursor = type_begin; cursor < declarator_end;) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > declarator_end) {
+                return malformed_trailing_return();
+            }
+            cursor = attribute_ends[cursor];
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        const bool top_level = delimiters.empty();
+        const bool terminal_specifier = spelling == "="
+            || spelling == "try"
+            || ((spelling == "override" || spelling == "final")
+                && first_token.has_value());
+        if (top_level && (spelling == "requires" || terminal_specifier)) {
+            type_end = cursor;
+            break;
+        }
+        if (top_level
+            && (spelling == "->" || spelling == ","
+                || spelling == ";")) {
+            return malformed_trailing_return();
+        }
+        if (!first_token) first_token = spelling;
+        last_token = spelling;
+        if (!consume_trailing_type_delimiter(spelling, delimiters)) {
+            return malformed_trailing_return();
+        }
+        ++cursor;
+    }
+
+    const auto begins_type = [](std::string_view spelling) noexcept {
+        return !spelling.empty()
+            && (identifier_begin(spelling.front()) || spelling == "::");
+    };
+    const auto ends_type = [](std::string_view spelling) noexcept {
+        return !spelling.empty()
+            && (identifier_begin(spelling.front()) || spelling == ">"
+                || spelling == ">>" || spelling == ")"
+                || spelling == "]" || spelling == "*"
+                || spelling == "&" || spelling == "&&"
+                || spelling == "...");
+    };
+    if (type_begin >= type_end || !delimiters.empty()
+        || !first_token || !last_token
+        || !begins_type(*first_token) || !ends_type(*last_token)) {
+        return malformed_trailing_return();
+    }
+    return {
+        .state = trailing_return_scan_state::valid,
+        .type_begin = type_begin,
+        .type_end = type_end,
+    };
+}
+
+/// Finds a function's trailing return type without entering its body. The
+/// prefix grammar is deliberately closed to cv/ref qualifiers, attributes,
+/// and noexcept; nested arrows are ignored inside balanced token groups.
+[[nodiscard]] inline trailing_return_scan scan_trailing_return_type(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    if (parameter_close >= declarator_end
+        || declarator_end > tokens.size()) {
+        return malformed_trailing_return();
+    }
+    const return_arrow_scan arrow = find_return_arrow(
+        tokens, attribute_ends, parameter_close, declarator_end);
+    if (!arrow.balanced) return malformed_trailing_return();
+    if (!arrow.arrow) return {};
+    if (!valid_trailing_return_prefix(
+            tokens, attribute_ends, parameter_close, *arrow.arrow)) {
+        return malformed_trailing_return();
+    }
+    return scan_trailing_type_id(
+        tokens, attribute_ends, *arrow.arrow, declarator_end);
+}
+
+/// Returns the source-spelled return type for a function declarator. A
+/// malformed trailing return suppresses the leading placeholder so callers
+/// cannot accidentally treat an invalid declaration as explicitly typed.
+[[nodiscard]] inline std::string function_return_type_spelling(
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t declaration_begin,
+    std::size_t name_token,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    const trailing_return_scan trailing = scan_trailing_return_type(
+        tokens, attribute_ends, parameter_close, declarator_end);
+    if (trailing.state == trailing_return_scan_state::malformed) {
+        return {};
+    }
+    if (trailing.state == trailing_return_scan_state::valid) {
+        return std::string{trim_view(source_between(
+            source, tokens, trailing.type_begin, trailing.type_end))};
+    }
+    return explicit_type_before_name(
+        source,
+        tokens,
+        attribute_ends,
+        declaration_begin,
+        name_token);
+}
+
+/// Reports whether a source-spelled declared type is a deduced placeholder.
+[[nodiscard]] inline bool is_deduced_declared_type(
+    std::string_view spelling) {
+    std::string compact;
+    compact.reserve(spelling.size());
+    std::ranges::copy_if(
+        spelling,
+        std::back_inserter(compact),
+        [](char value) { return !ascii_space(value); });
+    return compact == "auto" || compact == "decltype(auto)";
 }
 
 [[nodiscard]] inline declaration_record make_sliced_declaration(
@@ -3295,12 +3605,22 @@ previous_identifier_token(
             payload_range.begin.byte_offset,
             payload_range.end.byte_offset
                 - payload_range.begin.byte_offset))};
+    } else if (kind == declaration_kind::function && name_token
+               && bounds.parameter_close) {
+        explicit_type = function_return_type_spelling(
+            source,
+            tokens,
+            attribute_ends,
+            begin,
+            *name_token,
+            *bounds.parameter_close,
+            head_end);
     } else if (name_token) {
         explicit_type = explicit_type_before_name(
             source, tokens, attribute_ends, begin, *name_token);
     }
-    const bool has_deduced_type = explicit_type == "auto"
-        || explicit_type.contains("decltype(auto)");
+    const bool has_deduced_type =
+        is_deduced_declared_type(explicit_type);
     const bool has_default_arguments =
         kind == declaration_kind::function
         && bounds.first_parenthesis
@@ -3816,6 +4136,8 @@ inline void validate_body_free_probe_syntax(
     const auto [tokens, comments] = detail::lex_source(source);
     const std::vector<detail::attribute_block> blocks =
         detail::collect_attribute_blocks(source, tokens);
+    const std::vector<std::size_t> attribute_ends =
+        detail::attribute_end_by_begin(tokens.size(), blocks);
     const std::vector<detail::scope_region> scopes =
         detail::collect_scopes(tokens, blocks);
 
@@ -3913,16 +4235,47 @@ inline void validate_body_free_probe_syntax(
             }
             if (subject.kind == declaration_kind::function
                 && subject.open_parenthesis && subject.close_parenthesis) {
-                declaration.return_type = detail::source_between(
-                    source,
-                    tokens,
-                    subject.token_begin,
-                    subject.name_token);
+                const detail::sliced_declaration_bounds bounds =
+                    detail::slice_direct_declaration_bounds(
+                        source_path,
+                        tokens,
+                        attribute_ends,
+                        {},
+                        subject.token_begin,
+                        tokens.size());
+                if (!bounds.first_parenthesis
+                    || !bounds.parameter_close) {
+                    throw std::runtime_error(
+                        source_path.string() + ":"
+                        + std::to_string(
+                            tokens[subject.name_token].range.begin.line)
+                        + ": token slicer lost function parameter bounds");
+                }
+                const std::size_t head_end = bounds.body_open.value_or(
+                    bounds.initializer.value_or(
+                        bounds.semicolon.value_or(bounds.token_end)));
+                declaration.return_type =
+                    detail::function_return_type_spelling(
+                        source,
+                        tokens,
+                        attribute_ends,
+                        subject.token_begin,
+                        subject.name_token,
+                        *bounds.parameter_close,
+                        head_end);
+                declaration.explicit_declared_type =
+                    declaration.return_type;
+                declaration.specifiers.has_deduced_type =
+                    detail::is_deduced_declared_type(
+                        declaration.return_type);
+                declaration.specifiers.has_explicit_type =
+                    !declaration.return_type.empty()
+                    && !declaration.specifiers.has_deduced_type;
                 declaration.parameters = detail::parse_parameters(
                     source,
                     tokens,
-                    *subject.open_parenthesis,
-                    *subject.close_parenthesis,
+                    *bounds.first_parenthesis,
+                    *bounds.parameter_close,
                     blocks);
                 std::size_t body_open = *subject.close_parenthesis + 1;
                 while (body_open < tokens.size()

@@ -806,6 +806,18 @@ inline void verify_malformed_materialization_sources() {
     reject_source(
         std::move(conditional),
         "preprocessor directives inside the materialization namespace fail closed");
+    reject_source(
+        replace_once(
+            std::string{fixture_source()},
+            "Value leaf(std::uint8_t abi_code, int value)",
+            "auto leaf(std::uint8_t abi_code, int value)"),
+        "a genuinely deduced auto entry return remains rejected");
+    reject_source(
+        replace_once(
+            std::string{fixture_source()},
+            "long root(std::uint8_t abi_code, int value)",
+            "decltype(auto) root(std::uint8_t abi_code, int value)"),
+        "a genuinely deduced decltype(auto) entry return remains rejected");
 
     reject_source(
         R"CPP(export module malformed.prefix_binding;
