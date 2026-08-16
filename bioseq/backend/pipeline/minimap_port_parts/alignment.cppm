@@ -2,6 +2,10 @@
  * @file pipeline/minimap_port_parts/alignment.cppm
  * @brief Scalar and Block Aligner region-extension execution.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.minimap_port:alignment;
 
 import std;
@@ -21,6 +25,11 @@ import bioseq.storage.lazy_sequence;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.pipeline_ops;
+
+// Merge libc++'s aligned allocation declaration into this module attachment.
+static_assert(requires {
+    ::operator new(std::size_t{}, std::align_val_t{});
+});
 
 export namespace bioseq::simd {
 
