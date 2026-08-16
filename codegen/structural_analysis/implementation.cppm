@@ -2761,6 +2761,35 @@ struct sliced_declaration_bounds {
     bool multiple_declarators{};
 };
 
+/// Tracks only the top-level requires grammar following a function parameter
+/// list. A requires-expression body is introduced by a second top-level
+/// `requires`; nested requires tokens never advance this state.
+struct trailing_requires_state {
+    enum class stage {
+        before_clause,
+        constraint_expression,
+        requires_expression,
+    };
+
+    stage current{stage::before_clause};
+
+    /// Consumes one top-level suffix token and reports whether its opening
+    /// brace belongs to a requires-expression rather than the function body.
+    [[nodiscard]] constexpr bool consume(
+        std::string_view spelling) noexcept {
+        if (spelling == "requires") {
+            current = current == stage::before_clause
+                ? stage::constraint_expression
+                : stage::requires_expression;
+            return false;
+        }
+        if (current != stage::requires_expression) return false;
+        if (spelling == "(") return false;
+        current = stage::constraint_expression;
+        return spelling == "{";
+    }
+};
+
 [[nodiscard]] inline std::vector<std::size_t> attribute_end_by_begin(
     std::size_t token_count,
     const std::vector<attribute_block>& blocks) {
@@ -2803,7 +2832,7 @@ slice_direct_declaration_bounds(
     bool declaration_scope = false;
     bool constructor_initializer = false;
     bool constructor_component_complete = false;
-    bool skipped_requires_body = false;
+    trailing_requires_state trailing_requires;
     for (std::size_t cursor = begin; cursor < limit; ++cursor) {
         if (attribute_ends[cursor] > cursor) {
             cursor = attribute_ends[cursor] - 1;
@@ -2820,10 +2849,13 @@ slice_direct_declaration_bounds(
             && brackets == 0;
         const bool type_top_level = delimiter_top_level
             && angles == 0;
+        const bool after_function_parameters =
+            result.parameter_close
+            && cursor > *result.parameter_close;
+        const bool requires_expression_body = type_top_level
+            && after_function_parameters
+            && trailing_requires.consume(spelling);
         if (type_top_level && spelling == "=") {
-            const bool after_function_parameters =
-                result.parameter_close
-                && cursor > *result.parameter_close;
             const bool special_function_definition =
                 after_function_parameters
                 && cursor + 1 < limit
@@ -2880,41 +2912,11 @@ slice_direct_declaration_bounds(
                 && cursor > begin
                 && tokens[cursor - 1].spelling != ")"
                 && tokens[cursor - 1].spelling != "}";
-            bool requires_expression_body = false;
-            if (declaration_scope && !skipped_requires_body
-                && result.parameter_close
-                && cursor > *result.parameter_close) {
-                const auto requires_token = std::ranges::find_if(
-                    tokens.begin()
-                        + static_cast<std::ptrdiff_t>(
-                            *result.parameter_close + 1),
-                    tokens.begin()
-                        + static_cast<std::ptrdiff_t>(cursor),
-                    [](const lexical_token& token) {
-                        return token.spelling == "requires";
-                    });
-                if (requires_token
-                    != tokens.begin()
-                        + static_cast<std::ptrdiff_t>(cursor)) {
-                    const std::string_view previous =
-                        tokens[cursor - 1].spelling;
-                    requires_expression_body = previous == "requires"
-                        || (previous == ")"
-                            && std::ranges::count_if(
-                                requires_token,
-                                tokens.begin()
-                                    + static_cast<std::ptrdiff_t>(cursor),
-                                [](const lexical_token& token) {
-                                    return token.spelling == "requires";
-                                }) >= 2);
-                }
-            }
             if (constructor_braced_initializer
                 || requires_expression_body) {
                 cursor = *close;
                 constructor_component_complete =
                     constructor_braced_initializer;
-                skipped_requires_body = requires_expression_body;
                 continue;
             }
             if (declaration_scope && !saw_initializer) {
@@ -4277,25 +4279,15 @@ inline void validate_body_free_probe_syntax(
                     *bounds.first_parenthesis,
                     *bounds.parameter_close,
                     blocks);
-                std::size_t body_open = *subject.close_parenthesis + 1;
-                while (body_open < tokens.size()
-                       && tokens[body_open].spelling != "{"
-                       && tokens[body_open].spelling != ";") {
-                    ++body_open;
-                }
-                if (body_open < tokens.size()
-                    && tokens[body_open].spelling == "{") {
-                    if (const auto body_close = detail::matching_token(
-                            tokens, body_open, "{", "}")) {
-                        declaration.initializer_text =
-                            detail::source_between(
-                                source,
-                                tokens,
-                                body_open + 1,
-                                *body_close);
-                        declaration.range.end =
-                            tokens[*body_close].range.end;
-                    }
+                if (bounds.body_open && bounds.body_close) {
+                    declaration.initializer_text =
+                        detail::source_between(
+                            source,
+                            tokens,
+                            *bounds.body_open + 1,
+                            *bounds.body_close);
+                    declaration.range.end =
+                        tokens[*bounds.body_close].range.end;
                 }
             }
             if (subject.kind == declaration_kind::variable

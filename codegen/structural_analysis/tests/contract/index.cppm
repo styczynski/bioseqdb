@@ -959,7 +959,10 @@ using value_type = int;
 
 template <class p_value>
 [[bioseq::template_flatten_entry("nested")]]
-auto nested(p_value value) noexcept(noexcept(value.operator->()))
+auto nested(p_value value) noexcept(noexcept(
+    [](p_value item) -> decltype(item.operator->()) {
+        return item.operator->();
+    }(value)))
     [[maybe_unused]]
     -> std::array<std::pair<int, long>, 2>
     requires requires(p_value item) {
@@ -980,6 +983,16 @@ auto nested_requires_type()
     return true;
 }
 
+auto nested_requires_noise()
+    -> decltype(requires(value_type value) {
+        requires (sizeof(value_type) > 0);
+        value_type{};
+        []() -> value_type { return {}; }();
+        value.operator->();
+    }) {
+    return true;
+}
+
 auto arrow_noise() noexcept(noexcept(
     []() -> int { return 1; }()
     + pointer_like.operator->()))
@@ -989,8 +1002,16 @@ auto arrow_noise() noexcept(noexcept(
 
 auto lambda_holder = []() -> long { return 2L; };
 
+auto trailing_deduced() -> decltype(auto) {
+    return (deduced_auto());
+}
+
 auto missing_type() -> requires true;
 auto unbalanced_type() -> std::array<int, 2;
+auto unbalanced_requires_type()
+    -> decltype(requires {
+        requires (sizeof(value_type) > 0);
+    )};
 }
 )CPP";
     const translation_unit trailing_return_slice = scan_token_slice(
@@ -1080,14 +1101,51 @@ auto unbalanced_type() -> std::array<int, 2;
             && nested_requires_type.explicit_declared_type
                 == nested_requires_type.return_type
             && nested_requires_type.specifiers.has_explicit_type
-            && !nested_requires_type.specifiers.has_deduced_type,
+            && !nested_requires_type.specifiers.has_deduced_type
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_type.declaration_head_range)
+                == "auto nested_requires_type()\n"
+                   "    -> decltype(requires {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "    }) "
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_type.body_or_initializer_range)
+                == "{\n    return true;\n}"
+            && nested_requires_type.declaration_head_range.end.byte_offset
+                == nested_requires_type.body_or_initializer_range
+                       .begin.byte_offset,
         "token-slice trailing return truncated a requires-expression "
         "nested inside the type-id");
+
+    const declaration_record& nested_requires_noise =
+        trailing_declaration("nested_requires_noise");
+    require(
+        nested_requires_noise.return_type
+                == "decltype(requires(value_type value) {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "        value_type{};\n"
+                   "        []() -> value_type { return {}; }();\n"
+                   "        value.operator->();\n"
+                   "    })"
+            && nested_requires_noise.explicit_declared_type
+                == nested_requires_noise.return_type
+            && nested_requires_noise.specifiers.has_explicit_type
+            && !nested_requires_noise.specifiers.has_deduced_type
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_noise.body_or_initializer_range)
+                == "{\n    return true;\n}",
+        "token-slice trailing type-id lost nested requirements, lambdas, "
+        "operator arrows, or expression requirements");
 
     const declaration_record& deduced_auto =
         trailing_declaration("deduced_auto");
     const declaration_record& deduced_decltype =
         trailing_declaration("deduced_decltype");
+    const declaration_record& trailing_deduced =
+        trailing_declaration("trailing_deduced");
     require(
         deduced_auto.return_type == "auto"
             && deduced_auto.explicit_declared_type == "auto"
@@ -1097,7 +1155,12 @@ auto unbalanced_type() -> std::array<int, 2;
             && deduced_decltype.explicit_declared_type
                 == "decltype(auto)"
             && !deduced_decltype.specifiers.has_explicit_type
-            && deduced_decltype.specifiers.has_deduced_type,
+            && deduced_decltype.specifiers.has_deduced_type
+            && trailing_deduced.return_type == "decltype(auto)"
+            && trailing_deduced.explicit_declared_type
+                == "decltype(auto)"
+            && !trailing_deduced.specifiers.has_explicit_type
+            && trailing_deduced.specifiers.has_deduced_type,
         "token-slice genuinely deduced function returns became explicit");
 
     const declaration_record& arrow_noise =
@@ -1116,6 +1179,7 @@ auto unbalanced_type() -> std::array<int, 2;
     for (const std::string_view malformed_name : {
              std::string_view{"missing_type"},
              std::string_view{"unbalanced_type"},
+             std::string_view{"unbalanced_requires_type"},
          }) {
         const declaration_record& malformed =
             trailing_declaration(malformed_name);
@@ -1151,6 +1215,14 @@ auto nested_arrow_noise() noexcept(noexcept(
 }
 
 [[bioseq_sql::function]]
+auto nested_requires_source()
+    -> decltype(requires {
+        requires (sizeof(int) > 0);
+    }) {
+    return true;
+}
+
+[[bioseq_sql::function]]
 decltype(auto) source_deduced() { return (nested_arrow_noise()); }
 }
 )CPP";
@@ -1177,6 +1249,8 @@ decltype(auto) source_deduced() { return (nested_arrow_noise()); }
         structural_declaration("operator");
     const declaration_record& nested_arrow_noise =
         structural_declaration("nested_arrow_noise");
+    const declaration_record& nested_requires_source =
+        structural_declaration("nested_requires_source");
     const declaration_record& source_deduced =
         structural_declaration("source_deduced");
     require(
@@ -1194,6 +1268,16 @@ decltype(auto) source_deduced() { return (nested_arrow_noise()); }
             && nested_arrow_noise.return_type == "auto"
             && nested_arrow_noise.specifiers.has_deduced_type
             && !nested_arrow_noise.specifiers.has_explicit_type
+            && nested_requires_source.return_type
+                == "decltype(requires {\n"
+                   "        requires (sizeof(int) > 0);\n"
+                   "    })"
+            && nested_requires_source.explicit_declared_type
+                == nested_requires_source.return_type
+            && nested_requires_source.specifiers.has_explicit_type
+            && !nested_requires_source.specifiers.has_deduced_type
+            && nested_requires_source.initializer_text
+                == "return true;"
             && source_deduced.return_type == "decltype(auto)"
             && source_deduced.specifiers.has_deduced_type
             && !source_deduced.specifiers.has_explicit_type,
