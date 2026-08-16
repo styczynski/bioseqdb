@@ -938,6 +938,9 @@ inline void validate_inventories(
         required_source_record{"block_aligner_dp", "alignment"},
         required_source_record{"block_aligner_traceback", "alignment"},
         required_source_record{"chaining", "chaining"},
+        required_source_record{"chaining_backtracking", "chaining"},
+        required_source_record{"chaining_candidate_scoring", "chaining"},
+        required_source_record{"chaining_forward", "chaining"},
         required_source_record{"hasher_base", "hasher_base"},
         required_source_record{"hasher_lexic", "hasher_lexic"},
         required_source_record{"hasher_minimap_int", "hasher_minimap_int"},
@@ -954,6 +957,12 @@ inline void validate_inventories(
             "minimizer_two_stack_nthash_continuation", "minimizers"},
         required_source_record{
             "minimizer_two_stack_nthash_drivers", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_chronological", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_decode", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_k15_w10", "minimizers"},
         required_source_record{
             "minimizer_two_stack_nthash_exact_vectors", "minimizers"},
         required_source_record{

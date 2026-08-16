@@ -2,8 +2,8 @@
  * @file simd.cppm
  * @brief Target-neutral contracts and facade for SIMD DP chaining.
  *
- * The complete Highway implementation is generated per target from
- * chaining_simd_kernel.cppm. This module intentionally contains no Highway
+ * The complete Highway implementation is generated per target from the
+ * chaining SIMD source modules. This module intentionally contains no Highway
  * headers, target namespaces, or runtime dispatch. Callers supply the function
  * selected once by the dispatch processor.
  */

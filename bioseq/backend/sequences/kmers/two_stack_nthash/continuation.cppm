@@ -15,6 +15,9 @@ import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
 import bioseq.highway.sources.minimizer_two_stack_nthash_exact_vectors;
+import bioseq.highway.sources.minimizer_two_stack_nthash_exact_decode;
+import bioseq.highway.sources.minimizer_two_stack_nthash_exact_k15_w10;
+import bioseq.highway.sources.minimizer_two_stack_nthash_exact_chronological;
 
 export namespace bioseq::simd {
 namespace [[bioseq::simd]] target {

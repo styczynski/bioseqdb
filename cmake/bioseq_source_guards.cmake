@@ -274,6 +274,9 @@ set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/state.cppm
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm
+  ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_decode.cppm
+  ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_k15_w10.cppm
+  ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_chronological.cppm
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm
   ${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm
@@ -326,7 +329,7 @@ function(bioseq_private_packed_access_scope_names
     set(_bioseq_scopes
       two_stack_simd_iteration_resident_kernel)
   elseif("${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm")
+      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_decode.cppm")
     set(_bioseq_scopes
       decode_packed_dna4_rank_vector
       decode_packed_nt4_rank_vector)
@@ -430,7 +433,7 @@ function(bioseq_private_packed_access_line_allowed
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm"
       OR "${_bioseq_source}" STREQUAL
-      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm"
+      "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/exact_decode.cppm"
       OR "${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_SOURCE_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm"
       OR "${_bioseq_source}" STREQUAL

@@ -299,9 +299,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # Fail closed on authored additions until their target and generator ownership
 # has been reviewed and the exact inventory count is advanced deliberately.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 326)
+if(NOT _bioseq_nopg_module_count EQUAL 332)
   message(FATAL_ERROR
-    "Domain-neutral module inventory must contain exactly 326 authored units; "
+    "Domain-neutral module inventory must contain exactly 332 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -336,6 +336,9 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/state.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/resident_stream.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_vectors.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_decode.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_k15_w10.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/exact_chronological.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/continuation.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash/drivers.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stack_nthash_kernel.cppm"
@@ -349,6 +352,9 @@ set(BIOSEQ_HIGHWAY_TARGET_TEMPLATE_MODULES
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/prefilter/sneaky_snake/kernel.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_candidate_scoring.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_forward.cppm"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_backtracking.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd_kernel.cppm"
   "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/highway_indexing_kernels.cppm")
 
