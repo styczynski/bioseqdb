@@ -16,6 +16,7 @@ module;
 #include <span>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 export module bioseq.io.compression.aligned_byte_buffer;
 

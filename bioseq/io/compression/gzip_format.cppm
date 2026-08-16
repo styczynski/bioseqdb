@@ -12,6 +12,7 @@ module;
 #include <expected>
 #include <span>
 #include <string>
+#include <utility>
 
 export module bioseq.io.compression.gzip_format;
 

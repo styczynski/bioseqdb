@@ -14,12 +14,14 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -793,13 +795,21 @@ class chunk_fetcher {
         }
     }
 
+    /// Stop background work before releasing decoder and arena state.
     ~chunk_fetcher() {
         shutdown();
     }
 
+    /// Fetchers exclusively own their task group and chunk arena.
     chunk_fetcher(const chunk_fetcher&) = delete;
+
+    /// Fetchers cannot copy active producer state into another instance.
     chunk_fetcher& operator=(const chunk_fetcher&) = delete;
+
+    /// Fetchers cannot transfer active producer state between instances.
     chunk_fetcher(chunk_fetcher&&) = delete;
+
+    /// Fetchers cannot replace their task group through move assignment.
     chunk_fetcher& operator=(chunk_fetcher&&) = delete;
 
     /// Start the background producer once.
@@ -1000,6 +1010,7 @@ class chunk_fetcher {
     // Producer (parallel-pool path)
     // -----------------------------------------------------------------
 
+    /// Plan independent chunks, decode them concurrently, and drain in order.
     void producer_loop_parallel() noexcept {
         auto members_or = detail::prescan_members(_compressed_view);
         if (!members_or) {
