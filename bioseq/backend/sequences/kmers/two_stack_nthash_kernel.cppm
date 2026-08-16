@@ -10,6 +10,7 @@ module;
 export module bioseq.highway.sources.minimizer_two_stack_nthash;
 
 import std;
+import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.highway.sources.minimizer_two_stack_nthash_state;
