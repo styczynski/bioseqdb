@@ -83,8 +83,9 @@ try_borrow_reinterpreted_packed_bytes(lazy_sequence_view<p_alphabet> view,
         if (requested_width != k_target_width || from > to || to > view.bp_size()) {
             return std::nullopt;
         }
-        if (k_bits_per_symbol == 0u || (k_source_width * CHAR_BIT) % k_bits_per_symbol != 0u ||
-            (k_target_width * CHAR_BIT) % k_bits_per_symbol != 0u) {
+        if (k_bits_per_symbol == 0u ||
+            (k_source_width * std::numeric_limits<unsigned char>::digits) % k_bits_per_symbol != 0u ||
+            (k_target_width * std::numeric_limits<unsigned char>::digits) % k_bits_per_symbol != 0u) {
             return std::nullopt;
         }
         const sequence_size_t target_letters_per_unit =
