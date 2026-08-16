@@ -1,12 +1,12 @@
 {
-  "_comment": "Real bench_framework artifacts fetched over raw HTTP. CI may update these raw paths when a newer sign-off report is published; never replace them with GitHub blob-page URLs.",
+  "_comment": "The website build copies selected bench_framework artifacts beside this manifest. Entries stay relative so browsers fetch them from the deployed site's own HTTP origin.",
   "sources": [
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bench/bench_v10_configuration.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bench/bench_e2e_configuration.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/bioseq/io/io_bench_v10_configuration.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench/report_138.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench_e2e/report_159.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_bench_e2e/report_154.json",
-    "https://raw.githubusercontent.com/styczynski/bioseqdb/main/main/reporting/bioseq_io_bench/report_7.json"
+    "benchmark-data/alignment_benchmark_configuration.json",
+    "benchmark-data/bench_e2e_configuration.json",
+    "benchmark-data/io_benchmark_configuration.json",
+    "benchmark-data/report_138.json",
+    "benchmark-data/report_159.json",
+    "benchmark-data/report_154.json",
+    "benchmark-data/report_7.json"
   ]
 }

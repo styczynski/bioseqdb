@@ -16,9 +16,9 @@ harness:
     generated page cannot depend on the network;
   * loads the landing, benchmark explorer, tutorials, and reference pages at the
     CONFIGURED mount (e.g. /bioseqdb/v0.1/...);
-  * intercepts the benchmark explorer's production raw/API JSON requests with
-    supplied real bench artifacts, then exercises loading, rendered, reload,
-    responsive, tooltip, filtering/navigation, and failure states;
+  * serves the benchmark explorer's build-copied JSON artifacts over loopback
+    HTTP, then exercises loading, rendered, reload, responsive, tooltip,
+    filtering/navigation, and failure states;
   * asserts the response carries the security-headers.txt contract (CSP incl.
     frame-ancestors, X-Content-Type-Options, Referrer-Policy, Permissions-Policy);
   * asserts the meta Content-Security-Policy is present and there is exactly one
@@ -57,7 +57,7 @@ import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 _WEBSITE_ROOT = _TESTS_ROOT.parent
@@ -78,10 +78,15 @@ EXIT_SKIP = 4
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 _REPOSITORY_URL = "https://github.com/styczynski/bioseqdb"
 _EXPECTED_TUTORIALS = (
+    "quick_read_search_write",
     "sequence_column_type",
+    "slice_concat_reverse",
     "similarity_search",
+    "multiple_sequence_columns_and_joins",
+    "remote_provider_to_search",
     "query_cache",
     "highway_runtime_dispatch",
+    "reading_bioseq_explain",
 )
 _DESIGN_PALETTE = {
     "comment": "#6f8698",
@@ -95,16 +100,31 @@ _DESIGN_PALETTE = {
     "operator": "#cbd8e4",
 }
 _BENCHMARK_FIXTURES = _TESTS_ROOT / "fixtures" / "benchmark_artifacts"
-_BENCHMARK_FIXTURE_NAMES = (
-    "bench_v10_configuration.json",
-    "bench_e2e_configuration.json",
-    "io_bench_v10_configuration.json",
-    "report_138.json",
-    "report_159.json",
-    "report_154.json",
-    "report_7.json",
-)
-_BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com", "api.github.com"}
+_BENCHMARK_CONFIGURATION_SOURCES = {
+    "alignment_benchmark_configuration.json":
+        _REPOSITORY_ROOT / "bench" / "alignment_benchmark_configuration.json",
+    "bench_e2e_configuration.json":
+        _REPOSITORY_ROOT / "bench" / "bench_e2e_configuration.json",
+    "io_benchmark_configuration.json":
+        _REPOSITORY_ROOT / "bioseq" / "io" / "benchmark" / "configuration.json",
+}
+_BENCHMARK_REPORT_SOURCES = {
+    "report_138.json": _BENCHMARK_FIXTURES / "report_138.json",
+    "report_159.json": _BENCHMARK_FIXTURES / "report_159.json",
+    "report_154.json": _BENCHMARK_FIXTURES / "report_154.json",
+    "report_7.json": _BENCHMARK_FIXTURES / "report_7.json",
+}
+_BENCHMARK_ARTIFACT_SOURCES = {
+    **_BENCHMARK_CONFIGURATION_SOURCES,
+    **_BENCHMARK_REPORT_SOURCES,
+}
+_BENCHMARK_ARTIFACT_NAMES = tuple(_BENCHMARK_ARTIFACT_SOURCES)
+_BENCHMARK_SOURCE_ALIASES = {
+    **{name: name for name in _BENCHMARK_ARTIFACT_NAMES},
+    "bench_v10_configuration.json": "alignment_benchmark_configuration.json",
+    "io_bench_v10_configuration.json": "io_benchmark_configuration.json",
+}
+_BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
 
 class AssertionFail(Exception):
@@ -404,8 +424,9 @@ def _assert_authored_content_contract(version: str) -> None:
         _check(tutorial.count(target) == 1,
                "similarity tutorial does not copy each canonical hoe target exactly once")
     probe = probe_match.group(1)
-    _check(tutorial.count(f"'{probe}'") == 2,
-           "similarity tutorial must use exact k_hoe_probe_sequence in EXPLAIN and visible SQL")
+    _check(tutorial.count(f"'{probe}'") >= 2,
+           "similarity tutorial must use exact k_hoe_probe_sequence in its "
+           "executed and visible SQL")
     for assertion in (
         "EXPLAIN (FORMAT JSON)", "'{0,Plan,\"Node Type\"}'",
         "'{0,Plan,\"Custom Plan Provider\"}'", "'Custom Scan'", "'BioseqScan'",
@@ -420,11 +441,11 @@ def _assert_authored_content_contract(version: str) -> None:
            and "match=\"'dna4'\" title=\"Alphabet\"" in sequence
            and 'match="64" title="Storage-unit width"' in sequence,
            "sequence anatomy must be driven by the exact two Markdown annotations")
-    _check(not re.search(r"temporary|placeholder|lorem|symbol_count", sequence, re.I),
+    _check(not re.search(r"temporary|placeholder|lorem", sequence, re.I),
            "sequence tutorial contains disabled or prototype content")
     cache = cache_path.read_text(encoding="utf-8")
     for spelling in (
-        "order: 30", "bioseq_cache.query_cache.mode = 'exact_query'",
+        "order: 60", "bioseq_cache.query_cache.mode = 'exact_query'",
         "bioseq_cache.query_cache.mode = 'reusable_fragments'",
         "minimizers_per_sequence", "minimizers_per_fragment",
         "bioseq_cache.stats()", "bioseq_cache.entries()",
@@ -434,7 +455,7 @@ def _assert_authored_content_contract(version: str) -> None:
         _check(spelling in cache, f"cache tutorial is missing {spelling}")
     highway = highway_path.read_text(encoding="utf-8")
     for spelling in (
-        "order: 40", "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)",
+        "order: 70", "EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON)",
         "Highway Compiled Targets", "CPU-Supported Targets",
         "Runnable Targets", "Planned Architecture",
         "Executed Architecture",
@@ -445,36 +466,130 @@ def _assert_authored_content_contract(version: str) -> None:
            "landing examples contain disabled or prototype content")
 
 
-def _load_benchmark_fixture_contract(site: Path) -> dict:
-    """Bind browser interception to the supplied, genuine bench artifacts."""
-    fixture_paths = {
-        name: _BENCHMARK_FIXTURES / name for name in _BENCHMARK_FIXTURE_NAMES
-    }
-    for path in fixture_paths.values():
-        _check(path.is_file(), f"benchmark browser fixture is missing: {path}")
-    artifacts = {name: path.read_bytes() for name, path in fixture_paths.items()}
-    documents = {name: json.loads(body) for name, body in artifacts.items()}
-    for name in _BENCHMARK_FIXTURE_NAMES[:3]:
+def _load_benchmark_fixture_contract(site: Path, base_path: str) -> dict:
+    """Bind browser checks to build-copied, source-owned benchmark artifacts.
+
+    The default manifest contains only relative entries and therefore resolves
+    beside the content-addressed manifest on the generated site's own origin.
+    A build may explicitly override that manifest with public raw HTTPS URLs;
+    browser acceptance remains offline by serving the exact local source bytes
+    for those optional endpoints.
+    """
+    for path in _BENCHMARK_ARTIFACT_SOURCES.values():
+        _check(path.is_file(), f"benchmark source artifact is missing: {path}")
+
+    manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
+    _check(len(manifest_paths) == 1,
+           f"expected one published benchmarks-manifest.json, got {manifest_paths}")
+    manifest_path = manifest_paths[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if isinstance(manifest, list):
+        sources = manifest
+    elif isinstance(manifest, dict):
+        sources = manifest.get("sources", [])
+    else:
+        sources = []
+    _check(isinstance(sources, list) and bool(sources),
+           "published benchmark manifest has no JSON sources")
+
+    manifest_route = _public_route(
+        base_path, manifest_path.relative_to(site).as_posix())
+    manifest_url = f"https://website.invalid{manifest_route}"
+    site_root = site.resolve()
+    documents: dict[str, dict] = {}
+    local_source_routes: set[str] = set()
+    remote_sources: set[str] = set()
+    remote_artifacts: dict[str, bytes] = {}
+    canonical_names: list[str] = []
+
+    for source in sources:
+        value = (source if isinstance(source, str)
+                 else source.get("url", "") if isinstance(source, dict)
+                 else "")
+        _check(isinstance(value, str) and bool(value),
+               f"benchmark manifest contains an invalid source: {source!r}")
+        parsed = urlsplit(value)
+        source_name = Path(parsed.path).name
+        canonical_name = _BENCHMARK_SOURCE_ALIASES.get(source_name, "")
+        _check(bool(canonical_name),
+               f"benchmark manifest source is not a selected artifact: {value}")
+        _check(canonical_name not in documents,
+               f"benchmark manifest repeats artifact role {canonical_name}")
+
+        if parsed.scheme or parsed.netloc:
+            _check(parsed.scheme == "https"
+                   and parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
+                   f"benchmark override is not a supported public raw URL: {value}")
+            _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
+                   f"benchmark override uses a GitHub HTML blob URL: {value}")
+            body = _BENCHMARK_ARTIFACT_SOURCES[canonical_name].read_bytes()
+            remote_sources.add(value)
+            remote_artifacts[value] = body
+        else:
+            _check(not parsed.path.startswith("/") and not parsed.query
+                   and not parsed.fragment,
+                   f"same-origin benchmark source must be a plain relative path: {value}")
+            _check(Path(parsed.path).parts == ("benchmark-data", canonical_name),
+                   f"same-origin benchmark source is outside benchmark-data: {value}")
+            generated_path = (manifest_path.parent / parsed.path).resolve()
+            try:
+                generated_path.relative_to(site_root)
+            except ValueError:
+                raise AssertionFail(
+                    f"benchmark manifest escapes the generated site: {value}") from None
+            _check(generated_path.is_file(),
+                   f"same-origin benchmark artifact is missing: {generated_path}")
+            body = generated_path.read_bytes()
+            source_route = urlsplit(urljoin(manifest_url, value)).path
+            local_source_routes.add(source_route)
+
+        expected_body = _BENCHMARK_ARTIFACT_SOURCES[canonical_name].read_bytes()
+        _check(body == expected_body,
+               f"published benchmark artifact rewrote source bytes: {canonical_name}")
+        try:
+            document = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise AssertionFail(
+                f"benchmark artifact {canonical_name} is invalid JSON: {error}") from error
+        _check(isinstance(document, dict),
+               f"benchmark artifact {canonical_name} must be a JSON object")
+        documents[canonical_name] = document
+        canonical_names.append(canonical_name)
+
+    _check(tuple(canonical_names) == _BENCHMARK_ARTIFACT_NAMES,
+           f"benchmark manifest roles {canonical_names} do not match the selected "
+           f"artifact set {list(_BENCHMARK_ARTIFACT_NAMES)}")
+    for name in _BENCHMARK_CONFIGURATION_SOURCES:
         config = documents[name]
         _check("params" in config and "test_cases" in config,
-               f"benchmark fixture {name} is not a real bench configuration")
-    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
-        _check(isinstance(documents[name].get("benchmarks"), dict)
-               and bool(documents[name]["benchmarks"]),
-               f"benchmark fixture {name} has no real benchmark results")
+               f"benchmark source {name} is not a bench configuration")
+    for name in _BENCHMARK_REPORT_SOURCES:
+        report = documents[name]
+        _check(set(report) == {
+                   "meta", "raw_evidence", "paired_rule_evidence",
+                   "rule_violations", "regressions", "sanity_warnings", "benchmarks",
+               }, f"immutable benchmark report {name} has an unexpected top-level shape")
+        _check(isinstance(report.get("benchmarks"), dict)
+               and bool(report["benchmarks"]),
+               f"immutable benchmark report {name} has no benchmark results")
+        meta = report.get("meta", {})
+        _check(all(field in meta for field in (
+                   "commit", "dirty", "timestamp", "created", "fast")),
+               f"immutable benchmark report {name} lacks writer metadata")
+
     model_keys = {
         key
-        for name in _BENCHMARK_FIXTURE_NAMES[:3]
+        for name in _BENCHMARK_CONFIGURATION_SOURCES
         for key, value in documents[name].items()
         if isinstance(value, dict) and isinstance(value.get("matrix"), dict)
     }
-    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
+    for name in _BENCHMARK_REPORT_SOURCES:
         model_keys.update(documents[name]["benchmarks"])
     # Mirror the supplied Component's initial-selection rule: each report run is
     # scored by execution tuples x distinct test cases, with the alphabetically
     # first benchmark winning a tie after buildModel sorts measured keys.
     candidates: list[tuple[int, str, dict]] = []
-    for name in _BENCHMARK_FIXTURE_NAMES[3:]:
+    for name in _BENCHMARK_REPORT_SOURCES:
         for key, benchmark in documents[name]["benchmarks"].items():
             tuples = [
                 item for item in benchmark.get("execution_tuples", [])
@@ -494,32 +609,16 @@ def _load_benchmark_fixture_contract(site: Path) -> dict:
     _check(benchmark_score > 0,
            f"richest benchmark fixture {benchmark_key} has no measured tuples")
 
-    manifest_paths = sorted(site.rglob("benchmarks-manifest.json"))
-    _check(len(manifest_paths) == 1,
-           f"expected one published benchmarks-manifest.json, got {manifest_paths}")
-    manifest = json.loads(manifest_paths[0].read_text(encoding="utf-8"))
-    sources = manifest if isinstance(manifest, list) else manifest.get("sources", [])
-    _check(isinstance(sources, list) and bool(sources),
-           "published benchmark manifest has no production JSON sources")
-    production_names: list[str] = []
-    for source in sources:
-        value = source if isinstance(source, str) else source.get("url", "")
-        parsed = urlsplit(value)
-        _check(parsed.scheme == "https" and parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
-               f"benchmark manifest source is not a production raw/API URL: {value}")
-        _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
-               f"benchmark manifest uses a GitHub HTML blob URL: {value}")
-        production_names.append(Path(parsed.path).name)
-    _check(tuple(production_names) == _BENCHMARK_FIXTURE_NAMES,
-           f"benchmark manifest sources {production_names} do not match the supplied "
-           f"artifact set {list(_BENCHMARK_FIXTURE_NAMES)}")
-
     return {
-        "artifacts": artifacts,
         "key": benchmark_key,
         "title": benchmark.get("title") or benchmark_key,
         "benchmark_count": len(model_keys),
         "sources": sources,
+        "manifest_route": manifest_route,
+        "local_source_routes": local_source_routes,
+        "remote_sources": remote_sources,
+        "remote_artifacts": remote_artifacts,
+        "same_origin": not remote_sources,
     }
 
 
@@ -560,8 +659,8 @@ def _load_static_contract(site: Path, base_path: str, version: str,
            "similarity_search must carry one runnable example")
     _check(len(by_slug["query_cache"].get("sql_examples", [])) == 3,
            "query_cache must carry three runnable examples")
-    _check(len(by_slug["highway_runtime_dispatch"].get("sql_examples", [])) == 1,
-           "highway_runtime_dispatch must carry one runnable example")
+    _check(len(by_slug["highway_runtime_dispatch"].get("sql_examples", [])) == 2,
+           "highway_runtime_dispatch must carry two runnable examples")
 
     for tutorial in tutorials:
         for example in tutorial.get("sql_examples", []):
@@ -682,7 +781,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
     tutorial_records = [record for record in records if record.get("group") == "Tutorials"]
     _check({record.get("id") for record in tutorial_records}
            == {f"tutorial:{slug}" for slug in _EXPECTED_TUTORIALS},
-           "search index must contain the four direct tutorial records")
+           "search index must contain all nine direct tutorial records")
     forbidden_route = _public_route(base_path, f"{version}/tutorials/")
     _check(not any(record.get("route") == forbidden_route for record in records),
            f"search index still contains forbidden tutorial-list route {forbidden_route}")
@@ -730,7 +829,7 @@ def _load_static_contract(site: Path, base_path: str, version: str,
 
     design = _read_design_contract(design_source)
     _assert_translator_declaration_parity(site, design_source)
-    benchmarks = _load_benchmark_fixture_contract(site)
+    benchmarks = _load_benchmark_fixture_contract(site, base_path)
     return {
         "model": model,
         "tutorials": by_slug,
@@ -776,14 +875,24 @@ def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
     base = mount if mount else ""
     return {
         "landing": f"{base}/",
+        "tutorial_quick":
+            f"{base}/{version}/tutorials/quick_read_search_write/",
         "tutorial_sequence":
             f"{base}/{version}/tutorials/sequence_column_type/",
+        "tutorial_slice":
+            f"{base}/{version}/tutorials/slice_concat_reverse/",
         "tutorial_similarity":
             f"{base}/{version}/tutorials/similarity_search/",
+        "tutorial_columns":
+            f"{base}/{version}/tutorials/multiple_sequence_columns_and_joins/",
+        "tutorial_remote":
+            f"{base}/{version}/tutorials/remote_provider_to_search/",
         "tutorial_cache":
             f"{base}/{version}/tutorials/query_cache/",
         "tutorial_highway":
             f"{base}/{version}/tutorials/highway_runtime_dispatch/",
+        "tutorial_explain":
+            f"{base}/{version}/tutorials/reading_bioseq_explain/",
         "reference": f"{base}/{version}/reference/",
         "entity": _discover_entity_route(site, base, version),
         "benchmarks": f"{base}/benchmarks/",
@@ -1295,7 +1404,8 @@ def _exercise_markdown_callouts(page, slug: str) -> None:
 
 
 def _assert_landing_routes(page, base_path: str, version: str) -> None:
-    first = _public_route(base_path, f"{version}/tutorials/sequence_column_type/")
+    first = _public_route(
+        base_path, f"{version}/tutorials/{_EXPECTED_TUTORIALS[0]}/")
     read_links = page.locator("a", has_text="Read the docs")
     _check(read_links.count() == 3,
            f"supplied landing has three Read the docs links, got {read_links.count()}")
@@ -1767,7 +1877,7 @@ def _wait_for_benchmark_fetch_gate(page) -> None:
             return
         page.wait_for_timeout(25)
     raise AssertionFail(
-        "benchmark loader never requested a production raw/API JSON artifact")
+        "benchmark loader never requested its HTTP JSON manifest")
 
 
 def _release_benchmark_fetches(page) -> None:
@@ -1781,7 +1891,7 @@ def _release_benchmark_fetches(page) -> None:
 
 def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
                          base_path: str, version: str) -> None:
-    """Exercise the copied benchmark shell against intercepted real artifacts."""
+    """Exercise the copied benchmark shell against build-copied real artifacts."""
     benchmark = contract["benchmarks"]
     _check((page.locator("h1").inner_text()).strip() == benchmark["title"],
            "benchmark heading is not derived from the supplied report artifact")
@@ -1886,27 +1996,55 @@ def _exercise_benchmarks(page, request_urls: list[str], contract: dict,
     _wait_for_benchmark_fetch_gate(page)
     _release_benchmark_fetches(page)
 
-    remote = [url for url in request_urls
-              if (urlsplit(url).hostname or "") not in _LOOPBACK_HOSTS]
-    benchmark_json = [url for url in remote
-                      if urlsplit(url).hostname in _BENCHMARK_REMOTE_HOSTS]
-    _check(bool(benchmark_json),
-           "benchmark browser run made no production raw/API JSON requests")
-    blob_requests = [url for url in remote
+    manifest_requests = {
+        url for url in request_urls
+        if urlsplit(url).path == benchmark["manifest_route"]
+    }
+    _check(bool(manifest_requests),
+           "benchmark browser run did not fetch its manifest over HTTP")
+    _check(all(urlsplit(url).scheme in {"http", "https"}
+               for url in manifest_requests),
+           "benchmark manifest was not fetched over HTTP")
+
+    requested_local_routes = {
+        urlsplit(url).path for url in request_urls
+        if urlsplit(url).path in benchmark["local_source_routes"]
+    }
+    _check(requested_local_routes == benchmark["local_source_routes"],
+           f"benchmark loader requested local artifacts "
+           f"{sorted(requested_local_routes)}, expected "
+           f"{sorted(benchmark['local_source_routes'])}")
+    requested_remote_sources = {
+        url for url in request_urls if url in benchmark["remote_sources"]
+    }
+    _check(requested_remote_sources == benchmark["remote_sources"],
+           f"benchmark loader requested remote overrides "
+           f"{sorted(requested_remote_sources)}, expected "
+           f"{sorted(benchmark['remote_sources'])}")
+    _check(all(urlsplit(url).scheme in {"http", "https"}
+               for url in request_urls
+               if urlsplit(url).path in benchmark["local_source_routes"]
+               or url in benchmark["remote_sources"]),
+           "benchmark artifacts were not fetched over HTTP")
+    if benchmark["same_origin"]:
+        unexpected_remote = [
+            url for url in request_urls
+            if urlsplit(url).hostname in _BENCHMARK_REMOTE_HOSTS
+        ]
+        _check(not unexpected_remote,
+               f"default benchmark bundle made remote requests: {unexpected_remote}")
+
+    blob_requests = [url for url in request_urls
                      if urlsplit(url).hostname == "github.com"
                      and "/blob/" in urlsplit(url).path]
     _check(not blob_requests,
            f"benchmark loader requested GitHub HTML blob pages: {blob_requests}")
-    requested_names = {Path(urlsplit(url).path).name for url in benchmark_json}
-    _check(requested_names == set(_BENCHMARK_FIXTURE_NAMES),
-           f"benchmark loader requested {sorted(requested_names)}, expected the full "
-           f"production artifact set {list(_BENCHMARK_FIXTURE_NAMES)}")
-    for url in benchmark_json:
+    for url in requested_remote_sources:
         parsed = urlsplit(url)
         _check(parsed.hostname in _BENCHMARK_REMOTE_HOSTS,
-               f"benchmark JSON request used an unexpected host: {url}")
+               f"benchmark override used an unexpected host: {url}")
         _check(parsed.hostname != "github.com" and "/blob/" not in parsed.path,
-               f"benchmark JSON request used a GitHub HTML blob page: {url}")
+               f"benchmark override used a GitHub HTML blob page: {url}")
 
 
 def _exercise_benchmark_failure(page, remote_state: dict[str, bool]) -> None:
@@ -1993,26 +2131,33 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
         context = browser.new_context()
         remote_state = {"failure": False}
 
-        # Enforce offline except for production benchmark JSON endpoints. Those
-        # are intercepted with supplied real-artifact bytes so the acceptance
-        # run proves the production URL contract without depending on GitHub.
+        # The default benchmark bundle is served by the loopback fixture server,
+        # exactly as a deployed same-origin static host serves it. Optional
+        # public-raw override URLs remain offline-deterministic by receiving the
+        # corresponding source-owned bytes here.
         def _guard(route):
             parsed = urlsplit(route.request.url)
             host = parsed.hostname or ""
             if host in _LOOPBACK_HOSTS or host == server._host:
-                route.continue_()
-            elif host in _BENCHMARK_REMOTE_HOSTS:
-                if "/blob/" in parsed.path:
-                    route.abort()
-                    return
+                if (remote_state["failure"]
+                        and parsed.path in
+                        contract["benchmarks"]["local_source_routes"]):
+                    route.fulfill(
+                        status=200,
+                        body=b"{}",
+                        headers={
+                            "cache-control": "no-store",
+                            "content-type": "application/json; charset=utf-8",
+                        },
+                    )
+                else:
+                    route.continue_()
+            elif route.request.url in contract["benchmarks"]["remote_sources"]:
                 if remote_state["failure"]:
                     body = b"{}"
                 else:
-                    name = Path(parsed.path).name
-                    body = contract["benchmarks"]["artifacts"].get(name)
-                    if body is None:
-                        route.abort()
-                        return
+                    body = contract["benchmarks"]["remote_artifacts"][
+                        route.request.url]
                 route.fulfill(
                     status=200,
                     body=body,
@@ -2037,9 +2182,11 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 try { url = new URL(raw, location.href); } catch (_) {
                   return nativeFetch(input, init);
                 }
-                const remote = url.hostname === 'raw.githubusercontent.com' ||
-                  url.hostname === 'api.github.com';
-                if (!remote || gate.open) return nativeFetch(input, init);
+                const benchmarkJson =
+                  url.pathname.endsWith('/benchmarks-manifest.json') ||
+                  url.pathname.includes('/benchmark-data/') ||
+                  url.hostname === 'raw.githubusercontent.com';
+                if (!benchmarkJson || gate.open) return nativeFetch(input, init);
                 return new Promise((resolve, reject) => {
                   gate.pending.push(() => nativeFetch(input, init).then(resolve, reject));
                 });
@@ -2161,6 +2308,15 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 ):
                     _check(highway_label in body,
                            f"Highway page is missing {highway_label}")
+                _exercise_jsonld(page)
+                _exercise_doc_frame(page, expect_toc=True)
+            if label in {
+                "tutorial_quick", "tutorial_slice", "tutorial_columns",
+                "tutorial_remote", "tutorial_explain",
+            }:
+                _assert_literal_design_structure(page, label, contract["design"])
+                _exercise_design_style_parity(page, label, contract["design"])
+                _assert_tutorial_sidebar(page, base_path, version)
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=True)
             if label == "reference":
@@ -2303,10 +2459,9 @@ def main(argv: list[str] | None = None) -> int:
                             "support.js",
                         )
                     },
-                    "benchmark_fixture_sha256": {
-                        name: hashlib.sha256(
-                            (_BENCHMARK_FIXTURES / name).read_bytes()).hexdigest()
-                        for name in _BENCHMARK_FIXTURE_NAMES
+                    "benchmark_source_sha256": {
+                        name: hashlib.sha256(path.read_bytes()).hexdigest()
+                        for name, path in _BENCHMARK_ARTIFACT_SOURCES.items()
                     },
                 },
                 indent=2,

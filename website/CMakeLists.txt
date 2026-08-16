@@ -114,6 +114,50 @@ set(_site_config "${_source_dir}/site.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
+# The deployed default is a self-contained, same-origin benchmark bundle.  The
+# selected report payloads are immutable byte copies of their corresponding
+# main/reporting artifacts; they are copied, never parsed or rewritten.  Current
+# configuration owners are used directly so a renamed/refactored configuration
+# cannot drift behind a website-only copy.
+set(_benchmark_configuration_sources
+  "${CMAKE_SOURCE_DIR}/bench/alignment_benchmark_configuration.json"
+  "${CMAKE_SOURCE_DIR}/bench/bench_e2e_configuration.json"
+  "${CMAKE_SOURCE_DIR}/bioseq/io/benchmark/configuration.json")
+set(_benchmark_report_fixture_dir
+  "${_source_dir}/tests/fixtures/benchmark_artifacts")
+set(_benchmark_report_sources
+  "${_benchmark_report_fixture_dir}/report_138.json"
+  "${_benchmark_report_fixture_dir}/report_159.json"
+  "${_benchmark_report_fixture_dir}/report_154.json"
+  "${_benchmark_report_fixture_dir}/report_7.json")
+set(_benchmark_payload_sources
+  ${_benchmark_configuration_sources} ${_benchmark_report_sources})
+
+# An override is a checked/local manifest file whose entries may point at a
+# separately published raw HTTP endpoint.  It is intentionally a file rather
+# than a token or download URL: website builds never acquire credentials or
+# perform a network fetch while assembling the static bundle.
+set(BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE "" CACHE FILEPATH
+  "Optional benchmark manifest file; empty generates same-origin URLs")
+set(_benchmark_default_manifest
+  "${_output_root}/benchmarks-manifest.default.json")
+configure_file(
+  "${_static_dir}/benchmarks-manifest.json"
+  "${_benchmark_default_manifest}"
+  COPYONLY)
+if(BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE STREQUAL "")
+  set(_benchmark_manifest_input "${_benchmark_default_manifest}")
+else()
+  get_filename_component(_benchmark_manifest_input
+    "${BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE}" ABSOLUTE
+    BASE_DIR "${CMAKE_SOURCE_DIR}")
+  if(NOT EXISTS "${_benchmark_manifest_input}")
+    message(FATAL_ERROR
+      "website: benchmark manifest override does not exist: "
+      "${_benchmark_manifest_input}")
+  endif()
+endif()
+
 # --- Config inputs that must reconfigure on author additions -------------------
 file(GLOB_RECURSE _tutorial_md CONFIGURE_DEPENDS "${_source_dir}/${_version}/*.md")
 file(GLOB_RECURSE _template_files CONFIGURE_DEPENDS "${_templates_dir}/*.j2")
@@ -430,6 +474,58 @@ add_custom_command(
   COMMENT "website: verify non-mutating supplied-design translation parity"
   VERBATIM)
 
+# Prepare the exact static tree consumed by every render.  The source static
+# directory remains the mechanical projection of the supplied design; benchmark
+# deployment adaptation happens only in this confined build-tree copy.
+set(_render_static_dir "${_output_root}/render-static")
+set(_render_static_stamp "${_output_root}/render-static.stamp")
+set(_render_benchmark_dir "${_render_static_dir}/benchmark-data")
+set(_render_benchmark_manifest
+  "${_render_static_dir}/benchmarks-manifest.json")
+add_custom_command(
+  OUTPUT "${_render_static_stamp}"
+  BYPRODUCTS
+    "${_render_benchmark_manifest}"
+    "${_render_benchmark_dir}/alignment_benchmark_configuration.json"
+    "${_render_benchmark_dir}/bench_e2e_configuration.json"
+    "${_render_benchmark_dir}/io_benchmark_configuration.json"
+    "${_render_benchmark_dir}/report_138.json"
+    "${_render_benchmark_dir}/report_159.json"
+    "${_render_benchmark_dir}/report_154.json"
+    "${_render_benchmark_dir}/report_7.json"
+  COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_render_static_dir}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory
+          "${_static_dir}" "${_render_static_dir}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_render_benchmark_dir}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/bench/alignment_benchmark_configuration.json"
+          "${_render_benchmark_dir}/alignment_benchmark_configuration.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/bench/bench_e2e_configuration.json"
+          "${_render_benchmark_dir}/bench_e2e_configuration.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${CMAKE_SOURCE_DIR}/bioseq/io/benchmark/configuration.json"
+          "${_render_benchmark_dir}/io_benchmark_configuration.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_benchmark_report_fixture_dir}/report_138.json"
+          "${_render_benchmark_dir}/report_138.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_benchmark_report_fixture_dir}/report_159.json"
+          "${_render_benchmark_dir}/report_159.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_benchmark_report_fixture_dir}/report_154.json"
+          "${_render_benchmark_dir}/report_154.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_benchmark_report_fixture_dir}/report_7.json"
+          "${_render_benchmark_dir}/report_7.json"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_benchmark_manifest_input}" "${_render_benchmark_manifest}"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_render_static_stamp}"
+  DEPENDS "${_design_translation_stamp}" "${_benchmark_manifest_input}"
+          ${_static_files} ${_benchmark_payload_sources}
+  COMMENT "website: prepare same-origin benchmark data in the static bundle"
+  VERBATIM)
+
 # --- Pinned Python validation environment (§4.4) ------------------------------
 # The independent html5lib validator and the Playwright browser tests run in a
 # hash-locked virtualenv provisioned from tests/requirements.lock, so html5lib and
@@ -510,13 +606,14 @@ add_custom_command(
           --version "${_version}"
           --site-config "${_site_config}"
           --templates "${_templates_dir}"
-          --static "${_static_dir}"
+          --static "${_render_static_dir}"
           --base-path "${_base_path}"
           --source-revision "${_revision}"
           ${_plan_drafts_flag}
           --output "${_plan_json}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
+          "${_render_static_stamp}"
           "${_site_config}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
@@ -932,13 +1029,14 @@ add_custom_command(
           --model "${_site_model}"
           --site-config "${_site_config}"
           --templates "${_templates_dir}"
-          --static "${_static_dir}"
+          --static "${_render_static_dir}"
           --base-path "${_base_path}"
           --source-revision "${_revision}"
           --output "${_staging_dir}"
           --model-validation-stamp "${_model_validation_stamp}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
+          "${_render_static_stamp}"
           ${_template_files} ${_static_files}
   COMMENT "website: render resolved model into owner-marked staging (no database)"
   VERBATIM)
@@ -972,16 +1070,8 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
   set(_browser_deploy_stamp "${_output_root}/browser-deployment-base.stamp")
   set(_browser_root_stamp "${_output_root}/browser-root-base.stamp")
   set(_browser_bioseqdb_stamp "${_output_root}/browser-bioseqdb-base.stamp")
-  set(_benchmark_fixture_dir
-      "${CMAKE_SOURCE_DIR}/website/tests/fixtures/benchmark_artifacts")
   set(_benchmark_browser_fixtures
-      "${_benchmark_fixture_dir}/bench_v10_configuration.json"
-      "${_benchmark_fixture_dir}/bench_e2e_configuration.json"
-      "${_benchmark_fixture_dir}/io_bench_v10_configuration.json"
-      "${_benchmark_fixture_dir}/report_138.json"
-      "${_benchmark_fixture_dir}/report_159.json"
-      "${_benchmark_fixture_dir}/report_154.json"
-      "${_benchmark_fixture_dir}/report_7.json")
+      ${_benchmark_payload_sources})
   set(_fixture_root_slash "${_output_root}/fixture-root")
   set(_fixture_root_bioseqdb "${_output_root}/fixture-bioseqdb")
   add_custom_command(
@@ -990,11 +1080,11 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
                "${_browser_bioseqdb_stamp}"
     COMMAND "${_gen}" website render --model "${_site_model}"
             --site-config "${_site_config}" --templates "${_templates_dir}"
-            --static "${_static_dir}" --base-path "/"
+            --static "${_render_static_dir}" --base-path "/"
             --source-revision "${_revision}" --output "${_fixture_root_slash}"
     COMMAND "${_gen}" website render --model "${_site_model}"
             --site-config "${_site_config}" --templates "${_templates_dir}"
-            --static "${_static_dir}" --base-path "/bioseqdb/"
+            --static "${_render_static_dir}" --base-path "/bioseqdb/"
             --source-revision "${_revision}" --output "${_fixture_root_bioseqdb}"
     COMMAND "${_venv_python}"
             "${CMAKE_SOURCE_DIR}/website/tests/contract/test_generated_site_validation.py"

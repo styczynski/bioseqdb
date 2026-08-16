@@ -53,6 +53,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     import html5lib
@@ -73,6 +74,27 @@ _INLINE_HANDLERS = (
     " onclick=", " onload=", " onerror=", " onmouseover=", " onfocus=",
     " onsubmit=", " onchange=")
 _H1 = re.compile(r"<h1[\s>]", re.IGNORECASE)
+_EXPECTED_TUTORIAL_IDS = {
+    "tutorial:quick_read_search_write",
+    "tutorial:sequence_column_type",
+    "tutorial:slice_concat_reverse",
+    "tutorial:similarity_search",
+    "tutorial:multiple_sequence_columns_and_joins",
+    "tutorial:remote_provider_to_search",
+    "tutorial:query_cache",
+    "tutorial:highway_runtime_dispatch",
+    "tutorial:reading_bioseq_explain",
+}
+_EXPECTED_BENCHMARK_ARTIFACTS = (
+    "alignment_benchmark_configuration.json",
+    "bench_e2e_configuration.json",
+    "io_benchmark_configuration.json",
+    "report_138.json",
+    "report_159.json",
+    "report_154.json",
+    "report_7.json",
+)
+_BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
 # HTML namespace used by html5lib's etree treebuilder; the ``id`` attribute key
 # itself is not namespaced (verified empirically against html5lib 1.1).
@@ -275,6 +297,88 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         except Exception as error:  # noqa: BLE001
             problems.append(_fail(path, f"is not valid XML: {error}"))
 
+    # The default benchmark manifest is a same-origin static-data index. An
+    # explicit build override may instead contain public raw HTTPS URLs, but a
+    # mixed or private/blob/file/data source set is never a deployable contract.
+    benchmark_manifests = sorted(site.rglob("benchmarks-manifest.json"))
+    if len(benchmark_manifests) != 1:
+        problems.append(_fail(
+            site, f"expected one benchmark manifest, got {benchmark_manifests}"))
+    else:
+        benchmark_manifest = benchmark_manifests[0]
+        try:
+            benchmark_document = json.loads(
+                benchmark_manifest.read_text(encoding="utf-8"))
+        except Exception:  # already reported by the general JSON pass
+            benchmark_document = {}
+        if isinstance(benchmark_document, list):
+            sources = benchmark_document
+        elif isinstance(benchmark_document, dict):
+            sources = benchmark_document.get("sources", [])
+        else:
+            sources = []
+        if not isinstance(sources, list) or not sources:
+            problems.append(_fail(
+                benchmark_manifest, "has no non-empty sources array"))
+        else:
+            local_names: list[str] = []
+            remote_count = 0
+            for source in sources:
+                value = (source if isinstance(source, str)
+                         else source.get("url", "") if isinstance(source, dict)
+                         else "")
+                parsed = urlsplit(value)
+                if parsed.scheme or parsed.netloc:
+                    remote_count += 1
+                    if (parsed.scheme != "https"
+                            or parsed.hostname not in _BENCHMARK_REMOTE_HOSTS
+                            or "/blob/" in parsed.path):
+                        problems.append(_fail(
+                            benchmark_manifest,
+                            f"unsupported benchmark override URL {value!r}",
+                        ))
+                    continue
+                if (not value or parsed.path.startswith("/") or parsed.query
+                        or parsed.fragment):
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is not a plain relative path: {value!r}",
+                    ))
+                    continue
+                if Path(parsed.path).parts != (
+                        "benchmark-data", Path(parsed.path).name):
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is outside benchmark-data: {value!r}",
+                    ))
+                    continue
+                target = (benchmark_manifest.parent / parsed.path).resolve()
+                try:
+                    target.relative_to(site.resolve())
+                except ValueError:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source escapes the site: {value!r}",
+                    ))
+                    continue
+                if not target.is_file():
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source does not resolve: {value!r}",
+                    ))
+                local_names.append(Path(parsed.path).name)
+            if local_names and remote_count:
+                problems.append(_fail(
+                    benchmark_manifest,
+                    "must not mix same-origin data with remote overrides",
+                ))
+            if local_names and tuple(local_names) != _EXPECTED_BENCHMARK_ARTIFACTS:
+                problems.append(_fail(
+                    benchmark_manifest,
+                    f"same-origin benchmark inventory is {local_names}, expected "
+                    f"{list(_EXPECTED_BENCHMARK_ARTIFACTS)}",
+                ))
+
     # (2) site-manifest set-equality + per-file SHA-256 verification (§16). The
     #     external layer re-derives the tree so a typed-model manifest cannot
     #     self-certify; symlinks and special files are rejected outright.
@@ -367,12 +471,6 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                     problems.append(_fail(path, f"link {url} anchor #{frag} not found in target"))
 
     # (5) Search records, entity references, and tooltip data URLs resolve (§12.4).
-    expected_tutorial_ids = {
-        "tutorial:sequence_column_type",
-        "tutorial:similarity_search",
-        "tutorial:query_cache",
-        "tutorial:highway_runtime_dispatch",
-    }
     for search_path in site.rglob("search-index.json"):
         records = json.loads(
             search_path.read_text(encoding="utf-8")
@@ -382,10 +480,10 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             for record in records
             if record.get("group") == "Tutorials"
         }
-        if tutorial_ids != expected_tutorial_ids:
+        if tutorial_ids != _EXPECTED_TUTORIAL_IDS:
             problems.append(_fail(
                 search_path,
-                "tutorial search inventory is not the exact current four-page set",
+                "tutorial search inventory is not the exact current nine-page set",
             ))
         for record in records:
             route = record.get("route")

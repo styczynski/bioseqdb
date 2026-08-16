@@ -936,19 +936,22 @@ def benchmark_component_source(source: str) -> str:
 
 
 def validate_benchmark_manifest(source: str) -> None:
-    """Require real report/config HTTP endpoints and reject GitHub HTML pages."""
+    """Require same-origin build data or an explicit public raw HTTPS source."""
     document = json.loads(source)
     sources = document.get("sources") if isinstance(document, dict) else None
     if not isinstance(sources, list) or not sources:
         raise RuntimeError("benchmark manifest must contain a non-empty sources array")
-    allowed_prefixes = (
-        "https://raw.githubusercontent.com/",
-        "https://api.github.com/",
-    )
+    allowed_prefixes = ("https://raw.githubusercontent.com/",)
     for url in sources:
-        if not isinstance(url, str) or not url.startswith(allowed_prefixes):
-            raise RuntimeError(f"benchmark source is not a raw/API HTTPS URL: {url!r}")
-        if "/blob/" in url:
+        if not isinstance(url, str):
+            raise RuntimeError(f"benchmark source is not a URL string: {url!r}")
+        same_origin = re.fullmatch(
+            r"benchmark-data/[a-z0-9][a-z0-9_.-]*\.json", url) is not None
+        public_raw = url.startswith(allowed_prefixes)
+        if not same_origin and not public_raw:
+            raise RuntimeError(
+                f"benchmark source is not same-origin data or public raw HTTPS: {url!r}")
+        if public_raw and "/blob/" in url:
             raise RuntimeError(f"benchmark source is a GitHub blob HTML URL: {url}")
 
 
