@@ -58,15 +58,16 @@ struct compact_direct_query_set_stats {
 
 /// FNV-1a offset basis used by the compact-direct query-set checksum.
 inline constexpr std::uint64_t k_compact_direct_query_set_fnv_offset =
-    UINT64_C(1469598103934665603);
+    std::uint64_t{1469598103934665603};
 /// FNV-1a prime used by the compact-direct query-set checksum.
-inline constexpr std::uint64_t k_compact_direct_query_set_fnv_prime = UINT64_C(1099511628211);
+inline constexpr std::uint64_t k_compact_direct_query_set_fnv_prime =
+    std::uint64_t{1099511628211};
 
 /// Fold one little-endian 64-bit word into a query-set checksum.
 [[nodiscard]] constexpr std::uint64_t
 compact_direct_query_set_fnv_mix_u64(std::uint64_t hash, std::uint64_t value) noexcept {
     for (int byte_index = 0; byte_index < 8; ++byte_index) {
-        hash ^= value & UINT64_C(0xff);
+        hash ^= value & std::uint64_t{0xff};
         hash *= k_compact_direct_query_set_fnv_prime;
         value >>= 8u;
     }
@@ -352,7 +353,7 @@ struct query_occurrence_packing_layout {
     std::uint32_t query_bits = 0u;
     std::uint32_t ordinal_bits = 32u;
     std::uint64_t ordinal_capacity = std::uint64_t{1} << 32u;
-    std::uint32_t ordinal_mask = UINT32_MAX;
+    std::uint32_t ordinal_mask = std::numeric_limits<std::uint32_t>::max();
 
     [[nodiscard]] constexpr bool packed() const noexcept {
         return route == query_occurrence_route::packed;
@@ -386,7 +387,7 @@ valid_query_occurrence_packing_layout(const query_occurrence_packing_layout& lay
                                      : (std::uint64_t{1} << expected_ordinal_bits);
     const std::uint32_t expected_ordinal_mask =
         expected_ordinal_bits == 32u
-            ? UINT32_MAX
+            ? std::numeric_limits<std::uint32_t>::max()
             : static_cast<std::uint32_t>((std::uint32_t{1} << expected_ordinal_bits) - 1u);
     return layout.query_bits == expected_query_bits &&
            layout.ordinal_bits == expected_ordinal_bits &&
@@ -414,7 +415,7 @@ plan_query_occurrence_packing(std::uint64_t query_count,
     const std::uint64_t ordinal_capacity =
         ordinal_bits == 32u ? (std::uint64_t{1} << 32u) : (std::uint64_t{1} << ordinal_bits);
     const std::uint32_t ordinal_mask =
-        ordinal_bits == 32u ? UINT32_MAX
+        ordinal_bits == 32u ? std::numeric_limits<std::uint32_t>::max()
                             : static_cast<std::uint32_t>((std::uint32_t{1} << ordinal_bits) - 1u);
     return query_occurrence_packing_layout{
         .route = largest_query_occurrence_count <= ordinal_capacity ? query_occurrence_route::packed
