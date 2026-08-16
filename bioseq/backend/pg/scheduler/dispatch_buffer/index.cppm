@@ -311,40 +311,40 @@ public:
         TupleTableSlot* query_slot = nullptr;
     };
 
-	/* PG_TRY is sigsetjmp-based, so mutable automatic C++ objects become
-	 * indeterminate after an ERROR longjmp.  Deferred Highway preparation keeps
-	 * every vector and exception receipt in this stable buffer-owned object;
-	 * only trivial scalar locals cross the inner PG_TRY boundary. */
-	struct join_cpu_preparation_scratch final {
-		std::vector<const bioseq::pg_types::seq*> query_headers{};
-		std::vector<Datum> query_recipe_datums{};
-		std::vector<pg_sequence_descriptor> query_recipe_descriptors{};
-		std::vector<std::uint64_t> query_ordinals{};
-		std::vector<bioseq::pg_types::seq*> detoast_copies{};
-		std::vector<std::vector<char>> rewidthed_query_varlenas{};
-		std::exception_ptr cpp_error{};
+    /* PG_TRY is sigsetjmp-based, so mutable automatic C++ objects become
+     * indeterminate after an ERROR longjmp.  Deferred Highway preparation keeps
+     * every vector and exception receipt in this stable buffer-owned object;
+     * only trivial scalar locals cross the inner PG_TRY boundary. */
+    struct join_cpu_preparation_scratch final {
+        std::vector<const bioseq::pg_types::seq*> query_headers{};
+        std::vector<Datum> query_recipe_datums{};
+        std::vector<pg_sequence_descriptor> query_recipe_descriptors{};
+        std::vector<std::uint64_t> query_ordinals{};
+        std::vector<bioseq::pg_types::seq*> detoast_copies{};
+        std::vector<std::vector<char>> rewidthed_query_varlenas{};
+        std::exception_ptr cpp_error{};
 
-		[[nodiscard]] bool empty() const noexcept {
-			return query_headers.empty()
-				&& query_recipe_datums.empty()
-				&& query_recipe_descriptors.empty()
-				&& query_ordinals.empty()
-				&& detoast_copies.empty()
-				&& rewidthed_query_varlenas.empty()
-				&& cpp_error == nullptr;
-		}
+        [[nodiscard]] bool empty() const noexcept {
+            return query_headers.empty()
+                && query_recipe_datums.empty()
+                && query_recipe_descriptors.empty()
+                && query_ordinals.empty()
+                && detoast_copies.empty()
+                && rewidthed_query_varlenas.empty()
+                && cpp_error == nullptr;
+        }
 
-		void clear_storage_noexcept() noexcept {
-			std::vector<const bioseq::pg_types::seq*>{}.swap(query_headers);
-			std::vector<Datum>{}.swap(query_recipe_datums);
-			std::vector<pg_sequence_descriptor>{}.swap(
-				query_recipe_descriptors);
-			std::vector<std::uint64_t>{}.swap(query_ordinals);
-			std::vector<bioseq::pg_types::seq*>{}.swap(detoast_copies);
-			std::vector<std::vector<char>>{}.swap(rewidthed_query_varlenas);
-			cpp_error = nullptr;
-		}
-	};
+        void clear_storage_noexcept() noexcept {
+            std::vector<const bioseq::pg_types::seq*>{}.swap(query_headers);
+            std::vector<Datum>{}.swap(query_recipe_datums);
+            std::vector<pg_sequence_descriptor>{}.swap(
+                query_recipe_descriptors);
+            std::vector<std::uint64_t>{}.swap(query_ordinals);
+            std::vector<bioseq::pg_types::seq*>{}.swap(detoast_copies);
+            std::vector<std::vector<char>>{}.swap(rewidthed_query_varlenas);
+            cpp_error = nullptr;
+        }
+    };
 
     struct join_output_cursor {
         std::size_t query_index = 0;
@@ -400,12 +400,12 @@ private:
     AttrNumber join_target_slot_rowno_resno = InvalidAttrNumber;
     AttrNumber join_query_slot_seq_resno = InvalidAttrNumber;
     std::vector<join_query_ref> join_queries{};
-	/* Stable query-slot references for CPU preparation.  Keeping only these
-	 * scalar descriptors before dispatch ensures that every Highway-sensitive
-	 * sketch/reader action runs below process_sequences' one selector. */
-	std::vector<join_query_ref> join_pending_cpu_preparation_queries{};
-	bool join_cpu_preparation_pending = false;
-	join_cpu_preparation_scratch join_cpu_preparation_scratch{};
+    /* Stable query-slot references for CPU preparation.  Keeping only these
+     * scalar descriptors before dispatch ensures that every Highway-sensitive
+     * sketch/reader action runs below process_sequences' one selector. */
+    std::vector<join_query_ref> join_pending_cpu_preparation_queries{};
+    bool join_cpu_preparation_pending = false;
+    join_cpu_preparation_scratch join_cpu_preparation_scratch{};
     std::map<std::uint64_t,
         std::vector<::bioseq::simd::match_result>>
         join_match_map{};
@@ -414,16 +414,16 @@ private:
     bool join_target_active = false;
     bool join_target_prepared = false;
     bool join_target_outcomes_recorded = false;
-	bool join_prepared_union_outcomes_recorded = false;
-	bool join_prepared_build_checksum_recorded = false;
-	std::optional<bioseq::storage::indexing::active_read_policy_resolution>
-		join_active_read_policy{};
-	bioseq::storage::indexing::cold_index_preparation_stats
-		join_cold_policy_stats{};
-	::bioseq::simd::batch_processor::cpu_prepared_target
-		join_cpu_prepared_target{};
-	::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target
-		join_gpu_prepared_grouped_soa_target{};
+    bool join_prepared_union_outcomes_recorded = false;
+    bool join_prepared_build_checksum_recorded = false;
+    std::optional<bioseq::storage::indexing::active_read_policy_resolution>
+        join_active_read_policy{};
+    bioseq::storage::indexing::cold_index_preparation_stats
+        join_cold_policy_stats{};
+    ::bioseq::simd::batch_processor::cpu_prepared_target
+        join_cpu_prepared_target{};
+    ::bioseq::simd::batch_processor::gpu_prepared_grouped_soa_target
+        join_gpu_prepared_grouped_soa_target{};
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> join_target_hdrs{};
     std::array<const bioseq::pg_types::seq*, dispatch_batch_capacity> join_query_hdrs{};
     std::array<int32_t, dispatch_batch_capacity> join_query_ids{};
@@ -563,10 +563,10 @@ public:
      */
     void release_per_row_slice_async_owner_after_drain();
 
-	/* batch join discovers its owner from the retained query relation.  The
-	 * binding spans every target in one executor pass, then is released only
-	 * after reset_join_runtime_for_rescan() has drained all waves. */
-	void release_join_slice_async_owner_after_drain();
+    /* batch join discovers its owner from the retained query relation.  The
+     * binding spans every target in one executor pass, then is released only
+     * after reset_join_runtime_for_rescan() has drained all waves. */
+    void release_join_slice_async_owner_after_drain();
 
     /*
      * Install the per-scan aligner parameters. Called from
@@ -681,18 +681,18 @@ public:
     void begin_join_target(TupleTableSlot* target_slot);
 
 private:
-	static void prepare_join_cpu_after_highway_selection_thunk(
-			void* state,
-			::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-			const ::bioseq::simd::minimap2_parameters& dispatched_params,
-			const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
-				typmod_ops);
+    static void prepare_join_cpu_after_highway_selection_thunk(
+            void* state,
+            ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
+            const ::bioseq::simd::minimap2_parameters& dispatched_params,
+            const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
+                typmod_ops);
 
-	void prepare_join_cpu_after_highway_selection(
-			::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
-			const ::bioseq::simd::minimap2_parameters& dispatched_params,
-			const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
-				typmod_ops);
+    void prepare_join_cpu_after_highway_selection(
+            ::bioseq::simd::batch_processor::scanner_pg_context& scanner_pg_ctx,
+            const ::bioseq::simd::minimap2_parameters& dispatched_params,
+            const ::bioseq::simd::batch_processor::cpu_preparation_typmod_operations&
+                typmod_ops);
 
 public:
 
