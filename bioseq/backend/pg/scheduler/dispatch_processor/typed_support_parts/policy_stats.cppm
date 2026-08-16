@@ -144,43 +144,57 @@ pg_gpu_index_identity(std::uint64_t rowno,
                       sequence_size_t clip_hi_bp,
                       bioseq::minimizers::minimizer_sketch_backend sketch_backend) noexcept {
     const auto scheme = bioseq::indexing::minimizer_scheme_identity_for_backend(sketch_backend);
-    std::uint64_t h = bioseq::indexing::splitmix64(rowno);
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_lo_bp) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_hi_bp) + (h << 1));
-    for (unsigned char c : index_name) {
-        h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(c) + (h << 1));
+    std::uint64_t identity_hash = bioseq::indexing::splitmix64(rowno);
+    identity_hash ^=
+        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_lo_bp) + (identity_hash << 1));
+    identity_hash ^=
+        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(clip_hi_bp) + (identity_hash << 1));
+    for (const unsigned char index_character : index_name) {
+        identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(index_character) +
+                                                      (identity_hash << 1));
     }
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(sketch_backend) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.id) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.revision) + (h << 1));
-    if (h == 0) {
-        h = 0x9e3779b97f4a7c15ULL;
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(sketch_backend) +
+                                                  (identity_hash << 1));
+    identity_hash ^=
+        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.id) + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(scheme.revision) +
+                                                  (identity_hash << 1));
+    if (identity_hash == 0) {
+        identity_hash = 0x9e3779b97f4a7c15ULL;
     }
-    return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = h};
+    return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = identity_hash};
 }
 
 [[nodiscard]] inline bioseq::indexing::gpu_index_cache_identity
 pg_gpu_index_identity(const bioseq::storage::indexing::assembled_index_key& key) noexcept {
-    std::uint64_t h = bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.db_oid));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.user_relid) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.tablespace_oid) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.main_relfilenode) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(
-        static_cast<std::uint64_t>(static_cast<std::uint16_t>(key.column_attno)) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(key.index_name_hash + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.sketch_backend) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.minimizer_scheme.id) +
-                                      (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.minimizer_scheme.revision) +
-                                      (h << 1));
-    h ^= bioseq::indexing::splitmix64(key.query_key + (h << 1));
-    h ^= bioseq::indexing::splitmix64(key.query_signature + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.clip_lo_bp) + (h << 1));
-    h ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.clip_hi_bp) + (h << 1));
-    if (h == 0) {
-        h = 0x9e3779b97f4a7c15ULL;
+    std::uint64_t identity_hash =
+        bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.db_oid));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.user_relid) +
+                                                  (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.tablespace_oid) +
+                                                  (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.main_relfilenode) +
+                                                  (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(
+        static_cast<std::uint64_t>(static_cast<std::uint16_t>(key.column_attno)) +
+        (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(key.index_name_hash + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.sketch_backend) +
+                                                  (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(
+        static_cast<std::uint64_t>(key.minimizer_scheme.id) + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(
+        static_cast<std::uint64_t>(key.minimizer_scheme.revision) + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(key.query_key + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(key.query_signature + (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.clip_lo_bp) +
+                                                  (identity_hash << 1));
+    identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.clip_hi_bp) +
+                                                  (identity_hash << 1));
+    if (identity_hash == 0) {
+        identity_hash = 0x9e3779b97f4a7c15ULL;
     }
-    return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = h};
+    return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = identity_hash};
 }
 
 enum class deferred_minimizer_index_kind : std::uint8_t {

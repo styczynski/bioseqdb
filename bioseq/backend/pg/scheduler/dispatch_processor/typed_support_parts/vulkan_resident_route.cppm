@@ -136,8 +136,8 @@ void process_vulkan_resident_route(
     using target_sidecar_type = gpu_batch_target_sidecar<gpu_row_view>;
     auto& gpu_query_recipe_views = state.gpu_query_recipe_views;
     auto& gpu_target_recipe_views = state.gpu_target_recipe_views;
-    const std::size_t w = state.w;
-    const std::size_t k = state.k;
+    const std::size_t window_size = state.window_size;
+    const std::size_t kmer_size = state.kmer_size;
     auto& query_records = state.query_records;
     auto& query_minimizer_device_span = state.query_minimizer_device_span;
     auto& query_sketch_authority = state.query_sketch_authority;
@@ -385,13 +385,13 @@ void process_vulkan_resident_route(
             auto built =
                 full_target_range
                     ? bioseq::gpu::vulkan::build_gpu_index_on_device<minimizer_type>(
-                          target_view, w, k, frozen_query_gate, &decline)
+                          target_view, window_size, kmer_size, frozen_query_gate, &decline)
                     : bioseq::gpu::vulkan::build_gpu_segment_index_on_device<minimizer_type>(
                           target_view,
                           segment_lo_bp,
                           segment_hi_bp,
-                          w,
-                          k,
+                          window_size,
+                          kmer_size,
                           frozen_query_gate,
                           &decline);
             if (!built) {

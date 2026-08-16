@@ -102,8 +102,8 @@ template <class p_sequence> struct vulkan_query_batch_state {
     std::array<std::optional<gpu_row_view>, dispatch_batch_capacity> gpu_query_recipe_views{};
     std::array<std::optional<gpu_row_view>, dispatch_batch_capacity> gpu_target_recipe_views{};
     std::array<std::optional<std::size_t>, dispatch_batch_capacity> gpu_query_resident{};
-    std::size_t w{};
-    std::size_t k{};
+    std::size_t window_size{};
+    std::size_t kmer_size{};
     std::shared_ptr<bioseq::gpu::vulkan::vulkan_batch_sketch_memory_retention>
         query_sketch_memory_retention;
     std::vector<bioseq::gpu::vulkan::gpu_seed_query_record_wire> query_records;
@@ -266,10 +266,10 @@ void prepare_vulkan_query_route(
             }
         }
     }
-    state.w = static_cast<std::size_t>(dispatch_params.window_size);
-    state.k = static_cast<std::size_t>(dispatch_params.kmer_size);
-    const std::size_t w = state.w;
-    const std::size_t k = state.k;
+    state.window_size = static_cast<std::size_t>(dispatch_params.window_size);
+    state.kmer_size = static_cast<std::size_t>(dispatch_params.kmer_size);
+    const std::size_t window_size = state.window_size;
+    const std::size_t kmer_size = state.kmer_size;
     // The resident query sketch remains device-only.  A fair
     // no-index target build is complete and query-independent;
     // host-materialising query hashes to filter that build
@@ -338,8 +338,8 @@ void prepare_vulkan_query_route(
                 std::span<const bioseq::gpu::vulkan::sequence_upload_view>{
                     batch_query_uploads.data(), batch_query_uploads.size()},
                 rank_lut,
-                w,
-                k,
+                window_size,
+                kmer_size,
                 bioseq::gpu::vulkan::vulkan_sketch_host_materialization::device_only);
         if (!gpu_batch_sketch) {
             pipe::throw_vulkan_declined("Vulkan batched query minimizer sketch");
