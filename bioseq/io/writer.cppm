@@ -144,7 +144,10 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         return writer;
     }
 
+    /// Construct a closed writer without a sink.
     sequence_writer() = default;
+
+    /// Transfer the sink, producer buffers, options, and diagnostic state.
     sequence_writer(sequence_writer&& other) noexcept
         : _sink(std::move(other._sink)), _options(other._options),
           _producers_mutex(std::make_unique<std::mutex>()), _producers(std::move(other._producers)),
@@ -153,6 +156,7 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
           _first_error_message(std::move(other._first_error_message)) {
         other._failed.store(false, std::memory_order_relaxed);
     }
+    /// Replace this writer with transferred sink and producer state.
     sequence_writer& operator=(sequence_writer&& other) noexcept {
         if (this != &other) {
             _sink = std::move(other._sink);
@@ -164,9 +168,13 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
         }
         return *this;
     }
+    /// Writers exclusively own their sink and producer buffers.
     sequence_writer(const sequence_writer&) = delete;
+
+    /// Writers cannot copy sink or producer ownership.
     sequence_writer& operator=(const sequence_writer&) = delete;
 
+    /// Flush every residual producer chunk before releasing the sink.
     ~sequence_writer() {
         // Drain every active producer's residual chunk. close() may
         // have been called already. If so, _sink is null and this is
@@ -541,6 +549,8 @@ template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> clas
                                              _first_error_message);
         }
     }
+
+    /// Copy the first terminal sink diagnostic and discard later failures.
     void stamp_error(const std::string& msg) {
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {

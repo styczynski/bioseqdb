@@ -53,14 +53,17 @@ concept io_sink =
 /// to surface open-time errors via `std::expected`.
 class posix_pwrite_sink {
   public:
+    /// Construct a closed sink without an owned file descriptor.
     posix_pwrite_sink() = default;
 
+    /// Transfer the file descriptor, reservation cursor, and diagnostic state.
     posix_pwrite_sink(posix_pwrite_sink&& other) noexcept
         : _fd(other._fd), _next_offset(other._next_offset.load(std::memory_order_relaxed)),
           _last_error_message(std::move(other._last_error_message)) {
         other._fd = -1;
     }
 
+    /// Replace this sink with transferred descriptor and reservation state.
     posix_pwrite_sink& operator=(posix_pwrite_sink&& other) noexcept {
         if (this != &other) {
             close_fd();
@@ -73,9 +76,13 @@ class posix_pwrite_sink {
         return *this;
     }
 
+    /// Sinks exclusively own their file descriptor.
     posix_pwrite_sink(const posix_pwrite_sink&) = delete;
+
+    /// Sinks cannot copy file-descriptor ownership.
     posix_pwrite_sink& operator=(const posix_pwrite_sink&) = delete;
 
+    /// Close the owned file descriptor.
     ~posix_pwrite_sink() {
         close_fd();
     }
@@ -171,6 +178,7 @@ class posix_pwrite_sink {
     }
 
   private:
+    /// Close the owned descriptor when one is active.
     void close_fd() noexcept {
         if (_fd >= 0) {
             ::close(_fd);
@@ -195,8 +203,10 @@ class posix_pwrite_sink {
 /// metadata, not data.
 class mmap_pwrite_sink {
   public:
+    /// Construct a closed sink without a mapping.
     mmap_pwrite_sink() = default;
 
+    /// Transfer mapping ownership and the reservation cursor.
     mmap_pwrite_sink(mmap_pwrite_sink&& other) noexcept
         : _fd(other._fd), _addr(other._addr), _capacity(other._capacity),
           _next_offset(other._next_offset.load(std::memory_order_relaxed)),
@@ -206,9 +216,13 @@ class mmap_pwrite_sink {
         other._capacity = 0;
     }
 
+    /// Sinks exclusively own their mapping and file descriptor.
     mmap_pwrite_sink(const mmap_pwrite_sink&) = delete;
+
+    /// Sinks cannot copy mapping ownership.
     mmap_pwrite_sink& operator=(const mmap_pwrite_sink&) = delete;
 
+    /// Unmap the region and close its backing descriptor.
     ~mmap_pwrite_sink() {
         cleanup();
     }
@@ -321,6 +335,7 @@ class mmap_pwrite_sink {
     }
 
   private:
+    /// Release the mapping before closing its backing descriptor.
     void cleanup() noexcept {
         if (_addr != nullptr) {
             ::munmap(_addr, _capacity);

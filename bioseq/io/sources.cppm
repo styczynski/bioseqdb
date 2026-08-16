@@ -46,14 +46,17 @@ export namespace bioseq::io {
 /// open-time errors via `std::expected`.
 class posix_read_source {
   public:
+    /// Construct a closed source without an owned file descriptor.
     posix_read_source() = default;
 
+    /// Transfer the file descriptor, offset, and diagnostic state.
     posix_read_source(posix_read_source&& other) noexcept
         : _fd(other._fd), _global_offset(other._global_offset), _bom_consumed(other._bom_consumed),
           _last_error_message(std::move(other._last_error_message)) {
         other._fd = -1;
     }
 
+    /// Replace this source with transferred descriptor and cursor state.
     posix_read_source& operator=(posix_read_source&& other) noexcept {
         if (this != &other) {
             close_fd();
@@ -66,9 +69,13 @@ class posix_read_source {
         return *this;
     }
 
+    /// Sources exclusively own their file descriptor.
     posix_read_source(const posix_read_source&) = delete;
+
+    /// Sources cannot copy file-descriptor ownership.
     posix_read_source& operator=(const posix_read_source&) = delete;
 
+    /// Close the owned file descriptor.
     ~posix_read_source() {
         close_fd();
     }
@@ -133,6 +140,7 @@ class posix_read_source {
     }
 
   private:
+    /// Close the owned descriptor when one is active.
     void close_fd() noexcept {
         if (_fd >= 0) {
             ::close(_fd);
@@ -159,8 +167,10 @@ struct mmap_source_with_magic;
 /// Compressed input is copied through its decompressor.
 class mmap_source {
   public:
+    /// Construct an empty source without a mapping.
     mmap_source() = default;
 
+    /// Transfer mapping ownership and the current read cursor.
     mmap_source(mmap_source&& other) noexcept
         : _addr(other._addr), _size(other._size), _cursor(other._cursor), _fd(other._fd),
           _bom_consumed(other._bom_consumed),
@@ -169,6 +179,7 @@ class mmap_source {
         other._fd = -1;
     }
 
+    /// Replace this source with transferred mapping and cursor state.
     mmap_source& operator=(mmap_source&& other) noexcept {
         if (this != &other) {
             release();
@@ -184,9 +195,13 @@ class mmap_source {
         return *this;
     }
 
+    /// Sources exclusively own their mapping and file descriptor.
     mmap_source(const mmap_source&) = delete;
+
+    /// Sources cannot copy mapping ownership.
     mmap_source& operator=(const mmap_source&) = delete;
 
+    /// Unmap the owned byte region and close its descriptor.
     ~mmap_source() {
         release();
     }
@@ -252,6 +267,7 @@ class mmap_source {
     }
 
   private:
+    /// Release the mapping before closing its backing descriptor.
     void release() noexcept {
         if (_addr != nullptr) {
             ::munmap(_addr, _size);
@@ -346,8 +362,10 @@ mmap_source::try_open_with_magic(std::string_view path, const reader_options& op
 /// "POSIX with auto-decompression".
 class gzip_source {
   public:
+    /// Construct a closed source without a zlib handle.
     gzip_source() = default;
 
+    /// Transfer the zlib handle, offset, and diagnostic state.
     gzip_source(gzip_source&& other) noexcept
         : _file(other._file), _global_offset(other._global_offset),
           _bom_consumed(other._bom_consumed),
@@ -355,6 +373,7 @@ class gzip_source {
         other._file = nullptr;
     }
 
+    /// Replace this source with transferred zlib state.
     gzip_source& operator=(gzip_source&& other) noexcept {
         if (this != &other) {
             release();
@@ -367,9 +386,13 @@ class gzip_source {
         return *this;
     }
 
+    /// Sources exclusively own their zlib handle.
     gzip_source(const gzip_source&) = delete;
+
+    /// Sources cannot copy zlib-handle ownership.
     gzip_source& operator=(const gzip_source&) = delete;
 
+    /// Close the owned zlib handle.
     ~gzip_source() {
         release();
     }
@@ -434,6 +457,7 @@ class gzip_source {
     }
 
   private:
+    /// Close the zlib handle when one is active.
     void release() noexcept {
         if (_file != nullptr) {
             ::gzclose(_file);
