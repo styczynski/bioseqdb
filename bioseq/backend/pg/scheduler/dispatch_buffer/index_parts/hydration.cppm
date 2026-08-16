@@ -157,8 +157,7 @@ void tuple_dispatch_buffer::hydrate_one_column(
         return;
     }
     out_payloads.assign(batch_size, nullptr);
-    for (std::uint8_t bucket_index = 0;
-         bucket_index < storage_manager_type::bucket_count;
+    for (std::uint8_t bucket_index = 0; bucket_index < storage_manager_type::bucket_count;
          ++bucket_index) {
         auto& requests = per_bucket[bucket_index];
         if (requests.empty()) {
@@ -217,19 +216,16 @@ void tuple_dispatch_buffer::hydrate_one_column(
             buffered_entries[row_index].hydrated_seq_hdr = out_payloads[row_index];
         }
         TupleTableSlot* scan_slot_copy = buffered_entries[row_index].scan_slot_copy;
-        const bool preserve_raw_output = is_query
-                                             ? buffered_entries[row_index]
-                                                   .query_from_evaluated_expression
-                                             : buffered_entries[row_index]
-                                                   .target_from_evaluated_expression;
+        const bool preserve_raw_output =
+            is_query ? buffered_entries[row_index].query_from_evaluated_expression
+                     : buffered_entries[row_index].target_from_evaluated_expression;
         if (scan_slot_copy != nullptr && !preserve_raw_output) {
             const int attribute_index = column_attno - 1;
             if (attribute_index >= 0 &&
                 attribute_index < scan_slot_copy->tts_tupleDescriptor->natts) {
                 bioseq::postgres::support::pg_slot_datums_view{scan_slot_copy}.set_raw(
                     column_attno,
-                    bioseq::postgres::support::pg_datum::from_pointer(
-                        out_payloads[row_index]));
+                    bioseq::postgres::support::pg_datum::from_pointer(out_payloads[row_index]));
             }
         }
     }

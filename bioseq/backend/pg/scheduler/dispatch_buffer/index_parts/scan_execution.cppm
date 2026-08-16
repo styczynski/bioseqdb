@@ -281,8 +281,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     auto refresh_row_arrays =
         [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
             for (const size_t row_index : rows) {
-                if (row_index >= buffered_entries.size() ||
-                    row_index >= dispatch_batch_capacity) {
+                if (row_index >= buffered_entries.size() || row_index >= dispatch_batch_capacity) {
                     continue;
                 }
                 const buffered_scan_entry& entry = buffered_entries[row_index];
@@ -301,11 +300,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         const std::uint64_t row_bytes = estimate_hydration_bytes(row_index);
         if (requires_flat_sequence_payloads &&
             row_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                     errmsg("selected dispatch cannot materialize sequence recipe"),
-                     errdetail("row=%zu requires an invalid or oversized flat payload",
-                               row_index)));
+            ereport(
+                ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("selected dispatch cannot materialize sequence recipe"),
+                 errdetail("row=%zu requires an invalid or oversized flat payload", row_index)));
         }
         const bool split = budget != (std::numeric_limits<std::uint64_t>::max)() &&
                            wave_bytes != 0 && row_bytes > 0 &&
@@ -629,11 +628,9 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                  * an independent process_sequences pass over the same active
                  * wave, then logically AND the matches into the wave map.
                  */
-                for (size_t extra_query_index = 0;
-                     extra_query_index < extra_query_varlenas.size();
+                for (size_t extra_query_index = 0; extra_query_index < extra_query_varlenas.size();
                      ++extra_query_index) {
-                    const std::vector<char>& extra_bytes =
-                        extra_query_varlenas[extra_query_index];
+                    const std::vector<char>& extra_bytes = extra_query_varlenas[extra_query_index];
                     if (extra_bytes.empty()) {
                         continue;
                     }
