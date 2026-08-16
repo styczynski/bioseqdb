@@ -134,13 +134,6 @@ export {
                                             Oid relation_id,
                                             int number_of_columns_read);
     uint64_t bioseq_column_table_stripe_count(Oid relation_id);
-    void add_bioseq_column_scan_paths_rec(PlannerInfo* root,
-                                          RelOptInfo* rel,
-                                          RangeTblEntry* rte,
-                                          Relids param_relids,
-                                          Relids candidate_relids,
-                                          int depth_limit);
-
     /* hooks and callbacks */
     Plan* bioseq_column_scan_path_plan_custom_path(PlannerInfo* root,
                                                    RelOptInfo* rel,

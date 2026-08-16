@@ -85,80 +85,6 @@ using namespace bioseq::postgres::support;
 
 export {
     /*
-     * AddBioseqColumnScanPaths is the entry point for recursively generating
-     * parameterized paths. See AddBioseqColumnScanPathsRec() for discussion.
-     */
-    void add_bioseq_column_scan_paths(PlannerInfo* root, RelOptInfo* rel, RangeTblEntry* rte) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() entered");
-        List* join_clauses = find_pushdown_join_clauses(root, rel);
-        Relids candidate_relids = find_candidate_relids(root, rel, join_clauses);
-
-        int depth_limit = choose_depth_limit(bms_num_members(candidate_relids));
-
-        /* must always parameterize by lateral refs */
-        Relids param_relids = bms_copy(rel->lateral_relids);
-
-        add_bioseq_column_scan_paths_rec(
-            root, rel, rte, param_relids, candidate_relids, depth_limit);
-
-        /* Once a CustomPath claims a restriction, remove only alternatives that
-         * would execute that same RestrictInfo through the SQL function.  This is
-         * structural selection; costs remain honest and nonnegative. */
-        postgres_list<RestrictInfo> owners;
-        for (Path* candidate : postgres_list<Path>(rel->pathlist)) {
-            if (!IsA(candidate, CustomPath))
-                continue;
-            CustomPath* custom = reinterpret_cast<CustomPath*>(candidate);
-            bool is_mmsearch_owner = false;
-            for (Node* private_node : postgres_list<Node>(custom->custom_private)) {
-                if (private_node == nullptr || !IsA(private_node, List))
-                    continue;
-                List* tag = reinterpret_cast<List*>(private_node);
-                if (list_length(tag) == 3 && IsA(reinterpret_cast<Node*>(linitial(tag)), Integer) &&
-                    intVal(linitial(tag)) == k_bioseq_mmsearch_owner_magic) {
-                    is_mmsearch_owner = true;
-                    break;
-                }
-            }
-            if (!is_mmsearch_owner)
-                continue;
-            for (RestrictInfo* owner : postgres_list<RestrictInfo>(custom->custom_restrictinfo)) {
-                if (!list_member_ptr(owners.get(), owner))
-                    owners.append(owner);
-            }
-        }
-        auto prune_owned = [rel, &owners](List* paths) {
-            postgres_list<Path> survivors;
-            for (Path* candidate : postgres_list<Path>(paths)) {
-                bool remove = false;
-                for (RestrictInfo* owner : owners) {
-                    const bool executes_owner =
-                        list_member_ptr(rel->baserestrictinfo, owner) ||
-                        (candidate->param_info != nullptr &&
-                         list_member_ptr(candidate->param_info->ppi_clauses, owner));
-                    const bool owns_restriction =
-                        IsA(candidate, CustomPath) &&
-                        list_member_ptr(
-                            reinterpret_cast<CustomPath*>(candidate)->custom_restrictinfo, owner);
-                    if (executes_owner && !owns_restriction) {
-                        remove = true;
-                        break;
-                    }
-                }
-                if (!remove)
-                    survivors.append(candidate);
-            }
-            return survivors.release();
-        };
-        if (!owners.is_empty()) {
-            rel->pathlist = prune_owned(rel->pathlist);
-            rel->partial_pathlist = prune_owned(rel->partial_pathlist);
-        }
-
-        bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() returning");
-    }
-
-    /*
      * AddBioseqColumnScanPathsRec is a recursive function to search the
      * parameterization space and add CustomPaths for columnar scans.
      *
@@ -324,6 +250,80 @@ export {
         }
 
         bms_free(tmp_candidate_relids);
+    }
+
+    /*
+     * AddBioseqColumnScanPaths is the entry point for recursively generating
+     * parameterized paths. See AddBioseqColumnScanPathsRec() for discussion.
+     */
+    void add_bioseq_column_scan_paths(PlannerInfo* root, RelOptInfo* rel, RangeTblEntry* rte) {
+        bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() entered");
+        List* join_clauses = find_pushdown_join_clauses(root, rel);
+        Relids candidate_relids = find_candidate_relids(root, rel, join_clauses);
+
+        int depth_limit = choose_depth_limit(bms_num_members(candidate_relids));
+
+        /* must always parameterize by lateral refs */
+        Relids param_relids = bms_copy(rel->lateral_relids);
+
+        add_bioseq_column_scan_paths_rec(
+            root, rel, rte, param_relids, candidate_relids, depth_limit);
+
+        /* Once a CustomPath claims a restriction, remove only alternatives that
+         * would execute that same RestrictInfo through the SQL function.  This is
+         * structural selection; costs remain honest and nonnegative. */
+        postgres_list<RestrictInfo> owners;
+        for (Path* candidate : postgres_list<Path>(rel->pathlist)) {
+            if (!IsA(candidate, CustomPath))
+                continue;
+            CustomPath* custom = reinterpret_cast<CustomPath*>(candidate);
+            bool is_mmsearch_owner = false;
+            for (Node* private_node : postgres_list<Node>(custom->custom_private)) {
+                if (private_node == nullptr || !IsA(private_node, List))
+                    continue;
+                List* tag = reinterpret_cast<List*>(private_node);
+                if (list_length(tag) == 3 && IsA(reinterpret_cast<Node*>(linitial(tag)), Integer) &&
+                    intVal(linitial(tag)) == k_bioseq_mmsearch_owner_magic) {
+                    is_mmsearch_owner = true;
+                    break;
+                }
+            }
+            if (!is_mmsearch_owner)
+                continue;
+            for (RestrictInfo* owner : postgres_list<RestrictInfo>(custom->custom_restrictinfo)) {
+                if (!list_member_ptr(owners.get(), owner))
+                    owners.append(owner);
+            }
+        }
+        auto prune_owned = [rel, &owners](List* paths) {
+            postgres_list<Path> survivors;
+            for (Path* candidate : postgres_list<Path>(paths)) {
+                bool remove = false;
+                for (RestrictInfo* owner : owners) {
+                    const bool executes_owner =
+                        list_member_ptr(rel->baserestrictinfo, owner) ||
+                        (candidate->param_info != nullptr &&
+                         list_member_ptr(candidate->param_info->ppi_clauses, owner));
+                    const bool owns_restriction =
+                        IsA(candidate, CustomPath) &&
+                        list_member_ptr(
+                            reinterpret_cast<CustomPath*>(candidate)->custom_restrictinfo, owner);
+                    if (executes_owner && !owns_restriction) {
+                        remove = true;
+                        break;
+                    }
+                }
+                if (!remove)
+                    survivors.append(candidate);
+            }
+            return survivors.release();
+        };
+        if (!owners.is_empty()) {
+            rel->pathlist = prune_owned(rel->pathlist);
+            rel->partial_pathlist = prune_owned(rel->partial_pathlist);
+        }
+
+        bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() returning");
     }
 
     /*
