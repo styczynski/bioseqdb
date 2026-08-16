@@ -210,11 +210,11 @@ choose_deferred_minimizer_persist_index(const batch_processor::scanner_pg_contex
     const auto policy = bioseq::storage::indexing::resolve_minimizer_persistence_policy(
         ctx.user_relid, ctx.main_relfilenode, ctx.mmsearch_seq_attno, ctx.snapshot);
 
-    for (std::size_t i = 0; i < minimizers.size(); ++i) {
-        if (policy.enabled[i] && policy.update_on_insert[i]) {
+    for (std::size_t policy_index = 0; policy_index < minimizers.size(); ++policy_index) {
+        if (policy.enabled[policy_index] && policy.update_on_insert[policy_index]) {
             return deferred_minimizer_persist_choice{
-                .kind = deferred_kind_for_index(minimizers[i]),
-                .index_name = minimizers[i],
+                .kind = deferred_kind_for_index(minimizers[policy_index]),
+                .index_name = minimizers[policy_index],
             };
         }
     }
@@ -832,11 +832,12 @@ make_persisted_gpu_cache_validation_stats(
                 .is_valid = coordinate.is_valid != 0u,
             },
     };
-    for (std::size_t i = 0u; i < result.submissions.size(); ++i) {
-        result.submissions[i] = {
+    for (std::size_t submission_index = 0u; submission_index < result.submissions.size();
+         ++submission_index) {
+        result.submissions[submission_index] = {
             .operation_identity = source.shape_pipeline_operation_identity,
-            .ordinal = source.shape_submission_ordinals[i],
-            .submit_wait_identity = submit_wait_identities[i],
+            .ordinal = source.shape_submission_ordinals[submission_index],
+            .submit_wait_identity = submit_wait_identities[submission_index],
         };
     }
     return result;

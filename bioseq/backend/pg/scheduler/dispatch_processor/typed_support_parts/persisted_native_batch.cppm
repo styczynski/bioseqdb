@@ -328,9 +328,11 @@ void process_persisted_native_batch(
                                         1,
                                         bioseq::parallelism::task_parallel_minimums::k_query_count,
                                         bioseq::parallelism::task_parallel_region::query_batch,
-                                        [&align_hash_major_query, hash_major_reader](
-                                            const std::size_t lo, const std::size_t hi) {
-                                            for (std::size_t row = lo; row < hi; ++row) {
+                                        [&align_hash_major_query,
+                                         hash_major_reader](const std::size_t range_begin,
+                                                            const std::size_t range_end) {
+                                            for (std::size_t row = range_begin; row < range_end;
+                                                 ++row) {
                                                 align_hash_major_query(row, *hash_major_reader);
                                             }
                                         });
@@ -499,9 +501,11 @@ void process_persisted_native_batch(
                                                     query_batch,
                                                 [&align_fragment_query,
                                                  &prepared_seed_batch,
-                                                 wave_begin](const std::size_t lo,
-                                                             const std::size_t hi) {
-                                                    for (std::size_t row = lo; row < hi; ++row) {
+                                                 wave_begin](const std::size_t range_begin,
+                                                             const std::size_t range_end) {
+                                                    for (std::size_t row = range_begin;
+                                                         row < range_end;
+                                                         ++row) {
                                                         const auto query_index =
                                                             prepared_seed_batch->query_view(
                                                                 row - wave_begin);

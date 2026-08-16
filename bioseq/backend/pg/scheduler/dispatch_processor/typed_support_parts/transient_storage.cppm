@@ -139,28 +139,28 @@ struct opportunistic_fragment_index_storage {
     }
 
     [[nodiscard]] std::size_t number_of_chunks(bioseq::indexing::index_sub_key_t sub_key) const {
-        std::size_t count = 0;
+        std::size_t chunk_count = 0;
         for (const opportunistic_index_chunk& chunk : chunks) {
             if (chunk.sub_key == sub_key) {
-                ++count;
+                ++chunk_count;
             }
         }
-        return count;
+        return chunk_count;
     }
 
     [[nodiscard]] std::size_t number_of_sub_keys() const {
-        std::size_t count = 0;
-        bioseq::indexing::index_sub_key_t last =
+        std::size_t sub_key_count = 0;
+        bioseq::indexing::index_sub_key_t last_sub_key =
             std::numeric_limits<bioseq::indexing::index_sub_key_t>::min();
-        bool have = false;
+        bool have_sub_key = false;
         for (const opportunistic_index_chunk& chunk : chunks) {
-            if (!have || chunk.sub_key != last) {
-                ++count;
-                last = chunk.sub_key;
-                have = true;
+            if (!have_sub_key || chunk.sub_key != last_sub_key) {
+                ++sub_key_count;
+                last_sub_key = chunk.sub_key;
+                have_sub_key = true;
             }
         }
-        return count;
+        return sub_key_count;
     }
 
     [[nodiscard]] std::size_t chunk_byte_size(bioseq::indexing::index_sub_key_t sub_key,
@@ -185,19 +185,19 @@ struct opportunistic_fragment_index_storage {
     }
 
     void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes_count) {
-        const std::size_t n =
+        const std::size_t chunk_count =
             bytes_count == 0 ? 1
                              : (bytes_count + bioseq::indexing::k_max_index_chunk_size_bytes - 1) /
                                    bioseq::indexing::k_max_index_chunk_size_bytes;
-        std::vector<std::size_t> plan(n);
-        std::size_t remaining = bytes_count;
-        for (std::size_t i = 0; i < n; ++i) {
-            const std::size_t bytes =
-                std::min(remaining, bioseq::indexing::k_max_index_chunk_size_bytes);
-            plan[i] = bytes;
-            remaining -= bytes;
+        std::vector<std::size_t> chunk_plan(chunk_count);
+        std::size_t remaining_bytes = bytes_count;
+        for (std::size_t chunk_index = 0; chunk_index < chunk_count; ++chunk_index) {
+            const std::size_t chunk_bytes =
+                std::min(remaining_bytes, bioseq::indexing::k_max_index_chunk_size_bytes);
+            chunk_plan[chunk_index] = chunk_bytes;
+            remaining_bytes -= chunk_bytes;
         }
-        plans[sub_key] = std::move(plan);
+        plans[sub_key] = std::move(chunk_plan);
     }
 
     void resize_chunks(bioseq::indexing::index_sub_key_t sub_key,
@@ -209,13 +209,13 @@ struct opportunistic_fragment_index_storage {
 
     template <class p_value, class p_function>
     void write_to_each(bioseq::indexing::index_sub_key_t sub_key, p_function&& writer) {
-        auto it = plans.find(sub_key);
-        if (it == plans.end()) {
+        auto plan_iterator = plans.find(sub_key);
+        if (plan_iterator == plans.end()) {
             index_error("write_to_each without resize");
         }
-        const std::vector<std::size_t>& plan = it->second;
-        for (std::size_t chunk_no = 0; chunk_no < plan.size();) {
-            const std::size_t payload_bytes = plan[chunk_no];
+        const std::vector<std::size_t>& chunk_plan = plan_iterator->second;
+        for (std::size_t chunk_no = 0; chunk_no < chunk_plan.size();) {
+            const std::size_t payload_bytes = chunk_plan[chunk_no];
             if (payload_bytes % sizeof(p_value) != 0) {
                 index_error("chunk payload is not divisible by the value type size");
             }
@@ -232,29 +232,29 @@ struct opportunistic_fragment_index_storage {
             chunks.push_back(std::move(chunk));
             chunk_no = (next == chunk_no) ? chunk_no + 1 : next;
         }
-        plans.erase(it);
+        plans.erase(plan_iterator);
     }
 
     template <class p_function>
-    void read_chunks_in_range(bioseq::indexing::index_sub_key_t lo,
-                              bioseq::indexing::index_sub_key_t hi,
-                              p_function&& cb) {
+    void read_chunks_in_range(bioseq::indexing::index_sub_key_t lower_bound,
+                              bioseq::indexing::index_sub_key_t upper_bound,
+                              p_function&& callback) {
         for (const opportunistic_index_chunk& chunk : chunks) {
-            if (chunk.sub_key >= lo && chunk.sub_key < hi) {
-                cb(chunk.sub_key, chunk.bytes.data(), chunk.bytes.size());
+            if (chunk.sub_key >= lower_bound && chunk.sub_key < upper_bound) {
+                callback(chunk.sub_key, chunk.bytes.data(), chunk.bytes.size());
             }
         }
     }
 
-    void for_each_sub_key(auto&& fn) const {
-        bioseq::indexing::index_sub_key_t last =
+    void for_each_sub_key(auto&& callback) const {
+        bioseq::indexing::index_sub_key_t last_sub_key =
             std::numeric_limits<bioseq::indexing::index_sub_key_t>::min();
-        bool have = false;
+        bool have_sub_key = false;
         for (const opportunistic_index_chunk& chunk : chunks) {
-            if (!have || chunk.sub_key != last) {
-                fn(chunk.sub_key);
-                last = chunk.sub_key;
-                have = true;
+            if (!have_sub_key || chunk.sub_key != last_sub_key) {
+                callback(chunk.sub_key);
+                last_sub_key = chunk.sub_key;
+                have_sub_key = true;
             }
         }
     }
@@ -268,13 +268,14 @@ struct opportunistic_fragment_index_storage {
         clear_entity();
     }
 
-    void discard_sub_keys(bioseq::indexing::index_sub_key_t lo,
-                          bioseq::indexing::index_sub_key_t hi) {
-        chunks.erase(std::remove_if(chunks.begin(),
-                                    chunks.end(),
-                                    [lo, hi](const opportunistic_index_chunk& chunk) {
-                                        return chunk.sub_key >= lo && chunk.sub_key <= hi;
-                                    }),
+    void discard_sub_keys(bioseq::indexing::index_sub_key_t first_sub_key,
+                          bioseq::indexing::index_sub_key_t last_sub_key) {
+        chunks.erase(std::remove_if(
+                         chunks.begin(),
+                         chunks.end(),
+                         [first_sub_key, last_sub_key](const opportunistic_index_chunk& chunk) {
+                             return chunk.sub_key >= first_sub_key && chunk.sub_key <= last_sub_key;
+                         }),
                      chunks.end());
     }
 
@@ -345,16 +346,16 @@ struct opportunistic_sequence_index_storage {
     }
 
     void resize_chunks(bioseq::indexing::index_sub_key_t sub_key,
-                       std::span<const std::size_t> plan) {
-        for (std::size_t chunk_no = 0; chunk_no < plan.size(); ++chunk_no) {
+                       std::span<const std::size_t> chunk_plan) {
+        for (std::size_t chunk_no = 0; chunk_no < chunk_plan.size(); ++chunk_no) {
             auto& chunk = ensure_chunk(sub_key, chunk_no);
-            chunk.bytes.resize(plan[chunk_no]);
+            chunk.bytes.resize(chunk_plan[chunk_no]);
         }
     }
 
     void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes) {
-        std::array<std::size_t, 1> plan{bytes};
-        resize_chunks(sub_key, std::span<const std::size_t>{plan.data(), plan.size()});
+        std::array<std::size_t, 1> chunk_plan{bytes};
+        resize_chunks(sub_key, std::span<const std::size_t>{chunk_plan.data(), chunk_plan.size()});
     }
 
     void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
@@ -392,44 +393,44 @@ struct opportunistic_sequence_index_storage {
     }
 
     [[nodiscard]] std::size_t number_of_chunks(bioseq::indexing::index_sub_key_t sub_key) const {
-        std::size_t count = 0;
+        std::size_t chunk_count = 0;
         for (const opportunistic_sequence_chunk& chunk : chunks) {
             if (chunk.sub_key == sub_key) {
-                ++count;
+                ++chunk_count;
             }
         }
-        return count;
+        return chunk_count;
     }
 
     // Reports the distinct sub-keys required by the storage concept.
     [[nodiscard]] std::size_t number_of_sub_keys() const {
-        std::size_t count = 0;
-        for_each_sub_key([&count](bioseq::indexing::index_sub_key_t) { ++count; });
-        return count;
+        std::size_t sub_key_count = 0;
+        for_each_sub_key([&sub_key_count](bioseq::indexing::index_sub_key_t) { ++sub_key_count; });
+        return sub_key_count;
     }
 
-    template <class p_function> void for_each_sub_key(p_function&& fn) const {
-        bioseq::indexing::index_sub_key_t last = 0;
-        bool have_last = false;
+    template <class p_function> void for_each_sub_key(p_function&& callback) const {
+        bioseq::indexing::index_sub_key_t last_sub_key = 0;
+        bool have_last_sub_key = false;
         // chunks are appended in build order; emit each distinct sub_key once.
-        std::vector<bioseq::indexing::index_sub_key_t> seen;
+        std::vector<bioseq::indexing::index_sub_key_t> seen_sub_keys;
         for (const opportunistic_sequence_chunk& chunk : chunks) {
-            if (have_last && chunk.sub_key == last) {
+            if (have_last_sub_key && chunk.sub_key == last_sub_key) {
                 continue;
             }
-            bool already = false;
-            for (const auto key : seen) {
+            bool already_seen = false;
+            for (const auto key : seen_sub_keys) {
                 if (key == chunk.sub_key) {
-                    already = true;
+                    already_seen = true;
                     break;
                 }
             }
-            if (!already) {
-                seen.push_back(chunk.sub_key);
-                fn(chunk.sub_key);
+            if (!already_seen) {
+                seen_sub_keys.push_back(chunk.sub_key);
+                callback(chunk.sub_key);
             }
-            last = chunk.sub_key;
-            have_last = true;
+            last_sub_key = chunk.sub_key;
+            have_last_sub_key = true;
         }
     }
 
@@ -474,13 +475,14 @@ struct opportunistic_sequence_index_storage {
     }
 
     template <class p_function>
-    void read_chunks_in_range(bioseq::indexing::index_sub_key_t first,
-                              bioseq::indexing::index_sub_key_t last,
-                              p_function&& f) const {
-        for (bioseq::indexing::index_sub_key_t sub_key = first; sub_key < last; ++sub_key) {
+    void read_chunks_in_range(bioseq::indexing::index_sub_key_t range_begin,
+                              bioseq::indexing::index_sub_key_t range_end,
+                              p_function&& callback) const {
+        for (bioseq::indexing::index_sub_key_t sub_key = range_begin; sub_key < range_end;
+             ++sub_key) {
             for (const opportunistic_sequence_chunk& chunk : chunks) {
                 if (chunk.sub_key == sub_key) {
-                    f(sub_key, chunk.bytes.data(), chunk.bytes.size());
+                    callback(sub_key, chunk.bytes.data(), chunk.bytes.size());
                 }
             }
         }

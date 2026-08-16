@@ -178,20 +178,21 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
             "GPU CIGAR extension sequence window exceeds sequence length");
     }
 
-    const std::size_t start = static_cast<std::size_t>(start_bp);
-    const std::size_t end = static_cast<std::size_t>(end_bp);
-    const std::size_t len = end - start;
-    const std::size_t out_offset = destination.size();
-    destination.resize(out_offset + len);
-    if (len == 0) {
-        return std::span<const std::uint32_t>{destination.data() + out_offset, 0u};
+    const std::size_t sequence_start = static_cast<std::size_t>(start_bp);
+    const std::size_t sequence_end = static_cast<std::size_t>(end_bp);
+    const std::size_t window_length = sequence_end - sequence_start;
+    const std::size_t destination_offset = destination.size();
+    destination.resize(destination_offset + window_length);
+    if (window_length == 0) {
+        return std::span<const std::uint32_t>{destination.data() + destination_offset, 0u};
     }
 
     if constexpr (sizeof(rank_t) == sizeof(std::uint8_t)) {
-        scratch.resize(len);
-        auto out8 = std::span<std::uint8_t>{reinterpret_cast<std::uint8_t*>(scratch.data()), len};
+        scratch.resize(window_length);
+        auto rank_bytes =
+            std::span<std::uint8_t>{reinterpret_cast<std::uint8_t*>(scratch.data()), window_length};
         if (reverse) {
-            seq.template copy_ranks<false, true>(out8, start, end);
+            seq.template copy_ranks<false, true>(rank_bytes, sequence_start, sequence_end);
             if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
                 for (rank_t& rank : scratch) {
                     rank = static_cast<rank_t>(traits::letter_complement(
@@ -199,37 +200,40 @@ append_gpu_alignment_symbols(std::vector<std::uint32_t>& destination,
                 }
             }
         } else {
-            seq.template copy_ranks<false, false>(out8, start, end);
+            seq.template copy_ranks<false, false>(rank_bytes, sequence_start, sequence_end);
         }
-        for (std::size_t i = 0; i < len; ++i) {
-            destination[out_offset + i] = static_cast<std::uint32_t>(scratch[i]);
+        for (std::size_t symbol_index = 0; symbol_index < window_length; ++symbol_index) {
+            destination[destination_offset + symbol_index] =
+                static_cast<std::uint32_t>(scratch[symbol_index]);
         }
     } else {
-        auto iter = seq.template iterable<logical_rank>().begin();
-        for (std::size_t i = 0; i < start; ++i) {
-            ++iter;
+        auto rank_iterator = seq.template iterable<logical_rank>().begin();
+        for (std::size_t skipped_symbols = 0; skipped_symbols < sequence_start; ++skipped_symbols) {
+            ++rank_iterator;
         }
         if (reverse) {
-            for (std::size_t i = 0; i < len; ++i) {
-                const auto letter = *iter;
+            for (std::size_t symbol_index = 0; symbol_index < window_length; ++symbol_index) {
+                const auto letter = *rank_iterator;
                 if constexpr (seqan3::nucleotide_alphabet<typename traits::alphabet_type>) {
-                    destination[out_offset + len - 1u - i] =
+                    destination[destination_offset + window_length - 1u - symbol_index] =
                         static_cast<std::uint32_t>(traits::letter_complement(
                             static_cast<typename traits::storage_unit>(letter)));
                 } else {
-                    destination[out_offset + len - 1u - i] = static_cast<std::uint32_t>(letter);
+                    destination[destination_offset + window_length - 1u - symbol_index] =
+                        static_cast<std::uint32_t>(letter);
                 }
-                ++iter;
+                ++rank_iterator;
             }
         } else {
-            for (std::size_t i = 0; i < len; ++i) {
-                destination[out_offset + i] = static_cast<std::uint32_t>(*iter);
-                ++iter;
+            for (std::size_t symbol_index = 0; symbol_index < window_length; ++symbol_index) {
+                destination[destination_offset + symbol_index] =
+                    static_cast<std::uint32_t>(*rank_iterator);
+                ++rank_iterator;
             }
         }
     }
 
-    return std::span<const std::uint32_t>{destination.data() + out_offset, len};
+    return std::span<const std::uint32_t>{destination.data() + destination_offset, window_length};
 }
 
 template <sequence_alphabet p_alphabet>
