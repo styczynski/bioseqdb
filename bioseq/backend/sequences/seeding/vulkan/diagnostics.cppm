@@ -1,6 +1,11 @@
 /**
  * @file diagnostics.cppm
  * @brief Seed-lookup ABI checks, decline diagnostics, and checked bounds.
+ *
+ * The host anchor layout is proven against its device wire record before any
+ * dispatch surface is exported. Admission and execution declines retain their
+ * exact geometry, memory, routing, and canonical-order evidence for logs and
+ * strict selected-backend failures.
  */
 module;
 
@@ -52,73 +57,134 @@ static_assert(offsetof(bioseq::chaining::anchor, segment_id)
 
 /// Fail-closed reasons for declining an explicitly selected Vulkan lookup.
 enum class vulkan_seed_lookup_decline_reason : std::uint8_t {
+    /** No decline has been recorded. */
     none,
+    /** Vulkan seed lookup was disabled by the selected execution policy. */
     vulkan_disabled,
+    /** Query length cannot be represented by the 32-bit device ABI. */
     query_length_exceeds_u32,
+    /** Query minimizer count cannot be represented by the 32-bit device ABI. */
     query_minimizer_count_exceeds_u32,
+    /** Exclusive-prefix length cannot be represented by the 32-bit device ABI. */
     query_prefix_length_exceeds_u32,
+    /** Requested k-mer size is outside the selected lookup contract. */
     invalid_kmer_size,
+    /** The shared runtime does not own a hardware Vulkan device. */
     hardware_device_unavailable,
+    /** No compatible resident GPU index cache is available. */
     index_cache_unavailable,
+    /** Uploading the selected resident index was explicitly declined. */
     resident_index_upload_declined,
+    /** A compatible resident index could not be acquired after upload. */
     resident_index_unavailable,
+    /** Exact anchor count cannot be represented by the 32-bit device ABI. */
     exact_anchor_count_exceeds_u32,
+    /** Lookup dispatch exceeds the device's X workgroup limit. */
     dispatch_workgroup_limit_exceeded,
+    /** Selected radix sort geometry is unsupported by the device. */
     radix_workgroup_geometry_unsupported,
+    /** At least one target coordinate is outside the canonical wire domain. */
     target_coordinate_invalid,
+    /** Selected sort buffers exceed the device storage-buffer range. */
     sort_storage_buffer_range_exceeded,
+    /** Sort-plan size arithmetic saturated. */
     sort_plan_arithmetic_overflow,
+    /** A negative occurrence cap cannot be represented by the device lookup. */
     negative_max_occ_unsupported,
+    /** Transient seed memory admission rejected the planned reservation. */
     seed_transient_memory_admission_denied,
+    /** The mapped exclusive-prefix authority failed validation. */
     mapped_prefix_authority_invalid,
+    /** The caller cannot retain the required output-arena memory permit. */
     seed_arena_permit_owner_unavailable,
 };
 
 /// Structured diagnostics for a Vulkan seed-lookup admission or execution decline.
 struct vulkan_seed_lookup_decline {
+    /** Terminal reason, or @ref vulkan_seed_lookup_decline_reason::none. */
     vulkan_seed_lookup_decline_reason reason = vulkan_seed_lookup_decline_reason::none;
+    /** Query length in logical symbols. */
     std::uint64_t query_length = 0;
+    /** Number of query minimizers submitted to lookup. */
     std::uint64_t query_minimizer_count = 0;
+    /** Number of entries required by the exclusive-prefix array. */
     std::uint64_t query_prefix_length = 0;
+    /** Exact anchors reported by the count/prefix pass. */
     std::uint64_t exact_anchor_count = 0;
+    /** Workgroups required by the selected dispatch. */
     std::uint64_t required_workgroups = 0;
+    /** Device limit for the dispatch X dimension. */
     std::uint64_t max_workgroup_count_x = 0;
+    /** Requested k-mer size. */
     std::int32_t kmer_size = 0;
+    /** Requested maximum occurrence count. */
     std::int32_t max_occ = 0;
+    /** Whether the fused minimizer-and-seed frontend was selected. */
     bool fused_frontend = false;
+    /** Total seed-lookup dispatches observed during the attempt. */
     std::uint64_t seed_lookup_dispatches = 0;
+    /** Open-addressed lookup dispatches observed during the attempt. */
     std::uint64_t open_addressed_lookup_dispatches = 0;
+    /** Sorted-dense lookup dispatches observed during the attempt. */
     std::uint64_t sorted_dense_lookup_dispatches = 0;
+    /** Selected anchor-sort geometry and storage estimate. */
     bioseq::gpu::vulkan::seed_anchor_sort_plan sort_plan{};
+    /** Anchor-sort dispatch counters reported by the runtime. */
     bioseq::gpu::vulkan::seed_lookup_sort_execution_stats sort_stats{};
+    /** Total transient bytes reserved through memory admission. */
     std::uint64_t reserved_bytes = 0;
+    /** Planned sum of driver-accounted Vulkan allocation requirements. */
     std::uint64_t planned_vulkan_allocation_bytes = 0u;
+    /** Actual driver-accounted Vulkan allocation requirements. */
     std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    /** Host bytes retaining the exclusive-prefix array. */
     std::uint64_t host_prefix_bytes = 0u;
+    /** Host bytes receiving lookup results. */
     std::uint64_t host_result_bytes = 0u;
+    /** Planned caller-retained anchor growth. */
     std::uint64_t anchors_out_growth_bytes = 0;
+    /** Actual caller-retained anchor growth. */
     std::uint64_t anchors_out_actual_growth_bytes = 0;
+    /** Memory permit bytes transferred to the retained anchor owner. */
     std::uint64_t anchors_out_retained_permit_bytes = 0;
+    /** Number of mapped-prefix authority validations. */
     std::uint64_t mapped_prefix_authority_passes = 0;
+    /** Prefix entries inspected by mapped-prefix validation. */
     std::uint64_t mapped_prefix_lookup_count = 0;
+    /** Prefix comparisons performed by mapped-prefix validation. */
     std::uint64_t mapped_prefix_comparison_count = 0;
+    /** Anchor count included in the canonical-order digest. */
     std::uint64_t canonical_anchor_count = 0u;
+    /** Low word of the canonical anchor digest. */
     std::uint64_t canonical_anchor_digest_lo = bioseq::gpu::vulkan::k_seed_anchor_digest_seed_low;
+    /** High word of the canonical anchor digest. */
     std::uint64_t canonical_anchor_digest_hi = bioseq::gpu::vulkan::k_seed_anchor_digest_seed_high;
+    /** Number of equal-key runs normalized to canonical order. */
     std::uint64_t canonical_tie_normalization_runs = 0u;
+    /** Number of anchors participating in tie normalization. */
     std::uint64_t canonical_tie_normalization_anchors = 0u;
+    /** Whether canonical anchor order was checked. */
     bool canonical_anchor_order_checked = false;
+    /** Whether canonical anchor order passed validation. */
     bool canonical_anchor_order_accepted = false;
+    /** Nested evidence for a resident-index upload decline. */
     bioseq::indexing::gpu_index_upload_decline index_upload{};
+    /** Nested evidence for a transient-memory admission decline. */
     bioseq::parallelism::memory_admission_failure admission{};
 
-    /// Return whether a decline reason has been recorded.
+    /** @return `true` when a terminal decline reason has been recorded. */
     [[nodiscard]] constexpr bool is_declined() const noexcept {
         return reason != vulkan_seed_lookup_decline_reason::none;
     }
 };
 
-/// Copy canonical-order audit counters into @p decline when provided.
+/**
+ * @brief Copy canonical-order audit counters into an optional decline record.
+ * @param decline Destination diagnostics, or `nullptr` when reporting is disabled.
+ * @param validation Canonical count, digest, and order-validation evidence.
+ * @param tie_normalization_runs Number of equal-key runs normalized.
+ * @param tie_normalization_anchors Number of anchors participating in normalization.
+ */
 inline void record_vulkan_seed_anchor_audit(
     vulkan_seed_lookup_decline* decline,
     const bioseq::gpu::vulkan::seed_anchor_canonical_order_audit& validation,
@@ -138,7 +204,11 @@ inline void record_vulkan_seed_anchor_audit(
         tie_normalization_anchors;
 }
 
-/// Copy canonical-order audit counters from a complete lookup result.
+/**
+ * @brief Copy canonical-order audit counters from a complete lookup result.
+ * @param decline Destination diagnostics, or `nullptr` when reporting is disabled.
+ * @param result Lookup result carrying canonical validation and tie counters.
+ */
 inline void record_vulkan_seed_anchor_audit(
     vulkan_seed_lookup_decline* decline,
     const bioseq::gpu::vulkan::seed_lookup_result& result) noexcept
@@ -150,7 +220,11 @@ inline void record_vulkan_seed_anchor_audit(
         result.canonical_tie_normalization_anchors);
 }
 
-/// Return the stable diagnostic spelling of @p reason.
+/**
+ * @brief Return the stable diagnostic spelling of a decline reason.
+ * @param reason Decline reason to name.
+ * @return Stable snake-case spelling, or `unknown` for an invalid enum value.
+ */
 [[nodiscard]] inline constexpr std::string_view
 vulkan_seed_lookup_decline_reason_name(
     vulkan_seed_lookup_decline_reason reason) noexcept
@@ -200,7 +274,12 @@ vulkan_seed_lookup_decline_reason_name(
     return "unknown";
 }
 
-/// Format the complete structured decline for logs and strict exceptions.
+/**
+ * @brief Format a complete structured decline for logs and strict exceptions.
+ * @param decline Admission and execution evidence to format.
+ * @return Single-line reason and metric record, including nested index-upload
+ * or memory-admission evidence when applicable.
+ */
 [[nodiscard]] inline std::string format_vulkan_seed_lookup_decline(
     const vulkan_seed_lookup_decline& decline)
 {
@@ -302,7 +381,12 @@ vulkan_seed_lookup_decline_reason_name(
     return fmt::format("reason={} {}", reason, metrics);
 }
 
-/// Raise a strict runtime error containing @p operation and @p decline.
+/**
+ * @brief Raise a strict selected-backend error containing complete diagnostics.
+ * @param operation Human-readable name of the selected Vulkan operation.
+ * @param decline Structured evidence explaining why execution was rejected.
+ * @throws bioseq::gpu::vulkan::vulkan_runtime_error Always.
+ */
 [[noreturn]] inline void throw_vulkan_seed_lookup_strict_decline(
     std::string_view operation,
     const vulkan_seed_lookup_decline& decline)
@@ -315,29 +399,43 @@ vulkan_seed_lookup_decline_reason_name(
 
 /// Bounded seed-lookup quantity that exceeded the 32-bit device ABI.
 enum class seed_lookup_overflow_kind : std::uint8_t {
+    /** Exclusive-prefix entry count exceeded the device ABI. */
     query_prefix_length,
+    /** Accumulated exact anchor count exceeded the device ABI. */
     exact_anchor_count,
 };
 
 /// Internal checked-arithmetic exception carrying the overflowing quantity.
 struct seed_lookup_too_large final : std::exception {
+    /**
+     * @param overflow_kind Quantity whose checked accumulation failed.
+     * @param observed_value First unrepresentable value.
+     */
     seed_lookup_too_large(
         seed_lookup_overflow_kind overflow_kind,
         std::uint64_t observed_value) noexcept
         : kind(overflow_kind), observed(observed_value) {}
 
+    /** Quantity whose checked accumulation failed. */
     seed_lookup_overflow_kind kind = seed_lookup_overflow_kind::exact_anchor_count;
+    /** First value outside the 32-bit device domain. */
     std::uint64_t observed = 0;
 
+    /** @return Stable exception description for the checked ABI boundary. */
     [[nodiscard]] const char* what() const noexcept override {
         return "Vulkan seed lookup anchor count exceeds uint32_t";
     }
 };
 
-/// Shared checked arithmetic for both the mapped-resident and CPU-oracle
-/// prefix passes.  Keeping the boundary in a scalar seam makes the u32 ABI
-/// failure testable without constructing an invalid multi-billion-element
-/// span, while the production loops still exercise this exact helper.
+/**
+ * @brief Compute the checked exclusive-prefix length for a minimizer count.
+ * @param query_minimizer_count Number of minimizers addressed by the prefix.
+ * @return `query_minimizer_count + 1` within the 32-bit device domain.
+ * @throws seed_lookup_too_large When the prefix length exceeds `std::uint32_t`.
+ *
+ * Both mapped-resident and CPU-oracle prefix passes share this scalar seam, so
+ * overflow remains testable without constructing a multi-billion-element span.
+ */
 [[nodiscard]] inline std::uint64_t checked_seed_prefix_length(
     std::uint64_t query_minimizer_count)
 {
@@ -351,6 +449,13 @@ struct seed_lookup_too_large final : std::exception {
     return prefix_len;
 }
 
+/**
+ * @brief Accumulate an exact anchor count within the 32-bit device domain.
+ * @param current_total Anchors accumulated before the current group.
+ * @param additional_anchors Anchors contributed by the current group.
+ * @return Checked combined anchor count.
+ * @throws seed_lookup_too_large When the combined count exceeds `std::uint32_t`.
+ */
 [[nodiscard]] inline std::uint64_t checked_seed_anchor_total(
     std::uint64_t current_total,
     std::uint32_t additional_anchors)
