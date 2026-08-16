@@ -4,7 +4,7 @@
  *
  * The sorter returns a permutation so tuple ownership remains with its caller.
  * Resident, worker-shareable batches may use the Vulkan sequence-sort path.
- * every decline falls back to rank-stream comparison in the configured TBB
+ * Every decline falls back to rank-stream comparison in the configured TBB
  * arena. Fragmented scanners are not flattened for the accelerator path.
  */
 module;
@@ -38,7 +38,12 @@ import bioseq.storage.scanner;
 
 export namespace bioseq::storage {
 
-/** Planner-owned sequence ordering options without PostgreSQL types. */
+/**
+ * Planner-owned sequence ordering options without PostgreSQL types.
+ *
+ * Null placement is consumed by tuple orchestration because this value-only
+ * sorter never receives null sequence views.
+ */
 struct sequence_sort_options {
     bool descending = false;
     bool nulls_first = false;

@@ -44,7 +44,7 @@ enum class sequence_transform : std::uint8_t {
     return (std::to_underlying(transform) & 2u) != 0u;
 }
 
-/** Return `abs(value)` in the unsigned domain, including `INT64_MIN`. */
+/** Return a negative value's unsigned magnitude, including `INT64_MIN`. */
 [[nodiscard]] constexpr std::uint64_t negative_magnitude(
     std::int64_t value) noexcept
 {
