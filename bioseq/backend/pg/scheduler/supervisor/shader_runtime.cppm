@@ -303,33 +303,35 @@ process_shader_seed_snapshot() {
     });
 
     constexpr std::uint64_t k_peak_compile_bytes = 256ull << 20;
-    std::size_t cursor = 0;
-    while (cursor < keys->size()) {
+    std::size_t compile_cursor = 0;
+    while (compile_cursor < keys->size()) {
         const unsigned requested =
-            static_cast<unsigned>(std::min<std::size_t>(4, keys->size() - cursor));
+            static_cast<unsigned>(std::min<std::size_t>(4, keys->size() - compile_cursor));
         auto wave = bioseq::parallelism::try_reserve_budgeted_wave(requested, k_peak_compile_bytes);
         if (!wave.is_admitted) {
             return std::unexpected("shader cache AOT memory admission failed");
         }
-        const std::size_t begin = cursor;
-        const std::size_t end = std::min<std::size_t>(keys->size(), cursor + wave.fanout);
+        const std::size_t wave_begin = compile_cursor;
+        const std::size_t wave_end =
+            std::min<std::size_t>(keys->size(), compile_cursor + wave.fanout);
         std::mutex error_mu;
         std::string first_error;
         bioseq::parallelism::global_pool::instance().parallel_for(
-            begin,
-            end,
+            wave_begin,
+            wave_end,
             1,
-            [&cache_dir, &error_mu, &first_error, &inputs, &keys](std::size_t b, std::size_t e) {
-                for (std::size_t i = b; i < e; ++i) {
+            [&cache_dir, &error_mu, &first_error, &inputs, &keys](const std::size_t range_begin,
+                                                                  const std::size_t range_end) {
+                for (std::size_t key_index = range_begin; key_index < range_end; ++key_index) {
                     auto compiled = bioseq::gpu::vulkan::ensure_compiled_for_sealed_seed(
-                        cache_dir, (*keys)[i], inputs.msl);
+                        cache_dir, (*keys)[key_index], inputs.msl);
                     if (!compiled) {
-                        std::lock_guard<std::mutex> guard(error_mu);
+                        std::lock_guard<std::mutex> error_lock(error_mu);
                         if (first_error.empty()) {
-                            first_error =
-                                fmt::format("{}: {}",
-                                            bioseq::gpu::vulkan::cache_file_stem((*keys)[i]),
-                                            compiled.error());
+                            first_error = fmt::format(
+                                "{}: {}",
+                                bioseq::gpu::vulkan::cache_file_stem((*keys)[key_index]),
+                                compiled.error());
                         }
                     }
                 }
@@ -337,7 +339,7 @@ process_shader_seed_snapshot() {
         if (!first_error.empty()) {
             return std::unexpected(first_error);
         }
-        cursor = end;
+        compile_cursor = wave_end;
     }
     auto sealed = bioseq::gpu::vulkan::seal_shader_cache_manifest(cache_dir, digest, *keys);
     if (!sealed) {
@@ -512,10 +514,10 @@ void wait_for_runtime_ready() {
         sleep_prepared = true;
         for (;;) {
             pg_check_for_interrupts_as_cpp();
-            const auto state = static_cast<runtime_initialization_state>(
+            const auto runtime_state = static_cast<runtime_initialization_state>(
                 pg_atomic_read_u32(&g_shared->runtime_init_state));
             pg_read_barrier();
-            if (state == runtime_initialization_state::ready) {
+            if (runtime_state == runtime_initialization_state::ready) {
                 const std::string digest = current_runtime_cache_digest();
 #if defined(__APPLE__)
                 if (digest.empty()) {
@@ -557,7 +559,7 @@ void wait_for_runtime_ready() {
                 cancel_sleep();
                 return;
             }
-            if (state == runtime_initialization_state::failed) {
+            if (runtime_state == runtime_initialization_state::failed) {
                 const std::uint32_t errc = pg_atomic_read_u32(&g_shared->runtime_init_errc);
                 const std::string diagnostic =
                     fmt::format("load_bioseq_runtime failed (errc {}); GPU unavailable", errc);
@@ -797,21 +799,22 @@ struct pg_supervisor_compile_service {
             for (;;) {
                 pg_check_for_interrupts_as_cpp();
                 shader_compile_slot& slot = g_shared->compile_queue[slot_index];
-                const auto state = static_cast<compile_slot_state>(pg_atomic_read_u32(&slot.state));
-                const std::uint32_t observed_gen = pg_atomic_read_u32(&slot.generation);
-                if ((state == compile_slot_state::done_ok ||
-                     state == compile_slot_state::done_error) &&
-                    observed_gen != generation) {
+                const auto slot_state =
+                    static_cast<compile_slot_state>(pg_atomic_read_u32(&slot.state));
+                const std::uint32_t observed_generation = pg_atomic_read_u32(&slot.generation);
+                if ((slot_state == compile_slot_state::done_ok ||
+                     slot_state == compile_slot_state::done_error) &&
+                    observed_generation != generation) {
                     pg_read_barrier();
-                    const std::uint32_t errc = slot.errc;
+                    const std::uint32_t error_code = slot.errc;
                     cancel_sleep();
-                    (void)try_release_completed_shader_compile_slot(slot_index, state);
-                    if (state == compile_slot_state::done_ok) {
+                    (void)try_release_completed_shader_compile_slot(slot_index, slot_state);
+                    if (slot_state == compile_slot_state::done_ok) {
                         return {};
                     }
                     return std::unexpected(fmt::format("shader compile failed for {} (errc {})",
                                                        bioseq::gpu::vulkan::cache_file_stem(key),
-                                                       errc));
+                                                       error_code));
                 }
                 if (static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns()) >
                     deadline) {
