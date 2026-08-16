@@ -118,14 +118,14 @@ export {
         sequence_size_t target_end = 0;   ///< col 9: target end on original strand
         sequence_size_t num_matches = 0;  ///< col 10: number of residue matches (mlen)
         sequence_size_t block_length = 0; ///< col 11: alignment block length (blen)
-        int32_t mapq = 0;                 ///< col 12: mapping quality (0-255)
+        std::int32_t mapq = 0;            ///< col 12: mapping quality (0-255)
 
         // Additional alignment info
-        int32_t chain_score = 0;            ///< chaining score
-        int32_t dp_score = 0;               ///< DP alignment score
-        int32_t dp_max_score = 0;           ///< max scoring segment score (dp_max0 in original)
-        int32_t seed_count = 0;             ///< number of seeds in chain
-        int32_t secondary_chain_score = 0;  ///< best secondary chaining score against this primary
+        std::int32_t chain_score = 0;           ///< chaining score
+        std::int32_t dp_score = 0;              ///< DP alignment score
+        std::int32_t dp_max_score = 0;          ///< max scoring segment score (dp_max0 in original)
+        std::int32_t seed_count = 0;            ///< number of seeds in chain
+        std::int32_t secondary_chain_score = 0; ///< best secondary score against this primary
         float divergence = -1.f;            ///< sequence divergence estimate
         bool is_primary = true;             ///< primary mapping flag
         bool has_cigar = false;             ///< whether CIGAR alignment was performed

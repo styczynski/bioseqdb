@@ -32,6 +32,7 @@ import bioseq.indexing.minimizer_index;
 import bioseq.indexing.storage;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.vulkan_minimizers;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
