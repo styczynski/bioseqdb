@@ -65,6 +65,10 @@ import :contract_core;
 
 namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
+/**
+ * @brief Inserts, reads, updates, and deletes a row in a TOAST carrier relation.
+ * @return Count of toastable attributes stored out of line, or zero when @p p_codec has none.
+ */
 template <class p_codec,
           class p_live_row_factory,
           class p_live_updated_row_factory,
@@ -200,6 +204,10 @@ exercise_external_toast_lifecycle(Relation relation,
     return verified;
 }
 
+/**
+ * @brief Creates a temporary unindexed table LIKE the source relation for TOAST probing.
+ * @return Open carrier relation locked in RowExclusive mode.
+ */
 template <class p_codec>
 [[nodiscard]] Relation create_unindexed_toast_carrier(Relation source_relation) {
     ++toast_carrier_sequence;
@@ -250,6 +258,10 @@ template <class p_codec>
     return invoke_pg_as_cpp([relation_oid] { return table_open(relation_oid, RowExclusiveLock); });
 }
 
+/**
+ * @brief Runs the generated row-codec runtime contract for one descriptor and optional carriers.
+ * @return Receipt summarizing field counts and which lifecycle checks completed.
+ */
 template <class p_codec,
           class p_null_row_factory,
           class p_full_row_factory,
@@ -562,6 +574,10 @@ exercise_codec_with_external(TupleDesc descriptor,
     };
 }
 
+/**
+ * @brief Runs exercise_codec_with_external without an external carrier relation.
+ * @return Receipt from the codec runtime contract for @p descriptor.
+ */
 template <class p_codec,
           class p_null_row_factory,
           class p_full_row_factory,
@@ -596,6 +612,10 @@ template <class p_codec,
                                                  verify_scan);
 }
 
+/**
+ * @brief Opens a catalog relation and invokes @p exercise with its tuple descriptor.
+ * @return Receipt produced by @p exercise.
+ */
 template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
 with_relation_descriptor(const char* schema_name, const char* relation_name, p_exercise exercise) {
@@ -620,6 +640,10 @@ with_relation_descriptor(const char* schema_name, const char* relation_name, p_e
     return result;
 }
 
+/**
+ * @brief Resolves a composite type descriptor and invokes @p exercise without a live relation.
+ * @return Receipt produced by @p exercise.
+ */
 template <class p_codec, class p_exercise>
 [[nodiscard]] runtime_receipt_entry
 with_composite_descriptor(const char* schema_name, const char* type_name, p_exercise exercise) {
@@ -652,6 +676,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
     return result;
 }
 
+/** @brief Serializes runtime receipt entries into a stable semicolon-separated report string. */
 [[nodiscard]] std::string render_receipt(std::vector<runtime_receipt_entry> entries) {
     std::ranges::sort(entries, {}, &runtime_receipt_entry::identity);
     std::string result;
@@ -696,6 +721,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
     return result;
 }
 
+/** @brief Rolls back @p transaction and rethrows the active exception. */
 [[noreturn]] void rethrow_after_rollback(subtransaction& transaction) {
     const std::exception_ptr original = std::current_exception();
     try {

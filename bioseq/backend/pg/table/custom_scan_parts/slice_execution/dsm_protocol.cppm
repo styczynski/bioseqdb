@@ -83,12 +83,14 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Byte offsets for one SliceProject DSM segment layout. */
     struct slice_project_dsm_layout {
         Size header_bytes;
         Size slot_stride;
         Size total_bytes;
     };
 
+    /** @brief Counters and flags recorded while merging one DSM cycle into trace state. */
     struct slice_project_dsm_merge_audit {
         std::uint32_t slot_headers_read = 0u;
         std::uint32_t counter_records_read = 0u;
@@ -99,6 +101,7 @@ export {
         bool merged = false;
     };
 
+    /** @brief Computes aligned header, slot stride, and total bytes for a DSM layout. */
     [[nodiscard]] slice_project_dsm_layout make_slice_project_dsm_layout(std::uint32_t recipe_count,
                                                                          std::uint32_t slot_count) {
         const Size header_bytes = MAXALIGN(sizeof(slice_dsm_header));
@@ -113,6 +116,7 @@ export {
         };
     }
 
+    /** @brief Adds two allocation sizes when the sum stays within MaxAllocSize. */
     [[nodiscard]] bool
     slice_project_checked_add_noexcept(Size left, Size right, Size* result) noexcept {
         if (result == nullptr || left > MaxAllocSize || right > MaxAllocSize - left)
@@ -121,6 +125,7 @@ export {
         return true;
     }
 
+    /** @brief Multiplies two allocation sizes when the product stays within MaxAllocSize. */
     [[nodiscard]] bool
     slice_project_checked_mul_noexcept(Size left, Size right, Size* result) noexcept {
         if (result == nullptr || (left != 0u && right > MaxAllocSize / left)) {
@@ -130,6 +135,7 @@ export {
         return true;
     }
 
+    /** @brief Fills layout from recipe and slot counts without throwing on overflow. */
     [[nodiscard]] bool
     slice_project_dsm_layout_noexcept(std::uint32_t recipe_count,
                                       std::uint32_t slot_count,
@@ -157,6 +163,7 @@ export {
         return true;
     }
 
+    /** @brief Returns the worker header at slot_index bytes after header->header_bytes. */
     [[nodiscard]] slice_dsm_worker_header*
     slice_project_worker_slot(slice_dsm_header* header, std::uint32_t slot_index) noexcept {
         return reinterpret_cast<slice_dsm_worker_header*>(
@@ -164,12 +171,14 @@ export {
             static_cast<Size>(slot_index) * header->slot_stride);
     }
 
+    /** @brief Returns the counter array stored immediately after one worker header. */
     [[nodiscard]] slice_dsm_counter*
     slice_project_worker_counters(slice_dsm_worker_header* worker) noexcept {
         return reinterpret_cast<slice_dsm_counter*>(reinterpret_cast<char*>(worker) +
                                                     sizeof(slice_dsm_worker_header));
     }
 
+    /** @brief Marks a live trace attachment invalid and overflowed. */
     void slice_project_mark_trace_invalid_noexcept(slice_trace_attachment* attachment) noexcept {
         if (!slice_trace_attachment_live(attachment))
             return;
@@ -177,6 +186,7 @@ export {
         attachment->runtime->overflowed = true;
     }
 
+    /** @brief Checks header magic, version, and layout fields against the expected cycle and counts. */
     [[nodiscard]] bool
     slice_project_validate_dsm_header_noexcept(slice_dsm_header const* header,
                                                std::uint32_t recipe_count,
@@ -193,6 +203,7 @@ export {
                header->cycle == cycle && header->slot_stride == layout->slot_stride;
     }
 
+    /** @brief Merges published-complete slot counters for expected_cycle into the trace cumulative sink. */
     void slice_project_merge_dsm_cycle_noexcept(
         slice_dsm_header* header,
         std::uintptr_t map_base,
@@ -315,6 +326,7 @@ export {
         }
     }
 
+    /** @brief Merges a DSM cycle using map bounds from a parallel context segment. */
     void slice_project_merge_dsm_cycle_noexcept(
         slice_dsm_header* header,
         ParallelContext* pcxt,
@@ -335,6 +347,7 @@ export {
     }
 
 #ifdef BIOSEQ_TEST_INDEXES
+    /** @brief Single-field corruption modes exercised by corrupt DSM merge tests. */
     enum class slice_project_dsm_corruption : std::uint8_t {
         version = 0u,
         recipe_count,
@@ -344,11 +357,13 @@ export {
         stale_cycle,
     };
 
+    /** @brief Outcome of one corrupt DSM merge test run and its merge audit. */
     struct slice_project_dsm_test_case_result {
         bool validated = false;
         slice_project_dsm_merge_audit audit{};
     };
 
+    /** @brief Writes a valid SliceProject DSM header for the supplied layout and cycle. */
     void slice_project_initialize_test_dsm(slice_dsm_header* header,
                                            slice_project_dsm_layout const& layout,
                                            std::uint32_t recipe_count,
@@ -363,6 +378,7 @@ export {
         header->slot_stride = layout.slot_stride;
     }
 
+    /** @brief Returns whether every worker slot and counter matches a fresh DSM reset. */
     [[nodiscard]] bool
     slice_project_test_dsm_payload_is_reset(slice_dsm_header* header,
                                             slice_project_dsm_layout const& layout,
@@ -395,6 +411,7 @@ export {
         return true;
     }
 
+    /** @brief Applies one corruption, runs merge, and checks that counters stayed unread. */
     [[nodiscard]] slice_project_dsm_test_case_result
     slice_project_run_corrupt_dsm_test(slice_project_runtime const& source,
                                        slice_project_dsm_corruption corruption) {
@@ -479,6 +496,7 @@ export {
         return result;
     }
 
+    /** @brief Invocation counts for async-owner test callbacks. */
     struct slice_project_async_test_callbacks {
         std::uint32_t cancelled = 0u;
         std::uint32_t joined = 0u;
@@ -487,26 +505,32 @@ export {
         std::uint32_t incomplete_published = 0u;
     };
 
+    /** @brief Test cancel callback that increments cancelled on the shared callback record. */
     void slice_project_test_cancel(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->cancelled;
     }
 
+    /** @brief Test join callback that increments joined on the shared callback record. */
     void slice_project_test_join(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->joined;
     }
 
+    /** @brief Test backing-release callback that increments backings_released on the shared record. */
     void slice_project_test_release_backing(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->backings_released;
     }
 
+    /** @brief Test publish-complete callback that increments complete_published on the shared record. */
     void slice_project_test_publish_complete(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->complete_published;
     }
 
+    /** @brief Test publish-incomplete callback that increments incomplete_published on the shared record. */
     void slice_project_test_publish_incomplete(void* argument) noexcept {
         ++static_cast<slice_project_async_test_callbacks*>(argument)->incomplete_published;
     }
 
+    /** @brief Exercises shutdown of one scheduled async job that never published complete. */
     [[nodiscard]] bool slice_project_run_incomplete_async_test(slice_project_runtime const& source,
                                                                std::uint32_t* cleanup_callbacks) {
         if (cleanup_callbacks != nullptr)
@@ -577,6 +601,7 @@ export {
                callbacks.complete_published == 0u && callbacks.incomplete_published == 1u;
     }
 
+    /** @brief Calls DSM reinitialize under PG_TRY and reports ERRCODE_DATA_CORRUPTED rejection. */
     [[nodiscard]] bool slice_project_reinitialize_rejects_test_cycle(slice_project_state* state,
                                                                      ParallelContext* pcxt,
                                                                      slice_dsm_header* header) {
@@ -600,6 +625,7 @@ export {
         return rejected;
     }
 
+    /** @brief Runs DSM diagnostic fixtures selected by runtime.dsm_test_fixture_mode. */
     void slice_project_apply_dsm_test_fixture(slice_project_state* state) {
         if (state == nullptr)
             return;

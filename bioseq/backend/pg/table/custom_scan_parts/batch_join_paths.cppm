@@ -85,6 +85,13 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /**
+     * @brief Extends join path generation for one eligible mmsearch inner join.
+     *
+     * Invokes the chained hook first. For one securely promotable mmsearch restriction
+     * on supported inputs, retains existing custom-owner paths, admits transformed
+     * per-row paths, or appends a raw two-child BatchJoin CustomPath to @p joinrel.
+     */
     void bioseq_batch_join_set_join_pathlist_hook(PlannerInfo* root,
                                                   RelOptInfo* joinrel,
                                                   RelOptInfo* outerrel,
@@ -181,10 +188,12 @@ export {
         const bool transformed_operands =
             bioseq_expr_uses_lazy_sequence_projection(arguments.get_first()) ||
             bioseq_expr_uses_lazy_sequence_projection(arguments.get_second());
+        /** @brief Reports whether @p input is a base or other-member planner relation. */
         auto is_base_input = [](RelOptInfo const* input) noexcept {
             return input != nullptr && (input->reloptkind == RELOPT_BASEREL ||
                                         input->reloptkind == RELOPT_OTHER_MEMBER_REL);
         };
+        /** @brief Reports whether @p input is a join planner relation. */
         auto is_join_input = [](RelOptInfo const* input) noexcept {
             return input != nullptr && input->reloptkind == RELOPT_JOINREL;
         };
@@ -592,6 +601,7 @@ export {
         locator_path->path.total_cost = target_candidate.cost_owner->total_cost;
         locator_path->path.rows = target_candidate.cost_owner->rows;
         locator_path->path.pathtarget = create_empty_pathtarget();
+        /** @brief Copies eligible expressions from @p source into the locator pathtarget. */
         auto append_locator_target = [locator_path](const PathTarget* source) {
             if (source == nullptr)
                 return;
@@ -803,6 +813,7 @@ export {
             lappend(join_path->custom_private, make_batch_join_cost_const(incumbent_cost_floor));
         Assert(list_length(join_path->custom_private) == k_bioseq_batch_join_path_private_fields);
         join_path->methods = bioseq_batch_join_path_methods();
+        /** @brief Keeps CustomPath entries that already own the mmsearch restriction. */
         auto retain_existing_owner = [restriction](List* paths) {
             postgres_list<Path> survivors;
             for (Path* incumbent : postgres_list<Path>(paths)) {

@@ -41,6 +41,11 @@ import bioseq.sequences.simd;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 
+/**
+ * @brief Decodes a bioseq.seq typmod and rejects unsupported alphabet or width tags.
+ * @param typmod Non-negative PostgreSQL typmod integer.
+ * @return Normalized alphabet and storage-unit parameters.
+ */
 export [[nodiscard]] compact_sequence_stdc_type_params
 decode_seq_typmod_checked(int32_t typmod)
 {
@@ -61,6 +66,12 @@ decode_seq_typmod_checked(int32_t typmod)
     return params;
 }
 
+/**
+ * @brief Parses a supported alphabet name and reports invalid names through PostgreSQL.
+ * @param alphabet_name C string naming the alphabet.
+ * @param type_name SQL type label used in error messages.
+ * @return Compiled alphabet code for the name.
+ */
 export [[nodiscard]] std::uint8_t parse_alphabet_name_checked(
     char const* alphabet_name,
     char const* type_name)
@@ -80,12 +91,25 @@ export [[nodiscard]] std::uint8_t parse_alphabet_name_checked(
     return static_cast<std::uint8_t>(*code);
 }
 
+/**
+ * @brief Returns the registered name for a compiled alphabet code.
+ * @param alphabet_code Compiled alphabet dispatch index.
+ * @return Name view owned by the alphabet dispatch table.
+ */
 export [[nodiscard]] std::string_view supported_alphabet_name(
     std::uint8_t alphabet_code) noexcept
 {
     return pgseq_supported_alphabets::name_of_alphabet_code(alphabet_code);
 }
 
+/**
+ * @brief Out-of-line rank lookup for one input byte in a compiled alphabet.
+ * @param alphabet_code Compiled alphabet dispatch index.
+ * @param input Raw input byte.
+ * @param rank Output rank written on success.
+ * @param canonical Optional output for the canonical ASCII symbol.
+ * @return Whether the input maps to a valid rank.
+ */
 export [[nodiscard]] bool pgseq_rank_for_symbol_out_of_line(
     std::uint8_t alphabet_code,
     unsigned char input,
@@ -96,6 +120,13 @@ export [[nodiscard]] bool pgseq_rank_for_symbol_out_of_line(
         alphabet_code, input, rank, canonical);
 }
 
+/**
+ * @brief Out-of-line symbol lookup for one rank in a compiled alphabet.
+ * @param alphabet_code Compiled alphabet dispatch index.
+ * @param rank Alphabet rank to encode.
+ * @param symbol Output canonical character written on success.
+ * @return Whether the rank maps to a valid symbol.
+ */
 export [[nodiscard]] bool pgseq_symbol_for_rank_out_of_line(
     std::uint8_t alphabet_code,
     std::uint8_t rank,
@@ -106,6 +137,14 @@ export [[nodiscard]] bool pgseq_symbol_for_rank_out_of_line(
 
 namespace {
 
+/**
+ * @brief Allocates a flat unbound sequence from ASCII input bytes.
+ * @param input ASCII symbols read for the full length.
+ * @param length Number of input bytes.
+ * @param require_already_canonical Whether non-canonical bytes are rejected.
+ * @param invalid_sqlstate SQLSTATE used when symbol validation fails.
+ * @return New flat unbound sequence allocated in the current memory context.
+ */
 [[nodiscard]] inline bioseq::pg_types::seq* allocate_unbound_ascii(
     char const* input,
     std::size_t length,
@@ -159,6 +198,13 @@ namespace {
     return result;
 }
 
+/**
+ * @brief Packs validated ASCII into a bound flat sequence for the target typmod.
+ * @param ascii Input ASCII symbols.
+ * @param length Number of symbols.
+ * @param target Destination alphabet and storage-unit parameters.
+ * @return New bound flat sequence allocated in the current memory context.
+ */
 [[nodiscard]] inline bioseq::pg_types::seq* pack_ascii_for_target(
     char const* ascii,
     std::size_t length,
@@ -211,6 +257,12 @@ namespace {
     return result;
 }
 
+/**
+ * @brief Materializes a flat sequence copy from inline or expanded input.
+ * @param datum Sequence Datum that may be expanded or toasted.
+ * @param must_free Set to true when the returned pointer must be pfree'd.
+ * @return Flat sequence pointer suitable for wire or text helpers.
+ */
 [[nodiscard]] inline bioseq::pg_types::seq* flatten_sequence_datum(
     Datum datum,
     bool& must_free)
@@ -228,6 +280,14 @@ namespace {
     return result;
 }
 
+/**
+ * @brief Reads one wire storage unit from a libpq receive buffer.
+ * @tparam p_alphabet Compiled alphabet slot in the wire receive dispatch signature.
+ * @tparam p_output Destination integer type for the decoded unit.
+ * @param buffer Receive buffer positioned at the next unit.
+ * @param width Storage-unit byte width on the wire.
+ * @return Decoded storage unit cast to `p_output`.
+ */
 [[nodiscard]] inline constexpr auto pg_recv_byte_reader =
     []<class p_alphabet, class p_output>(
         StringInfoData& buffer,
@@ -244,6 +304,13 @@ namespace {
         __builtin_unreachable();
     };
 
+/**
+ * @brief Writes one wire storage unit into a libpq send buffer.
+ * @tparam p_input Source integer type for the unit value.
+ * @param buffer Send buffer receiving the encoded unit.
+ * @param unit Storage unit value to encode.
+ * @param width Storage-unit byte width on the wire.
+ */
 [[nodiscard]] inline constexpr auto pg_send_byte_writer =
     []<class p_input>(StringInfoData& buffer,
                  std::uint64_t unit,
@@ -259,11 +326,19 @@ namespace {
                  errmsg("invalid bioseq wire storage width %u", width)));
     };
 
+/** @brief Trace attachment metadata borrowed from an expanded sequence Datum. */
 struct sequence_trace_provenance {
+    /// @brief Borrowed slice trace attachment when the Datum is expanded.
     slice_trace_attachment* attachment;
+    /// @brief Producer value id recorded alongside the attachment.
     std::uint32_t producer_value_id;
 };
 
+/**
+ * @brief Collects trace provenance from an expanded sequence Datum.
+ * @param input Sequence Datum that may carry expanded-object trace metadata.
+ * @return Empty provenance for inline values, otherwise borrowed attachment fields.
+ */
 [[nodiscard]] inline sequence_trace_provenance trace_provenance_for(
     Datum input)
 {
@@ -277,16 +352,26 @@ struct sequence_trace_provenance {
     };
 }
 
+/**
+ * @brief Rank-pack sink that encodes storage units into a libpq send buffer.
+ * @tparam p_unit Wire storage-unit type for the bound alphabet instance.
+ */
 template<class p_unit>
 struct pg_wire_rank_unit_sink {
+    /// @brief Storage-unit type encoded on the wire.
     using storage_unit = p_unit;
+    /// @brief Fixed-span capacity policy used by the rank packer.
     static constexpr auto capacity_policy =
         bioseq::sequences::pack_capacity_policy::fixed_span;
 
+    /// @brief libpq send buffer receiving encoded units.
     StringInfoData* buffer;
+    /// @brief Maximum wire units allowed for this encode.
     std::uint64_t maximum_units;
+    /// @brief Number of wire units written so far.
     std::uint64_t written{};
 
+    /// @brief Encodes one storage unit when wire capacity remains.
     [[nodiscard]] bool try_write(p_unit value)
     {
         if (written >= maximum_units) {
@@ -299,12 +384,17 @@ struct pg_wire_rank_unit_sink {
         return true;
     }
 
+    /// @brief Returns how many wire units have been written so far.
     [[nodiscard]] std::size_t written_units() const noexcept
     {
         return static_cast<std::size_t>(written);
     }
 };
 
+/**
+ * @brief Raises PostgreSQL errors for failed wire rank packing.
+ * @param status Rank-pack status code from the checked writer.
+ */
 [[noreturn]] inline void wire_rank_pack_error(
     bioseq::sequences::rank_pack_status status)
 {
@@ -318,6 +408,15 @@ struct pg_wire_rank_unit_sink {
     __builtin_unreachable();
 }
 
+/**
+ * @brief Streams transformed ranks from a lazy view into wire encoding.
+ * @tparam p_instance Bound alphabet and width instance.
+ * @tparam p_view Lazy sequence view supplying ranks.
+ * @param view View covering the logical sequence length.
+ * @param buffer libpq send buffer receiving encoded units.
+ * @param length Logical base-pair length to stream.
+ * @param expected_units Number of storage units expected on the wire.
+ */
 template<class p_instance, class p_view>
 void stream_view_to_wire(
     p_view view,
@@ -343,6 +442,12 @@ void stream_view_to_wire(
     }
 }
 
+/**
+ * @brief Writes canonical ASCII symbols for every rank in a lazy view.
+ * @tparam p_alphabet Compiled alphabet for rank-to-symbol decoding.
+ * @param view Lazy sequence view read in rank chunks.
+ * @param output Destination buffer with one byte per base pair.
+ */
 template<class p_alphabet>
 void view_to_ascii(
     bioseq::storage::lazy_sequence_view<p_alphabet> view,
@@ -386,6 +491,13 @@ export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
         input, length, require_already_canonical));
 }
 
+/**
+ * @brief Builds a bound sequence Datum from validated ASCII for a typmod.
+ * @param input ASCII symbols.
+ * @param length Number of input bytes.
+ * @param target Destination alphabet and storage-unit parameters.
+ * @return Datum owning a newly allocated flat bound sequence.
+ */
 export [[nodiscard]] inline Datum make_bound_sequence_from_ascii(
     char const* input,
     std::size_t length,
@@ -396,6 +508,11 @@ export [[nodiscard]] inline Datum make_bound_sequence_from_ascii(
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Parses PostgreSQL typmod input array into a bioseq.seq typmod integer.
+ * @param array One-dimensional cstring array with alphabet name and width bits.
+ * @return Encoded typmod for the parsed alphabet and storage width.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -456,6 +573,11 @@ std::int32_t seq_typmod_in(
 }
 
 
+/**
+ * @brief Formats a bioseq.seq typmod as a parenthesized SQL literal fragment.
+ * @param typmod PostgreSQL typmod integer, or negative for untyped.
+ * @return Allocated C string in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -484,6 +606,13 @@ char* seq_typmod_out(std::int32_t typmod)
 }
 
 
+/**
+ * @brief Text input function for bioseq.seq values.
+ * @param input Null-terminated ASCII sequence text.
+ * @param type_oid Declared type OID (unused).
+ * @param typmod Destination typmod, or negative for unbound storage.
+ * @return Flat sequence allocated in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -511,6 +640,11 @@ bioseq::pg_types::seq* seq_in(
     return pack_ascii_for_target(input, length, target);
 }
 
+/**
+ * @brief Text output function that materializes a sequence as an ASCII C string.
+ * @param input Sequence Datum in inline, expanded, or toasted form.
+ * @return Allocated null-terminated ASCII in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -583,6 +717,12 @@ char* seq_out(
     return output;
 }
 
+/**
+ * @brief Materializes a sequence Datum as a PostgreSQL text value.
+ * @param input Sequence Datum in inline, expanded, or toasted form.
+ * @param reason Materialization reason recorded for slice tracing.
+ * @return Allocated text value with VARHDRSZ payload.
+ */
 [[nodiscard]] inline text* materialize_pg_sequence_text(
     Datum input,
     materialization_reason reason)
@@ -643,6 +783,13 @@ char* seq_out(
     return result;
 }
 
+/**
+ * @brief Casts a sequence Datum to a destination typmod when alphabet and width allow.
+ * @param input Source sequence Datum.
+ * @param target_typmod Destination typmod, or negative to preserve the input.
+ * @param explicit_cast Whether the cast was explicit (unused).
+ * @return Datum owning the cast result or the unchanged input.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -715,6 +862,11 @@ Datum seq_cast(
     return PointerGetDatum(result);
 }
 
+/**
+ * @brief Binary output function that encodes a sequence for the PostgreSQL wire format.
+ * @param input Sequence Datum in inline, expanded, or toasted form.
+ * @return Allocated bytea value containing the type send framing.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -895,6 +1047,13 @@ text* seq_send(
     return result;
 }
 
+/**
+ * @brief Binary input function that decodes the PostgreSQL wire representation.
+ * @param buffer libpq receive buffer positioned after the bytea header.
+ * @param type_oid Declared type OID (unused).
+ * @param typmod Destination typmod used to validate bound wire headers.
+ * @return Flat sequence allocated in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
@@ -1038,6 +1197,11 @@ std::int64_t len(
     return static_cast<std::int64_t>(descriptor.bp_length);
 }
 
+/**
+ * @brief Returns the number of logical storage units for a bound sequence.
+ * @param input Sequence Datum whose header is classified without detoasting.
+ * @return Ceiled unit count for bound values, otherwise the base-pair length.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .create = bioseq::sql::create_mode::or_replace,
