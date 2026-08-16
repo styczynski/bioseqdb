@@ -834,7 +834,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     }
 
     /// Admits and allocates the exact retained-position image after control decoding.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     prepare_global_position_storage();
 
     static constexpr std::size_t query_radix_target_mean_ = 4u;
@@ -850,38 +850,38 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     };
 
     /// Sizes the high-bit directory for bounded exact point-lookup buckets.
-    [[nodiscard]] static inline std::expected<query_radix_plan, minimizer_generation_encoding_error>
+    [[nodiscard]] static std::expected<query_radix_plan, minimizer_generation_encoding_error>
     plan_query_radix_(std::size_t query_count, std::uint64_t max_hash) noexcept;
 
     /// Maps a query hash to its high-bit directory bucket.
-    [[nodiscard]] static inline std::size_t
+    [[nodiscard]] static std::size_t
     query_radix_bucket_(hash_type hash, std::uint32_t hash_bits, std::uint32_t radix_bits) noexcept;
 
     /// Extracts the suffix retained inside one query directory bucket.
-    [[nodiscard]] static inline std::uint64_t
+    [[nodiscard]] static std::uint64_t
     query_radix_suffix_(hash_type hash, std::uint32_t suffix_bits) noexcept;
 
     /// Resolves one hash while optionally counting exact-route probes.
-    [[nodiscard]] inline std::size_t
+    [[nodiscard]] std::size_t
     query_index_for_hash_impl_(std::uint64_t hash, std::uint32_t* hash_probes) const noexcept;
 
-    [[nodiscard]] inline std::size_t query_index_for_hash(std::uint64_t hash) const noexcept;
+    [[nodiscard]] std::size_t query_index_for_hash(std::uint64_t hash) const noexcept;
 
     /// Resolves a control hash and reports its exact-route probe count.
-    [[nodiscard]] inline std::size_t
+    [[nodiscard]] std::size_t
     query_index_for_control_hash(std::uint64_t hash, std::uint32_t& hash_probes) const noexcept;
 
     /// Reports whether a directory entry overlaps the sorted query set.
-    [[nodiscard]] inline bool
+    [[nodiscard]] bool
     query_intersects_entry(const grouped_soa_bucket_directory_entry& entry) const noexcept;
 
     /// Positions the physical reader at the first authenticated extent.
-    inline void initialize_physical_cursor() noexcept;
+    void initialize_physical_cursor() noexcept;
 
     /// Advances the physical reader across control and position stages.
-    inline void advance_physical_cursor() noexcept;
+    void advance_physical_cursor() noexcept;
 
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     initialize_identity_core(bioseq::parallelism::memory_admission_controller& admission,
                              const minimizer_generation_head& head,
                              const minimizer_generation_manifest& manifest,
@@ -892,7 +892,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
 
     [[nodiscard]] static constexpr std::uint64_t query_hash_value_(std::uint64_t hash) noexcept;
 
-    [[nodiscard]] static inline std::uint64_t
+    [[nodiscard]] static std::uint64_t
     query_hash_value_(const minimap_sketch_data& minimizer) noexcept;
 
     /**
@@ -900,7 +900,7 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
      * @tparam p_query_value Query scalar or minimizer sketch type.
      */
     template <class p_query_value>
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     initialize_query_protocol(bioseq::parallelism::memory_admission_controller& admission,
                               const minimizer_generation_head& head,
                               const minimizer_generation_manifest& manifest,
@@ -913,37 +913,37 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
                               bool query_hashes_are_sorted_unique = false);
 
     /// Admits reusable storage for the largest selected control extent.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     ensure_control_scratch_();
 
     /// Decodes and routes one authenticated control extent.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     observe_control_extent(const grouped_soa_bucket_directory_entry& entry,
                            std::span<const std::byte> bytes);
 
     /// Appends one decoded position to its admitted query owner.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     append_retained_position(std::size_t query_index, std::uint64_t value);
 
     /// Decodes and routes one authenticated position payload.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     observe_position_payload(const grouped_soa_bucket_directory_entry& entry,
                              std::span<const std::byte> payload);
 
     /// Validates and consumes one row under the selected checksum authority.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row_impl(const minimizer_generation_row_view& row,
                              bool row_checksum_prevalidated);
 
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row(const minimizer_generation_row_view& row);
 
     /// Consumes one row carrying validated checksum authority.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     accept_protocol_row(const validated_minimizer_generation_row_receipt& receipt);
 
     /// Finalizes decoded extents and publishes lookup-ready state.
-    [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
+    [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     finish_query_protocol();
 
     /// Borrows one prepared query result and its retained positions.
@@ -954,12 +954,12 @@ class trait_driven_prepared_query_core : protected admitted_prepared_reader_core
     };
 
     /// Looks up one hash after successful protocol finalization.
-    [[nodiscard]] inline protocol_lookup lookup_protocol(std::uint64_t hash) const noexcept;
+    [[nodiscard]] protocol_lookup lookup_protocol(std::uint64_t hash) const noexcept;
 
     /// Counts retained positions across the active storage layout.
-    [[nodiscard]] inline std::size_t protocol_retained_position_count() const noexcept;
+    [[nodiscard]] std::size_t protocol_retained_position_count() const noexcept;
 
-    [[nodiscard]] inline const grouped_soa_query_admission_stats&
+    [[nodiscard]] const grouped_soa_query_admission_stats&
     protocol_admission_failure_stats() const noexcept;
 };
 
