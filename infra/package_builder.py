@@ -89,12 +89,18 @@ EXPECTED_SIGNING_FINGERPRINT = "452F34C5F1EF6D471EC041ADDD94780B0728F093"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_S3_PREFIX = "bioseq/packages"
 RESOURCE_NAME_PREFIX = "bioseq-package-builder"
-CI_ACCESS_SCHEMA_REVISION = 2
+CI_ACCESS_SCHEMA_REVISION = 3
+CI_ACCESS_DESCRIPTION = "bioseq package release ephemeral SSH"
 COLLECTION_SCHEMA_REVISION = 2
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
 REMOTE_POETRY_VENV_ROOT = f"{REMOTE_WORKSPACE}/caches/poetry-venvs"
 REMOTE_PACKAGE_CMAKE_CACHE_ROOT = f"{REMOTE_WORKSPACE}/caches/package-cmake"
+REMOTE_PACKAGE_LIFECYCLE_LOCK = "/run/lock/bioseq-package-builder-controller.lock"
+REMOTE_PACKAGE_LIFECYCLE_LOCK_WAIT_SECONDS = 60
+SSM_CLEANUP_TIMEOUT_SECONDS = 120
+SSM_CANCEL_RESERVE_SECONDS = 30
+EC2_CLEANUP_STATE_TIMEOUT_SECONDS = 120
 SOURCE_ARCHIVE_IDENTITY = "repository-root-sealed-papers-excluded"
 SOURCE_ARCHIVE_REVISION = 4
 PACKAGE_MATRIX_SCHEMA_REVISION = 1
@@ -103,7 +109,7 @@ PACKAGE_MANIFEST_SCHEMA_REVISION = 2
 PACKAGE_RUN_SCHEMA_REVISION = 1
 PRODUCTION_OPTIMIZATION = "O3"
 PRODUCTION_OPTIMIZATION_FLAG = "-O3"
-OPTIMIZATION_POLICY_REVISION = 1
+OPTIMIZATION_POLICY_REVISION = 2
 INSTANCE_CONNECT_AUTH_ATTEMPTS = 10
 INSTANCE_CONNECT_AUTH_RETRY_SECONDS = 2
 _WORKER_PACKAGE_MANIFEST_ROOT_KEYS = frozenset({
@@ -217,10 +223,12 @@ REMOTE_OPTIMIZATION_EVIDENCE_SCRIPT = r"""
 import hashlib
 import json
 import pathlib
+import re
 import shlex
+import subprocess
 import sys
 
-root = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[1]).resolve(strict=True)
 architecture = sys.argv[2]
 expected_cache_paths = json.loads(sys.argv[3])
 if (
@@ -230,6 +238,34 @@ if (
     or expected_cache_paths != sorted(set(expected_cache_paths))
 ):
     raise RuntimeError("expected production package cache paths are invalid")
+
+resolved_cache_paths = []
+for relative in expected_cache_paths:
+    pure = pathlib.PurePosixPath(relative)
+    if (
+        pure.is_absolute()
+        or ".." in pure.parts
+        or len(pure.parts) != 4
+        or pure.parts[2:] != ("build-repository-root", "CMakeCache.txt")
+        or not pure.parts[0]
+        or not pure.parts[1].startswith("postgresql")
+        or not pure.parts[1].removeprefix("postgresql").isdigit()
+    ):
+        raise RuntimeError(
+            f"invalid selected production package cache path: {relative}"
+        )
+    candidate = root.joinpath(*pure.parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"selected production package cache is missing: {relative}"
+        ) from error
+    if resolved != candidate or not resolved.is_file():
+        raise RuntimeError(
+            f"selected production package cache is not a canonical file: {relative}"
+        )
+    resolved_cache_paths.append(resolved)
 
 def cache_value(cache_path, key):
     matches = []
@@ -243,6 +279,28 @@ def cache_value(cache_path, key):
         raise RuntimeError("CMake cache does not contain exactly one " + key)
     return matches[0]
 
+def require_o3_ndebug(tokens, label):
+    optimization = sorted({token for token in tokens if token.startswith("-O")})
+    embedded_forbidden = sorted({
+        token
+        for token in tokens
+        if re.search(r"(?:^|[,=])-O(?:0|1|2|s|g)(?:$|[,])", token)
+    })
+    ndebug = [token for token in tokens if "NDEBUG" in token]
+    frame_pointer = [token for token in tokens if "omit-frame-pointer" in token]
+    if (
+        optimization != ["-O3"]
+        or embedded_forbidden
+        or ndebug != ["-DNDEBUG"]
+        or frame_pointer != ["-fno-omit-frame-pointer"]
+    ):
+        raise RuntimeError(
+            "production compiler command must contain only -O3, exactly "
+            "-DNDEBUG, and exactly -fno-omit-frame-pointer; "
+            f"optimization={optimization} embedded_forbidden={embedded_forbidden} "
+            f"ndebug={ndebug} frame_pointer={frame_pointer}: {label}"
+        )
+
 expected = {
     "CMAKE_BUILD_TYPE": "Release",
     "CMAKE_C_FLAGS": "",
@@ -250,9 +308,7 @@ expected = {
     "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG -fno-omit-frame-pointer",
     "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG -fno-omit-frame-pointer",
 }
-cache_paths = sorted(
-    root.glob("*/postgresql*/build-repository-root/CMakeCache.txt")
-)
+cache_paths = sorted(resolved_cache_paths)
 observed_cache_paths = [path.relative_to(root).as_posix() for path in cache_paths]
 if observed_cache_paths != expected_cache_paths:
     raise RuntimeError(
@@ -261,6 +317,7 @@ if observed_cache_paths != expected_cache_paths:
     )
 observations = []
 databases = []
+build_files = []
 for cache_path in cache_paths:
     observed = {
         key: cache_value(cache_path, key)
@@ -286,17 +343,32 @@ for cache_path in cache_paths:
         raise RuntimeError(
             f"production package cache {relative} emitted no compile database"
         )
+    for database in cache_databases:
+        resolved_database = database.resolve(strict=True)
+        if resolved_database != database or not resolved_database.is_file():
+            relative = database.relative_to(root)
+            raise RuntimeError(
+                f"production package compile database is not canonical: {relative}"
+            )
     databases.extend(cache_databases)
-all_databases = sorted(root.rglob("compile_commands.json"))
-if databases != all_databases:
-    unexpected = [
-        path.relative_to(root).as_posix()
-        for path in all_databases
-        if path not in databases
-    ]
-    raise RuntimeError(
-        f"compile databases exist outside selected package caches: {unexpected}"
-    )
+    cache_build_files = sorted(cache_path.parent.rglob("build.ninja"))
+    if not cache_build_files:
+        relative = cache_path.parent.relative_to(root)
+        raise RuntimeError(
+            f"production package cache {relative} emitted no Ninja build graph"
+        )
+    for build_file in cache_build_files:
+        resolved_build_file = build_file.resolve(strict=True)
+        if resolved_build_file != build_file or not resolved_build_file.is_file():
+            relative = build_file.relative_to(root)
+            raise RuntimeError(
+                f"production package Ninja build graph is not canonical: {relative}"
+            )
+    build_files.extend(cache_build_files)
+if databases != sorted(set(databases)):
+    raise RuntimeError("selected production package compile databases overlap")
+if build_files != sorted(set(build_files)):
+    raise RuntimeError("selected production package Ninja build graphs overlap")
 first_observation = observations[0]
 if any(observed != first_observation for observed in observations[1:]):
     raise RuntimeError("production package caches resolved inconsistent compiler flags")
@@ -304,6 +376,10 @@ database_records = []
 database_evidence = []
 compile_command_count = 0
 language_compile_commands = {"C": 0, "CXX": 0}
+cache_language_compile_commands = {
+    cache_path.parent: {"C": 0, "CXX": 0}
+    for cache_path in cache_paths
+}
 for path in databases:
     raw = path.read_bytes()
     entries = json.loads(raw)
@@ -323,12 +399,7 @@ for path in databases:
             tokens = shlex.split(entry["command"])
         else:
             raise RuntimeError(f"compile command has no argv in {path}")
-        optimization = sorted({token for token in tokens if token.startswith("-O")})
-        if optimization != ["-O3"]:
-            raise RuntimeError(
-                "production package compile command must resolve to only -O3; "
-                f"found {optimization}: {entry.get('file', '<unknown>')}"
-            )
+        require_o3_ndebug(tokens, entry.get("file", "<unknown>"))
         suffix = pathlib.Path(str(entry.get("file", ""))).suffix.lower()
         if suffix == ".c":
             language_compile_commands["C"] += 1
@@ -336,11 +407,29 @@ for path in databases:
         elif suffix in {".cc", ".cpp", ".cppm", ".cxx", ".ixx"}:
             language_compile_commands["CXX"] += 1
             database_language_counts["CXX"] += 1
+        else:
+            raise RuntimeError(
+                f"production package compile command has unsupported source: "
+                f"{entry.get('file', '<unknown>')}"
+            )
         compile_command_count += 1
     relative = path.relative_to(root).as_posix()
-    if any(database_language_counts[language] <= 0 for language in ("C", "CXX")):
+    if sum(database_language_counts.values()) != len(entries):
         raise RuntimeError(
-            f"compile database must contain positive C and C++ commands: {relative}"
+            f"compile database does not account for every C/C++ command: {relative}"
+        )
+    owners = [
+        cache_root
+        for cache_root in cache_language_compile_commands
+        if path.is_relative_to(cache_root)
+    ]
+    if len(owners) != 1:
+        raise RuntimeError(
+            f"compile database does not have one selected cache owner: {relative}"
+        )
+    for language in ("C", "CXX"):
+        cache_language_compile_commands[owners[0]][language] += (
+            database_language_counts[language]
         )
     digest = hashlib.sha256(raw).hexdigest()
     database_records.append(
@@ -354,6 +443,122 @@ for path in databases:
             "language_compile_commands": database_language_counts,
         }
     )
+for cache_root, counts in cache_language_compile_commands.items():
+    if any(counts[language] <= 0 for language in ("C", "CXX")):
+        relative = cache_root.relative_to(root).as_posix()
+        raise RuntimeError(
+            f"selected production package cache lacks C/C++ coverage: {relative}"
+        )
+
+compiler_paths = {
+    first_observation["CMAKE_C_COMPILER"],
+    first_observation["CMAKE_CXX_COMPILER"],
+}
+ninja_build_evidence = []
+ninja_digest_records = []
+ninja_compile_command_count = 0
+link_command_count = 0
+cache_ninja_command_counts = {
+    cache_path.parent: {"compile": 0, "link": 0}
+    for cache_path in cache_paths
+}
+for build_file in build_files:
+    relative = build_file.relative_to(root).as_posix()
+    owners = [
+        cache_root
+        for cache_root in cache_ninja_command_counts
+        if build_file.is_relative_to(cache_root)
+    ]
+    if len(owners) != 1:
+        raise RuntimeError(
+            f"Ninja build graph does not have one selected cache owner: {relative}"
+        )
+    try:
+        commands = subprocess.run(
+            ["ninja", "-C", str(build_file.parent), "-t", "commands"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Ninja command graph timed out: {relative}"
+        ) from error
+    if commands.returncode != 0:
+        raise RuntimeError(
+            f"Ninja command graph failed for {relative}: "
+            f"{commands.stderr[-1000:]}"
+        )
+    file_compile_count = 0
+    file_link_count = 0
+    file_command_records = []
+    for line_number, line in enumerate(commands.stdout.splitlines(), 1):
+        try:
+            tokens = shlex.split(line)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Ninja command graph has invalid shell syntax: "
+                f"{relative}:{line_number}"
+            ) from error
+        for compiler_index, token in enumerate(tokens):
+            if token not in compiler_paths:
+                continue
+            command_end = len(tokens)
+            for index in range(compiler_index + 1, len(tokens)):
+                if tokens[index] in {"&&", "||", ";"}:
+                    command_end = index
+                    break
+            argv = tokens[compiler_index:command_end]
+            is_compile = any(
+                marker in argv
+                for marker in ("-c", "-E", "-S", "--precompile", "-fsyntax-only")
+            )
+            is_link = not is_compile and "-o" in argv
+            # Compiler paths can also be provenance arguments to code generators.
+            # Only argv segments that actually compile or link are policy evidence.
+            if not is_compile and not is_link:
+                continue
+            kind = "compile" if is_compile else "link"
+            require_o3_ndebug(argv, f"{relative}:{line_number}:{kind}")
+            command_digest = hashlib.sha256(
+                "\0".join(argv).encode("utf-8")
+            ).hexdigest()
+            file_command_records.append(
+                f"{line_number}\0{kind}\0{command_digest}"
+            )
+            if is_compile:
+                file_compile_count += 1
+                ninja_compile_command_count += 1
+                cache_ninja_command_counts[owners[0]]["compile"] += 1
+            else:
+                file_link_count += 1
+                link_command_count += 1
+                cache_ninja_command_counts[owners[0]]["link"] += 1
+    build_file_digest = hashlib.sha256(build_file.read_bytes()).hexdigest()
+    command_set_digest = hashlib.sha256(
+        "\n".join(file_command_records).encode("utf-8")
+    ).hexdigest()
+    ninja_build_evidence.append(
+        {
+            "path": relative,
+            "sha256": build_file_digest,
+            "compile_command_count": file_compile_count,
+            "link_command_count": file_link_count,
+            "compiler_commands_sha256": command_set_digest,
+        }
+    )
+    ninja_digest_records.append(
+        f"{relative}\0{build_file_digest}\0{file_compile_count}\0"
+        f"{file_link_count}\0{command_set_digest}"
+    )
+for cache_root, counts in cache_ninja_command_counts.items():
+    if counts["compile"] <= 0 or counts["link"] <= 0:
+        relative = cache_root.relative_to(root).as_posix()
+        raise RuntimeError(
+            f"selected production package cache lacks Ninja compile/link "
+            f"coverage: {relative}"
+        )
 
 effective_c_flags = shlex.split(first_observation["CMAKE_C_FLAGS"])
 effective_c_flags += shlex.split(first_observation["CMAKE_C_FLAGS_RELEASE"])
@@ -362,7 +567,7 @@ effective_cxx_flags += shlex.split(
     first_observation["CMAKE_CXX_FLAGS_RELEASE"]
 )
 result = {
-    "policy_revision": 1,
+    "policy_revision": 2,
     "requested": "O3",
     "architecture": architecture,
     "build_type": first_observation["CMAKE_BUILD_TYPE"],
@@ -380,8 +585,117 @@ result = {
     "compile_databases_sha256": hashlib.sha256(
         "\n".join(database_records).encode("utf-8")
     ).hexdigest(),
+    "ninja_build_file_count": len(build_files),
+    "ninja_build_files": ninja_build_evidence,
+    "ninja_compile_command_count": ninja_compile_command_count,
+    "link_command_count": link_command_count,
+    "ninja_commands_sha256": hashlib.sha256(
+        "\n".join(ninja_digest_records).encode("utf-8")
+    ).hexdigest(),
 }
 print(json.dumps(result, sort_keys=True))
+""".strip()
+
+REMOTE_PACKAGE_ACTIVITY_PROBE_SCRIPT = r"""
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+workspace = pathlib.Path(sys.argv[1])
+if not workspace.is_absolute():
+    raise RuntimeError("package workspace must be absolute")
+
+worker_pids = []
+for process in pathlib.Path("/proc").glob("[0-9]*"):
+    try:
+        raw = process.joinpath("cmdline").read_bytes()
+    except (FileNotFoundError, PermissionError, ProcessLookupError):
+        continue
+    argv = [
+        value.decode("utf-8", "replace")
+        for value in raw.rstrip(b"\0").split(b"\0")
+        if value
+    ]
+    if any(value.endswith("/build_packages.py") for value in argv):
+        worker_pids.append(int(process.name))
+
+listed = subprocess.run(
+    [
+        "systemctl", "list-units", "--type=service", "--all", "--plain",
+        "--no-legend", "--no-pager", "bioseq-package-*",
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+unit_names = []
+for line in listed.stdout.splitlines():
+    fields = line.removeprefix("● ").split()
+    if fields and re.fullmatch(r"bioseq-package-[A-Za-z0-9_.@-]+\.service", fields[0]):
+        unit_names.append(fields[0])
+active_units = []
+for unit_name in sorted(set(unit_names)):
+    status = subprocess.run(
+        ["systemctl", "show", unit_name, "--property=ActiveState", "--value"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if status not in {"inactive", "failed"}:
+        active_units.append(f"{unit_name}:{status}")
+
+container_ids = subprocess.run(
+    ["docker", "ps", "--no-trunc", "--quiet"],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.split()
+containers = []
+if container_ids:
+    inspected = subprocess.run(
+        ["docker", "inspect", *container_ids],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rows = json.loads(inspected.stdout)
+    if not isinstance(rows, list) or len(rows) != len(container_ids):
+        raise RuntimeError("Docker package-activity probe returned malformed rows")
+    workspace_prefix = str(workspace) + "/"
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("Docker package-activity probe returned a malformed row")
+        container_id = str(row.get("Id", ""))
+        name = str(row.get("Name", "")).removeprefix("/")
+        mounts = row.get("Mounts", [])
+        if not isinstance(mounts, list):
+            raise RuntimeError("Docker package-activity probe returned malformed mounts")
+        workspace_mount = any(
+            isinstance(mount, dict)
+            and mount.get("Type") == "bind"
+            and isinstance(mount.get("Source"), str)
+            and (
+                mount["Source"] == str(workspace)
+                or mount["Source"].startswith(workspace_prefix)
+            )
+            for mount in mounts
+        )
+        package_name = re.fullmatch(
+            r"bioseq-(?:arm64|x64)-pg[0-9]+-[A-Za-z0-9_.-]+", name
+        ) is not None
+        if workspace_mount or package_name:
+            containers.append(f"{container_id}:{name}")
+
+result = {
+    "worker_pids": sorted(worker_pids),
+    "active_units": sorted(active_units),
+    "containers": sorted(containers),
+}
+print(json.dumps(result, sort_keys=True))
+if any(result.values()):
+    raise SystemExit(70)
 """.strip()
 
 RUN_ID_RE = re.compile(r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<revision>[0-9a-f]{12})$")
@@ -653,6 +967,14 @@ def normalize_ssh_cidr(value: str | None) -> str:
     if network.version != 4 or network.prefixlen != 32:
         raise PackageBuilderError("--ssh-cidr must be one explicit IPv4 /32")
     return str(network)
+
+
+def ci_access_owner(owner_token: str) -> tuple[str, str]:
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,239}", owner_token) is None:
+        raise PackageBuilderError("CI access owner token is invalid")
+    owner_sha256 = hashlib.sha256(owner_token.encode("utf-8")).hexdigest()
+    description = f"{CI_ACCESS_DESCRIPTION} owner={owner_sha256[:24]}"
+    return owner_sha256, description
 
 
 @dataclass(frozen=True)
@@ -1450,13 +1772,50 @@ def validated_builder_security_group(
     return group_id, group
 
 
-def security_group_has_cidr(group: dict[str, Any], cidr: str) -> bool:
-    return any(
-        value.get("CidrIp") == cidr
+def security_group_cidr_description(
+    group: dict[str, Any], cidr: str,
+) -> str | None:
+    matches = [
+        str(value.get("Description") or "")
         for permission in group.get("IpPermissions", [])
         if isinstance(permission, dict)
         for value in permission.get("IpRanges", [])
         if isinstance(value, dict)
+        and value.get("CidrIp") == cidr
+    ]
+    if len(matches) > 1:
+        raise PackageBuilderError(
+            f"security group contains duplicate SSH ingress for {cidr}"
+        )
+    return matches[0] if matches else None
+
+
+def security_group_has_cidr(group: dict[str, Any], cidr: str) -> bool:
+    return security_group_cidr_description(group, cidr) is not None
+
+
+def authorize_ci_ssh_ingress(
+    region: str, group_id: str, cidr: str, description: str,
+) -> None:
+    permission = json.dumps(
+        [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "IpRanges": [{"CidrIp": cidr, "Description": description}],
+            }
+        ],
+        separators=(",", ":"),
+    )
+    aws_no_output(
+        region,
+        "ec2",
+        "authorize-security-group-ingress",
+        "--group-id",
+        group_id,
+        "--ip-permissions",
+        permission,
     )
 
 
@@ -1485,6 +1844,7 @@ def read_ci_lifecycle_receipt(
             "region",
             "security_group_id",
             "cidr",
+            "owner_token_sha256",
             "description",
             "rule_added",
             "closed",
@@ -1502,7 +1862,12 @@ def read_ci_lifecycle_receipt(
         or any(character.isspace() for character in caller_arn)
         or payload["region"] != region
         or SECURITY_GROUP_ID_RE.fullmatch(str(payload["security_group_id"])) is None
-        or payload["description"] != "bioseq package release ephemeral SSH"
+        or not isinstance(payload["owner_token_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", payload["owner_token_sha256"]) is None
+        or payload["description"] != (
+            f"{CI_ACCESS_DESCRIPTION} "
+            f"owner={payload['owner_token_sha256'][:24]}"
+        )
         or type(payload["rule_added"]) is not bool
         or type(payload["closed"]) is not bool
     ):
@@ -1575,8 +1940,14 @@ def record_builder_stop_ownership(
 
 
 def open_ci_access(
-    *, region: str, ssh_key: Path, ssh_cidr: str | None, receipt: Path,
+    *,
+    region: str,
+    ssh_key: Path,
+    ssh_cidr: str | None,
+    owner_token: str,
+    receipt: Path,
 ) -> dict[str, Any]:
+    owner_token_sha256, description = ci_access_owner(owner_token)
     matrix = load_matrix()
     key_path = ssh_key.expanduser().resolve()
     if not key_path.is_file():
@@ -1587,8 +1958,58 @@ def open_ci_access(
     )
     cidr = normalize_ssh_cidr(ssh_cidr)
     group_id, group = validated_builder_security_group(region, records)
-    added = not security_group_has_cidr(group, cidr)
-    description = "bioseq package release ephemeral SSH"
+    if receipt.exists():
+        existing = read_ci_lifecycle_receipt(
+            receipt,
+            region=region,
+            identity={
+                "Account": outputs["account_id"],
+                "Arn": outputs["caller_arn"],
+            },
+            builders=builders,
+            require_open=True,
+        )
+        if existing["cidr"] != cidr or existing["security_group_id"] != group_id:
+            raise PackageBuilderError(
+                "existing open CI lifecycle receipt targets different SSH access"
+            )
+        if existing["owner_token_sha256"] != owner_token_sha256:
+            raise PackageBuilderError(
+                "existing open CI lifecycle receipt belongs to another workflow run"
+            )
+        current_description = security_group_cidr_description(group, cidr)
+        if existing["rule_added"]:
+            if current_description not in {None, existing["description"]}:
+                raise PackageBuilderError(
+                    "existing open CI lifecycle receipt no longer owns its SSH ingress"
+                )
+            if current_description is None:
+                # The receipt is written before AuthorizeSecurityGroupIngress.
+                # If that mutation was interrupted or transiently failed, the
+                # exact same receipt can safely finish it on retry.
+                authorize_ci_ssh_ingress(
+                    region, group_id, cidr, existing["description"]
+                )
+        if not existing["rule_added"] and current_description is None:
+            raise PackageBuilderError(
+                "existing open CI lifecycle receipt lost its pre-existing SSH ingress"
+            )
+        return existing
+
+    existing_description = security_group_cidr_description(group, cidr)
+    if (
+        existing_description is not None
+        and existing_description.startswith(CI_ACCESS_DESCRIPTION)
+        and existing_description != description
+    ):
+        raise PackageBuilderError(
+            "existing workflow SSH ingress belongs to another owner token"
+        )
+    added = existing_description is None
+    # A retry on a new runner may inherit the exact workflow-authored rule after
+    # the prior runner died before revocation. Adopt only that canonical rule;
+    # a matching operator/OpenTofu CIDR with any other description stays unowned.
+    cleanup_owned = added or existing_description == description
     payload = {
         "schema_revision": CI_ACCESS_SCHEMA_REVISION,
         "account": outputs["account_id"],
@@ -1596,8 +2017,9 @@ def open_ci_access(
         "region": region,
         "security_group_id": group_id,
         "cidr": cidr,
+        "owner_token_sha256": owner_token_sha256,
         "description": description,
-        "rule_added": added,
+        "rule_added": cleanup_owned,
         "closed": False,
         "builders": {
             name: {
@@ -1618,27 +2040,11 @@ def open_ci_access(
         require_open=True,
     )
     if added:
-        permission = json.dumps(
-            [
-                {
-                    "IpProtocol": "tcp",
-                    "FromPort": 22,
-                    "ToPort": 22,
-                    "IpRanges": [
-                        {"CidrIp": cidr, "Description": description}
-                    ],
-                }
-            ],
-            separators=(",", ":"),
-        )
-        aws_no_output(
-            region,
-            "ec2",
-            "authorize-security-group-ingress",
-            "--group-id",
-            group_id,
-            "--ip-permissions",
-            permission,
+        authorize_ci_ssh_ingress(region, group_id, cidr, description)
+    elif not cleanup_owned:
+        info(
+            f"SSH ingress {cidr} already exists with non-ephemeral ownership; "
+            "the CI receipt will not revoke it"
         )
     return payload
 
@@ -1668,7 +2074,17 @@ def close_ci_access(*, region: str, receipt: Path) -> dict[str, Any]:
         },
         label=f"security group {group_id}",
     )
-    if payload["rule_added"] and not payload["closed"] and security_group_has_cidr(group, cidr):
+    current_description = security_group_cidr_description(group, cidr)
+    if (
+        payload["rule_added"]
+        and not payload["closed"]
+        and current_description is not None
+    ):
+        if current_description != payload["description"]:
+            raise PackageBuilderError(
+                f"refusing to revoke SSH ingress {cidr} after its ownership "
+                "description changed"
+            )
         permission = json.dumps(
             [
                 {
@@ -2030,7 +2446,10 @@ def start_builders(
 
 
 def wait_for_ssm_online(
-    region: str, instance_id: str, *, timeout_seconds: int = 600,
+    region: str,
+    instance_id: str,
+    *,
+    timeout_seconds: int = SSM_CLEANUP_TIMEOUT_SECONDS,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -2051,6 +2470,265 @@ def wait_for_ssm_online(
             return
         time.sleep(10)
     raise PackageBuilderError(f"SSM did not become online for {instance_id}")
+
+
+def wait_for_ec2_state(
+    region: str,
+    instance_id: str,
+    expected_state: str,
+    *,
+    timeout_seconds: int = EC2_CLEANUP_STATE_TIMEOUT_SECONDS,
+) -> None:
+    if (
+        INSTANCE_ID_RE.fullmatch(instance_id) is None
+        or expected_state not in {"running", "stopped"}
+        or type(timeout_seconds) is not int
+        or timeout_seconds <= 0
+    ):
+        raise PackageBuilderError("EC2 cleanup state wait is invalid")
+    deadline = time.monotonic() + timeout_seconds
+    last_state = "unknown"
+    while time.monotonic() < deadline:
+        payload = aws_json(
+            region, "ec2", "describe-instances", "--instance-ids", instance_id
+        )
+        instances = [
+            instance
+            for reservation in payload.get("Reservations", [])
+            if isinstance(reservation, dict)
+            for instance in reservation.get("Instances", [])
+            if isinstance(instance, dict)
+        ]
+        if (
+            len(instances) != 1
+            or instances[0].get("InstanceId") != instance_id
+        ):
+            raise PackageBuilderError(
+                f"EC2 cleanup state wait lost exact instance {instance_id}"
+            )
+        last_state = instance_state(instances[0])
+        if last_state == expected_state:
+            return
+        if expected_state == "running" and last_state != "pending":
+            raise PackageBuilderError(
+                f"instance {instance_id} reached {last_state!r} while waiting "
+                "for running"
+            )
+        if expected_state == "stopped" and last_state not in {"running", "stopping"}:
+            raise PackageBuilderError(
+                f"instance {instance_id} reached {last_state!r} while waiting "
+                "for stopped"
+            )
+        time.sleep(5)
+    raise PackageBuilderError(
+        f"instance {instance_id} remained {last_state!r}; expected "
+        f"{expected_state!r} within {timeout_seconds} seconds"
+    )
+
+
+def remote_package_quiescence_script(
+    *, poweroff: bool, not_after_epoch: int | None = None,
+) -> str:
+    """Return the fail-closed, lifecycle-locked package activity probe."""
+
+    if poweroff != (type(not_after_epoch) is int and not_after_epoch > 0):
+        raise PackageBuilderError(
+            "poweroff quiescence requires exactly one positive mutation deadline"
+        )
+
+    lines = [
+        "set -Eeuo pipefail",
+        f"exec 9>{shlex.quote(REMOTE_PACKAGE_LIFECYCLE_LOCK)}",
+        "flock --exclusive --wait "
+        f"{REMOTE_PACKAGE_LIFECYCLE_LOCK_WAIT_SECONDS} 9",
+    ]
+    if poweroff:
+        lines.extend(
+            [
+                f"not_after={not_after_epoch}",
+                "test \"$(date +%s)\" -le \"$not_after\" || exit 76",
+            ]
+        )
+    lines.append(
+        command_text(
+            [
+                "python3",
+                "-c",
+                REMOTE_PACKAGE_ACTIVITY_PROBE_SCRIPT,
+                REMOTE_WORKSPACE,
+            ]
+        )
+    )
+    if poweroff:
+        lines.extend(
+            [
+                "test \"$(date +%s)\" -le \"$not_after\" || exit 76",
+                "/usr/bin/systemctl poweroff --no-block",
+                "for attempt in $(seq 1 100); do",
+                "  state=$(systemctl is-system-running 2>/dev/null || true)",
+                "  case \"$state\" in stopping|offline) exit 0 ;; esac",
+                "  sleep 0.2",
+                "done",
+                "printf 'systemd did not enter stopping state after poweroff request\\n' >&2",
+                "exit 75",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def run_ssm_shell_command(
+    region: str,
+    instance_ids: Sequence[str],
+    *,
+    script: str,
+    comment: str,
+    timeout_seconds: int = SSM_CLEANUP_TIMEOUT_SECONDS,
+) -> str:
+    """Run one bounded SSM shell command and require every exact target to pass."""
+
+    expected = tuple(sorted(set(instance_ids)))
+    if (
+        not expected
+        or len(expected) != len(instance_ids)
+        or any(INSTANCE_ID_RE.fullmatch(value) is None for value in expected)
+        or not script.strip()
+        or type(timeout_seconds) is not int
+        or timeout_seconds <= SSM_CANCEL_RESERVE_SECONDS
+    ):
+        raise PackageBuilderError("SSM package cleanup targets are invalid")
+    execution_timeout = timeout_seconds - SSM_CANCEL_RESERVE_SECONDS
+    response = aws_json(
+        region,
+        "ssm",
+        "send-command",
+        "--document-name",
+        "AWS-RunShellScript",
+        "--comment",
+        comment,
+        "--instance-ids",
+        *expected,
+        "--timeout-seconds",
+        str(execution_timeout),
+        "--parameters",
+        json.dumps(
+            {
+                "commands": [
+                    command_text(["/bin/bash", "-lc", script])
+                ]
+            },
+            separators=(",", ":"),
+        ),
+    )
+    command_id = response.get("Command", {}).get("CommandId")
+    if not isinstance(command_id, str) or not command_id:
+        raise PackageBuilderError("SSM did not acknowledge package cleanup command")
+
+    terminal = {"Success", "Cancelled", "TimedOut", "Failed"}
+
+    def observe() -> list[dict[str, Any]]:
+        observed = aws_json(
+            region,
+            "ssm",
+            "list-command-invocations",
+            "--command-id",
+            command_id,
+            "--details",
+        ).get("CommandInvocations", [])
+        if not isinstance(observed, list):
+            raise PackageBuilderError("SSM package cleanup returned malformed rows")
+        rows = [value for value in observed if isinstance(value, dict)]
+        if len(rows) != len(observed):
+            raise PackageBuilderError("SSM package cleanup returned malformed rows")
+        observed_ids = sorted(str(value.get("InstanceId", "")) for value in rows)
+        if any(value not in expected for value in observed_ids) or len(
+            observed_ids
+        ) != len(set(observed_ids)):
+            raise PackageBuilderError(
+                "SSM package cleanup returned unexpected instance identities"
+            )
+        return rows
+
+    started = time.monotonic()
+    execution_deadline = started + execution_timeout
+    overall_deadline = started + timeout_seconds
+    rows: list[dict[str, Any]] = []
+    while True:
+        rows = observe()
+        observed_ids = sorted(str(value.get("InstanceId", "")) for value in rows)
+        if observed_ids == list(expected) and all(
+            value.get("Status") in terminal for value in rows
+        ):
+            break
+        if time.monotonic() >= execution_deadline:
+            cancel_error: Exception | None = None
+            try:
+                aws_no_output(
+                    region,
+                    "ssm",
+                    "cancel-command",
+                    "--command-id",
+                    command_id,
+                    "--instance-ids",
+                    *expected,
+                )
+            except Exception as error:
+                # The command can cross into a terminal state immediately before
+                # cancellation.  Continue observing instead of guessing whether
+                # the failed cancel left executable work behind.
+                cancel_error = error
+            while True:
+                rows = observe()
+                observed_ids = sorted(
+                    str(value.get("InstanceId", "")) for value in rows
+                )
+                if observed_ids == list(expected) and all(
+                    value.get("Status") in terminal for value in rows
+                ):
+                    break
+                if time.monotonic() >= overall_deadline:
+                    statuses = {
+                        str(value.get("InstanceId", "")): value.get("Status")
+                        for value in rows
+                    }
+                    suffix = (
+                        f"; cancel error: {cancel_error}"
+                        if cancel_error is not None
+                        else ""
+                    )
+                    raise PackageBuilderError(
+                        f"SSM package cleanup {command_id} did not become terminal "
+                        f"after cancellation; statuses={statuses}{suffix}"
+                    )
+                time.sleep(2)
+            break
+        time.sleep(5)
+
+    if sorted(str(value.get("InstanceId", "")) for value in rows) != list(expected):
+        raise PackageBuilderError(
+            f"SSM package cleanup {command_id} omitted an exact target"
+        )
+
+    failures = []
+    for row in rows:
+        if row.get("Status") == "Success":
+            continue
+        outputs = []
+        plugins = row.get("CommandPlugins", [])
+        if isinstance(plugins, list):
+            outputs = [
+                str(plugin.get("Output", "")).strip()
+                for plugin in plugins
+                if isinstance(plugin, dict) and str(plugin.get("Output", "")).strip()
+            ]
+        detail = " | ".join(outputs)[-2000:]
+        failures.append(
+            f"{row.get('InstanceId')} status={row.get('Status')} detail={detail!r}"
+        )
+    if failures:
+        raise PackageBuilderError(
+            "SSM package cleanup failed closed: " + "; ".join(failures)
+        )
+    return command_id
 
 
 def stop_existing_builders(
@@ -2084,6 +2762,66 @@ def stop_existing_builders(
                 )
     states = {name: instance_state(records[name]) for name in matrix.architectures}
     errors: list[str] = []
+    if not targets:
+        info(
+            "no package builder lifecycle is owned by this workflow; "
+            "leaving every builder unchanged"
+        )
+        return states
+
+    # Normalize pending instances before any remote proof.  Cancellation can
+    # arrive after lifecycle ownership is recorded but before StartInstances
+    # reaches running; probing SSH/SSM before this wait would fail and strand a
+    # workflow-owned paid machine.
+    def prepare_quiescence_probe(name: str, builder: Builder) -> None:
+        state = states[name]
+        if state == "pending":
+            wait_for_ec2_state(region, builder.instance_id, "running")
+            states[name] = "running"
+            state = "running"
+        if state == "running":
+            wait_for_ssm_online(region, builder.instance_id)
+        elif state not in {"stopped", "stopping"}:
+            raise PackageBuilderError(
+                f"cannot prove {name} builder {builder.instance_id} quiescent "
+                f"from state {state!r}"
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-builder-probe-ready"
+    ) as executor:
+        futures = {
+            executor.submit(prepare_quiescence_probe, name, builder): name
+            for name, builder in builders.items()
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+    if errors:
+        raise PackageBuilderError(
+            "refusing package builder stop without reachable-state proof: "
+            + "; ".join(errors)
+        )
+
+    # Joint fail-closed barrier across every running canonical builder.  The
+    # probe recognizes workers, active package units, named build/repository
+    # containers, and unnamed smoke containers through their workspace binds.
+    running_ids = [
+        builders[name].instance_id
+        for name in matrix.architectures
+        if states[name] == "running"
+    ]
+    if running_ids:
+        command_id = run_ssm_shell_command(
+            region,
+            running_ids,
+            script=remote_package_quiescence_script(poweroff=False),
+            comment="Bioseq package release pre-stop quiescence barrier",
+        )
+        info(f"package-builder quiescence barrier passed via SSM {command_id}")
 
     def stop_builder(name: str, builder: Builder) -> None:
         state = states[name]
@@ -2092,58 +2830,27 @@ def stop_existing_builders(
             return
         if state == "stopping":
             pass
-        elif state == "pending":
-            run_command(
-                [
-                    require_executable("aws"),
-                    "--region",
-                    region,
-                    "ec2",
-                    "wait",
-                    "instance-running",
-                    "--instance-ids",
-                    builder.instance_id,
-                ]
+        elif state == "running":
+            not_after_epoch = int(time.time()) + (
+                SSM_CLEANUP_TIMEOUT_SECONDS - SSM_CANCEL_RESERVE_SECONDS
             )
-        elif state != "running":
+            command_id = run_ssm_shell_command(
+                region,
+                [builder.instance_id],
+                script=remote_package_quiescence_script(
+                    poweroff=True, not_after_epoch=not_after_epoch
+                ),
+                comment="Bioseq package release quiescent cost cleanup",
+            )
+            info(
+                f"{name} builder quiescent poweroff acknowledged via SSM "
+                f"{command_id}"
+            )
+        else:
             raise PackageBuilderError(
                 f"cannot stop {name} builder {builder.instance_id} from state {state!r}"
             )
-        if state != "stopping":
-            wait_for_ssm_online(region, builder.instance_id)
-            response = aws_json(
-                region,
-                "ssm",
-                "send-command",
-                "--document-name",
-                "AWS-RunShellScript",
-                "--comment",
-                "Bioseq package release cost cleanup",
-                "--instance-ids",
-                builder.instance_id,
-                "--parameters",
-                json.dumps(
-                    {"commands": ["/usr/bin/systemctl poweroff"]},
-                    separators=(",", ":"),
-                ),
-            )
-            command_id = response.get("Command", {}).get("CommandId")
-            if not isinstance(command_id, str) or not command_id:
-                raise PackageBuilderError(
-                    f"SSM did not acknowledge stop command for {builder.instance_id}"
-                )
-        run_command(
-            [
-                require_executable("aws"),
-                "--region",
-                region,
-                "ec2",
-                "wait",
-                "instance-stopped",
-                "--instance-ids",
-                builder.instance_id,
-            ]
-        )
+        wait_for_ec2_state(region, builder.instance_id, "stopped")
 
     if targets:
         with concurrent.futures.ThreadPoolExecutor(
@@ -3699,11 +4406,28 @@ def launch_remote_build(
         f"= {shlex.quote(revision)}; "
         f"test \"$(sha256sum {shlex.quote(packaging_dir + '/poetry.lock')} | "
         f"awk '{{print $1}}')\" = {shlex.quote(poetry_environment.lock_sha256)}; "
-        f"install -d -m 0755 {shlex.quote(build_root)}; "
+        f"{command_text(['python3', '-c', REMOTE_PACKAGE_ACTIVITY_PROBE_SCRIPT, REMOTE_WORKSPACE])}; "
+        f"install -d -o ubuntu -g ubuntu -m 0755 {shlex.quote(build_root)}; "
         f"{command_text(systemd_argv)}"
     )
     info(f"{builder.architecture} build log: {log_path}")
-    ssh_run(builder, key_path, f"bash -lc {shlex.quote(source_check)}")
+    ssh_run(
+        builder,
+        key_path,
+        command_text(
+            [
+                "sudo",
+                "flock",
+                "--exclusive",
+                "--wait",
+                "120",
+                REMOTE_PACKAGE_LIFECYCLE_LOCK,
+                "/bin/bash",
+                "-lc",
+                source_check,
+            ]
+        ),
+    )
     return RemoteBuildHandle(
         builder=builder,
         unit_name=unit_name,
@@ -3780,6 +4504,11 @@ def require_compiler_optimization_evidence(
             "compile_command_count",
             "language_compile_commands",
             "compile_databases_sha256",
+            "ninja_build_file_count",
+            "ninja_build_files",
+            "ninja_compile_command_count",
+            "link_command_count",
+            "ninja_commands_sha256",
         },
         label,
     )
@@ -3852,6 +4581,9 @@ def require_compiler_optimization_evidence(
     database_command_total = 0
     database_digest_records: list[str] = []
     cache_directories = [path.removesuffix("CMakeCache.txt") for path in cache_paths]
+    cache_language_totals = {
+        directory: {"C": 0, "CXX": 0} for directory in cache_directories
+    }
     for index, database in enumerate(databases):
         database_label = f"{label} compile database {index}"
         if not isinstance(database, dict):
@@ -3878,16 +4610,24 @@ def require_compiler_optimization_evidence(
             or not isinstance(counts, dict)
             or set(counts) != {"C", "CXX"}
             or any(type(counts[key]) is not int for key in ("C", "CXX"))
-            or any(counts[key] <= 0 for key in ("C", "CXX"))
-            or sum(counts.values()) > command_count
+            or any(counts[key] < 0 for key in ("C", "CXX"))
+            or sum(counts.values()) != command_count
         ):
             raise PackageBuilderError(
-                f"{database_label} does not prove per-database C/C++ O3 coverage"
+                f"{database_label} does not account for every C/C++ O3 command"
+            )
+        cache_owners = [
+            directory for directory in cache_directories if path.startswith(directory)
+        ]
+        if len(cache_owners) != 1:
+            raise PackageBuilderError(
+                f"{database_label} does not have one selected cache owner"
             )
         database_paths.append(path)
         database_command_total += command_count
         for language in database_language_totals:
             database_language_totals[language] += counts[language]
+            cache_language_totals[cache_owners[0]][language] += counts[language]
         database_digest_records.append(
             f"{path}\0{digest}\0{command_count}"
         )
@@ -3899,6 +4639,11 @@ def require_compiler_optimization_evidence(
             not any(path.startswith(directory) for path in database_paths)
             for directory in cache_directories
         )
+        or any(
+            counts[language] <= 0
+            for counts in cache_language_totals.values()
+            for language in ("C", "CXX")
+        )
     ):
         raise PackageBuilderError(
             f"{label} compile database records do not cover every primary cache"
@@ -3909,6 +4654,103 @@ def require_compiler_optimization_evidence(
     ).hexdigest()
     if digest != expected_digest:
         raise PackageBuilderError(f"{label} has an invalid compile database digest")
+
+    for key in (
+        "ninja_build_file_count",
+        "ninja_compile_command_count",
+        "link_command_count",
+    ):
+        if type(value[key]) is not int or value[key] <= 0:
+            raise PackageBuilderError(f"{label} has an invalid {key}")
+    build_files = value["ninja_build_files"]
+    if (
+        not isinstance(build_files, list)
+        or len(build_files) != value["ninja_build_file_count"]
+    ):
+        raise PackageBuilderError(f"{label} has invalid Ninja build records")
+    build_paths: list[str] = []
+    ninja_compile_total = 0
+    link_total = 0
+    ninja_digest_records: list[str] = []
+    cache_ninja_totals = {
+        directory: {"compile": 0, "link": 0, "build_files": 0}
+        for directory in cache_directories
+    }
+    for index, build_file in enumerate(build_files):
+        build_label = f"{label} Ninja build graph {index}"
+        if not isinstance(build_file, dict):
+            raise PackageBuilderError(f"{build_label} must be an object")
+        require_exact_keys(
+            build_file,
+            {
+                "path",
+                "sha256",
+                "compile_command_count",
+                "link_command_count",
+                "compiler_commands_sha256",
+            },
+            build_label,
+        )
+        path = build_file["path"]
+        build_digest = build_file["sha256"]
+        compile_count = build_file["compile_command_count"]
+        build_link_count = build_file["link_command_count"]
+        command_digest = build_file["compiler_commands_sha256"]
+        if (
+            not isinstance(path, str)
+            or path.startswith("/")
+            or ".." in path.split("/")
+            or not path.endswith("/build.ninja")
+            or not any(path.startswith(directory) for directory in cache_directories)
+            or not isinstance(build_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", build_digest) is None
+            or type(compile_count) is not int
+            or compile_count < 0
+            or type(build_link_count) is not int
+            or build_link_count < 0
+            or not isinstance(command_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", command_digest) is None
+        ):
+            raise PackageBuilderError(
+                f"{build_label} does not prove compiler/link command policy"
+            )
+        owners = [
+            directory for directory in cache_directories if path.startswith(directory)
+        ]
+        if len(owners) != 1:
+            raise PackageBuilderError(
+                f"{build_label} does not have one selected cache owner"
+            )
+        build_paths.append(path)
+        ninja_compile_total += compile_count
+        link_total += build_link_count
+        cache_ninja_totals[owners[0]]["compile"] += compile_count
+        cache_ninja_totals[owners[0]]["link"] += build_link_count
+        cache_ninja_totals[owners[0]]["build_files"] += 1
+        ninja_digest_records.append(
+            f"{path}\0{build_digest}\0{compile_count}\0"
+            f"{build_link_count}\0{command_digest}"
+        )
+    if (
+        build_paths != sorted(set(build_paths))
+        or ninja_compile_total != value["ninja_compile_command_count"]
+        or link_total != value["link_command_count"]
+        or any(
+            counts["build_files"] <= 0
+            or counts["compile"] <= 0
+            or counts["link"] <= 0
+            for counts in cache_ninja_totals.values()
+        )
+    ):
+        raise PackageBuilderError(
+            f"{label} Ninja records do not cover every selected compile/link graph"
+        )
+    ninja_digest = value["ninja_commands_sha256"]
+    expected_ninja_digest = hashlib.sha256(
+        "\n".join(ninja_digest_records).encode("utf-8")
+    ).hexdigest()
+    if ninja_digest != expected_ninja_digest:
+        raise PackageBuilderError(f"{label} has an invalid Ninja command digest")
     return value
 
 
@@ -3925,13 +4767,32 @@ def attest_remote_compiler_optimization(
         )
     remote_source = _remote_committed_source_path(source_revision)
     helper = f"{remote_source}/cmake/verify_o3_compile_database.py"
+    selected_roots = [
+        f"{REMOTE_PACKAGE_CMAKE_CACHE_ROOT}/{path.removesuffix('/CMakeCache.txt')}"
+        for path in normalized_cache_paths
+    ]
+    selected_cache_checks = "\n".join(
+        f"test -f {shlex.quote(root + '/CMakeCache.txt')}\n"
+        f"test ! -L {shlex.quote(root + '/CMakeCache.txt')}"
+        for root in selected_roots
+    )
+    find_command = command_text(
+        [
+            "find",
+            *selected_roots,
+            "-name",
+            "compile_commands.json",
+            "-type",
+            "f",
+            "-print0",
+        ]
+    )
     helper_check = (
         "set -Eeuo pipefail\n"
         f"helper={shlex.quote(helper)}\n"
-        f"root={shlex.quote(REMOTE_PACKAGE_CMAKE_CACHE_ROOT)}\n"
         "test -f \"$helper\"\n"
-        "mapfile -d '' databases < <(find \"$root\" "
-        "-name compile_commands.json -type f -print0 | sort -z)\n"
+        f"{selected_cache_checks}\n"
+        f"mapfile -d '' databases < <({find_command} | sort -zu)\n"
         "(( ${#databases[@]} > 0 ))\n"
         "python3 \"$helper\" \"${databases[@]}\"\n"
     )
@@ -6012,6 +6873,7 @@ def cmd_open_ci_access(args: argparse.Namespace) -> None:
         region=args.region,
         ssh_key=Path(args.ssh_key),
         ssh_cidr=args.ssh_cidr,
+        owner_token=args.owner_token,
         receipt=Path(args.receipt).expanduser().resolve(),
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -6291,6 +7153,11 @@ def build_parser() -> argparse.ArgumentParser:
     open_access_parser.add_argument("--region", default=DEFAULT_REGION)
     open_access_parser.add_argument("--ssh-key", required=True)
     open_access_parser.add_argument("--ssh-cidr")
+    open_access_parser.add_argument(
+        "--owner-token",
+        required=True,
+        help="stable non-secret workflow-run identity used to own a retryable /32",
+    )
     open_access_parser.add_argument("--receipt", required=True)
     open_access_parser.set_defaults(handler=cmd_open_ci_access)
 

@@ -277,4 +277,4 @@ printf '%s\n' "${pg_config_path}" \
   > "/opt/bioseq-package-toolchain/state/pg_config-${BIOSEQ_POSTGRES_MAJOR}"
 chmod 0644 "/opt/bioseq-package-toolchain/state/pg_config-${BIOSEQ_POSTGRES_MAJOR}"
 
-echo "bioseq package preparation complete: distro=${distro_id} arch=${native_arch} PostgreSQL=${BIOSEQ_POSTGRES_MAJOR} optimization=0"
+echo "bioseq package preparation complete: distro=${distro_id} arch=${native_arch} PostgreSQL=${BIOSEQ_POSTGRES_MAJOR}"

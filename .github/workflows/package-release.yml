@@ -107,6 +107,7 @@ jobs:
           python3 infra/package_builder.py open-ci-access \
             --region "$AWS_REGION" \
             --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID" \
             --receipt "$RUNNER_TEMP/package-builder-access.json"
 
       - name: Build and collect the complete package matrix
@@ -141,7 +142,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Revoke ephemeral access and stop owned builders before publishing
+      - name: Revoke access and stop only quiescent owned builders before publishing
         if: env.RELEASE_ALREADY_COMPLETE != '1'
         timeout-minutes: 15
         shell: bash
@@ -265,9 +266,9 @@ jobs:
           verify_assets
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
 
-      - name: Revoke ephemeral access and stop owned builders (always)
+      - name: Revoke access and stop only quiescent owned builders (always)
         if: always()
-        timeout-minutes: 40
+        timeout-minutes: 25
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}

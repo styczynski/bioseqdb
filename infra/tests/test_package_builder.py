@@ -53,6 +53,16 @@ def compiler_optimization_evidence(
     database_records = [
         f"{path}\0{database_sha256}\0{2}" for path in database_paths
     ]
+    build_paths = [
+        path.removesuffix("CMakeCache.txt") + "build.ninja"
+        for path in cache_paths
+    ]
+    build_sha256 = "d" * 64
+    compiler_commands_sha256 = "e" * 64
+    build_records = [
+        f"{path}\0{build_sha256}\0{2}\0{1}\0{compiler_commands_sha256}"
+        for path in build_paths
+    ]
     compile_databases = [
         {
             "path": path,
@@ -89,6 +99,22 @@ def compiler_optimization_evidence(
         },
         "compile_databases_sha256": hashlib.sha256(
             "\n".join(database_records).encode("utf-8")
+        ).hexdigest(),
+        "ninja_build_file_count": len(build_paths),
+        "ninja_build_files": [
+            {
+                "path": path,
+                "sha256": build_sha256,
+                "compile_command_count": 2,
+                "link_command_count": 1,
+                "compiler_commands_sha256": compiler_commands_sha256,
+            }
+            for path in build_paths
+        ],
+        "ninja_compile_command_count": 2 * len(build_paths),
+        "link_command_count": len(build_paths),
+        "ninja_commands_sha256": hashlib.sha256(
+            "\n".join(build_records).encode("utf-8")
         ).hexdigest(),
     }
 
@@ -392,6 +418,8 @@ class SourceArchiveContractTests(unittest.TestCase):
 
 
 class OptimizationPolicyTests(unittest.TestCase):
+    O3_FLAGS = ["-O3", "-DNDEBUG", "-fno-omit-frame-pointer"]
+
     def optimization_root(
         self,
         root: Path,
@@ -452,6 +480,24 @@ class OptimizationPolicyTests(unittest.TestCase):
         (build_root / "compile_commands.json").write_text(
             json.dumps(entries), encoding="utf-8"
         )
+        rendered_flags = " ".join(flags)
+        (build_root / "build.ninja").write_text(
+            textwrap.dedent(
+                f"""
+                rule cc
+                  command = /opt/bioseq-package-toolchain/llvm-22/bin/clang {rendered_flags} -c source.c -o source.c.o
+                rule cxx
+                  command = /opt/bioseq-package-toolchain/llvm-22/bin/clang++ -stdlib=libc++ {rendered_flags} -c source.cpp -o source.cpp.o
+                rule link
+                  command = /opt/bioseq-package-toolchain/llvm-22/bin/clang++ -stdlib=libc++ {rendered_flags} source.c.o source.cpp.o -o package-test
+                build source.c.o: cc
+                build source.cpp.o: cxx
+                build package-test: link source.c.o source.cpp.o
+                default package-test
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
         return root
 
     def run_evidence(
@@ -478,8 +524,8 @@ class OptimizationPolicyTests(unittest.TestCase):
 
     def test_remote_compiler_evidence_records_effective_o3_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.optimization_root(Path(tmp), ["-O3"])
-            self.optimization_root(root, ["-O3"], "ubuntu_26.04")
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
+            self.optimization_root(root, self.O3_FLAGS, "ubuntu_26.04")
             completed = self.run_evidence(
                 root,
                 [
@@ -499,6 +545,9 @@ class OptimizationPolicyTests(unittest.TestCase):
         self.assertEqual(evidence["optimization_flags"], ["-O3"])
         self.assertEqual(evidence["compile_database_count"], 2)
         self.assertEqual(evidence["compile_command_count"], 4)
+        self.assertEqual(evidence["ninja_build_file_count"], 2)
+        self.assertEqual(evidence["ninja_compile_command_count"], 4)
+        self.assertEqual(evidence["link_command_count"], 2)
         self.assertEqual(
             evidence["language_compile_commands"], {"C": 2, "CXX": 2}
         )
@@ -509,7 +558,7 @@ class OptimizationPolicyTests(unittest.TestCase):
 
     def test_remote_compiler_evidence_requires_every_selected_cell_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.optimization_root(Path(tmp), ["-O3"])
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
             completed = self.run_evidence(
                 root,
                 [
@@ -520,13 +569,13 @@ class OptimizationPolicyTests(unittest.TestCase):
                 ],
             )
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("do not match the selected cells", completed.stderr)
+        self.assertIn("selected production package cache is missing", completed.stderr)
 
-    def test_remote_compiler_evidence_requires_both_languages_per_database(
+    def test_remote_compiler_evidence_requires_both_languages_per_selected_cache(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = self.optimization_root(Path(tmp), ["-O3"])
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
             database = (
                 root
                 / "fedora_44"
@@ -541,16 +590,134 @@ class OptimizationPolicyTests(unittest.TestCase):
             )
             completed = self.run_evidence(root)
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("positive C and C++ commands", completed.stderr)
+        self.assertIn("selected production package cache lacks C/C++ coverage", completed.stderr)
+
+    def test_remote_compiler_evidence_allows_language_specific_nested_databases(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
+            build_root = (
+                root / "fedora_44" / "postgresql17" / "build-repository-root"
+            )
+            entries = json.loads(
+                (build_root / "compile_commands.json").read_text(encoding="utf-8")
+            )
+            (build_root / "compile_commands.json").write_text(
+                json.dumps([entry for entry in entries if entry["file"] == "source.c"]),
+                encoding="utf-8",
+            )
+            nested = build_root / "generated" / "compile_commands.json"
+            nested.parent.mkdir(parents=True)
+            nested.write_text(
+                json.dumps([entry for entry in entries if entry["file"] == "source.cpp"]),
+                encoding="utf-8",
+            )
+            completed = self.run_evidence(root)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        evidence = json.loads(completed.stdout)
+        package_builder.require_compiler_optimization_evidence(
+            evidence,
+            architecture="arm64",
+            label="language-specific nested database evidence",
+        )
+        self.assertEqual(evidence["compile_database_count"], 2)
+        self.assertEqual(
+            [
+                value["language_compile_commands"]
+                for value in evidence["compile_databases"]
+            ],
+            [{"C": 1, "CXX": 0}, {"C": 0, "CXX": 1}],
+        )
+
+    def test_remote_compiler_evidence_ignores_unselected_preserved_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
+            self.optimization_root(
+                root, [*self.O3_FLAGS, "-O0"], "arch"
+            )
+            legacy = (
+                root
+                / "fedora_44"
+                / "postgresql17"
+                / "build-rooted"
+            )
+            legacy.mkdir(parents=True)
+            (legacy / "compile_commands.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "arguments": ["clang++", "-O0", "-c", "legacy.cpp"],
+                            "file": "legacy.cpp",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            completed = self.run_evidence(root)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        evidence = json.loads(completed.stdout)
+        self.assertEqual(evidence["compile_database_count"], 1)
+        self.assertTrue(
+            all(
+                value["path"].startswith(
+                    "fedora_44/postgresql17/build-repository-root/"
+                )
+                for value in evidence["compile_databases"]
+            )
+        )
 
     def test_remote_compiler_evidence_rejects_every_lower_optimization(self) -> None:
         for forbidden in ("-O0", "-O1", "-O2", "-Os", "-Og"):
             with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as tmp:
                 completed = self.run_evidence(
-                    self.optimization_root(Path(tmp), ["-O3", forbidden])
+                    self.optimization_root(
+                        Path(tmp), [*self.O3_FLAGS, forbidden]
+                    )
                 )
                 self.assertNotEqual(completed.returncode, 0)
-                self.assertIn("must resolve to only -O3", completed.stderr)
+                self.assertIn(
+                    "production compiler command must contain only -O3",
+                    completed.stderr,
+                )
+
+    def test_remote_compiler_evidence_requires_actual_ndebug(self) -> None:
+        for invalid in (
+            ["-O3", "-fno-omit-frame-pointer"],
+            [*self.O3_FLAGS, "-UNDEBUG"],
+        ):
+            with self.subTest(flags=invalid), tempfile.TemporaryDirectory() as tmp:
+                completed = self.run_evidence(
+                    self.optimization_root(Path(tmp), invalid)
+                )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("ndebug=", completed.stderr)
+
+    def test_remote_compiler_evidence_rejects_link_only_lower_optimization(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), self.O3_FLAGS)
+            build_file = (
+                root
+                / "fedora_44"
+                / "postgresql17"
+                / "build-repository-root"
+                / "build.ninja"
+            )
+            contents = build_file.read_text(encoding="utf-8")
+            build_file.write_text(
+                contents.replace(
+                    "-O3 -DNDEBUG -fno-omit-frame-pointer source.c.o",
+                    "-O3 -O2 -DNDEBUG -fno-omit-frame-pointer source.c.o",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            completed = self.run_evidence(root)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(":link", completed.stderr)
+        self.assertIn("-O2", completed.stderr)
 
     def test_run_cli_accepts_only_explicit_o3_policy(self) -> None:
         parser = package_builder.build_parser()
@@ -1475,6 +1642,10 @@ class PoetryEnvironmentTests(unittest.TestCase):
         self.assertIn(f"{environment.venv_path}/bin/python", command)
         self.assertIn(f"--source-revision {self.revision}", command)
         self.assertIn(f"--poetry-lock-sha256 {self.lock_sha256}", command)
+        self.assertIn(package_builder.REMOTE_PACKAGE_LIFECYCLE_LOCK, command)
+        self.assertIn("flock --exclusive --wait 120", command)
+        self.assertIn("build_packages.py", command)
+        self.assertIn("docker", command)
         self.assertIn(
             "--source-dir /opt/bioseq-package-builder/workspace/source",
             command,
@@ -3169,9 +3340,164 @@ class ManifestTests(unittest.TestCase):
                 python_environment=python_environment,
             )
 
+class SsmQuiescenceTests(unittest.TestCase):
+    def test_ssm_quiescence_requires_success_from_every_exact_instance(self) -> None:
+        instance_ids = ["i-0aaabbbcccdddee1", "i-0aaabbbcccdddee2"]
+        responses = [
+            {"Command": {"CommandId": "command-1"}},
+            {
+                "CommandInvocations": [
+                    {"InstanceId": value, "Status": "Success"}
+                    for value in reversed(instance_ids)
+                ]
+            },
+        ]
+        with mock.patch.object(
+            package_builder, "aws_json", side_effect=responses
+        ) as aws:
+            command_id = package_builder.run_ssm_shell_command(
+                "us-east-1",
+                instance_ids,
+                script="true\n",
+                comment="test quiescence",
+            )
+        self.assertEqual(command_id, "command-1")
+        self.assertEqual(aws.call_count, 2)
+        self.assertIn("send-command", aws.call_args_list[0].args)
+        self.assertIn("list-command-invocations", aws.call_args_list[1].args)
+        send_args = aws.call_args_list[0].args
+        parameters = json.loads(send_args[send_args.index("--parameters") + 1])
+        self.assertEqual(len(parameters["commands"]), 1)
+        self.assertTrue(parameters["commands"][0].startswith("/bin/bash -lc "))
+        self.assertIn("true", parameters["commands"][0])
+
+    def test_ssm_quiescence_surfaces_remote_activity_and_fails_closed(self) -> None:
+        responses = [
+            {"Command": {"CommandId": "command-2"}},
+            {
+                "CommandInvocations": [
+                    {
+                        "InstanceId": "i-0aaabbbcccdddee1",
+                        "Status": "Failed",
+                        "CommandPlugins": [
+                            {
+                                "Output": (
+                                    '{"worker_pids":[42],"active_units":[],'
+                                    '"containers":[]}'
+                                )
+                            }
+                        ],
+                    }
+                ]
+            },
+        ]
+        with mock.patch.object(
+            package_builder, "aws_json", side_effect=responses
+        ), self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "worker_pids.*42"
+        ):
+            package_builder.run_ssm_shell_command(
+                "us-east-1",
+                ["i-0aaabbbcccdddee1"],
+                script="exit 70\n",
+                comment="test active worker",
+            )
+
+    def test_ssm_quiescence_cancels_and_waits_for_terminal_cancelled(self) -> None:
+        instance_id = "i-0aaabbbcccdddee1"
+        responses = [
+            {"Command": {"CommandId": "command-cancelled"}},
+            {
+                "CommandInvocations": [
+                    {"InstanceId": instance_id, "Status": "Cancelling"}
+                ]
+            },
+            {
+                "CommandInvocations": [
+                    {"InstanceId": instance_id, "Status": "Cancelled"}
+                ]
+            },
+        ]
+        with mock.patch.object(
+            package_builder, "aws_json", side_effect=responses
+        ), mock.patch.object(
+            package_builder.time, "monotonic", side_effect=(0, 91)
+        ), mock.patch.object(
+            package_builder, "aws_no_output"
+        ) as cancel, self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "status=Cancelled"
+        ):
+            package_builder.run_ssm_shell_command(
+                "us-east-1",
+                [instance_id],
+                script="true\n",
+                comment="test terminal cancellation",
+            )
+        self.assertIn("cancel-command", cancel.call_args.args)
+        self.assertIn(instance_id, cancel.call_args.args)
+
+    def test_ssm_quiescence_rejects_nonterminal_cancelling_at_deadline(self) -> None:
+        instance_id = "i-0aaabbbcccdddee1"
+        responses = [
+            {"Command": {"CommandId": "command-stuck"}},
+            {
+                "CommandInvocations": [
+                    {"InstanceId": instance_id, "Status": "InProgress"}
+                ]
+            },
+            {
+                "CommandInvocations": [
+                    {"InstanceId": instance_id, "Status": "Cancelling"}
+                ]
+            },
+        ]
+        with mock.patch.object(
+            package_builder, "aws_json", side_effect=responses
+        ), mock.patch.object(
+            package_builder.time, "monotonic", side_effect=(0, 91, 121)
+        ), mock.patch.object(
+            package_builder, "aws_no_output"
+        ) as cancel, self.assertRaisesRegex(
+            package_builder.PackageBuilderError,
+            "did not become terminal after cancellation",
+        ):
+            package_builder.run_ssm_shell_command(
+                "us-east-1",
+                [instance_id],
+                script="true\n",
+                comment="test stuck cancellation",
+            )
+        cancel.assert_called_once()
+
+    def test_quiescence_probe_covers_workers_units_repository_and_smoke(self) -> None:
+        script = package_builder.remote_package_quiescence_script(poweroff=False)
+        for required in (
+            package_builder.REMOTE_PACKAGE_LIFECYCLE_LOCK,
+            package_builder.REMOTE_WORKSPACE,
+            "build_packages.py",
+            "bioseq-package-",
+            "docker",
+            'mount["Source"].startswith(workspace_prefix)',
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, script)
+        self.assertNotIn("poweroff", script)
+        poweroff = package_builder.remote_package_quiescence_script(
+            poweroff=True, not_after_epoch=2_000_000_000
+        )
+        self.assertIn("poweroff --no-block", poweroff)
+        self.assertLess(poweroff.index("build_packages.py"), poweroff.index("poweroff"))
+        self.assertEqual(poweroff.count("date +%s"), 2)
+        self.assertLess(poweroff.rindex("date +%s"), poweroff.index("poweroff"))
+
+
 class ReleaseAutomationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.matrix = package_builder.load_matrix()
+        self.owner_token = "bioseq/repository:1234567890"
+        self.owner_token_sha256, self.owner_description = (
+            package_builder.ci_access_owner(self.owner_token)
+        )
 
     def builder_record(self, architecture: str) -> dict:
         expected = self.matrix.architectures[architecture]
@@ -3481,7 +3807,8 @@ class ReleaseAutomationTests(unittest.TestCase):
             "region": "us-east-1",
             "security_group_id": "sg-0aaabbbcccdddeee1",
             "cidr": "203.0.113.10/32",
-            "description": "bioseq package release ephemeral SSH",
+            "owner_token_sha256": self.owner_token_sha256,
+            "description": self.owner_description,
             "rule_added": True,
             "closed": False,
             "builders": {
@@ -3551,11 +3878,11 @@ class ReleaseAutomationTests(unittest.TestCase):
         ), mock.patch.object(
             package_builder, "wait_for_ssm_online"
         ), mock.patch.object(
-            package_builder,
-            "aws_json",
-            return_value={"Command": {"CommandId": "cmd-x64"}},
-        ) as aws, mock.patch.object(
-            package_builder, "run_command"
+            package_builder, "run_ssm_shell_command", side_effect=(
+                "cmd-barrier", "cmd-x64-poweroff"
+            )
+        ) as ssm, mock.patch.object(
+            package_builder, "wait_for_ec2_state"
         ) as wait, mock.patch.object(
             package_builder, "validate_builders", return_value=final
         ):
@@ -3565,10 +3892,75 @@ class ReleaseAutomationTests(unittest.TestCase):
                 lifecycle_receipt=Path("/tmp/access.json"),
             )
         self.assertEqual(states, {"arm64": "running", "x64": "stopped"})
-        aws.assert_called_once()
-        self.assertIn(builders["x64"].instance_id, aws.call_args.args)
-        self.assertNotIn(builders["arm64"].instance_id, aws.call_args.args)
-        self.assertEqual(wait.call_count, 1)
+        self.assertEqual(ssm.call_count, 2)
+        self.assertEqual(
+            set(ssm.call_args_list[0].args[1]),
+            {builder.instance_id for builder in builders.values()},
+        )
+        self.assertEqual(
+            ssm.call_args_list[1].args[1], [builders["x64"].instance_id]
+        )
+        self.assertIn(
+            "poweroff --no-block", ssm.call_args_list[1].kwargs["script"]
+        )
+        wait.assert_called_once_with(
+            "us-east-1", builders["x64"].instance_id, "stopped"
+        )
+
+    def test_receipt_scoped_stop_without_owned_builders_is_noop(self) -> None:
+        records = {
+            name: {**self.builder_record(name), "State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        receipt = {
+            "builders": {
+                name: {"stop_owned": False} for name in self.matrix.architectures
+            }
+        }
+        with mock.patch.object(
+            package_builder,
+            "aws_preflight",
+            return_value={
+                "Account": "123456789012",
+                "Arn": "arn:aws:iam::123456789012:user/release",
+            },
+        ), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(
+            package_builder, "read_ci_lifecycle_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online"
+        ) as online, mock.patch.object(
+            package_builder, "run_ssm_shell_command"
+        ) as ssm, mock.patch.object(
+            package_builder, "run_command"
+        ) as mutate, mock.patch.object(
+            package_builder, "validate_builders"
+        ) as validate:
+            states = package_builder.stop_existing_builders(
+                "us-east-1",
+                self.matrix,
+                lifecycle_receipt=Path("/tmp/access.json"),
+            )
+        self.assertEqual(states, {"arm64": "running", "x64": "running"})
+        online.assert_not_called()
+        ssm.assert_not_called()
+        mutate.assert_not_called()
+        validate.assert_not_called()
 
     def test_stop_uses_instance_initiated_poweroff_for_both_builders(self) -> None:
         records = {
@@ -3591,10 +3983,6 @@ class ReleaseAutomationTests(unittest.TestCase):
             name: {**record, "State": {"Name": "stopped"}}
             for name, record in records.items()
         }
-        acknowledgements = [
-            {"Command": {"CommandId": "cmd-arm64"}},
-            {"Command": {"CommandId": "cmd-x64"}},
-        ]
         ssm_wait_barrier = threading.Barrier(2)
 
         def wait_for_ssm(_region, _instance_id):
@@ -3607,20 +3995,119 @@ class ReleaseAutomationTests(unittest.TestCase):
         ), mock.patch.object(
             package_builder, "wait_for_ssm_online", side_effect=wait_for_ssm
         ), mock.patch.object(
-            package_builder, "aws_json", side_effect=acknowledgements
-        ) as aws, mock.patch.object(package_builder, "run_command") as run, mock.patch.object(
+            package_builder,
+            "run_ssm_shell_command",
+            side_effect=("cmd-barrier", "cmd-poweroff-a", "cmd-poweroff-b"),
+        ) as ssm, mock.patch.object(
+            package_builder, "wait_for_ec2_state"
+        ) as state_wait, mock.patch.object(
             package_builder, "validate_builders", return_value=stopped
         ):
             states = package_builder.stop_existing_builders("us-east-1", self.matrix)
         self.assertEqual(states, {"arm64": "stopped", "x64": "stopped"})
-        self.assertEqual(aws.call_count, 2)
-        for call in aws.call_args_list:
-            self.assertIn("AWS-RunShellScript", call.args)
-            self.assertIn(
-                '{"commands":["/usr/bin/systemctl poweroff"]}', call.args
+        self.assertEqual(ssm.call_count, 3)
+        self.assertEqual(
+            set(ssm.call_args_list[0].args[1]),
+            {builder.instance_id for builder in builders.values()},
+        )
+        for call in ssm.call_args_list[1:]:
+            self.assertEqual(len(call.args[1]), 1)
+            self.assertIn("poweroff --no-block", call.kwargs["script"])
+        self.assertEqual(state_wait.call_count, 2)
+        self.assertTrue(
+            all(call.args[2] == "stopped" for call in state_wait.call_args_list)
+        )
+
+    def test_stop_refuses_all_poweroff_when_joint_quiescence_fails(self) -> None:
+        records = {
+            name: {**self.builder_record(name), "State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
             )
-            self.assertNotIn("stop-instances", call.args)
-        self.assertEqual(run.call_count, 2)
+            for name, record in records.items()
+        }
+        with mock.patch.object(package_builder, "aws_preflight"), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online"
+        ), mock.patch.object(
+            package_builder,
+            "run_ssm_shell_command",
+            side_effect=package_builder.PackageBuilderError(
+                "SSM package cleanup failed closed: worker_pids=[42]"
+            ),
+        ) as ssm, mock.patch.object(
+            package_builder, "run_command"
+        ) as poweroff_wait, mock.patch.object(
+            package_builder, "validate_builders"
+        ) as validate:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "worker_pids.*42"
+            ):
+                package_builder.stop_existing_builders("us-east-1", self.matrix)
+        ssm.assert_called_once()
+        poweroff_wait.assert_not_called()
+        validate.assert_not_called()
+
+    def test_stop_waits_for_pending_builder_before_ssm_quiescence(self) -> None:
+        records = {
+            name: {
+                **self.builder_record(name),
+                "State": {"Name": "pending" if name == "arm64" else "running"},
+            }
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        stopped = {
+            name: {**record, "State": {"Name": "stopped"}}
+            for name, record in records.items()
+        }
+        with mock.patch.object(package_builder, "aws_preflight"), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online"
+        ) as online, mock.patch.object(
+            package_builder,
+            "run_ssm_shell_command",
+            side_effect=("cmd-barrier", "cmd-poweroff-a", "cmd-poweroff-b"),
+        ), mock.patch.object(
+            package_builder, "wait_for_ec2_state"
+        ) as state_wait, mock.patch.object(
+            package_builder, "validate_builders", return_value=stopped
+        ):
+            states = package_builder.stop_existing_builders(
+                "us-east-1", self.matrix
+            )
+        self.assertEqual(states, {"arm64": "stopped", "x64": "stopped"})
+        self.assertEqual(online.call_count, 2)
+        self.assertIn(
+            mock.call("us-east-1", builders["arm64"].instance_id, "running"),
+            state_wait.call_args_list,
+        )
 
     def test_ci_ingress_receipt_revokes_only_a_rule_it_added(self) -> None:
         records = {
@@ -3677,10 +4164,14 @@ class ReleaseAutomationTests(unittest.TestCase):
                     region="us-east-1",
                     ssh_key=key,
                     ssh_cidr="203.0.113.10/32",
+                    owner_token=self.owner_token,
                     receipt=receipt,
                 )
             self.assertTrue(opened["rule_added"])
-            self.assertEqual(opened["schema_revision"], 2)
+            self.assertEqual(
+                opened["schema_revision"],
+                package_builder.CI_ACCESS_SCHEMA_REVISION,
+            )
             self.assertEqual(
                 opened["caller_arn"],
                 "arn:aws:iam::123456789012:user/release",
@@ -3696,7 +4187,12 @@ class ReleaseAutomationTests(unittest.TestCase):
                     "IpProtocol": "tcp",
                     "FromPort": 22,
                     "ToPort": 22,
-                    "IpRanges": [{"CidrIp": "203.0.113.10/32"}],
+                    "IpRanges": [
+                        {
+                            "CidrIp": "203.0.113.10/32",
+                            "Description": self.owner_description,
+                        }
+                    ],
                 }
             ]
             with mock.patch.object(
@@ -3738,6 +4234,312 @@ class ReleaseAutomationTests(unittest.TestCase):
                     region="us-east-1", receipt=receipt
                 )
             aws.assert_not_called()
+
+    def test_ci_ingress_retry_adopts_only_exact_ephemeral_description(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        group = {
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [
+                        {
+                            "CidrIp": "203.0.113.10/32",
+                            "Description": self.owner_description,
+                        }
+                    ],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("private", encoding="ascii")
+            key.with_name("key.pub").write_text(
+                "ssh-ed25519 AAAA release-test\n", encoding="ascii"
+            )
+            receipt = Path(tmp) / "access.json"
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(
+                    {
+                        "account_id": "123456789012",
+                        "caller_arn": "arn:aws:iam::123456789012:user/release",
+                    },
+                    builders,
+                    records,
+                ),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=("sg-0aaabbbcccdddeee1", group),
+            ), mock.patch.object(package_builder, "aws_no_output") as authorize:
+                opened = package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr="203.0.113.10/32",
+                    owner_token=self.owner_token,
+                    receipt=receipt,
+                )
+        self.assertTrue(opened["rule_added"])
+        authorize.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("private", encoding="ascii")
+            key.with_name("key.pub").write_text(
+                "ssh-ed25519 AAAA release-test\n", encoding="ascii"
+            )
+            receipt = Path(tmp) / "access.json"
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(
+                    {
+                        "account_id": "123456789012",
+                        "caller_arn": "arn:aws:iam::123456789012:user/release",
+                    },
+                    builders,
+                    records,
+                ),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=("sg-0aaabbbcccdddeee1", group),
+            ), mock.patch.object(
+                package_builder, "aws_no_output"
+            ) as mutate, self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "another owner token"
+            ):
+                package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr="203.0.113.10/32",
+                    owner_token="bioseq/repository:other-run",
+                    receipt=receipt,
+                )
+            mutate.assert_not_called()
+
+    def test_ci_ingress_does_not_adopt_or_revoke_non_ephemeral_rule(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        group = {
+            "Tags": [
+                {"Key": key, "Value": value}
+                for key, value in {
+                    "Project": "bioseq",
+                    "ManagedBy": "opentofu",
+                    "Component": "package-build-machine",
+                    "Name": "bioseq-package-builder-sg",
+                }.items()
+            ],
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [
+                        {
+                            "CidrIp": "203.0.113.10/32",
+                            "Description": "operator-managed SSH",
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("private", encoding="ascii")
+            key.with_name("key.pub").write_text(
+                "ssh-ed25519 AAAA release-test\n", encoding="ascii"
+            )
+            receipt = Path(tmp) / "access.json"
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(
+                    {
+                        "account_id": "123456789012",
+                        "caller_arn": "arn:aws:iam::123456789012:user/release",
+                    },
+                    builders,
+                    records,
+                ),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=("sg-0aaabbbcccdddeee1", group),
+            ), mock.patch.object(package_builder, "aws_no_output") as authorize:
+                opened = package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr="203.0.113.10/32",
+                    owner_token=self.owner_token,
+                    receipt=receipt,
+                )
+            self.assertFalse(opened["rule_added"])
+            authorize.assert_not_called()
+
+            with mock.patch.object(
+                package_builder,
+                "aws_preflight",
+                return_value={
+                    "Account": "123456789012",
+                    "Arn": "arn:aws:iam::123456789012:user/release",
+                },
+            ), mock.patch.object(
+                package_builder,
+                "aws_json",
+                return_value={"SecurityGroups": [group]},
+            ), mock.patch.object(package_builder, "aws_no_output") as revoke:
+                closed = package_builder.close_ci_access(
+                    region="us-east-1", receipt=receipt
+                )
+            self.assertTrue(closed["closed"])
+            revoke.assert_not_called()
+
+    def test_ci_ingress_same_receipt_retry_preserves_lifecycle_ownership(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        group = {
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort": 22,
+                    "IpRanges": [
+                        {
+                            "CidrIp": "203.0.113.10/32",
+                            "Description": self.owner_description,
+                        }
+                    ],
+                }
+            ]
+        }
+        payload = {
+            "schema_revision": package_builder.CI_ACCESS_SCHEMA_REVISION,
+            "account": "123456789012",
+            "caller_arn": "arn:aws:iam::123456789012:user/release",
+            "region": "us-east-1",
+            "security_group_id": "sg-0aaabbbcccdddeee1",
+            "cidr": "203.0.113.10/32",
+            "owner_token_sha256": self.owner_token_sha256,
+            "description": self.owner_description,
+            "rule_added": True,
+            "closed": False,
+            "builders": {
+                name: {
+                    "instance_id": builder.instance_id,
+                    "initial_state": "stopped",
+                    "stop_owned": name == "x64",
+                }
+                for name, builder in builders.items()
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            key = Path(tmp) / "key"
+            key.write_text("private", encoding="ascii")
+            key.with_name("key.pub").write_text(
+                "ssh-ed25519 AAAA release-test\n", encoding="ascii"
+            )
+            receipt = Path(tmp) / "access.json"
+            package_builder.write_json_atomic(receipt, payload)
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(
+                    {
+                        "account_id": payload["account"],
+                        "caller_arn": payload["caller_arn"],
+                    },
+                    builders,
+                    records,
+                ),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=(payload["security_group_id"], group),
+            ), mock.patch.object(package_builder, "aws_no_output") as mutate:
+                retried = package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr=payload["cidr"],
+                    owner_token=self.owner_token,
+                    receipt=receipt,
+                )
+            mutate.assert_not_called()
+            group["IpPermissions"] = []
+            with mock.patch.object(
+                package_builder,
+                "discover_existing_infrastructure",
+                return_value=(
+                    {
+                        "account_id": payload["account"],
+                        "caller_arn": payload["caller_arn"],
+                    },
+                    builders,
+                    records,
+                ),
+            ), mock.patch.object(
+                package_builder,
+                "validated_builder_security_group",
+                return_value=(payload["security_group_id"], group),
+            ), mock.patch.object(package_builder, "aws_no_output") as authorize:
+                resumed = package_builder.open_ci_access(
+                    region="us-east-1",
+                    ssh_key=key,
+                    ssh_cidr=payload["cidr"],
+                    owner_token=self.owner_token,
+                    receipt=receipt,
+                )
+        self.assertTrue(retried["builders"]["x64"]["stop_owned"])
+        self.assertFalse(retried["builders"]["arm64"]["stop_owned"])
+        self.assertTrue(resumed["builders"]["x64"]["stop_owned"])
+        authorize.assert_called_once()
+        self.assertIn(
+            "authorize-security-group-ingress", authorize.call_args.args
+        )
 
     def test_collection_enumerates_ten_exact_packages_and_four_json_receipts(self) -> None:
         revision = "a" * 40
@@ -4142,9 +4944,41 @@ save()
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("timeout-minutes: 360", self.workflow)
         self.assertIn("timeout-minutes: 270", self.workflow)
-        self.assertIn("timeout-minutes: 40", self.workflow)
+        self.assertIn("timeout-minutes: 25", self.workflow)
         self.assertIn("ref: ${{ github.sha }}", self.workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow)
+
+    def test_cleanup_step_budgets_dominate_every_internal_wait(self) -> None:
+        def timeout_minutes(step_name: str) -> int:
+            lines = self.workflow.splitlines()
+            start = lines.index(f"      - name: {step_name}")
+            value = next(
+                line.strip()
+                for line in lines[start + 1:]
+                if line.strip().startswith("timeout-minutes:")
+            )
+            return int(value.split(":", 1)[1].strip())
+
+        worst_case_seconds = (
+            package_builder.EC2_CLEANUP_STATE_TIMEOUT_SECONDS
+            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
+            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
+            + package_builder.SSM_CLEANUP_TIMEOUT_SECONDS
+            + package_builder.EC2_CLEANUP_STATE_TIMEOUT_SECONDS
+        )
+        minimum_with_margin = (worst_case_seconds + 59) // 60 + 2
+        self.assertGreaterEqual(
+            timeout_minutes(
+                "Revoke access and stop only quiescent owned builders before publishing"
+            ),
+            minimum_with_margin,
+        )
+        self.assertGreaterEqual(
+            timeout_minutes(
+                "Revoke access and stop only quiescent owned builders (always)"
+            ),
+            minimum_with_margin,
+        )
 
     def test_workflow_uses_only_secret_backed_standard_credential_env(self) -> None:
         access_mapping = "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}"
@@ -4162,6 +4996,10 @@ save()
         self.assertIn("package_builder.py matrix --require-complete", self.workflow)
         self.assertIn("package_builder.py run \\", self.workflow)
         self.assertIn("--existing-only", self.workflow)
+        self.assertIn(
+            '--owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID"',
+            self.workflow,
+        )
         self.assertEqual(self.workflow.count("--optimization O3"), 1)
         self.assertNotIn("--architectures", self.workflow)
         self.assertNotIn("--distros", self.workflow)
@@ -4181,7 +5019,7 @@ save()
         )
         self.assertLess(
             self.workflow.index(
-                "- name: Revoke ephemeral access and stop owned builders before publishing"
+                "- name: Revoke access and stop only quiescent owned builders before publishing"
             ),
             self.workflow.index("- name: Create deterministic GitHub release"),
         )
@@ -4200,8 +5038,8 @@ save()
 
     def test_cleanup_attempts_revoke_and_stop_independently_on_either_failure(self) -> None:
         steps = (
-            "Revoke ephemeral access and stop owned builders before publishing",
-            "Revoke ephemeral access and stop owned builders (always)",
+            "Revoke access and stop only quiescent owned builders before publishing",
+            "Revoke access and stop only quiescent owned builders (always)",
         )
         for step in steps:
             for failing_command in ("close-ci-access", "stop"):
