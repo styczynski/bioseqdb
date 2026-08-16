@@ -510,38 +510,42 @@ template <class p_sequence>
                                                 static_cast<unsigned>(scratch_result.error())));
                                     }
                                     auto scratch = std::move(*scratch_result);
-                                    const bioseq::indexing::fragment_seed_query request{
+                                    const bioseq::indexing::fragment_seed_query fragment_query{
                                         .minimizers = alignment_query_minimizers,
                                         .query_length = static_cast<sequence_size_t>(query_bp_size),
                                         .kmer_size = idx_params.kmer_size,
                                     };
                                     fragment_anchor_wave_completion wave_completion{scratch};
-                                    auto prepared =
+                                    auto prepared_seed_batch =
                                         prepared_group->persisted_fragment_reader
                                             ->prepare_fragment_anchor_batch(
                                                 admission,
                                                 std::span<
                                                     const bioseq::indexing::fragment_seed_query>{
-                                                    &request, 1u},
+                                                    &fragment_query, 1u},
                                                 idx_params.max_occ,
                                                 scratch,
                                                 /*baseline_query_plan_matcher_for_testing=*/false,
                                                 /*verify_compositional_order_for_testing=*/false,
                                                 prepared_group->persisted_fragment_lookup_route);
-                                    const auto query_index = prepared.query_view(0u);
+                                    const auto prepared_query_index =
+                                        prepared_seed_batch.query_view(0u);
                                     const std::uint64_t prepare_host_wall_ns =
                                         elapsed_dispatch_host_ns(prepare_started_ns);
-                                    match_result_collection out = minimap_port_fragment_query_owned(
-                                        fq_pg_view,
-                                        ft_pg_view,
-                                        alignment_query_minimizers,
-                                        query_index,
-                                        idx_params,
-                                        /*gpu_index_cache=*/nullptr,
-                                        bioseq::indexing::gpu_index_cache_identity{});
-                                    out.record_seed_lookup_host_time(prepare_host_wall_ns);
-                                    out.record_fragment_native_query_stats(prepared.stats());
-                                    return out;
+                                    match_result_collection match_collection =
+                                        minimap_port_fragment_query_owned(
+                                            fq_pg_view,
+                                            ft_pg_view,
+                                            alignment_query_minimizers,
+                                            prepared_query_index,
+                                            idx_params,
+                                            /*gpu_index_cache=*/nullptr,
+                                            bioseq::indexing::gpu_index_cache_identity{});
+                                    match_collection.record_seed_lookup_host_time(
+                                        prepare_host_wall_ns);
+                                    match_collection.record_fragment_native_query_stats(
+                                        prepared_seed_batch.stats());
+                                    return match_collection;
                                 });
                         } else {
                             collection = minimap_port_grouped_soa_pg_checked(
@@ -749,7 +753,7 @@ template <class p_sequence>
                                     bioseq::indexing::gpu_index_cache_identity{
                                         .assembly_identity = prepared_group->key_set_checksum});
                             }
-                            match_result_collection out =
+                            match_result_collection match_collection =
                                 minimap_port_fragment_index_vector_pg_checked(
                                     fq_pg_view,
                                     ft_pg_view,
@@ -760,7 +764,7 @@ template <class p_sequence>
                                     gpu_identity);
                             bioseq::storage::indexing::store_assembled_index(cache_key,
                                                                              std::move(idx));
-                            return out;
+                            return match_collection;
                         };
                         if (prepared_group != nullptr) {
                             /* One full-target union-filtered index is the
@@ -959,7 +963,7 @@ template <class p_sequence>
                                                             .assembly_identity =
                                                                 prepared_group->key_set_checksum});
                                                 }
-                                                match_result_collection out =
+                                                match_result_collection match_collection =
                                                     minimap_port_fragment_index_vector_pg_checked(
                                                         fq_pg_view,
                                                         ft_pg_view,
@@ -970,7 +974,7 @@ template <class p_sequence>
                                                         gpu_identity);
                                                 bioseq::storage::indexing::store_assembled_index(
                                                     cache_key, std::move(idx));
-                                                return out;
+                                                return match_collection;
                                             };
                                             if (prepared_group != nullptr) {
                                                 collection =
@@ -1174,7 +1178,7 @@ template <class p_sequence>
                                         }
                                     }
                                     auto idx = assemble_ram_one(cs_u, ce_u);
-                                    match_result_collection out =
+                                    match_result_collection match_collection =
                                         minimap_port_fragment_index_vector_pg_checked(
                                             fq_pg_view,
                                             ft_pg_view,
@@ -1187,7 +1191,7 @@ template <class p_sequence>
                                         bioseq::storage::indexing::store_assembled_index(
                                             cache_key, std::move(idx));
                                     }
-                                    return out;
+                                    return match_collection;
                                 };
                             if (total_bp <= postgres_segmentation_threshold_bp) {
                                 collection = run_with_ram_index(0, total_bp, 0, size_u);
