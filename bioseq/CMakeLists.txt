@@ -225,7 +225,6 @@ set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_index_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_segment_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/kmers/vulkan_minimizers/vulkan_minimizer_upload_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/scalar_highway_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/batch_sort_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/tests/unit/storage/lazy_sequence_test.cpp)
 file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
