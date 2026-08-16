@@ -43,10 +43,10 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     if (!features_.available) {
         throw vulkan_runtime_error("run_sequence_sort_roundtrip on unavailable device");
     }
-    const std::uint32_t n = static_cast<std::uint32_t>(descs.size());
-    if (n == 0)
+    const std::uint32_t sequence_count = static_cast<std::uint32_t>(descs.size());
+    if (sequence_count == 0)
         return {};
-    if (n == 1)
+    if (sequence_count == 1)
         return std::vector<std::uint32_t>{0u};
 
     std::uint64_t packed_unit_bytes = 0;
@@ -89,7 +89,8 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
         get_compute_pipeline_locked(dense_kind, k_sequence_sort_local_size, 0u);
     const compute_pipeline prefix_pipe =
         get_compute_pipeline_locked(prefix_kind, k_sequence_sort_local_size, 0u);
-    const workgroup_plan swg = plan_workgroups(n, features_.max_workgroup_count_x);
+    const workgroup_plan swg =
+        plan_workgroups(sequence_count, features_.max_workgroup_count_x);
     auto next_power_of_two = [](std::uint32_t value) -> std::uint32_t {
         if (value <= 1u)
             return 1u;
@@ -105,20 +106,26 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
         value |= value >> 16u;
         return value + 1u;
     };
-    const std::uint32_t padded_n = next_power_of_two(n);
+    const std::uint32_t padded_sequence_count = next_power_of_two(sequence_count);
 
     // Device buffers (unified/host-coherent on Apple). seq is the concatenated,
     // 4-byte-aligned per-row unit blocks viewed as `uint seq_words[]`.
     const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_unit_bytes, 4u);
     buffer seq = create_device_buffer(seq_bytes, k_compute_buffer_usage);
-    buffer descs_buf = create_device_buffer(std::uint64_t{n} * 16u, k_compute_buffer_usage);
-    buffer keys = create_device_buffer(std::uint64_t{n} * 8u, k_compute_buffer_usage);
-    buffer vals = create_device_buffer(std::uint64_t{n} * 8u, k_compute_buffer_usage);
-    buffer keys_scr = create_device_buffer(std::uint64_t{n} * 8u, k_compute_buffer_usage);
-    buffer vals_scr = create_device_buffer(std::uint64_t{n} * 8u, k_compute_buffer_usage);
+    buffer descs_buf =
+        create_device_buffer(std::uint64_t{sequence_count} * 16u, k_compute_buffer_usage);
+    buffer keys =
+        create_device_buffer(std::uint64_t{sequence_count} * 8u, k_compute_buffer_usage);
+    buffer vals =
+        create_device_buffer(std::uint64_t{sequence_count} * 8u, k_compute_buffer_usage);
+    buffer keys_scr =
+        create_device_buffer(std::uint64_t{sequence_count} * 8u, k_compute_buffer_usage);
+    buffer vals_scr =
+        create_device_buffer(std::uint64_t{sequence_count} * 8u, k_compute_buffer_usage);
     buffer hist =
         create_device_buffer(std::uint64_t{swg.num_workgroups} * 256u * 4u, k_compute_buffer_usage);
-    buffer index_buf = create_device_buffer(std::uint64_t{padded_n} * 4u, k_compute_buffer_usage);
+    buffer index_buf = create_device_buffer(
+        std::uint64_t{padded_sequence_count} * 4u, k_compute_buffer_usage);
     buffer dense_status = create_device_buffer(4u, k_compute_buffer_usage);
     if (seq.mapped == nullptr || descs_buf.mapped == nullptr || keys.mapped == nullptr ||
         vals.mapped == nullptr || keys_scr.mapped == nullptr || vals_scr.mapped == nullptr ||
@@ -166,7 +173,8 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
 
     // Dense-rank GPU fast path. Offset 0 handles short/front-key batches. The
     // tail offset handles long fixed-length common-prefix batches only when the
-    // shader validates the prefix identity and the selected key is [0,n)-dense.
+    // shader validates the prefix identity and the selected key is
+    // [0, sequence_count)-dense.
     auto* index_ptr = static_cast<std::uint32_t*>(index_buf.mapped);
     auto* dense_status_ptr = static_cast<std::uint32_t*>(dense_status.mapped);
     const std::uint32_t units_for_64 =
@@ -181,14 +189,15 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     for (std::uint32_t attempt = 0; attempt < dense_offset_count; ++attempt) {
         const std::uint32_t key_offset = dense_offsets[attempt];
         const std::uint64_t prefix_work =
-            static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(key_offset);
+            static_cast<std::uint64_t>(sequence_count) *
+            static_cast<std::uint64_t>(key_offset);
         if (prefix_work > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
             continue;
         }
-        std::fill(index_ptr, index_ptr + padded_n, 0xffffffffu);
+        std::fill(index_ptr, index_ptr + padded_sequence_count, 0xffffffffu);
         *dense_status_ptr = 0u;
         const sequence_sort_push_constants dense_push{
-            n,
+            sequence_count,
             params.unit_bits,
             params.bits_per_char,
             params.letters_per_unit,
@@ -227,12 +236,14 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                                        dense_infos,
                                        &dense_push,
                                        sizeof(dense_push),
-                                       bioseq::common::ceil_div(n, k_sequence_sort_local_size));
+                                       bioseq::common::ceil_div(sequence_count,
+                                                                k_sequence_sort_local_size));
         record_shader_to_host(command_buffer_);
         submit_and_wait(device_, queue_, command_buffer_, fence_, "submit(seqsort-dense)");
         if (*dense_status_ptr == 0u &&
-            std::find(index_ptr, index_ptr + n, 0xffffffffu) == index_ptr + n) {
-            std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+            std::find(index_ptr, index_ptr + sequence_count, 0xffffffffu) ==
+                index_ptr + sequence_count) {
+            std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
             seq_sort_dense_scatter_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
             bump();
             return perm;
@@ -240,7 +251,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     }
 
     const sequence_sort_push_constants key_push{
-        n,
+        sequence_count,
         params.unit_bits,
         params.bits_per_char,
         params.letters_per_unit,
@@ -272,9 +283,11 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                                        key_infos,
                                        &key_push,
                                        sizeof(key_push),
-                                       bioseq::common::ceil_div(n, k_sequence_sort_local_size));
+                                       bioseq::common::ceil_div(sequence_count,
+                                                                k_sequence_sort_local_size));
         record_compute_barrier(command_buffer_);
-        const gpu_sort_plan sort_plan{n, 8u, 8u, 8u, 8u}; // full 64-bit key, 8 LSD passes
+        const gpu_sort_plan sort_plan{
+            sequence_count, 8u, 8u, 8u, 8u}; // full 64-bit key, 8 LSD passes
         record_radix_sort_locked(command_buffer_,
                                  keys_s,
                                  vals_s,
@@ -297,9 +310,9 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
         static_cast<const std::uint64_t*>((sorted_in_scratch ? vals_scr : vals).mapped);
 
     // Seed `index` from the sorted row ids (ascending by key, radix-stable on ties).
-    for (std::uint32_t i = 0; i < n; ++i)
+    for (std::uint32_t i = 0; i < sequence_count; ++i)
         index_ptr[i] = static_cast<std::uint32_t>(sorted_vals[i] & 0xffffffffu);
-    for (std::uint32_t i = n; i < padded_n; ++i)
+    for (std::uint32_t i = sequence_count; i < padded_sequence_count; ++i)
         index_ptr[i] = 0xffffffffu;
 
     // Build equal-key run ranges (only runs of length > 1 need a tie-break).
@@ -309,9 +322,9 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     };
     std::vector<run_range> ranges;
     bool has_oversized_run = false;
-    for (std::uint32_t i = 0; i < n;) {
+    for (std::uint32_t i = 0; i < sequence_count;) {
         std::uint32_t j = i + 1u;
-        while (j < n && sorted_keys[j] == sorted_keys[i])
+        while (j < sequence_count && sorted_keys[j] == sorted_keys[i])
             ++j;
         if (j - i > 1u) {
             const std::uint32_t len = j - i;
@@ -323,7 +336,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
 
     if (ranges.empty()) {
         // No equal-key collisions: the 64-bit key fully ordered the batch.
-        std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+        std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
         bump();
         return perm;
     }
@@ -375,11 +388,11 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                 {index_s.buffer->buffer_handle, index_s.offset, index_s.size},
                 {ranges_s.buffer->buffer_handle, ranges_s.offset, ranges_s.size},
             }};
-            for (std::uint32_t sort_size = 2u; sort_size <= padded_n;) {
+            for (std::uint32_t sort_size = 2u; sort_size <= padded_sequence_count;) {
                 for (std::uint32_t stride = sort_size >> 1u; stride > 0u; stride >>= 1u) {
                     record_compute_barrier(command_buffer_);
                     sequence_sort_push_constants gc_push{
-                        padded_n,
+                        padded_sequence_count,
                         params.unit_bits,
                         params.bits_per_char,
                         params.letters_per_unit,
@@ -395,10 +408,11 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
                         gc_infos,
                         &gc_push,
                         sizeof(gc_push),
-                        bioseq::common::ceil_div(padded_n, k_sequence_sort_local_size));
+                        bioseq::common::ceil_div(padded_sequence_count,
+                                                 k_sequence_sort_local_size));
                     ++global_compare_dispatches;
                 }
-                if (sort_size == padded_n)
+                if (sort_size == padded_sequence_count)
                     break;
                 sort_size <<= 1u;
             }
@@ -413,7 +427,7 @@ runtime::run_sequence_sort_roundtrip(std::span<const sequence_sort_upload_chunk>
     }
     index_ptr =
         static_cast<std::uint32_t*>(index_buf.mapped); // mapping is stable; re-fetch defensively
-    std::vector<std::uint32_t> perm(index_ptr, index_ptr + n);
+    std::vector<std::uint32_t> perm(index_ptr, index_ptr + sequence_count);
     bump();
     return perm;
 }

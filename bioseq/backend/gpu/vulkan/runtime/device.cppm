@@ -48,9 +48,9 @@ void buffer::reset() noexcept {
 runtime::runtime() {
     try {
         init();
-    } catch (const std::exception& e) {
-        init_error_ = e.what();
-        bioseq_log<logging_level::debug>("[vulkan_runtime] init failed: {}", e.what());
+    } catch (const std::exception& exception) {
+        init_error_ = exception.what();
+        bioseq_log<logging_level::debug>("[vulkan_runtime] init failed: {}", exception.what());
         shutdown();
         features_ = vulkan_feature_set{};
     } catch (...) {
@@ -233,9 +233,9 @@ void runtime::init() {
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, families.data());
 
         std::optional<std::uint32_t> compute_family;
-        for (std::uint32_t f = 0; f < family_count; ++f) {
-            if (families[f].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                compute_family = f;
+        for (std::uint32_t family_index = 0; family_index < family_count; ++family_index) {
+            if (families[family_index].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                compute_family = family_index;
                 break;
             }
         }
@@ -436,9 +436,9 @@ void runtime::init() {
     VkPhysicalDeviceMemoryProperties mem_props{};
     vkGetPhysicalDeviceMemoryProperties(physical_, &mem_props);
     std::uint64_t device_local = 0;
-    for (std::uint32_t h = 0; h < mem_props.memoryHeapCount; ++h) {
-        if (mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-            device_local = std::max(device_local, mem_props.memoryHeaps[h].size);
+    for (std::uint32_t heap_index = 0; heap_index < mem_props.memoryHeapCount; ++heap_index) {
+        if (mem_props.memoryHeaps[heap_index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            device_local = std::max(device_local, mem_props.memoryHeaps[heap_index].size);
         }
     }
     features_.device_local_bytes = device_local;
@@ -472,11 +472,11 @@ void runtime::init() {
 
     // --- Fixed descriptor-set layout (4 storage buffers) + pipeline layout ---
     std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
-    for (std::uint32_t b = 0; b < 4; ++b) {
-        bindings[b].binding = b;
-        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[b].descriptorCount = 1;
-        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (std::uint32_t binding_index = 0; binding_index < 4; ++binding_index) {
+        bindings[binding_index].binding = binding_index;
+        bindings[binding_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[binding_index].descriptorCount = 1;
+        bindings[binding_index].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo set_layout_info{};
     set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;

@@ -73,11 +73,12 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     if (!features_.available)
         throw vulkan_runtime_error("build_target_index on unavailable device");
     const std::uint32_t bp = params.bp_size;
-    const std::uint32_t w = params.window_size;
-    const std::uint32_t k = params.kmer_size;
+    const std::uint32_t window_size = params.window_size;
+    const std::uint32_t kmer_size = params.kmer_size;
     out.target_len = bp;
     out.ownership.target_minimizer_capacity_estimate = max_target_minimizers;
-    if (bp == 0u || w == 0u || k == 0u || bp < k || max_target_minimizers == 0u) {
+    if (bp == 0u || window_size == 0u || kmer_size == 0u || bp < kmer_size ||
+        max_target_minimizers == 0u) {
         out.failure_reason = gpu_index_build_failure::invalid_shape;
         return out; // empty/invalid shape; selected GPU callers throw.
     }
@@ -138,8 +139,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     max_target_minimizers,
                                     0u,
                                     gpu_sketch_purpose::target_index_build,
-                                    k,
-                                    w,
+                                    kmer_size,
+                                    window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
     if (!memory_plan.is_valid) {
@@ -160,7 +161,7 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     // : grid-strided sketch — clamp the dispatch to the device limit.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
-    const std::uint32_t overlap = sketch_replay_overlap_bp(k, w);
+    const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
     // Small per-call scaffolding lives in the shared arena (seq + lut + tiles +
     // tile counts/offsets). The large minimizer/sort/index arrays are sized from
     // the EXACT minimizer count (downloaded after the count pass) as standalone
@@ -283,7 +284,9 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
     }
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile, k_sketch_local_size, std::max<std::uint32_t>(w, 1u));
+        shader_kind::ordered_sketch_tile,
+        k_sketch_local_size,
+        std::max<std::uint32_t>(window_size, 1u));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -325,14 +328,14 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                 {tblocks_s.buffer->buffer_handle, tblocks_s.offset, tblocks_s.size},
             }};
             sketch_push_constants push{0u,
-                                       w,
-                                       k,
+                                       window_size,
+                                       kmer_size,
                                        params.hash_bits,
                                        params.hash_shift,
                                        params.pos_bits,
                                        params.minimizer_word_kind,
                                        params.minimizer_words32,
-                                       k,
+                                       kmer_size,
                                        params.alphabet_kind,
                                        params.unit_bits,
                                        params.bits_per_char,
@@ -393,7 +396,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                     sizeof(last_count));
         out.ownership.exact_count_control_readbacks += 1u;
         const std::uint64_t exact_count = static_cast<std::uint64_t>(last_offset) + last_count;
-        const std::uint64_t hard_bound = target_minimizer_count_upper_bound(bp, k);
+        const std::uint64_t hard_bound =
+            target_minimizer_count_upper_bound(bp, kmer_size);
         if ((last_count & 0x80000000u) != 0u || exact_count > hard_bound ||
             exact_count > static_cast<std::uint64_t>(bp) ||
             exact_count > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
@@ -487,8 +491,8 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
                                     emit_capacity,
                                     0u,
                                     gpu_sketch_purpose::target_index_build,
-                                    k,
-                                    w,
+                                    kmer_size,
+                                    window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
     const auto allocation_requirement = [this](std::uint64_t bytes) {
@@ -613,14 +617,14 @@ gpu_built_index runtime::build_target_index(std::span<const std::byte> packed_se
             {gate_binding_s.buffer->buffer_handle, gate_binding_s.offset, gate_binding_s.size},
         }};
         sketch_push_constants push{1u,
-                                   w,
-                                   k,
+                                   window_size,
+                                   kmer_size,
                                    params.hash_bits,
                                    params.hash_shift,
                                    params.pos_bits,
                                    params.minimizer_word_kind,
                                    params.minimizer_words32,
-                                   k,
+                                   kmer_size,
                                    params.alphabet_kind,
                                    params.unit_bits,
                                    params.bits_per_char,

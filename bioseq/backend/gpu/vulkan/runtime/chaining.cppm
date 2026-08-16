@@ -74,13 +74,13 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
         {predecessors.buffer_handle, 0, VK_WHOLE_SIZE},
     }};
     std::array<VkWriteDescriptorSet, 4> writes{};
-    for (std::uint32_t b = 0; b < 4; ++b) {
-        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[b].dstSet = descriptor_set_;
-        writes[b].dstBinding = b;
-        writes[b].descriptorCount = 1;
-        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[b].pBufferInfo = &buffer_infos[b];
+    for (std::uint32_t binding_index = 0; binding_index < 4; ++binding_index) {
+        writes[binding_index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[binding_index].dstSet = descriptor_set_;
+        writes[binding_index].dstBinding = binding_index;
+        writes[binding_index].descriptorCount = 1;
+        writes[binding_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[binding_index].pBufferInfo = &buffer_infos[binding_index];
     }
     vkUpdateDescriptorSets(
         device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
@@ -235,13 +235,13 @@ runtime::run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& ke
         {predecessors.buffer_handle, 0, VK_WHOLE_SIZE},
     }};
     std::array<VkWriteDescriptorSet, 4> writes{};
-    for (std::uint32_t b = 0; b < 4; ++b) {
-        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[b].dstSet = descriptor_set_;
-        writes[b].dstBinding = b;
-        writes[b].descriptorCount = 1;
-        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[b].pBufferInfo = &chain_infos[b];
+    for (std::uint32_t binding_index = 0; binding_index < 4; ++binding_index) {
+        writes[binding_index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[binding_index].dstSet = descriptor_set_;
+        writes[binding_index].dstBinding = binding_index;
+        writes[binding_index].descriptorCount = 1;
+        writes[binding_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[binding_index].pBufferInfo = &chain_infos[binding_index];
     }
     vkUpdateDescriptorSets(
         device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);

@@ -351,13 +351,13 @@ runtime::run_seed_to_coordinate_roundtrip(const gpu_seed_inputs& inputs,
         }};
         VkDescriptorSet chain_set = allocate_dispatch_descriptor_set_locked(descriptor_set_layout_);
         std::array<VkWriteDescriptorSet, 4> writes{};
-        for (std::uint32_t b = 0; b < 4; ++b) {
-            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[b].dstSet = chain_set;
-            writes[b].dstBinding = b;
-            writes[b].descriptorCount = 1;
-            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[b].pBufferInfo = &chain_infos[b];
+        for (std::uint32_t binding_index = 0; binding_index < 4; ++binding_index) {
+            writes[binding_index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[binding_index].dstSet = chain_set;
+            writes[binding_index].dstBinding = binding_index;
+            writes[binding_index].descriptorCount = 1;
+            writes[binding_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[binding_index].pBufferInfo = &chain_infos[binding_index];
         }
         vkUpdateDescriptorSets(
             device_, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);

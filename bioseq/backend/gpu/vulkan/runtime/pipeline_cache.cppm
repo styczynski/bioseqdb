@@ -225,8 +225,9 @@ runtime::chaining_pipeline runtime::create_pipeline_locked(const chaining_pipeli
         try {
             spirv = compile_shader_spirv(shader_compile_request{
                 shader_kind::chain_tiled_dp_u64, key.tile_size, key.local_size});
-        } catch (const std::exception& e) {
-            throw vulkan_runtime_error(fmt::format("shader compile failed: {}", e.what()));
+        } catch (const std::exception& exception) {
+            throw vulkan_runtime_error(
+                fmt::format("shader compile failed: {}", exception.what()));
         }
 
         // Validate the direct-anchor ABI in the emitted SPIR-V before trusting the
@@ -397,11 +398,11 @@ runtime::compute_pipeline runtime::get_compute_pipeline_locked(shader_kind kind,
     entry.push_size = push_size;
 
     std::vector<VkDescriptorSetLayoutBinding> bindings(binding_count);
-    for (std::uint32_t b = 0; b < binding_count; ++b) {
-        bindings[b].binding = b;
-        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[b].descriptorCount = 1;
-        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (std::uint32_t binding_index = 0; binding_index < binding_count; ++binding_index) {
+        bindings[binding_index].binding = binding_index;
+        bindings[binding_index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[binding_index].descriptorCount = 1;
+        bindings[binding_index].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo set_layout_info{};
     set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;

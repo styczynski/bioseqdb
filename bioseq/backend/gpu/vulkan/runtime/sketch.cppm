@@ -44,9 +44,9 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     }
     gpu_arena_trim_guard arena_trim{arena};
     const std::uint32_t bp = params.bp_size;
-    const std::uint32_t w = params.window_size;
-    const std::uint32_t k = params.kmer_size;
-    if (bp == 0u || w == 0u || k == 0u || bp < k) {
+    const std::uint32_t window_size = params.window_size;
+    const std::uint32_t kmer_size = params.kmer_size;
+    if (bp == 0u || window_size == 0u || kmer_size == 0u || bp < kmer_size) {
         result.count = 0;
         if (!arena_trim.release_now()) {
             throw vulkan_runtime_error("gpu sketch empty roundtrip left live arena slices");
@@ -77,8 +77,8 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
                                     max_minimizers,
                                     out_bytes,
                                     gpu_sketch_purpose::minimizer_words,
-                                    k,
-                                    w,
+                                    kmer_size,
+                                    window_size,
                                     params.letters_per_unit,
                                     features_.max_workgroup_count_x);
     if (!memory_plan.is_valid) {
@@ -97,13 +97,13 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     // correctly, just over more grid-stride steps.
     const std::uint32_t sketch_groups = std::min(
         bioseq::common::ceil_div(num_tiles, k_sketch_local_size), features_.max_workgroup_count_x);
-    const std::uint32_t overlap = sketch_replay_overlap_bp(k, w);
+    const std::uint32_t overlap = sketch_replay_overlap_bp(kmer_size, window_size);
     std::vector<sketch_tile_type> tiles(num_tiles);
-    for (std::uint32_t t = 0; t < num_tiles; ++t) {
-        const std::uint32_t lo = t * tile_bp;
-        const std::uint32_t hi = std::min(bp, (t + 1u) * tile_bp);
+    for (std::uint32_t tile_index = 0; tile_index < num_tiles; ++tile_index) {
+        const std::uint32_t lo = tile_index * tile_bp;
+        const std::uint32_t hi = std::min(bp, (tile_index + 1u) * tile_bp);
         const std::uint32_t rlo = lo > overlap ? lo - overlap : 0u;
-        tiles[t] = sketch_tile_type{params.seq_word_offset, bp, rlo, lo, hi, 0u};
+        tiles[tile_index] = sketch_tile_type{params.seq_word_offset, bp, rlo, lo, hi, 0u};
     }
     const std::uint32_t num_blocks = memory_plan.tiles.scan_block_count;
     buffer out_words = create_device_buffer(out_bytes, k_compute_buffer_usage);
@@ -165,7 +165,9 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
         std::memset(out_words.mapped, 0, static_cast<std::size_t>(out_words.bytes));
 
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile, k_sketch_local_size, std::max<std::uint32_t>(w, 1u));
+        shader_kind::ordered_sketch_tile,
+        k_sketch_local_size,
+        std::max<std::uint32_t>(window_size, 1u));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -191,14 +193,14 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     }};
 
     sketch_push_constants push{0u,
-                               w,
-                               k,
+                               window_size,
+                               kmer_size,
                                params.hash_bits,
                                params.hash_shift,
                                params.pos_bits,
                                params.minimizer_word_kind,
                                params.minimizer_words32,
-                               k,
+                               kmer_size,
                                params.alphabet_kind,
                                params.unit_bits,
                                params.bits_per_char,
@@ -299,9 +301,10 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         throw vulkan_runtime_error("gpu sketch tile batch has invalid host materialization mode");
     }
     result.dispatch_stats.materialization_ = materialization;
-    const std::uint32_t w = params.window_size;
-    const std::uint32_t k = params.kmer_size;
-    if (tiles.empty() || query_layouts.empty() || w == 0u || k == 0u || max_minimizers == 0u) {
+    const std::uint32_t window_size = params.window_size;
+    const std::uint32_t kmer_size = params.kmer_size;
+    if (tiles.empty() || query_layouts.empty() || window_size == 0u || kmer_size == 0u ||
+        max_minimizers == 0u) {
         return result;
     }
     if (tiles.size() > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
@@ -417,7 +420,9 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
             runtime_pipeline_operation_kind::query_sketch, 1u, next_operation_identity_locked());
     }
     const compute_pipeline sketch_pipe = get_compute_pipeline_locked(
-        shader_kind::ordered_sketch_tile, k_sketch_local_size, std::max<std::uint32_t>(w, 1u));
+        shader_kind::ordered_sketch_tile,
+        k_sketch_local_size,
+        std::max<std::uint32_t>(window_size, 1u));
     const compute_pipeline scan_block_pipe =
         get_compute_pipeline_locked(shader_kind::prefix_scan_block, 1u, 1u);
     const compute_pipeline scan_add_pipe =
@@ -460,14 +465,14 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     }};
 
     sketch_push_constants push{0u,
-                               w,
-                               k,
+                               window_size,
+                               kmer_size,
                                params.hash_bits,
                                params.hash_shift,
                                params.pos_bits,
                                params.minimizer_word_kind,
                                params.minimizer_words32,
-                               k,
+                               kmer_size,
                                params.alphabet_kind,
                                params.unit_bits,
                                params.bits_per_char,
