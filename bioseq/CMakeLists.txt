@@ -2771,6 +2771,7 @@ set(BIOSEQ_UNIT_TEST_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/segmented_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/pipeline/pipe/vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/gatekeeper_test.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/gatekeeper_vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/prefilter/sneaky_snake_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/seeding/vulkan_test.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/tests/unit/sequences/edit_distance_threshold_test.cpp"
