@@ -34,6 +34,7 @@ namespace bioseq::io::benchmark::detail {
 /// Move-only packed payload that maintains live allocation and admission counters.
 class lazy_expression_materialization {
   public:
+    /// Own one packed result and charge its payload to benchmark accounting.
     lazy_expression_materialization(lazy_expression_packed&& packed,
                                     lazy_expression_allocation_statistics& stats,
                                     bool final_boundary,
@@ -57,23 +58,32 @@ class lazy_expression_materialization {
             std::max(stats.peak_live_admitted_bytes, stats.live_admitted_bytes);
     }
 
+    /// Transfer the packed result and its outstanding accounting charge.
     lazy_expression_materialization(lazy_expression_materialization&& other) noexcept
         : packed_(std::move(other.packed_)), stats_(std::exchange(other.stats_, nullptr)),
           payload_bytes_(other.payload_bytes_), admitted_bytes_(other.admitted_bytes_) {}
 
+    /// Materializations exclusively own one accounting charge.
     lazy_expression_materialization(lazy_expression_materialization const&) = delete;
+
+    /// Materializations cannot duplicate an accounting charge.
     lazy_expression_materialization& operator=(lazy_expression_materialization const&) = delete;
+
+    /// Materializations cannot replace an already charged result.
     lazy_expression_materialization& operator=(lazy_expression_materialization&&) = delete;
 
+    /// Release the outstanding accounting charge with the packed result.
     ~lazy_expression_materialization() {
         release_tracking();
     }
 
+    /// Return a borrowed facade over the owned packed result.
     [[nodiscard]] lazy_expression_facade view() const noexcept {
         return packed_.view();
     }
 
   private:
+    /// Subtract this result from live payload and admission counters once.
     void release_tracking() noexcept {
         if (stats_ == nullptr) {
             return;
