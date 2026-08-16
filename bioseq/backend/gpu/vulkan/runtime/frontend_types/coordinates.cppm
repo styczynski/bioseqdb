@@ -6,6 +6,7 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -20,6 +21,13 @@ import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
 import std;
+
+// Keep libc++'s aligned allocation declaration attached to this module's
+// global fragment; a distinct implicit declaration makes allocator lookup
+// ambiguous when this interface is precompiled through materialization.
+static_assert(requires {
+    ::operator new(std::size_t{}, std::align_val_t{});
+});
 
 export namespace bioseq::gpu::vulkan {
 
