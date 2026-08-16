@@ -403,7 +403,7 @@ class query_wave_scratch {
 /// Immutable, separately admitted final anchor owner.
 class prepared_fragment_anchor_batch {
   private:
-    static constexpr std::uint64_t sortedness_receipt_ = UINT64_C(0x46524147414E4348); // "FRAGANCH"
+    static constexpr std::uint64_t sortedness_receipt_ = std::uint64_t{0x46524147414E4348}; // "FRAGANCH"
 
     // Declared first so exact anchors die before their permit.
     bioseq::parallelism::memory_permit permit_{};
