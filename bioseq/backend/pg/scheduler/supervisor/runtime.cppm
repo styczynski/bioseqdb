@@ -87,10 +87,10 @@ void scheduler_shmem_startup() {
         prev_shmem_startup_hook();
     }
 
-    bool found = false;
-    g_shared = static_cast<scheduler_shared_state*>(
-        ShmemInitStruct("bioseq scheduler shared state", sizeof(scheduler_shared_state), &found));
-    if (!found) {
+    bool shared_state_found = false;
+    g_shared = static_cast<scheduler_shared_state*>(ShmemInitStruct(
+        "bioseq scheduler shared state", sizeof(scheduler_shared_state), &shared_state_found));
+    if (!shared_state_found) {
         pg_atomic_init_u32(&g_shared->cfg_max_concurrency, 0);
         pg_atomic_init_u32(&g_shared->cfg_generation, 1);
         pg_atomic_init_u32(&g_shared->state, 1);

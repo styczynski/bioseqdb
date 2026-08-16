@@ -449,15 +449,16 @@ export class batch_processor {
          */
         [[nodiscard]] const cpu_prepared_query_sketch*
         find_retained_query_sketch(const std::uint64_t query_ordinal) const noexcept {
-            const auto found = std::lower_bound(
+            const auto retained_sketch = std::lower_bound(
                 retained_query_sketches.begin(),
                 retained_query_sketches.end(),
                 query_ordinal,
                 [](const cpu_prepared_query_sketch& sketch, const std::uint64_t ordinal) noexcept {
                     return sketch.query_ordinal < ordinal;
                 });
-            return found != retained_query_sketches.end() && found->query_ordinal == query_ordinal
-                       ? &*found
+            return retained_sketch != retained_query_sketches.end() &&
+                           retained_sketch->query_ordinal == query_ordinal
+                       ? &*retained_sketch
                        : nullptr;
         }
     };

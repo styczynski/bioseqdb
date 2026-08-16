@@ -556,9 +556,9 @@ void process_minimizer_sequence_build_claim(const persist_claim& claim,
 [[nodiscard]] std::expected<void, std::string> load_bioseq_runtime();
 /**
  * @brief Publishes terminal runtime initialization state and wakes waiters.
- * @param[in] result Runtime initialization outcome safe for shared publication.
+ * @param[in] initialization_result Runtime initialization outcome safe for shared publication.
  */
-void publish_runtime_init_result(std::expected<void, std::string> result) noexcept;
+void publish_runtime_init_result(std::expected<void, std::string> initialization_result) noexcept;
 /** @brief Services every shader compilation request currently ready to claim. */
 void service_pending_shader_compiles();
 /** @brief Claims and processes at most one queued persistence job. */
