@@ -447,7 +447,10 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                       "fragmented lazy iter: only logical-rank iteration is supported "
                       "the minimizer kernel can consume ranks; alphabet-symbol mode is not "
                       "exercised on the fragmented path.");
-        if (iterator.global_unit_ >= size()) {
+        if (iterator.parent_ != this || iterator.global_unit_ > size()) {
+            abort_lazy_sequence_access("packed iterator cannot be mapped to this lazy sequence");
+        }
+        if (iterator.global_unit_ == size()) {
             return logical_rank_iterator_impl{this, bp_size()};
         }
         const auto logical_rank = bioseq::common::checked_mul(
@@ -618,7 +621,8 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
                 const std::size_t cur_frag = forward_from / fragment_bp;
                 const std::size_t in_frag_bp = forward_from % fragment_bp;
                 const encoded_slot& slot = ensure_rank_slot(cur_frag);
-                if (in_frag_bp + required_length <= slot.bp_count) {
+                if (in_frag_bp <= slot.bp_count &&
+                    required_length <= slot.bp_count - in_frag_bp) {
                     return slot.bytes + in_frag_bp;
                 }
             }
@@ -692,19 +696,21 @@ struct lazy_sequence<p_sequence_range, p_scanner> {
         fragment.logical_length = is_last
                                       ? (scanner_.bp_size() - fragment.logical_offset)
                                       : static_cast<sequence_size_t>(k_fragment_logical_capacity);
-        fragment.trailing_padding =
-            is_last ? static_cast<std::uint16_t>(scanner_.trailing_padding()) : std::uint16_t{0};
+        const std::size_t trailing_padding =
+            is_last ? scanner_.trailing_padding() : std::size_t{0};
         const auto fragment_capacity =
             bioseq::common::checked_mul(static_cast<std::uint64_t>(fragment.data.size()),
                                         static_cast<std::uint64_t>(k_letters_per_unit));
         if (!fragment_capacity.has_value() || fragment.data.empty() ||
             fragment.data.size() > k_fragment_storage_units ||
             (!is_last && fragment.data.size() != k_fragment_storage_units) ||
-            fragment.trailing_padding >= k_letters_per_unit ||
+            trailing_padding > (std::numeric_limits<std::uint16_t>::max)() ||
+            trailing_padding >= k_letters_per_unit ||
             fragment.logical_length > *fragment_capacity ||
-            *fragment_capacity - fragment.logical_length != fragment.trailing_padding) {
+            *fragment_capacity - fragment.logical_length != trailing_padding) {
             abort_lazy_sequence_access("scanner returned invalid fragment geometry");
         }
+        fragment.trailing_padding = static_cast<std::uint16_t>(trailing_padding);
         fragments_.push(fragment, [this](fragment_type& evicted) noexcept {
             scanner_.release_fragment(evicted.fragment_index);
         });
