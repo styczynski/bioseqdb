@@ -1442,13 +1442,79 @@ unset(_bioseq_pipeline_dispatch_owner_all_count)
 unset(_bioseq_pipeline_dispatch_owner_dna5_count)
 unset(_bioseq_pipeline_dispatch_owner_dna4_count)
 
-# Generated scheduler sources must reach the heavy pipeline only through the
-# distinct scheduler-owned entries. A compatibility-template call or explicit
-# template-id would silently restore one heavy instantiation per leaf.
-set(_bioseq_pipeline_dispatch_owner_bypass_source
-  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor/typed_template.cppm")
-file(READ "${_bioseq_pipeline_dispatch_owner_bypass_source}"
-  _bioseq_pipeline_dispatch_owner_bypass_text)
+# Generated scheduler sources and their imported typed-support closure must
+# reach the heavy pipeline only through the distinct scheduler-owned entries.
+# A compatibility-template call or explicit template-id would silently restore
+# one heavy instantiation per leaf.
+set(_bioseq_pipeline_dispatch_owner_boundary_root
+  "${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor")
+set(_bioseq_pipeline_dispatch_owner_boundary_support_root
+  "${_bioseq_pipeline_dispatch_owner_boundary_root}/typed_support_parts")
+set(_bioseq_pipeline_dispatch_owner_boundary_sources
+  "${_bioseq_pipeline_dispatch_owner_boundary_root}/typed_template.cppm"
+  "${_bioseq_pipeline_dispatch_owner_boundary_root}/typed_support.cppm")
+file(GLOB _bioseq_pipeline_dispatch_owner_boundary_support_sources
+  CONFIGURE_DEPENDS LIST_DIRECTORIES FALSE
+  "${_bioseq_pipeline_dispatch_owner_boundary_support_root}/*.cppm")
+list(APPEND _bioseq_pipeline_dispatch_owner_boundary_sources
+  ${_bioseq_pipeline_dispatch_owner_boundary_support_sources})
+set(_bioseq_pipeline_dispatch_owner_boundary_unique_sources
+  ${_bioseq_pipeline_dispatch_owner_boundary_sources})
+list(REMOVE_DUPLICATES
+  _bioseq_pipeline_dispatch_owner_boundary_unique_sources)
+list(LENGTH _bioseq_pipeline_dispatch_owner_boundary_sources
+  _bioseq_pipeline_dispatch_owner_boundary_source_count)
+list(LENGTH _bioseq_pipeline_dispatch_owner_boundary_unique_sources
+  _bioseq_pipeline_dispatch_owner_boundary_unique_source_count)
+if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_count EQUAL
+    _bioseq_pipeline_dispatch_owner_boundary_unique_source_count)
+  message(FATAL_ERROR
+    "Post-erasure scheduler boundary contains duplicate sources")
+endif()
+if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_count EQUAL 14)
+  message(FATAL_ERROR
+    "Post-erasure scheduler boundary must contain exactly 14 sources; got "
+    "${_bioseq_pipeline_dispatch_owner_boundary_source_count}")
+endif()
+set(_bioseq_pipeline_dispatch_owner_boundary_text)
+foreach(_bioseq_pipeline_dispatch_owner_boundary_source IN LISTS
+    _bioseq_pipeline_dispatch_owner_boundary_sources)
+  if(NOT EXISTS "${_bioseq_pipeline_dispatch_owner_boundary_source}")
+    message(FATAL_ERROR
+      "Post-erasure scheduler boundary source does not exist: "
+      "${_bioseq_pipeline_dispatch_owner_boundary_source}")
+  endif()
+  if(NOT _bioseq_pipeline_dispatch_owner_boundary_source MATCHES
+      "\\.cppm$")
+    message(FATAL_ERROR
+      "Post-erasure scheduler boundary source is not a module unit: "
+      "${_bioseq_pipeline_dispatch_owner_boundary_source}")
+  endif()
+  if(NOT _bioseq_pipeline_dispatch_owner_boundary_source STREQUAL
+        "${_bioseq_pipeline_dispatch_owner_boundary_root}/typed_template.cppm"
+      AND NOT _bioseq_pipeline_dispatch_owner_boundary_source STREQUAL
+        "${_bioseq_pipeline_dispatch_owner_boundary_root}/typed_support.cppm")
+    cmake_path(IS_PREFIX
+      _bioseq_pipeline_dispatch_owner_boundary_support_root
+      "${_bioseq_pipeline_dispatch_owner_boundary_source}" NORMALIZE
+      _bioseq_pipeline_dispatch_owner_boundary_source_in_support_root)
+    file(RELATIVE_PATH
+      _bioseq_pipeline_dispatch_owner_boundary_relative_source
+      "${_bioseq_pipeline_dispatch_owner_boundary_support_root}"
+      "${_bioseq_pipeline_dispatch_owner_boundary_source}")
+    if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_in_support_root
+        OR _bioseq_pipeline_dispatch_owner_boundary_relative_source MATCHES
+          "/")
+      message(FATAL_ERROR
+        "Post-erasure scheduler boundary source escaped its exact category: "
+        "${_bioseq_pipeline_dispatch_owner_boundary_source}")
+    endif()
+  endif()
+  file(READ "${_bioseq_pipeline_dispatch_owner_boundary_source}"
+    _bioseq_pipeline_dispatch_owner_boundary_source_text)
+  string(APPEND _bioseq_pipeline_dispatch_owner_boundary_text
+    "\n${_bioseq_pipeline_dispatch_owner_boundary_source_text}")
+endforeach()
 foreach(_bioseq_pipeline_dispatch_owner_bypass_pattern IN ITEMS
     "minimap_port[ \t\r\n]*\\("
     "minimap_port_segmented[ \t\r\n]*\\("
@@ -1461,7 +1527,7 @@ foreach(_bioseq_pipeline_dispatch_owner_bypass_pattern IN ITEMS
     "minimap2_port_with_index_owned[ \t\r\n]*<"
     "dispatch_pipeline[ \t\r\n]*<"
     "minimap_port_with_repr[ \t\r\n]*<")
-  if(_bioseq_pipeline_dispatch_owner_bypass_text MATCHES
+  if(_bioseq_pipeline_dispatch_owner_boundary_text MATCHES
       "${_bioseq_pipeline_dispatch_owner_bypass_pattern}")
     message(FATAL_ERROR
       "Generated scheduler input bypasses the post-erasure pipeline owner "
@@ -1475,7 +1541,7 @@ foreach(_bioseq_pipeline_dispatch_owned_entry IN ITEMS
     minimap_port_hash_major_owned
     minimap_port_grouped_soa_owned
     minimap_port_fragment_query_owned)
-  if(NOT _bioseq_pipeline_dispatch_owner_bypass_text MATCHES
+  if(NOT _bioseq_pipeline_dispatch_owner_boundary_text MATCHES
       "${_bioseq_pipeline_dispatch_owned_entry}[ \t\r\n]*\\(")
     message(FATAL_ERROR
       "Generated scheduler input does not call required post-erasure entry "
@@ -1484,8 +1550,17 @@ foreach(_bioseq_pipeline_dispatch_owned_entry IN ITEMS
 endforeach()
 unset(_bioseq_pipeline_dispatch_owned_entry)
 unset(_bioseq_pipeline_dispatch_owner_bypass_pattern)
-unset(_bioseq_pipeline_dispatch_owner_bypass_text)
-unset(_bioseq_pipeline_dispatch_owner_bypass_source)
+unset(_bioseq_pipeline_dispatch_owner_boundary_source_text)
+unset(_bioseq_pipeline_dispatch_owner_boundary_relative_source)
+unset(_bioseq_pipeline_dispatch_owner_boundary_source_in_support_root)
+unset(_bioseq_pipeline_dispatch_owner_boundary_unique_source_count)
+unset(_bioseq_pipeline_dispatch_owner_boundary_source_count)
+unset(_bioseq_pipeline_dispatch_owner_boundary_unique_sources)
+unset(_bioseq_pipeline_dispatch_owner_boundary_support_sources)
+unset(_bioseq_pipeline_dispatch_owner_boundary_sources)
+unset(_bioseq_pipeline_dispatch_owner_boundary_text)
+unset(_bioseq_pipeline_dispatch_owner_boundary_support_root)
+unset(_bioseq_pipeline_dispatch_owner_boundary_root)
 
 set(_bioseq_pipeline_dispatch_owner_expected_implementation_units
   ${BIOSEQ_PIPELINE_DISPATCH_OWNER_DNA4_IMPLEMENTATION_UNITS})
