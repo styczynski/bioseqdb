@@ -101,6 +101,7 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
     struct is_minimizer {
         const std::uint32_t* mini_pos_count;
         sequence_size_t query_len;
+        /// Test whether the prefix table contains one forward position.
         [[nodiscard, gnu::always_inline]]
         inline bool operator()(std::int64_t pos) const noexcept {
             if (pos < 0 || static_cast<sequence_size_t>(pos) > query_len)
@@ -112,6 +113,7 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
     struct range_count {
         const std::uint32_t* mini_pos_count;
         sequence_size_t query_len;
+        /// Count minimizers in one inclusive, clamped position interval.
         [[nodiscard, gnu::always_inline]]
         inline int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
             if (a < 0)
@@ -153,6 +155,7 @@ void estimate_divergence_from_seeds(std::span<alignment_region> regions,
             sequence_size_t query_len;
             bool region_is_reverse;
 
+            /// Project one chain anchor onto its forward query coordinate.
             [[nodiscard, gnu::always_inline]]
             inline std::int64_t operator()(int32_t s) const noexcept {
                 const anchor& chain_anchor = region_is_reverse

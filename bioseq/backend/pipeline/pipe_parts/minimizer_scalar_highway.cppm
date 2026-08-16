@@ -66,6 +66,7 @@ export {
     // ---------------------------------------------------------------------------
     enum class minimizer_kernel_kind { scalar, simd, exact_simd };
 
+    /// Resolve and validate the selected table's alphabet identity.
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] inline const ::bioseq::simd_dispatch::highway_alphabet_identity_entry&
     resolved_highway_alphabet_identity(const ::bioseq::simd_dispatch::highway_kernel_table* table) {
@@ -79,6 +80,7 @@ export {
         return *identity;
     }
 
+    /// Project one resident packed descriptor into the neutral kernel ABI.
     template <sequence_alphabet p_alphabet, class p_descriptor>
     [[nodiscard]] inline ::bioseq::minimizers::packed_sequence_kernel_view
     minimizer_kernel_view(const p_descriptor& descriptor,
@@ -144,9 +146,11 @@ export {
      */
     template <class p_minimizer, class p_collector> class highway_minimizer_sink_state final {
       public:
+        /// Borrow the collector used for this one coarse kernel call.
         explicit highway_minimizer_sink_state(p_collector& collector) noexcept
             : collector_(&collector) {}
 
+        /// Expose the fixed callback table consumed by the neutral kernel ABI.
         [[nodiscard]] ::bioseq::minimizers::minimizer_sink sink() noexcept {
             return {
                 .state = this,
@@ -156,6 +160,7 @@ export {
             };
         }
 
+        /// Validate transport completion and rethrow any collector exception.
         void validate(const ::bioseq::minimizers::minimizer_kernel_result& result) {
             if (exception_ != nullptr) {
                 std::rethrow_exception(exception_);
@@ -196,6 +201,7 @@ export {
         static_assert(std::is_trivially_copyable_v<p_minimizer>);
         static_assert(std::is_trivially_destructible_v<p_minimizer>);
 
+        /// Acquire the class-owned fixed-capacity output batch.
         [[nodiscard]] static ::bioseq::minimizers::minimizer_sink_batch_view
         acquire(void* opaque, std::size_t minimum) {
             auto& self = *static_cast<highway_minimizer_sink_state*>(opaque);
@@ -213,6 +219,7 @@ export {
             };
         }
 
+        /// Commit constructed records to the borrowed collector without throwing.
         static void commit(void* opaque, std::size_t initialized) noexcept {
             auto& self = *static_cast<highway_minimizer_sink_state*>(opaque);
             if (!self.is_acquired_ || initialized > batch_capacity) {
@@ -249,6 +256,7 @@ export {
             }
         }
 
+        /// Append an exact raw-u64 batch when its wire layout is identical.
         [[nodiscard]] static bool
         append_raw_u64(void* opaque,
                        ::bioseq::minimizers::minimizer_output_layout layout,
@@ -314,6 +322,7 @@ export {
         bool rejected_ = false;
     };
 
+    /// Select one required minimizer function from the resolved Highway table.
     [[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_function
     selected_minimizer_kernel(const ::bioseq::simd_dispatch::highway_kernel_table* table,
                               ::bioseq::simd_dispatch::highway_kernel id) {
@@ -334,6 +343,7 @@ export {
         throw std::invalid_argument("requested Highway kernel is not a minimizer kernel");
     }
 
+    /// Invoke one neutral Highway minimizer kernel and validate its family stats.
     template <class p_minimizer, class p_collector>
     [[nodiscard]] inline ::bioseq::minimizers::minimizer_kernel_result
     invoke_selected_minimizer_kernel(
@@ -376,6 +386,7 @@ export {
         return result;
     }
 
+    /// Map a neutral transport failure onto the exact two-stack status domain.
     [[nodiscard]] constexpr two_stack_continuation_status two_stack_transport_failure_status(
         const ::bioseq::minimizers::minimizer_kernel_result& result) noexcept {
         const auto family = static_cast<two_stack_continuation_status>(result.family_status);
@@ -394,6 +405,7 @@ export {
         }
     }
 
+    /// Execute the selected whole-sequence scalar or Highway minimizer route.
     template <minimizer_kernel_kind p_kind,
               class p_minimizer,
               sequence_alphabet p_alphabet,
@@ -521,6 +533,7 @@ export {
         return {};
     }
 
+    /// Enforce compile-time window/k-mer values before whole-sequence dispatch.
     template <minimizer_kernel_kind p_kind,
               std::size_t p_window_size,
               std::size_t p_kmer_size,
@@ -558,6 +571,7 @@ export {
     // per-segment wall clock. The shared scalar sub-range body lives in
     // `collect_minimizers_segment_scalar` (bioseq.sequences.kmers). Under
     // `vulkan_segment` the GPU segment sketch is called and throws on any decline.
+    /// Execute one biological-coordinate subrange through its admitted backend.
     template <class p_minimizer, sequence_alphabet p_alphabet, class p_collector>
     [[gnu::always_inline]] inline minimizer_range_execution_stats minimizer_dispatch_range(
         p_collector& collector,

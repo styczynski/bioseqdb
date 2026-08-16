@@ -133,14 +133,17 @@ export {
         bounded_nthash_execution_stats bounded_nthash_stats{};
         bool bounded_nthash_execution_stats_available = false;
 
+        /// Create an empty query-sketch owner.
         budgeted_sketch_vector() = default;
         budgeted_sketch_vector(const budgeted_sketch_vector&) = delete;
         budgeted_sketch_vector& operator=(const budgeted_sketch_vector&) = delete;
 
+        /// Transfer every allocation and its corresponding admission anchor.
         budgeted_sketch_vector(budgeted_sketch_vector&& other) noexcept {
             steal_from_(std::move(other));
         }
 
+        /// Replace this query sketch after releasing its owned allocations.
         budgeted_sketch_vector& operator=(budgeted_sketch_vector&& other) noexcept {
             if (this != &other) {
                 release_owned_memory_before_permit();
@@ -149,6 +152,7 @@ export {
             return *this;
         }
 
+        /// Destroy host/device storage before releasing either permit.
         void release_owned_memory_before_permit() noexcept {
             {
                 std::vector<p_minimizer> empty;
@@ -158,11 +162,13 @@ export {
             permit.reset();
         }
 
+        /// Borrow the retained host minimizers.
         [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
             return minimizers;
         }
 
       private:
+        /// Move storage, permits, and execution evidence from one emptying owner.
         void steal_from_(budgeted_sketch_vector&& other) noexcept {
             // Transfer allocations while all source admission anchors remain live,
             // then transfer device and host permits. Swap proves the source has no
@@ -184,6 +190,7 @@ export {
         }
     };
 
+    /// Sketch one query through the backend used for index selection.
     template <class p_minimizer, sequence_alphabet p_alphabet>
     [[nodiscard]] budgeted_sketch_vector<p_minimizer>
     sketch_query_for_index_selection(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,

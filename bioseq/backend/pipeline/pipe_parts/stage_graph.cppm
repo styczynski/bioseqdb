@@ -75,6 +75,7 @@ export {
     /// minimizer implementation.
     class bounded_nthash_runtime_error final : public std::runtime_error {
       public:
+        /// Describe a fail-closed bounded-ntHash rejection.
         explicit bounded_nthash_runtime_error(std::string detail)
             : std::runtime_error(std::string{"bounded_nthash_simd minimizer execution rejected: "} +
                                  std::move(detail)) {}
@@ -85,6 +86,7 @@ export {
 
     using host_stage_clock = std::chrono::steady_clock;
 
+    /// Sample the monotonic host-stage clock as a positive nanosecond value.
     [[nodiscard]] inline std::uint64_t host_stage_now_ns() noexcept {
         const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              host_stage_clock::now().time_since_epoch())
@@ -92,6 +94,7 @@ export {
         return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
     }
 
+    /// Return a positive elapsed host-stage duration for one sampled start.
     [[nodiscard]] inline std::uint64_t
     elapsed_host_stage_ns(const std::uint64_t started_ns) noexcept {
         const std::uint64_t finished_ns = host_stage_now_ns();
@@ -103,6 +106,7 @@ export {
         return elapsed > 0 ? elapsed : 1u;
     }
 
+    /// Report that a mandatory Vulkan stage did not execute.
     [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
         auto& runtime = bioseq::gpu::vulkan::runtime::instance();
         const std::string detail =
@@ -119,6 +123,7 @@ export {
             fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
     }
 
+    /// Report the structured decline emitted by a mandatory Vulkan sketch.
     [[noreturn]] inline void
     throw_vulkan_sketch_declined(std::string_view stage,
                                  const bioseq::gpu::vulkan::vulkan_sketch_decline& decline) {
@@ -196,6 +201,7 @@ export {
         }
     };
 
+    /// Recognize a compile-time aligner parameter bundle.
     template <class p_type>
     concept is_constexpr_aligner_params = requires {
         { p_type::window_len } -> std::convertible_to<std::size_t>;
@@ -265,18 +271,23 @@ export {
         std::span<const p_minimizer> host{};
         std::optional<bioseq::gpu::vulkan::vulkan_device_minimizer_span<p_minimizer>> device{};
 
+        /// Return the first host minimizer, or null for an empty batch.
         [[nodiscard]] const p_minimizer* data() const noexcept {
             return host.data();
         }
+        /// Return the number of host minimizers.
         [[nodiscard]] std::size_t size() const noexcept {
             return host.size();
         }
+        /// View the host minimizers without transferring device ownership.
         [[nodiscard]] std::span<const p_minimizer> as_span() const noexcept {
             return host;
         }
+        /// Return the host-range begin iterator.
         [[nodiscard]] auto begin() const noexcept {
             return host.begin();
         }
+        /// Return the host-range end iterator.
         [[nodiscard]] auto end() const noexcept {
             return host.end();
         }
@@ -397,6 +408,7 @@ export {
         emit_token& operator=(const emit_token&) = delete;
         emit_token& operator=(emit_token&&) = delete;
 
+        /// Emit one ordinary batch and consume this permission token.
         template <class p_element>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_batch(std::span<p_element> data) && {
@@ -411,6 +423,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
+        /// Emit one paired batch and consume this permission token.
         template <class p_first_element, class p_second_element>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_batch_pair(std::span<p_first_element> first_batch,
@@ -425,6 +438,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
+        /// Emit an index-decorated batch and consume this permission token.
         template <class p_element, class p_index>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink>
@@ -442,6 +456,7 @@ export {
         }
 
         // — narrow minimizer-batch emit (carries optional device span).
+        /// Emit a host/device minimizer batch and consume this permission token.
         template <class p_minimizer>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink> emit_minimizer_batch(minimizer_batch_view<p_minimizer> batch) && {
@@ -454,6 +469,7 @@ export {
             return emitted_token<p_sink>::make();
         }
 
+        /// Emit an index-decorated host/device batch and consume this token.
         template <class p_minimizer, class p_index>
         [[nodiscard, gnu::always_inline]]
         emitted_token<p_sink>
@@ -522,24 +538,30 @@ export {
 
         ::bioseq::chaining::arena_slab<p_element>* slab_;
 
+        /// Append one movable minimizer to the arena slab.
         [[gnu::always_inline]] void collect(p_element sketch) {
             slab_->push_back(std::move(sketch));
         }
+        /// Append one borrowed minimizer to the arena slab.
         [[gnu::always_inline]] void collect(const p_element& sketch) {
             slab_->push_back(sketch);
         }
+        /// Reserve space for the caller's conservative output estimate.
         [[gnu::always_inline]] void reserve(std::size_t expected_count) {
             slab_->reserve(expected_count);
         }
+        /// Return the number of constructed minimizers.
         [[nodiscard, gnu::always_inline]] std::size_t size() const noexcept {
             return slab_->size();
         }
 
+        /// Append a trivially copyable batch without per-record dispatch.
         [[nodiscard, gnu::always_inline]] bool
         append_records(const std::span<const p_element> records) {
             return slab_->append_trivial_records(records);
         }
 
+        /// Append exact raw storage when its layout matches the minimizer type.
         template <class p_minimizer_type = p_element>
         [[nodiscard, gnu::always_inline]] bool
         append_raw_storage(const typename p_minimizer_type::storage_type* raw, std::size_t count)
@@ -564,12 +586,14 @@ export {
     template <class p_derived, class p_output> struct stage_base : bare_stage<p_derived> {
         using out_element_type = p_output;
 
+        /// Bind this stage to its downstream sink and parameter bundle.
         template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
         [[gnu::always_inline]] auto attach(p_sink sink) noexcept {
             return stage<p_aligner_parameters, p_derived, p_sink>{
                 std::move(sink), std::move(static_cast<p_derived&>(*this))};
         }
 
+        /// Complete a stage that has no terminal action of its own.
         template <class p_sink> [[gnu::always_inline]] void finalize(p_sink&) noexcept {
             /* default: no-op */
         }
@@ -591,6 +615,7 @@ export {
         p_sink sink_;
         p_self self_;
 
+        /// Own one configured stage and its downstream sink.
         constexpr stage(p_sink sink_arg, p_self self_arg) noexcept
             : sink_(std::move(sink_arg)), self_(std::move(self_arg)) {}
 
@@ -598,11 +623,13 @@ export {
         // own stack and hands it to `process*<p_aligner_parameters>` by rvalue reference; the
         // concrete-stage body returns the (discarded) `emitted_token<p_sink>` stats
         // type whose construction is friend-private to `emit_token<p_sink>`.
+        /// Forward one ordinary batch through the bound stage.
         template <class p_batch> [[gnu::always_inline]] void on_batch(p_batch&& batch) {
             (void)self_.template process<p_aligner_parameters>(std::forward<p_batch>(batch),
                                                                emit_token<p_sink>{sink_});
         }
 
+        /// Forward one paired batch through the bound stage.
         template <class p_first_batch, class p_second_batch>
         [[gnu::always_inline]] void on_batch_pair(p_first_batch&& first_batch,
                                                   p_second_batch&& second_batch) {
@@ -612,6 +639,7 @@ export {
                 emit_token<p_sink>{sink_});
         }
 
+        /// Forward one index-decorated batch through the bound stage.
         template <class p_batch, class p_index>
         [[gnu::always_inline]] void
         on_batch_with_index(p_batch&& batch,
@@ -622,11 +650,13 @@ export {
         }
 
         // — forwarders for the narrow minimizer-batch shape.
+        /// Forward one host/device minimizer batch through the bound stage.
         template <class p_minimizer>
         [[gnu::always_inline]] void on_minimizer_batch(minimizer_batch_view<p_minimizer> batch) {
             (void)self_.template process<p_aligner_parameters>(batch, emit_token<p_sink>{sink_});
         }
 
+        /// Forward one index-decorated host/device batch through the bound stage.
         template <class p_minimizer, class p_index>
         [[gnu::always_inline]] void
         on_minimizer_batch_with_index(minimizer_batch_view<p_minimizer> batch,
@@ -636,6 +666,7 @@ export {
                 batch, index_ref, identity, emit_token<p_sink>{sink_});
         }
 
+        /// Finalize this stage before completing its downstream sink.
         [[gnu::always_inline]] void on_completed() noexcept {
             self_.finalize(sink_);
             sink_.on_completed();
@@ -651,6 +682,7 @@ export {
      * peels one bare stage off the front, builds the downstream pipeline from the
      * remaining arguments, and attaches.
      */
+    /// Terminate pipeline composition at the supplied sink.
     template <is_constexpr_aligner_params p_aligner_parameters, class p_sink>
     [[gnu::always_inline]] constexpr auto make_pipeline(p_sink sink) noexcept {
         static_assert(!detail::is_bare_stage<p_sink>,
@@ -659,6 +691,7 @@ export {
         return sink;
     }
 
+    /// Attach one stage to the recursively composed downstream pipeline.
     template <is_constexpr_aligner_params p_aligner_parameters,
               class p_first_stage,
               class... p_remaining_stages>

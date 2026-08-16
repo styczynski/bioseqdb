@@ -115,6 +115,7 @@ export {
         }
         bioseq::indexing::gpu_minimizer_index_cache* segmented_gpu_index_cache_ptr =
             segmented_gpu_index_cache ? &*segmented_gpu_index_cache : nullptr;
+        /// Derive a stable cache identity for one target segment.
         auto segment_gpu_identity = [](std::size_t segment_index) noexcept {
             return bioseq::indexing::gpu_index_cache_identity{
                 .assembly_identity =
@@ -181,6 +182,7 @@ export {
                     std::abort();
                 }
             };
+        /// Attach the once-per-query sketch stats to the merged segment result.
         auto finalize_segmented_stats = [&query_sketch,
                                          exact_simd_segmented_route,
                                          bounded_nthash_segmented_route,
@@ -256,6 +258,7 @@ export {
             std::uint64_t mask = 0u;
             bool exact = false;
 
+            /// Build a conservative fixed-width membership gate for query k-mers.
             void build(const boost::unordered_flat_set<std::uint64_t>& filter,
                        std::size_t /*kmer_size*/) {
                 const unsigned gate_bits = 26u;
@@ -274,6 +277,7 @@ export {
                 }
             }
 
+            /// Test the conservative bit gate before exact host lookup.
             [[nodiscard, gnu::always_inline]] bool
             maybe_contains(std::uint64_t kmer) const noexcept {
                 if (words.empty())
@@ -283,11 +287,13 @@ export {
                         (std::uint32_t{1} << (bit & 31u))) != 0u;
             }
 
+            /// Report that this approximate gate never proves exact membership.
             [[nodiscard, gnu::always_inline]] bool
             accepts_exactly(std::uint64_t /*kmer*/) const noexcept {
                 return false;
             }
 
+            /// Borrow the gate words through the Vulkan sketch ABI.
             [[nodiscard]] bioseq::gpu::vulkan::vulkan_sketch_query_gate
             vulkan_gate() const noexcept {
                 return bioseq::gpu::vulkan::vulkan_sketch_query_gate{
@@ -300,6 +306,7 @@ export {
             query_gate.build(query_kmer_filter, k);
         }
         using filtered_minimizer_pair = std::pair<std::uint64_t, std::uint64_t>;
+        /// Build a segment index containing only query-relevant minimizers.
         auto build_query_filtered_segment_index =
             [&query_kmer_filter, &query_gate, target_len](
                 std::span<const p_minimizer> minimizers,
@@ -337,18 +344,22 @@ export {
             std::uint64_t position_offset = 0u;
             std::vector<filtered_minimizer_pair> pairs;
 
+            /// Reserve a conservative filtered-pair capacity.
             void reserve(std::size_t expected_count) {
                 const std::size_t filtered_hint =
                     filter == nullptr ? expected_count
                                       : std::min<std::size_t>(expected_count, filter->size() + 64u);
                 pairs.reserve(filtered_hint);
             }
+            /// Reuse retained capacity for the next segment.
             void clear() {
                 pairs.clear();
             }
+            /// Forward a movable minimizer to the borrowed-record overload.
             [[gnu::always_inline]] void collect(p_minimizer&& sketch) {
                 collect(static_cast<const p_minimizer&>(sketch));
             }
+            /// Append one query-relevant minimizer with its global position.
             [[gnu::always_inline]] void collect(const p_minimizer& sketch) {
                 const std::uint64_t kmer = sketch.kmer();
                 if (filter == nullptr || ((gate == nullptr || gate->maybe_contains(kmer)) &&
@@ -358,6 +369,7 @@ export {
                     pairs.emplace_back(kmer, encoded);
                 }
             }
+            /// Decode and append an exact raw-storage minimizer batch.
             [[nodiscard]] bool append_raw_storage(const typename p_minimizer::storage_type* raw,
                                                   std::size_t count) {
                 if (count > pairs.max_size() - pairs.size()) {
@@ -375,6 +387,7 @@ export {
         constexpr std::size_t lpu = 1u;
         const sequence_size_t overlap_bp = pipe::segment_overlap_bp(query_len);
 
+        /// Execute the established serial segmented route and merge in order.
         auto run_serial_segmented = [target_len,
                                      query_len,
                                      lpu,
@@ -579,6 +592,7 @@ export {
             return finalize_segmented_stats(std::move(merged_collection));
         };
 
+        /// Execute the all-Vulkan segment-coordinate batch when strictly selected.
         auto run_vulkan_segment_coordinate_batch = [target_len,
                                                     query_len,
                                                     lpu,
@@ -754,6 +768,7 @@ export {
         };
 
         constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
+        /// Bound collected biological symbols for one segment core.
         auto collected_bp_upper_bound = [target_len,
                                          overlap_bp](sequence_size_t core_bp) -> std::uint64_t {
             const std::uint64_t core = static_cast<std::uint64_t>(core_bp);
@@ -766,6 +781,7 @@ export {
             return std::min<std::uint64_t>(collected, static_cast<std::uint64_t>(target_len));
         };
 
+        /// Estimate the peak host bytes for one admitted segment core.
         auto peak_for_segment_core_bp = [&collected_bp_upper_bound](sequence_size_t core_bp) {
             return bioseq::parallelism::minimizer_index_peak_bytes_for_bp(
                        collected_bp_upper_bound(core_bp)) +
@@ -783,6 +799,7 @@ export {
             std::uint64_t estimated_work_bp = 0;
         };
 
+        /// Choose the first geometry whose full worker wave is memory-admitted.
         auto try_admit_segment_geometry = [&pool,
                                            target_len,
                                            &collected_bp_upper_bound,
@@ -894,6 +911,7 @@ export {
                 match_result_collection merged_collection;
                 std::vector<match_result>& merged = merged_collection.results;
 
+                /// Materialize and persist one fragment-producing segment serially.
                 auto process_segment_serial = [&ranges,
                                                &target_seq,
                                                &query_seq,
@@ -1082,6 +1100,7 @@ export {
         std::vector<std::size_t> segment_minimizer_counts(ranges.size());
         std::vector<std::size_t> segment_filtered_counts(ranges.size());
 
+        /// Execute one non-persisting segment for serial fallback waves.
         auto process_segment_serial = [&ranges,
                                        &seg_out,
                                        &target_seq,
