@@ -96,6 +96,11 @@ export {
      * ExprStates while only their physical sources are promoted.  The scan slot is
      * restored on normal completion, C++ unwind, and PostgreSQL longjmp before a
      * caller can buffer it.
+     * @param runtime Scan runtime with mmsearch operand ExprStates and pre-eval source flags.
+     * @param slot Input tuple whose locator-backed sources may be promoted for evaluation.
+     * @param qual Residual qual ExprState, or nullptr when no qual is installed.
+     * @param expression_context Executor context supplying per-tuple memory and evaluation state.
+     * @return Qual pass flag plus evaluated target and optional query datums for buffered submission.
      */
     [[nodiscard]] mmsearch_row_evaluation
     evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
@@ -181,6 +186,10 @@ export {
      * VectorAgg consumes one vector_column_storage pointer per projected attribute.
      * The ordinary scan path extracts scalar rows, so build a projected
      * vector batch explicitly when the planner attached VectorAgg.
+     * @param bioseq_scan_state Custom scan state with vector slots and compiled vector qualifiers.
+     * @param access_mtd Child access-method fetch callback.
+     * @param recheck_mtd Recheck callback for lossy index predicates.
+     * @return Virtual vector result slot holding one projected batch, or an empty slot at EOF.
      */
     static TupleTableSlot* next_vectorized_aggregate_batch(scan_state* bioseq_scan_state,
                                                            ExecScanAccessMtd access_mtd,
@@ -274,6 +283,11 @@ export {
 
     /**
      * @brief Runs the base scan's scalar or vectorized write/drain state machine.
+     * Routes VectorAgg parents through vector batch projection. Otherwise runs the scalar or
+     * vectorized fetch path, buffers mmsearch-qualified rows, and drains projected match output.
+     * @param bioseq_scan_state Writable scan, buffer, and vectorization state for the node.
+     * @param access_mtd Child access-method fetch callback.
+     * @param recheck_mtd Recheck callback for lossy index predicates.
      * @return The next projected row or vector batch, or an empty slot at end of scan.
      */
     static TupleTableSlot* inner_custom_exec_scan(scan_state* bioseq_scan_state,

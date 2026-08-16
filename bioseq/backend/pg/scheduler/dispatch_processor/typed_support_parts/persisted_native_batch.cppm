@@ -277,6 +277,10 @@ void process_persisted_native_batch(
                              batch_size,
                              worker_bounded_fragment_wave_size,
                              fragment_wave_size]() -> match_result_collection {
+                                /**
+                                 * Runs minimap hash-major alignment for one batch row into
+                                 * native_collections at the given row index.
+                                 */
                                 const auto align_hash_major_query =
                                     [&native_collections,
                                      &native_query_params,
@@ -299,6 +303,10 @@ void process_persisted_native_batch(
                                             /*gpu_index_cache=*/nullptr,
                                             bioseq::indexing::gpu_index_cache_identity{});
                                     };
+                                /**
+                                 * Runs minimap fragment-query alignment for one batch row using
+                                 * the prepared fragment anchor handle.
+                                 */
                                 const auto align_fragment_query =
                                     [&native_collections,
                                      &native_query_params,

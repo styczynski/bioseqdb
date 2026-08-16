@@ -84,6 +84,7 @@ import :custom_scan_slice_execution_dsm_protocol;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Frees detach state when its refcount drops to zero after a balanced release. */
     void slice_project_release_detach_state(slice_dsm_detach_state* state) noexcept {
         if (state != nullptr && state->refcount != 0u &&
             state->refcount != std::numeric_limits<std::uint32_t>::max() &&
@@ -91,6 +92,7 @@ export {
             pfree(state);
     }
 
+    /** @brief Memory-context reset callback that quiesces the async owner and drops DSM detach bookkeeping. */
     void slice_project_owner_reset(void* argument) noexcept {
         auto* state = static_cast<slice_project_state*>(argument);
         if (state == nullptr)
@@ -126,6 +128,7 @@ export {
         runtime.source_routes_acquired = false;
     }
 
+    /** @brief DSM detach callback that merges the final parallel cycle and releases trace attachment. */
     void slice_project_dsm_on_detach(dsm_segment*, Datum argument) noexcept {
         auto* state = reinterpret_cast<slice_dsm_detach_state*>(DatumGetPointer(argument));
         if (state == nullptr || !state->callback_armed)
@@ -141,6 +144,7 @@ export {
         slice_project_release_detach_state(state);
     }
 
+    /** @brief Merges backend-local counter deltas into the shared worker slot and publishes final_state. */
     void slice_project_publish_worker_noexcept(slice_project_state* state,
                                                slice_dsm_publish_state final_state) noexcept {
         if (state == nullptr)
@@ -181,6 +185,7 @@ export {
         }
     }
 
+    /** @brief Discards incomplete worker deltas and reattaches the slot for another parallel rescan. */
     [[nodiscard]] bool
     slice_project_rearm_worker_for_rescan_noexcept(slice_project_state* state) noexcept {
         if (state == nullptr)
@@ -210,16 +215,19 @@ export {
         return true;
     }
 
+    /** @brief Async-owner publish-complete callback that marks the worker slot published_complete. */
     void slice_project_publish_complete_noexcept(void* argument) noexcept {
         slice_project_publish_worker_noexcept(static_cast<slice_project_state*>(argument),
                                               slice_dsm_publish_state::published_complete);
     }
 
+    /** @brief Async-owner publish-incomplete callback that marks the worker slot published_incomplete. */
     void slice_project_publish_incomplete_noexcept(void* argument) noexcept {
         slice_project_publish_worker_noexcept(static_cast<slice_project_state*>(argument),
                                               slice_dsm_publish_state::published_incomplete);
     }
 
+    /** @brief Walks a plan subtree to retain BioseqScan and nested projector sequence source routes. */
     void slice_project_attach_sources_from_plan_state(PlanState* child,
                                                       slice_project_state* state,
                                                       std::uint32_t& tagged_sources) {
@@ -307,6 +315,7 @@ export {
         }
     }
 
+    /** @brief Retains child sequence provenance and binds trace ownership across the projector subtree. */
     void slice_project_attach_trace_to_child(CustomScanState* custom, slice_project_state* state) {
         if (custom == nullptr || custom->custom_ps == NIL || state == nullptr)
             return;
@@ -321,6 +330,7 @@ export {
         }
     }
 
+    /** @brief Allocates trace runtime, async owner, materialization boundaries, and output bindings from plan metadata. */
     void
     slice_project_initialize_trace(slice_project_state* state, CustomScan* scan, EState* estate) {
         auto& runtime = state->runtime;
@@ -416,6 +426,7 @@ export {
         }
     }
 
+    /** @brief Lazily initializes trace state and child source attachment on first use. */
     void slice_project_ensure_trace_initialized(CustomScanState* custom) {
         if (custom == nullptr)
             return;
@@ -435,6 +446,7 @@ export {
         slice_project_attach_trace_to_child(custom, state);
     }
 
+    /** @brief Returns shared DSM bytes required when instrumentation collects actual materialization counters. */
     Size slice_project_estimate_dsm(CustomScanState* custom, ParallelContext* pcxt) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
         slice_project_ensure_trace_initialized(custom);
@@ -450,6 +462,7 @@ export {
             .total_bytes;
     }
 
+    /** @brief Publishes the initial DSM header, arms detach merge, and retains trace attachment for workers. */
     void
     slice_project_initialize_dsm(CustomScanState* custom, ParallelContext* pcxt, void* coordinate) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
@@ -496,6 +509,7 @@ export {
         detach->callback_armed = true;
     }
 
+    /** @brief Merges the prior parallel cycle into trace state, bumps the DSM cycle, and clears worker slots. */
     void slice_project_reinitialize_dsm(CustomScanState* custom,
                                         ParallelContext* pcxt,
                                         void* coordinate) {
@@ -576,6 +590,7 @@ export {
         }
     }
 
+    /** @brief Maps one parallel worker to its DSM slot and marks it attached_running for the current cycle. */
     void slice_project_initialize_worker(CustomScanState* custom, shm_toc*, void* coordinate) {
         auto* state = reinterpret_cast<slice_project_state*>(custom);
         slice_project_ensure_trace_initialized(custom);
@@ -621,6 +636,7 @@ export {
         worker->publish_state = slice_dsm_publish_state::attached_running;
     }
 
+    /** @brief Executes the sole child plan and publishes its tuple into the scan slot with read-only expanded datums. */
     [[nodiscard]] TupleTableSlot* slice_project_publish_child(CustomScanState* custom,
                                                               bool count_row) {
         if (custom->custom_ps == NIL || list_length(custom->custom_ps) != 1) {

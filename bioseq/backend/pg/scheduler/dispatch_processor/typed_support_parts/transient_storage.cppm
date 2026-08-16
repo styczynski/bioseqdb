@@ -74,16 +74,19 @@ import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
+/** In-memory byte payload for one opportunistic fragment-index chunk. */
 struct opportunistic_index_chunk {
     bioseq::indexing::index_sub_key_t sub_key = 0;
     std::uint32_t chunk_no = 0;
     std::vector<char> bytes{};
 };
 
+/** Transient in-memory chunked storage for opportunistic minimizer fragment indexes. */
 struct opportunistic_fragment_index_storage {
     std::map<bioseq::indexing::index_sub_key_t, std::vector<std::size_t>> plans{};
     std::vector<opportunistic_index_chunk> chunks{};
 
+    /** Raises a PostgreSQL data-corruption error and does not return. */
     [[noreturn]] void index_error(std::string_view msg) const {
         bioseq::postgres::support::invoke_pg_as_cpp([msg] {
             ereport(ERROR,
@@ -95,6 +98,7 @@ struct opportunistic_fragment_index_storage {
         pg_unreachable();
     }
 
+    /** Validates encoded minimizer blob header, layout revision, and total byte size. */
     [[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index::encoded_header
     validate_minimizer_blob_or_error(
         const char* blob_data,
@@ -124,12 +128,14 @@ struct opportunistic_fragment_index_storage {
         return header;
     }
 
+    /** Rejects directory blobs shorter than one int64. */
     void validate_minimizer_directory_or_error(const char*, std::size_t bytes) const {
         if (bytes < sizeof(std::int64_t)) {
             index_error("directory truncated");
         }
     }
 
+    /** Rejects chunk metadata when stored byte size is below @p min_bytes. */
     void validate_minimizer_chunk_metadata_or_error(bioseq::indexing::index_sub_key_t sub_key,
                                                     std::size_t chunk_no,
                                                     std::size_t min_bytes,
@@ -139,6 +145,7 @@ struct opportunistic_fragment_index_storage {
         }
     }
 
+    /** Returns how many chunks belong to @p sub_key. */
     [[nodiscard]] std::size_t number_of_chunks(bioseq::indexing::index_sub_key_t sub_key) const {
         std::size_t chunk_count = 0;
         for (const opportunistic_index_chunk& chunk : chunks) {
@@ -149,6 +156,7 @@ struct opportunistic_fragment_index_storage {
         return chunk_count;
     }
 
+    /** Counts distinct sub-keys in chunk append order. */
     [[nodiscard]] std::size_t number_of_sub_keys() const {
         std::size_t sub_key_count = 0;
         bioseq::indexing::index_sub_key_t last_sub_key =
@@ -164,6 +172,7 @@ struct opportunistic_fragment_index_storage {
         return sub_key_count;
     }
 
+    /** Returns stored byte length for a chunk, or zero when missing. */
     [[nodiscard]] std::size_t chunk_byte_size(bioseq::indexing::index_sub_key_t sub_key,
                                               std::size_t chunk_no) const {
         for (const opportunistic_index_chunk& chunk : chunks) {
@@ -174,6 +183,7 @@ struct opportunistic_fragment_index_storage {
         return 0;
     }
 
+    /** Returns a typed view into chunk bytes or reports a missing chunk. */
     template <class p_value>
     [[nodiscard]] const p_value* read_chunk(bioseq::indexing::index_sub_key_t sub_key,
                                             std::size_t chunk_no) {
@@ -185,6 +195,7 @@ struct opportunistic_fragment_index_storage {
         index_error("chunk missing");
     }
 
+    /** Plans fixed-size chunks that cover @p bytes_count for @p sub_key. */
     void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes_count) {
         const std::size_t chunk_count =
             bytes_count == 0 ? 1
@@ -201,13 +212,16 @@ struct opportunistic_fragment_index_storage {
         plans[sub_key] = std::move(chunk_plan);
     }
 
+    /** Replaces the per-chunk byte plan for @p sub_key. */
     void resize_chunks(bioseq::indexing::index_sub_key_t sub_key,
                        std::span<const std::size_t> per_chunk_bytes) {
         plans[sub_key] = std::vector<std::size_t>(per_chunk_bytes.begin(), per_chunk_bytes.end());
     }
 
+    /** No-op prefetch hook required by the storage concept. */
     void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
 
+    /** Materializes planned chunks and fills each via @p writer. */
     template <class p_value, class p_function>
     void write_to_each(bioseq::indexing::index_sub_key_t sub_key, p_function&& writer) {
         auto plan_iterator = plans.find(sub_key);
@@ -236,6 +250,7 @@ struct opportunistic_fragment_index_storage {
         plans.erase(plan_iterator);
     }
 
+    /** Invokes @p callback for chunks whose sub-key lies in [@p lower_bound, @p upper_bound). */
     template <class p_function>
     void read_chunks_in_range(bioseq::indexing::index_sub_key_t lower_bound,
                               bioseq::indexing::index_sub_key_t upper_bound,
@@ -247,6 +262,7 @@ struct opportunistic_fragment_index_storage {
         }
     }
 
+    /** Calls @p callback once per distinct sub-key in chunk order. */
     void for_each_sub_key(auto&& callback) const {
         bioseq::indexing::index_sub_key_t last_sub_key =
             std::numeric_limits<bioseq::indexing::index_sub_key_t>::min();
@@ -260,15 +276,18 @@ struct opportunistic_fragment_index_storage {
         }
     }
 
+    /** Drops all chunk payloads and pending resize plans. */
     void clear_entity() {
         plans.clear();
         chunks.clear();
     }
 
+    /** Clears transient storage and ignores the name argument. */
     void clear(std::string_view) {
         clear_entity();
     }
 
+    /** Removes chunks for sub-keys in the inclusive [@p first_sub_key, @p last_sub_key] range. */
     void discard_sub_keys(bioseq::indexing::index_sub_key_t first_sub_key,
                           bioseq::indexing::index_sub_key_t last_sub_key) {
         chunks.erase(std::remove_if(
@@ -280,16 +299,19 @@ struct opportunistic_fragment_index_storage {
                      chunks.end());
     }
 
+    /** Reports an index error because this operation is unsupported. */
     [[nodiscard]] std::size_t
     spill_sorted_run(std::span<const std::pair<std::uint64_t, std::uint64_t>>) {
         index_error("external sort spill is not supported by opportunistic storage");
     }
 
+    /** Reports an index error because this operation is unsupported. */
     [[nodiscard]] std::size_t
     spill_sorted_run_owned(std::vector<std::pair<std::uint64_t, std::uint64_t>>) {
         index_error("external sort spill is not supported by opportunistic storage");
     }
 
+    /** Releases @p permit and reports an index error because this operation is unsupported. */
     [[nodiscard]] std::size_t
     spill_sorted_run_owned_admitted(std::vector<std::pair<std::uint64_t, std::uint64_t>>,
                                     std::uint64_t,
@@ -298,16 +320,21 @@ struct opportunistic_fragment_index_storage {
         index_error("external sort spill is not supported by opportunistic storage");
     }
 
+    /** Reports an index error because this operation is unsupported. */
     void merge_runs(auto&&) {
         index_error("external sort merge is not supported by opportunistic storage");
     }
 
+    /** Does nothing because opportunistic fragment storage holds no sorted runs. */
     void release_resident_runs_noexcept() noexcept {}
 
+    /** Does nothing because opportunistic fragment storage holds no sorted runs. */
     void release_runs_noexcept() noexcept {}
 
+    /** Does nothing because opportunistic fragment storage holds no sorted runs. */
     void release_runs() {}
 
+    /** Always returns zero because external sort is unsupported. */
     [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
         return 0;
     }
@@ -318,6 +345,7 @@ struct opportunistic_fragment_index_storage {
 // spill), this delegates spill/merge to a real sorted_pair_run_store so it satisfies
 // is_external_sort_spill_storage + is_index_chunked_storage_for<CHUNKED_PER_FRAGMENT>
 // that direct_minimizer_bucket_index<p_sequence> requires. No persisted sidecar rows.
+/** In-memory byte payload for one opportunistic per-sequence index chunk. */
 struct opportunistic_sequence_chunk {
     bioseq::indexing::index_sub_key_t sub_key = 0;
     std::size_t chunk_no = 0;
@@ -325,16 +353,19 @@ struct opportunistic_sequence_chunk {
 };
 
 struct opportunistic_sequence_index_storage {
+    /** Key/value pair spilled during external sort. */
     using sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
 
     std::vector<opportunistic_sequence_chunk> chunks;
     bioseq::storage::indexing::sorted_pair_run_store sorted_runs;
     std::size_t run_buffer_bytes_value = std::size_t{256} << 20;
 
+    /** Returns the configured in-memory buffer budget for sorted runs. */
     [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
         return run_buffer_bytes_value;
     }
 
+    /** Clears chunk payloads and releases spilled sorted runs. */
     void clear_entity() {
         chunks.clear();
         sorted_runs.release_runs();
@@ -346,6 +377,7 @@ struct opportunistic_sequence_index_storage {
         clear_entity();
     }
 
+    /** Resizes or creates chunks for @p sub_key from @p chunk_plan. */
     void resize_chunks(bioseq::indexing::index_sub_key_t sub_key,
                        std::span<const std::size_t> chunk_plan) {
         for (std::size_t chunk_no = 0; chunk_no < chunk_plan.size(); ++chunk_no) {
@@ -354,13 +386,16 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
+    /** Stores all @p bytes in a single chunk for @p sub_key. */
     void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes) {
         std::array<std::size_t, 1> chunk_plan{bytes};
         resize_chunks(sub_key, std::span<const std::size_t>{chunk_plan.data(), chunk_plan.size()});
     }
 
+    /** No-op prefetch hook required by the storage concept. */
     void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
 
+    /** Invokes @p writer for each existing chunk of @p sub_key. */
     template <class p_value, class p_function>
     void write_to_each(bioseq::indexing::index_sub_key_t sub_key, p_function&& writer) {
         for (opportunistic_sequence_chunk& chunk : chunks) {
@@ -372,27 +407,32 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
+    /** Alias for @c write_to_each on the transient per-sequence path. */
     template <class p_value, class p_function>
     void write_to(bioseq::indexing::index_sub_key_t sub_key, p_function&& writer) {
         write_to_each<p_value>(sub_key, std::forward<p_function>(writer));
     }
 
+    /** Returns raw bytes for a chunk. */
     [[nodiscard]] const char* read_chunk(bioseq::indexing::index_sub_key_t sub_key,
                                          std::size_t chunk_no) const {
         return chunk_ref(sub_key, chunk_no).bytes.data();
     }
 
+    /** Returns a typed view into chunk bytes. */
     template <class p_value>
     [[nodiscard]] const p_value* read_chunk(bioseq::indexing::index_sub_key_t sub_key,
                                             std::size_t chunk_no) const {
         return reinterpret_cast<const p_value*>(chunk_ref(sub_key, chunk_no).bytes.data());
     }
 
+    /** Returns stored byte length for a chunk. */
     [[nodiscard]] std::size_t chunk_byte_size(bioseq::indexing::index_sub_key_t sub_key,
                                               std::size_t chunk_no) const {
         return chunk_ref(sub_key, chunk_no).bytes.size();
     }
 
+    /** Returns how many chunks belong to @p sub_key. */
     [[nodiscard]] std::size_t number_of_chunks(bioseq::indexing::index_sub_key_t sub_key) const {
         std::size_t chunk_count = 0;
         for (const opportunistic_sequence_chunk& chunk : chunks) {
@@ -410,6 +450,7 @@ struct opportunistic_sequence_index_storage {
         return sub_key_count;
     }
 
+    /** Invokes @p callback for each distinct sub-key. */
     template <class p_function> void for_each_sub_key(p_function&& callback) const {
         bioseq::indexing::index_sub_key_t last_sub_key = 0;
         bool have_last_sub_key = false;
@@ -435,6 +476,7 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
+    /** Spills a sorted key/value span and returns the run index. */
     [[nodiscard]] std::size_t spill_sorted_run(std::span<const sorted_pair_t> sorted) {
         return sorted_runs.spill_sorted_run(sorted);
     }
@@ -448,6 +490,7 @@ struct opportunistic_sequence_index_storage {
             std::span<const sorted_pair_t>(sorted.data(), sorted.size()));
     }
 
+    /** Spills an owned sorted run after admission and releases @p permit. */
     [[nodiscard]] std::size_t
     spill_sorted_run_owned_admitted(std::vector<sorted_pair_t> sorted,
                                     std::uint64_t admitted_bytes,
@@ -459,22 +502,27 @@ struct opportunistic_sequence_index_storage {
         return run_index;
     }
 
+    /** Merges spilled runs and forwards each k-mer to @p on_kmer. */
     template <class p_function> void merge_runs(p_function&& on_kmer) {
         sorted_runs.merge_runs(std::forward<p_function>(on_kmer));
     }
 
+    /** Releases resident sorted-run buffers without throwing. */
     void release_resident_runs_noexcept() noexcept {
         sorted_runs.release_resident_runs_noexcept();
     }
 
+    /** Releases all sorted runs and their backing storage. */
     void release_runs() {
         sorted_runs.release_runs();
     }
 
+    /** Releases all sorted runs without throwing. */
     void release_runs_noexcept() noexcept {
         sorted_runs.release_runs_noexcept();
     }
 
+    /** Invokes @p callback for every chunk in [@p range_begin, @p range_end). */
     template <class p_function>
     void read_chunks_in_range(bioseq::indexing::index_sub_key_t range_begin,
                               bioseq::indexing::index_sub_key_t range_end,
@@ -489,13 +537,16 @@ struct opportunistic_sequence_index_storage {
         }
     }
 
+    /** Does nothing because the transient path does not use directory validation. */
     void validate_minimizer_directory_or_error(const char*, std::size_t) const {}
 
+    /** Does nothing because the transient path does not use chunk metadata validation. */
     void validate_minimizer_chunk_metadata_or_error(bioseq::indexing::index_sub_key_t,
                                                     std::size_t,
                                                     std::size_t,
                                                     std::size_t) const {}
 
+    /** Validates minimizer blob header size and optional bucket count. */
     auto validate_minimizer_blob_or_error(const char* blob,
                                           std::size_t bytes,
                                           std::uint32_t expected_bucket_count = 0) const {
@@ -511,6 +562,7 @@ struct opportunistic_sequence_index_storage {
         return header;
     }
 
+    /** Raises a PostgreSQL data-corruption error and does not return. */
     [[noreturn]] void index_error(std::string_view message) const {
         bioseq::postgres::support::invoke_pg_as_cpp([message] {
             ereport(ERROR,
@@ -523,6 +575,7 @@ struct opportunistic_sequence_index_storage {
     }
 
   private:
+    /** Returns an existing chunk or appends a zero-length placeholder. */
     opportunistic_sequence_chunk& ensure_chunk(bioseq::indexing::index_sub_key_t sub_key,
                                                std::size_t chunk_no) {
         for (opportunistic_sequence_chunk& chunk : chunks) {
@@ -538,6 +591,7 @@ struct opportunistic_sequence_index_storage {
         return chunks.back();
     }
 
+    /** Returns a chunk reference or reports a missing chunk. */
     [[nodiscard]] const opportunistic_sequence_chunk&
     chunk_ref(bioseq::indexing::index_sub_key_t sub_key, std::size_t chunk_no) const {
         for (const opportunistic_sequence_chunk& chunk : chunks) {
@@ -551,6 +605,7 @@ struct opportunistic_sequence_index_storage {
     }
 };
 
+/** Builds a persist target for a per-fragment minimizer index row. */
 [[nodiscard]] bioseq::postgres::scheduler::persist_target make_fragment_index_persist_target(
     const batch_processor::scanner_pg_context& ctx,
     const bioseq::storage::sequence_locator& loc,
@@ -569,6 +624,7 @@ struct opportunistic_sequence_index_storage {
     };
 }
 
+/** True when async recompute may defer minimizer persistence for this scan context. */
 [[nodiscard]] bool
 can_defer_recompute_minimizer_persist(const batch_processor::scanner_pg_context& ctx,
                                       const minimap2_parameters& params) noexcept {
@@ -590,6 +646,7 @@ target_backend_from_params_for_recompute(const minimap2_parameters& params) noex
     return pipe::target_index_sketch_backend_from_params(params);
 }
 
+/** Resolves segment unit ranges for PostgreSQL indexing using the selected sketch backend. */
 [[nodiscard]] inline std::vector<::bioseq::indexing::segment_unit_range>
 pg_segment_unit_ranges(sequence_size_t total_bp,
                        sequence_size_t query_len,

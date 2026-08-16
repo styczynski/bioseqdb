@@ -86,6 +86,13 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  *
  * All result, pipeline-stat, source-identity, lifecycle, and SQL-ledger
  * mutations remain staged until the final no-throw publication boundary.
+ *
+ * @tparam p_sequence Query sequence type carried by @p state.
+ * @tparam p_runtime Vulkan runtime that executes seed-to-coordinate and finalizes
+ *         the persisted grouped-SoA operation receipt.
+ * @tparam p_prepared_target Prepared persisted grouped-SoA resident target handle.
+ * @throws bioseq::gpu::vulkan::vulkan_runtime_error when admission, identity,
+ *         receipt, or stats contracts fail before the publication boundary.
  */
 template <class p_sequence, class p_runtime, class p_prepared_target>
 void process_vulkan_persisted_route(const size_t batch_size,
@@ -140,6 +147,7 @@ void process_vulkan_persisted_route(const size_t batch_size,
             "persisted GPU grouped-SoA publication staging admission was rejected");
     }
 
+    /** Per-job pipeline stats row staged before the publication boundary merges them. */
     using staged_job_type = ::bioseq::pipeline_stats::pipeline_job_execution_stats;
     std::vector<bioseq::gpu::vulkan::gpu_seed_coordinate_job> direct_jobs;
     std::vector<std::size_t> direct_job_rows;
@@ -580,6 +588,12 @@ void process_vulkan_persisted_route(const size_t batch_size,
     DEBUG_ASSERT(cache_metrics_delta.is_valid() &&
                      cache_metrics_delta.audit() == authoritative_cache_metrics,
                  "persisted GPU cache token changed after finalizer");
+    /**
+     * Applies the finalized persisted grouped-SoA publication: publishes cache metrics,
+     * burns the one-shot cache token, swaps staged match results and stats, stamps
+     * scanner row identities, advances target lifecycle counters, and commits the
+     * sealed SQL operation chunk. Runs noexcept after all validation passes.
+     */
     const auto commit_publication = [&authoritative_cache_metrics,
                                      &cache_metrics_delta,
                                      &results,
