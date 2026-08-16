@@ -19,6 +19,18 @@ export namespace bioseq::storage {
 
 static_assert(__cplusplus >= 202302L);
 
+namespace lazy_sequence_detail {
+
+template <class p_alphabet>
+concept complementable_sequence_alphabet =
+    requires(p_alphabet value) { seqan3::complement(std::move(value)); };
+
+static_assert(complementable_sequence_alphabet<seq::dna4>);
+static_assert(complementable_sequence_alphabet<seq::dna5>);
+static_assert(!complementable_sequence_alphabet<seq::aa27>);
+
+} // namespace lazy_sequence_detail
+
 /** @brief Storage category reported by a traced sequence-payload allocation. */
 enum class sequence_payload_allocation_kind : std::uint8_t {
     admitted_packed_sequence = 0u,

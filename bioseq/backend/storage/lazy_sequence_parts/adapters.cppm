@@ -17,14 +17,6 @@ export namespace bioseq::storage {
 
 namespace lazy_sequence_detail {
 
-template <class p_alphabet>
-concept complementable_sequence_alphabet =
-    requires(p_alphabet value) { seqan3::complement(std::move(value)); };
-
-static_assert(complementable_sequence_alphabet<seq::dna4>);
-static_assert(complementable_sequence_alphabet<seq::dna5>);
-static_assert(!complementable_sequence_alphabet<seq::aa27>);
-
 template <bool p_is_reversed, bool p_write_reversed, class p_sequence_range, class p_scanner>
 [[nodiscard]] const std::uint8_t* owned_sequence_read_at(void const* state,
                                                          sequence_size_t bp_from,
