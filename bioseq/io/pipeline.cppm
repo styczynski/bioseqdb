@@ -7,6 +7,7 @@
  */
 module;
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>

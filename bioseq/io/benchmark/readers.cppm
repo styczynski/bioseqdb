@@ -7,6 +7,7 @@ module;
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <kseq++/seqio.hpp>
 #include <map>
@@ -37,15 +38,18 @@ struct bench_identifier_writer {
     identifier_benchmark_measurement* measurement = nullptr;
     std::vector<std::string> field_storage;
 
+    /// Construct destination storage and bind the benchmark measurement.
     explicit bench_identifier_writer(std::size_t destination_count,
                                      identifier_benchmark_measurement& output_measurement)
         : destination_count_value(destination_count), measurement(&output_measurement),
           field_storage(destination_count) {}
 
+    /// Clear destination slots before parsing one identifier.
     void begin_tuple() {
         for (auto& field : field_storage)
             field.clear();
     }
+    /// Copy one parsed field into its routed destination slot.
     void set_field(bioseq::io::identifier_parser::destination_slot slot,
                    const char* data,
                    std::int32_t len) {
@@ -54,11 +58,17 @@ struct bench_identifier_writer {
         ++measurement->parsed_field_count;
         measurement->parsed_field_bytes += field.size();
     }
+    /// Clear one routed destination slot.
     void set_null(bioseq::io::identifier_parser::destination_slot slot) {
         field_storage.at(static_cast<std::size_t>(slot)).clear();
     }
+    /// Complete one identifier tuple without additional benchmark work.
     void end_tuple() {}
+
+    /// Complete the parser run without additional benchmark work.
     void finish() {}
+
+    /// Return the number of routed destination slots.
     [[nodiscard]] std::size_t destination_count() const noexcept {
         return destination_count_value;
     }

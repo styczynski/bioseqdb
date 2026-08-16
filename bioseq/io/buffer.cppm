@@ -10,6 +10,7 @@ module;
 #include <cstring>
 #include <hwy/aligned_allocator.h>
 #include <libassert/assert.hpp>
+#include <utility>
 
 export module bioseq.io.buffer;
 
@@ -28,6 +29,7 @@ struct buffer_slab {
     std::size_t parse_cursor = 0;
     bool is_eof = false;
 
+    /// Construct an empty slab without an allocation.
     buffer_slab() = default;
 
     /// Allocate an empty slab with the requested byte capacity.

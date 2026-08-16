@@ -13,6 +13,7 @@ module;
 #include <array>
 #include <boost/container/small_vector.hpp>
 #include <charconv>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
