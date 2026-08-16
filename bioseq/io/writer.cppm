@@ -8,7 +8,9 @@
  */
 module;
 
+#include <algorithm>
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -39,8 +41,8 @@ export namespace bioseq::io {
 /// Raw byte buffer for the writer's per-thread output chunk. Unlike
 /// `std::vector<uint8_t>`, a `resize`/`extend` call does NOT
 /// zero-initialise the new bytes — the writer's append paths
-/// immediately overwrite them with decoded ASCII / qualities. With a
-/// This avoids the initialization writes that `std::vector::resize`
+/// immediately overwrite them with decoded ASCII / qualities. This avoids the
+/// initialization writes that `std::vector::resize`
 /// would perform before the bytes are overwritten.
 struct writer_byte_buffer {
     std::unique_ptr<std::uint8_t[]> data;

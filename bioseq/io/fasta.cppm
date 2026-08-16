@@ -14,6 +14,7 @@ module;
 #include <libassert/assert.hpp>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -46,8 +47,8 @@ enum class parse_outcome : std::uint8_t {
 };
 
 /// Returned by `parse_one_fasta_record` / `parse_one_fastq_record` to
-/// avoid an output pointer for the cursor. The caller does
-/// Assign each returned cursor to `slab.parse_cursor` before the next call.
+/// avoid an output pointer for the cursor. The caller assigns each returned
+/// cursor to `slab.parse_cursor` before the next call.
 struct record_parse_result {
     parse_outcome outcome = parse_outcome::incomplete;
     std::size_t cursor = 0;

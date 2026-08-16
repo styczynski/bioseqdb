@@ -5,6 +5,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <climits>
 #include <cstddef>

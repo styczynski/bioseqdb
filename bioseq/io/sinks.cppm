@@ -9,6 +9,7 @@ module;
 
 #include <atomic>
 #include <cerrno>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
