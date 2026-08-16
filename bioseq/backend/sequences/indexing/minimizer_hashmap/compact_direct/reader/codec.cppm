@@ -489,9 +489,9 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
     const fragment_block_plan& block,
     fragment_probe_context& context,
     p_visitor&& visitor,
-    std::uint64_t* accepted_prefix_bytes = nullptr,
-    std::uint64_t* rejected_prefix_bytes = nullptr,
-    bool validate_rejected_prefixes = true) const noexcept {
+    std::uint64_t* accepted_prefix_bytes,
+    std::uint64_t* rejected_prefix_bytes,
+    bool validate_rejected_prefixes) const noexcept {
     using namespace minimizer_generation_wire_detail;
     if constexpr (p_oracle) {
         DEBUG_ASSERT(context.query_plan_radix.size() ==
