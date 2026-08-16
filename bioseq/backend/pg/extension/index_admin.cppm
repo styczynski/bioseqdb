@@ -112,18 +112,19 @@ list_metadata() {
 	namespace bidx = bioseq::indexing;
 	std::vector<bioseq::postgres::sql_rows::list_metadata_row> result;
 
-	const auto kinds = bsi::pg_supported_indexes::list_types();
-	const auto allows = bsi::pg_supported_indexes::allows_on_insert_flags();
+	const auto index_types = bsi::pg_supported_indexes::list_types();
+	const auto allows_on_insert =
+		bsi::pg_supported_indexes::allows_on_insert_flags();
 
     bioseq::postgres::support::spi_session spi;
 	if (spi.connect() != SPI_OK_CONNECT) {
         throw std::runtime_error{
             "bioseq.list_metadata could not connect to SPI"};
     }
-	const auto execute_spi = [](const char* sql, const bool read_only) {
+	const auto execute_spi = [](const char* statement, const bool read_only) {
 		return bioseq::postgres::support::invoke_pg_as_cpp(
-			[sql, read_only] {
-				return SPI_execute(sql, read_only, 0);
+			[statement, read_only] {
+				return SPI_execute(statement, read_only, 0);
 			});
 	};
 	const auto quote_literal_owned = [](const std::string_view value) {
@@ -156,73 +157,95 @@ list_metadata() {
 	};
 
 	/* 1. every user bioseq-AM relation (exclude internal namespaces / names). */
-	std::vector<Oid> rels;
+	std::vector<Oid> relation_oids;
 	if (execute_spi(
 			"SELECT c.oid FROM pg_class c JOIN pg_am am ON c.relam=am.oid "
 			"JOIN pg_namespace n ON c.relnamespace=n.oid "
 			"WHERE am.amname='bioseq' AND c.relkind='r' "
 			"AND n.nspname NOT IN ('bioseq_internal','pg_catalog','information_schema') "
 			"AND n.nspname NOT LIKE 'pg\\_temp%'", true) == SPI_OK_SELECT) {
-		for (std::uint64_t r = 0; r < SPI_processed; ++r) {
-			auto rel_cell = bioseq::postgres::support::pg_spi_cell::get(
-				SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1);
-			if (auto rel_oid = rel_cell.optional_oid()) rels.push_back(*rel_oid);
+		for (std::uint64_t row_index = 0; row_index < SPI_processed;
+			 ++row_index) {
+			auto relation_cell = bioseq::postgres::support::pg_spi_cell::get(
+				SPI_tuptable->vals[row_index], SPI_tuptable->tupdesc, 1);
+			if (auto relation_oid = relation_cell.optional_oid()) {
+				relation_oids.push_back(*relation_oid);
+			}
 		}
 	}
 
 	/* 2. build the VALUES source: (rel, attno, attname, idx_name, idx_type, def_uoi, prefix). */
-	std::string values;
-	for (Oid rel : rels) {
-		const auto rid = bsi::index_relation_identity(rel);
-		std::string colsql = fmt::format(
+	std::string source_values;
+	for (const Oid relation_oid : relation_oids) {
+		const auto relation_identity = bsi::index_relation_identity(relation_oid);
+		std::string column_query = fmt::format(
 			"SELECT a.attnum, a.attname FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid "
 			"JOIN pg_namespace tn ON t.typnamespace=tn.oid WHERE a.attrelid={}::oid AND t.typname='seq' "
 			"AND tn.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
-			static_cast<unsigned>(rel));
-		if (execute_spi(colsql.c_str(), true) != SPI_OK_SELECT)
+			static_cast<unsigned>(relation_oid));
+		if (execute_spi(column_query.c_str(), true) != SPI_OK_SELECT)
 		{
 			continue;
 		}
-		std::vector<std::pair<std::int16_t, std::string>> cols;
-		for (std::uint64_t c = 0; c < SPI_processed; ++c) {
-			auto att_cell = bioseq::postgres::support::pg_spi_cell::get(
-				SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 1);
-			const std::int16_t a = att_cell.optional<std::int16_t>().value_or(0);
-			char* nm = bioseq::postgres::support::invoke_pg_as_cpp(
-				[c] {
+		std::vector<std::pair<std::int16_t, std::string>> sequence_columns;
+		for (std::uint64_t row_index = 0; row_index < SPI_processed;
+			 ++row_index) {
+			auto attribute_cell = bioseq::postgres::support::pg_spi_cell::get(
+				SPI_tuptable->vals[row_index], SPI_tuptable->tupdesc, 1);
+			const std::int16_t attribute_number =
+				attribute_cell.optional<std::int16_t>().value_or(0);
+			char* attribute_name_data =
+				bioseq::postgres::support::invoke_pg_as_cpp(
+				[row_index] {
 					return SPI_getvalue(
-						SPI_tuptable->vals[c],
+						SPI_tuptable->vals[row_index],
 						SPI_tuptable->tupdesc, 2);
 				});
-			cols.emplace_back(
-				a, nm == nullptr ? std::string{} : std::string{nm});
-			if (nm != nullptr) {
+			sequence_columns.emplace_back(
+				attribute_number,
+				attribute_name_data == nullptr
+					? std::string{}
+					: std::string{attribute_name_data});
+			if (attribute_name_data != nullptr) {
 				bioseq::postgres::support::invoke_pg_as_cpp(
-					[nm] { pfree(nm); });
+					[attribute_name_data] { pfree(attribute_name_data); });
 			}
 		}
-		for (auto& [attno, attname] : cols) {
-			for (std::size_t i = 0; i < kinds.size(); ++i) {
-				const std::string idx_name{kinds[i].first};
-				const std::string idx_type{bidx::sequence_index_layout_name(kinds[i].second)};
-				const bool def_uoi = bidx::is_default_update_on_insert_index(kinds[i].first) && allows[i];
-				const std::string prefix = fmt::format("seqidx_{}_{:016x}_",
-					bsi::short_index_for(kinds[i].first),
-					bsi::identity_hash64(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, kinds[i].first));
-				if (!values.empty()) values += ",";
-				values += fmt::format("({}::oid,{}::int2,{},{},{},{},{})",
-					static_cast<unsigned>(rel), static_cast<int>(attno),
-					quote_literal_owned(attname),
-					quote_literal_owned(idx_name),
-					quote_literal_owned(idx_type),
-					def_uoi ? "true" : "false",
-					quote_literal_owned(prefix));
+		for (auto& [attribute_number, attribute_name] : sequence_columns) {
+			for (std::size_t index_type_index = 0;
+				 index_type_index < index_types.size(); ++index_type_index) {
+				const auto& index_type_entry = index_types[index_type_index];
+				const std::string index_name{index_type_entry.first};
+				const std::string index_type{
+					bidx::sequence_index_layout_name(index_type_entry.second)};
+				const bool default_update_on_insert =
+					bidx::is_default_update_on_insert_index(index_type_entry.first)
+					&& allows_on_insert[index_type_index];
+				const std::string relation_prefix = fmt::format(
+					"seqidx_{}_{:016x}_",
+					bsi::short_index_for(index_type_entry.first),
+					bsi::identity_hash64(
+						relation_identity.db_oid,
+						relation_identity.tablespace_oid,
+						relation_identity.relfilenode,
+						attribute_number,
+						index_type_entry.first));
+				if (!source_values.empty()) source_values += ",";
+				source_values += fmt::format(
+					"({}::oid,{}::int2,{},{},{},{},{})",
+					static_cast<unsigned>(relation_oid),
+					static_cast<int>(attribute_number),
+					quote_literal_owned(attribute_name),
+					quote_literal_owned(index_name),
+					quote_literal_owned(index_type),
+					default_update_on_insert ? "true" : "false",
+					quote_literal_owned(relation_prefix));
 			}
 		}
 	}
 
-	if (!values.empty()) {
-		std::string query = fmt::format(
+	if (!source_values.empty()) {
+		std::string metadata_query = fmt::format(
 			"WITH src(rel,attno,attname,idx_name,idx_type,def_uoi,prefix) AS (VALUES {}) "
 			"SELECT src.rel::regclass, src.attno::int2, src.attname, src.idx_name, src.idx_type, "
 			"  CASE WHEN p.update_on_insert IS NOT NULL "
@@ -235,10 +258,11 @@ list_metadata() {
 			"     WHERE m.user_relid=src.rel AND m.column_attno=src.attno AND m.index_name=src.idx_name LIMIT 1) "
 			"FROM src LEFT JOIN bioseq_internal.index_policy p "
 			"  ON p.user_relid=src.rel AND p.column_attno=src.attno AND p.index_name=src.idx_name "
-			"ORDER BY src.rel, src.attno, src.idx_name", values);
-		if (execute_spi(query.c_str(), true) == SPI_OK_SELECT) {
-			for (std::uint64_t r = 0; r < SPI_processed; ++r) {
-                HeapTuple tuple = SPI_tuptable->vals[r];
+			"ORDER BY src.rel, src.attno, src.idx_name", source_values);
+		if (execute_spi(metadata_query.c_str(), true) == SPI_OK_SELECT) {
+			for (std::uint64_t row_index = 0; row_index < SPI_processed;
+				 ++row_index) {
+                HeapTuple tuple = SPI_tuptable->vals[row_index];
                 TupleDesc descriptor = SPI_tuptable->tupdesc;
                 const auto required_text =
                     [tuple, descriptor](int column) {

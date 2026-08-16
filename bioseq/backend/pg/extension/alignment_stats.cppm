@@ -35,13 +35,14 @@ namespace bioseq::pg::detail {
 
 /** @brief Formats an unsigned value as 16 lower-case hexadecimal digits. */
 [[nodiscard]] auto fixed_hex_u64(std::uint64_t value) -> std::string {
-    constexpr auto digits = std::to_array("0123456789abcdef");
-    static_assert(digits.size() == 17u);
-    static_assert(sizeof(digits) == sizeof("0123456789abcdef"));
-    static_assert(alignof(decltype(digits)) == alignof(char));
+    constexpr auto k_digits = std::to_array("0123456789abcdef");
+    static_assert(k_digits.size() == 17u);
+    static_assert(sizeof(k_digits) == sizeof("0123456789abcdef"));
+    static_assert(alignof(decltype(k_digits)) == alignof(char));
     std::string result(16, '0');
-	for (std::size_t i = 0; i < result.size(); ++i) {
-		result[result.size() - i - 1] = digits[value & 0x0fU];
+	for (std::size_t digit_index = 0; digit_index < result.size();
+		 ++digit_index) {
+		result[result.size() - digit_index - 1] = k_digits[value & 0x0fU];
 		value >>= 4U;
 	}
 	return result;
@@ -55,7 +56,7 @@ namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 using bioseq::pg::detail::fixed_hex_bytes;
 using bioseq::pg::detail::fixed_hex_u64;
 
-inline constexpr int alignment_stats_column_count = 151;
+inline constexpr int k_alignment_stats_column_count = 151;
 
 [[nodiscard]] auto
 cold_index_preparation_json(const bioseq::pipeline_stats::pipeline_operational_stats& stats)
@@ -419,8 +420,8 @@ namespace {
 [[nodiscard]] auto
 make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& snapshot,
                          bioseq::pipeline_stats::pipeline_stage stage)
-    -> bioseq::postgres::support::pg_datum_list<alignment_stats_column_count> {
-    alignment_stats_row_builder<alignment_stats_column_count> out{};
+    -> bioseq::postgres::support::pg_datum_list<k_alignment_stats_column_count> {
+    alignment_stats_row_builder<k_alignment_stats_column_count> out{};
 	const auto& stats = snapshot.pipeline;
 	const auto& environment = stats.environment;
 	const auto& operational = stats.operational;
@@ -472,7 +473,9 @@ make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& sna
 						"bioseq GPU pipeline-cache hit observation is invalid"});
 		}                                                           // 11
 	} else {
-		for (int i = 0; i < 7; ++i) out.null_value();                // 5-11
+		for (int column_index = 0; column_index < 7; ++column_index) {
+			out.null_value();                                           // 5-11
+		}
 	}
 	out.integer(snapshot.scan_node_count);                           // 12
 	out.integer(snapshot.nested_alignment_executor_count);           // 13
@@ -640,12 +643,12 @@ make_alignment_stats_row(const alignment_exec::alignment_execution_snapshot& sna
 
 template<class p_value>
 struct alignment_optional_traits {
-	static constexpr bool is_optional = false;
+	static constexpr bool k_is_optional = false;
 };
 
 template<class p_value>
 struct alignment_optional_traits<std::optional<p_value>> {
-	static constexpr bool is_optional = true;
+	static constexpr bool k_is_optional = true;
 	using contained_type = p_value;
 };
 
@@ -653,7 +656,7 @@ template <class p_value, std::size_t p_column_count>
 [[nodiscard]] auto
 alignment_stats_field(const bioseq::postgres::support::pg_datum_list<p_column_count>& raw,
                       const int attnum) -> p_value {
-    if constexpr (alignment_optional_traits<p_value>::is_optional) {
+    if constexpr (alignment_optional_traits<p_value>::k_is_optional) {
 		if (raw.is_null(attnum)) {
 			return std::nullopt;
 		}

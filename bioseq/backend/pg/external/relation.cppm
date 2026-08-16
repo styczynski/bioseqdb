@@ -906,7 +906,7 @@ relation_needs_toast_table(Relation rel)
 }
 
 /* Provider-free estimate: fixed cardinality and local type widths only. */
-constexpr double default_estimated_rows = 1000.0;
+constexpr double k_default_estimated_rows = 1000.0;
 
 /** @brief Publishes provider-free relation size estimates to the planner. */
 void
@@ -915,7 +915,7 @@ estimate_relation_size(Relation rel, int32 *attr_widths,
 								  double *allvisfrac)
 {
 	*pages = 0;
-	*tuples = default_estimated_rows;
+	*tuples = k_default_estimated_rows;
 	*allvisfrac = 0.0;
 
 	/* Local (statistics/type) column widths only — no remote I/O. */

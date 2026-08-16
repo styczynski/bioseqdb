@@ -29,11 +29,11 @@ using bioseq::pg::detail::fixed_hex_u64;
 [[nodiscard]] std::string minimizer_fragment_reader_stats_json(
         const alignment_exec::alignment_execution_snapshot& snapshot)
 {
-    constexpr std::uint32_t revision_number = 6u;
+    constexpr std::uint32_t k_revision_number = 6u;
     const auto& operational = snapshot.pipeline.operational;
     std::string result =
         R"({"schema":"bioseq.grouped_soa_reader_memory_stats","revision":)"
-        + std::to_string(revision_number);
+        + std::to_string(k_revision_number);
     result.reserve(12'288u);
 	const auto append_signed = [&result](
 			const std::string_view key,
@@ -528,7 +528,7 @@ using bioseq::pg::detail::fixed_hex_u64;
 	const auto append_text = [&result](
 			const std::string_view key,
 			const std::string_view value) {
-		constexpr std::string_view hex = "0123456789abcdef";
+		constexpr std::string_view k_hex_digits = "0123456789abcdef";
 		result += ",\"";
 		result.append(key);
 		result += "\":\"";
@@ -539,8 +539,8 @@ using bioseq::pg::detail::fixed_hex_u64;
 				result += static_cast<char>(byte);
 			} else if (byte < 0x20u || byte > 0x7eu) {
 				result += "\\u00";
-				result += hex[byte >> 4u];
-				result += hex[byte & 0x0fu];
+				result += k_hex_digits[byte >> 4u];
+				result += k_hex_digits[byte & 0x0fu];
 			} else {
 				result += static_cast<char>(byte);
 			}
@@ -752,13 +752,14 @@ using bioseq::pg::detail::fixed_hex_u64;
 				"coordinate_dispatches", job.coordinate_dispatches);
 			result += '}';
 			result += R"(,"submissions":[)";
-			constexpr std::array<std::string_view, 4> stages{
+			constexpr std::array<std::string_view, 4> k_stages{
 				"count", "emit", "sort_range", "chain_coordinate"};
-			for (std::size_t i = 0u; i < job.submissions.size(); ++i) {
-				if (i != 0u) result += ',';
-				const auto& submission = job.submissions[i];
+			for (std::size_t submission_index = 0u;
+				 submission_index < job.submissions.size(); ++submission_index) {
+				if (submission_index != 0u) result += ',';
+				const auto& submission = job.submissions[submission_index];
 				result += R"({"stage":")";
-				result.append(stages[i]);
+				result.append(k_stages[submission_index]);
 				result += R"(","operation_identity":")";
 				result += fixed_hex_u64(submission.operation_identity);
 				result += R"(","ordinal":)";

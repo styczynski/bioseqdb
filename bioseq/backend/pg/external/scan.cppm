@@ -202,8 +202,8 @@ streaming_accession(const scan_runtime &runtime)
     return external_io::accession_from_query(runtime.query);
 }
 
-constexpr std::size_t stream_channel_byte_limit = 8u * 1024u * 1024u;
-constexpr std::size_t stream_channel_item_limit = 4;
+constexpr std::size_t k_stream_channel_byte_limit = 8u * 1024u * 1024u;
+constexpr std::size_t k_stream_channel_item_limit = 4;
 
 void
 start_streaming_query(scan_runtime &runtime, std::string accession)
@@ -214,7 +214,7 @@ start_streaming_query(scan_runtime &runtime, std::string accession)
             : provider::query_target::sequence;
 
     runtime.channel = std::make_unique<scan_runtime::stream_channel>(
-        stream_channel_byte_limit, stream_channel_item_limit);
+        k_stream_channel_byte_limit, k_stream_channel_item_limit);
     scan_runtime::stream_channel *channel = runtime.channel.get();
     runtime.producer = std::jthread(
         [channel, accession = std::move(accession),
@@ -300,10 +300,11 @@ provider_field_from_sql_column(std::string_view column)
 {
     if (column.empty())
         return std::nullopt;
-    const auto count = static_cast<std::size_t>(provider::external_field::count);
-    for (std::size_t i = 0; i < count; ++i)
+    const auto field_count =
+        static_cast<std::size_t>(provider::external_field::count);
+    for (std::size_t field_index = 0; field_index < field_count; ++field_index)
     {
-        const auto field = static_cast<provider::external_field>(i);
+        const auto field = static_cast<provider::external_field>(field_index);
         if (provider::to_sql_column(field) == column)
             return field;
     }
@@ -566,7 +567,7 @@ initialize_query(CustomScanState *node, scan_runtime &runtime)
 std::vector<provider::normalized_external_query>
 expand_in_predicates(const provider::normalized_external_query &base)
 {
-    constexpr std::size_t maximum_query_expansions = 64;
+    constexpr std::size_t k_maximum_query_expansions = 64;
     std::vector<provider::normalized_external_query> expanded_queries{base};
     bool was_truncated = false;
 
@@ -597,13 +598,13 @@ expand_in_predicates(const provider::normalized_external_query &base)
                     expanded_comparison->values.push_back(value);
                 }
                 next_queries.push_back(std::move(expanded_query));
-                if (next_queries.size() >= maximum_query_expansions)
+                if (next_queries.size() >= k_maximum_query_expansions)
                 {
                     was_truncated = true;
                     break;
                 }
             }
-            if (next_queries.size() >= maximum_query_expansions)
+            if (next_queries.size() >= k_maximum_query_expansions)
             {
                 was_truncated = true;
                 break;
@@ -616,7 +617,7 @@ expand_in_predicates(const provider::normalized_external_query &base)
         ereport(WARNING,
                 (errmsg("bioseq_external: IN-list fan-out capped at %zu "
                         "expansions; some value combinations were not queried",
-                        maximum_query_expansions)));
+                        k_maximum_query_expansions)));
     return expanded_queries;
 }
 
@@ -742,12 +743,13 @@ begin_scan(CustomScanState *node, EState *executor_state, int flags)
 
         /* Free the C++ heap when the per-query context is reset (covers the
          * normal end-of-query path and error longjmp/abort). */
-        MemoryContextCallback *cb = static_cast<MemoryContextCallback *>(
-			MemoryContextAlloc(executor_state->es_query_cxt,
-                               sizeof(MemoryContextCallback)));
-        cb->func = destroy_scan_runtime;
-        cb->arg = runtime;
-		MemoryContextRegisterResetCallback(executor_state->es_query_cxt, cb);
+        MemoryContextCallback *cleanup_callback =
+            static_cast<MemoryContextCallback *>(MemoryContextAlloc(
+                executor_state->es_query_cxt, sizeof(MemoryContextCallback)));
+        cleanup_callback->func = destroy_scan_runtime;
+        cleanup_callback->arg = runtime;
+        MemoryContextRegisterResetCallback(
+            executor_state->es_query_cxt, cleanup_callback);
 
 		runtime->entity = entity_from_options(node->ss.ss_currentRelation);
 		initialize_query(node, *runtime);
@@ -1033,9 +1035,9 @@ plan_custom_path(PlannerInfo *root, RelOptInfo *relation_info,
 	return &custom_scan->scan.plan;
 }
 
-constexpr double default_path_rows = 1000.0;
-constexpr Cost external_path_startup_cost = 0.0;
-constexpr Cost external_path_total_cost = 1.0;
+constexpr double k_default_path_rows = 1000.0;
+constexpr Cost k_external_path_startup_cost = 0.0;
+constexpr Cost k_external_path_total_cost = 1.0;
 
 bool
 add_scan_paths(PlannerInfo *root, RelOptInfo *relation_info,
@@ -1057,9 +1059,9 @@ add_scan_paths(PlannerInfo *root, RelOptInfo *relation_info,
 	path->path.parallel_workers = 0;
 	path->path.rows = relation_info->rows > 0
 					  ? relation_info->rows
-					  : default_path_rows;
-	path->path.startup_cost = external_path_startup_cost;
-	path->path.total_cost = external_path_total_cost;
+					  : k_default_path_rows;
+	path->path.startup_cost = k_external_path_startup_cost;
+	path->path.total_cost = k_external_path_total_cost;
 	path->flags = 0;
 	path->custom_paths = NIL;
 	path->custom_private = NIL;

@@ -500,9 +500,9 @@ inline void populate_bpchar_vector(
 inline void exercise_bpchar_comparison_matrix(
 		vector_column_storage* column,
 		const std::array<Datum, 4>& sources) {
-	constexpr std::array<char, 5> normalized_lanes{
+	constexpr std::array<char, 5> k_normalized_lanes{
 		'a', 'b', 'c', 'b', '\0'};
-	constexpr std::array<Oid, 6> scalar_oids{
+	constexpr std::array<Oid, 6> k_scalar_operator_oids{
 		F_BPCHAREQ,
 		F_BPCHARNE,
 		F_BPCHARGT,
@@ -510,24 +510,24 @@ inline void exercise_bpchar_comparison_matrix(
 		F_BPCHARLE,
 		F_BPCHARGE};
 
-	for (const Oid scalar_oid : scalar_oids) {
+	for (const Oid scalar_oid : k_scalar_operator_oids) {
 		validate_bpchar_vector_call(
 			scalar_oid,
 			column,
 			sources[3],
 			'b',
-			normalized_lanes,
+			k_normalized_lanes,
 			false);
 		validate_bpchar_vector_call(
 			scalar_oid,
 			column,
 			sources[3],
 			'b',
-			normalized_lanes,
+			k_normalized_lanes,
 			true);
 	}
 
-	constexpr std::array<char, 4> normalized_constants{
+	constexpr std::array<char, 4> k_normalized_constants{
 		'a', 'b', 'c', 'b'};
 	for (std::size_t source_index = 0;
 		 source_index < sources.size();
@@ -536,8 +536,8 @@ inline void exercise_bpchar_comparison_matrix(
 			F_BPCHAREQ,
 			column,
 			sources[source_index],
-			normalized_constants[source_index],
-			normalized_lanes,
+			k_normalized_constants[source_index],
+			k_normalized_lanes,
 			false);
 	}
 }
@@ -831,14 +831,14 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 				"slot clear did not reset the BPCHAR vector");
 		}
 		populate_bpchar_vector(column, sources);
-		constexpr std::array<char, 5> normalized_lanes{
+		constexpr std::array<char, 5> k_normalized_lanes{
 			'a', 'b', 'c', 'b', '\0'};
 		validate_bpchar_vector_call(
 			F_BPCHAREQ,
 			column,
 			sources[1],
 			'b',
-			normalized_lanes,
+			k_normalized_lanes,
 			false);
 		reset_vector_tuple_table_slot(vector_slot);
 		reset_vector_tuple_table_slot(vector_slot);
@@ -911,13 +911,13 @@ inline void exercise_bpchar_physical_lifetime(Oid relation_oid) {
 				vector_slot->virtual_slot.base.tts_values[1]));
 		write_datum_to_vector_column(
 			column, reused_source, false, 0);
-		constexpr std::array<char, 1> reused_lane{'a'};
+		constexpr std::array<char, 1> k_reused_lane{'a'};
 		validate_bpchar_vector_call(
 			F_BPCHAREQ,
 			column,
 			reused_source,
 			'a',
-			reused_lane,
+			k_reused_lane,
 			false);
 		end_scan();
 		drop_vector_slot();
@@ -991,43 +991,43 @@ namespace bioseq::pg::sql_routines {
  */
 void arm_sequence_source_failure(std::string failure_point) {
 #ifdef BIOSEQ_TEST_INDEXES
-	constexpr std::string_view catalog_barrier_prefix{
+	constexpr std::string_view k_catalog_barrier_prefix{
 		"catalog_handle_barrier:"};
-	constexpr std::string_view reaper_barrier_prefix{
+	constexpr std::string_view k_reaper_barrier_prefix{
 		"orphan_reaper_barrier:"};
-	constexpr std::string_view catalog_resolve_prefix{
+	constexpr std::string_view k_catalog_resolve_prefix{
 		"catalog_handle_resolve:"};
-	constexpr std::string_view bpchar_physical_prefix{
+	constexpr std::string_view k_bpchar_physical_prefix{
 		"bpchar_physical_probe:"};
-	if (failure_point.starts_with(catalog_barrier_prefix)) {
+	if (failure_point.starts_with(k_catalog_barrier_prefix)) {
 		bioseq::postgres::support::catalog_entity_test_support::
 			arm_lookup_barrier(
 				catalog_runtime_contract::parse_integer(
 					std::string_view{failure_point}.substr(
-						catalog_barrier_prefix.size()),
+						k_catalog_barrier_prefix.size()),
 					"catalog handle barrier"));
 		return;
 	}
-	if (failure_point.starts_with(reaper_barrier_prefix)) {
+	if (failure_point.starts_with(k_reaper_barrier_prefix)) {
 		bioseq::storage::orphan_reaper_test_support::
 			arm_drop_barrier(
 				catalog_runtime_contract::parse_integer(
 					std::string_view{failure_point}.substr(
-						reaper_barrier_prefix.size()),
+						k_reaper_barrier_prefix.size()),
 					"orphan reaper barrier"));
 		return;
 	}
-	if (failure_point.starts_with(catalog_resolve_prefix)) {
+	if (failure_point.starts_with(k_catalog_resolve_prefix)) {
 		catalog_runtime_contract::resolve_expected(
 			std::string_view{failure_point}.substr(
-				catalog_resolve_prefix.size()));
+				k_catalog_resolve_prefix.size()));
 		return;
 	}
-	if (failure_point.starts_with(bpchar_physical_prefix)) {
+	if (failure_point.starts_with(k_bpchar_physical_prefix)) {
 		const std::int64_t parsed_relation =
 			catalog_runtime_contract::parse_integer(
 				std::string_view{failure_point}.substr(
-					bpchar_physical_prefix.size()),
+					k_bpchar_physical_prefix.size()),
 				"BPCHAR physical probe relation");
 		if (parsed_relation <= 0
 			|| static_cast<std::uint64_t>(parsed_relation)
@@ -1100,13 +1100,13 @@ void arm_sequence_source_failure(std::string failure_point) {
 		}
 		return;
 	}
-	constexpr std::string_view row_codec_all_prefix{
+	constexpr std::string_view k_row_codec_all_prefix{
 		"row_codec_all:"};
-	if (failure_point.starts_with(row_codec_all_prefix)) {
+	if (failure_point.starts_with(k_row_codec_all_prefix)) {
 		bioseq::postgres::support::row_codec_runtime_test_support::
 			exercise_all(
 				std::string_view{failure_point}.substr(
-					row_codec_all_prefix.size()));
+					k_row_codec_all_prefix.size()));
 		return;
 	}
 	if (failure_point == "row_codec_index_table_shard") {

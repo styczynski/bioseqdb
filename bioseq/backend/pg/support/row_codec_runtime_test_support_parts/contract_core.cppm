@@ -75,7 +75,7 @@ namespace metadata_codecs = bioseq::postgres::storage::metadata::sql_row_codecs;
 namespace table_rows = bioseq::table::composite_rows;
 namespace table_codecs = bioseq::postgres::table::sql_row_codecs;
 
-constexpr std::string_view operation_evidence{
+constexpr std::string_view k_operation_evidence{
     "descriptor+encode+form+deform+update+null-bits"
     "+required-null-matrix+null-result-context+source-release"
     "+result-context-ownership+context-reset-reuse"

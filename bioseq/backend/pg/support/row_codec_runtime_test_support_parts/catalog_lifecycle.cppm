@@ -78,8 +78,9 @@ exercise_external_toast_lifecycle(Relation relation,
                                   MemoryContext value_context,
                                   MemoryContext result_context,
                                   MemoryContext comparison_context) {
-    constexpr std::size_t expected_toastable = toastable_field_count<p_codec>();
-    if constexpr (expected_toastable == 0) {
+    constexpr std::size_t k_expected_toastable =
+        toastable_field_count<p_codec>();
+    if constexpr (k_expected_toastable == 0) {
         static_cast<void>(relation);
         static_cast<void>(descriptor);
         return 0;
@@ -352,8 +353,9 @@ exercise_codec_with_external(TupleDesc descriptor,
         reset_context_once(result_context, p_codec::row_name);
     }
 
-    constexpr std::size_t nullable_count = nullable_field_count<p_codec>();
-    constexpr std::size_t required_count = p_codec::field_count - nullable_count;
+    constexpr std::size_t k_nullable_count = nullable_field_count<p_codec>();
+    constexpr std::size_t k_required_count =
+        p_codec::field_count - k_nullable_count;
     for (std::size_t required_index = 0; required_index < p_codec::field_count; ++required_index) {
         if (p_codec::expected_descriptor[required_index].nullable) {
             continue;
@@ -510,8 +512,8 @@ exercise_codec_with_external(TupleDesc descriptor,
         catalog_crud_completed = true;
     }
 
-    constexpr std::size_t toastable_count = toastable_field_count<p_codec>();
-    if constexpr (toastable_count != 0) {
+    constexpr std::size_t k_toastable_count = toastable_field_count<p_codec>();
+    if constexpr (k_toastable_count != 0) {
         Relation toast_relation = external_relation;
         TupleDesc toast_descriptor = external_descriptor;
         bool owns_toast_relation = false;
@@ -535,7 +537,7 @@ exercise_codec_with_external(TupleDesc descriptor,
             invoke_pg_as_cpp([toast_relation] { table_close(toast_relation, RowExclusiveLock); });
         }
     }
-    if (external_toast_verified != toastable_count) {
+    if (external_toast_verified != k_toastable_count) {
         contract_failure(std::string{p_codec::row_name} +
                          " external-TOAST evidence count mismatch");
     }
@@ -551,10 +553,10 @@ exercise_codec_with_external(TupleDesc descriptor,
         .identity = std::string{entity_kind} + ":" + std::string{p_codec::row_name},
         .owner = std::string{owner},
         .fields = p_codec::field_count,
-        .nullable_fields = nullable_count,
+        .nullable_fields = k_nullable_count,
         .by_reference_fields = by_reference_field_count<p_codec>(),
-        .toastable_fields = toastable_count,
-        .required_null_checks = required_count,
+        .toastable_fields = k_toastable_count,
+        .required_null_checks = k_required_count,
         .scan_policy_verified = identity_key.has_value(),
         .catalog_crud_completed = catalog_crud_completed,
     };
@@ -688,7 +690,7 @@ with_composite_descriptor(const char* schema_name, const char* type_name, p_exer
             result += "not-applicable";
         }
         result += "|ops=";
-        result += operation_evidence;
+        result += k_operation_evidence;
         result += "|lifetime=verified";
     }
     return result;

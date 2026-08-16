@@ -542,18 +542,18 @@ struct pg_datum_list
 	void
 	set(int attnum, p_value value) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = pg_datum::from(value).raw();
-		nulls[idx] = false;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = pg_datum::from(value).raw();
+		nulls[attribute_index] = false;
 	}
 
 	/** @brief Stores one non-null raw Datum attribute. */
 	void
 	set_raw(int attnum, pg_datum value) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = value.raw();
-		nulls[idx] = false;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = value.raw();
+		nulls[attribute_index] = false;
 	}
 
 	/** @brief Selects one PostgreSQL object-identifier replacement. */
@@ -581,9 +581,9 @@ struct pg_datum_list
 	void
 	set_null(int attnum) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = static_cast<Datum>(0);
-		nulls[idx] = true;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = static_cast<Datum>(0);
+		nulls[attribute_index] = true;
 	}
 
 	/** @brief Fills every null flag and clears values when marking null. */
@@ -669,20 +669,20 @@ struct pg_datum_update
 	void
 	set(int attnum, p_value value) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = pg_datum::from(value).raw();
-		nulls[idx] = false;
-		replace[idx] = true;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = pg_datum::from(value).raw();
+		nulls[attribute_index] = false;
+		replace[attribute_index] = true;
 	}
 
 	/** @brief Selects one non-null raw Datum replacement. */
 	void
 	set_raw(int attnum, pg_datum value) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = value.raw();
-		nulls[idx] = false;
-		replace[idx] = true;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = value.raw();
+		nulls[attribute_index] = false;
+		replace[attribute_index] = true;
 	}
 
 	void
@@ -707,10 +707,10 @@ struct pg_datum_update
 	void
 	set_null(int attnum) noexcept
 	{
-		const std::size_t idx = att_index(attnum);
-		values[idx] = static_cast<Datum>(0);
-		nulls[idx] = true;
-		replace[idx] = true;
+		const std::size_t attribute_index = att_index(attnum);
+		values[attribute_index] = static_cast<Datum>(0);
+		nulls[attribute_index] = true;
+		replace[attribute_index] = true;
 	}
 
 	/** @return A modified heap tuple using the selected replacement attributes. */
@@ -945,10 +945,11 @@ detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
 	const int natts = tuple_desc->natts;
 	Datum *values = original_values;
 
-	for (int i = 0; i < natts; ++i)
+	for (int attribute_index = 0; attribute_index < natts; ++attribute_index)
 	{
-		if (!nulls[i] && TupleDescAttr(tuple_desc, i)->attlen == -1 &&
-			VARATT_IS_EXTENDED(values[i]))
+		if (!nulls[attribute_index]
+			&& TupleDescAttr(tuple_desc, attribute_index)->attlen == -1
+			&& VARATT_IS_EXTENDED(values[attribute_index]))
 		{
 			if (values == original_values)
 			{
@@ -957,8 +958,9 @@ detoast_values(TupleDesc tuple_desc, Datum *original_values, bool *nulls)
 				std::memcpy(values, original_values, sizeof(Datum) * static_cast<std::size_t>(natts));
 			}
 
-			auto *new_value = detoast_attr(reinterpret_cast<varlena *>(DatumGetPointer(values[i])));
-			values[i] = PointerGetDatum(new_value);
+			auto* detoasted_value = detoast_attr(reinterpret_cast<varlena*>(
+				DatumGetPointer(values[attribute_index])));
+			values[attribute_index] = PointerGetDatum(detoasted_value);
 		}
 	}
 

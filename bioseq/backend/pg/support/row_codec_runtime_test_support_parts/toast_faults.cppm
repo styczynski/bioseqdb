@@ -67,8 +67,9 @@ import :catalog_lifecycle;
 namespace bioseq::postgres::support::row_codec_runtime_test_support {
 
 [[nodiscard]] std::string make_incompressible_text(std::size_t size, std::uint64_t seed) {
-    static constexpr std::string_view alphabet{"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                                               "abcdefghijklmnopqrstuvwxyz!@#$%^&*()-_=+[]{}"};
+    static constexpr std::string_view k_alphabet{
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz!@#$%^&*()-_=+[]{}"};
     std::string result;
     result.resize(size);
     std::uint64_t state = seed;
@@ -76,7 +77,8 @@ namespace bioseq::postgres::support::row_codec_runtime_test_support {
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
-        value = alphabet[static_cast<std::size_t>(state % alphabet.size())];
+        value = k_alphabet[
+            static_cast<std::size_t>(state % k_alphabet.size())];
     }
     return result;
 }

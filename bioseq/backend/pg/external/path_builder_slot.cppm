@@ -18,24 +18,6 @@ using path_builder_callback =
 	bool (*)(PlannerInfo *root, RelOptInfo *relation_info,
 			 RangeTblEntry *range_table_entry, Relation relation);
 
-/**
- * @brief Registers the external-relation path builder.
- *
- * A second non-null registration is a programming error. Passing null clears
- * the slot. The slot belongs to the always-loaded PostgreSQL planner boundary,
- * so an extension built without external providers simply leaves it empty.
- */
-void register_path_builder(path_builder_callback builder);
-
-/**
- * @brief Invokes the registered path builder when one is available.
- * @return The builder's result, or `false` when external scanning is not
- * installed.
- */
-[[nodiscard]] bool try_add_scan_paths(
-	PlannerInfo *root, RelOptInfo *relation_info,
-	RangeTblEntry *range_table_entry, Relation relation);
-
 } // namespace bioseq::postgres::external
 
 namespace bioseq::postgres::external {
@@ -47,8 +29,18 @@ path_builder_callback registered_path_builder = nullptr;
 
 } // namespace
 
-void
-register_path_builder(path_builder_callback builder)
+} // namespace bioseq::postgres::external
+
+export namespace bioseq::postgres::external {
+
+/**
+ * @brief Registers the external-relation path builder.
+ *
+ * A second non-null registration is a programming error. Passing null clears
+ * the slot. The slot belongs to the always-loaded PostgreSQL planner boundary,
+ * so an extension built without external providers simply leaves it empty.
+ */
+void register_path_builder(path_builder_callback builder)
 {
 	if (builder != nullptr && registered_path_builder != nullptr)
 	{
@@ -59,9 +51,14 @@ register_path_builder(path_builder_callback builder)
 	registered_path_builder = builder;
 }
 
-bool
-try_add_scan_paths(PlannerInfo *root, RelOptInfo *relation_info,
-				   RangeTblEntry *range_table_entry, Relation relation)
+/**
+ * @brief Invokes the registered path builder when one is available.
+ * @return The builder's result, or `false` when external scanning is not
+ * installed.
+ */
+[[nodiscard]] bool try_add_scan_paths(
+	PlannerInfo *root, RelOptInfo *relation_info,
+	RangeTblEntry *range_table_entry, Relation relation)
 {
 	if (registered_path_builder == nullptr)
 	{

@@ -686,11 +686,12 @@ bioseq_batch_join_append_runtime_generation_digest(
         || domain->provider_id != k_bioseq_scan_provider_id) {
         return bioseq_cache_status_unsupported;
     }
-    constexpr std::array<std::uint8_t, 8> identity{
+    constexpr std::array<std::uint8_t, 8> k_domain_identity{
         0x53, 0x51, 0x53, 0x42,  // provider id, little endian
         0x01, 0x00, 0x00, 0x00,  // recipe revision
     };
-    return detail::append_bytes(sink, identity.data(), identity.size())
+    return detail::append_bytes(
+               sink, k_domain_identity.data(), k_domain_identity.size())
             && detail::append_bytes(
                 sink,
                 k_bioseq_scan_provider_name,
@@ -749,11 +750,12 @@ bioseq_batch_join_append_domain_digest(
         || domain->provider_id != k_bioseq_batch_join_provider_id) {
         return bioseq_cache_status_unsupported;
     }
-    constexpr std::array<std::uint8_t, 8> identity{
+    constexpr std::array<std::uint8_t, 8> k_domain_identity{
         0x4a, 0x51, 0x53, 0x42,  // provider id, little endian
         0x01, 0x00, 0x00, 0x00,  // recipe revision
     };
-    return detail::append_bytes(sink, identity.data(), identity.size())
+    return detail::append_bytes(
+               sink, k_domain_identity.data(), k_domain_identity.size())
             && detail::append_bytes(
                 sink,
                 k_bioseq_batch_join_provider_name,

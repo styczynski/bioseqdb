@@ -472,21 +472,21 @@ namespace {
 
 template <class p_result>
 [[nodiscard]] static auto fixture_sql_integer(const std::uint64_t value,
-                                              const std::string_view context,
+                                              const std::string_view diagnostic_context,
                                               const std::string_view field) -> p_result {
     static_assert(
 		std::is_same_v<p_result, std::int32_t>
 		|| std::is_same_v<p_result, std::int64_t>);
 	if (value > static_cast<std::uint64_t>(
 			(std::numeric_limits<p_result>::max)())) {
-		constexpr std::string_view sql_type =
+		constexpr std::string_view k_sql_type =
 			std::is_same_v<p_result, std::int32_t>
 				? "INTEGER" : "BIGINT";
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 			{
 				.message = fmt::format(
-					"{} field exceeds {}", context, sql_type),
+					"{} field exceeds {}", diagnostic_context, k_sql_type),
 				.detail = fmt::format("field={}", field),
 			});
 	}
@@ -559,42 +559,42 @@ build_minimizer_fixture(
 			layout,
 			minimizer_fixture_backend(requested_backend),
 			static_cast<std::uint64_t>(position_segment_span_bp));
-	constexpr std::string_view context = "minimizer build fixture";
+	constexpr std::string_view k_context = "minimizer build fixture";
 	std::vector<bioseq::postgres::sql_rows::build_minimizer_fixture_row> rows;
 	rows.push_back({
 		fixture.table_name,
 		static_cast<std::int16_t>(fixture.layout),
-		fixture_sql_integer<std::int64_t>(fixture.generation_id, context, "generation_id"),
+		fixture_sql_integer<std::int64_t>(fixture.generation_id, k_context, "generation_id"),
 		fixed_hex_u64(fixture.source_identity),
 		fixed_hex_u64(fixture.source_content_checksum),
 		fixed_hex_u64(fixture.storage_contract_checksum),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_num_fragments, context, "source_num_fragments"),
+			fixture.source_num_fragments, k_context, "source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_total_bp, context, "source_total_bp"),
+			fixture.source_total_bp, k_context, "source_total_bp"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_padding_letters, context,
+			fixture.source_padding_letters, k_context,
 			"source_padding_letters"),
-		fixture_sql_integer<std::int64_t>(fixture.writer_rows, context, "writer_rows"),
-		fixture_sql_integer<std::int64_t>(fixture.writer_batches, context, "writer_batches"),
+		fixture_sql_integer<std::int64_t>(fixture.writer_rows, k_context, "writer_rows"),
+		fixture_sql_integer<std::int64_t>(fixture.writer_batches, k_context, "writer_batches"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.published_head_bytes, context, "published_head_bytes"),
-		fixture_sql_integer<std::int64_t>(fixture.control_count, context, "control_count"),
-		fixture_sql_integer<std::int64_t>(fixture.position_count, context, "position_count"),
+			fixture.published_head_bytes, k_context, "published_head_bytes"),
+		fixture_sql_integer<std::int64_t>(fixture.control_count, k_context, "control_count"),
+		fixture_sql_integer<std::int64_t>(fixture.position_count, k_context, "position_count"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.directory_entries, context, "directory_entries"),
+			fixture.directory_entries, k_context, "directory_entries"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.position_segment_count, context,
+			fixture.position_segment_count, k_context,
 			"position_segment_count"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.control_encoded_bytes, context,
+			fixture.control_encoded_bytes, k_context,
 			"control_encoded_bytes"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.position_encoded_bytes, context,
+			fixture.position_encoded_bytes, k_context,
 			"position_encoded_bytes"),
-		fixture_sql_integer<std::int64_t>(fixture.control_chunks, context, "control_chunks"),
+		fixture_sql_integer<std::int64_t>(fixture.control_chunks, k_context, "control_chunks"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.position_chunks, context, "position_chunks"),
+			fixture.position_chunks, k_context, "position_chunks"),
 	});
 	return bioseq::postgres::support::table_rows<
 		bioseq::postgres::sql_rows::build_minimizer_fixture_row>{
@@ -631,75 +631,75 @@ read_minimizer_fixture(
 			static_cast<std::uint16_t>(window_size),
 			layout,
 			minimizer_fixture_backend(requested_backend));
-	constexpr std::string_view context = "minimizer read fixture";
+	constexpr std::string_view k_context = "minimizer read fixture";
 	const auto& stats = fixture.read_stats;
 	std::vector<bioseq::postgres::sql_rows::read_minimizer_fixture_row> rows;
 	rows.push_back({
 		fixture.table_name,
 		static_cast<std::int16_t>(fixture.layout),
-		fixture_sql_integer<std::int64_t>(fixture.generation_id, context, "generation_id"),
+		fixture_sql_integer<std::int64_t>(fixture.generation_id, k_context, "generation_id"),
 		fixed_hex_u64(fixture.source_identity),
 		fixed_hex_u64(fixture.source_content_checksum),
 		fixed_hex_u64(fixture.storage_contract_checksum),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_num_fragments, context, "source_num_fragments"),
+			fixture.source_num_fragments, k_context, "source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_total_bp, context, "source_total_bp"),
+			fixture.source_total_bp, k_context, "source_total_bp"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.source_padding_letters, context,
+			fixture.source_padding_letters, k_context,
 			"source_padding_letters"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.validated_control_bytes, context,
+			fixture.validated_control_bytes, k_context,
 			"validated_control_bytes"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.validated_position_bytes, context,
+			fixture.validated_position_bytes, k_context,
 			"validated_position_bytes"),
 		fixed_hex_u64(fixture.validated_control_checksum),
 		fixed_hex_u64(fixture.validated_position_checksum),
-		fixture_sql_integer<std::int64_t>(fixture.lookup_count, context, "lookup_count"),
-		fixture_sql_integer<std::int64_t>(fixture.lookup_bp, context, "lookup_bp"),
+		fixture_sql_integer<std::int64_t>(fixture.lookup_count, k_context, "lookup_count"),
+		fixture_sql_integer<std::int64_t>(fixture.lookup_bp, k_context, "lookup_bp"),
 		fixture.lookup_reverse,
 		fixture.positions_complete,
-		fixture_sql_integer<std::int64_t>(stats.relation_opens, context, "relation_opens"),
-		fixture_sql_integer<std::int64_t>(stats.index_scans, context, "index_scans"),
-		fixture_sql_integer<std::int64_t>(stats.head_scans, context, "head_scans"),
+		fixture_sql_integer<std::int64_t>(stats.relation_opens, k_context, "relation_opens"),
+		fixture_sql_integer<std::int64_t>(stats.index_scans, k_context, "index_scans"),
+		fixture_sql_integer<std::int64_t>(stats.head_scans, k_context, "head_scans"),
 		fixture_sql_integer<std::int64_t>(
-			stats.manifest_directory_scans, context,
+			stats.manifest_directory_scans, k_context,
 			"manifest_directory_scans"),
 		fixture_sql_integer<std::int64_t>(
-			stats.planned_request_groups, context,
+			stats.planned_request_groups, k_context,
 			"planned_request_groups"),
 		fixture_sql_integer<std::int64_t>(
-			stats.executed_request_groups, context,
+			stats.executed_request_groups, k_context,
 			"executed_request_groups"),
 		fixture_sql_integer<std::int64_t>(
-			stats.bulk_read_calls, context, "bulk_read_calls"),
+			stats.bulk_read_calls, k_context, "bulk_read_calls"),
 		fixture_sql_integer<std::int64_t>(
-			stats.range_scan_calls, context, "range_scan_calls"),
+			stats.range_scan_calls, k_context, "range_scan_calls"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.wanted_extents, context,
+			stats.payload.wanted_extents, k_context,
 			"payload_wanted_extents"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.read_extents, context, "payload_read_extents"),
+			stats.payload.read_extents, k_context, "payload_read_extents"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.wanted_chunks, context,
+			stats.payload.wanted_chunks, k_context,
 			"payload_wanted_chunks"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.delivered_chunks, context,
+			stats.payload.delivered_chunks, k_context,
 			"payload_delivered_chunks"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.delivered_bytes, context,
+			stats.payload.delivered_bytes, k_context,
 			"payload_delivered_bytes"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload_heap_rows_read, context,
+			stats.payload_heap_rows_read, k_context,
 			"payload_heap_rows_read"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.skipped_rows, context, "payload_skipped_rows"),
+			stats.payload.skipped_rows, k_context, "payload_skipped_rows"),
 		fixture_sql_integer<std::int64_t>(
-			stats.toast_values_read, context, "toast_values_read"),
+			stats.toast_values_read, k_context, "toast_values_read"),
 		fixture_sql_integer<std::int64_t>(
-			stats.detoast_bytes, context, "detoast_bytes"),
-		fixture_sql_integer<std::int64_t>(stats.cache_lookups, context, "cache_lookups"),
+			stats.detoast_bytes, k_context, "detoast_bytes"),
+		fixture_sql_integer<std::int64_t>(stats.cache_lookups, k_context, "cache_lookups"),
 		bioseq::postgres::support::jsonb_value{
 			cold_index_selective_probe_json(
 				fixture.selective_probe_stats.cold)},
@@ -737,7 +737,7 @@ scan_grouped_soa_minimizer_generation_test(
 				bioseq::indexing::minimizer_generation_layout>(
 					static_cast<std::uint16_t>(selected_layout)),
 			minimizer_fixture_backend(requested_backend));
-	constexpr std::string_view context =
+	constexpr std::string_view k_context =
 		"minimizer generation scan fixture";
 	const auto& stats = fixture.read_stats;
 	std::vector<
@@ -746,30 +746,30 @@ scan_grouped_soa_minimizer_generation_test(
 	rows.push_back({
 		fixture.table_name,
 		fixture.selected_backend_name,
-		fixture_sql_integer<std::int64_t>(fixture.generation_id, context, "generation_id"),
-		fixture_sql_integer<std::int64_t>(fixture.control_bytes, context, "control_bytes"),
+		fixture_sql_integer<std::int64_t>(fixture.generation_id, k_context, "generation_id"),
+		fixture_sql_integer<std::int64_t>(fixture.control_bytes, k_context, "control_bytes"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.position_bytes, context, "position_bytes"),
+			fixture.position_bytes, k_context, "position_bytes"),
 		fixed_hex_u64(fixture.control_checksum),
 		fixed_hex_u64(fixture.position_checksum),
-		fixture_sql_integer<std::int64_t>(stats.relation_opens, context, "relation_opens"),
-		fixture_sql_integer<std::int64_t>(stats.index_scans, context, "index_scans"),
+		fixture_sql_integer<std::int64_t>(stats.relation_opens, k_context, "relation_opens"),
+		fixture_sql_integer<std::int64_t>(stats.index_scans, k_context, "index_scans"),
 		fixture_sql_integer<std::int64_t>(
-			stats.range_scan_calls, context, "range_scan_calls"),
+			stats.range_scan_calls, k_context, "range_scan_calls"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload_heap_rows_read, context, "payload_heap_rows"),
+			stats.payload_heap_rows_read, k_context, "payload_heap_rows"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.delivered_chunks, context, "delivered_chunks"),
+			stats.payload.delivered_chunks, k_context, "delivered_chunks"),
 		fixture_sql_integer<std::int64_t>(
-			stats.payload.delivered_bytes, context, "delivered_bytes"),
+			stats.payload.delivered_bytes, k_context, "delivered_bytes"),
 		fixture_sql_integer<std::int64_t>(
-			stats.full_generation.planned_extents, context,
+			stats.full_generation.planned_extents, k_context,
 			"planned_extents"),
 		fixture_sql_integer<std::int64_t>(
-			stats.full_generation.completed_extents, context,
+			stats.full_generation.completed_extents, k_context,
 			"completed_extents"),
 		fixture_sql_integer<std::int64_t>(
-			stats.full_generation.scan_calls, context, "scan_calls"),
+			stats.full_generation.scan_calls, k_context, "scan_calls"),
 	});
 	return bioseq::postgres::support::table_rows<
 		bioseq::postgres::sql_rows::scan_grouped_soa_minimizer_generation_test_row>{
@@ -819,7 +819,7 @@ build_ready_minimizer_fragment_generation(
 				"ready minimizer-fragment fixture returned a non-fragment "
 				"execution receipt"});
 	}
-	constexpr std::string_view context = "ready minimizer-fragment fixture";
+	constexpr std::string_view k_context = "ready minimizer-fragment fixture";
 	const auto are_bounded_stats_consistent =
 		execution->packed_bounded_stats_present
 		&& execution->packed_bounded_status
@@ -833,79 +833,79 @@ build_ready_minimizer_fragment_generation(
 		fixture.table_name,
 		fixture.column_attno,
 		fixture_sql_integer<std::int64_t>(
-			fixture.sequence_rowno, context, "sequence_rowno"),
+			fixture.sequence_rowno, k_context, "sequence_rowno"),
 		fixed_hex_u64(fixture.locator.source_epoch),
 		fixture_sql_integer<std::int64_t>(
-			fixture.locator.fragment_count, context,
+			fixture.locator.fragment_count, k_context,
 			"source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.locator.logical_length, context, "source_total_bp"),
+			fixture.locator.logical_length, k_context, "source_total_bp"),
 		fixture.selected_backend_name,
 		static_cast<std::int16_t>(fixture.manifest.layout),
 		publication.published(),
 		fixture.head_manifest_verified,
 		fixture_sql_integer<std::int64_t>(
-			publication.generation_id(), context, "generation_id"),
+			publication.generation_id(), k_context, "generation_id"),
 		fixed_hex_u64(publication.source_identity()),
 		fixed_hex_u64(publication.source_content_checksum()),
 		fixed_hex_u64(publication.storage_contract_checksum()),
 		fixture_sql_integer<std::int64_t>(
-			fixture.manifest.target_length, context,
+			fixture.manifest.target_length, k_context,
 			"manifest_target_length"),
 		static_cast<std::int16_t>(fixture.manifest.kmer_size),
 		static_cast<std::int16_t>(fixture.manifest.window_size),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.minimizer_scheme_id, context,
+			fixture.manifest.minimizer_scheme_id, k_context,
 			"minimizer_scheme_id"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.minimizer_scheme_revision, context,
+			fixture.manifest.minimizer_scheme_revision, k_context,
 			"minimizer_scheme_revision"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.gpu_abi_revision, context,
+			fixture.manifest.gpu_abi_revision, k_context,
 			"gpu_abi_revision"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.manifest.position_segment_span_bp, context,
+			fixture.manifest.position_segment_span_bp, k_context,
 			"position_segment_span_bp"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.position_segment_count, context,
+			fixture.manifest.position_segment_count, k_context,
 			"position_segment_count"),
 		fixture_sql_integer<std::int64_t>(
-			publication.writer_rows(), context, "writer_rows"),
+			publication.writer_rows(), k_context, "writer_rows"),
 		fixture_sql_integer<std::int64_t>(
-			publication.writer_batches(), context, "writer_batches"),
+			publication.writer_batches(), k_context, "writer_batches"),
 		fixture_sql_integer<std::int64_t>(
-			publication.control_count(), context, "control_count"),
+			publication.control_count(), k_context, "control_count"),
 		fixture_sql_integer<std::int64_t>(
-			publication.position_count(), context, "position_count"),
+			publication.position_count(), k_context, "position_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->producer_scan_count, context,
+			execution->producer_scan_count, k_context,
 			"producer_scan_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->geometry_retry_count, context,
+			execution->geometry_retry_count, k_context,
 			"geometry_retry_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->short_core_runs, context, "short_core_runs"),
+			execution->short_core_runs, k_context, "short_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->scalar_core_runs, context, "scalar_core_runs"),
+			execution->scalar_core_runs, k_context, "scalar_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->exact_simd_core_runs, context,
+			execution->exact_simd_core_runs, k_context,
 			"exact_simd_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->bounded_nthash_core_runs, context,
+			execution->bounded_nthash_core_runs, k_context,
 			"bounded_nthash_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_core_runs, context, "vulkan_core_runs"),
+			execution->vulkan_core_runs, k_context, "vulkan_core_runs"),
 		execution->is_accepted(),
 		execution->exact_simd_stats_present,
 		execution->exact_simd_stats_present
 			&& execution->exact_simd_stats.is_internally_consistent(
 				/*require_work=*/true),
 		fixture_sql_integer<std::int64_t>(
-			execution->exact_simd_stats.vector_batches, context,
+			execution->exact_simd_stats.vector_batches, k_context,
 			"exact_vector_batches"),
 		fixture_sql_integer<std::int64_t>(
 			execution->exact_simd_stats.scalar_backend_branches,
-			context, "exact_scalar_backend_branches"),
+			k_context, "exact_scalar_backend_branches"),
 		execution->packed_bounded_stats_present,
 		std::string{
 			bioseq::indexing::packed_bounded_nthash_index_status_name(
@@ -913,15 +913,15 @@ build_ready_minimizer_fragment_generation(
 		are_bounded_stats_consistent,
 		fixture_sql_integer<std::int64_t>(
 			execution->packed_bounded_stats.packed_decode_batches,
-			context, "bounded_nthash_packed_decode_batches"),
+			k_context, "bounded_nthash_packed_decode_batches"),
 		fixture_sql_integer<std::int64_t>(
-			execution->packed_bounded_stats.fallback_calls, context,
+			execution->packed_bounded_stats.fallback_calls, k_context,
 			"bounded_nthash_fallback_calls"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_stats.completed_roundtrips, context,
+			execution->vulkan_stats.completed_roundtrips, k_context,
 			"vulkan_completed_roundtrips"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_stats.downloaded_minimizers, context,
+			execution->vulkan_stats.downloaded_minimizers, k_context,
 			"vulkan_downloaded_minimizers"),
 	});
 	return bioseq::postgres::support::table_rows<
@@ -971,7 +971,7 @@ build_ready_minimizer_sequence_generation(
 				"ready minimizer-sequence fixture returned a non-sequence "
 				"execution receipt"});
 	}
-	constexpr std::string_view context = "ready minimizer-sequence fixture";
+	constexpr std::string_view k_context = "ready minimizer-sequence fixture";
 	const auto are_bounded_stats_consistent =
 		execution->packed_bounded_stats_available
 		&& execution->packed_bounded_status
@@ -985,100 +985,100 @@ build_ready_minimizer_sequence_generation(
 		fixture.table_name,
 		fixture.column_attno,
 		fixture_sql_integer<std::int64_t>(
-			fixture.sequence_rowno, context, "sequence_rowno"),
+			fixture.sequence_rowno, k_context, "sequence_rowno"),
 		fixed_hex_u64(fixture.locator.source_epoch),
 		fixture_sql_integer<std::int64_t>(
-			fixture.locator.fragment_count, context,
+			fixture.locator.fragment_count, k_context,
 			"source_num_fragments"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.locator.logical_length, context, "source_total_bp"),
+			fixture.locator.logical_length, k_context, "source_total_bp"),
 		fixture.selected_backend_name,
 		static_cast<std::int16_t>(fixture.manifest.layout),
 		publication.published(),
 		fixture.head_manifest_verified,
 		fixture_sql_integer<std::int64_t>(
-			publication.generation_id(), context, "generation_id"),
+			publication.generation_id(), k_context, "generation_id"),
 		fixed_hex_u64(publication.source_identity()),
 		fixed_hex_u64(publication.source_content_checksum()),
 		fixed_hex_u64(publication.storage_contract_checksum()),
 		fixture_sql_integer<std::int64_t>(
-			fixture.manifest.target_length, context,
+			fixture.manifest.target_length, k_context,
 			"manifest_target_length"),
 		static_cast<std::int16_t>(fixture.manifest.kmer_size),
 		static_cast<std::int16_t>(fixture.manifest.window_size),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.minimizer_scheme_id, context,
+			fixture.manifest.minimizer_scheme_id, k_context,
 			"minimizer_scheme_id"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.minimizer_scheme_revision, context,
+			fixture.manifest.minimizer_scheme_revision, k_context,
 			"minimizer_scheme_revision"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.gpu_abi_revision, context,
+			fixture.manifest.gpu_abi_revision, k_context,
 			"gpu_abi_revision"),
 		fixture_sql_integer<std::int64_t>(
-			fixture.manifest.position_segment_span_bp, context,
+			fixture.manifest.position_segment_span_bp, k_context,
 			"position_segment_span_bp"),
 		fixture_sql_integer<std::int32_t>(
-			fixture.manifest.position_segment_count, context,
+			fixture.manifest.position_segment_count, k_context,
 			"position_segment_count"),
 		fixture_sql_integer<std::int64_t>(
-			publication.writer_rows(), context, "writer_rows"),
+			publication.writer_rows(), k_context, "writer_rows"),
 		fixture_sql_integer<std::int64_t>(
-			publication.writer_batches(), context, "writer_batches"),
+			publication.writer_batches(), k_context, "writer_batches"),
 		fixture_sql_integer<std::int64_t>(
-			publication.control_count(), context, "control_count"),
+			publication.control_count(), k_context, "control_count"),
 		fixture_sql_integer<std::int64_t>(
-			publication.position_count(), context, "position_count"),
+			publication.position_count(), k_context, "position_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_run_count, context, "spill_run_count"),
+			execution->spill_run_count, k_context, "spill_run_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spilled_event_count, context,
+			execution->spilled_event_count, k_context,
 			"spilled_event_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_operation_epoch, context,
+			execution->spill_operation_epoch, k_context,
 			"spill_operation_epoch"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_storage_binding.generation_token, context,
+			execution->spill_storage_binding.generation_token, k_context,
 			"spill_generation_token"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_storage_binding.mutation_revision, context,
+			execution->spill_storage_binding.mutation_revision, k_context,
 			"spill_mutation_revision"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_qualification_scan_count, context,
+			execution->spill_qualification_scan_count, k_context,
 			"spill_qualification_scan_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->spill_qualification_merge_count, context,
+			execution->spill_qualification_merge_count, k_context,
 			"spill_qualification_merge_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->configured_core_span_bp, context,
+			execution->configured_core_span_bp, k_context,
 			"configured_core_span_bp"),
 		fixture_sql_integer<std::int64_t>(
-			execution->peak_core_span_bp, context, "peak_core_span_bp"),
+			execution->peak_core_span_bp, k_context, "peak_core_span_bp"),
 		fixture_sql_integer<std::int64_t>(
-			execution->peak_core_events, context, "peak_core_events"),
+			execution->peak_core_events, k_context, "peak_core_events"),
 		fixture_sql_integer<std::int64_t>(
-			execution->short_core_runs, context, "short_core_runs"),
+			execution->short_core_runs, k_context, "short_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->scalar_core_runs, context, "scalar_core_runs"),
+			execution->scalar_core_runs, k_context, "scalar_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->exact_simd_core_runs, context,
+			execution->exact_simd_core_runs, k_context,
 			"exact_simd_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->bounded_nthash_core_runs, context,
+			execution->bounded_nthash_core_runs, k_context,
 			"bounded_nthash_core_runs"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_core_runs, context, "vulkan_core_runs"),
+			execution->vulkan_core_runs, k_context, "vulkan_core_runs"),
 		execution->is_internally_consistent(),
 		execution->exact_simd_stats_available,
 		execution->exact_simd_stats_available
 			&& execution->exact_simd_stats.is_internally_consistent(
 				/*require_work=*/true),
 		fixture_sql_integer<std::int64_t>(
-			execution->exact_simd_stats.vector_batches, context,
+			execution->exact_simd_stats.vector_batches, k_context,
 			"exact_vector_batches"),
 		fixture_sql_integer<std::int64_t>(
 			execution->exact_simd_stats.scalar_backend_branches,
-			context, "exact_scalar_backend_branches"),
+			k_context, "exact_scalar_backend_branches"),
 		execution->packed_bounded_stats_available,
 		std::string{
 			bioseq::indexing::packed_bounded_nthash_index_status_name(
@@ -1086,68 +1086,68 @@ build_ready_minimizer_sequence_generation(
 		are_bounded_stats_consistent,
 		fixture_sql_integer<std::int64_t>(
 			execution->packed_bounded_stats.packed_decode_batches,
-			context, "bounded_nthash_packed_decode_batches"),
+			k_context, "bounded_nthash_packed_decode_batches"),
 		fixture_sql_integer<std::int64_t>(
-			execution->packed_bounded_stats.fallback_calls, context,
+			execution->packed_bounded_stats.fallback_calls, k_context,
 			"bounded_nthash_fallback_calls"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_stats.completed_roundtrips, context,
+			execution->vulkan_stats.completed_roundtrips, k_context,
 			"vulkan_completed_roundtrips"),
 		fixture_sql_integer<std::int64_t>(
-			execution->vulkan_stats.downloaded_minimizers, context,
+			execution->vulkan_stats.downloaded_minimizers, k_context,
 			"vulkan_downloaded_minimizers"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_scan_count, context, "replay_scan_count"),
+			execution->replay_scan_count, k_context, "replay_scan_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_merge_pass_count, context,
+			execution->replay_merge_pass_count, k_context,
 			"replay_merge_pass_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_reroute_pass_count, context,
+			execution->replay_reroute_pass_count, k_context,
 			"replay_reroute_pass_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_completed_scan_count, context,
+			execution->replay_completed_scan_count, k_context,
 			"replay_completed_scan_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_failed_scan_count, context,
+			execution->replay_failed_scan_count, k_context,
 			"replay_failed_scan_count"),
 		fixture_sql_integer<std::int64_t>(
 			execution->replay_binding_checked_failed_scan_count,
-			context, "replay_binding_checked_failed_scan_count"),
+			k_context, "replay_binding_checked_failed_scan_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_illegal_span_transition_count, context,
+			execution->replay_illegal_span_transition_count, k_context,
 			"replay_illegal_span_transition_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_first_completed_event_count, context,
+			execution->replay_first_completed_event_count, k_context,
 			"replay_first_completed_event_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_last_completed_event_count, context,
+			execution->replay_last_completed_event_count, k_context,
 			"replay_last_completed_event_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_final_span_bp, context,
+			execution->replay_final_span_bp, k_context,
 			"replay_final_span_bp"),
 		fixture_sql_integer<std::int64_t>(
 			execution->replay_final_storage_binding.generation_token,
-			context, "replay_final_generation_token"),
+			k_context, "replay_final_generation_token"),
 		fixture_sql_integer<std::int64_t>(
 			execution->replay_final_storage_binding.mutation_revision,
-			context, "replay_final_mutation_revision"),
+			k_context, "replay_final_mutation_revision"),
 		fixture_sql_integer<std::int64_t>(
-			execution->replay_visited_event_count, context,
+			execution->replay_visited_event_count, k_context,
 			"replay_visited_event_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->manifest_position_count, context,
+			execution->manifest_position_count, k_context,
 			"manifest_position_count"),
 		fixture_sql_integer<std::int64_t>(
-			execution->manifest_position_segment_span_bp, context,
+			execution->manifest_position_segment_span_bp, k_context,
 			"manifest_position_segment_span_bp"),
 		fixture_sql_integer<std::int64_t>(
-			publication.minimizer_sequence_spill_generation_token(), context,
+			publication.minimizer_sequence_spill_generation_token(), k_context,
 			"release_generation_token"),
 		fixture_sql_integer<std::int64_t>(
-			publication.minimizer_sequence_spill_mutation_before_release(), context,
+			publication.minimizer_sequence_spill_mutation_before_release(), k_context,
 			"release_mutation_before"),
 		fixture_sql_integer<std::int64_t>(
-			publication.minimizer_sequence_spill_mutation_after_release(), context,
+			publication.minimizer_sequence_spill_mutation_after_release(), k_context,
 			"release_mutation_after"),
 		publication.minimizer_sequence_spill_resources_released(),
 	});
