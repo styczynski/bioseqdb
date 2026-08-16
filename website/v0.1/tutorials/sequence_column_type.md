@@ -433,7 +433,7 @@ RESET bioseq.index.insert_maintenance.enabled;
 
 ## Loading a FASTA file
 
-[[sql:bioseq.load]] reads a server-side FASTA or FASTQ file. This
+`bioseq.load` reads a server-side FASTA or FASTQ file. This
 example maps the UniProt accession in each FASTA header to a text column. The
 function returns the number of loaded records.
 
