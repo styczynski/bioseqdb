@@ -5,11 +5,12 @@
  * A, C, G, and T map to ranks zero through three while N resets rolling state.
  */
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
-#include <string>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

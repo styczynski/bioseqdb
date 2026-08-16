@@ -3,24 +3,7 @@
  * @brief Verifies resident, fragmented, erased, and admitted lazy-sequence contracts.
  */
 
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <new>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <tests/support/common.hpp>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #ifndef __has_feature
 #define __has_feature(feature) 0
 #endif
@@ -29,6 +12,9 @@
 #include <sanitizer/asan_interface.h>
 #endif
 
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.storage.scanner;

@@ -4,27 +4,13 @@
  */
 module;
 
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 #include <vulkan/vulkan_core.h>
 
 export module bioseq.tests.unit.indexing.gpu_minimizer_index_support;
 
+import std;
 import bioseq.common.logging;
 import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;

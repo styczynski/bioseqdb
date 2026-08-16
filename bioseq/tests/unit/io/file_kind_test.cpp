@@ -2,10 +2,9 @@
  * @file file_kind_test.cpp
  * @brief Verifies sequence file suffix classification.
  */
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.io.options;
 import bioseq.io.file_kind;

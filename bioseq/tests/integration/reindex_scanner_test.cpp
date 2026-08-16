@@ -1,12 +1,11 @@
 /**
  * @file Reindex coverage for stub-backed rows and fragmented PostgreSQL scans.
  */
-#include <tests/support/postgres.hpp>
 #include <libpq-fe.h>
-#include <chrono>
-#include <set>
-#include <thread>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

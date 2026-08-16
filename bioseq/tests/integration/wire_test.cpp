@@ -6,10 +6,12 @@
  * invalid payloads without damaging the PostgreSQL connection.
  */
 
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
-#include <filesystem>
 
 using namespace bioseq_int_tests;
 

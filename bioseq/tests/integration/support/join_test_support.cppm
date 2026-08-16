@@ -3,19 +3,13 @@
  * @brief Provides fixtures and audits shared by Bioseq join integration cases.
  */
 module;
-#include <array>
-#include <chrono>
-#include <cstddef>
 #include <libpq-fe.h>
-#include <set>
-#include <string>
-#include <string_view>
-#include <tests/support/postgres.hpp>
-#include <thread>
-#include <vector>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.join_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::join_test_support {

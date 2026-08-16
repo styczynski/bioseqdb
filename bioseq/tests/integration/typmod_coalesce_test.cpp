@@ -7,13 +7,12 @@
  * EXPLAIN assertions provide a secondary user-visible signal.
  */
 
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <set>
-#include <string>
-#include <string_view>
+#include <catch2/catch_template_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

@@ -3,22 +3,13 @@
  * @brief Provides shared EXPLAIN fixtures, parsers, and plan assertions.
  */
 module;
-#include <algorithm>
-#include <array>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <limits>
-#include <mutex>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <tests/support/postgres.hpp>
-#include <utility>
-#include <vector>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.explain_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::explain_test_support {

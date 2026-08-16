@@ -1,16 +1,9 @@
 /** @file SQL slicing, algebra, bridge, and durable-boundary integration tests. */
 
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cstdint>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

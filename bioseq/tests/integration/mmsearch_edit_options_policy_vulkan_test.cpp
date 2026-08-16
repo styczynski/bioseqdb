@@ -1,19 +1,12 @@
 /** @file Edit, options, policy, and Vulkan mmsearch scenarios. */
 
-#include <tests/support/postgres.hpp>
-
-#include <array>
-#include <bit>
 #include <cctype>
-#include <chrono>
-#include <cstdint>
-#include <filesystem>
 #include <libpq-fe.h>
-#include <set>
-#include <span>
-#include <string_view>
-#include <thread>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.mmsearch_test_support;
 

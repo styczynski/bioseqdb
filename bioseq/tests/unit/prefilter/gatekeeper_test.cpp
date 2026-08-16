@@ -6,16 +6,9 @@
  * arbitrary byte ranks, packed dna4/dna5/aa27 ranges, boundary lengths, conservative slice
  * handling, and randomized batch fixtures.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <span>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.edit_distance_threshold;

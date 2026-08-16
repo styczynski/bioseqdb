@@ -3,16 +3,10 @@
  * @brief Verifies storage bucket math, locator bytes, and fragment geometry.
  */
 
-#include <array>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <span>
-#include <tests/support/common.hpp>
-#include <type_traits>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.storage.layout;
 
 namespace {

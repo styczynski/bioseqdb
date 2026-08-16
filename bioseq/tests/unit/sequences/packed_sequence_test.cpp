@@ -5,11 +5,9 @@
 
 #include <cstring>
 #include <hwy/highway.h>
-#include <memory>
-#include <string>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.common.templating;

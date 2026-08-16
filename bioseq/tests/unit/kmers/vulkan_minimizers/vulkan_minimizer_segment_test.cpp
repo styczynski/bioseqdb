@@ -3,26 +3,14 @@
  * @brief Vulkan minimizer representation and segmented-route tests.
  */
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
-
-#include <array>
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <exception>
-#include <memory>
-#include <span>
-#include <sstream>
-#include <string>
-#include <tuple>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
+
+import std;
 import bioseq.tests.unit.kmers.vulkan_minimizers_support;
 
 using namespace seq::literals;

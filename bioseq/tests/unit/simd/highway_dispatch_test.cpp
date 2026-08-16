@@ -3,18 +3,10 @@
  * @brief Verifies Highway kernel inventory, alignment tables, and target masks.
  */
 
-#include <array>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
 #include <hwy/highway.h>
-#include <limits>
-#include <span>
-#include <string_view>
-#include <tests/support/common.hpp>
-#include <type_traits>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;

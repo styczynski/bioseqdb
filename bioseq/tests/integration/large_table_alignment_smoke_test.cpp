@@ -6,14 +6,10 @@
  * coordinates, exact match placement, and the streaming-only 6 Gbp route.
  */
 
-#include <algorithm>
-#include <filesystem>
-#include <set>
-#include <span>
-#include <system_error>
-#include <tests/support/postgres.hpp>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 import bioseq.common.logging;
 

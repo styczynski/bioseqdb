@@ -1,19 +1,16 @@
-#pragma once
-
-#include <cstddef>
-#include <cstdint>
-#include <type_traits>
-
 /**
- * @file
- * @brief Test-private ABI for generated fixed-target Highway probes.
+ * @file contract.cppm
+ * @brief Defines the test-private C ABI for fixed-target Highway probes.
  *
- * No Highway tag, vector, mask, iterator, or target namespace crosses this
- * boundary.
+ * Highway tags, vectors, masks, iterators, and target namespaces do not cross
+ * this boundary.
  */
+export module bioseq.highway.test_probe_contract;
+
+import std;
 
 /** @brief Receipt for target-local SIMD utility checks. */
-struct bioseq_highway_simd_utils_probe_receipt final {
+export struct bioseq_highway_simd_utils_probe_receipt final {
     std::int64_t target{};                ///< Compiled Highway target identifier.
     std::uint64_t passed_properties{};    ///< Bit set for each passing category.
     std::uint32_t cases_run{};            ///< Number of typed checks attempted.
@@ -25,7 +22,7 @@ struct bioseq_highway_simd_utils_probe_receipt final {
 };
 
 /** @brief Receipt for target-local packed-sequence iteration checks. */
-struct bioseq_highway_sequence_ops_probe_receipt final {
+export struct bioseq_highway_sequence_ops_probe_receipt final {
     std::int64_t target{};              ///< Compiled Highway target identifier.
     std::uint64_t passed_properties{};  ///< Bit set for each passing fixture.
     std::uint32_t cases_run{};          ///< Number of context checks attempted.
@@ -33,7 +30,7 @@ struct bioseq_highway_sequence_ops_probe_receipt final {
 };
 
 /** @brief Receipt for target-local scalar and SIMD hash parity checks. */
-struct bioseq_highway_hashers_probe_receipt final {
+export struct bioseq_highway_hashers_probe_receipt final {
     std::int64_t target{};              ///< Compiled Highway target identifier.
     std::uint64_t passed_properties{};  ///< Bit set for each passing hasher case.
     std::uint32_t cases_run{};          ///< Number of hasher cases attempted.
@@ -41,7 +38,7 @@ struct bioseq_highway_hashers_probe_receipt final {
 };
 
 /** @brief Receipt for target-local two-stack minimizer checks. */
-struct bioseq_highway_two_stack_probe_receipt final {
+export struct bioseq_highway_two_stack_probe_receipt final {
     std::int64_t target{};              ///< Compiled Highway target identifier.
     std::uint64_t passed_properties{};  ///< Bit set for each passing category.
     std::uint32_t cases_run{};          ///< Number of checks attempted.
@@ -54,26 +51,29 @@ struct bioseq_highway_two_stack_probe_receipt final {
 };
 
 /** @brief Maximum number of reference minimizer pairs returned by a probe. */
-inline constexpr std::size_t
+export inline constexpr std::size_t
     k_bioseq_highway_two_stack_reference_output_capacity = 64U;
 
 /** @brief One position and k-mer pair emitted by the reference probe. */
-struct bioseq_highway_two_stack_reference_output_pair final {
+export struct bioseq_highway_two_stack_reference_output_pair final {
     std::uint64_t last_position{};  ///< Final logical position of the minimizer.
     std::uint64_t kmer{};           ///< Canonical packed k-mer value.
 };
 
 /** @brief Fixed-capacity output receipt for the supported reference shape. */
-struct bioseq_highway_two_stack_reference_output_receipt final {
+export struct bioseq_highway_two_stack_reference_output_receipt final {
     std::int64_t target{};              ///< Compiled Highway target identifier.
     std::uint64_t pair_count{};         ///< Number of populated pairs.
     std::uint32_t input_storage_unit_bytes{};  ///< Packed storage-unit width.
     std::uint32_t window{};             ///< Minimizer window used by the probe.
     std::uint32_t kmer{};               ///< K-mer length used by the probe.
     bioseq_highway_two_stack_reference_output_pair
-        pairs[k_bioseq_highway_two_stack_reference_output_capacity]{};  ///< ABI array of pairs.
+        pairs[k_bioseq_highway_two_stack_reference_output_capacity]{};  ///< ABI pairs.
 };
 
+static_assert(sizeof(std::int64_t) == 8U);
+static_assert(sizeof(std::uint64_t) == 8U);
+static_assert(sizeof(std::uint32_t) == 4U);
 static_assert(std::is_standard_layout_v<
               bioseq_highway_simd_utils_probe_receipt>);
 static_assert(std::is_standard_layout_v<
@@ -90,13 +90,20 @@ static_assert(std::is_trivially_copyable_v<
               bioseq_highway_two_stack_reference_output_pair>);
 static_assert(std::is_trivially_copyable_v<
               bioseq_highway_two_stack_reference_output_receipt>);
+static_assert(sizeof(bioseq_highway_simd_utils_probe_receipt) == 40U);
+static_assert(sizeof(bioseq_highway_sequence_ops_probe_receipt) == 24U);
+static_assert(sizeof(bioseq_highway_hashers_probe_receipt) == 24U);
+static_assert(sizeof(bioseq_highway_two_stack_probe_receipt) == 40U);
+static_assert(sizeof(bioseq_highway_two_stack_reference_output_pair) == 16U);
+static_assert(
+    sizeof(bioseq_highway_two_stack_reference_output_receipt) == 1056U);
 
 /**
  * @brief Runs SIMD utility checks for the configured fixed target.
  * @param[out] receipt Receives target identity, counters, and lane widths.
  * @return `true` when every utility check passes.
  */
-extern "C" auto bioseq_highway_run_simd_utils_probe(
+export extern "C" auto bioseq_highway_run_simd_utils_probe(
     bioseq_highway_simd_utils_probe_receipt* receipt) noexcept -> bool;
 
 /**
@@ -104,7 +111,7 @@ extern "C" auto bioseq_highway_run_simd_utils_probe(
  * @param[out] receipt Receives target identity and result counters.
  * @return `true` when every iteration check passes.
  */
-extern "C" auto bioseq_highway_run_sequence_ops_probe(
+export extern "C" auto bioseq_highway_run_sequence_ops_probe(
     bioseq_highway_sequence_ops_probe_receipt* receipt) noexcept -> bool;
 
 /**
@@ -112,7 +119,7 @@ extern "C" auto bioseq_highway_run_sequence_ops_probe(
  * @param[out] receipt Receives target identity and result counters.
  * @return `true` when every hash check passes.
  */
-extern "C" auto bioseq_highway_run_hashers_probe(
+export extern "C" auto bioseq_highway_run_hashers_probe(
     bioseq_highway_hashers_probe_receipt* receipt) noexcept -> bool;
 
 /**
@@ -120,12 +127,11 @@ extern "C" auto bioseq_highway_run_hashers_probe(
  * @param[out] receipt Receives target identity and per-category counters.
  * @return `true` when every minimizer check passes.
  */
-extern "C" auto bioseq_highway_run_two_stack_probe(
+export extern "C" auto bioseq_highway_run_two_stack_probe(
     bioseq_highway_two_stack_probe_receipt* receipt) noexcept -> bool;
 
 /**
  * @brief Collects reference outputs for the supported DNA4/u8/W10/K4 shape.
- *
  * @param[in] ranks Contiguous DNA4 rank values.
  * @param[in] rank_count Number of input ranks.
  * @param[in] input_storage_unit_bytes Storage-unit width, required to be one.
@@ -134,7 +140,7 @@ extern "C" auto bioseq_highway_run_two_stack_probe(
  * @param[out] receipt Receives bounded position and k-mer pairs.
  * @return `true` when the shape is supported and collection succeeds.
  */
-extern "C" auto bioseq_highway_collect_two_stack_reference_output(
+export extern "C" auto bioseq_highway_collect_two_stack_reference_output(
     const std::uint8_t* ranks,
     std::uint64_t rank_count,
     std::uint32_t input_storage_unit_bytes,

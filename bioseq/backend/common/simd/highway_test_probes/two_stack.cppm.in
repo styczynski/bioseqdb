@@ -7,13 +7,12 @@
 #error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
 #endif
 
-#include "common/simd/highway_test_probes/contract.h"
-
 // Generated target token: @BIOSEQ_HIGHWAY_PROBE_TARGET_TOKEN@
 // Generated probe key: @BIOSEQ_HIGHWAY_PROBE_KEY@
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
+import bioseq.highway.test_probe_contract;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.highway_minimizer_contract;

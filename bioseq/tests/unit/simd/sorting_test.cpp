@@ -3,14 +3,12 @@
  * @brief Compares unsigned 128-bit SIMD sort routes with `std::sort`.
  */
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
 #include <hwy/highway.h>
-#include <random>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
+import std;
 import bioseq.simd.sorting;
 
 /**

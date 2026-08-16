@@ -3,15 +3,9 @@
  * @brief Verifies edit-distance thresholds and prefilter correctness metrics.
  */
 
-#include <array>
-#include <cstdint>
-#include <limits>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.bench.prefilter_pipeline_metrics;
 

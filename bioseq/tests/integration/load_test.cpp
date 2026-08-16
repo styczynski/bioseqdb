@@ -10,17 +10,11 @@
  * including write-state flushing
  * as a cross-check, plus the column-rule and malformed-file error paths.
  */
-#include <algorithm>
-#include <cstdint>
 #include <cstdlib>
 #include <fmt/format.h>
-#include <fstream>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 
 namespace {

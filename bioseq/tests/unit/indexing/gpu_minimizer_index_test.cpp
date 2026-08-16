@@ -3,25 +3,16 @@
  * @brief Tests host GPU-index layouts, planning, cache identity, and decline reporting.
  */
 
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 #include <vulkan/vulkan_core.h>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.sequences.kmers;
 import bioseq.indexing.minimizer_hashmap;

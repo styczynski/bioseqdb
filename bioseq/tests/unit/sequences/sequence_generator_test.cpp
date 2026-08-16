@@ -2,21 +2,12 @@
  * @file sequence_generator_test.cpp
  * @brief Generic sequence generator checks.
  */
-#include <tests/support/common.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
-#include <array>
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <iostream>
-#include <limits>
-#include <set>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.gpu.vulkan.runtime;

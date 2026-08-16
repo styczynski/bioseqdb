@@ -3,15 +3,9 @@
  * @brief Verifies KSW2 score and CIGAR parity across lazy-sequence fragments.
  */
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <stdexcept>
-#include <tests/support/common.hpp>
-#include <type_traits>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

@@ -3,23 +3,15 @@
  * @brief Provides sequence-slicing acceptance fixtures and lifetime guards.
  */
 module;
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <fstream>
-#include <iterator>
 #include <libpq-fe.h>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <vector>
+
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.lazy_sequence_slicing_acceptance_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::lazy_sequence_slicing_acceptance_test_support {

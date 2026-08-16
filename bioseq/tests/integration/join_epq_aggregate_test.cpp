@@ -2,12 +2,11 @@
  * @file
  * @brief Exercises EvalPlanQual, aggregate, and fail-closed Bioseq joins.
  */
-#include <chrono>
 #include <libpq-fe.h>
-#include <set>
-#include <tests/support/postgres.hpp>
-#include <thread>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.join_test_support;
 

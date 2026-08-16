@@ -5,8 +5,10 @@
  * The case streams each table row into one little-endian count chunk and
  * checks that insert-time maintenance is rejected for table-wide indexes.
  */
-#include <string>
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

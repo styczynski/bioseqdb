@@ -14,24 +14,16 @@
  *   * strict_alphabet mode rejection of stray bytes.
  *   * async pipeline mode round-trip.
  */
-#include <tests/support/common.hpp>
-
-#include <array>
-#include <atomic>
-#include <cstdint>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
-#include <mutex>
-#include <random>
-#include <string>
-#include <utility>
-#include <vector>
 #include <unistd.h>
 #include <zlib.h>
 
 #include <kseq++/seqio.hpp>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

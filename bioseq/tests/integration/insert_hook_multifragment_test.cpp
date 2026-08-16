@@ -5,10 +5,10 @@
  * One insert must build every fragment and both default indexes. Stored
  * assembly must match recomputation for the single-segment DNA4 fixture.
  */
-#include <set>
-#include <string>
-#include <tests/support/postgres.hpp>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

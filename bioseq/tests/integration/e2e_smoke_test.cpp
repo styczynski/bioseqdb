@@ -9,20 +9,15 @@
  *        mis-mapped dna5 result can never pass). The dna5 path exercises the nt4
  *        normalization (N resets, T valid) end-to-end through the SQL surface.
  */
-#include <tests/support/common.hpp>
-#include <fmt/format.h>
-
-#include <array>
-#include <charconv>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
-#include <string>
-#include <string_view>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
+
+import std;
 import bioseq.sequences;
 import bioseq.sequences.generation;
 import bioseq.common.logging;

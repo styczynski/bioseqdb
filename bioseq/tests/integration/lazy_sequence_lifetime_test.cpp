@@ -3,21 +3,13 @@
  * @brief Exercises persistent ropes, source faults, catalogs, and SQL packing.
  */
 
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <fstream>
-#include <iterator>
 #include <libpq-fe.h>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.lazy_sequence_slicing_acceptance_test_support;
 

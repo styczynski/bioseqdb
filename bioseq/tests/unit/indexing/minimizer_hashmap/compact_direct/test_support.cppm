@@ -6,7 +6,7 @@ module;
 
 #include <hwy/highway.h>
 #include <sys/mman.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.indexing.minimizer_hashmap.compact_direct_support;
 

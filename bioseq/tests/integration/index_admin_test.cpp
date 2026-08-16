@@ -26,13 +26,12 @@
 //   * row-count assertions use bioseq.index_table_row_count() through the
 //     integration-test index_table_row_count() wrapper.
 
-#include <tests/support/postgres.hpp>
-#include <algorithm>
-#include <chrono>
 #include <libpq-fe.h>
-#include <thread>
-#include <utility>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.index_admin_test_support;
 

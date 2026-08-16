@@ -87,7 +87,7 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_manifest_support.cppm"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_scenario_support.cppm"
       HARNESS_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_main.cc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_main.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_activation.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_describe.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/support/safety_runtime_harness_run_case.cpp"

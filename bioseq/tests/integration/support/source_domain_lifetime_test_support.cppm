@@ -3,22 +3,14 @@
  * @brief Provides source-domain counters and process-lifetime fixtures.
  */
 module;
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
+
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.source_domain_lifetime_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::source_domain_lifetime_test_support {

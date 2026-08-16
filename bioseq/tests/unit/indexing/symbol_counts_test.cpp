@@ -3,15 +3,9 @@
  * @brief Tests per-rank symbol histograms and the inline symbol-count index.
  */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <cstdint>
-#include <map>
-#include <span>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

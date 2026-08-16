@@ -5,28 +5,13 @@
 module;
 
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
-
-#include <array>
-#include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <exception>
-#include <memory>
-#include <span>
-#include <sstream>
-#include <string>
-#include <tuple>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
+
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.kmers.vulkan_minimizers_support;
 
+import std;
 export import bioseq.common.logging;
 export import bioseq.common.checked_arithmetic;
 export import bioseq.common.seqan_adapter;

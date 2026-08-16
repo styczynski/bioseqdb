@@ -2,14 +2,9 @@
  * @file minimizer_collector_admission_test.cpp
  * @brief Memory-admission checks for minimizer collector growth.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 

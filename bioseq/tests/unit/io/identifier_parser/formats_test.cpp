@@ -2,11 +2,9 @@
  * @file formats_test.cpp
  * @brief Verifies header format definitions and name normalization.
  */
-#include <array>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.io.identifier_parser.formats;
 

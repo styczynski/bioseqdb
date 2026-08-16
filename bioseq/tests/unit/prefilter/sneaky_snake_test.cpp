@@ -8,17 +8,9 @@
  * conservative contracts across every backend.
  */
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <stdexcept>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.prefilter.sneaky_snake.vulkan;

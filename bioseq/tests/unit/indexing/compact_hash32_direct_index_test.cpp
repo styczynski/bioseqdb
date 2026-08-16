@@ -3,29 +3,15 @@
  * @brief Tests direct hash32 wire formats and bounded or exact open validation.
  */
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <expected>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <set>
-#include <span>
-#include <tests/support/common.hpp>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
 
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.tests.unit.indexing.compact_hash32_direct_index_support;
 

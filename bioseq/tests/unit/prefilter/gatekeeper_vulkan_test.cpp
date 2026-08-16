@@ -5,18 +5,9 @@
  * Hardware cases compare every result ABI field with the scalar oracle while retaining production
  * dispatch keys, poisoned slice boundaries, and order-sensitive command replay fixtures.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <numeric>
-#include <span>
-#include <vector>
-
+import std;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.prefilter.gatekeeper;
 import bioseq.prefilter.gatekeeper.vulkan;

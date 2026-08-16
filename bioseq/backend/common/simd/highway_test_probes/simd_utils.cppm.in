@@ -7,11 +7,10 @@
 #error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
 #endif
 
-#include "common/simd/highway_test_probes/contract.h"
-
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
+import bioseq.highway.test_probe_contract;
 import :simd_utils;
 
 namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {

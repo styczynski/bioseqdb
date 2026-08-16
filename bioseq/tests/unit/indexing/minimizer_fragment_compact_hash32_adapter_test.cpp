@@ -3,22 +3,9 @@
  * @brief Tests compact-hash32 adaptation from persisted minimizer fragments.
  */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <expected>
-#include <limits>
-#include <map>
-#include <optional>
-#include <span>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
 import bioseq.indexing.storage;
 import bioseq.indexing.type;

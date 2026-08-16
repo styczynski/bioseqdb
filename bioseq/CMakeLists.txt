@@ -279,9 +279,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # Fail closed on authored additions until their target and generator ownership
 # has been reviewed and the exact inventory count is advanced deliberately.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 336)
+if(NOT _bioseq_nopg_module_count EQUAL 337)
   message(FATAL_ERROR
-    "Domain-neutral module inventory must contain exactly 336 authored units; "
+    "Domain-neutral module inventory must contain exactly 337 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)

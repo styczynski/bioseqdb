@@ -5,10 +5,10 @@
  * The cases cover insert maintenance, row placement, recomputation, rollback,
  * reserved sub-keys, and missing manifests.
  */
-#include <set>
-#include <string_view>
-#include <tests/support/postgres.hpp>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

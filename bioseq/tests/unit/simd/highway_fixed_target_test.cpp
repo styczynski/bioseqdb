@@ -3,10 +3,9 @@
  * @brief Verifies fixed-target Highway probes without runtime redispatch.
  */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include "common/simd/highway_test_probes/contract.h"
-
+import std;
 import bioseq.highway.test_support;
 
 #if defined(BIOSEQ_TEST_INDEXES)

@@ -3,15 +3,9 @@
  * @brief Verifies exact edit accounting across KSW2 and Block Aligner routes.
  */
 
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.cigar;

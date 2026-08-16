@@ -4,33 +4,13 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
-#include <expected>
 #include <hwy/highway.h>
-#include <iterator>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
-#include <tests/support/common.hpp>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.indexing.minimizer_hashmap.fragment_producer_support;
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.context;

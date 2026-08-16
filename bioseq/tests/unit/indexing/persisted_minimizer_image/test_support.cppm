@@ -4,28 +4,12 @@
  */
 module;
 
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <exception>
-#include <expected>
-#include <initializer_list>
-#include <limits>
-#include <optional>
-#include <span>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include <sys/mman.h>
 #include <unistd.h>
 
 export module bioseq.tests.unit.indexing.persisted_minimizer_image_support;
 
+import std;
 import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_fragment_image;

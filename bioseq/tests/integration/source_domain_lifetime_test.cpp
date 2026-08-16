@@ -1,19 +1,11 @@
 /** @file Shared source-domain ownership and lifetime integration coverage. */
 
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.source_domain_lifetime_test_support;
 

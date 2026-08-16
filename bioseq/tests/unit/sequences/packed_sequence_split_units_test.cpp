@@ -2,12 +2,12 @@
  * @file packed_sequence_split_units_test.cpp
  * @brief Unit-aligned sequence partitioning and reassembly checks.
  */
-#include <tests/support/common.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
-#include <string>
-#include <tuple>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

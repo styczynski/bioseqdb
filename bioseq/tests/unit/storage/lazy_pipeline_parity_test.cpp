@@ -3,15 +3,10 @@
  * @brief Verifies minimap pipeline parity across resident and chunked sequence views.
  */
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
 #include <fmt/format.h>
-#include <stdexcept>
-#include <string>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

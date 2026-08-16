@@ -1,10 +1,8 @@
 /** @file Integration contracts for SQL metadata row codecs. */
 
-#include <tests/support/postgres.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <string>
-#include <string_view>
-
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

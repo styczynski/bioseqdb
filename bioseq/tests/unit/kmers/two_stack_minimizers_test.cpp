@@ -2,23 +2,9 @@
  * @file two_stack_minimizers_test.cpp
  * @brief Biological and dispatch checks for two-stack minimizer kernels.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <compare>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <string_view>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;

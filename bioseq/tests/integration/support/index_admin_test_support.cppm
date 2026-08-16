@@ -3,15 +3,14 @@
  * @brief Provides metadata-admin fixtures shared by integration cases.
  */
 module;
-#include <tests/support/postgres.hpp>
-#include <algorithm>
-#include <chrono>
 #include <libpq-fe.h>
-#include <thread>
-#include <utility>
+
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.index_admin_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::index_admin_test_support {

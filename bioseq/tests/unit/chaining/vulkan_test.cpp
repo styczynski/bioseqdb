@@ -3,15 +3,10 @@
  * @brief Verifies Vulkan chaining, CIGAR, coordinate, and shader-layout contracts.
  */
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <hwy/highway.h>
-#include <span>
-#include <stdexcept>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.common.context;

@@ -3,16 +3,10 @@
  * @brief Verifies fixed-target SIMD chaining policies against scalar oracles.
  */
 
-#include <algorithm>
-#include <array>
-#include <cstdint>
 #include <hwy/highway.h>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.context;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;

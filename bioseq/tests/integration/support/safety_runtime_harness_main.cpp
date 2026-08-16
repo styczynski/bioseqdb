@@ -1,5 +1,5 @@
 /**
- * @file safety_runtime_harness_main.cc
+ * @file safety_runtime_harness_main.cpp
  * @brief Dispatch the standalone SQL-boundary safety evidence protocol.
  */
 

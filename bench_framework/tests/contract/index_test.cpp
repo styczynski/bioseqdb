@@ -23,8 +23,6 @@
  *     `printf`/`cerr` outside `standard_error_capture`'s redirect plumbing,
  *     and no helper that throws on cleanup.
  */
-#include <tests/support/common.hpp>
-
 #include <catch2/catch_approx.hpp>
 
 #include <simdjson.h>
@@ -33,37 +31,16 @@
 
 #include <oneapi/tbb/global_control.h>
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <chrono>
-#include <cmath>
-#include <condition_variable>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <set>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <tuple>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.instrumentation;
 import bioseq.parallelism.concepts;

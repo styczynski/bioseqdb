@@ -1496,6 +1496,7 @@ collect_slot_owners(const source_manifest& inventory) {
            << "#include <stdexcept>\n\n"
            << "// Generated fixed-target test binding; do not edit.\n"
            << "export module bioseq.highway.test_support;\n\n"
+           << "export import bioseq.highway.test_probe_contract;\n"
            << "import " << plan.source_inventory.contract_module << ";\n"
            << "import " << coordinate.module_name << ";\n\n"
            << "export namespace bioseq::simd_dispatch {\n\n"
@@ -1624,6 +1625,8 @@ inline void validate_rendered_artifact(
     if (artifact.kind == artifact_kind::unit_probe_implementation
         && (!artifact.content.contains("#define HWY_TARGET ")
             || !artifact.content.contains("import :")
+            || !artifact.content.contains(
+                "import bioseq.highway.test_probe_contract;")
             || artifact.content.contains("export module")
             || artifact.content.contains("bind_highway_target"))) {
         throw std::runtime_error(

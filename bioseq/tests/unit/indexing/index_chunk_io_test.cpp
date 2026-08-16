@@ -3,23 +3,11 @@
  * @brief Tests chunk sizing, addressing, reads, and writes with small fake chunks.
  */
 
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <initializer_list>
-#include <limits>
-#include <map>
-#include <span>
-#include <string>
-#include <string_view>
-#include <tuple>
-#include <utility>
-#include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

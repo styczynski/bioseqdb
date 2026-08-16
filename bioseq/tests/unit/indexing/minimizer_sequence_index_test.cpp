@@ -7,20 +7,9 @@
  */
 
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstdint>
-#include <limits>
-#include <iterator>
-#include <map>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;

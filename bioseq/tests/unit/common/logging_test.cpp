@@ -3,19 +3,11 @@
  * @brief Verifies logging sinks, fallback files, argument packing, and lifetimes.
  */
 
-#include <array>
-#include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <limits>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
-#include <thread>
-#include <vector>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 
 /** @brief Tracks copies, moves, and destruction of queued custom arguments. */

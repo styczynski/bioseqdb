@@ -2,19 +2,12 @@
  * @file identifier_parser_test.cpp
  * @brief Verifies header parsing, destination mapping, and file sampling.
  */
-#include <atomic>
-#include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.io.options;
 import bioseq.io.reader;

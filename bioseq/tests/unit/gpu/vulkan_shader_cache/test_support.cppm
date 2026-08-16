@@ -4,37 +4,18 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <chrono>
-#include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <expected>
 #include <fcntl.h>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
-#include <limits>
-#include <memory>
-#include <optional>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
 #include <sys/stat.h>
-#include <tests/support/common.hpp>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 #include <vulkan/vulkan.h>
+
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.gpu.vulkan_shader_cache_support;
 
+import std;
 import bioseq.gpu.vulkan.shader_cache;
 import bioseq.gpu.vulkan.shader_compiler;
 import bioseq.gpu.vulkan.shader_layout;

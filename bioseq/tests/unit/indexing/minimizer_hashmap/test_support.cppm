@@ -5,7 +5,7 @@
 module;
 
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.indexing.minimizer_hashmap_support;
 

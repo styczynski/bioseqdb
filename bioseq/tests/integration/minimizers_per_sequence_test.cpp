@@ -2,9 +2,10 @@
  * @file
  * @brief Integration contract for per-sequence minimizer merge and active reads.
  */
-#include <set>
-#include <tests/support/postgres.hpp>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

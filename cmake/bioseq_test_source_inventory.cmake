@@ -17,9 +17,9 @@ target_sources(bioseq_bench_prefilter_metrics
     FILES
       "${CMAKE_CURRENT_SOURCE_DIR}/../bench/prefilter_pipeline_metrics.cppm")
 
-# Indexing storage fakes and the libpq integration client each have one reusable
-# test-support owner. Test executables link these targets instead of recompiling
-# the same providers in every consumer.
+# Indexing storage fakes and the libpq integration client each have one
+# reusable test-support owner. Test executables link these targets instead of
+# recompiling the same providers in every consumer.
 bioseq_collect_authored_sources(
   BIOSEQ_UNIT_TEST_SUPPORT_MODULES
   BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests"
@@ -246,6 +246,229 @@ set(BIOSEQ_INTEGRATION_TEST_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/symbol_count_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/typmod_coalesce_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/wire_test.cpp")
+
+# Dead support bundles stay removed. Sources that replaced them use `import
+# std` and own only the external macro headers required by their tokens.
+function(_bioseq_require_direct_test_header
+    result source contents tokens token_regex header)
+  string(REGEX MATCH "${token_regex}" _bioseq_uses_token "${tokens}")
+  string(FIND "${contents}" "#include <${header}>"
+    _bioseq_direct_header_offset)
+  if(_bioseq_uses_token AND _bioseq_direct_header_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Test token has no direct ${header} include in ${source}")
+  elseif(NOT _bioseq_uses_token
+      AND NOT _bioseq_direct_header_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Unused ${header} include in ${source}")
+  endif()
+  set(${result} "${_bioseq_uses_token}" PARENT_SCOPE)
+endfunction()
+
+file(GLOB_RECURSE _bioseq_test_support_contract_sources
+  LIST_DIRECTORIES FALSE CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.hpp")
+list(APPEND _bioseq_test_support_contract_sources
+  "${CMAKE_CURRENT_SOURCE_DIR}/../bench_framework/tests/contract/index_test.cpp")
+set(_bioseq_std_import_test_source_count 0)
+foreach(_bioseq_test_support_contract_source IN LISTS
+    _bioseq_test_support_contract_sources)
+  file(READ "${_bioseq_test_support_contract_source}"
+    _bioseq_test_support_contract_contents)
+  string(REGEX REPLACE "//[^\n]*" ""
+    _bioseq_test_support_contract_tokens
+    "${_bioseq_test_support_contract_contents}")
+  string(REGEX REPLACE "/\\*([^*]|\\*+[^*/])*\\*+/" ""
+    _bioseq_test_support_contract_tokens
+    "${_bioseq_test_support_contract_tokens}")
+
+  string(FIND "${_bioseq_test_support_contract_contents}"
+    "import std;" _bioseq_test_support_std_import_offset)
+  if(NOT _bioseq_test_support_std_import_offset EQUAL -1)
+    math(EXPR _bioseq_std_import_test_source_count
+      "${_bioseq_std_import_test_source_count} + 1")
+    string(REGEX MATCH
+      "#[ \t]*include[ \t]*<(algorithm|array|atomic|bit|chrono|concepts|exception|expected|filesystem|fstream|iterator|limits|map|memory|mutex|numeric|optional|ostream|queue|random|ranges|set|span|sstream|stdexcept|string|string_view|thread|tuple|type_traits|utility|vector)>"
+      _bioseq_test_support_textual_std
+      "${_bioseq_test_support_contract_contents}")
+    if(_bioseq_test_support_textual_std)
+      message(FATAL_ERROR
+        "Test source imports std but also restores the former textual "
+        "standard-library bundle: "
+        "${_bioseq_test_support_contract_source}")
+    endif()
+
+    string(REGEX MATCH "(^|[^A-Za-z0-9_])fmt::"
+      _bioseq_test_support_uses_fmt
+      "${_bioseq_test_support_contract_tokens}")
+    string(FIND "${_bioseq_test_support_contract_contents}"
+      "#include <fmt/format.h>" _bioseq_test_support_fmt_header_offset)
+    if(_bioseq_test_support_uses_fmt
+        AND _bioseq_test_support_fmt_header_offset EQUAL -1)
+      message(FATAL_ERROR
+        "Direct fmt use has no direct format header in "
+        "${_bioseq_test_support_contract_source}")
+    elseif(NOT _bioseq_test_support_uses_fmt
+        AND NOT _bioseq_test_support_fmt_header_offset EQUAL -1)
+      message(FATAL_ERROR
+        "Unused fmt format header in ${_bioseq_test_support_contract_source}")
+    endif()
+
+    string(REGEX MATCH "(^|[^A-Za-z0-9_])sqlgen::"
+      _bioseq_test_support_uses_sqlgen
+      "${_bioseq_test_support_contract_tokens}")
+    string(REGEX MATCH
+      "#[ \t]*include[ \t]*<sqlgen/(read|write)\\.hpp>"
+      _bioseq_test_support_sqlgen_header
+      "${_bioseq_test_support_contract_contents}")
+    if(_bioseq_test_support_uses_sqlgen
+        AND NOT _bioseq_test_support_sqlgen_header)
+      message(FATAL_ERROR
+        "Direct sqlgen use has no direct interface header in "
+        "${_bioseq_test_support_contract_source}")
+    elseif(NOT _bioseq_test_support_uses_sqlgen
+        AND _bioseq_test_support_sqlgen_header)
+      message(FATAL_ERROR
+        "Unused sqlgen interface header in "
+        "${_bioseq_test_support_contract_source}")
+    endif()
+  endif()
+
+  foreach(_bioseq_test_support_forbidden_spelling IN ITEMS
+      "tests/support/common.hpp"
+      "tests/support/postgres.hpp"
+      "tests/support/common.cppm"
+      "tests/support/postgres.cppm"
+      "bioseq.tests.support.common"
+      "import bioseq.tests.support.postgres;"
+      "bioseq_common_test_support"
+      "ASSERT_SQLGEN"
+      "assert_range_set_equality"
+      "increasing_vector"
+      "increasing_array"
+      "vector_increasing_matrix_2d"
+      "nested_range"
+      "flatten_t"
+      "CATCH_CONFIG_CONSOLE_WIDTH")
+    string(FIND "${_bioseq_test_support_contract_contents}"
+      "${_bioseq_test_support_forbidden_spelling}"
+      _bioseq_test_support_forbidden_offset)
+    if(NOT _bioseq_test_support_forbidden_offset EQUAL -1)
+      message(FATAL_ERROR
+        "Removed test-support boundary resurfaced in "
+        "${_bioseq_test_support_contract_source}: "
+        "${_bioseq_test_support_forbidden_spelling}")
+    endif()
+  endforeach()
+
+  set(_bioseq_catch_universal_header_count 0)
+  foreach(_bioseq_catch_universal_header IN ITEMS
+      "catch2/catch_test_macros.hpp"
+      "catch2/catch_template_test_macros.hpp"
+      "catch2/generators/catch_generators.hpp"
+      "catch2/benchmark/catch_benchmark.hpp")
+    string(FIND "${_bioseq_test_support_contract_contents}"
+      "${_bioseq_catch_universal_header}"
+      _bioseq_catch_universal_header_offset)
+    if(NOT _bioseq_catch_universal_header_offset EQUAL -1)
+      math(EXPR _bioseq_catch_universal_header_count
+        "${_bioseq_catch_universal_header_count} + 1")
+    endif()
+  endforeach()
+  if(_bioseq_catch_universal_header_count EQUAL 4)
+    message(FATAL_ERROR
+      "Test source restored the former universal Catch header bundle: "
+      "${_bioseq_test_support_contract_source}")
+  endif()
+
+  _bioseq_require_direct_test_header(
+    _bioseq_test_support_uses_catch_core
+    "${_bioseq_test_support_contract_source}"
+    "${_bioseq_test_support_contract_contents}"
+    "${_bioseq_test_support_contract_tokens}"
+    "(^|[^A-Za-z0-9_])(TEST_CASE(_METHOD)?|SCENARIO(_METHOD)?|SECTION|DYNAMIC_SECTION|REQUIRE(_[A-Z_]+)?|CHECK(_[A-Z_]+)?|STATIC_REQUIRE(_FALSE)?|INFO|UNSCOPED_INFO|WARN|CAPTURE|FAIL(_CHECK)?|SUCCEED|SKIP)[ \t\r\n]*\\("
+    "catch2/catch_test_macros.hpp")
+  _bioseq_require_direct_test_header(
+    _bioseq_test_support_uses_catch_template
+    "${_bioseq_test_support_contract_source}"
+    "${_bioseq_test_support_contract_contents}"
+    "${_bioseq_test_support_contract_tokens}"
+    "(^|[^A-Za-z0-9_])(TEMPLATE_(TEST_CASE|TEST_CASE_SIG|TEST_CASE_METHOD|TEST_CASE_METHOD_SIG|PRODUCT_TEST_CASE|PRODUCT_TEST_CASE_SIG|PRODUCT_TEST_CASE_METHOD|PRODUCT_TEST_CASE_METHOD_SIG|LIST_TEST_CASE|LIST_TEST_CASE_METHOD)|CATCH_TEMPLATE_(TEST_CASE|TEST_CASE_SIG|TEST_CASE_METHOD|TEST_CASE_METHOD_SIG|PRODUCT_TEST_CASE|PRODUCT_TEST_CASE_SIG|PRODUCT_TEST_CASE_METHOD|PRODUCT_TEST_CASE_METHOD_SIG|LIST_TEST_CASE|LIST_TEST_CASE_METHOD))"
+    "catch2/catch_template_test_macros.hpp")
+  _bioseq_require_direct_test_header(
+    _bioseq_test_support_uses_catch_generators
+    "${_bioseq_test_support_contract_source}"
+    "${_bioseq_test_support_contract_contents}"
+    "${_bioseq_test_support_contract_tokens}"
+    "(^|[^A-Za-z0-9_])(GENERATE|GENERATE_COPY|GENERATE_REF)[ \t\r\n]*\\(|Catch::Generators::"
+    "catch2/generators/catch_generators.hpp")
+  _bioseq_require_direct_test_header(
+    _bioseq_test_support_uses_catch_benchmark
+    "${_bioseq_test_support_contract_source}"
+    "${_bioseq_test_support_contract_contents}"
+    "${_bioseq_test_support_contract_tokens}"
+    "(^|[^A-Za-z0-9_])(BENCHMARK|BENCHMARK_ADVANCED)[ \t\r\n]*\\(|Catch::Benchmark::"
+    "catch2/benchmark/catch_benchmark.hpp")
+
+  _bioseq_require_direct_test_header(
+    _bioseq_test_support_uses_libassert
+    "${_bioseq_test_support_contract_source}"
+    "${_bioseq_test_support_contract_contents}"
+    "${_bioseq_test_support_contract_tokens}"
+    "(^|[^A-Za-z0-9_])(ASSERT|DEBUG_ASSERT|ASSUME|PANIC|UNREACHABLE)[ \t\r\n]*\\(|libassert::"
+    "libassert/assert.hpp")
+  string(REGEX MATCH
+    "(^|[^A-Za-z0-9_])(ASSERT|DEBUG_ASSERT|ASSUME|PANIC|UNREACHABLE)[ \t\r\n]*\\("
+    _bioseq_test_support_uses_libassert_macro
+    "${_bioseq_test_support_contract_tokens}")
+  string(FIND "${_bioseq_test_support_contract_contents}"
+    "#include <libassert/assert-catch2.hpp>"
+    _bioseq_test_support_libassert_catch_header_offset)
+  if(_bioseq_test_support_uses_libassert_macro
+      AND (_bioseq_test_support_uses_catch_core
+        OR _bioseq_test_support_uses_catch_template))
+    if(_bioseq_test_support_libassert_catch_header_offset EQUAL -1)
+      message(FATAL_ERROR
+        "Catch test using libassert lacks direct integration header in "
+        "${_bioseq_test_support_contract_source}")
+    endif()
+  elseif(NOT _bioseq_test_support_libassert_catch_header_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Unused libassert Catch integration header in "
+      "${_bioseq_test_support_contract_source}")
+  endif()
+endforeach()
+if(NOT _bioseq_std_import_test_source_count EQUAL 167)
+  message(FATAL_ERROR
+    "Test source inventory must have exactly 167 import-std units; got "
+    "${_bioseq_std_import_test_source_count}")
+endif()
+unset(_bioseq_catch_universal_header_count)
+unset(_bioseq_catch_universal_header_offset)
+unset(_bioseq_catch_universal_header)
+unset(_bioseq_std_import_test_source_count)
+unset(_bioseq_test_support_textual_std)
+unset(_bioseq_test_support_std_import_offset)
+unset(_bioseq_test_support_uses_fmt)
+unset(_bioseq_test_support_fmt_header_offset)
+unset(_bioseq_test_support_uses_sqlgen)
+unset(_bioseq_test_support_sqlgen_header)
+unset(_bioseq_test_support_uses_catch_core)
+unset(_bioseq_test_support_uses_catch_template)
+unset(_bioseq_test_support_uses_catch_generators)
+unset(_bioseq_test_support_uses_catch_benchmark)
+unset(_bioseq_test_support_uses_libassert)
+unset(_bioseq_test_support_uses_libassert_macro)
+unset(_bioseq_test_support_libassert_catch_header_offset)
+unset(_bioseq_test_support_forbidden_offset)
+unset(_bioseq_test_support_forbidden_spelling)
+unset(_bioseq_test_support_contract_tokens)
+unset(_bioseq_test_support_contract_contents)
+unset(_bioseq_test_support_contract_source)
+unset(_bioseq_test_support_contract_sources)
 
 if(NOT BIOSEQ_TEST_INDEXES)
   set_source_files_properties(

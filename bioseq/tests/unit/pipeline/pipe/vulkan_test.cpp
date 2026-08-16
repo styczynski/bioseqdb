@@ -2,27 +2,11 @@
  * @file vulkan_test.cpp
  * @brief Exercises Vulkan pipeline routes.
  */
-#include <tests/support/common.hpp>
-
 #include <catch2/matchers/catch_matchers.hpp>
 
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cmath>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.unit.pipeline.pipe_support;
 
 using namespace bioseq::tests::pipeline::pipe_support;

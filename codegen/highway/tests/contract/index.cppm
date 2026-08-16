@@ -906,6 +906,8 @@ inline void verify_generated_closure() {
                     artifact.module_name == "bioseq.highway.test_support"
                         && artifact.target_token == "HWY_EMU128"
                         && artifact.content.contains(
+                            "export import bioseq.highway.test_probe_contract;")
+                        && artifact.content.contains(
                             "N_EMU128::bind_highway_target()")
                         && artifact.content.contains(
                             "highway_test_kernel_table()")

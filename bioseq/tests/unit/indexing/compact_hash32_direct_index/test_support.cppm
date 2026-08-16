@@ -4,26 +4,12 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <expected>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <set>
-#include <span>
-#include <tests/support/common.hpp>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.unit.indexing.compact_hash32_direct_index_support;
 
+import std;
 import bioseq.indexing.compact_hash32_direct_index;
 
 export namespace bioseq::tests::unit::indexing::compact_hash32_direct_index_test_support {

@@ -3,21 +3,10 @@
  * @brief Verifies rank packing across alphabets, widths, sinks, and adapters.
  */
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <span>
-#include <string>
-#include <string_view>
-#include <tests/support/common.hpp>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;

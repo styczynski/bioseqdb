@@ -3,20 +3,9 @@
  * @brief Fixed-output checks for resident and fixed-target two-stack kernels.
  */
 
-#include <tests/support/common.hpp>
-#include "common/simd/highway_test_probes/contract.h"
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <ranges>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;

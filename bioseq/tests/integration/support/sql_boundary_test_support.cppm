@@ -3,20 +3,14 @@
  * @brief Provides SQL-boundary fixtures shared by integration cases.
  */
 module;
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <chrono>
 #include <libpq-fe.h>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <utility>
+
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
 export module bioseq.tests.integration.sql_boundary_test_support;
 
+import std;
 import bioseq.tests.integration.support;
 
 export namespace bioseq_int_tests::sql_boundary_test_support {

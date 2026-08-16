@@ -3,15 +3,9 @@
  * @brief Verifies GPU and CPU sequence-sort permutations against a scalar oracle.
  */
 
-#include <cstdint>
-#include <deque>
-#include <numeric>
-#include <random>
-#include <span>
-#include <string>
-#include <tests/support/common.hpp>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter; // seq::dna4 / seq::dna5
 import bioseq.sequences;

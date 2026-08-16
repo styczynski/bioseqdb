@@ -1,19 +1,11 @@
 /** @file Deterministic randomized properties for lazy sequence expressions. */
 
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <limits>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

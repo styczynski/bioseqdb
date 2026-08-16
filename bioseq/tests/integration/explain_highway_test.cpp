@@ -2,14 +2,11 @@
  * @file
  * @brief Exercises Highway dispatch metadata in Bioseq EXPLAIN output.
  */
-#include <algorithm>
-#include <array>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <limits>
-#include <mutex>
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 import bioseq.tests.integration.explain_test_support;
 

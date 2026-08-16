@@ -3,18 +3,9 @@
  * @brief Verifies pool scheduling, tracked tasks, and memory-admission lifetimes.
  */
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <stdexcept>
-#include <tests/support/common.hpp>
-#include <thread>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.context;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;

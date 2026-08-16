@@ -6,12 +6,10 @@
 // Integration coverage for the Bioseq administration views and the native
 // table-option functions.
 
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include <cstddef>
-#include <string>
-#include <string_view>
-
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

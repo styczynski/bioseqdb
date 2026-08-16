@@ -7,20 +7,14 @@
  * forward/reverse hits and target positions above 2^32. Skips cleanly when no
  * hardware Vulkan device exists.
  */
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <span>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include <vulkan/vulkan_core.h>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.common.context;
 import bioseq.sequences.kmers;

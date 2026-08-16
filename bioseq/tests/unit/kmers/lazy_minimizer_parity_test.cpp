@@ -6,21 +6,9 @@
  */
 
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cstdint>
-#include <iterator>
-#include <limits>
-#include <span>
-#include <stdexcept>
-#include <string_view>
-#include <tuple>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;

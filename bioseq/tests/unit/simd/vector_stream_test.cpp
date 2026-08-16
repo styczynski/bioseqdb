@@ -3,13 +3,12 @@
  * @brief Verifies vector-stream operations against direct Highway operations.
  */
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
-#include <type_traits>
+#include <catch2/catch_template_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
+import std;
 import bioseq.simd.utils;
 import bioseq.simd.vector_stream;
 import bioseq.common.logging;
