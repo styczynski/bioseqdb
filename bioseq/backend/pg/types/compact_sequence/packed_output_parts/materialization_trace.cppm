@@ -519,11 +519,10 @@ find_unique_boundary_by_classification(
 }
 
 [[nodiscard]] inline std::uint64_t steady_clock_now_ns() noexcept {
-  using namespace std::chrono;
-  const auto value =
-      duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
-          .count();
-  return value <= 0 ? 1u : static_cast<std::uint64_t>(value);
+    const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    return value <= 0 ? 1u : static_cast<std::uint64_t>(value);
 }
 
 } // namespace

@@ -310,8 +310,8 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
     sequence_size_t cap_bytes,
     bioseq::storage::seq_caches* caches) {
     using traits = typename compact_sequence_range<p_sequence_config>::traits;
-    using unit_t = typename traits::storage_unit;
-    static_assert(sizeof(unit_t) == k_dna4_storage_width,
+    using storage_unit_type = typename traits::storage_unit;
+    static_assert(sizeof(storage_unit_type) == k_dna4_storage_width,
                   "create_query_target_sample_table expects dna4/u64 storage");
     static_assert(traits::letters_per_unit == k_dna4_letters_per_unit,
                   "create_query_target_sample_table expects dna4/u64 packing");
@@ -341,7 +341,7 @@ template <bioseq::sequences::generation::packed_sequence_config p_sequence_confi
         std::memcpy(
             dst->data,
             seq.packed_units.data() + unit0,
-            units * sizeof(unit_t));
+            units * sizeof(storage_unit_type));
     };
 
     return bioseq::postgres::support::invoke_pg_as_cpp(
@@ -402,8 +402,6 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
             .default_value = bioseq::sql::checked_sql{"42"},
         })]]
         std::optional<std::int64_t> seed) {
-    using namespace bioseq::sequences::generation::pg;
-
     if (!table_name.has_value() || !n_sequences.has_value()
         || !sequence_bp_size.has_value()) {
         bioseq::postgres::support::raise_sql_error(
@@ -634,7 +632,6 @@ export namespace bioseq::sequences::generation::pg::sql_routines {
         std::optional<double> deletion_length_mean,
         std::optional<double> reverse_complement_rate,
         std::optional<std::int64_t> seed) {
-    using namespace bioseq::sequences::generation::pg;
     namespace gen_ns = bioseq::sequences::generation;
 
     if (!table_name.has_value()) {

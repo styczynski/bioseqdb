@@ -262,11 +262,6 @@ enum class retired_join_root_policy : std::uint8_t {
 
 namespace {
 
-[[nodiscard]] inline bool record_retired_join_root(
-    piece_tree_arena& destination,
-    piece_edge edge,
-    retired_join_root_policy policy);
-
 [[nodiscard]] inline tracked_piece_edge make_branch_tracked(
     piece_tree_arena& destination,
     piece_edge_cleanup_ledger* ledger,
