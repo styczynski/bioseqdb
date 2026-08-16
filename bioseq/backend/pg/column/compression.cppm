@@ -37,10 +37,11 @@ import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.support;
 
-/*
- * Header prepended to a pglz-compressed buffer; combines the standard
- * varlena length header with a separate raw-size field so decompression
- * can allocate the right output buffer without external metadata.
+/**
+ * @brief Prefixes PGLZ bytes with encoded and raw buffer sizes.
+ *
+ * The standard varlena field remains first so PostgreSQL macros can validate the encoded
+ * length. `raw_size` lets decompression allocate without external metadata.
  */
 struct compressed_column_header
 {
@@ -59,6 +60,11 @@ static_assert(
 	static_cast<uint64_t>(PGLZ_MAX_OUTPUT(0))
 	== pglz_maximum_output_overhead);
 
+/**
+ * @brief Reports a PostgreSQL size-limit error for compression allocation.
+ * @param[in] operation Diagnostic verb describing the failed operation.
+ * @param[in] byte_count Requested size in bytes.
+ */
 [[noreturn]] static void
 raise_compression_size_error(const char* operation, uint64_t byte_count)
 {
@@ -75,6 +81,10 @@ raise_compression_size_error(const char* operation, uint64_t byte_count)
 		});
 }
 
+/**
+ * @brief Reports malformed compressed input through PostgreSQL's error boundary.
+ * @param[in] detail Diagnostic detail moved into the error report.
+ */
 [[noreturn]] static void
 raise_corrupt_compressed_buffer(std::string detail)
 {
@@ -86,6 +96,11 @@ raise_corrupt_compressed_buffer(std::string detail)
 		});
 }
 
+/**
+ * @brief Validates source and destination `StringInfo` storage before compression.
+ * @param[in] input_buffer Readable input with a nonnegative length.
+ * @param[in] output_buffer Writable initialized destination buffer.
+ */
 static void
 validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
 {
@@ -109,6 +124,12 @@ validate_compression_buffers(StringInfo input_buffer, StringInfo output_buffer)
 	}
 }
 
+/**
+ * @brief Narrows a byte count to PostgreSQL's allocatable `StringInfo` range.
+ * @param[in] byte_count Requested byte count.
+ * @param[in] operation Diagnostic verb used when the request is too large.
+ * @return Valid signed capacity.
+ */
 [[nodiscard]] static int
 validate_string_info_size(uint64_t byte_count, const char* operation)
 {
@@ -123,7 +144,7 @@ validate_string_info_size(uint64_t byte_count, const char* operation)
 }
 
 /**
- * Parse the SQL spelling of a supported compression algorithm.
+ * @brief Parses the SQL spelling of a supported compression algorithm.
  *
  * @param[in] value Null-terminated PostgreSQL name buffer.
  * @return Parsed algorithm, or `invalid` for an unsupported spelling.
@@ -156,8 +177,9 @@ parse_compression_algorithm(const char* value) noexcept
 }
 
 /**
- * Return the SQL spelling of a supported compression algorithm.
+ * @brief Returns the SQL spelling of a supported compression algorithm.
  *
+ * @param[in] value Algorithm selector.
  * @return Static spelling, or null for a sentinel value.
  */
 export [[nodiscard]] const char*
@@ -184,25 +206,35 @@ compression_algorithm_name(bioseq::compression_algorithm value) noexcept
 	return nullptr;
 }
 
-// These hot-path helpers interpret the prefix of a StringInfo byte buffer.
+/// @brief Returns the fixed PGLZ column header size in bytes.
+/// @return Header size used by both encoder and decoder.
 [[gnu::always_inline]] [[nodiscard]] inline constexpr int32_t
 compressed_column_header_size() noexcept
 {
 	return static_cast<int32_t>(sizeof(compressed_column_header));
 }
 
+/// @brief Reads the raw byte count from a validated PGLZ column header.
+/// @param[in] compressed_buffer Buffer beginning with `compressed_column_header`.
+/// @return Declared decompressed size in bytes.
 [[gnu::always_inline]] [[nodiscard]] inline int32_t
 compressed_column_raw_size(const char* compressed_buffer) noexcept
 {
 	return reinterpret_cast<const compressed_column_header*>(compressed_buffer)->raw_size;
 }
 
+/// @brief Locates the PGLZ payload after its fixed header.
+/// @param[in] compressed_buffer Writable buffer beginning with the header.
+/// @return Pointer to the first compressed payload byte.
 [[gnu::always_inline]] [[nodiscard]] inline char*
 compressed_column_payload(char* compressed_buffer) noexcept
 {
 	return compressed_buffer + compressed_column_header_size();
 }
 
+/// @brief Writes the raw byte count into a PGLZ column header.
+/// @param[in,out] compressed_buffer Writable buffer beginning with the header.
+/// @param[in] raw_size Decompressed size in bytes.
 [[gnu::always_inline]] inline void
 set_compressed_column_raw_size(char* compressed_buffer, int32_t raw_size) noexcept
 {
@@ -210,12 +242,14 @@ set_compressed_column_raw_size(char* compressed_buffer, int32_t raw_size) noexce
 }
 
 
-/** @brief Compresses a serialized column buffer when the algorithm is effective.
- * @param input_buffer Source bytes.
- * @param output_buffer Destination scratch buffer, valid on success.
- * @param compression_algorithm Configured compression algorithm.
- * @param compression_level Algorithm-specific level.
- * @return True when compressed bytes were produced.
+/**
+ * @brief Compresses a serialized column buffer when the selected codec succeeds.
+ * @param[in] input_buffer Source bytes borrowed for the call.
+ * @param[in,out] output_buffer Reusable destination scratch buffer, valid on success.
+ * @param[in] compression_algorithm Configured compression algorithm.
+ * @param[in] compression_level Algorithm-specific compression level.
+ * @return `true` when compressed bytes were produced.
+ * @note Invalid buffers and unallocatable sizes report PostgreSQL errors.
  */
 export bool
 compress_column_buffer(StringInfo input_buffer,
@@ -377,8 +411,13 @@ compress_column_buffer(StringInfo input_buffer,
 }
 
 
-/** @brief Decompresses serialized column bytes.
- * @return The input buffer for `none`, otherwise a newly allocated buffer.
+/**
+ * @brief Decompresses serialized column bytes and validates the exact output size.
+ * @param[in] buffer Encoded bytes, or the uncompressed buffer for `none`.
+ * @param[in] compression_algorithm Codec used to produce the buffer.
+ * @param[in] decompressed_size Expected output size in bytes.
+ * @return The borrowed input for `none`, otherwise a current-context allocated buffer.
+ * @note Malformed input and size mismatches report PostgreSQL data-corruption errors.
  */
 export StringInfo
 decompress_column_buffer(StringInfo buffer,

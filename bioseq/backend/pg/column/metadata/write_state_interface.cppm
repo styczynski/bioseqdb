@@ -22,6 +22,10 @@ import bioseq.postgres.support;
  *
  * If the caller supplied an MVCC snapshot, replaces it with a registered copy
  * whose curcid includes the just-flushed rows.
+ *
+ * @param[in] relation_file_number Physical relation owning the pending writes.
+ * @param[in,out] snapshot Snapshot handle to refresh after the flush.
+ * @param[out] snapshot_registered_by_us Set when this function registers a replacement.
  */
 export void
 flush_write_state_with_fresh_snapshot(Oid relation_file_number,
@@ -54,7 +58,10 @@ flush_write_state_with_fresh_snapshot(Oid relation_file_number,
 }
 
 
-/** @brief Commits pending column and row-mask writes for a subtransaction.
+/**
+ * @brief Commits pending column and row-mask writes for a subtransaction.
+ * @param[in] current_sub_xid Subtransaction whose state is being completed.
+ * @param[in] parent_sub_xid Parent that inherits committed state.
  */
 export void
 flush_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
@@ -64,7 +71,10 @@ flush_all_relation_write_states(SubTransactionId current_sub_xid, SubTransaction
 }
 
 
-/** @brief Discards pending column and row-mask writes for a subtransaction.
+/**
+ * @brief Discards pending column and row-mask writes for a subtransaction.
+ * @param[in] current_sub_xid Aborted subtransaction whose state is discarded.
+ * @param[in] parent_sub_xid Parent used to locate nested state.
  */
 export void
 discard_all_relation_write_states(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid)
@@ -74,7 +84,10 @@ discard_all_relation_write_states(SubTransactionId current_sub_xid, SubTransacti
 }
 
 
-/** @brief Marks both write-state stores as dropped for a relation.
+/**
+ * @brief Marks both write-state stores as dropped for a relation.
+ * @param[in] relation_file_number Physical relation removed by the transaction.
+ * @param[in] current_sub_xid Subtransaction that owns the drop marker.
  */
 export void
 mark_write_state_relation_dropped(Oid relation_file_number, SubTransactionId current_sub_xid)
@@ -84,7 +97,9 @@ mark_write_state_relation_dropped(Oid relation_file_number, SubTransactionId cur
 }
 
 
-/** @brief Removes relation state outside subtransaction lifecycle callbacks.
+/**
+ * @brief Removes relation state outside subtransaction lifecycle callbacks.
+ * @param[in] relation_file_number Physical relation whose transient state is released.
  */
 export void
 drop_write_state_outside_transaction(Oid relation_file_number)
@@ -93,7 +108,11 @@ drop_write_state_outside_transaction(Oid relation_file_number)
 	drop_row_mask_state_outside_transaction(relation_file_number);
 }
 
-/** @brief Tests whether an ancestor subtransaction owns pending writes.
+/**
+ * @brief Tests whether an ancestor subtransaction owns pending writes.
+ * @param[in] relation_file_number Physical relation to inspect.
+ * @param[in] current_sub_xid Current subtransaction excluded from the ancestor search.
+ * @return `true` when either metadata store contains writes owned by an ancestor.
  */
 export bool
 writes_pending_in_parent_transactions(

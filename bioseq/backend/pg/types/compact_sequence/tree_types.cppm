@@ -41,6 +41,8 @@ export struct piece_edge {
     bioseq::storage::sequence_transform transform{
         bioseq::storage::sequence_transform::identity};
 
+    /// @brief Tests whether this edge names a node.
+    /// @return `true` when `node` is non-null.
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return node != nullptr;
@@ -94,11 +96,15 @@ export struct tracked_piece_edge {
     piece_edge edge;
     piece_edge_cleanup_handle cleanup;
 
+    /// @brief Tests whether the tracked edge names a node.
+    /// @return `true` when the underlying edge is populated.
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return static_cast<bool>(edge);
     }
 
+    /// @brief Borrows the underlying edge without transferring its cleanup token.
+    /// @return Arena-qualified edge value.
     [[nodiscard]] operator piece_edge() const noexcept
     {
         return edge;
@@ -149,10 +155,12 @@ export struct branch_piece {
 
 /// Cached length, piece count, height, and payload for one immutable node.
 export struct piece_node {
+    /// @brief Selects the active payload representation.
     enum class kind : std::uint8_t { branch, source, literal } node_kind;
     std::uint64_t bp_length;
     std::uint32_t piece_count;
     std::uint16_t height;
+    /// @brief Stores exactly the payload selected by `node_kind`.
     union payload_union {
         branch_piece branch;
         source_piece source;
@@ -251,7 +259,8 @@ export struct pg_sequence_expanded {
 
 /* Defined by :packed_output after its two EOH callbacks.  The declaration is
  * the representation identity used by Datum classification. */
-/// Return the singleton expanded-object method table.
+/// @brief Returns the singleton expanded-object method table.
+/// @return Process-lifetime callbacks for flattening and sizing expanded sequences.
 export [[nodiscard]] ExpandedObjectMethods const&
 pg_sequence_expanded_methods() noexcept;
 
@@ -281,7 +290,11 @@ export struct pg_sequence_read_handle {
     bioseq::storage::sequence_size_t logical_length;
     bool alphabet_bound;
 
+    /// @brief Returns the retained root used by the current read scope.
+    /// @return Borrowed arena-qualified root edge.
     [[nodiscard]] piece_edge root() const noexcept { return root_value; }
+    /// @brief Returns the cached logical sequence length.
+    /// @return Length in base pairs.
     [[nodiscard]] bioseq::storage::sequence_size_t bp_length() const noexcept
     {
         return logical_length;

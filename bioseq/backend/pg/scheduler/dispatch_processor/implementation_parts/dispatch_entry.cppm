@@ -77,6 +77,26 @@ import bioseq.postgres.scheduler.supervisor.vulkan;
 
 namespace bioseq::simd {
 
+/**
+ * @brief Selects one Highway target and executes a typed alignment batch.
+ *
+ * Only the first `batch_size` target and identifier slots participate. Observer state is
+ * restored on both success and failure, while processing errors propagate to the caller.
+ *
+ * @param[in] batch_size Number of live rows in the fixed-capacity arrays.
+ * @param[in] alphabet_code Shared alphabet code for every participating sequence.
+ * @param[in] storage_unit_byte_width Shared packed storage width in bytes.
+ * @param[in] query_hdr Broadcast query, or `nullptr` in per-row query mode.
+ * @param[in] per_row_query_hdrs Optional fixed-capacity array of per-row queries.
+ * @param[in] target_hdrs Fixed-capacity target array with a live prefix of `batch_size`.
+ * @param[in] query_ids Stable row identifiers parallel to `target_hdrs`.
+ * @param[in] base_params Caller-selected minimap2 parameters.
+ * @param[in] invocation_role Broadcast or per-row scheduling role.
+ * @param[in] broadcast_query_ordinal Stable ordinal for broadcast-query accounting.
+ * @param[in,out] stats Batch and pipeline counters accumulated by the typed route.
+ * @param[in,out] scanner_pg_ctx Optional scan-owned preparation and observer context.
+ * @return Matches grouped by the corresponding query identifier.
+ */
 [[nodiscard]] std::map<int32_t, std::vector<match_result>> batch_processor::process_sequences(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -171,6 +191,14 @@ namespace bioseq::simd {
     return results;
 }
 
+/**
+ * @brief Finds a prepared CPU index group matching one minimizer configuration.
+ * @param[in] kmer_size Minimizer k-mer length in bases.
+ * @param[in] window_size Minimizer window length in bases.
+ * @param[in] max_occ Maximum retained minimizer occurrence count.
+ * @param[in] sketch_backend Sketch implementation used to build the group.
+ * @return Borrowed group pointer, or `nullptr` when no prepared group matches.
+ */
 batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target::find_group(
     const std::int32_t kmer_size,
     const std::int32_t window_size,
@@ -185,6 +213,12 @@ batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target:
     return nullptr;
 }
 
+/**
+ * @brief Scales untouched minimizer defaults for short query-target pairs.
+ * @param[in] base Requested parameters, preserved when any tuned field is nondefault.
+ * @param[in] min_bp Shorter operand length in base pairs.
+ * @return Effective parameters for the pair.
+ */
 minimap2_parameters batch_processor::effective_params_for_pair(const minimap2_parameters& base,
                                                                const std::size_t min_bp) noexcept {
     const bool all_defaults = base.kmer_size == 15 && base.window_size == 10 &&

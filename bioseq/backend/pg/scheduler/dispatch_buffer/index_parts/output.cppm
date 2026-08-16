@@ -63,7 +63,11 @@ import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
 
-/** @brief Implements the read next output contract declared by the stable buffer facade. */
+/**
+ * @brief Replays the next validated scan or join match from the buffered batch.
+ * @return Borrowed input and match pointers, or no value at the exact end of output.
+ * @note Corrupt cursors cross the PostgreSQL error boundary instead of producing partial rows.
+ */
 [[nodiscard]] std::optional<tuple_dispatch_buffer::next_output>
 tuple_dispatch_buffer::read_next_output() {
     if (join_mode) {

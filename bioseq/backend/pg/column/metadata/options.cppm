@@ -32,6 +32,11 @@ import :types;
 import :tuple_ops;
 import :core;
 
+/**
+ * @brief Converts a generated catalog row into the runtime option model.
+ * @param[in] row Decoded non-null catalog fields.
+ * @return Runtime options with compression text resolved to its enum.
+ */
 [[nodiscard]] static column_options options_to_domain(const options_row& row) {
     return column_options{
         .stripe_row_limit = static_cast<uint64>(row.stripe_row_limit),
@@ -41,10 +46,11 @@ import :core;
     };
 }
 
-/*
- * read_column_options returns the stored options for a relation,
- * GUC-derived defaults when no row exists, or std::nullopt when the options
- * catalog is unavailable during database or extension removal.
+/**
+ * @brief Reads stored relation options or derives defaults when no row exists.
+ * @param[in] regclass Relation OID used as the catalog key.
+ * @return Options, or no value when extension removal has made the catalog unavailable.
+ * @note PostgreSQL resources close before any captured C++ exception is rethrown.
  */
 export std::optional<column_options> read_column_options(Oid regclass) {
     ScanKeyData scan_keys[1];
@@ -121,9 +127,10 @@ export std::optional<column_options> read_column_options(Oid regclass) {
     return result;
 }
 
-/*
- * initialize_column_options initialized the columnar table options. Meaning it writes the
- * default options to the options table if not already existing.
+/**
+ * @brief Inserts configured defaults for a relation that has no options row.
+ * @param[in] regclass Relation OID used as the catalog key.
+ * @note Binary-upgrade restore owns catalog population and makes this a no-op.
  */
 export void initialize_column_options(Oid regclass) {
     /*
@@ -146,12 +153,18 @@ export void initialize_column_options(Oid regclass) {
 }
 
 /// @brief Replaces the authoritative column options for a relation.
+/// @param[in] regclass Relation OID used as the catalog key.
+/// @param[in] options Borrowed option values copied into the catalog row.
 export void set_column_options(Oid regclass, column_options* options) {
     write_column_options(regclass, options, true);
 }
 
-/** @brief Writes relation options subject to an overwrite policy.
- * @return True when the catalog row was inserted or replaced.
+/**
+ * @brief Writes relation options subject to an overwrite policy.
+ * @param[in] regclass Relation OID used as the catalog key.
+ * @param[in] options Borrowed option values copied into the catalog row.
+ * @param[in] overwrite Whether an existing row is replaced.
+ * @return `true` when the catalog row was inserted or replaced.
  */
 bool write_column_options(Oid regclass, column_options* options, bool overwrite) {
     /* Binary-upgrade restores own the catalog rows and must not replace them. */
@@ -221,11 +234,12 @@ bool write_column_options(Oid regclass, column_options* options, bool overwrite)
     return written;
 }
 
-/*
- * delete_column_table_options removes the columnar table options for a regclass. When
- * missing_ok is false it will throw an error when no table options can be found.
- *
- * Returns whether a record has been removed.
+/**
+ * @brief Deletes the option row for a columnar relation.
+ * @param[in] regclass Relation OID used as the catalog key.
+ * @param[in] missing_ok Whether an absent row is accepted.
+ * @return `true` when a catalog row was removed.
+ * @note Returns `false` when extension removal has made the catalog unavailable.
  */
 export bool delete_column_table_options(Oid regclass, bool missing_ok) {
     bool result = false;

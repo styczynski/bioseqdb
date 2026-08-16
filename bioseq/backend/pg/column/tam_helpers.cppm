@@ -22,6 +22,8 @@ import bioseq.postgres.support;
 import bioseq.common.logging;
 
 /// @brief Rejects row numbers that cannot be represented by a PostgreSQL TID.
+/// @param[in] row_number One-based column row number to validate.
+/// @note Reports a PostgreSQL error when the value is reserved or exceeds TID capacity.
 static void
 validate_row_number(uint64_t row_number)
 {
@@ -41,7 +43,7 @@ validate_row_number(uint64_t row_number)
 
 
 /// @brief Encodes a column row number as a PostgreSQL item pointer.
-/// @param row_number Valid one-based column row number.
+/// @param[in] row_number Valid one-based column row number.
 /// @return PostgreSQL item pointer containing the row identity.
 export ItemPointerData
 row_number_to_tid(uint64_t row_number)
@@ -57,7 +59,7 @@ row_number_to_tid(uint64_t row_number)
 
 
 /// @brief Decodes a PostgreSQL item pointer into a column row number.
-/// @param tid Item pointer produced by row_number_to_tid.
+/// @param[in] tid Item pointer produced by row_number_to_tid.
 /// @return One-based column row number.
 export uint64_t
 tid_to_row_number(ItemPointerData tid)
@@ -75,6 +77,7 @@ tid_to_row_number(ItemPointerData tid)
 static const TableAmRoutine* registered_column_table_access_method = nullptr;
 
 /// @brief Records the installed Bioseq table-access routine identity.
+/// @param[in] routine Process-lifetime routine whose address identifies Bioseq relations.
 export void
 register_column_table_access_method(const TableAmRoutine* routine) noexcept
 {
@@ -87,6 +90,9 @@ register_column_table_access_method(const TableAmRoutine* routine) noexcept
  * exact handle is essential during dependency deletion: reopening an OID from
  * PostgreSQL's precomputed DROP list can fail after an earlier recursive drop
  * has already removed the catalog row.
+ *
+ * @param[in] relation Borrowed relation handle, or `nullptr`.
+ * @return `true` when the handle uses the registered Bioseq routine.
  */
 export bool
 relation_uses_column_table_access_method(Relation relation) noexcept
@@ -98,6 +104,7 @@ relation_uses_column_table_access_method(Relation relation) noexcept
 
 
 /// @brief Opens an OID and tests it for the Bioseq table-access method.
+/// @param[in] relation_oid Relation to inspect without retaining a lock or relcache pin.
 /// @return False for invalid OIDs or relations using another access method.
 export bool
 relation_oid_uses_column_table_access_method(Oid relation_oid)

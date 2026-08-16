@@ -12,11 +12,13 @@ import bioseq.codegen.sql.annotation_model;
 
 export namespace bioseq::storage::metadata::sql_entities {
 
+/// @brief Allocates identifiers for persisted row-mask records.
 [[bioseq_sql::sequence({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
 inline constexpr std::int64_t row_mask_seq = 1;
 
+/// @brief Allocates storage identifiers above the reserved metadata range.
 [[bioseq_sql::sequence({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
     .create = bioseq::sql::create_mode::if_not_exists,

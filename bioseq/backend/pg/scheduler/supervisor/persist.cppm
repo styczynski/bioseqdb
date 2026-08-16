@@ -78,6 +78,7 @@ void enqueue_pending_minimizer_sequence_build(const persist_target& target,
 /**
  * @brief Publishes jobs after commit and releases them after abort or prepare.
  * @param[in] event PostgreSQL transaction event controlling queue publication.
+ * @note Publication failure releases the job locally and does not escape the callback.
  */
 void bioseq_persist_xact_callback(XactEvent event, void*) {
     std::vector<pending_persist_job>& jobs = pending_persist_jobs();
@@ -130,7 +131,10 @@ void bioseq_persist_xact_callback(XactEvent event, void*) {
     jobs.clear();
 }
 
-/** @brief Registers the persistence transaction callback at the PostgreSQL leaf boundary. */
+/**
+ * @brief Registers the persistence transaction callback at the PostgreSQL leaf boundary.
+ * @note Called once during backend initialization.
+ */
 void register_persist_xact_callback_pg_leaf() {
     RegisterXactCallback(bioseq_persist_xact_callback, nullptr);
 }

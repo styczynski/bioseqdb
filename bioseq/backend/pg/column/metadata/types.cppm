@@ -174,6 +174,7 @@ export struct parallel_column_scan_state
 	std::uint64_t slot_stride;
 	char snapshot_data[FLEXIBLE_ARRAY_MEMBER];
 };
+/// @brief Pointer handle to shared parallel-scan state with trailing snapshot storage.
 export using parallel_column_scan_handle = parallel_column_scan_state*;
 
 /// @brief Aggregate cache counters reported by column scans.
@@ -321,6 +322,7 @@ export struct column_write_state
 // ABI mirrors pin size and representative offsets. The parallel state has a
 // flexible array, so its fixed-header offset is checked instead of sizeof.
 namespace {
+/// @brief Mirrors the cross-module `column_read_state` ABI for layout assertions.
 struct column_read_state_layout
 {
 	TupleDesc tuple_descriptor;
@@ -343,6 +345,7 @@ static_assert(std::is_standard_layout_v<column_read_state> &&
 			  offsetof(column_read_state, parallel_scan) == offsetof(column_read_state_layout, parallel_scan),
 			  "column_read_state layout drift (reinterpret_cast'd across modules)");
 
+/// @brief Mirrors the cross-module `column_write_state` ABI for layout assertions.
 struct column_write_state_layout
 {
 	TupleDesc tuple_descriptor;
@@ -365,6 +368,7 @@ static_assert(std::is_standard_layout_v<column_write_state> &&
 			  offsetof(column_write_state, seq_caches) == offsetof(column_write_state_layout, seq_caches),
 			  "column_write_state layout drift (reinterpret_cast'd across modules)");
 
+/// @brief Mirrors the fixed header of shared parallel-scan state.
 struct parallel_column_scan_state_layout
 {
 	pg_atomic_uint64 next_stripe_id;

@@ -10,6 +10,7 @@ import :letter;
 
 namespace bioseq::pg_types::sql_catalog {
 
+/// @brief Registers default B-tree ordering for alphabet letters.
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::btree,
     .is_default = true,
@@ -32,6 +33,7 @@ namespace bioseq::pg_types::sql_catalog {
 })]]
 inline constexpr bioseq::sql::opclass_tag letter_btree_ops{};
 
+/// @brief Registers default hash indexing for alphabet letters.
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::hash,
     .is_default = true,
@@ -48,6 +50,7 @@ inline constexpr bioseq::sql::opclass_tag letter_btree_ops{};
 })]]
 inline constexpr bioseq::sql::opclass_tag letter_hash_ops{};
 
+/// @brief Registers default B-tree ordering for compact sequences.
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::btree,
     .is_default = true,
@@ -70,6 +73,7 @@ inline constexpr bioseq::sql::opclass_tag letter_hash_ops{};
 })]]
 inline constexpr bioseq::sql::opclass_tag seq_ops{};
 
+/// @brief Registers default hash indexing for compact sequences.
 [[bioseq_sql::opclass({
     .access_method = bioseq::sql::pg_catalog_reference::hash,
     .is_default = true,

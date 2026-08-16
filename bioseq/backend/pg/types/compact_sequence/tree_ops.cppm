@@ -38,7 +38,8 @@ export import :tree_ops_failure_contracts;
  * fixtures, without poisoning the backend-global production state. */
 export namespace bioseq::pg_types::sql_routines {
 
-/// Run bounded construction, cleanup, corruption, and balancing contracts.
+/// @brief Runs bounded construction, cleanup, corruption, and balancing contracts.
+/// @return `true` when every lifetime and structural contract succeeds without leaked arenas.
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
 })]]
