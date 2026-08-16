@@ -29,7 +29,6 @@ module;
 #include <array>
 #include <bioseq/pg_compat.h>
 #include <cstdint>
-#include <cstring>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -143,13 +142,13 @@ struct vector_qualifier_node final {
                            makeString(pnstrdup(routine_name.data(), routine_name.size())));
             std::array<Oid, 2> exact_argument_types{};
             std::ranges::copy(argument_types, exact_argument_types.begin());
-            const Oid result =
+            const Oid resolved_oid =
                 LookupFuncName(qualified_name,
                                static_cast<int>(argument_types.size()),
                                argument_types.empty() ? nullptr : exact_argument_types.data(),
                                true);
             list_free_deep(qualified_name);
-            return result;
+            return resolved_oid;
         });
     return OidIsValid(routine_oid) ? std::optional<Oid>{routine_oid} : std::nullopt;
 }
@@ -288,35 +287,35 @@ export List* rewrite_vectorized_expression_list(List* expression_list) {
 
     check_stack_depth();
 
-    List* new_qual_list = NIL;
+    List* rewritten_expressions = NIL;
 
-    for (Node* node : postgres_list<Node>{expression_list}) {
-        if (node == nullptr)
+    for (Node* expression_node : postgres_list<Node>{expression_list}) {
+        if (expression_node == nullptr)
             return nullptr;
 
         /*
          * OpExpr / DistinctExpr / NullIfExpr share OpExpr storage but carry
          * distinct tags; try_cast_pg_operator_expression groups all three.
          */
-        if (OpExpr* op_expr_node = try_cast_pg_operator_expression(node)) {
+        if (OpExpr* op_expr_node = try_cast_pg_operator_expression(expression_node)) {
             if (list_length(op_expr_node->args) != 2) {
-                new_qual_list = lappend(new_qual_list, op_expr_node);
+                rewritten_expressions = lappend(rewritten_expressions, op_expr_node);
                 continue;
             }
 
             if (!is_pg_const_var_binary_args(op_expr_node->args)) {
-                new_qual_list = lappend(new_qual_list, op_expr_node);
+                rewritten_expressions = lappend(rewritten_expressions, op_expr_node);
                 continue;
             }
             if (contains_null_constant(op_expr_node->args)) {
-                new_qual_list = lappend(new_qual_list, op_expr_node);
+                rewritten_expressions = lappend(rewritten_expressions, op_expr_node);
                 continue;
             }
 
             HeapTuple operator_tuple =
                 SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
             if (!HeapTupleIsValid(operator_tuple)) {
-                new_qual_list = lappend(new_qual_list, op_expr_node);
+                rewritten_expressions = lappend(rewritten_expressions, op_expr_node);
                 continue;
             }
             Form_pg_operator operator_form =
@@ -326,46 +325,47 @@ export List* rewrite_vectorized_expression_list(List* expression_list) {
 
             const std::optional<Oid> vectorized_oid = lookup_vectorized_routine_oid(procedure_oid);
             if (!vectorized_oid) {
-                new_qual_list = lappend(new_qual_list, op_expr_node);
+                rewritten_expressions = lappend(rewritten_expressions, op_expr_node);
                 continue;
             }
 
             OpExpr* vectorized_op_expr_node = bioseq::postgres::support::copy_pg_node(op_expr_node);
             vectorized_op_expr_node->opfuncid = *vectorized_oid;
-            new_qual_list = lappend(new_qual_list, vectorized_op_expr_node);
+            rewritten_expressions = lappend(rewritten_expressions, vectorized_op_expr_node);
 
             continue;
         }
 
-        if (BoolExpr* bool_expr = pg_node_view{node}.try_cast<BoolExpr>()) {
-            List* rewritten_bool_expr_args = rewrite_vectorized_expression_list(bool_expr->args);
+        if (BoolExpr* boolean_expression = pg_node_view{expression_node}.try_cast<BoolExpr>()) {
+            List* rewritten_bool_expr_args =
+                rewrite_vectorized_expression_list(boolean_expression->args);
             List* unchanged_arguments =
-                list_intersection(rewritten_bool_expr_args, bool_expr->args);
+                list_intersection(rewritten_bool_expr_args, boolean_expression->args);
             const bool all_arguments_rewritten = unchanged_arguments == NIL;
             list_free(unchanged_arguments);
 
             if (all_arguments_rewritten &&
-                (bool_expr->boolop == AND_EXPR || bool_expr->boolop == OR_EXPR)) {
+                (boolean_expression->boolop == AND_EXPR || boolean_expression->boolop == OR_EXPR)) {
                 Expr* boolean_clause = nullptr;
 
-                if (bool_expr->boolop == AND_EXPR) {
+                if (boolean_expression->boolop == AND_EXPR) {
                     boolean_clause = make_andclause(rewritten_bool_expr_args);
-                } else if (bool_expr->boolop == OR_EXPR) {
+                } else if (boolean_expression->boolop == OR_EXPR) {
                     boolean_clause = make_orclause(rewritten_bool_expr_args);
                 }
 
-                new_qual_list = lappend(new_qual_list, boolean_clause);
+                rewritten_expressions = lappend(rewritten_expressions, boolean_clause);
             } else {
-                new_qual_list = lappend(new_qual_list, bool_expr);
+                rewritten_expressions = lappend(rewritten_expressions, boolean_expression);
             }
 
             continue;
         }
 
-        new_qual_list = lappend(new_qual_list, node);
+        rewritten_expressions = lappend(rewritten_expressions, expression_node);
     }
 
-    return new_qual_list;
+    return rewritten_expressions;
 }
 
 /**
@@ -376,28 +376,30 @@ export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorize
     vector_tuple_table_slot_storage* vector_slot =
         reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
 
-    List* vector_qual_list = NIL;
-    for (Node* node : postgres_list<Node>{vectorized_qual}) {
-        if (OpExpr* op_expr_node = try_cast_pg_operator_expression(node)) {
+    List* compiled_qualifiers = NIL;
+    for (Node* expression_node : postgres_list<Node>{vectorized_qual}) {
+        if (OpExpr* op_expr_node = try_cast_pg_operator_expression(expression_node)) {
             int argument_index = 0;
             const int argument_count = list_length(op_expr_node->args);
 
-            vector_qualifier_node* new_vector_qual =
+            vector_qualifier_node* compiled_qualifier =
                 allocate_zeroed_object<vector_qualifier_node>();
-            new_vector_qual->kind = vector_qualifier_node_kind::expression;
+            compiled_qualifier->kind = vector_qualifier_node_kind::expression;
 
-            new_vector_qual->payload.expression.function_info = allocate_zeroed_object<FmgrInfo>();
-            new_vector_qual->payload.expression.call_info =
+            compiled_qualifier->payload.expression.function_info =
+                allocate_zeroed_object<FmgrInfo>();
+            compiled_qualifier->payload.expression.call_info =
                 allocate_zeroed_storage<FunctionCallInfoBaseData>(
                     SizeForFunctionCallInfo(argument_count));
-            new_vector_qual->payload.expression.arguments =
+            compiled_qualifier->payload.expression.arguments =
                 allocate_zeroed_array<vector_operand_storage>(argument_count);
 
-            fmgr_info(op_expr_node->opfuncid, new_vector_qual->payload.expression.function_info);
-            fmgr_info_set_expr(node, new_vector_qual->payload.expression.function_info);
+            fmgr_info(op_expr_node->opfuncid, compiled_qualifier->payload.expression.function_info);
+            fmgr_info_set_expr(expression_node,
+                               compiled_qualifier->payload.expression.function_info);
 
-            InitFunctionCallInfoData(*(new_vector_qual->payload.expression.call_info),
-                                     new_vector_qual->payload.expression.function_info,
+            InitFunctionCallInfoData(*(compiled_qualifier->payload.expression.call_info),
+                                     compiled_qualifier->payload.expression.function_info,
                                      argument_count,
                                      op_expr_node->inputcollid,
                                      nullptr,
@@ -405,16 +407,16 @@ export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorize
 
             for (Expr* argument : postgres_list<Expr>{op_expr_node->args}) {
                 vector_operand_storage* argument_storage =
-                    new_vector_qual->payload.expression.arguments + argument_index;
+                    compiled_qualifier->payload.expression.arguments + argument_index;
 
                 if (Const* constant =
                         pg_node_view{reinterpret_cast<Node*>(argument)}.try_cast<Const>()) {
                     argument_storage->kind = vector_operand_storage_kind::constant;
                     argument_storage->datum = constant->constvalue;
 
-                    new_vector_qual->payload.expression.call_info->args[argument_index].value =
+                    compiled_qualifier->payload.expression.call_info->args[argument_index].value =
                         reinterpret_cast<Datum>(argument_storage);
-                    new_vector_qual->payload.expression.call_info->args[argument_index].isnull =
+                    compiled_qualifier->payload.expression.call_info->args[argument_index].isnull =
                         constant->constisnull;
                 } else {
                     Var* variable = pg_node_view{reinterpret_cast<Node*>(argument)}.try_cast<Var>();
@@ -425,46 +427,46 @@ export List* compile_vector_qualifier_list(TupleTableSlot* slot, List* vectorize
                     argument_storage->datum =
                         vector_slot->virtual_slot.base.tts_values[column_index];
 
-                    new_vector_qual->payload.expression.call_info->args[argument_index].value =
+                    compiled_qualifier->payload.expression.call_info->args[argument_index].value =
                         reinterpret_cast<Datum>(argument_storage);
-                    new_vector_qual->payload.expression.call_info->args[argument_index].isnull =
+                    compiled_qualifier->payload.expression.call_info->args[argument_index].isnull =
                         false;
                 }
 
                 ++argument_index;
             }
 
-            vector_qual_list = lappend(vector_qual_list, new_vector_qual);
+            compiled_qualifiers = lappend(compiled_qualifiers, compiled_qualifier);
             continue;
         }
 
-        if (BoolExpr* bool_expr = pg_node_view{node}.try_cast<BoolExpr>()) {
-            vector_qualifier_node* new_vector_qual =
+        if (BoolExpr* boolean_expression = pg_node_view{expression_node}.try_cast<BoolExpr>()) {
+            vector_qualifier_node* compiled_qualifier =
                 allocate_zeroed_object<vector_qualifier_node>();
-            new_vector_qual->kind = vector_qualifier_node_kind::boolean_expression;
+            compiled_qualifier->kind = vector_qualifier_node_kind::boolean_expression;
 
-            new_vector_qual->payload.boolean_expression.kind = bool_expr->boolop;
-            new_vector_qual->payload.boolean_expression.expressions =
-                compile_vector_qualifier_list(slot, bool_expr->args);
+            compiled_qualifier->payload.boolean_expression.kind = boolean_expression->boolop;
+            compiled_qualifier->payload.boolean_expression.expressions =
+                compile_vector_qualifier_list(slot, boolean_expression->args);
 
-            vector_qual_list = lappend(vector_qual_list, new_vector_qual);
+            compiled_qualifiers = lappend(compiled_qualifiers, compiled_qualifier);
 
             continue;
         }
     }
 
-    return vector_qual_list;
+    return compiled_qualifiers;
 }
 
 /** Invoke one compiled vector expression in the per-tuple memory context. */
-static bool* evaluate_vectorized_expression(vector_qualifier_node* vector_qual,
+static bool* evaluate_vectorized_expression(vector_qualifier_node* compiled_qualifier,
                                             ExprContext* expression_context) {
     vector_column_storage* evaluation_result;
     {
         bioseq::postgres::support::memory_context_scope memory_scope{
             expression_context->ecxt_per_tuple_memory};
         evaluation_result = reinterpret_cast<vector_column_storage*>(
-            DatumGetPointer(FunctionCallInvoke(vector_qual->payload.expression.call_info)));
+            DatumGetPointer(FunctionCallInvoke(compiled_qualifier->payload.expression.call_info)));
     }
 
     return reinterpret_cast<bool*>(evaluation_result->data);
@@ -480,21 +482,22 @@ export bool* evaluate_vectorized_qualifiers(TupleTableSlot* slot,
 
     bool* combined_result = nullptr;
 
-    for (vector_qualifier_node* vector_qual :
+    for (vector_qualifier_node* compiled_qualifier :
          postgres_list<vector_qualifier_node>{vectorized_qual_list}) {
-        bool* qual_result = nullptr;
+        bool* qualifier_result = nullptr;
 
-        switch (vector_qual->kind) {
+        switch (compiled_qualifier->kind) {
         case vector_qualifier_node_kind::expression: {
-            qual_result = evaluate_vectorized_expression(vector_qual, expression_context);
+            qualifier_result =
+                evaluate_vectorized_expression(compiled_qualifier, expression_context);
             break;
         }
         case vector_qualifier_node_kind::boolean_expression: {
-            const BoolExprType nested_kind = vector_qual->payload.boolean_expression.kind;
+            const BoolExprType nested_kind = compiled_qualifier->payload.boolean_expression.kind;
             if (nested_kind == AND_EXPR || nested_kind == OR_EXPR) {
-                qual_result = evaluate_vectorized_qualifiers(
+                qualifier_result = evaluate_vectorized_qualifiers(
                     slot,
-                    vector_qual->payload.boolean_expression.expressions,
+                    compiled_qualifier->payload.boolean_expression.expressions,
                     nested_kind,
                     expression_context);
             }
@@ -503,13 +506,13 @@ export bool* evaluate_vectorized_qualifiers(TupleTableSlot* slot,
         }
 
         if (combined_result == nullptr) {
-            combined_result = qual_result;
+            combined_result = qualifier_result;
         } else {
             const std::uint32_t row_count = vector_slot->row_count;
             if (bool_type == AND_EXPR)
-                bioseq::column::vec::mask_and(combined_result, qual_result, row_count);
+                bioseq::column::vec::mask_and(combined_result, qualifier_result, row_count);
             else if (bool_type == OR_EXPR)
-                bioseq::column::vec::mask_or(combined_result, qual_result, row_count);
+                bioseq::column::vec::mask_or(combined_result, qualifier_result, row_count);
         }
     }
 
