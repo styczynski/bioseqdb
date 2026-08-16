@@ -1585,6 +1585,9 @@ class PackageOptimizationContractTests(unittest.TestCase):
         bioseq_cmake = (
             REPOSITORY_ROOT / "bioseq" / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
+        postgres_source_graph = (
+            REPOSITORY_ROOT / "cmake" / "bioseq_postgres_source_graph.cmake"
+        ).read_text(encoding="utf-8")
         pipeline = (
             REPOSITORY_ROOT / "bioseq" / "backend" / "pipeline" / "pipe.cppm"
         ).read_text(encoding="utf-8")
@@ -1629,6 +1632,7 @@ class PackageOptimizationContractTests(unittest.TestCase):
             root_cmake,
             presets,
             bioseq_cmake,
+            postgres_source_graph,
             pipeline,
         )
         for token in (
@@ -1640,8 +1644,11 @@ class PackageOptimizationContractTests(unittest.TestCase):
                 with self.subTest(token=token):
                     self.assertNotIn(token, source)
         self.assertNotIn("__OPTIMIZE__", pipeline)
-        self.assertIn("BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0", bioseq_cmake)
-        self.assertIn("preset -O3", bioseq_cmake)
+        self.assertIn(
+            "BIOSEQ_TEMPLATE_DISPATCH_FORCE_INLINE=0",
+            postgres_source_graph,
+        )
+        self.assertIn("preset -O3", postgres_source_graph)
 
 
 class BuildAndStageContractTests(unittest.TestCase):
