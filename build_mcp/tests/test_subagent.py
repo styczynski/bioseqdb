@@ -266,7 +266,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
         return data["messages"]
 
     def test_tier_mapping_costs_and_runtime_arguments_are_exact(self) -> None:
-        self.assertEqual(subject.SUBAGENT_BUDGET, 1300)
+        self.assertEqual(subject.SUBAGENT_BUDGET, 4000)
         self.assertEqual(
             {
                 tier: (
@@ -587,15 +587,15 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertEqual(agent_id, 1)
         self.assertEqual(self._state()["agents"]["1"]["description"], "x" * 200)
 
-    def test_live_budget_accepts_exact_1300_and_rejects_any_overage(self) -> None:
+    def test_live_budget_accepts_exact_4000_and_rejects_any_overage(self) -> None:
         self._initialize_root()
         costs_and_tiers = (
-            [(100, "specialist")] * 11
+            [(100, "specialist")] * 38
             + [(70, "senior")]
             + [(22, "intern")] * 4
             + [(10, "contractor-intern")] * 2
         )
-        self.assertEqual(sum(cost for cost, _ in costs_and_tiers), 1278)
+        self.assertEqual(sum(cost for cost, _ in costs_and_tiers), 3978)
 
         def populate(state) -> None:
             for agent_id, (cost, tier) in enumerate(costs_and_tiers, 1):
@@ -609,12 +609,12 @@ class PersistentSubagentContractTest(unittest.TestCase):
         agent_id, accepted = self._create("intern")
         self.assertTrue(accepted["ok"], accepted)
         self.assertGreater(agent_id, 0)
-        self.assertEqual(subject._live_budget(self._state()), 1300)
+        self.assertEqual(subject._live_budget(self._state()), 4000)
 
         _, rejected = self._create("contractor-intern")
         self.assertFalse(rejected["ok"])
         self.assertEqual(rejected["error_code"], "BUDGET_EXCEEDED")
-        self.assertIn("1300", rejected["summary"])
+        self.assertIn("4000", rejected["summary"])
         self.assertIn("must not", rejected["summary"].lower())
 
     def test_create_rejects_codex_accounts_below_three_percent(self) -> None:
@@ -811,22 +811,22 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertEqual(len({message["id"] for message in messages}), 40)
 
         def populate(state) -> None:
-            for agent_id in range(1, 12):
+            for agent_id in range(1, 39):
                 state["agents"][str(agent_id)] = self._agent_record(
                     agent_id, tier="specialist", cost=100,
                 )
-            state["agents"]["12"] = self._agent_record(
-                12, tier="senior", cost=70,
+            state["agents"]["39"] = self._agent_record(
+                39, tier="senior", cost=70,
             )
-            for agent_id in range(13, 17):
+            for agent_id in range(40, 44):
                 state["agents"][str(agent_id)] = self._agent_record(
                     agent_id, tier="intern", cost=22,
                 )
-            for agent_id in range(17, 19):
+            for agent_id in range(44, 46):
                 state["agents"][str(agent_id)] = self._agent_record(
                     agent_id, tier="contractor-intern", account="cursor", cost=10,
                 )
-            state["next_agent_id"] = 19
+            state["next_agent_id"] = 46
 
         self._mutate_state(populate)
         create_arguments = {
@@ -843,7 +843,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertEqual(sum(bool(response["ok"]) for response in creates), 1)
         rejected = next(response for response in creates if not response["ok"])
         self.assertEqual(rejected["error_code"], "BUDGET_EXCEEDED")
-        self.assertEqual(subject._live_budget(self._state()), 1300)
+        self.assertEqual(subject._live_budget(self._state()), 4000)
         for message in ("", "x" * 20_001):
             response = self._call(command="bus-write", message=message)
             self.assertFalse(response["ok"])
