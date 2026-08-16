@@ -186,7 +186,17 @@ struct log_site_key_hash {
      * @param[in] key Stable call-site identity.
      * @return Combined hash of file, format, coordinates, and severity.
      */
-    std::size_t operator()(const log_site_key& key) const noexcept;
+    std::size_t operator()(const log_site_key& key) const noexcept
+    {
+        std::uint64_t hash_value = bioseq::common::fnv1a_64(key.file_name);
+        hash_value = bioseq::common::hash_combine_64(
+            hash_value,
+            bioseq::common::fnv1a_64(key.format_string));
+        hash_value = bioseq::common::hash_combine_64(hash_value, key.line);
+        hash_value = bioseq::common::hash_combine_64(hash_value, key.column);
+        hash_value = bioseq::common::hash_combine_64(hash_value, key.severity);
+        return static_cast<std::size_t>(hash_value);
+    }
 };
 
 /** @brief Compares complete logging-site identities. */
@@ -200,7 +210,14 @@ struct log_site_key_equal {
      */
     bool operator()(
         const log_site_key& first,
-        const log_site_key& second) const noexcept;
+        const log_site_key& second) const noexcept
+    {
+        return first.line == second.line &&
+               first.column == second.column &&
+               first.severity == second.severity &&
+               first.file_name == second.file_name &&
+               first.format_string == second.format_string;
+    }
 };
 
 /**
@@ -233,30 +250,6 @@ inline postgres_logging_sink postgres_sink;
 inline std::atomic<const bool*> postgres_debug_logging_enabled{nullptr};
 /** Debug flag used when PostgreSQL has not registered a sink. */
 inline std::atomic<bool> fallback_debug_logging_enabled{false};
-
-inline std::size_t log_site_key_hash::operator()(
-    const log_site_key& key) const noexcept
-{
-    std::uint64_t hash_value = bioseq::common::fnv1a_64(key.file_name);
-    hash_value = bioseq::common::hash_combine_64(
-        hash_value,
-        bioseq::common::fnv1a_64(key.format_string));
-    hash_value = bioseq::common::hash_combine_64(hash_value, key.line);
-    hash_value = bioseq::common::hash_combine_64(hash_value, key.column);
-    hash_value = bioseq::common::hash_combine_64(hash_value, key.severity);
-    return static_cast<std::size_t>(hash_value);
-}
-
-inline bool log_site_key_equal::operator()(
-    const log_site_key& first,
-    const log_site_key& second) const noexcept
-{
-    return first.line == second.line &&
-           first.column == second.column &&
-           first.severity == second.severity &&
-           first.file_name == second.file_name &&
-           first.format_string == second.format_string;
-}
 
 /**
  * @brief Formats source coordinates for fmtlog's location field.
