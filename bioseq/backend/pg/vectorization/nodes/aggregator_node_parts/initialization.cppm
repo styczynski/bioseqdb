@@ -26,9 +26,24 @@ import :transitions;
 import :hash_runtime;
 import :execution;
 
-/** Converts one catalog initializer to its transition type. */
-static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type);
-/** Builds one reusable transition descriptor from catalog metadata. */
+/** Converts a catalog text initializer to the aggregate transition type. */
+static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type) {
+    Oid type_input_function;
+    Oid type_io_parameter;
+    char* initial_value_text;
+    Datum initial_value;
+
+    getTypeInputInfo(transition_type, &type_input_function, &type_io_parameter);
+    initial_value_text = TextDatumGetCString(text_initial_value);
+    initial_value =
+        OidInputFunctionCall(type_input_function, initial_value_text, type_io_parameter, -1);
+    pfree(initial_value_text);
+    return initial_value;
+}
+
+/**
+ * Initializes one reusable transition descriptor from resolved aggregate metadata.
+ */
 static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                              AggState* aggregate_state,
                                              EState* executor_state,
@@ -40,7 +55,211 @@ static void build_aggregate_transition_state(AggStatePerTrans transition_state,
                                              Datum initial_value,
                                              bool initial_value_is_null,
                                              Oid* input_types,
-                                             int argument_count);
+                                             int argument_count) {
+    const int grouping_set_count = std::max(aggregate_state->maxsets, 1);
+    Expr* transition_function_expression;
+    int transition_argument_count;
+    Expr* serialize_function_expression = nullptr;
+    Expr* deserialize_function_expression = nullptr;
+    int input_count;
+    int direct_argument_count;
+    List* sort_list;
+    int sort_column_count;
+    int distinct_column_count;
+
+    /* Begin filling in the transition_state data */
+    transition_state->aggref = aggregate_reference;
+    transition_state->aggshared = false;
+    transition_state->aggCollation = aggregate_reference->inputcollid;
+    transition_state->transfn_oid = transfn_oid;
+    transition_state->serialfn_oid = aggregate_serialize_function_oid;
+    transition_state->deserialfn_oid = aggregate_deserialize_function_oid;
+    transition_state->initValue = initial_value;
+    transition_state->initValueIsNull = initial_value_is_null;
+
+    /* Count the "direct" arguments, if any */
+    direct_argument_count = list_length(aggregate_reference->aggdirectargs);
+
+    /* Count the number of aggregated input columns */
+    transition_state->numInputs = input_count = list_length(aggregate_reference->args);
+
+    transition_state->aggtranstype = aggregate_transition_type;
+
+    /* account for the current transition state */
+    transition_argument_count = transition_state->numTransInputs + 1;
+
+    /**
+     * Set up infrastructure for calling the transfn.  Note that invtrans is
+     * not needed here.
+     */
+    build_aggregate_transfn_expr(input_types,
+                                 argument_count,
+                                 direct_argument_count,
+                                 aggregate_reference->aggvariadic,
+                                 aggregate_transition_type,
+                                 aggregate_reference->inputcollid,
+                                 transfn_oid,
+                                 InvalidOid,
+                                 &transition_function_expression,
+                                 nullptr);
+
+    fmgr_info(transfn_oid, &transition_state->transfn);
+    fmgr_info_set_expr(reinterpret_cast<Node*>(transition_function_expression),
+                       &transition_state->transfn);
+
+    transition_state->transfn_fcinfo = allocate_zeroed_storage<FunctionCallInfoBaseData>(
+        SizeForFunctionCallInfo(transition_argument_count));
+    InitFunctionCallInfoData(*transition_state->transfn_fcinfo,
+                             &transition_state->transfn,
+                             transition_argument_count,
+                             transition_state->aggCollation,
+                             reinterpret_cast<Node*>(aggregate_state),
+                             nullptr);
+
+    /* get info about the state value's datatype */
+    get_typlenbyval(aggregate_transition_type,
+                    &transition_state->transtypeLen,
+                    &transition_state->transtypeByVal);
+
+    if (OidIsValid(aggregate_serialize_function_oid)) {
+        build_aggregate_serialfn_expr(aggregate_serialize_function_oid,
+                                      &serialize_function_expression);
+        fmgr_info(aggregate_serialize_function_oid, &transition_state->serialfn);
+        fmgr_info_set_expr(reinterpret_cast<Node*>(serialize_function_expression),
+                           &transition_state->serialfn);
+
+        transition_state->serialfn_fcinfo =
+            allocate_zeroed_storage<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
+        InitFunctionCallInfoData(*transition_state->serialfn_fcinfo,
+                                 &transition_state->serialfn,
+                                 1,
+                                 InvalidOid,
+                                 reinterpret_cast<Node*>(aggregate_state),
+                                 nullptr);
+    }
+
+    if (OidIsValid(aggregate_deserialize_function_oid)) {
+        build_aggregate_deserialfn_expr(aggregate_deserialize_function_oid,
+                                        &deserialize_function_expression);
+        fmgr_info(aggregate_deserialize_function_oid, &transition_state->deserialfn);
+        fmgr_info_set_expr(reinterpret_cast<Node*>(deserialize_function_expression),
+                           &transition_state->deserialfn);
+
+        transition_state->deserialfn_fcinfo =
+            allocate_zeroed_storage<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
+        InitFunctionCallInfoData(*transition_state->deserialfn_fcinfo,
+                                 &transition_state->deserialfn,
+                                 2,
+                                 InvalidOid,
+                                 reinterpret_cast<Node*>(aggregate_state),
+                                 nullptr);
+    }
+
+    /**
+     * Resolves sort columns for plain DISTINCT and ORDER BY aggregates.
+     *
+     * Ordered-set aggregates retain responsibility for their own ordering.
+     */
+    if (AGGKIND_IS_ORDERED_SET(aggregate_reference->aggkind)) {
+        sort_list = NIL;
+        sort_column_count = distinct_column_count = 0;
+    } else if (aggregate_reference->aggdistinct) {
+        sort_list = aggregate_reference->aggdistinct;
+        sort_column_count = distinct_column_count = list_length(sort_list);
+        Assert(sort_column_count >= list_length(aggregate_reference->aggorder));
+    } else {
+        sort_list = aggregate_reference->aggorder;
+        sort_column_count = list_length(sort_list);
+        distinct_column_count = 0;
+    }
+
+    transition_state->numSortCols = sort_column_count;
+    transition_state->numDistinctCols = distinct_column_count;
+
+    /**
+     * Creates the aggregate-input slot required by sorting or filtering.
+     */
+    if (sort_column_count > 0 || aggregate_reference->aggfilter) {
+        transition_state->sortdesc = ExecTypeFromTL(aggregate_reference->args);
+        transition_state->sortslot =
+            ExecInitExtraTupleSlot(executor_state, transition_state->sortdesc, &TTSOpsMinimalTuple);
+    }
+
+    if (sort_column_count > 0) {
+        /**
+         * We don't implement DISTINCT or ORDER BY aggs in the HASHED case
+         * (yet)
+         */
+        Assert(aggregate_state->aggstrategy != AGG_HASHED &&
+               aggregate_state->aggstrategy != AGG_MIXED);
+
+        /* ORDER BY aggregates are not supported with partial aggregation */
+        Assert(!DO_AGGSPLIT_COMBINE(aggregate_state->aggsplit));
+
+        /* If we have only one input, we need its len/byval info. */
+        if (input_count == 1) {
+            get_typlenbyval(input_types[direct_argument_count],
+                            &transition_state->inputtypeLen,
+                            &transition_state->inputtypeByVal);
+        } else if (distinct_column_count > 0) {
+            /* we will need an extra slot to store prior values */
+            transition_state->uniqslot = ExecInitExtraTupleSlot(
+                executor_state, transition_state->sortdesc, &TTSOpsMinimalTuple);
+        }
+
+        /* Extract the sort information for use later */
+        transition_state->sortColIdx = allocate_zeroed_array<AttrNumber>(sort_column_count);
+        transition_state->sortOperators = allocate_zeroed_array<Oid>(sort_column_count);
+        transition_state->sortCollations = allocate_zeroed_array<Oid>(sort_column_count);
+        transition_state->sortNullsFirst = allocate_zeroed_array<bool>(sort_column_count);
+
+        int sort_column_index = 0;
+        for (SortGroupClause* sort_clause : postgres_list<SortGroupClause>{sort_list}) {
+            TargetEntry* target_entry =
+                get_sortgroupclause_tle(sort_clause, aggregate_reference->args);
+
+            /* the parser should have made sure of this */
+            Assert(OidIsValid(sort_clause->sortop));
+
+            transition_state->sortColIdx[sort_column_index] = target_entry->resno;
+            transition_state->sortOperators[sort_column_index] = sort_clause->sortop;
+            transition_state->sortCollations[sort_column_index] =
+                exprCollation(reinterpret_cast<Node*>(target_entry->expr));
+            transition_state->sortNullsFirst[sort_column_index] = sort_clause->nulls_first;
+            ++sort_column_index;
+        }
+        Assert(sort_column_index == sort_column_count);
+    }
+
+    if (aggregate_reference->aggdistinct) {
+        Assert(argument_count > 0);
+        Assert(list_length(aggregate_reference->aggdistinct) == distinct_column_count);
+
+        Oid* equality_operators = allocate_zeroed_array<Oid>(distinct_column_count);
+
+        int distinct_column_index = 0;
+        for (SortGroupClause* group_clause :
+             postgres_list<SortGroupClause>{aggregate_reference->aggdistinct}) {
+            equality_operators[distinct_column_index++] = group_clause->eqop;
+        }
+
+        /* lookup / build the necessary comparators */
+        if (distinct_column_count == 1)
+            fmgr_info(get_opcode(equality_operators[0]), &transition_state->equalfnOne);
+        else
+            transition_state->equalfnMulti =
+                execTuplesMatchPrepare(transition_state->sortdesc,
+                                       distinct_column_count,
+                                       transition_state->sortColIdx,
+                                       equality_operators,
+                                       transition_state->sortCollations,
+                                       &aggregate_state->ss.ps);
+        pfree(equality_operators);
+    }
+
+    transition_state->sortstates = allocate_zeroed_array<Tuplesortstate*>(grouping_set_count);
+}
+
 /**
  * Builds the PostgreSQL AggState used by the vector custom scan.
  */
@@ -793,240 +1012,6 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
     }
 
     return aggregate_state;
-}
-
-/**
- * Initializes one reusable transition descriptor from resolved aggregate metadata.
- */
-static void build_aggregate_transition_state(AggStatePerTrans transition_state,
-                                             AggState* aggregate_state,
-                                             EState* executor_state,
-                                             Aggref* aggregate_reference,
-                                             Oid transfn_oid,
-                                             Oid aggregate_transition_type,
-                                             Oid aggregate_serialize_function_oid,
-                                             Oid aggregate_deserialize_function_oid,
-                                             Datum initial_value,
-                                             bool initial_value_is_null,
-                                             Oid* input_types,
-                                             int argument_count) {
-    const int grouping_set_count = std::max(aggregate_state->maxsets, 1);
-    Expr* transition_function_expression;
-    int transition_argument_count;
-    Expr* serialize_function_expression = nullptr;
-    Expr* deserialize_function_expression = nullptr;
-    int input_count;
-    int direct_argument_count;
-    List* sort_list;
-    int sort_column_count;
-    int distinct_column_count;
-
-    /* Begin filling in the transition_state data */
-    transition_state->aggref = aggregate_reference;
-    transition_state->aggshared = false;
-    transition_state->aggCollation = aggregate_reference->inputcollid;
-    transition_state->transfn_oid = transfn_oid;
-    transition_state->serialfn_oid = aggregate_serialize_function_oid;
-    transition_state->deserialfn_oid = aggregate_deserialize_function_oid;
-    transition_state->initValue = initial_value;
-    transition_state->initValueIsNull = initial_value_is_null;
-
-    /* Count the "direct" arguments, if any */
-    direct_argument_count = list_length(aggregate_reference->aggdirectargs);
-
-    /* Count the number of aggregated input columns */
-    transition_state->numInputs = input_count = list_length(aggregate_reference->args);
-
-    transition_state->aggtranstype = aggregate_transition_type;
-
-    /* account for the current transition state */
-    transition_argument_count = transition_state->numTransInputs + 1;
-
-    /**
-     * Set up infrastructure for calling the transfn.  Note that invtrans is
-     * not needed here.
-     */
-    build_aggregate_transfn_expr(input_types,
-                                 argument_count,
-                                 direct_argument_count,
-                                 aggregate_reference->aggvariadic,
-                                 aggregate_transition_type,
-                                 aggregate_reference->inputcollid,
-                                 transfn_oid,
-                                 InvalidOid,
-                                 &transition_function_expression,
-                                 nullptr);
-
-    fmgr_info(transfn_oid, &transition_state->transfn);
-    fmgr_info_set_expr(reinterpret_cast<Node*>(transition_function_expression),
-                       &transition_state->transfn);
-
-    transition_state->transfn_fcinfo = allocate_zeroed_storage<FunctionCallInfoBaseData>(
-        SizeForFunctionCallInfo(transition_argument_count));
-    InitFunctionCallInfoData(*transition_state->transfn_fcinfo,
-                             &transition_state->transfn,
-                             transition_argument_count,
-                             transition_state->aggCollation,
-                             reinterpret_cast<Node*>(aggregate_state),
-                             nullptr);
-
-    /* get info about the state value's datatype */
-    get_typlenbyval(aggregate_transition_type,
-                    &transition_state->transtypeLen,
-                    &transition_state->transtypeByVal);
-
-    if (OidIsValid(aggregate_serialize_function_oid)) {
-        build_aggregate_serialfn_expr(aggregate_serialize_function_oid,
-                                      &serialize_function_expression);
-        fmgr_info(aggregate_serialize_function_oid, &transition_state->serialfn);
-        fmgr_info_set_expr(reinterpret_cast<Node*>(serialize_function_expression),
-                           &transition_state->serialfn);
-
-        transition_state->serialfn_fcinfo =
-            allocate_zeroed_storage<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
-        InitFunctionCallInfoData(*transition_state->serialfn_fcinfo,
-                                 &transition_state->serialfn,
-                                 1,
-                                 InvalidOid,
-                                 reinterpret_cast<Node*>(aggregate_state),
-                                 nullptr);
-    }
-
-    if (OidIsValid(aggregate_deserialize_function_oid)) {
-        build_aggregate_deserialfn_expr(aggregate_deserialize_function_oid,
-                                        &deserialize_function_expression);
-        fmgr_info(aggregate_deserialize_function_oid, &transition_state->deserialfn);
-        fmgr_info_set_expr(reinterpret_cast<Node*>(deserialize_function_expression),
-                           &transition_state->deserialfn);
-
-        transition_state->deserialfn_fcinfo =
-            allocate_zeroed_storage<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
-        InitFunctionCallInfoData(*transition_state->deserialfn_fcinfo,
-                                 &transition_state->deserialfn,
-                                 2,
-                                 InvalidOid,
-                                 reinterpret_cast<Node*>(aggregate_state),
-                                 nullptr);
-    }
-
-    /**
-     * Resolves sort columns for plain DISTINCT and ORDER BY aggregates.
-     *
-     * Ordered-set aggregates retain responsibility for their own ordering.
-     */
-    if (AGGKIND_IS_ORDERED_SET(aggregate_reference->aggkind)) {
-        sort_list = NIL;
-        sort_column_count = distinct_column_count = 0;
-    } else if (aggregate_reference->aggdistinct) {
-        sort_list = aggregate_reference->aggdistinct;
-        sort_column_count = distinct_column_count = list_length(sort_list);
-        Assert(sort_column_count >= list_length(aggregate_reference->aggorder));
-    } else {
-        sort_list = aggregate_reference->aggorder;
-        sort_column_count = list_length(sort_list);
-        distinct_column_count = 0;
-    }
-
-    transition_state->numSortCols = sort_column_count;
-    transition_state->numDistinctCols = distinct_column_count;
-
-    /**
-     * Creates the aggregate-input slot required by sorting or filtering.
-     */
-    if (sort_column_count > 0 || aggregate_reference->aggfilter) {
-        transition_state->sortdesc = ExecTypeFromTL(aggregate_reference->args);
-        transition_state->sortslot =
-            ExecInitExtraTupleSlot(executor_state, transition_state->sortdesc, &TTSOpsMinimalTuple);
-    }
-
-    if (sort_column_count > 0) {
-        /**
-         * We don't implement DISTINCT or ORDER BY aggs in the HASHED case
-         * (yet)
-         */
-        Assert(aggregate_state->aggstrategy != AGG_HASHED &&
-               aggregate_state->aggstrategy != AGG_MIXED);
-
-        /* ORDER BY aggregates are not supported with partial aggregation */
-        Assert(!DO_AGGSPLIT_COMBINE(aggregate_state->aggsplit));
-
-        /* If we have only one input, we need its len/byval info. */
-        if (input_count == 1) {
-            get_typlenbyval(input_types[direct_argument_count],
-                            &transition_state->inputtypeLen,
-                            &transition_state->inputtypeByVal);
-        } else if (distinct_column_count > 0) {
-            /* we will need an extra slot to store prior values */
-            transition_state->uniqslot = ExecInitExtraTupleSlot(
-                executor_state, transition_state->sortdesc, &TTSOpsMinimalTuple);
-        }
-
-        /* Extract the sort information for use later */
-        transition_state->sortColIdx = allocate_zeroed_array<AttrNumber>(sort_column_count);
-        transition_state->sortOperators = allocate_zeroed_array<Oid>(sort_column_count);
-        transition_state->sortCollations = allocate_zeroed_array<Oid>(sort_column_count);
-        transition_state->sortNullsFirst = allocate_zeroed_array<bool>(sort_column_count);
-
-        int sort_column_index = 0;
-        for (SortGroupClause* sort_clause : postgres_list<SortGroupClause>{sort_list}) {
-            TargetEntry* target_entry =
-                get_sortgroupclause_tle(sort_clause, aggregate_reference->args);
-
-            /* the parser should have made sure of this */
-            Assert(OidIsValid(sort_clause->sortop));
-
-            transition_state->sortColIdx[sort_column_index] = target_entry->resno;
-            transition_state->sortOperators[sort_column_index] = sort_clause->sortop;
-            transition_state->sortCollations[sort_column_index] =
-                exprCollation(reinterpret_cast<Node*>(target_entry->expr));
-            transition_state->sortNullsFirst[sort_column_index] = sort_clause->nulls_first;
-            ++sort_column_index;
-        }
-        Assert(sort_column_index == sort_column_count);
-    }
-
-    if (aggregate_reference->aggdistinct) {
-        Assert(argument_count > 0);
-        Assert(list_length(aggregate_reference->aggdistinct) == distinct_column_count);
-
-        Oid* equality_operators = allocate_zeroed_array<Oid>(distinct_column_count);
-
-        int distinct_column_index = 0;
-        for (SortGroupClause* group_clause :
-             postgres_list<SortGroupClause>{aggregate_reference->aggdistinct}) {
-            equality_operators[distinct_column_index++] = group_clause->eqop;
-        }
-
-        /* lookup / build the necessary comparators */
-        if (distinct_column_count == 1)
-            fmgr_info(get_opcode(equality_operators[0]), &transition_state->equalfnOne);
-        else
-            transition_state->equalfnMulti =
-                execTuplesMatchPrepare(transition_state->sortdesc,
-                                       distinct_column_count,
-                                       transition_state->sortColIdx,
-                                       equality_operators,
-                                       transition_state->sortCollations,
-                                       &aggregate_state->ss.ps);
-        pfree(equality_operators);
-    }
-
-    transition_state->sortstates = allocate_zeroed_array<Tuplesortstate*>(grouping_set_count);
-}
-
-/** Converts a catalog text initializer to the aggregate transition type. */
-static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type) {
-    Oid type_input_function;
-    Oid type_io_parameter;
-    char* initial_value_text;
-    Datum initial_value;
-
-    getTypeInputInfo(transition_type, &type_input_function, &type_io_parameter);
-    initial_value_text = TextDatumGetCString(text_initial_value);
-    initial_value =
-        OidInputFunctionCall(type_input_function, initial_value_text, type_io_parameter, -1);
-    pfree(initial_value_text);
-    return initial_value;
 }
 
 /** Releases the executor resources owned by a vector aggregate state. */
