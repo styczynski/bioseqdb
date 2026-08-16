@@ -117,7 +117,8 @@ llvm_root_meets_min() {
   clang_tidy_have="$(clang_version "$clang_tidy")"
   [ -n "$clang_have" ] && [ -n "$clang_tidy_have" ] || return 1
   [ "${clang_have%%.*}" = "${clang_tidy_have%%.*}" ] || return 1
-  dpkg --compare-versions "$clang_have" ge "$LLVM_MIN_VERSION"
+  dpkg --compare-versions "$clang_have" ge "$LLVM_MIN_VERSION" || return 1
+  dpkg --compare-versions "$clang_tidy_have" ge "$LLVM_MIN_VERSION"
 }
 
 install_llvm() {
@@ -166,6 +167,8 @@ CLANG_TIDY_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang-tidy")"
   || fail "clang-tidy missing or version not parseable at $LLVM_ROOT/bin/clang-tidy"
 dpkg --compare-versions "$CLANG_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
   || fail "clang $CLANG_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
+dpkg --compare-versions "$CLANG_TIDY_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
+  || fail "clang-tidy $CLANG_TIDY_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
 [ "${CLANG_ACTUAL_VERSION%%.*}" = "${CLANG_TIDY_ACTUAL_VERSION%%.*}" ] \
   || fail "clang-tidy major $CLANG_TIDY_ACTUAL_VERSION does not match clang $CLANG_ACTUAL_VERSION"
 "$LLVM_ROOT/bin/clang++" --version | head -1 || fail "clang++ not runnable"
