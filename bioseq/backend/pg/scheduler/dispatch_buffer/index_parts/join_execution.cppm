@@ -101,6 +101,8 @@ namespace bioseq::scheduler {
     auto& scanner_pg_ctx = *join_scanner_pg_ctx;
     const auto ticket =
         bioseq::postgres::scheduler::begin_batch(static_cast<std::int64_t>(batch_size));
+    /** @brief Sums prepared-target build, reuse, duplicate, and persisted-reader counters across
+     * all CPU preparation groups. */
     auto prepared_counter_totals = [this] {
         std::array<std::uint64_t, 5> totals{};
         for (const auto& group : join_cpu_prepared_target.groups) {
@@ -416,6 +418,7 @@ namespace bioseq::scheduler {
                     read_delta.persisted_source_fragment_rows_read = read.source_fragment_rows_read;
                     read_delta.persisted_source_decoded_bp = read.source_decoded_bp;
                     map_hash_major_index_reader_stats(read_delta, read);
+                    /** @brief Records grouped-SoA reader capacity and layout checks into @p read_delta. */
                     const auto record_grouped_soa_reader_memory_stats = [&read_delta](
                                                                             const auto& reader) {
                         const auto memory_stats = reader.memory_stats();

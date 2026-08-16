@@ -85,6 +85,7 @@ import :custom_scan_slice_rewrite_path_cloning;
 using namespace bioseq::postgres::support;
 
 export {
+    /** Tracks base-relation Var usage while walking one PathTarget expression list. */
     struct slice_project_base_target_validation {
         Index relid = 0;
         bool allow_row_identity = false;
@@ -92,6 +93,7 @@ export {
         bool invalid = false;
     };
 
+    /** Returns whether @p var is a row-identity column (tid or tableoid) for @p relid. */
     [[nodiscard]] bool slice_project_is_target_row_identity_var(const Var* var,
                                                                 const Index relid) noexcept {
         if (var == nullptr || !bioseq_is_concrete_rte_varno(relid) || var->varno != relid ||
@@ -103,7 +105,9 @@ export {
                 var->vartypmod == -1 && !OidIsValid(var->varcollid));
     }
 
+    /** Rejects PHVs and non-base Vars while walking one PathTarget expression list. */
     struct slice_project_base_target_visitor {
+        /** Updates @p validation and returns the next walk step. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -131,6 +135,7 @@ export {
         }
     };
 
+    /** Returns whether @p target is owned by an upper planner stage rather than the scan. */
     [[nodiscard]] bool slice_project_target_has_semantic_owner(PlannerInfo* root,
                                                                PathTarget* target) {
         if (root == nullptr || root->parse == nullptr || target == nullptr) {
@@ -196,6 +201,7 @@ export {
                !validation.invalid;
     }
 
+    /** Returns whether UPDATE recipe expressions use stable sequence Vars outside updated columns. */
     [[nodiscard]] bool slice_project_update_sources_are_stable(
         PlannerInfo* root, RelOptInfo* rel, slice_project_ir_builder const& builder) {
         if (root == nullptr || rel == nullptr || root->update_colnos == NIL) {
@@ -288,6 +294,7 @@ export {
 
         postgres_list<Path> owners;
         postgres_list<Path> partial_owners;
+        /** Builds a CustomPath owner wrapping a tagged BioseqScan child for @p source. */
         auto build_owner = [root,
                             rel,
                             projection_target,
@@ -357,11 +364,13 @@ export {
             add_partial_path(rel, owner);
     }
 
+    /** Holds opcode-presence state while walking one aggregate expression. */
     struct slice_project_aggregate_recipe_presence {
         const bioseq_stub_oids* oids = nullptr;
         bool found = false;
     };
 
+    /** Stops the walk when a recognized projection opcode appears. */
     struct slice_project_aggregate_recipe_presence_visitor {
         /* Stop at the first planner expression represented by the projection IR. */
         [[nodiscard]] pg_walk_step
@@ -387,6 +396,7 @@ export {
         return analysis.found;
     }
 
+    /** Collects sequence-Var presence and rejects cross-relation Vars in aggregate arguments. */
     struct slice_project_aggregate_argument_validation {
         const bioseq_stub_oids* oids = nullptr;
         Relids available_relids = nullptr;
@@ -394,6 +404,7 @@ export {
         bool invalid = false;
     };
 
+    /** Validates Vars in one aggregate argument against @c available_relids. */
     struct slice_project_aggregate_argument_visitor {
         /* Validate that every Var belongs to the aggregate input relation. */
         [[nodiscard]] pg_walk_step
@@ -441,6 +452,7 @@ export {
         return !validation.invalid && (!require_sequence_var || validation.saw_sequence_var);
     }
 
+    /** Accumulates movable aggregate arguments and safety flags for one AggPath. */
     struct slice_project_aggregate_input_validation {
         PlannerInfo* root = nullptr;
         const bioseq_stub_oids* oids = nullptr;
@@ -474,6 +486,7 @@ export {
         validation.input_expressions = lappend(validation.input_expressions, expression);
     }
 
+    /** Walks aggregate targets and collects recipe arguments that may cross an Agg barrier. */
     struct slice_project_aggregate_input_visitor {
         /* Collect movable whole arguments while enforcing aggregate barriers. */
         [[nodiscard]] pg_walk_step

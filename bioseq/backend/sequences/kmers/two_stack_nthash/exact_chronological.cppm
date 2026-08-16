@@ -25,12 +25,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace two_stack_internal {
 
+/** Per-lane forward and reverse rolling k-mer code vectors. */
 template<class p_simd_tag>
 struct canonical_kmer_vectors {
     hn::Vec<p_simd_tag> forward;
     hn::Vec<p_simd_tag> reverse;
 };
 
+/** Shift one nt4 code into per-lane forward and reverse rolling k-mer vectors. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE canonical_kmer_vectors<p_simd_tag> incorporate_kmer_codes(
     p_simd_tag d,
@@ -47,6 +49,7 @@ template<class p_simd_tag>
     return current;
 }
 
+/** Per-lane minimizer candidate hash, packed raw storage, and ordinal. */
 template<class p_simd_tag>
 struct minimizer_candidate_vectors {
     hn::Vec<p_simd_tag> hash;
@@ -54,6 +57,7 @@ struct minimizer_candidate_vectors {
     hn::Vec<p_simd_tag> ordinal;
 };
 
+/** Compare one combined-window slot against the running per-lane minimum. */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE minimizer_candidate_vectors<p_simd_tag> reduce_window_slot(
     p_simd_tag d,
@@ -73,6 +77,7 @@ template<class p_simd_tag>
     return minimum;
 }
 
+/** Run one SIMD batch through rolling k-mers, window reduction, tie handling, and emission. */
 template<
     bool p_invalid_only,
     std::size_t p_window_size,

@@ -84,6 +84,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** Returns true when @p path is a CustomPath whose CustomName is BioseqScan. */
     [[nodiscard]] bool slice_project_is_bioseq_scan_path(Path* path) {
         if (path == nullptr || !IsA(path, CustomPath))
             return false;
@@ -92,6 +93,7 @@ export {
                strcmp(custom->methods->CustomName, "BioseqScan") == 0;
     }
 
+    /** Returns true when @p path is a CustomPath using slice-project owner methods. */
     [[nodiscard]] bool slice_project_is_owner_path(Path* path) {
         if (path == nullptr || !IsA(path, CustomPath))
             return false;
@@ -99,6 +101,7 @@ export {
         return custom->methods == &bioseq_slice_project_path_methods();
     }
 
+    /** Returns true when @p actual and @p expected share the same expression list and sortgrouprefs. */
     [[nodiscard]] bool slice_project_targets_match(PathTarget* actual, PathTarget* expected) {
         const int expression_count = actual == nullptr ? 0 : list_length(actual->exprs);
         if (actual == nullptr || expected == nullptr ||
@@ -209,6 +212,7 @@ export {
      * whose elements recurse back through the path clone. */
     [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path);
 
+    /** Clones every Path in @p paths through slice_project_clone_mutable_path_spine. */
     [[nodiscard]] List* slice_project_clone_path_list(List* paths) {
         List* clones = NIL;
         for (Path* child : postgres_list<Path>(paths)) {
@@ -325,6 +329,7 @@ export {
         return path;
     }
 
+    /** Copies a BioseqScan @p path, rebuilds BSS3 source tags from @p target, and returns the tagged leaf. */
     [[nodiscard]] Path* slice_project_tag_source_child(Path* path,
                                                        PathTarget* target,
                                                        slice_project_ir_builder const& builder) {
@@ -503,6 +508,7 @@ export {
                 slice_project_tag_owned_path_tree(gather->subpath, builder, tagged_source);
             return path;
         }
+        /** Recursively tags every path stored in @p subpaths. */
         auto tag_path_list = [&builder, &tagged_source](List* subpaths) {
             for (ListCell* cell = list_head(subpaths); cell != nullptr;
                  cell = lnext(subpaths, cell)) {
@@ -615,6 +621,7 @@ export {
         return tagged ? private_path : path;
     }
 
+    /** Walks @p plan for lazy BioseqScan providers and adds each source route to @p routes. */
     void batch_sort_collect_source_routes(PlanState* plan,
                                           bioseq::storage::pg_sequence_source_route_set& routes,
                                           std::uint32_t& provider_count) {
@@ -665,6 +672,7 @@ export {
         }
     }
 
+    /** Collects BioseqScan source routes from @p child into @p routes and returns true when any provider is found. */
     [[nodiscard]] bool
     batch_sort_attach_source_routes(PlanState* child,
                                     bioseq::storage::pg_sequence_source_route_set& routes) {

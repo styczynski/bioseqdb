@@ -191,6 +191,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     bioseq::pg_types::seq::dispatch_instance(
         mmsearch_state.alphabet_code,
         mmsearch_state.storage_unit_byte_width,
+        /** @brief Records target letters-per-unit and storage-unit width for hydration sizing. */
         [&lpu_for_hydration, &bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
             using traits = typename compact_sequence_range<p_sequence>::traits;
             lpu_for_hydration = traits::letters_per_unit;
@@ -202,6 +203,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         bioseq::pg_types::seq::dispatch_instance(
             mmsearch_state.query_alphabet_code,
             mmsearch_state.query_storage_unit_byte_width,
+            /** @brief Records per-row query letters-per-unit and storage-unit width for hydration sizing. */
             [&query_lpu_for_hydration,
              &query_bytes_per_unit_for_hydration]<class p_sequence>() noexcept {
                 using traits = typename compact_sequence_range<p_sequence>::traits;
@@ -209,6 +211,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
                 query_bytes_per_unit_for_hydration = sizeof(typename traits::storage_unit);
             });
     }
+    /** @brief Estimates flat varlena bytes for a compact sequence from bp length and packing traits.
+     * Returns 0 when packing parameters are invalid or the size exceeds allocator limits. */
     auto estimate_flat_sequence_bytes = [](const std::uint64_t bp_length,
                                            const std::size_t letters_per_unit,
                                            const std::size_t bytes_per_unit) -> std::uint64_t {
@@ -235,6 +239,8 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return varlena_bytes;
     };
+    /** @brief Estimates per-row flat sequence bytes when dispatch requires materialised payloads.
+     * Returns 0 when flat payloads are not required. */
     auto estimate_hydration_bytes = [this,
                                      requires_flat_sequence_payloads,
                                      lpu_for_hydration,
@@ -278,6 +284,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return bytes;
     };
+    /** @brief Fills per-row target headers, per-row query headers, and query ids from buffered entries. */
     auto refresh_row_arrays =
         [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
             for (const size_t row_index : rows) {
@@ -418,11 +425,13 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         user_relid,
         user_main_relfilenode,
         static_cast<std::int16_t>(mmsearch_state.seq_attno));
+    /** @brief Clears per-row header and query-id arrays before each admitted wave. */
     auto reset_dispatch_arrays = [&target_hdrs, &per_row_query_hdrs, &query_ids] {
         target_hdrs.fill(nullptr);
         per_row_query_hdrs.fill(nullptr);
         query_ids.fill(-1);
     };
+    /** @brief Clears scanner_pg locator, recipe, rowno, and index-source fields for a new wave. */
     auto reset_scanner_wave = [&scanner_pg_ctx] {
         scanner_pg_ctx.target_locators.fill(std::nullopt);
         scanner_pg_ctx.query_locators.fill(std::nullopt);
@@ -434,6 +443,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         scanner_pg_ctx.target_index_sources.fill(
             ::bioseq::pipeline_stats::target_index_source::none);
     };
+    /** @brief Copies locator, recipe, and rowno state from buffered entries into scanner_pg for active wave rows. */
     auto install_scanner_wave = [this, &scanner_pg_ctx](std::span<const size_t> rows) {
         for (const size_t row : rows) {
             if (row >= buffered_entries.size() || row >= dispatch_batch_capacity) {
@@ -461,6 +471,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             scanner_pg_ctx.target_rownos[row] = buffered_entries[row].sequence_rowno;
         }
     };
+    /** @brief Sums hydration byte estimates across the rows in one admitted wave. */
     auto wave_estimated_bytes =
         [&estimate_hydration_bytes](std::span<const size_t> rows) -> std::uint64_t {
         std::uint64_t bytes = 0;
@@ -473,6 +484,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return bytes;
     };
+    /** @brief Reports whether any wave row has a recipe or locator-backed sequence source. */
     auto wave_has_source_facade = [this](std::span<const size_t> rows) noexcept {
         for (const size_t row : rows) {
             if (row >= buffered_entries.size())
@@ -485,6 +497,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         }
         return false;
     };
+    /** @brief Merges completed wave pipeline stats into the batch last_stats accumulator. */
     auto merge_stats =
         [this](const ::bioseq::pipeline_stats::pipeline_execution_stats& wave_stats) {
             last_stats.merge(wave_stats);
@@ -499,6 +512,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         ExecDropSingleTupleTableSlot(copy_staging_slot);
         copy_staging_slot = nullptr;
     }
+    /** @brief Drops hydrated header pointers and owned payload buffers for the active wave. */
     const auto clear_active_wave_member_handles_noexcept = [this]() noexcept {
         for (auto& entry : buffered_entries) {
             entry.hydrated_seq_hdr = nullptr;
@@ -507,6 +521,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         hydrated_target_payloads.clear();
         hydrated_query_payloads.clear();
     };
+    /** @brief Aborts the active read session and clears wave handles on an error path. */
     const auto release_active_wave_after_error_noexcept =
         [this, &clear_active_wave_member_handles_noexcept]() noexcept {
             scanner_pg_ctx.read_session = nullptr;
@@ -517,6 +532,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             per_row_query_hdrs.fill(nullptr);
             active_wave_permit.reset();
         };
+    /** @brief Verifies the read session finished, then clears wave handles and releases admission. */
     const auto release_active_wave_checked = [this, &clear_active_wave_member_handles_noexcept]() {
         if (active_wave_read_session != nullptr) {
             ereport(ERROR,
@@ -528,6 +544,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
         per_row_query_hdrs.fill(nullptr);
         active_wave_permit.reset();
     };
+    /** @brief Tears down the active wave and destroys scanner_pg sequence caches after failure. */
     const auto abandon_scanner_cache_noexcept =
         [this, &release_active_wave_after_error_noexcept]() noexcept {
             release_active_wave_after_error_noexcept();
