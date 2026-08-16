@@ -157,7 +157,9 @@ export {
 
     [[nodiscard]] Const* slice_project_int8_const(std::uint64_t value) {
         const std::uint64_t clamped =
-            std::min<std::uint64_t>(value, static_cast<std::uint64_t>(INT64_MAX));
+            std::min<std::uint64_t>(
+                value,
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
         return makeConst(INT8OID,
                          -1,
                          InvalidOid,

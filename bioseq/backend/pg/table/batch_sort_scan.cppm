@@ -837,7 +837,9 @@ void explain_batch_sort_scan(CustomScanState* node, List* ancestors, ExplainStat
     ExplainPropertyInteger("Bioseq Source Bytes Admitted",
                            "bytes",
                            static_cast<int64>(std::min<std::uint64_t>(
-                               rt->admitted_source_bytes, static_cast<std::uint64_t>(INT64_MAX))),
+                               rt->admitted_source_bytes,
+                               static_cast<std::uint64_t>(
+                                   std::numeric_limits<std::int64_t>::max()))),
                            es);
     ExplainPropertyInteger("Bioseq Source Admission Fallbacks",
                            nullptr,

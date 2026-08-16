@@ -8,7 +8,6 @@ module;
 #include <bioseq/pg_compat.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/integer.hpp>
-#include <climits>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +16,7 @@ module;
 #include <exception>
 #include <hwy/highway.h>
 #include <libassert/assert.hpp>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -487,7 +487,7 @@ void write_parent_row(load_context& ctx,
             raise_load_error_as_cpp(ERRCODE_DATA_EXCEPTION, routed.error());
         }
     } else if (ctx.cols.header_attno != 0) {
-        if (header.size() > static_cast<std::size_t>(INT_MAX)) {
+        if (header.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             raise_load_error_as_cpp(ERRCODE_PROGRAM_LIMIT_EXCEEDED,
                                     "FASTA/FASTQ header exceeds INT_MAX");
         }

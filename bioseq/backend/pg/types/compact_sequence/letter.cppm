@@ -9,6 +9,7 @@ module;
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <type_traits>
 
@@ -619,7 +620,8 @@ void bioseq_letter_post_parse_analyze(
      * form a last-installed-first-called chain, so bioseq can sit on either
      * side of another preload hook.  An inbound count proves exact traversal
      * of the installed chain independently of that ordering. */
-    if (letter_hook_call_count < static_cast<std::uint64_t>(INT64_MAX)) {
+    if (letter_hook_call_count <
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         ++letter_hook_call_count;
     }
     if (previous_letter_post_parse_analyze_hook != nullptr) {

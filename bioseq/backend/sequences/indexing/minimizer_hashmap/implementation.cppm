@@ -989,7 +989,7 @@ void minimizer_hashmap_fragment_index::build_from_pairs(
     positions.clear();
     const std::size_t n = pairs.size();
     if (n == 0) return;
-    if (n > UINT32_MAX) {
+    if (n > std::numeric_limits<std::uint32_t>::max()) {
         index_corruption_panic(
             "build_from_pairs: >UINT32_MAX positions (pos_offset is u32)");
     }
@@ -1006,7 +1006,7 @@ void minimizer_hashmap_fragment_index::build_from_pairs(
             positions[j] = pairs[j].second;
             ++j;
         }
-        if (j - i > UINT32_MAX) {
+        if (j - i > std::numeric_limits<std::uint32_t>::max()) {
             index_corruption_panic(
                 "build_from_pairs: kmer count > u32 (packed count field)");
         }

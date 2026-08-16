@@ -364,7 +364,8 @@ read_domain_ranks_on_backend(pg_sequence_source_domain* domain,
     }
     if (domain->stored_type != stored_type ||
         !locator_geometry_is_valid(locator, stored_type, 0u, /*validate_padding=*/false) ||
-        locator.logical_length > static_cast<std::uint64_t>(INT64_MAX) ||
+        locator.logical_length >
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         source_from > locator.logical_length ||
         output.size() > locator.logical_length - source_from) {
         ereport(ERROR,

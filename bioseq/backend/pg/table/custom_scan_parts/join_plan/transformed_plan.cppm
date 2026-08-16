@@ -153,7 +153,8 @@ export {
             !batch_join_typmod_is_supported(query_typmod_validation_result->typmod) ||
             !mmsearch_typmods_share_alphabet(target_typmod_validation_result->typmod,
                                              query_typmod_validation_result->typmod) ||
-            alphabet_code < 0 || alphabet_code > UINT8_MAX ||
+            alphabet_code < 0 ||
+            alphabet_code > static_cast<int>(std::numeric_limits<std::uint8_t>::max()) ||
             (storage_unit_byte_width != 1 && storage_unit_byte_width != 2 &&
              storage_unit_byte_width != 4 && storage_unit_byte_width != 8) ||
             index_read_requirement !=

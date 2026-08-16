@@ -76,7 +76,7 @@ bool piece_tree_self_test() {
       run_transformed_join_rotation_regression();
 
   auto *saturation_arena = make_piece_tree_arena();
-  saturation_arena->refcount = UINT32_MAX;
+  saturation_arena->refcount = std::numeric_limits<std::uint32_t>::max();
   PG_TRY();
   {
     retain_arena(saturation_arena);

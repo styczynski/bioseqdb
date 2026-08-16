@@ -303,7 +303,12 @@ runtime::run_seed_lookup_roundtrip(runtime_seed_lookup_inputs inputs,
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(seed)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(seed)");
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
+             "vkWaitForFences(seed)");
     require_immutable_metal_policy_live("seed operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(seed)");
 

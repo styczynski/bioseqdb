@@ -815,7 +815,8 @@ enum class materialization_size_probe : std::uint8_t {
             pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
             []<class p_instance>() {
               (void)bound_flat_size<p_instance>(
-                  static_cast<std::uint64_t>(UINT32_MAX) + 1u);
+                  static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) +
+                  1u);
             });
         break;
     }
@@ -905,14 +906,16 @@ namespace {
 /** Expose this contract to the packed-output SQL facade. */
 [[nodiscard]] inline bool run_concat_length_guardrail_matrix() {
   constexpr auto max_logical_length =
-      static_cast<std::uint64_t>(INT64_MAX);
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
   return checked_add_bp_lengths(max_logical_length, 0u)
              == max_logical_length
       && checked_add_bp_lengths(max_logical_length - 1u, 1u)
              == max_logical_length
       && concat_length_add_raises_program_limit(max_logical_length, 1u)
-      && concat_length_add_raises_program_limit(UINT64_MAX, 0u)
-      && concat_length_add_raises_program_limit(0u, UINT64_MAX);
+      && concat_length_add_raises_program_limit(
+          std::numeric_limits<std::uint64_t>::max(), 0u)
+      && concat_length_add_raises_program_limit(
+          0u, std::numeric_limits<std::uint64_t>::max());
 }
 
 namespace {
@@ -1087,20 +1090,21 @@ namespace {
               >= work_before.cleanup_ledger_steps
           && work_after.retired_root_steps
               >= work_before.retired_root_steps;
-      const std::uint64_t join_steps = work_monotonic
-          ? work_after.join_steps - work_before.join_steps : UINT64_MAX;
+      const std::uint64_t join_steps =
+          work_monotonic ? work_after.join_steps - work_before.join_steps
+                         : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t validation_steps = work_monotonic
           ? work_after.bounded_validation_steps
               - work_before.bounded_validation_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t ledger_steps = work_monotonic
           ? work_after.cleanup_ledger_steps
               - work_before.cleanup_ledger_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t retirement_steps = work_monotonic
           ? work_after.retired_root_steps
               - work_before.retired_root_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
 #else
       const bool work_monotonic = true;
       const std::uint64_t join_steps = 1u;
@@ -1199,18 +1203,19 @@ namespace {
               >= before.bounded_validation_steps
           && after.cleanup_ledger_steps >= before.cleanup_ledger_steps
           && after.retired_root_steps >= before.retired_root_steps;
-      const std::uint64_t join_steps = monotonic
-          ? after.join_steps - before.join_steps : UINT64_MAX;
+      const std::uint64_t join_steps =
+          monotonic ? after.join_steps - before.join_steps
+                    : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t validation_steps = monotonic
           ? after.bounded_validation_steps
               - before.bounded_validation_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t ledger_steps = monotonic
           ? after.cleanup_ledger_steps - before.cleanup_ledger_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
       const std::uint64_t retirement_steps = monotonic
           ? after.retired_root_steps - before.retired_root_steps
-          : UINT64_MAX;
+          : std::numeric_limits<std::uint64_t>::max();
 #else
       const bool monotonic = true;
       const std::uint64_t join_steps = 1u;

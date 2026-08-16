@@ -86,7 +86,8 @@ promote_pg_sequence_locator_impl(const pg_sequence_source_registry_lease& lease,
                  errmsg("bioseq source promotion requires a locator stub")));
     }
     const sequence_locator locator = decode_locator_from_stub(header);
-    if (locator.logical_length > static_cast<std::uint64_t>(INT64_MAX)) {
+    if (locator.logical_length >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq locator logical length exceeds bigint")));

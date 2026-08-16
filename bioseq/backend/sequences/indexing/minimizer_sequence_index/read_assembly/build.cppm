@@ -661,7 +661,7 @@ inline void direct_minimizer_bucket_index<p_storage>::build(
                         &ob_lo,
                         &ob_hi](std::uint64_t kmer_key, auto&& positions) {
         const std::uint64_t pcount = positions.total_count();
-        if (pcount > UINT32_MAX)
+        if (pcount > std::numeric_limits<std::uint32_t>::max())
             index_corruption_panic("merge_runs: kmer count > u32 (encoded_bucket.pos_count)");
         ++total_distinct;
         total_positions += pcount;

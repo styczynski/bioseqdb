@@ -140,7 +140,8 @@ template <class p_instance>
         .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
         .storage_unit_byte_width = 8u,
     };
-    std::uint8_t expected_rank = UINT8_MAX;
+    std::uint8_t expected_rank =
+        static_cast<int>(std::numeric_limits<std::uint8_t>::max());
     const bool rank_found = pgseq_rank_for_symbol(
         bound_type.alphabet_code, static_cast<unsigned char>('A'), expected_rank);
 

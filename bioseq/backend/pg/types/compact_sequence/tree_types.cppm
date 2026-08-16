@@ -7,6 +7,7 @@ module;
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 #include <bioseq/pg_compat.h>
@@ -55,11 +56,12 @@ export using piece_tree_ref = piece_edge;
  * height-bounded AVL join needs fewer than two tokens per level; 256 keeps the
  * guard independent of corrupt input metadata while remaining fixed-size. */
 export inline constexpr std::size_t max_pending_piece_edge_tokens = 256u;
-static_assert(max_pending_piece_edge_tokens < UINT16_MAX);
+static_assert(max_pending_piece_edge_tokens <
+              static_cast<int>(std::numeric_limits<std::uint16_t>::max()));
 
 /// Sentinel identifying no cleanup-ledger slot.
 export inline constexpr std::uint16_t invalid_piece_edge_cleanup_slot =
-    UINT16_MAX;
+    static_cast<int>(std::numeric_limits<std::uint16_t>::max());
 
 /// Generation-qualified handle for one cleanup-ledger token.
 export struct piece_edge_cleanup_handle {
@@ -230,9 +232,9 @@ export inline constexpr Size worst_piece_metadata =
 export inline constexpr std::uint32_t max_piece_count =
     static_cast<std::uint32_t>(
         (MaxAllocSize / worst_piece_metadata)
-            < static_cast<Size>(UINT32_MAX)
+            < static_cast<Size>(std::numeric_limits<std::uint32_t>::max())
         ? (MaxAllocSize / worst_piece_metadata)
-        : static_cast<Size>(UINT32_MAX));
+        : static_cast<Size>(std::numeric_limits<std::uint32_t>::max()));
 
 /// PostgreSQL expanded-object wrapper for a persistent sequence root.
 export struct pg_sequence_expanded {

@@ -315,12 +315,13 @@ namespace {
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq join attempted to retire an invalid local root")));
     }
-    if (destination.retired_join_root_count == UINT32_MAX) {
+    if (destination.retired_join_root_count == std::numeric_limits<std::uint32_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq join retirement count overflow")));
     }
-    if (destination.retired_join_rotation_count == UINT32_MAX) {
+    if (destination.retired_join_rotation_count ==
+        std::numeric_limits<std::uint32_t>::max()) {
         quarantine_piece_tree_invariant_noexcept(
             piece_tree_quarantine_reason::retired_join_root,
             "retired join rotation count overflow",

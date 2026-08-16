@@ -9,6 +9,7 @@ module;
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <map>
 #include <new>
 #include <optional>
@@ -85,6 +86,7 @@ static bool truncate_and_compact_column_stripes(Relation rel, int elevel);
 
 /** Retain impossible speculative authorities without allocating or throwing. */
 static void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
+    constexpr auto k_max_count = std::numeric_limits<std::uint64_t>::max();
     auto& pending = access_pending_speculative_sources();
     if (pending.empty())
         return;
@@ -93,19 +95,20 @@ static void quarantine_pending_speculative_sources_noexcept(XactEvent event) noe
     for (const auto& [key, entry] : pending) {
         (void)key;
         const auto entry_count = static_cast<std::uint64_t>(entry.sources.size());
-        source_count =
-            UINT64_MAX - source_count < entry_count ? UINT64_MAX : source_count + entry_count;
+        source_count = k_max_count - source_count < entry_count
+                           ? k_max_count
+                           : source_count + entry_count;
     }
 
     auto& state = speculative_source_quarantine_state_noexcept();
-    if (state.invariant_events != UINT64_MAX)
+    if (state.invariant_events != k_max_count)
         ++state.invariant_events;
     const auto pending_rows = static_cast<std::uint64_t>(pending.size());
-    state.quarantined_rows = UINT64_MAX - state.quarantined_rows < pending_rows
-                                 ? UINT64_MAX
+    state.quarantined_rows = k_max_count - state.quarantined_rows < pending_rows
+                                 ? k_max_count
                                  : state.quarantined_rows + pending_rows;
-    state.quarantined_sources = UINT64_MAX - state.quarantined_sources < source_count
-                                    ? UINT64_MAX
+    state.quarantined_sources = k_max_count - state.quarantined_sources < source_count
+                                    ? k_max_count
                                     : state.quarantined_sources + source_count;
     state.last_event = event;
 

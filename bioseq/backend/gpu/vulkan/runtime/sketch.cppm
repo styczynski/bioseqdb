@@ -251,7 +251,11 @@ runtime_sketch_result runtime::run_sketch_roundtrip(std::span<const std::byte> p
     const vulkan_submission_test_fault submission_test_fault =
         delay_vulkan_submission_test_after_submit();
 #endif
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
              "vkWaitForFences(pc_sketch)");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
     require_immutable_metal_policy_live("sketch operation completion");
@@ -557,7 +561,11 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_),
              "vkQueueSubmit(pc_sketch_batch_count_scan)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
              "vkWaitForFences(pc_sketch_batch_count_scan)");
     require_immutable_metal_policy_live("batched sketch count operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch_batch_count_scan)");
@@ -648,7 +656,11 @@ runtime_sketch_batch_result runtime::run_sketch_tile_batch_roundtrip(
         record_shader_to_host(command_buffer_);
         check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(pc_sketch_batch_emit)");
         check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(pc_sketch_batch_emit)");
-        check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
+        check_vk(vkWaitForFences(device_,
+                                 1,
+                                 &fence_,
+                                 VK_TRUE,
+                                 std::numeric_limits<std::uint64_t>::max()),
                  "vkWaitForFences(pc_sketch_batch_emit)");
         require_immutable_metal_policy_live("batched sketch emit operation completion");
         check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch_batch_emit)");

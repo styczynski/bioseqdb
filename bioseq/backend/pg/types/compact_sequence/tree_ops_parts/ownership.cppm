@@ -93,10 +93,10 @@ inline void mark_piece_tree_arena_quarantined_noexcept(
 {
     if (arena == nullptr) return;
     state.last_arena_generation = arena->generation;
-    if (arena->refcount == UINT32_MAX) return;
-    arena->refcount = UINT32_MAX;
+    if (arena->refcount == std::numeric_limits<std::uint32_t>::max()) return;
+    arena->refcount = std::numeric_limits<std::uint32_t>::max();
     arena->release_next = nullptr;
-    if (state.quarantined_arenas != UINT64_MAX) {
+    if (state.quarantined_arenas != std::numeric_limits<std::uint64_t>::max()) {
         ++state.quarantined_arenas;
     }
 }
@@ -116,7 +116,7 @@ inline void record_piece_tree_quarantine_noexcept(
         state.first_reason = reason;
         state.first_detail = detail;
     }
-    if (state.invariant_failures != UINT64_MAX) {
+    if (state.invariant_failures != std::numeric_limits<std::uint64_t>::max()) {
         ++state.invariant_failures;
     }
     state.last_reason = reason;
@@ -368,7 +368,7 @@ export inline void retain_arena(piece_tree_arena *arena) noexcept {
     ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
                     errmsg("cannot retain a released bioseq piece arena")));
   }
-  if (arena->refcount == UINT32_MAX) {
+  if (arena->refcount == std::numeric_limits<std::uint32_t>::max()) {
     ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                     errmsg("bioseq piece arena reference count overflow")));
   }
@@ -380,7 +380,8 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
   if (arena == nullptr) {
     return;
   }
-  if (arena->refcount == 0u || arena->refcount == UINT32_MAX) {
+  if (arena->refcount == 0u ||
+      arena->refcount == std::numeric_limits<std::uint32_t>::max()) {
     quarantine_piece_tree_invariant_noexcept(
         piece_tree_quarantine_reason::arena_refcount,
         "invalid root refcount",
@@ -411,7 +412,8 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
               child);
           return;
         }
-        if (child->refcount == 0u || child->refcount == UINT32_MAX) {
+        if (child->refcount == 0u ||
+            child->refcount == std::numeric_limits<std::uint32_t>::max()) {
           quarantine_piece_tree_invariant_noexcept(
               piece_tree_quarantine_reason::arena_dependency,
               "dependency refcount is invalid",
@@ -599,7 +601,7 @@ adopt_piece_edge_cleanup_token_noexcept(
         index = ledger.next_unused++;
     }
     auto& slot = ledger.slots[index];
-    if (slot.active || slot.generation == UINT32_MAX) {
+    if (slot.active || slot.generation == std::numeric_limits<std::uint32_t>::max()) {
         quarantine_piece_edge_cleanup_ledger_noexcept(
             ledger,
             "concat construction token slot state is invalid",
@@ -953,7 +955,7 @@ inline void reserve_arena_allocation(
     switch (kind) {
         case arena_allocation_kind::node:
             destination.node_metadata_bytes += aligned;
-            if (destination.node_count == UINT32_MAX) {
+            if (destination.node_count == std::numeric_limits<std::uint32_t>::max()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                          errmsg("bioseq piece node count overflow")));
@@ -962,7 +964,8 @@ inline void reserve_arena_allocation(
             break;
         case arena_allocation_kind::arena_dependency:
             destination.arena_dependency_metadata_bytes += aligned;
-            if (destination.arena_dependency_count == UINT32_MAX) {
+            if (destination.arena_dependency_count ==
+                std::numeric_limits<std::uint32_t>::max()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                          errmsg("bioseq arena dependency count overflow")));
@@ -971,7 +974,8 @@ inline void reserve_arena_allocation(
             break;
         case arena_allocation_kind::source_dependency:
             destination.source_dependency_metadata_bytes += aligned;
-            if (destination.source_dependency_count == UINT32_MAX) {
+            if (destination.source_dependency_count ==
+                std::numeric_limits<std::uint32_t>::max()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                          errmsg("bioseq source dependency count overflow")));
@@ -983,8 +987,8 @@ inline void reserve_arena_allocation(
             break;
         case arena_allocation_kind::retired_join_root_metadata:
             destination.retired_join_root_metadata_bytes += aligned;
-            if (destination.retired_join_root_overflow_block_count
-                == UINT32_MAX) {
+            if (destination.retired_join_root_overflow_block_count ==
+                std::numeric_limits<std::uint32_t>::max()) {
                 ereport(ERROR,
                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                          errmsg("bioseq retired join-root block count overflow")));
@@ -1023,7 +1027,7 @@ inline void register_arena_dependency(
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq piece arena dependency is already released")));
     }
-    if (child->refcount == UINT32_MAX) {
+    if (child->refcount == std::numeric_limits<std::uint32_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq piece arena dependency reference count overflow")));
@@ -1096,7 +1100,7 @@ namespace {
     std::uint64_t right)
 {
     constexpr auto max_logical_length =
-        static_cast<std::uint64_t>(INT64_MAX);
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     if (left > max_logical_length || right > max_logical_length
         || right > max_logical_length - left) {
         ereport(ERROR,

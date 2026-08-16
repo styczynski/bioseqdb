@@ -54,12 +54,15 @@ namespace {
 
 /** Provide the SQL facade with this deterministic piece-tree contract. */
 [[nodiscard]] inline bool run_tree_length_add_guardrail_matrix() {
-    constexpr auto max_logical_length = static_cast<std::uint64_t>(INT64_MAX);
+    constexpr auto max_logical_length =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     return checked_tree_length_add(max_logical_length, 0u) == max_logical_length &&
            checked_tree_length_add(max_logical_length - 1u, 1u) == max_logical_length &&
            tree_length_add_raises_program_limit(max_logical_length, 1u) &&
-           tree_length_add_raises_program_limit(UINT64_MAX, 0u) &&
-           tree_length_add_raises_program_limit(0u, UINT64_MAX);
+           tree_length_add_raises_program_limit(std::numeric_limits<std::uint64_t>::max(),
+                                                0u) &&
+           tree_length_add_raises_program_limit(0u,
+                                                std::numeric_limits<std::uint64_t>::max());
 }
 
 namespace {
@@ -141,8 +144,10 @@ namespace {
         .alphabet_code = pgseq_unbound_alphabet_code,
         .storage_unit_byte_width = pgseq_unbound_width_tag,
     };
-    const std::uint64_t left_length = oversized_left ? UINT64_MAX : 1u;
-    const std::uint64_t right_length = oversized_left ? 1u : UINT64_MAX;
+    const std::uint64_t left_length =
+        oversized_left ? std::numeric_limits<std::uint64_t>::max() : 1u;
+    const std::uint64_t right_length =
+        oversized_left ? 1u : std::numeric_limits<std::uint64_t>::max();
     const piece_edge left =
         make_literal_node(*arena, factory_failure_unbound_literal(arena, storage, 0u, left_length));
     const piece_edge right = make_literal_node(

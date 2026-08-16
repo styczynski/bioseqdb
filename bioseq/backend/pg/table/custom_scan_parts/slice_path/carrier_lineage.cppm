@@ -147,7 +147,8 @@ export {
                 }
             }
         }
-        if (builder.producer_expressions.size() >= static_cast<std::size_t>(INT_MAX - 1)) {
+        if (builder.producer_expressions.size() >=
+            static_cast<std::size_t>(std::numeric_limits<int>::max() - 1)) {
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("BioseqSliceProject producer graph is too large")));
@@ -288,7 +289,7 @@ export {
                 intVal(list_nth(record, k_slice_record_reason)) == static_cast<int>(reason))
                 return;
         }
-        if (builder.next_boundary_id == UINT32_MAX) {
+        if (builder.next_boundary_id == std::numeric_limits<std::uint32_t>::max()) {
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("BioseqSliceProject materialization DAG is too large")));

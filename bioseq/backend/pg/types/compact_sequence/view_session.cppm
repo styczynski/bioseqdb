@@ -207,7 +207,8 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(detoasted_or_expanded))) {
         auto const* expanded = get_pg_sequence_expanded_ro(
             detoasted_or_expanded);
-        if (expanded->bp_length > static_cast<std::uint64_t>(INT64_MAX)
+        if (expanded->bp_length >
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
             || (expanded->alphabet_bound
                 && !is_supported_alphabet_code(
                     expanded->type_params.alphabet_code))) {
@@ -281,8 +282,8 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
             const std::uint8_t width = static_cast<std::uint8_t>(
                 flat->storage_unit_byte_width) & pgseq_physical_width_mask;
             if (!locator.has_value() || locator->source_epoch == 0u
-                || locator->logical_length
-                    > static_cast<std::uint64_t>(INT64_MAX)
+                || locator->logical_length >
+                       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(flat->alphabet_code))
                 || !pgseq_supported_storage_unit_byte_widths::
@@ -1201,8 +1202,8 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                     const std::uint64_t slice_offset =
                         bioseq::pg_types::seq::header_bytes() - VARHDRSZ
                         + unit_index * sizeof(unit);
-                    if (slice_offset
-                        > static_cast<std::uint64_t>(INT32_MAX)) {
+                    if (slice_offset >
+                        static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
                         ereport(ERROR,
                                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                                  errmsg("bioseq element TOAST offset exceeds int32")));

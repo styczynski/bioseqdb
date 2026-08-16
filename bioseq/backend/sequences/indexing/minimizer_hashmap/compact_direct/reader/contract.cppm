@@ -182,7 +182,8 @@ class prepared_minimizer_fragment_reader {
     static_assert(((std::uint32_t{1} << 28u) >> 10u) == (std::uint32_t{1} << 18u));
     static_assert(((std::uint32_t{1} << 29u) >> 10u) == (std::uint32_t{1} << 19u));
     static_assert(((std::uint32_t{3} << 28u) >> 10u) == (std::uint32_t{3} << 18u));
-    static_assert((UINT32_MAX >> 12u) == query_radix_bucket_mask_);
+    static_assert((std::numeric_limits<std::uint32_t>::max() >> 12u) ==
+                  query_radix_bucket_mask_);
 
     [[nodiscard]] static std::uint64_t stage_now_ns_() noexcept {
         const auto now = bioseq::instrumentation::clock::now_ns();
@@ -407,14 +408,14 @@ class prepared_minimizer_fragment_reader {
         []() consteval {
             std::array<std::uint64_t, 1u << 11u> masks{};
             for (std::size_t low = 0u; low < masks.size(); ++low) {
-                const std::uint64_t mixed =
-                    (static_cast<std::uint64_t>(low) + 1u) * UINT64_C(0x9e3779b97f4a7c15);
-                masks[low] = (UINT64_C(1) << ((mixed >> 0u) & 63u)) |
-                             (UINT64_C(1) << ((mixed >> 6u) & 63u)) |
-                             (UINT64_C(1) << ((mixed >> 12u) & 63u)) |
-                             (UINT64_C(1) << ((mixed >> 18u) & 63u)) |
-                             (UINT64_C(1) << ((mixed >> 24u) & 63u)) |
-                             (UINT64_C(1) << ((mixed >> 30u) & 63u));
+                const std::uint64_t mixed = (static_cast<std::uint64_t>(low) + 1u) *
+                                            std::uint64_t{0x9e3779b97f4a7c15};
+                masks[low] = (std::uint64_t{1} << ((mixed >> 0u) & 63u)) |
+                             (std::uint64_t{1} << ((mixed >> 6u) & 63u)) |
+                             (std::uint64_t{1} << ((mixed >> 12u) & 63u)) |
+                             (std::uint64_t{1} << ((mixed >> 18u) & 63u)) |
+                             (std::uint64_t{1} << ((mixed >> 24u) & 63u)) |
+                             (std::uint64_t{1} << ((mixed >> 30u) & 63u));
             }
             return masks;
         }();
@@ -444,7 +445,8 @@ class prepared_minimizer_fragment_reader {
     static_assert(((std::uint32_t{1} << 28u) >> 9u) == (std::uint32_t{1} << 19u));
     static_assert(((std::uint32_t{1} << 29u) >> 9u) == (std::uint32_t{1} << 20u));
     static_assert(((std::uint32_t{3} << 28u) >> 9u) == (std::uint32_t{3} << 19u));
-    static_assert((UINT32_MAX >> 11u) == query_membership_filter_word_mask_);
+    static_assert((std::numeric_limits<std::uint32_t>::max() >> 11u) ==
+                  query_membership_filter_word_mask_);
 
     [[nodiscard, gnu::always_inline]] static query_occurrence_reference
     query_occurrence_reference_(const packed_query_occurrence& occurrence,

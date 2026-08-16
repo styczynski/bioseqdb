@@ -886,7 +886,7 @@ export [[nodiscard]] inline std::uint64_t checked_add_bp_lengths(
     std::uint64_t right)
 {
     constexpr auto max_logical_length =
-        static_cast<std::uint64_t>(INT64_MAX);
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
     if (left > max_logical_length || right > max_logical_length
         || right > max_logical_length - left) {
         ereport(ERROR,
@@ -1049,7 +1049,9 @@ export [[nodiscard]] bool alphabet_has_complete_complement(
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet_code,
         [alphabet_code, &complete]<class p_alphabet>() {
-            for (std::uint16_t rank = 0u; rank <= UINT8_MAX; ++rank) {
+            for (std::uint16_t rank = 0u;
+                 rank <= static_cast<int>(std::numeric_limits<std::uint8_t>::max());
+                 ++rank) {
                 char original = '\0';
                 if (!pgseq_symbol_for_rank(
                         alphabet_code, static_cast<std::uint8_t>(rank),
@@ -1082,7 +1084,8 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     std::uint32_t producer_value_id = 0u)
 {
     if (!pg_sequence_source_handle_valid(source)
-        || locator.logical_length > static_cast<std::uint64_t>(INT64_MAX)) {
+        || locator.logical_length >
+               static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("invalid source binding for bioseq locator promotion")));

@@ -216,9 +216,12 @@ export {
         if (version != k_bioseq_per_row_join_plan_version || !OidIsValid(target_relation_oid) ||
             target_storage_attno <= 0 || runtime->target_slot_resno <= 0 ||
             runtime->query_slot_resno <= 0 || runtime->child_column_count <= 0 ||
-            raw_alphabet < 0 || raw_alphabet > UINT8_MAX ||
+            raw_alphabet < 0 ||
+            raw_alphabet > static_cast<int>(std::numeric_limits<std::uint8_t>::max()) ||
             (raw_width != 1 && raw_width != 2 && raw_width != 4 && raw_width != 8) ||
-            raw_query_alphabet < 0 || raw_query_alphabet > UINT8_MAX ||
+            raw_query_alphabet < 0 ||
+            raw_query_alphabet >
+                static_cast<int>(std::numeric_limits<std::uint8_t>::max()) ||
             (raw_query_width != 1 && raw_query_width != 2 && raw_query_width != 4 &&
              raw_query_width != 8) ||
             (target_typmod_erased != 0 && target_typmod_erased != 1) ||

@@ -61,7 +61,8 @@ inline void validate_arena_accounting(piece_tree_arena const& arena)
         + arena.literal_storage_bytes
         + arena.retired_join_root_metadata_bytes;
     if (arena.payload_context == nullptr || arena.generation == 0u
-        || arena.refcount == 0u || arena.refcount == UINT32_MAX
+        || arena.refcount == 0u ||
+        arena.refcount == std::numeric_limits<std::uint32_t>::max()
         || arena.accounted_bytes > MaxAllocSize
         || arena.node_metadata_bytes != expected_nodes
         || arena.arena_dependency_metadata_bytes
@@ -104,7 +105,7 @@ inline void validate_retired_join_root_storage(
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("bioseq retired join-root record is invalid")));
         }
-        if (rotations == UINT32_MAX) {
+        if (rotations == std::numeric_limits<std::uint32_t>::max()) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("bioseq retired rotation count overflow")));
@@ -221,7 +222,7 @@ inline void validate_retired_join_root_storage(
         const auto right = validate_tree_node(
             branch.right, result_type, alphabet_bound);
         constexpr auto max_logical_length =
-            static_cast<std::uint64_t>(INT64_MAX);
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
         if (left.length > max_logical_length
             || right.length > max_logical_length
             || right.length > max_logical_length - left.length
@@ -289,7 +290,8 @@ inline void validate_retired_join_root_storage(
 export inline void validate_tree_and_limits(
     piece_edge edge, compact_sequence_stdc_type_params result_type,
     std::uint64_t expected_length, bool alphabet_bound = true) {
-  if (expected_length > static_cast<std::uint64_t>(INT64_MAX)) {
+  if (expected_length >
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
     ereport(ERROR, (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                     errmsg("bioseq logical length exceeds bigint")));
   }
@@ -379,11 +381,12 @@ inline void validate_bounded_edge_summary(
     note_piece_tree_bounded_validation_step_noexcept();
     if (!edge || edge.arena == nullptr || edge.node == nullptr
         || edge.arena->generation == 0u || edge.arena->refcount == 0u
-        || edge.arena->refcount == UINT32_MAX
+        || edge.arena->refcount == std::numeric_limits<std::uint32_t>::max()
         || std::to_underlying(edge.transform)
             > std::to_underlying(
                 bioseq::storage::sequence_transform::reverse_complement)
-        || edge.node->bp_length > static_cast<std::uint64_t>(INT64_MAX)
+        || edge.node->bp_length >
+               static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
         || edge.node->piece_count == 0u
         || edge.node->piece_count > max_piece_count
         || !bounded_edge_height_possible(
@@ -403,7 +406,8 @@ inline void validate_bounded_edge_summary(
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq trusted join node shape is corrupt")));
     }
-    if (count_external && audit.external_edges_checked != UINT32_MAX) {
+    if (count_external &&
+        audit.external_edges_checked != std::numeric_limits<std::uint32_t>::max()) {
         ++audit.external_edges_checked;
     }
 }
@@ -437,7 +441,7 @@ inline void validate_bounded_join_leaf(
     if (literal.storage_arena == nullptr || literal.bytes == nullptr
         || literal.storage_arena->generation == 0u
         || literal.storage_arena->refcount == 0u
-        || literal.storage_arena->refcount == UINT32_MAX
+        || literal.storage_arena->refcount == std::numeric_limits<std::uint32_t>::max()
         || literal.symbol_from > literal.symbol_to
         || literal.symbol_to - literal.symbol_from != node.bp_length
         || (literal.storage_arena != edge.arena
@@ -473,12 +477,16 @@ validate_trusted_join_and_limits(
     std::uint64_t expected_length, bool alphabet_bound)
 {
     bounded_join_validation_audit audit{};
-    if (left_length > static_cast<std::uint64_t>(INT64_MAX)
-        || right_length > static_cast<std::uint64_t>(INT64_MAX)
-        || right_length
-            > static_cast<std::uint64_t>(INT64_MAX) - left_length
+    if (left_length >
+            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+        || right_length >
+               static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+        || right_length >
+               static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) -
+                   left_length
         || left_length + right_length != expected_length
-        || expected_length > static_cast<std::uint64_t>(INT64_MAX)
+        || expected_length >
+               static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
         || destination.dependencies_released
         || destination.release_next != nullptr
         || destination.retired_join_root_count
@@ -582,7 +590,7 @@ validate_trusted_join_and_limits(
             auto& slot = required_arenas[slot_index];
             if (slot.key == nullptr) slot.key = child;
             if (slot.key == child) {
-                if (slot.required == UINT32_MAX) {
+                if (slot.required == std::numeric_limits<std::uint32_t>::max()) {
                     ereport(ERROR,
                             (errcode(ERRCODE_DATA_CORRUPTED),
                              errmsg("bioseq trusted join arena dependency multiplicity overflow")));
@@ -619,7 +627,7 @@ validate_trusted_join_and_limits(
                 slot.ops = source.ops;
             }
             if (slot.state == source.state && slot.ops == source.ops) {
-                if (slot.required == UINT32_MAX) {
+                if (slot.required == std::numeric_limits<std::uint32_t>::max()) {
                     ereport(ERROR,
                             (errcode(ERRCODE_DATA_CORRUPTED),
                              errmsg("bioseq trusted join source dependency multiplicity overflow")));
@@ -695,9 +703,9 @@ validate_trusted_join_and_limits(
                 && branch.left.arena->generation >= destination.generation)
             || (branch.right.arena != std::addressof(destination)
                 && branch.right.arena->generation >= destination.generation)
-            || branch.right.node->bp_length
-                > static_cast<std::uint64_t>(INT64_MAX)
-                    - branch.left.node->bp_length
+            || branch.right.node->bp_length >
+                   static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) -
+                       branch.left.node->bp_length
             || branch.left.node->bp_length + branch.right.node->bp_length
                 != node.bp_length
             || static_cast<std::uint64_t>(branch.left.node->piece_count)
@@ -829,9 +837,9 @@ validate_trusted_join_and_limits(
                 || (branch.right.arena != std::addressof(destination)
                     && branch.right.arena->generation
                         >= destination.generation)
-                || branch.right.node->bp_length
-                    > static_cast<std::uint64_t>(INT64_MAX)
-                        - branch.left.node->bp_length
+                || branch.right.node->bp_length >
+                       static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) -
+                           branch.left.node->bp_length
                 || branch.left.node->bp_length
                         + branch.right.node->bp_length
                     != node.bp_length
@@ -895,7 +903,8 @@ validate_trusted_join_and_limits(
             || dependency->child->generation == 0u
             || dependency->child->generation >= destination.generation
             || dependency->child->refcount == 0u
-            || dependency->child->refcount == UINT32_MAX) {
+            || dependency->child->refcount ==
+                   std::numeric_limits<std::uint32_t>::max()) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("bioseq trusted join arena dependency is invalid")));

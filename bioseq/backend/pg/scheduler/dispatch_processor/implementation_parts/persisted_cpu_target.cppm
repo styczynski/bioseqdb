@@ -521,7 +521,7 @@ void batch_processor::prepare_cpu_persisted_native_target(
      * no later complete query_hash_plan stream is guaranteed to exist. */
     const bool defer_compact_direct_query_set_validation =
         compact_h32_direct_requested && base_params.max_occ > 0 && !base_params.enable_profiling &&
-        target_bp_size > UINT64_C(256000000) &&
+        target_bp_size > std::uint64_t{256000000} &&
         std::ranges::all_of(query_recipe_datums,
                             [](Datum datum) noexcept { return datum == Datum{0}; }) &&
         query_headers.size() >= bioseq::parallelism::task_parallel_minimums::k_query_count &&

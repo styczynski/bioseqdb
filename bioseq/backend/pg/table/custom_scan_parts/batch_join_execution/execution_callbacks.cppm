@@ -207,7 +207,9 @@ export {
                     runtime->target_storage_seq_attno <= 0 || runtime->target_slot_seq_resno <= 0 ||
                     runtime->target_slot_rowno_resno <= 0 || runtime->query_slot_seq_resno <= 0 ||
                     runtime->target_column_count <= 0 || runtime->query_column_count <= 0 ||
-                    raw_alphabet_code < 0 || raw_alphabet_code > UINT8_MAX ||
+                    raw_alphabet_code < 0 ||
+                    raw_alphabet_code >
+                        static_cast<int>(std::numeric_limits<std::uint8_t>::max()) ||
                     (raw_storage_width != 1 && raw_storage_width != 2 && raw_storage_width != 4 &&
                      raw_storage_width != 8) ||
                     !bioseq::indexing::index_read_requirement_ordinal_valid(raw_requirement) ||
@@ -1041,13 +1043,15 @@ export {
             "Bioseq Query Planner Admission",
             "bytes",
             static_cast<std::int64_t>(std::min<std::uint64_t>(
-                runtime->query_planner_admission_bytes, static_cast<std::uint64_t>(INT64_MAX))),
+                runtime->query_planner_admission_bytes,
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))),
             es);
         ExplainPropertyInteger(
             "Bioseq Query Actual Materialization",
             "bytes",
             static_cast<std::int64_t>(std::min<std::uint64_t>(
-                runtime->query_actual_materialized_bytes, static_cast<std::uint64_t>(INT64_MAX))),
+                runtime->query_actual_materialized_bytes,
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))),
             es);
         ExplainPropertyInteger("Bioseq Distinct Targets",
                                nullptr,

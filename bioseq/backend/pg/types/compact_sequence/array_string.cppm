@@ -626,7 +626,8 @@ ArrayType* to_array(
             static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
         return result;
     }
-    if (descriptor.bp_length > static_cast<std::uint64_t>(INT_MAX)) {
+    if (descriptor.bp_length >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to materialize as letter[]")));

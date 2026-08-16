@@ -154,10 +154,12 @@ export {
         const double rows = std::max(0.0, child->rows);
         const double metadata_per_row =
             cpu_operator_cost *
-            static_cast<double>(std::min<std::uint64_t>(builder.piece_boundaries, UINT32_MAX));
+            static_cast<double>(std::min<std::uint64_t>(
+                builder.piece_boundaries, std::numeric_limits<std::uint32_t>::max()));
         const double boundary_per_row =
             cpu_operator_cost *
-            static_cast<double>(std::min<std::uint64_t>(builder.planned_symbols, UINT32_MAX));
+            static_cast<double>(std::min<std::uint64_t>(
+                builder.planned_symbols, std::numeric_limits<std::uint32_t>::max()));
         auto* owner = makeNode(CustomPath);
         owner->path.pathtype = T_CustomScan;
         owner->path.parent = source->parent;

@@ -193,7 +193,7 @@ inline void serialize_sorted_pairs_to_fragment_blob(
             positions.push_back(sorted_pairs[index].second);
             ++count;
             ++index;
-            if (count == UINT32_MAX) {
+            if (count == std::numeric_limits<std::uint32_t>::max()) {
                 index_corruption_panic("minimizers_per_fragment GPU blob: kmer count exceeds u32");
             }
         }

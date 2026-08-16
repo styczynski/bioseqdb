@@ -9,10 +9,10 @@ module;
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <climits>
 #include <cstdint>
 #include <exception>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -116,7 +116,8 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         if (!ssl_ || count <= 0) {
             return oatpp::IOError::BROKEN_PIPE;
         }
-        const int requested = static_cast<int>(std::min<::v_buff_size>(count, INT_MAX));
+        const int requested =
+            static_cast<int>(std::min<::v_buff_size>(count, std::numeric_limits<int>::max()));
         ERR_clear_error();
         errno = 0;
         const int transferred = SSL_read(ssl_.get(), buffer, requested);
@@ -138,7 +139,8 @@ class tls_stream final : public oatpp::base::Countable, public oatpp::data::stre
         if (!ssl_ || count <= 0) {
             return oatpp::IOError::BROKEN_PIPE;
         }
-        const int requested = static_cast<int>(std::min<::v_buff_size>(count, INT_MAX));
+        const int requested =
+            static_cast<int>(std::min<::v_buff_size>(count, std::numeric_limits<int>::max()));
         ERR_clear_error();
         errno = 0;
         const int transferred = SSL_write(ssl_.get(), data, requested);

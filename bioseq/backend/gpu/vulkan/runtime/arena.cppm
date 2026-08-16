@@ -124,7 +124,12 @@ buffer runtime::run_generate_units_roundtrip(std::uint32_t word_bits,
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(gen)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(gen)");
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
+             "vkWaitForFences(gen)");
     require_immutable_metal_policy_live("generate operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(gen)");
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(gen-post)");

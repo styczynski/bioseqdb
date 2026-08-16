@@ -279,10 +279,12 @@ export {
         cost_qual_eval(&expression_cost, projection_target->exprs, root);
         const double metadata_per_row =
             cpu_operator_cost *
-            static_cast<double>(std::min<std::uint64_t>(builder.piece_boundaries, UINT32_MAX));
+            static_cast<double>(std::min<std::uint64_t>(
+                builder.piece_boundaries, std::numeric_limits<std::uint32_t>::max()));
         const double boundary_per_row =
             cpu_operator_cost *
-            static_cast<double>(std::min<std::uint64_t>(builder.planned_symbols, UINT32_MAX));
+            static_cast<double>(std::min<std::uint64_t>(
+                builder.planned_symbols, std::numeric_limits<std::uint32_t>::max()));
 
         postgres_list<Path> owners;
         postgres_list<Path> partial_owners;

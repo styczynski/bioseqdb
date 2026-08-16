@@ -153,7 +153,12 @@ void runtime::run_chaining_tiled_dp_roundtrip(const chaining_pipeline_key& key,
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
+             "vkWaitForFences");
     require_immutable_metal_policy_live("chaining operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences");
 
@@ -351,7 +356,12 @@ runtime::run_chaining_coordinate_trace_roundtrip(const chaining_pipeline_key& ke
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
     check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "submit(chain_coord)");
-    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "wait(chain_coord)");
+    check_vk(vkWaitForFences(device_,
+                             1,
+                             &fence_,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
+             "wait(chain_coord)");
     require_immutable_metal_policy_live("chaining coordinate operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "reset_fence(chain_coord)");
 

@@ -530,7 +530,8 @@ export {
         auto set_int = [](Const* node, int64_t value) {
             if (node == nullptr)
                 return;
-            Assert(value >= INT32_MIN && value <= INT32_MAX);
+            Assert(value >= std::numeric_limits<std::int32_t>::min() &&
+                   value <= std::numeric_limits<std::int32_t>::max());
             node->constvalue =
                 bioseq::postgres::support::pg_datum::from(static_cast<std::int32_t>(value)).raw();
             node->constisnull = false;
@@ -541,7 +542,8 @@ export {
         auto set_bigint = [](Const* node, std::uint64_t value) {
             if (node == nullptr)
                 return;
-            Assert(value <= static_cast<std::uint64_t>(INT64_MAX));
+            Assert(value <=
+                   static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
             node->constvalue =
                 bioseq::postgres::support::pg_datum::from(static_cast<std::int64_t>(value)).raw();
             node->constisnull = false;

@@ -139,7 +139,8 @@ inline constexpr std::size_t k_file_action_diagnostic_capacity = 256u;
 /// Maximum files one reaper operation may reserve atomically.
 inline constexpr std::size_t k_maximum_reaper_file_actions = 64u;
 /// Sentinel used when an action has no paired queue slot.
-inline constexpr std::uint16_t k_no_paired_file_action = UINT16_MAX;
+inline constexpr std::uint16_t k_no_paired_file_action =
+    static_cast<int>(std::numeric_limits<std::uint16_t>::max());
 /// Stable identity tag for mapped minimizer-fragment files.
 inline constexpr std::uint8_t k_mapped_minimizer_fragment_index_identity = 1u;
 /// Database-local directory containing persisted fragment images.
@@ -329,7 +330,8 @@ inline void release_slot(const std::size_t slot) noexcept {
 
 /// Allocate a nonzero reservation identifier absent from the live queue.
 [[nodiscard]] inline std::uint32_t next_unused_reservation_id() {
-    for (std::uint64_t attempts = 0u; attempts < static_cast<std::uint64_t>(UINT32_MAX);
+    for (std::uint64_t attempts = 0u;
+         attempts < static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max());
          ++attempts) {
         std::uint32_t candidate = g_queue_state.next_reservation_id++;
         if (candidate == 0u) {

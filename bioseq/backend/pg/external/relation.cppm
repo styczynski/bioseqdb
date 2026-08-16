@@ -3,9 +3,9 @@
 module;
 #include <bioseq/pg_compat.h>
 
-#include <climits>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <optional>
 
 extern "C" {
@@ -1066,7 +1066,7 @@ initialize_relation_options()
 
 	add_int_reloption(relation_option_kind, "chunk_bases",
 					  "Chunk length in bases for sequence_chunk entities.",
-					  0, 0, INT_MAX, AccessExclusiveLock);
+					  0, 0, std::numeric_limits<int>::max(), AccessExclusiveLock);
 }
 
 } // namespace bioseq::postgres::external

@@ -124,7 +124,8 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
         seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
     static constexpr std::size_t k_rank_stream_bytes_per_symbol = 1;
     static constexpr std::size_t k_alphabet_size = seqan3::alphabet_size<p_alphabet>;
-    static_assert(k_logical_bits_per_symbol > 0 && k_logical_bits_per_symbol <= CHAR_BIT);
+    static_assert(k_logical_bits_per_symbol > 0 &&
+                  k_logical_bits_per_symbol <= std::numeric_limits<unsigned char>::digits);
 
     [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
         return static_cast<storage_unit>(packed_traits::letter_complement(rank));
@@ -144,10 +145,11 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
                                                             std::uint8_t bits_per_symbol) noexcept {
     if (!(storage_unit_width == 1u || storage_unit_width == 2u || storage_unit_width == 4u ||
           storage_unit_width == 8u) ||
-        bits_per_symbol == 0u || bits_per_symbol > CHAR_BIT) {
+        bits_per_symbol == 0u || bits_per_symbol > std::numeric_limits<unsigned char>::digits) {
         return 0u;
     }
-    return static_cast<std::size_t>(storage_unit_width) * CHAR_BIT / bits_per_symbol;
+    return static_cast<std::size_t>(storage_unit_width) *
+           std::numeric_limits<unsigned char>::digits / bits_per_symbol;
 }
 
 /** @brief Type-erased, non-owning logical-rank view over a lazy sequence owner. */

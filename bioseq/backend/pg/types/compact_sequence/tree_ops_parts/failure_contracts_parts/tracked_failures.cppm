@@ -534,7 +534,8 @@ run_invalid_later_literal_binding_iteration(piece_edge source_root,
            observed.last_reason == piece_tree_quarantine_reason::cleanup_ledger &&
            std::strcmp(observed.first_detail, "negative arena quarantine") == 0 &&
            std::strcmp(observed.last_detail, "negative ledger quarantine") == 0 &&
-           observed.last_arena_generation == 77u && suspect.refcount == UINT32_MAX &&
+           observed.last_arena_generation == 77u &&
+           suspect.refcount == std::numeric_limits<std::uint32_t>::max() &&
            suspect.release_next == nullptr;
 }
 

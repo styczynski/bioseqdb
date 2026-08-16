@@ -85,7 +85,8 @@ using namespace bioseq::postgres::support;
 
 export {
     void slice_project_release_detach_state(slice_dsm_detach_state* state) noexcept {
-        if (state != nullptr && state->refcount != 0u && state->refcount != UINT32_MAX &&
+        if (state != nullptr && state->refcount != 0u &&
+            state->refcount != std::numeric_limits<std::uint32_t>::max() &&
             --state->refcount == 0u)
             pfree(state);
     }
@@ -543,7 +544,7 @@ export {
                            static_cast<unsigned long long>(
                                trace_runtime == nullptr ? 0u : trace_runtime->last_merged_cycle))));
         }
-        if (expected_cycle == UINT64_MAX) {
+        if (expected_cycle == std::numeric_limits<std::uint64_t>::max()) {
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("BioseqSliceProject parallel cycle exhausted")));
@@ -587,7 +588,8 @@ export {
                      errmsg("BioseqSliceProject worker coordinate is invalid")));
         }
         auto* header = static_cast<slice_dsm_header*>(coordinate);
-        if (header->slot_count > static_cast<std::uint32_t>(INT_MAX) ||
+        if (header->slot_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
             ParallelWorkerNumber >= static_cast<int>(header->slot_count)) {
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),

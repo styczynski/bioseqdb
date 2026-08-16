@@ -1238,7 +1238,12 @@ void submit_executable_and_wait(VkDevice device,
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     check_vk(vkQueueSubmit(queue, 1, &submit, fence), what);
-    check_vk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
+    check_vk(vkWaitForFences(device,
+                             1,
+                             &fence,
+                             VK_TRUE,
+                             std::numeric_limits<std::uint64_t>::max()),
+             what);
     check_vk(vkResetFences(device, 1, &fence), what);
     // Restore the shared fence before any policy check can throw so the next
     // synchronous operation never inherits a signalled fence.

@@ -423,7 +423,7 @@ retain_slice_trace_attachment(slice_trace_attachment *attachment) noexcept {
   if (attachment == nullptr || attachment->refcount == 0u) {
     return;
   }
-  if (attachment->refcount == UINT32_MAX) {
+  if (attachment->refcount == std::numeric_limits<std::uint32_t>::max()) {
     /* Prefer a bounded leak to wrapping into a use-after-free. */
     attachment->valid = false;
     attachment->runtime = nullptr;
@@ -436,7 +436,7 @@ retain_slice_trace_attachment(slice_trace_attachment *attachment) noexcept {
 export inline void
 release_slice_trace_attachment(slice_trace_attachment *attachment) noexcept {
   if (attachment == nullptr || attachment->refcount == 0u ||
-      attachment->refcount == UINT32_MAX) {
+      attachment->refcount == std::numeric_limits<std::uint32_t>::max()) {
     return;
   }
   if (--attachment->refcount == 0u) {

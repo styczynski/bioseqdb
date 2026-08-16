@@ -160,10 +160,10 @@ struct hash_major_minimizer_parallel_scan_stats {
 
 namespace hash_major_minimizer_parallel_probe_detail {
 
-inline constexpr std::uint64_t k_toc_magic = UINT64_C(0x4236534350524f42); // "B6SCPROB"
-inline constexpr std::uint64_t k_header_toc_key = UINT64_C(0x4236534300000001);
-inline constexpr std::uint64_t k_parallel_scan_toc_key = UINT64_C(0x4236534300000002);
-inline constexpr std::uint64_t k_seen_bitset_toc_key = UINT64_C(0x4236534300000003);
+inline constexpr std::uint64_t k_toc_magic = std::uint64_t{0x4236534350524f42}; // "B6SCPROB"
+inline constexpr std::uint64_t k_header_toc_key = std::uint64_t{0x4236534300000001};
+inline constexpr std::uint64_t k_parallel_scan_toc_key = std::uint64_t{0x4236534300000002};
+inline constexpr std::uint64_t k_seen_bitset_toc_key = std::uint64_t{0x4236534300000003};
 inline constexpr std::uint32_t k_parallel_header_format_revision = 1u;
 
 /// Pointer-free expected shape for one stream in shared scan state.
@@ -199,7 +199,7 @@ struct parallel_scan_header {
 static_assert(std::is_trivially_destructible_v<parallel_scan_header>);
 static_assert(std::is_standard_layout_v<parallel_scan_header>);
 
-inline constexpr std::uint64_t k_image_magic = UINT64_C(0x42364636494d4147); // "B6F6IMAG"
+inline constexpr std::uint64_t k_image_magic = std::uint64_t{0x42364636494d4147}; // "B6F6IMAG"
 inline constexpr std::uint32_t k_image_format_revision = 1u;
 inline constexpr std::uint64_t k_image_section_alignment = 4096u;
 
@@ -249,9 +249,9 @@ struct parallel_image_validation {
 
 /// Mix one receipt value into the probe's commutative digest.
 [[nodiscard]] inline std::uint64_t mix64(std::uint64_t value) noexcept {
-    value += UINT64_C(0x9e3779b97f4a7c15);
-    value = (value ^ (value >> 30u)) * UINT64_C(0xbf58476d1ce4e5b9);
-    value = (value ^ (value >> 27u)) * UINT64_C(0x94d049bb133111eb);
+    value += std::uint64_t{0x9e3779b97f4a7c15};
+    value = (value ^ (value >> 30u)) * std::uint64_t{0xbf58476d1ce4e5b9};
+    value = (value ^ (value >> 27u)) * std::uint64_t{0x94d049bb133111eb};
     return value ^ (value >> 31u);
 }
 

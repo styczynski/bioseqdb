@@ -7,12 +7,12 @@ module;
 #include <algorithm>
 #include <array>
 #include <cerrno>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <fcntl.h>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <sys/mman.h>
@@ -417,7 +417,8 @@ class gzip_source {
             return source_read_result{0, false, true};
         }
         const unsigned to_read =
-            static_cast<unsigned>(std::min<std::size_t>(cap, static_cast<std::size_t>(UINT_MAX)));
+            static_cast<unsigned>(std::min<std::size_t>(
+                cap, static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())));
         const int read_count = ::gzread(_file, dst, to_read);
         if (read_count < 0) {
             int errnum = 0;

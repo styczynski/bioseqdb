@@ -361,7 +361,7 @@ template <sequence_alphabet p_alphabet>
             resident_target,
             params,
             static_cast<sequence_size_t>(loc.logical_length),
-            storage_unit_byte_width * CHAR_BIT /
+            storage_unit_byte_width * std::numeric_limits<unsigned char>::digits /
                 bioseq::storage::lazy_sequence_traits<p_alphabet>::k_logical_bits_per_symbol);
 
         bioseq_log<logging_level::debug>(

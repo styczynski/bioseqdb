@@ -281,7 +281,7 @@ export {
             const auto state = worker->publish_state;
             if (state == slice_dsm_publish_state::attached_running ||
                 state == slice_dsm_publish_state::published_incomplete) {
-                if (incomplete == UINT32_MAX) {
+                if (incomplete == std::numeric_limits<std::uint32_t>::max()) {
                     trace.overflowed = true;
                 } else {
                     ++incomplete;
@@ -301,8 +301,9 @@ export {
             }
             trace.overflowed = trace.overflowed || worker->overflowed != 0u;
         }
-        if (incomplete > UINT32_MAX - trace.incomplete_workers) {
-            trace.incomplete_workers = UINT32_MAX;
+        if (incomplete >
+            std::numeric_limits<std::uint32_t>::max() - trace.incomplete_workers) {
+            trace.incomplete_workers = std::numeric_limits<std::uint32_t>::max();
             trace.overflowed = true;
         } else {
             trace.incomplete_workers += incomplete;
@@ -866,8 +867,11 @@ export {
                 merge_slice_dsm_counter_noexcept(runtime.counters[index], local_counters[index]);
             }
         }
-        if (first_audit.incomplete_slots > UINT32_MAX - runtime.trace_runtime.incomplete_workers) {
-            runtime.trace_runtime.incomplete_workers = UINT32_MAX;
+        if (first_audit.incomplete_slots >
+            std::numeric_limits<std::uint32_t>::max() -
+                runtime.trace_runtime.incomplete_workers) {
+            runtime.trace_runtime.incomplete_workers =
+                std::numeric_limits<std::uint32_t>::max();
             runtime.trace_runtime.overflowed = true;
         } else {
             runtime.trace_runtime.incomplete_workers += first_audit.incomplete_slots;

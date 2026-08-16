@@ -103,7 +103,8 @@ export {
         Datum value = static_cast<Datum>(0);
         bool is_null = false;
         auto bigint = [&value](const std::uint64_t input) {
-            if (input > static_cast<std::uint64_t>(INT64_MAX)) {
+            if (input >
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
                 ereport(ERROR,
                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
                          errmsg("BioseqBatchJoin match coordinate exceeds bigint")));
