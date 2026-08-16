@@ -88,7 +88,7 @@ template <class p_sequence>
     std::optional<bioseq::storage::lazy_sequence_view<
         typename compact_sequence_range<p_sequence>::traits::alphabet_type>> target_recipe_view,
     const bioseq::pg_types::seq* target_hdr,
-    const std::size_t i,
+    const std::size_t row_index,
     const sequence_size_t target_bp_size,
     const std::size_t min_bp,
     const minimap2_parameters& dispatch_params,
@@ -118,14 +118,14 @@ template <class p_sequence>
                 "Vulkan execution cannot consume a CPU prepared target");
         }
         if (!cpu_prepared_target->unions_ready ||
-            cpu_prepared_target->target_rowno != scanner_pg_ctx->target_rownos[i] ||
+            cpu_prepared_target->target_rowno != scanner_pg_ctx->target_rownos[row_index] ||
             cpu_prepared_target->target_bp_size != static_cast<std::uint64_t>(target_bp_size)) {
             raise_typed_dispatch_pg_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
                 "bioseq batch join CPU prepared-target identity is invalid");
         }
     }
-    scanner_pg_ctx->target_index_sources[i] =
+    scanner_pg_ctx->target_index_sources[row_index] =
         ::bioseq::pipeline_stats::target_index_source::recomputed;
     std::optional<std::vector<minimap_sketch_data>> row_query_minimizers;
     std::optional<pipe::minimizer_range_execution_stats> row_query_minimizer_stats;
@@ -141,7 +141,7 @@ template <class p_sequence>
         raise_typed_dispatch_pg_error_as_cpp(ERRCODE_INTERNAL_ERROR,
                                              "PG lazy facade has invalid packed storage geometry");
     }
-    const auto& loc_opt = scanner_pg_ctx->target_locators[i];
+    const auto& loc_opt = scanner_pg_ctx->target_locators[row_index];
     const bool persisted_required =
         scanner_pg_ctx->index_read_requirement ==
         bioseq::indexing::index_read_requirement::require_compatible_persisted;
@@ -149,20 +149,20 @@ template <class p_sequence>
         (cpu_prepared_target == nullptr || selected_vulkan_execution(params))) {
         raise_required_persisted_index_error(
             scanner_pg_ctx,
-            scanner_pg_ctx->target_rownos[i],
+            scanner_pg_ctx->target_rownos[row_index],
             "the live persisted reader is available only through the retained "
             "CPU prepared-target lifecycle; GPU and ad-hoc row fallback are forbidden");
     }
     if (persisted_required && !loc_opt.has_value()) {
         raise_required_persisted_index_error(
             scanner_pg_ctx,
-            scanner_pg_ctx->target_rownos[i],
+            scanner_pg_ctx->target_rownos[row_index],
             "target payload is inline; persisted minimizer storage requires "
             "a locator-backed target");
     }
-    if (persisted_required && scanner_pg_ctx->target_rownos[i] < 0) {
+    if (persisted_required && scanner_pg_ctx->target_rownos[row_index] < 0) {
         raise_required_persisted_index_error(scanner_pg_ctx,
-                                             scanner_pg_ctx->target_rownos[i],
+                                             scanner_pg_ctx->target_rownos[row_index],
                                              "logical target row identity is unavailable");
     }
     if (target_recipe_view.has_value()) {
@@ -173,7 +173,7 @@ template <class p_sequence>
         if (persisted_required) {
             raise_required_persisted_index_error(
                 scanner_pg_ctx,
-                scanner_pg_ctx->target_rownos[i],
+                scanner_pg_ctx->target_rownos[row_index],
                 "a transformed target has no compatible persisted base-row index");
         }
         const auto observed_target = target_recipe_view->with_payload_allocation_observer(
@@ -213,7 +213,7 @@ template <class p_sequence>
              target_bp_size,
              alphabet_code,
              storage_unit_byte_width,
-             i,
+             row_index,
              &loc_opt,
              _padding,
              &pool,
@@ -249,7 +249,7 @@ template <class p_sequence>
                         "[bioseq] index: persisted read skipped for inapplicable storage profile "
                         "row={} "
                         "backend=bounded_nthash_simd reason=payload_has_no_scheme_identity",
-                        static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[i]));
+                        static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[row_index]));
                 }
                 const bool opportunistic_minimizer_fragment_recompute_requested =
                     !scanner_pg_ctx->read_index_active &&
@@ -285,7 +285,7 @@ template <class p_sequence>
                     auto* pg_gpu_index_cache_ptr =
                         pg_gpu_index_cache ? &*pg_gpu_index_cache : nullptr;
                     const std::uint64_t target_rowno =
-                        static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]);
+                        static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]);
                     auto& query_minimizers =
                         per_row_query_mode ? row_query_minimizers : cached_query_minimizers;
                     auto& query_minimizer_stats = per_row_query_mode ? row_query_minimizer_stats
@@ -446,7 +446,7 @@ template <class p_sequence>
                             !hash_major_read_receipt_valid) {
                             raise_required_persisted_index_error(
                                 scanner_pg_ctx,
-                                scanner_pg_ctx->target_rownos[i],
+                                scanner_pg_ctx->target_rownos[row_index],
                                 "the exact READY native persisted reader is absent, incomplete, "
                                 "duplicated, or "
                                 "mixed with a storage-profile-transcoded assembled index");
@@ -454,7 +454,7 @@ template <class p_sequence>
                         if (scanner_pg_ctx->explicit_query_ordinals) {
                             retained_prepared_query_sketch =
                                 prepared_group->find_retained_query_sketch(
-                                    scanner_pg_ctx->query_ordinals[i]);
+                                    scanner_pg_ctx->query_ordinals[row_index]);
                         }
                         if (retained_prepared_query_sketch != nullptr) {
                             const auto backend =
@@ -560,11 +560,11 @@ template <class p_sequence>
                         }
                         ++prepared_group->persisted_reader_queries;
                         assembled = true;
-                        scanner_pg_ctx->target_index_sources[i] =
+                        scanner_pg_ctx->target_index_sources[row_index] =
                             ::bioseq::pipeline_stats::target_index_source::persisted;
-                        scanner_pg_ctx->persisted_generation_ids[i] =
+                        scanner_pg_ctx->persisted_generation_ids[row_index] =
                             prepared_group->persisted_generation_id;
-                        scanner_pg_ctx->persisted_source_identities[i] =
+                        scanner_pg_ctx->persisted_source_identities[row_index] =
                             prepared_group->persisted_source_identity;
                     }
                     if (scanner_pg_ctx->read_index_active && !persisted_required &&
@@ -581,16 +581,16 @@ template <class p_sequence>
                                 .assembly_identity = prepared_group->key_set_checksum});
                         ++prepared_group->target_index_reuses;
                         assembled = true;
-                        scanner_pg_ctx->target_index_sources[i] =
+                        scanner_pg_ctx->target_index_sources[row_index] =
                             prepared_group->target_index_source;
                     }
                     auto make_cache_key = [scanner_pg_ctx,
                                            loc_opt,
                                            &query_minimizers,
                                            &idx_params,
-                                           i](std::string_view index_name,
-                                              sequence_size_t clip_lo_bp,
-                                              sequence_size_t clip_hi_bp) {
+                                           row_index](std::string_view index_name,
+                                                      sequence_size_t clip_lo_bp,
+                                                      sequence_size_t clip_hi_bp) {
                         const auto query_span = std::span<const minimap_sketch_data>(
                             query_minimizers->data(), query_minimizers->size());
                         const auto sketch_backend =
@@ -611,8 +611,8 @@ template <class p_sequence>
                             .minimizer_scheme =
                                 bioseq::indexing::minimizer_scheme_identity_for_backend(
                                     sketch_backend),
-                            .query_key =
-                                static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]),
+                            .query_key = static_cast<std::uint64_t>(
+                                scanner_pg_ctx->target_rownos[row_index]),
                             .query_signature = bioseq::storage::indexing::query_minimizer_signature(
                                 query_span,
                                 static_cast<std::uint32_t>(idx_params.kmer_size),
@@ -806,7 +806,8 @@ template <class p_sequence>
                                 scanner_pg_ctx->mmsearch_seq_attno,
                                 minimizers_per_sequence_index_name,
                                 *loc_opt,
-                                static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]),
+                                static_cast<std::uint64_t>(
+                                    scanner_pg_ctx->target_rownos[row_index]),
                                 scanner_pg_ctx->caches,
                                 scanner_pg_ctx->parent_mctx);
                             with_checked_minimizer_fragment_reader(
@@ -817,7 +818,7 @@ template <class p_sequence>
                                  &ensure_q,
                                  &fq_pg_view,
                                  &ft_pg_view,
-                                 &i,
+                                 &row_index,
                                  &idx_params,
                                  &loc_opt,
                                  &make_cache_key,
@@ -840,7 +841,7 @@ template <class p_sequence>
                                                 "[bioseq] index: logical fragment-backed read "
                                                 "index=minimizers_per_sequence row={} target_bp={}",
                                                 static_cast<unsigned long long>(
-                                                    scanner_pg_ctx->target_rownos[i]),
+                                                    scanner_pg_ctx->target_rownos[row_index]),
                                                 static_cast<unsigned long long>(
                                                     loc_opt->logical_length));
                                         } else {
@@ -1019,7 +1020,8 @@ template <class p_sequence>
                                 scanner_pg_ctx->mmsearch_seq_attno,
                                 minimizers_per_fragment_index_name,
                                 *loc_opt,
-                                static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]),
+                                static_cast<std::uint64_t>(
+                                    scanner_pg_ctx->target_rownos[row_index]),
                                 scanner_pg_ctx->caches,
                                 scanner_pg_ctx->parent_mctx);
                             with_checked_minimizer_fragment_reader(
@@ -1033,13 +1035,13 @@ template <class p_sequence>
                         }
                     }
                     if (assembled) {
-                        scanner_pg_ctx->target_index_sources[i] =
+                        scanner_pg_ctx->target_index_sources[row_index] =
                             ::bioseq::pipeline_stats::target_index_source::persisted;
                     }
                     if (persisted_required && !assembled) {
                         raise_required_persisted_index_error(
                             scanner_pg_ctx,
-                            scanner_pg_ctx->target_rownos[i],
+                            scanner_pg_ctx->target_rownos[row_index],
                             "the active persisted minimizer index has no compatible "
                             "directory/chunks for this target row");
                     }
@@ -1060,7 +1062,8 @@ template <class p_sequence>
                         bioseq_log<logging_level::debug>(
                             "[bioseq] index: recompute real-minimizer-sequence-read-index row={} "
                             "target_bp={} backend={}",
-                            static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[i]),
+                            static_cast<unsigned long long>(
+                                scanner_pg_ctx->target_rownos[row_index]),
                             static_cast<unsigned long long>(loc_opt->logical_length),
                             bioseq::minimizers::minimizer_sketch_backend_name(
                                 target_backend_from_params_for_recompute(params)));
@@ -1095,7 +1098,8 @@ template <class p_sequence>
                             bioseq_log<logging_level::debug>(
                                 "[bioseq] index: opportunistic RAM-first index row={} index={} "
                                 "target_bp={} chunks={} peak_bytes={}",
-                                static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[i]),
+                                static_cast<unsigned long long>(
+                                    scanner_pg_ctx->target_rownos[row_index]),
                                 opportunistic_index_name,
                                 static_cast<unsigned long long>(loc_opt->logical_length),
                                 ram_store.chunks.size(),
@@ -1214,7 +1218,8 @@ template <class p_sequence>
                             bioseq_log<logging_level::debug>(
                                 "[bioseq] index: opportunistic RAM-first index skipped row={} "
                                 "target_bp={} peak_bytes={} (not admitted)",
-                                static_cast<unsigned long long>(scanner_pg_ctx->target_rownos[i]),
+                                static_cast<unsigned long long>(
+                                    scanner_pg_ctx->target_rownos[row_index]),
                                 static_cast<unsigned long long>(loc_opt->logical_length),
                                 static_cast<unsigned long long>(peak_bytes));
                         }
@@ -1227,7 +1232,8 @@ template <class p_sequence>
                     scanner_pg_ctx->active_index == minimizers_per_sequence_index_name &&
                     stored_minimizer_scheme_compatible;
                 if (!assembled && want_seq_noindex) {
-                    const auto rowno = static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]);
+                    const auto rowno =
+                        static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]);
                     // No-index minimizer-sequence must use a real transient
                     // minimizers_per_sequence index even when
                     // index.recompute_async_persistence.enabled is off. Reads are
@@ -1277,7 +1283,7 @@ template <class p_sequence>
                         fast_minimizer_sequence_choice->kind ==
                             deferred_minimizer_index_kind::per_sequence) {
                         const auto rowno =
-                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]);
+                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]);
                         // Build a real transient minimizer-sequence index for the
                         // no-index/per-sequence cell. The GPU sorted-pair seam (GPU emit + host
                         // sort) streams from lazy PostgreSQL (no whole-target
@@ -1320,7 +1326,7 @@ template <class p_sequence>
                         auto resident = try_materialize_target_for_segment_workers(
                             ft_pg_view,
                             storage_unit_byte_width,
-                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]));
+                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]));
                         if (resident.has_value()) {
                             const auto resident_target_view = resident->owner.view();
                             const bool can_defer_recompute_persist =
@@ -1330,8 +1336,8 @@ template <class p_sequence>
                                     ? choose_deferred_minimizer_persist_index(*scanner_pg_ctx)
                                     : std::optional<deferred_minimizer_persist_choice>{};
                             if (deferred_persist_choice.has_value()) {
-                                const auto rowno =
-                                    static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]);
+                                const auto rowno = static_cast<std::uint64_t>(
+                                    scanner_pg_ctx->target_rownos[row_index]);
                                 collection = run_recompute_with_deferred_minimizer_persist(
                                     lazy_query_view,
                                     resident_target_view,
@@ -1353,7 +1359,7 @@ template <class p_sequence>
                                         "target_bp={} because active params are k={} w={} but "
                                         "persisted minimizer indexes are pinned to k=15 w=10",
                                         static_cast<unsigned long long>(
-                                            scanner_pg_ctx->target_rownos[i]),
+                                            scanner_pg_ctx->target_rownos[row_index]),
                                         static_cast<unsigned long long>(loc_opt->logical_length),
                                         params.kmer_size,
                                         params.window_size);
@@ -1363,7 +1369,7 @@ template <class p_sequence>
                                         "target_bp={} because no minimizer index is enabled for "
                                         "UPDATE_ON_INSERT",
                                         static_cast<unsigned long long>(
-                                            scanner_pg_ctx->target_rownos[i]),
+                                            scanner_pg_ctx->target_rownos[row_index]),
                                         static_cast<unsigned long long>(loc_opt->logical_length));
                                 }
                             }
@@ -1373,7 +1379,8 @@ template <class p_sequence>
                             stage_recompute_minimizer_sequence_build_if_selected(
                                 *scanner_pg_ctx,
                                 *loc_opt,
-                                static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]),
+                                static_cast<std::uint64_t>(
+                                    scanner_pg_ctx->target_rownos[row_index]),
                                 alphabet_code,
                                 storage_unit_byte_width,
                                 static_cast<std::uint16_t>(_padding),
@@ -1388,7 +1395,7 @@ template <class p_sequence>
                         stage_recompute_minimizer_sequence_build_if_selected(
                             *scanner_pg_ctx,
                             *loc_opt,
-                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[i]),
+                            static_cast<std::uint64_t>(scanner_pg_ctx->target_rownos[row_index]),
                             alphabet_code,
                             storage_unit_byte_width,
                             static_cast<std::uint16_t>(_padding),
