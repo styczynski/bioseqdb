@@ -13,7 +13,7 @@ forms, or forward and reverse-oriented values.
 
 The same columns can also take different roles in a query. One alias can supply
 stored targets while another alias supplies query sequences. Bioseq then plans
-the `mmsearch` predicate as a parameterized sequence join.
+the [[sql:bioseq.mmsearch]] predicate as a parameterized sequence join.
 
 This tutorial covers four shapes:
 
@@ -27,7 +27,7 @@ early instead of building ambiguous SQL.
 
 ## Create a table with two sequence columns
 
-Both columns below use the same alphabet and packed width. That makes either
+Both columns below use the same [[sql:bioseq.seq]] alphabet and packed width. That makes either
 column valid as a query for the other:
 
 ```sql
@@ -86,7 +86,8 @@ ORDER BY pk;
 ```
 
 The two lengths can follow different distributions. Keep their names and units
-separate in application models.
+separate in application models. [[sql:bioseq.len]] returns the biological
+symbol count for the column passed to it.
 
 Read only the needed sequence payload:
 
@@ -615,6 +616,8 @@ WHERE public.mmsearch(targets.seq0, probes.seq1)
 ORDER BY target_pk, probe_pk, target_start;
 -- bioseq:teardown
 DROP TABLE tutorial_paired_reads;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ## Plan and capacity checks

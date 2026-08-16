@@ -26,7 +26,8 @@ It also explains the nested pipeline, Highway, execution, prefilter, column
 cache, and materialization sections shared by several nodes.
 
 The `$1` values in query examples denote bound parameters supplied through a
-prepared statement or PostgreSQL's extended query protocol. Replace them with
+prepared statement or PostgreSQL's extended query protocol. The examples pass
+them to [[sql:bioseq.mmsearch]] as [[sql:bioseq.seq]] values. Replace them with
 typed literals when running the examples directly in `psql`.
 
 ## Begin with the right EXPLAIN form
@@ -55,17 +56,52 @@ WHERE public.mmsearch(
 );
 ```
 
-Use `ANALYZE` when it is safe to execute the statement:
+Use `ANALYZE` when it is safe to execute the statement. This example also
+projects [[sql:bioseq.target_start]], [[sql:bioseq.target_end]], and
+[[sql:bioseq.cigar]] so the custom scan has user-facing match columns to
+explain:
 
-```sql
-EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS OFF, FORMAT JSON)
-SELECT pk
-FROM reads
+```sql runnable id=reading_bioseq_explain timeout=40s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
+-- bioseq:setup
+SET max_parallel_workers_per_gather = 0;
+SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.index.sequence_read.enabled = off;
+SET bioseq.vectorization.enabled = on;
+SET bioseq.aligner.vulkan.enabled = off;
+SET bioseq.aligner.profiling.enabled = on;
+CREATE TABLE tutorial_explain_reads (
+    pk integer PRIMARY KEY,
+    seq0 bioseq.seq('dna4', 32) NOT NULL
+) USING bioseq;
+INSERT INTO tutorial_explain_reads VALUES
+    (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
+    (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA'),
+    (3, 'GGGGGTCACTTCTCAAAAATTAGGGGGGGGGTAGTCACTGTAGCCTGATCGTAGCTAGGACACATATCATCATCTACTCCTATCATCATCTACTCCTA');
+-- bioseq:visible
+EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS OFF)
+SELECT pk,
+       bioseq.target_start(pk) AS target_start,
+       bioseq.target_end(pk) AS target_end,
+       bioseq.cigar(pk) AS cigar
+FROM tutorial_explain_reads
 WHERE public.mmsearch(
-    sequence,
-    $1::bioseq.seq('dna4', 32)
-);
+    seq0,
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32)
+)
+ORDER BY pk, target_start;
+-- bioseq:teardown
+DROP TABLE tutorial_explain_reads;
+RESET bioseq.aligner.profiling.enabled;
+RESET bioseq.aligner.vulkan.enabled;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.sequence_read.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
+RESET max_parallel_workers_per_gather;
 ```
+
+The result attached to this block is the real text plan. Keeping text format
+here preserves its indentation and makes the nested Bioseq sections readable
+without turning the plan into one large JSON cell.
 
 `EXPLAIN ANALYZE` runs the query. It can perform expensive alignments, contact
 remote providers, wait on cache producers, and execute any other work in the

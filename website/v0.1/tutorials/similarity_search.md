@@ -7,10 +7,10 @@ keywords: [mmsearch, BioseqScan, similarity search, alignment, CIGAR]
 draft: false
 ---
 
-[[sql:public.mmsearch|`mmsearch`]] is a PostgreSQL predicate: put it in a
+[[sql:bioseq.mmsearch]] is a PostgreSQL predicate: put it in a
 `WHERE` clause over a `USING bioseq` table and Bioseq plans a sequence-aware
 custom scan. Its first argument is the stored target column. Its second argument
-is a query value with the same alphabet.
+is a [[sql:bioseq.seq]] query value with the same alphabet.
 
 Keep insert-time index maintenance enabled before loading rows:
 
@@ -90,6 +90,8 @@ WHERE organism = 'Homo sapiens'
 ORDER BY pk, target_start, target_end;
 -- bioseq:teardown
 DROP TABLE tutorial_mmsearch;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 The query can return more than one alignment for one stored row. `best_n` limits

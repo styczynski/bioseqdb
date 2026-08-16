@@ -8,7 +8,7 @@ draft: false
 ---
 
 Bioseq stores biological sequences in a compact PostgreSQL value called
-[[sql:bioseq.seq|the sequence type]]. Its type modifier records the biological
+[[sql:bioseq.seq]]. Its type modifier records the biological
 alphabet and the width of each packed storage unit. It does not impose a maximum
 sequence length.
 
@@ -140,7 +140,7 @@ SELECT bioseq.len(
        ) AS packed_units;
 ```
 
-`bioseq.len` returns biological symbols. `bioseq.unit_len` returns packed
+[[sql:bioseq.len]] returns biological symbols. `bioseq.unit_len` returns packed
 storage units. Both return `bigint`.
 
 Do not label `unit_len` as bases. Do not label `len` as bytes. Names such as
@@ -406,8 +406,7 @@ same `dna4` type for stored-target and stored-query joins.
 
 Searchable sequence tables use the `bioseq` table access method. The example
 below creates a small table, keeps its indexes current during inserts, and reads
-the values back with their length in biological symbols using
-[[sql:bioseq.len]].
+the values back with their length in biological symbols using `bioseq.len`.
 
 ```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)"
 -- bioseq:setup
@@ -425,6 +424,7 @@ FROM tutorial_reads
 ORDER BY id;
 -- bioseq:teardown
 DROP TABLE tutorial_reads;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 > [!TIP]
@@ -433,13 +433,12 @@ DROP TABLE tutorial_reads;
 
 ## Loading a FASTA file
 
-[[sql:bioseq.load|`bioseq.load`]] reads a server-side FASTA or FASTQ file. This
+[[sql:bioseq.load]] reads a server-side FASTA or FASTQ file. This
 example maps the UniProt accession in each FASTA header to a text column. The
 function returns the number of loaded records.
 
 ```sql runnable id=sequence_load timeout=20s
 -- bioseq:setup
--- bioseq:visible
 CREATE TABLE tutorial_loaded_reads (
   row_no bigserial PRIMARY KEY,
   accession text NOT NULL,
@@ -448,6 +447,7 @@ CREATE TABLE tutorial_loaded_reads (
 
 SET bioseq.index.insert_maintenance.enabled = on;
 
+-- bioseq:visible
 SELECT bioseq.load(
   'tutorial_loaded_reads'::regclass,
   'landing_reads.fasta',
@@ -464,6 +464,7 @@ FROM tutorial_loaded_reads
 ORDER BY accession;
 -- bioseq:teardown
 DROP TABLE tutorial_loaded_reads;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 The file path is resolved by the PostgreSQL server. The database role needs

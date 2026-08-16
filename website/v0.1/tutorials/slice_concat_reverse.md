@@ -7,10 +7,11 @@ keywords: [slice, concat, reverse, reverse complement, length, lazy sequence]
 draft: false
 ---
 
-Bioseq lets SQL work with a region of a sequence without first converting the
-whole value to text. You can index one symbol, take a half-open slice,
-concatenate compatible values, reverse a sequence, compute its reverse
-complement, and ask for its biological or packed length.
+Bioseq lets SQL work with a region of a [[sql:bioseq.seq]] value without first
+converting the whole value to text. You can index one symbol, take a half-open
+slice, concatenate compatible values, reverse a sequence, compute its reverse
+complement, and ask [[sql:bioseq.len]] for its biological length or
+`bioseq.unit_len` for its packed length.
 
 This tutorial starts with exact slice rules, then combines the operations into
 queries that remain useful for long stored values.

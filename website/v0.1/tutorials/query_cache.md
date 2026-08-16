@@ -7,7 +7,8 @@ keywords: [query cache, reusable fragments, statistics, invalidation, BioseqScan
 draft: false
 ---
 
-The query cache is disabled by default. To use it, add `bioseq_cache` before
+The query cache reuses work around [[sql:bioseq.mmsearch]] and is disabled by
+default. To use it, add `bioseq_cache` before
 `bioseq` in `shared_preload_libraries`, restart PostgreSQL, and install both
 extensions:
 
@@ -79,16 +80,16 @@ The value is in milliseconds. It defaults to 60 minutes. A longer TTL can keep
 more completed data live. It does not override dependency invalidation after a
 write.
 
-Start with [[sql:bioseq_cache.version|`bioseq_cache.version()`]], then use
-[[sql:bioseq_cache.stats|`stats()`]] and
-[[sql:bioseq_cache.entries|`entries()`]] to observe decisions. These
+Start with [[sql:bioseq_cache.version]], then use
+[[sql:bioseq_cache.stats]] and
+[[sql:bioseq_cache.entries]] to observe decisions. These
 diagnostics require membership in PostgreSQL's `pg_read_all_stats` role.
 
 ## Exact-query hits
 
-`exact_query` stores the final result for one complete statement. The hidden
-setup below runs the same `BioseqScan` twice. The visible query shows the
-counters after the first run and the repeated run.
+`exact_query` stores the final result for one complete statement. The visible
+block below runs the same `BioseqScan` twice, then shows the counters after the
+first run and the repeated run.
 
 ```sql runnable id=cache_exact_query timeout=30s entity="sql:function:bioseq_cache.stats()"
 -- bioseq:setup
@@ -101,19 +102,21 @@ CREATE TABLE cache_exact_reads (
 INSERT INTO cache_exact_reads VALUES
   (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
   (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA');
-SELECT count(*) FROM cache_exact_reads
-WHERE public.mmsearch(
-  seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
-SELECT count(*) FROM cache_exact_reads
-WHERE public.mmsearch(
-  seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
 -- bioseq:visible
+SELECT count(*) FROM cache_exact_reads
+WHERE public.mmsearch(
+  seq0,
+  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
+SELECT count(*) FROM cache_exact_reads
+WHERE public.mmsearch(
+  seq0,
+  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
 SELECT produced, completed_hits, reuse_hits, fallbacks, invalidations
 FROM bioseq_cache.stats();
 -- bioseq:teardown
 DROP TABLE cache_exact_reads;
+RESET bioseq_cache.query_cache.mode;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 `produced` increases for the cold execution and `completed_hits` for a completed
@@ -264,21 +267,23 @@ CREATE TABLE cache_reusable_reads (
 INSERT INTO cache_reusable_reads VALUES
   (1, 'TCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACTGTAGCCATACCTGAA'),
   (2, 'CCCCAACTTAGTCACTTCTCAAAAATTACTCTCTCATCATCATCTACTCCTAGTCACTGTAGCCTGATCGTAGCTAGTCACACACACCCCAAA');
-SELECT count(*) FROM cache_reusable_reads
-WHERE public.mmsearch(
-  seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
-SELECT count(*) FROM cache_reusable_reads
-WHERE public.mmsearch(
-  seq0,
-  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
 -- bioseq:visible
+SELECT count(*) FROM cache_reusable_reads
+WHERE public.mmsearch(
+  seq0,
+  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
+SELECT count(*) FROM cache_reusable_reads
+WHERE public.mmsearch(
+  seq0,
+  'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
 SELECT s.produced, s.completed_hits, s.reuse_hits, s.fallbacks,
        (SELECT count(*) FROM bioseq_cache.entries()
         WHERE state = 'COMPLETE') AS complete_entries
 FROM bioseq_cache.stats() AS s;
 -- bioseq:teardown
 DROP TABLE cache_reusable_reads;
+RESET bioseq_cache.query_cache.mode;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 Compare `logical_bytes` and `stored_bytes` in `stats()` when sizing shared
@@ -581,10 +586,10 @@ diagnostic functions simply to benefit from caching.
 
 Table writes retire dependent generations automatically. A superuser can also
 invalidate one relation with
-[[sql:bioseq_cache.invalidate_relation|`invalidate_relation()`]] or
+[[sql:bioseq_cache.invalidate_relation]] or
 all generations with
-[[sql:bioseq_cache.invalidate_all|`invalidate_all()`]], and can clear counters
-with [[sql:bioseq_cache.reset_stats|`reset_stats()`]]:
+[[sql:bioseq_cache.invalidate_all]], and can clear counters
+with [[sql:bioseq_cache.reset_stats]]:
 
 ```sql
 SELECT bioseq_cache.invalidate_relation('reads'::regclass);

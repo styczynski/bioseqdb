@@ -32,7 +32,8 @@ the target inventory can differ by build, CPU, and operating-system support.
 
 The following query selects the deterministic SIMD algorithms used by the
 integration examples. Vulkan is disabled so the resulting fields describe
-the CPU Highway dispatch rather than a GPU alignment route.
+the CPU Highway dispatch rather than a GPU alignment route. It runs
+[[sql:bioseq.mmsearch]] over a [[sql:bioseq.seq]] column.
 
 ```sql runnable id=highway_dispatch_explain timeout=30s
 -- bioseq:setup
@@ -62,6 +63,14 @@ WHERE public.mmsearch(
 ORDER BY pk;
 -- bioseq:teardown
 DROP TABLE highway_dispatch_reads;
+RESET bioseq.aligner.base_alignment.algorithm;
+RESET bioseq.aligner.chaining.algorithm;
+RESET bioseq.aligner.minimizer.algorithm;
+RESET bioseq.aligner.vulkan.enabled;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.sequence_read.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
+RESET max_parallel_workers_per_gather;
 ```
 
 The public control surface in this example is deliberately small. Use
@@ -196,6 +205,8 @@ FROM highway_dispatch_sort_reads
 ORDER BY seq0;
 -- bioseq:teardown
 DROP TABLE highway_dispatch_sort_reads;
+RESET bioseq.aligner.vulkan.enabled;
+RESET bioseq.planner.sequence_sort_scan.enabled;
 ```
 
 First look for `Custom Scan (BioseqBatchSortScan)`. That is a planning result

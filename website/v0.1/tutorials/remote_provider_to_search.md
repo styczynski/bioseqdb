@@ -314,7 +314,7 @@ plain planning succeeds.
 ## Retrieve a bounded nucleotide region
 
 The `sequences` relation returns a complete record or requested region in one
-`bioseq.seq` value:
+[[sql:bioseq.seq]] value:
 
 ```sql
 SELECT provider,
@@ -334,7 +334,9 @@ WHERE provider = 'ucsc'
 
 Selecting `sequence` or an expression that needs it requests nucleotide
 materialization. The standard external sequence relation stores the returned
-value as `dna5` in 64-bit units, selected by relation options.
+value as `dna5` in 64-bit units, selected by relation options. Use
+[[sql:bioseq.len]] to report its biological length without converting the
+sequence to text.
 
 If you need only metadata, query `catalog` instead. Do not select a sequence
 value and discard it in the client.
@@ -403,8 +405,9 @@ SET bioseq.index.insert_maintenance.enabled = on;
 ```
 
 You can rehearse the local half without contacting a provider. This checks the
-table, index maintenance, alignment helpers, and coordinate conversion with one
-small row:
+table, index maintenance, [[sql:bioseq.mmsearch]],
+[[sql:bioseq.target_start]], [[sql:bioseq.target_end]], and
+[[sql:bioseq.cigar]] with one small row:
 
 ```sql
 INSERT INTO imported_provider_targets (
@@ -418,7 +421,7 @@ VALUES (
     'local-check',
     'region-1',
     1000,
-    1062,
+    1058,
     'AAAATAGTCACTGTAGCCTGATCGTAGCTAGTCAACGTACGTACGTACGTACGTAAAA'
 );
 ```
@@ -447,8 +450,75 @@ FROM local_matches
 ORDER BY provider, accession, provider_start0;
 ```
 
-The row returns the exact match as `[1004, 1034)` with CIGAR `30M`. Remove the
-check row before importing provider data:
+The row returns the exact match as `[1004, 1034)` with CIGAR `30M`.
+
+The runnable version records the installation's real external-provider
+capability before running the local search. It does not contact a remote
+service. A build without the optional provider feature therefore renders
+`false`, `false`, and `0` in the first result instead of publishing a simulated
+provider response.
+
+```sql runnable id=remote_provider_capability_and_search timeout=30s entity="sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)" entity="sql:function:bioseq.target_start(anyelement)" entity="sql:function:bioseq.target_end(anyelement)" entity="sql:function:bioseq.cigar(anyelement)"
+-- bioseq:setup
+SET bioseq.index.insert_maintenance.enabled = on;
+SET bioseq.vectorization.enabled = on;
+CREATE TABLE remote_provider_stage (
+    provider text NOT NULL,
+    accession text NOT NULL,
+    start0 bigint NOT NULL,
+    end0 bigint NOT NULL,
+    sequence bioseq.seq('dna4', 64) NOT NULL,
+    PRIMARY KEY (provider, accession, start0, end0)
+) USING bioseq;
+INSERT INTO remote_provider_stage VALUES (
+    'local-check',
+    'region-1',
+    1000,
+    1058,
+    'AAAATAGTCACTGTAGCCTGATCGTAGCTAGTCAACGTACGTACGTACGTACGTAAAA'
+);
+-- bioseq:visible
+SELECT to_regnamespace('bioseq_external') IS NOT NULL AS schema_ready,
+       EXISTS (
+           SELECT 1
+           FROM pg_am
+           WHERE amname = 'bioseq_external'
+             AND amtype = 't'
+       ) AS table_am_ready,
+       (
+           SELECT count(*)
+           FROM pg_tables
+           WHERE schemaname = 'bioseq_external'
+       ) AS relation_count;
+
+WITH local_matches AS MATERIALIZED (
+    SELECT provider,
+           accession,
+           start0,
+           bioseq.target_start(accession) AS match_start_in_region,
+           bioseq.target_end(accession) AS match_end_in_region,
+           bioseq.cigar(accession) AS cigar
+    FROM remote_provider_stage
+    WHERE public.mmsearch(
+        sequence,
+        'TAGTCACTGTAGCCTGATCGTAGCTAGTCA'::bioseq.seq('dna4', 64),
+        aligner_options(best_n => 3)
+    )
+)
+SELECT provider,
+       accession,
+       start0 + match_start_in_region AS provider_start0,
+       start0 + match_end_in_region AS provider_end0,
+       cigar
+FROM local_matches
+ORDER BY provider, accession, provider_start0;
+-- bioseq:teardown
+DROP TABLE remote_provider_stage;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
+```
+
+Remove the check row before importing provider data:
 
 ```sql
 DELETE FROM imported_provider_targets

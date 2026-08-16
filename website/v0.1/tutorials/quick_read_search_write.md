@@ -12,7 +12,7 @@ that most applications need first:
 
 1. Write sequences beside ordinary PostgreSQL metadata
 2. Read lengths and selected bases without turning every value into text
-3. Search stored targets with `mmsearch`
+3. Search stored targets with [[sql:bioseq.mmsearch]]
 
 The examples use DNA with the four symbols A, C, G, and T. The later tutorials
 show the `dna5` alphabet, packed storage widths, slicing, joins, remote
@@ -26,7 +26,7 @@ Install Bioseq once in each database where you want to use it:
 CREATE EXTENSION bioseq;
 ```
 
-The extension creates the `bioseq.seq` type, the `bioseq` table access method,
+The extension creates the [[sql:bioseq.seq]] type, the `bioseq` table access method,
 the search predicate, sequence functions, and the planner support that connects
 them.
 
@@ -64,7 +64,7 @@ The sequence declaration has two independent parts:
 - `32` requests 32-bit packed storage units
 
 The number `32` is not a maximum sequence length. A value may contain far more
-than 32 bases. Use `bioseq.len(sequence)` when you need its length in biological
+than 32 bases. Use [[sql:bioseq.len]] when you need its length in biological
 symbols.
 
 The active build profile can normalize accepted widths to one physical width.
@@ -175,8 +175,8 @@ loading and build the sequence index once afterward:
 SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
-Load the rows with `COPY`, application batches, or `bioseq.load`. When the load
-has completed, build the search index for the relation:
+Load the rows with `COPY`, application batches, or [[sql:bioseq.load]]. When the
+load has completed, build the search index for the relation:
 
 ```sql
 SELECT bioseq.update_index(
@@ -334,7 +334,10 @@ assigning the search to `BioseqScan`.
 
 ## Return alignment coordinates
 
-Search results can include the matched spans and CIGAR string:
+Search results can include the matched spans and CIGAR string. Read them with
+[[sql:bioseq.query_start]], [[sql:bioseq.query_end]],
+[[sql:bioseq.target_start]], [[sql:bioseq.target_end]], and
+[[sql:bioseq.cigar]]:
 
 ```sql
 SELECT read_id,
@@ -505,6 +508,8 @@ WHERE public.mmsearch(
 ORDER BY read_id, target_start;
 -- bioseq:teardown
 DROP TABLE quick_reads;
+RESET bioseq.vectorization.enabled;
+RESET bioseq.index.insert_maintenance.enabled;
 ```
 
 ## What to carry into an application
