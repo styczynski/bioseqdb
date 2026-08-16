@@ -260,11 +260,12 @@ process_shader_seed_snapshot() {
     const auto inputs = conservative_shader_inputs();
     const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
     const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
-    std::error_code ec;
-    std::filesystem::create_directories(cache_dir, ec);
-    if (ec) {
-        return std::unexpected(
-            fmt::format("create shader cache dir {} failed: {}", cache_dir.string(), ec.message()));
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(cache_dir, filesystem_error);
+    if (filesystem_error) {
+        return std::unexpected(fmt::format("create shader cache dir {} failed: {}",
+                                           cache_dir.string(),
+                                           filesystem_error.message()));
     }
     auto keys = exact_aot_shader_keys(inputs);
     if (!keys) {
@@ -272,11 +273,11 @@ process_shader_seed_snapshot() {
     }
     const std::filesystem::path manifest_path =
         bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir);
-    const bool manifest_exists = std::filesystem::exists(manifest_path, ec);
-    if (ec) {
+    const bool manifest_exists = std::filesystem::exists(manifest_path, filesystem_error);
+    if (filesystem_error) {
         return std::unexpected(fmt::format("stat sealed shader cache manifest {} failed: {}",
                                            manifest_path.string(),
-                                           ec.message()));
+                                           filesystem_error.message()));
     }
     if (manifest_exists) {
         auto sealed = bioseq::gpu::vulkan::load_validated_sealed_shader_cache_manifest(
@@ -849,12 +850,12 @@ prepare_backend_local_shader_cache_env() {
     }
     const std::filesystem::path manifest_path =
         bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir);
-    std::error_code ec;
-    const bool manifest_exists = std::filesystem::exists(manifest_path, ec);
-    if (ec) {
+    std::error_code filesystem_error;
+    const bool manifest_exists = std::filesystem::exists(manifest_path, filesystem_error);
+    if (filesystem_error) {
         return std::unexpected(fmt::format("stat sealed shader cache manifest {} failed: {}",
                                            manifest_path.string(),
-                                           ec.message()));
+                                           filesystem_error.message()));
     }
     if (manifest_exists) {
         auto seed = load_process_shader_seed_once(cache_dir, digest, *keys);
