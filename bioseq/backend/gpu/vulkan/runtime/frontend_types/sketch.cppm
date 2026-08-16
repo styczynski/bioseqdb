@@ -92,28 +92,46 @@ enum class vulkan_sketch_host_materialization : std::uint8_t {
 /// count.  Default construction is deliberately invalid.
 class runtime_sketch_dispatch_stats {
   public:
+    /// @brief Constructs an intentionally invalid zero-dispatch statistic set.
     runtime_sketch_dispatch_stats() = default;
+    /// @brief Copies immutable dispatch statistics.
     runtime_sketch_dispatch_stats(const runtime_sketch_dispatch_stats&) = default;
+    /// @brief Replaces this object with copied dispatch statistics.
+    /// @return This statistics object.
     runtime_sketch_dispatch_stats& operator=(const runtime_sketch_dispatch_stats&) = default;
 
+    /// @brief Returns the requested host-materialization policy.
+    /// @return Materialization policy recorded for the operation.
     [[nodiscard]] constexpr vulkan_sketch_host_materialization materialization() const noexcept {
         return materialization_;
     }
+    /// @brief Returns exact-count dispatches.
+    /// @return Number of exact-count dispatches.
     [[nodiscard]] constexpr std::uint64_t count_dispatches() const noexcept {
         return count_dispatches_;
     }
+    /// @brief Returns sequences covered by prefix scanning.
+    /// @return Number of prefix-scanned sequences.
     [[nodiscard]] constexpr std::uint64_t prefix_scan_sequences() const noexcept {
         return prefix_scan_sequences_;
     }
+    /// @brief Returns prefix-scan dispatches.
+    /// @return Number of prefix-scan dispatches.
     [[nodiscard]] constexpr std::uint64_t prefix_scan_dispatches() const noexcept {
         return prefix_scan_dispatches_;
     }
+    /// @brief Returns minimizer-emission dispatches.
+    /// @return Number of emit dispatches.
     [[nodiscard]] constexpr std::uint64_t emit_dispatches() const noexcept {
         return emit_dispatches_;
     }
+    /// @brief Returns completed queue roundtrips.
+    /// @return Number of completed roundtrips.
     [[nodiscard]] constexpr std::uint64_t completed_roundtrips() const noexcept {
         return completed_roundtrips_;
     }
+    /// @brief Validates dispatch shape against the materialization policy.
+    /// @return `true` when all dispatch and roundtrip counts form a valid operation.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         const bool dispatch_shape_accepted =
             count_dispatches_ == 1u && prefix_scan_sequences_ == 1u &&
@@ -169,12 +187,18 @@ struct gpu_sketch_query_layout_wire {
 /// query buffer that produced the operation.
 class device_query_sketch_authorization {
   public:
+    /// @brief Constructs an empty invalid authorization.
     device_query_sketch_authorization() = default;
+    /// @brief Prevents copying one-shot query authority.
     device_query_sketch_authorization(const device_query_sketch_authorization&) = delete;
+    /// @brief Prevents copy-assignment of one-shot query authority.
     device_query_sketch_authorization& operator=(const device_query_sketch_authorization&) = delete;
+    /// @brief Transfers query authority and clears the source.
     device_query_sketch_authorization(device_query_sketch_authorization&& other) noexcept {
         move_from(other);
     }
+    /// @brief Clears current authority, then transfers authority from another object.
+    /// @return This authorization.
     device_query_sketch_authorization&
     operator=(device_query_sketch_authorization&& other) noexcept {
         if (this != &other) {
@@ -213,9 +237,13 @@ class device_query_sketch_authorization {
     [[nodiscard]] bool is_valid() const noexcept {
         return does_cover_device_output() && pipeline_token_.is_valid_for_query_sketch();
     }
+    /// @brief Returns the unique authorization identity.
+    /// @return Runtime-issued identity, or zero for an invalid authorization.
     [[nodiscard]] std::uint64_t identity() const noexcept {
         return identity_;
     }
+    /// @brief Computes retained host-vector capacity owned by the authorization.
+    /// @return Retained bytes, saturated at the maximum `uint64_t` value.
     [[nodiscard]] std::uint64_t owned_capacity_bytes() const noexcept {
         constexpr std::uint64_t maximum = (std::numeric_limits<std::uint64_t>::max)();
         if (query_records_.capacity() > maximum / sizeof(gpu_seed_query_record_wire) ||
@@ -233,6 +261,7 @@ class device_query_sketch_authorization {
   private:
     friend class runtime;
 
+    /// @brief Invalidates authority and releases all retained host elements.
     void clear() noexcept {
         identity_ = 0u;
         runtime_ = nullptr;
@@ -254,6 +283,7 @@ class device_query_sketch_authorization {
         query_records_.clear();
         query_tile_counts_.clear();
     }
+    /// @brief Transfers every authority field and clears the source.
     void move_from(device_query_sketch_authorization& other) noexcept {
         identity_ = other.identity_;
         runtime_ = other.runtime_;

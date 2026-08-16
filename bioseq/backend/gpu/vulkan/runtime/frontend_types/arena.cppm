@@ -33,6 +33,8 @@ struct gpu_arena_slice {
     std::uint64_t offset = 0;
     std::uint64_t size = 0;
 
+    /// @brief Reports whether the slice refers to an arena buffer.
+    /// @return `true` when the buffer pointer is non-null.
     [[nodiscard]] bool is_valid() const noexcept {
         return buffer != nullptr;
     }
@@ -51,11 +53,17 @@ struct gpu_arena_mark {
 /// Growth is allowed only outside an active count and execution submission pair.
 class gpu_arena {
   public:
+    /// @brief Associates an empty arena with its owning runtime.
+    /// @param[in] runtime Runtime that allocates and destroys backing buffers.
     explicit gpu_arena(runtime& runtime) noexcept : runtime_(&runtime) {}
 
+    /// @brief Captures the current allocation cursors.
+    /// @return Cursor snapshot suitable for `rewind`.
     [[nodiscard]] gpu_arena_mark mark() const noexcept {
         return gpu_arena_mark{device_cursor_, upload_cursor_, download_cursor_};
     }
+    /// @brief Restores all allocation cursors to a prior snapshot.
+    /// @param[in] mark Cursor snapshot to restore.
     void rewind(gpu_arena_mark mark) noexcept {
         device_cursor_ = mark.device_cursor;
         upload_cursor_ = mark.upload_cursor;
@@ -71,22 +79,35 @@ class gpu_arena {
                                        std::uint64_t upload_bytes,
                                        std::uint64_t download_bytes);
 
+    /// @brief Bump-allocates an aligned slice from device-local storage.
+    /// @return Allocated device slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_device(std::uint64_t bytes, std::uint64_t alignment);
+    /// @brief Bump-allocates an aligned slice from host-visible upload storage.
+    /// @return Allocated upload slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_upload(std::uint64_t bytes, std::uint64_t alignment);
+    /// @brief Bump-allocates an aligned slice from host-visible download storage.
+    /// @return Allocated download slice, or an invalid slice on failure.
     [[nodiscard]] gpu_arena_slice allocate_download(std::uint64_t bytes, std::uint64_t alignment);
 
+    /// @brief Binds an arena slice to one storage-buffer descriptor write.
     void bind_storage_slice(VkWriteDescriptorSet& write,
                             VkDescriptorBufferInfo& info,
                             std::uint32_t binding,
                             VkDescriptorSet dst_set,
                             const gpu_arena_slice& slice) const noexcept;
 
+    /// @brief Returns the device-local backing buffer.
+    /// @return Mutable device-local buffer owner.
     [[nodiscard]] buffer& device_buffer() noexcept {
         return device_;
     }
+    /// @brief Returns the host-visible upload backing buffer.
+    /// @return Mutable upload buffer owner.
     [[nodiscard]] buffer& upload_buffer() noexcept {
         return upload_;
     }
+    /// @brief Returns the host-visible download backing buffer.
+    /// @return Mutable download buffer owner.
     [[nodiscard]] buffer& download_buffer() noexcept {
         return download_;
     }
@@ -101,6 +122,8 @@ class gpu_arena {
     [[nodiscard]] bool release_idle_capacity() noexcept;
 
   private:
+    /// @brief Rounds a byte offset up to the requested alignment without overflow.
+    /// @return Aligned offset, or the maximum `uint64_t` value on overflow.
     [[nodiscard]] static std::uint64_t align_up(std::uint64_t value,
                                                 std::uint64_t alignment) noexcept {
         if (alignment <= 1u)
@@ -125,13 +148,19 @@ class gpu_arena {
 /// construction, and rewinds on destruction. Spans count submit + execution submit.
 class gpu_arena_reservation {
   public:
+    /// @brief Takes an admission permit and records the arena rewind point.
     gpu_arena_reservation(gpu_arena& arena, bioseq::parallelism::memory_permit permit) noexcept
         : arena_(&arena), permit_(std::move(permit)), mark_(arena.mark()) {}
+    /// @brief Prevents copying an owning arena reservation.
     gpu_arena_reservation(const gpu_arena_reservation&) = delete;
+    /// @brief Prevents copy-assignment of an owning arena reservation.
     gpu_arena_reservation& operator=(const gpu_arena_reservation&) = delete;
+    /// @brief Transfers the reservation and invalidates the source.
     gpu_arena_reservation(gpu_arena_reservation&& other) noexcept
         : arena_(std::exchange(other.arena_, nullptr)), permit_(std::move(other.permit_)),
           mark_(other.mark_) {}
+    /// @brief Releases the current reservation, then transfers another reservation.
+    /// @return This reservation.
     gpu_arena_reservation& operator=(gpu_arena_reservation&& other) noexcept {
         if (this != &other) {
             release();
@@ -141,15 +170,19 @@ class gpu_arena_reservation {
         }
         return *this;
     }
+    /// @brief Rewinds the arena when the reservation still owns it.
     ~gpu_arena_reservation() {
         release();
     }
+    /// @brief Rewinds the arena once and relinquishes the reservation.
     void release() noexcept {
         if (arena_ != nullptr) {
             arena_->rewind(mark_);
             arena_ = nullptr;
         }
     }
+    /// @brief Returns the reserved arena.
+    /// @return Arena associated with this live reservation.
     [[nodiscard]] gpu_arena& arena() noexcept {
         return *arena_;
     }
@@ -167,16 +200,24 @@ class gpu_arena_reservation {
 /// before arena growth and covers every return and exception path.
 class gpu_arena_trim_guard {
   public:
+    /// @brief Records an arena mark for request-boundary trimming.
     explicit gpu_arena_trim_guard(gpu_arena& arena) noexcept
         : arena_(&arena), mark_(arena.mark()) {}
+    /// @brief Prevents copying a trim guard.
     gpu_arena_trim_guard(const gpu_arena_trim_guard&) = delete;
+    /// @brief Prevents copy-assignment of a trim guard.
     gpu_arena_trim_guard& operator=(const gpu_arena_trim_guard&) = delete;
+    /// @brief Prevents moving a trim guard away from its lexical scope.
     gpu_arena_trim_guard(gpu_arena_trim_guard&&) = delete;
+    /// @brief Prevents move-assignment of a trim guard.
     gpu_arena_trim_guard& operator=(gpu_arena_trim_guard&&) = delete;
+    /// @brief Rewinds and trims the arena when still active.
     ~gpu_arena_trim_guard() {
         (void)release_now();
     }
 
+    /// @brief Rewinds and releases idle arena capacity at most once.
+    /// @return `true` when the guard is inactive or capacity was released.
     [[nodiscard]] bool release_now() noexcept {
         if (arena_ == nullptr) {
             return true;
