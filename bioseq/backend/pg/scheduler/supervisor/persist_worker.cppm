@@ -169,14 +169,15 @@ void finish_persist_claim(const persist_claim& claim) noexcept {
         async_minimizer_sequence_worker_pg_failure::relation_identity, [rel] {
             inject_async_minimizer_sequence_worker_pg_failure_leaf(
                 async_minimizer_sequence_worker_pg_failure::relation_identity);
-            relation_identity result{};
-            result.tablespace = OidIsValid(rel->rd_rel->reltablespace) ? rel->rd_rel->reltablespace
-                                                                       : MyDatabaseTableSpace;
-            result.relfilenode = static_cast<Oid>(rel->rd_locator.relNumber);
-            if (!OidIsValid(result.relfilenode)) {
-                result.relfilenode = RelationGetRelid(rel);
+            relation_identity captured_identity{};
+            captured_identity.tablespace = OidIsValid(rel->rd_rel->reltablespace)
+                                               ? rel->rd_rel->reltablespace
+                                               : MyDatabaseTableSpace;
+            captured_identity.relfilenode = static_cast<Oid>(rel->rd_locator.relNumber);
+            if (!OidIsValid(captured_identity.relfilenode)) {
+                captured_identity.relfilenode = RelationGetRelid(rel);
             }
-            return result;
+            return captured_identity;
         });
     invoke_async_minimizer_sequence_worker_pg_leaf(
         async_minimizer_sequence_worker_pg_failure::relation_close, [rel] {

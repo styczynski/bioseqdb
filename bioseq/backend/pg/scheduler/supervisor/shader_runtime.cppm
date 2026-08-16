@@ -363,13 +363,13 @@ process_shader_seed_snapshot() {
 
 /**
  * @brief Publishes terminal runtime initialization state and wakes every waiter.
- * @param[in] result Runtime initialization outcome.
+ * @param[in] initialization_result Runtime initialization outcome.
  */
-void publish_runtime_init_result(std::expected<void, std::string> result) noexcept {
+void publish_runtime_init_result(std::expected<void, std::string> initialization_result) noexcept {
     if (g_shared == nullptr) {
         return;
     }
-    if (result) {
+    if (initialization_result) {
         pg_atomic_write_u32(
             &g_shared->runtime_init_errc,
             static_cast<std::uint32_t>(bioseq::gpu::vulkan::shader_cache_error::ok));
@@ -377,14 +377,15 @@ void publish_runtime_init_result(std::expected<void, std::string> result) noexce
         g_shared->cache_digest_hex[0] = '\0';
         pg_atomic_write_u32(
             &g_shared->runtime_init_errc,
-            static_cast<std::uint32_t>(classify_shader_cache_error(result.error())));
+            static_cast<std::uint32_t>(classify_shader_cache_error(initialization_result.error())));
         bioseq_log<logging_level::warning, logging_target::postgres>(
-            "[bioseq] runtime init failed: {}", result.error());
+            "[bioseq] runtime init failed: {}", initialization_result.error());
     }
     pg_write_barrier();
     pg_atomic_write_u32(&g_shared->runtime_init_state,
-                        static_cast<std::uint32_t>(result ? runtime_initialization_state::ready
-                                                          : runtime_initialization_state::failed));
+                        static_cast<std::uint32_t>(initialization_result
+                                                       ? runtime_initialization_state::ready
+                                                       : runtime_initialization_state::failed));
     ConditionVariableBroadcast(&g_shared->runtime_init_cv);
 }
 
@@ -918,51 +919,53 @@ struct pg_backend_compile_service {
  * @return Stable multiline status including variant and artifact identities.
  */
 [[nodiscard]] std::string warmup_backend_local_shader_cache_report() {
-    std::ostringstream out;
+    std::ostringstream report;
 #if !defined(__APPLE__)
-    out << "pid=" << static_cast<long>(MyProcPid) << " platform=non-apple\n"
-        << "RESULT: ok variants=0 failed=0\n";
-    return out.str();
+    report << "pid=" << static_cast<long>(MyProcPid) << " platform=non-apple\n"
+           << "RESULT: ok variants=0 failed=0\n";
+    return report.str();
 #else
     const auto inputs = conservative_shader_inputs();
     auto prepared = prepare_backend_local_shader_cache_env();
     if (!prepared) {
-        out << "pid=" << static_cast<long>(MyProcPid) << '\n'
-            << "RESULT: failed\n"
-            << "error=" << prepared.error() << '\n';
-        return out.str();
+        report << "pid=" << static_cast<long>(MyProcPid) << '\n'
+               << "RESULT: failed\n"
+               << "error=" << prepared.error() << '\n';
+        return report.str();
     }
 
     const std::filesystem::path& cache_dir = *prepared;
-    out << "pid=" << static_cast<long>(MyProcPid) << " supervisor=" << (g_shared != nullptr ? 1 : 0)
-        << " cache_dir=" << cache_dir.string() << '\n';
+    report << "pid=" << static_cast<long>(MyProcPid)
+           << " supervisor=" << (g_shared != nullptr ? 1 : 0) << " cache_dir=" << cache_dir.string()
+           << '\n';
     if (const char* env = std::getenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB"); env != nullptr) {
-        out << "env BIOSEQ_MOLTENVK_COMMAND_METALLIB=" << env << '\n';
+        report << "env BIOSEQ_MOLTENVK_COMMAND_METALLIB=" << env << '\n';
     }
     if (const char* env = std::getenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR"); env != nullptr) {
-        out << "env BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR=" << env << '\n';
+        report << "env BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR=" << env << '\n';
     }
 
     auto keys = exact_aot_shader_keys(inputs);
     if (!keys) {
-        out << "RESULT: failed\n"
-            << "error=canonicalize exact AOT shader keys: " << keys.error() << '\n';
-        return out.str();
+        report << "RESULT: failed\n"
+               << "error=canonicalize exact AOT shader keys: " << keys.error() << '\n';
+        return report.str();
     }
     const std::string digest = cache_dir.filename().string();
     const auto seed = process_shader_seed_snapshot();
     if (!seed || !seed->is_accepted() || seed->manifest().cache_digest != digest ||
         seed->manifest().keys != *keys) {
-        out << "RESULT: failed\n"
-            << "error=process-owned shader seed unavailable after preparation\n";
-        return out.str();
+        report << "RESULT: failed\n"
+               << "error=process-owned shader seed unavailable after preparation\n";
+        return report.str();
     }
     const auto& sealed = seed->manifest();
-    out << "sealed_manifest="
-        << bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir).string()
-        << " seed_bytes=" << sealed.seed_size << " manifest_checksum=" << sealed.manifest_checksum
-        << " seed_load_count=" << seed->receipt().load_count()
-        << " seed_load_ns=" << seed->receipt().load_ns() << '\n';
+    report << "sealed_manifest="
+           << bioseq::gpu::vulkan::sealed_shader_cache_manifest_path(cache_dir).string()
+           << " seed_bytes=" << sealed.seed_size
+           << " manifest_checksum=" << sealed.manifest_checksum
+           << " seed_load_count=" << seed->receipt().load_count()
+           << " seed_load_ns=" << seed->receipt().load_ns() << '\n';
 
     std::size_t failed = 0;
     for (const auto& key : *keys) {
@@ -970,9 +973,9 @@ struct pg_backend_compile_service {
         auto compatible = bioseq::gpu::vulkan::make_sealed_shader_cache_key_view(*seed, key);
         if (!compatible) {
             ++failed;
-            out << "variant " << stem << " kind=" << key.kind << " tile=" << key.tile_size
-                << " local=" << key.local_size << " max_span=" << key.max_span
-                << " status=failed error=" << compatible.error() << '\n';
+            report << "variant " << stem << " kind=" << key.kind << " tile=" << key.tile_size
+                   << " local=" << key.local_size << " max_span=" << key.max_span
+                   << " status=failed error=" << compatible.error() << '\n';
             continue;
         }
         const auto key_iterator = std::find(sealed.keys.begin(), sealed.keys.end(), key);
@@ -1002,15 +1005,15 @@ struct pg_backend_compile_service {
             first_archive = false;
             archive_bytes << archive.descriptor.filename << ':' << archive.bytes.size();
         }
-        out << "variant " << stem << " kind=" << key.kind << " tile=" << key.tile_size
-            << " local=" << key.local_size << " max_span=" << key.max_span << " status=ok"
-            << " metallib_bytes=" << (metallib ? metallib->bytes.size() : 0u)
-            << " meta_bytes=" << (meta ? meta->bytes.size() : 0u)
-            << " archive_bytes=" << archive_bytes.str() << '\n';
+        report << "variant " << stem << " kind=" << key.kind << " tile=" << key.tile_size
+               << " local=" << key.local_size << " max_span=" << key.max_span << " status=ok"
+               << " metallib_bytes=" << (metallib ? metallib->bytes.size() : 0u)
+               << " meta_bytes=" << (meta ? meta->bytes.size() : 0u)
+               << " archive_bytes=" << archive_bytes.str() << '\n';
     }
-    out << "RESULT: " << (failed == 0 ? "ok" : "failed") << " variants=" << keys->size()
-        << " failed=" << failed << '\n';
-    return out.str();
+    report << "RESULT: " << (failed == 0 ? "ok" : "failed") << " variants=" << keys->size()
+           << " failed=" << failed << '\n';
+    return report.str();
 #endif
 }
 
