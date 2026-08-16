@@ -22,6 +22,7 @@ import :bucket_codec;
 import bioseq.common.checked_arithmetic;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.storage;
+import bioseq.indexing.type;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences.kmers;
 import bioseq.storage.size;

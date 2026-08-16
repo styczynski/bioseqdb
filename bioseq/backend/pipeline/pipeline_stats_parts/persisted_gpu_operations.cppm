@@ -2,6 +2,10 @@
  * @file pipeline/pipeline_stats_parts/persisted_gpu_operations.cppm
  * @brief Persisted-GPU operation receipts, authorization, and aggregation.
  */
+module;
+
+#include <new>
+
 export module bioseq.pipeline.stats:persisted_gpu_operations;
 
 import std;
@@ -9,6 +13,11 @@ import :aggregation;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.common.checked_arithmetic;
 import bioseq.parallelism.memory_admission;
+
+// Merge libc++'s aligned allocation declaration into this module attachment.
+static_assert(requires {
+    ::operator new(std::size_t{}, std::align_val_t{});
+});
 
 export namespace bioseq::pipeline_stats {
 
