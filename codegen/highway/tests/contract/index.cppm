@@ -1309,11 +1309,11 @@ inline void verify_typed_alignment_binder() {
                 && artifact.content.contains(
                     "alignment_kernels<::seq::dna5> alignment_1")
                 && artifact.content.contains(
-                    ".alphabet_code = 0u, .typed_table_complete = "
+                    ".alphabet_code = 0U, .typed_table_complete = "
                     "::bioseq::simd::is_alignment_kernel_table_complete("
                     "alignment_0), .typed_table = &alignment_0")
                 && artifact.content.contains(
-                    ".alphabet_code = 1u, .typed_table_complete = "
+                    ".alphabet_code = 1U, .typed_table_complete = "
                     "::bioseq::simd::is_alignment_kernel_table_complete("
                     "alignment_1), .typed_table = &alignment_1")
                 && occurrences(
@@ -1321,7 +1321,9 @@ inline void verify_typed_alignment_binder() {
                        "::bioseq::simd::is_alignment_kernel_table_complete(")
                     == 2U
                 && artifact.content.contains(
-                    "highway_alphabet_identity_entry alphabet_identities[]")
+                    "static const auto alphabet_identities = ::std::to_array<"
+                    "::bioseq::simd_dispatch::"
+                    "highway_alphabet_identity_entry>({")
                 && occurrences(
                        artifact.content,
                        "highway_alphabet_identity_for<::seq::dna4>()") == 1U
@@ -1565,7 +1567,9 @@ inline void verify_typed_minimizer_binder() {
                        artifact.content,
                        "minimizer_kernel_status::invalid_configuration") == 0U
                 && artifact.content.contains(
-                    "highway_alphabet_identity_entry alphabet_identities[]")
+                    "static const auto alphabet_identities = ::std::to_array<"
+                    "::bioseq::simd_dispatch::"
+                    "highway_alphabet_identity_entry>({")
                 && occurrences(
                        artifact.content,
                        "highway_alphabet_identity_for<::seq::dna4>()") == 1U
@@ -1717,7 +1721,7 @@ inline void verify_typed_minimizer_binder() {
                     "highway_alphabet_identity_for<"
                     + identity.alphabet_type
                     + ">(), .alphabet_code = "
-                    + std::to_string(identity.alphabet_code) + "u"),
+                    + std::to_string(identity.alphabet_code) + "U"),
                 "the reconciled identity axis preserves each generated "
                 "topology code/type pair");
         }
