@@ -120,7 +120,9 @@ jobs:
           set -Eeuo pipefail
           python3 infra/package_builder.py run \
             --existing-only \
+            --optimization O3 \
             --ssh-key "$RUNNER_TEMP/package-builder-key" \
+            --lifecycle-receipt "$RUNNER_TEMP/package-builder-access.json" \
             --region "$AWS_REGION"
           python3 infra/package_builder.py collect \
             --region "$AWS_REGION" \
@@ -139,7 +141,7 @@ jobs:
           compression-level: 0
           retention-days: 30
 
-      - name: Stop builders before publishing
+      - name: Revoke ephemeral access and stop owned builders before publishing
         if: env.RELEASE_ALREADY_COMPLETE != '1'
         timeout-minutes: 15
         shell: bash
@@ -149,11 +151,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           cleanup_status=0
-          python3 infra/package_builder.py stop \
-            --region "$AWS_REGION" || cleanup_status=$?
           python3 infra/package_builder.py close-ci-access \
             --region "$AWS_REGION" \
             --receipt "$RUNNER_TEMP/package-builder-access.json" \
+            || cleanup_status=$?
+          python3 infra/package_builder.py stop \
+            --region "$AWS_REGION" \
+            --lifecycle-receipt "$RUNNER_TEMP/package-builder-access.json" \
             || cleanup_status=$?
           if [[ $cleanup_status -eq 0 ]]; then
             printf 'PACKAGE_BUILDERS_CLEANED=1\n' >> "$GITHUB_ENV"
@@ -176,6 +180,9 @@ jobs:
             "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
             "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
             "Source commit: ${GITHUB_SHA}" > "$notes"
+          python3 infra/package_builder.py verify-release-assets \
+            --asset-dir "$RUNNER_TEMP/release-assets" \
+            --expected-revision "$GITHUB_SHA"
 
           verify_assets() {
             local expected_assets="$RUNNER_TEMP/expected-assets.txt"
@@ -219,6 +226,34 @@ jobs:
               --draft
           fi
 
+          # Converge a retryable draft to the exact local asset set. Deletion is
+          # guarded by both the exact tag target and draft state; the complete
+          # replacement set was verified above and the release remains a draft
+          # until the post-upload count and digest checks pass.
+          tag_target=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
+          test "$tag_target" = "$GITHUB_SHA"
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq 'select(.draft == true) | .id')
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            --jq '.[].id' > "$RUNNER_TEMP/stale-draft-asset-ids.txt"
+          while IFS= read -r asset_id; do
+            [[ "$asset_id" =~ ^[0-9]+$ ]]
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10"
+          done < "$RUNNER_TEMP/stale-draft-asset-ids.txt"
+
           gh release upload "$tag" "$RUNNER_TEMP"/release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
@@ -230,7 +265,7 @@ jobs:
           verify_assets
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
 
-      - name: Stop builders and revoke ephemeral access
+      - name: Revoke ephemeral access and stop owned builders (always)
         if: always()
         timeout-minutes: 40
         shell: bash
@@ -246,10 +281,12 @@ jobs:
             exit 0
           fi
           cleanup_status=0
-          python3 infra/package_builder.py stop \
-            --region "$AWS_REGION" || cleanup_status=$?
           python3 infra/package_builder.py close-ci-access \
             --region "$AWS_REGION" \
             --receipt "$RUNNER_TEMP/package-builder-access.json" \
+            || cleanup_status=$?
+          python3 infra/package_builder.py stop \
+            --region "$AWS_REGION" \
+            --lifecycle-receipt "$RUNNER_TEMP/package-builder-access.json" \
             || cleanup_status=$?
           exit "$cleanup_status"

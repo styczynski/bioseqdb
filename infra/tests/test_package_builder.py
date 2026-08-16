@@ -5,11 +5,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import re
 import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from pathlib import Path
@@ -30,7 +32,116 @@ sys.modules[SPEC.name] = package_builder
 SPEC.loader.exec_module(package_builder)
 
 
+def compiler_optimization_evidence(
+    architecture: str,
+    *,
+    distros: tuple[str, ...] | None = None,
+    postgres: tuple[int, ...] = (17,),
+) -> dict[str, object]:
+    if distros is None:
+        distros = tuple(package_builder.load_matrix().distributions)
+    cache_paths = sorted(
+        f"{distro}/postgresql{major}/build-repository-root/CMakeCache.txt"
+        for distro in distros
+        for major in postgres
+    )
+    database_paths = [
+        path.removesuffix("CMakeCache.txt") + "compile_commands.json"
+        for path in cache_paths
+    ]
+    database_sha256 = "c" * 64
+    database_records = [
+        f"{path}\0{database_sha256}\0{2}" for path in database_paths
+    ]
+    compile_databases = [
+        {
+            "path": path,
+            "sha256": database_sha256,
+            "command_count": 2,
+            "language_compile_commands": {"C": 1, "CXX": 1},
+        }
+        for path in database_paths
+    ]
+    database_count = len(database_paths)
+    return {
+        "policy_revision": package_builder.OPTIMIZATION_POLICY_REVISION,
+        "requested": package_builder.PRODUCTION_OPTIMIZATION,
+        "architecture": architecture,
+        "build_type": "Release",
+        "c_compiler": "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+        "cxx_compiler": "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+        "effective_c_flags": ["-O3", "-DNDEBUG", "-fno-omit-frame-pointer"],
+        "effective_cxx_flags": [
+            "-stdlib=libc++",
+            "-O3",
+            "-DNDEBUG",
+            "-fno-omit-frame-pointer",
+        ],
+        "optimization_flags": ["-O3"],
+        "forbidden_optimization_flags": [],
+        "cmake_cache_paths": cache_paths,
+        "compile_database_count": database_count,
+        "compile_databases": compile_databases,
+        "compile_command_count": 2 * database_count,
+        "language_compile_commands": {
+            "C": database_count,
+            "CXX": database_count,
+        },
+        "compile_databases_sha256": hashlib.sha256(
+            "\n".join(database_records).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 class SourceArchiveContractTests(unittest.TestCase):
+    def test_remote_source_tree_hash_detects_content_and_extra_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "CMakeLists.txt"
+            source.write_text("project(bioseq)\n", encoding="utf-8")
+
+            def digest() -> str:
+                result = subprocess.run(
+                    [sys.executable, "-c", package_builder.SOURCE_TREE_HASH_SCRIPT, str(root)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+
+            baseline = digest()
+            self.assertRegex(baseline, r"^[0-9a-f]{64}$")
+            source.write_text("project(changed)\n", encoding="utf-8")
+            self.assertNotEqual(digest(), baseline)
+            source.write_text("project(bioseq)\n", encoding="utf-8")
+            (root / "unexpected.txt").write_text("extra\n", encoding="utf-8")
+            self.assertNotEqual(digest(), baseline)
+
+    def test_committed_source_tree_hash_binds_git_modes_objects_and_exclusions(self) -> None:
+        records = (
+            "100755 blob " + "2" * 40 + "\ttools/build\0"
+            "100644 blob " + "1" * 40 + "\tCMakeLists.txt\0"
+            "100644 blob " + "3" * 40 + "\tmain/papers/secret.tex\0"
+        )
+        included = sorted(
+            (
+                (b"tools/build", ("100755 blob " + "2" * 40 + "\ttools/build\0").encode()),
+                (b"CMakeLists.txt", ("100644 blob " + "1" * 40 + "\tCMakeLists.txt\0").encode()),
+            )
+        )
+        expected = hashlib.sha256(
+            b"".join(record for _path, record in included)
+        ).hexdigest()
+        with mock.patch.object(
+            package_builder,
+            "run_command",
+            return_value=subprocess.CompletedProcess([], 0, records, ""),
+        ) as run:
+            observed = package_builder.committed_source_tree_sha256("a" * 40)
+        self.assertEqual(observed, expected)
+        self.assertIn("ls-tree", run.call_args.args[0])
+        self.assertIn("-z", run.call_args.args[0])
+
     def test_committed_source_archive_excludes_sealed_paths_before_streaming(self) -> None:
         builder = package_builder.Builder(
             "arm64",
@@ -48,6 +159,7 @@ class SourceArchiveContractTests(unittest.TestCase):
             f"{package_builder.SOURCE_ARCHIVE_REVISION}-{revision}"
         )
         token = "1" * 32
+        tree_sha256 = "e" * 64
         staging = expected_remote_source + f".tmp-{token}"
         archive_process = mock.Mock(
             stdout=io.BytesIO(), returncode=0)
@@ -55,7 +167,7 @@ class SourceArchiveContractTests(unittest.TestCase):
         extract_process = mock.Mock()
         extract_process.wait.return_value = 0
         ssh_responses = iter((
-            subprocess.CompletedProcess([], 3, "", ""),
+            subprocess.CompletedProcess([], 4, "", ""),
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 0, "", ""),
             subprocess.CompletedProcess([], 0, "", ""),
@@ -63,6 +175,10 @@ class SourceArchiveContractTests(unittest.TestCase):
         ))
         with mock.patch.object(
             package_builder.secrets, "token_hex", return_value=token,
+        ), mock.patch.object(
+            package_builder,
+            "committed_source_tree_sha256",
+            return_value=tree_sha256,
         ), mock.patch.object(
             package_builder, "ssh_run",
             side_effect=lambda *_args, **_kwargs: next(ssh_responses),
@@ -88,6 +204,9 @@ class SourceArchiveContractTests(unittest.TestCase):
             ":(top,exclude,literal)main/papers",
             ":(top,exclude,glob)main/papers/**",
         ])
+        self.assertEqual(
+            popen.call_args_list[0].kwargs["env"]["GIT_LFS_SKIP_SMUDGE"], "1"
+        )
         extract_argv = popen.call_args_list[1].args[0]
         self.assertEqual(extract_argv, ["ssh", f"tar -xf - -C {staging}"])
         commands = [call.args[2] for call in ssh_run.call_args_list]
@@ -95,11 +214,16 @@ class SourceArchiveContractTests(unittest.TestCase):
         self.assertEqual(commands[1], f"mkdir -m 0755 -- {staging}")
         self.assertIn(f"staging={staging}", commands[2])
         self.assertIn(f"destination={expected_remote_source}", commands[2])
+        self.assertIn(
+            f"quarantine={expected_remote_source}.invalid-{token}", commands[2]
+        )
+        self.assertIn('mv -T -- "$destination" "$quarantine"', commands[2])
         expected_marker = hashlib.sha256(
             (
                 f"{package_builder.SOURCE_ARCHIVE_IDENTITY}\n"
                 f"revision={package_builder.SOURCE_ARCHIVE_REVISION}\n"
                 f"source_revision={revision}\n"
+                f"source_tree_sha256={tree_sha256}\n"
             ).encode("ascii")
         ).hexdigest()
         self.assertIn(f"marker={expected_marker}", commands[2])
@@ -113,6 +237,9 @@ class SourceArchiveContractTests(unittest.TestCase):
             commands[2].index("valid_destination"),
         )
         self.assertIn(".bioseq-source-marker", commands[0])
+        self.assertIn(".bioseq-source-tree-sha256", commands[0])
+        self.assertIn("hashlib.sha1", commands[0])
+        self.assertIn(f"tree_sha256={tree_sha256}", commands[0])
         self.assertIn("flock -x 9", commands[0])
         self.assertIn("cmp -s", commands[0])
         self.assertEqual(commands[0], commands[3])
@@ -122,7 +249,7 @@ class SourceArchiveContractTests(unittest.TestCase):
             package_builder.SOURCE_ARCHIVE_IDENTITY,
             "repository-root-sealed-papers-excluded",
         )
-        self.assertEqual(package_builder.SOURCE_ARCHIVE_REVISION, 3)
+        self.assertEqual(package_builder.SOURCE_ARCHIVE_REVISION, 4)
         self.assertEqual(
             package_builder._remote_committed_source_path(revision),
             expected_remote_source,
@@ -134,6 +261,10 @@ class SourceArchiveContractTests(unittest.TestCase):
             "203.0.113.1", "10.0.0.1", "ami-0123456789abcdef0",
         )
         with mock.patch.object(
+            package_builder,
+            "committed_source_tree_sha256",
+            return_value="e" * 64,
+        ), mock.patch.object(
             package_builder, "ssh_run",
             return_value=subprocess.CompletedProcess([], 0, "", ""),
         ) as ssh_run, mock.patch.object(
@@ -149,6 +280,7 @@ class SourceArchiveContractTests(unittest.TestCase):
         self.assertIn(".bioseq-source-marker", ssh_run.call_args.args[2])
         self.assertIn("flock -x 9", ssh_run.call_args.args[2])
         self.assertIn("cmp -s", ssh_run.call_args.args[2])
+        self.assertIn("hashlib.sha1", ssh_run.call_args.args[2])
         popen.assert_not_called()
 
     def test_committed_source_rejects_symbolic_revision_before_io(self) -> None:
@@ -193,6 +325,10 @@ class SourceArchiveContractTests(unittest.TestCase):
             with self.subTest(
                 git_return=git_return, extract_return=extract_return,
             ), mock.patch.object(
+                package_builder,
+                "committed_source_tree_sha256",
+                return_value="e" * 64,
+            ), mock.patch.object(
                 package_builder.secrets, "token_hex", return_value="2" * 32,
             ), mock.patch.object(
                 package_builder, "ssh_run",
@@ -231,6 +367,10 @@ class SourceArchiveContractTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, "", ""),
         ))
         with mock.patch.object(
+            package_builder,
+            "committed_source_tree_sha256",
+            return_value="e" * 64,
+        ), mock.patch.object(
             package_builder.secrets, "token_hex", return_value="3" * 32,
         ), mock.patch.object(
             package_builder, "ssh_run",
@@ -249,6 +389,246 @@ class SourceArchiveContractTests(unittest.TestCase):
         extract_process.terminate.assert_called_once_with()
         self.assertNotIn(archive_process, package_builder.ACTIVE_CHILDREN)
         self.assertNotIn(extract_process, package_builder.ACTIVE_CHILDREN)
+
+
+class OptimizationPolicyTests(unittest.TestCase):
+    def optimization_root(
+        self,
+        root: Path,
+        flags: list[str],
+        distro: str = "fedora_44",
+    ) -> Path:
+        build_root = (
+            root / distro / "postgresql17" / "build-repository-root"
+        )
+        build_root.mkdir(parents=True, exist_ok=True)
+        cache = "\n".join(
+            (
+                "CMAKE_BUILD_TYPE:STRING=Release",
+                "CMAKE_C_FLAGS:STRING=",
+                "CMAKE_CXX_FLAGS:STRING=-stdlib=libc++",
+                (
+                    "CMAKE_C_FLAGS_RELEASE:STRING="
+                    "-O3 -DNDEBUG -fno-omit-frame-pointer"
+                ),
+                (
+                    "CMAKE_CXX_FLAGS_RELEASE:STRING="
+                    "-O3 -DNDEBUG -fno-omit-frame-pointer"
+                ),
+                (
+                    "CMAKE_C_COMPILER:FILEPATH="
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang"
+                ),
+                (
+                    "CMAKE_CXX_COMPILER:FILEPATH="
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang++"
+                ),
+            )
+        )
+        (build_root / "CMakeCache.txt").write_text(
+            cache + "\n", encoding="utf-8"
+        )
+        entries = [
+            {
+                "arguments": [
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang",
+                    *flags,
+                    "-c",
+                    "source.c",
+                ],
+                "file": "source.c",
+            },
+            {
+                "arguments": [
+                    "/opt/bioseq-package-toolchain/llvm-22/bin/clang++",
+                    "-stdlib=libc++",
+                    *flags,
+                    "-c",
+                    "source.cpp",
+                ],
+                "file": "source.cpp",
+            },
+        ]
+        (build_root / "compile_commands.json").write_text(
+            json.dumps(entries), encoding="utf-8"
+        )
+        return root
+
+    def run_evidence(
+        self,
+        root: Path,
+        expected_cache_paths: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        if expected_cache_paths is None:
+            expected_cache_paths = [
+                "fedora_44/postgresql17/build-repository-root/CMakeCache.txt"
+            ]
+        return subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                package_builder.REMOTE_OPTIMIZATION_EVIDENCE_SCRIPT,
+                str(root),
+                "arm64",
+                json.dumps(expected_cache_paths, separators=(",", ":")),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_remote_compiler_evidence_records_effective_o3_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), ["-O3"])
+            self.optimization_root(root, ["-O3"], "ubuntu_26.04")
+            completed = self.run_evidence(
+                root,
+                [
+                    "fedora_44/postgresql17/build-repository-root/"
+                    "CMakeCache.txt",
+                    "ubuntu_26.04/postgresql17/build-repository-root/"
+                    "CMakeCache.txt",
+                ],
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        evidence = json.loads(completed.stdout)
+        package_builder.require_compiler_optimization_evidence(
+            evidence,
+            architecture="arm64",
+            label="test optimization evidence",
+        )
+        self.assertEqual(evidence["optimization_flags"], ["-O3"])
+        self.assertEqual(evidence["compile_database_count"], 2)
+        self.assertEqual(evidence["compile_command_count"], 4)
+        self.assertEqual(
+            evidence["language_compile_commands"], {"C": 2, "CXX": 2}
+        )
+        self.assertEqual(
+            evidence["effective_cxx_flags"],
+            ["-stdlib=libc++", "-O3", "-DNDEBUG", "-fno-omit-frame-pointer"],
+        )
+
+    def test_remote_compiler_evidence_requires_every_selected_cell_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), ["-O3"])
+            completed = self.run_evidence(
+                root,
+                [
+                    "fedora_44/postgresql17/build-repository-root/"
+                    "CMakeCache.txt",
+                    "ubuntu_26.04/postgresql17/build-repository-root/"
+                    "CMakeCache.txt",
+                ],
+            )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("do not match the selected cells", completed.stderr)
+
+    def test_remote_compiler_evidence_requires_both_languages_per_database(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.optimization_root(Path(tmp), ["-O3"])
+            database = (
+                root
+                / "fedora_44"
+                / "postgresql17"
+                / "build-repository-root"
+                / "compile_commands.json"
+            )
+            entries = json.loads(database.read_text(encoding="utf-8"))
+            database.write_text(
+                json.dumps([entry for entry in entries if entry["file"] == "source.cpp"]),
+                encoding="utf-8",
+            )
+            completed = self.run_evidence(root)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("positive C and C++ commands", completed.stderr)
+
+    def test_remote_compiler_evidence_rejects_every_lower_optimization(self) -> None:
+        for forbidden in ("-O0", "-O1", "-O2", "-Os", "-Og"):
+            with self.subTest(forbidden=forbidden), tempfile.TemporaryDirectory() as tmp:
+                completed = self.run_evidence(
+                    self.optimization_root(Path(tmp), ["-O3", forbidden])
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("must resolve to only -O3", completed.stderr)
+
+    def test_run_cli_accepts_only_explicit_o3_policy(self) -> None:
+        parser = package_builder.build_parser()
+        self.assertEqual(
+            parser.parse_args(["run", "--optimization", "O3"]).optimization,
+            "O3",
+        )
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
+            SystemExit
+        ):
+            parser.parse_args(["run", "--optimization", "O2"])
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(
+            SystemExit
+        ):
+            parser.parse_args(["run"])
+
+    def test_controller_preserves_cache_but_forces_flag_reconfiguration(self) -> None:
+        builder = package_builder.Builder(
+            "arm64",
+            "i-0aaabbbcccdddeee1",
+            "c7g.xlarge",
+            "arm64",
+            "203.0.113.1",
+            "10.0.0.1",
+            "ami-0123456789abcdef0",
+        )
+        with mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="1" * 16
+        ), mock.patch.object(package_builder, "ssh_run") as ssh:
+            package_builder.force_remote_package_reconfigure(
+                builder, Path("/tmp/key")
+            )
+        command = ssh.call_args.args[2]
+        self.assertIn("caches/package-cmake", command)
+        self.assertIn(".controller-reconfigure.lock", command)
+        self.assertIn("flock -x 9", command)
+        self.assertIn("*/build-repository-root/CMakeCache.txt", command)
+        self.assertIn("CMakeCache.txt", command)
+        self.assertIn(".pre-o3-${token}", command)
+        self.assertIn('sudo -- mv -- "$cache" "$backup"', command)
+
+    def test_controller_reconfigure_is_noop_before_first_package_cache(self) -> None:
+        builder = package_builder.Builder(
+            "x64",
+            "i-0aaabbbcccdddeee2",
+            "m4.xlarge",
+            "x86_64",
+            "203.0.113.2",
+            "10.0.0.2",
+            "ami-0123456789abcdef1",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            absent_root = Path(tmp) / "package-cmake"
+
+            def local_ssh(
+                _builder: package_builder.Builder,
+                _key: Path,
+                command: str,
+                **_kwargs: object,
+            ) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    command,
+                    shell=True,
+                    executable="/bin/bash",
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+
+            with mock.patch.object(
+                package_builder,
+                "REMOTE_PACKAGE_CMAKE_CACHE_ROOT",
+                str(absent_root),
+            ), mock.patch.object(package_builder, "ssh_run", side_effect=local_ssh):
+                package_builder.force_remote_package_reconfigure(
+                    builder, Path("/tmp/key")
+                )
+            self.assertFalse(absent_root.exists())
 
 
 class MatrixTests(unittest.TestCase):
@@ -293,7 +673,7 @@ class MatrixTests(unittest.TestCase):
 
     def test_package_run_result_rejects_legacy_wrong_and_unknown_identity(self) -> None:
         current = {
-            "schema_revision": 1,
+            "schema_revision": package_builder.PACKAGE_RUN_SCHEMA_REVISION,
             "status": "success",
             "run_id": "20260810T000000Z-aaaaaaaaaaaa",
             "revision": "a" * 40,
@@ -310,6 +690,11 @@ class MatrixTests(unittest.TestCase):
             "worker_units": {},
             "worker_launch_acknowledged": {},
             "manifests": {},
+            "optimization": {
+                "policy_revision": package_builder.OPTIMIZATION_POLICY_REVISION,
+                "requested": package_builder.PRODUCTION_OPTIMIZATION,
+                "architectures": {},
+            },
             "builders_left_running": {},
         }
         self.assertEqual(
@@ -606,6 +991,36 @@ class LifecycleSafetyTests(unittest.TestCase):
         self.assertEqual(ssh.call_count, 2)
         self.assertNotIn("cloud-init status", ssh.call_args_list[1].args[2])
 
+    def test_bootstrap_reconcile_appends_missing_schema_assignment(self) -> None:
+        builder = package_builder.Builder(
+            architecture="arm64",
+            instance_id="i-0aaabbbcccdddeee1",
+            instance_type="c7g.xlarge",
+            aws_architecture="arm64",
+            public_ip="203.0.113.1",
+            private_ip="10.0.0.1",
+            source_ami_id="ami-0123456789abcdef0",
+        )
+        success = subprocess.CompletedProcess([], 0, "", "")
+        ready_mismatch = subprocess.CompletedProcess([], 1, "", "")
+        with mock.patch.object(
+            package_builder, "wait_for_ssh"
+        ), mock.patch.object(
+            package_builder,
+            "ssh_run",
+            side_effect=(success, ready_mismatch, success),
+        ) as ssh, mock.patch.object(package_builder, "wait_for_bootstrap"):
+            package_builder.reconcile_remote_bootstrap(
+                builder,
+                Path("/tmp/key"),
+                "/opt/bioseq-package-builder/workspace/source",
+            )
+        command = ssh.call_args_list[2].args[2]
+        self.assertIn("if grep -q", command)
+        self.assertIn("^BIOSEQ_AMI_SCHEMA_REVISION=", command)
+        self.assertIn("sudo tee -a /etc/bioseq-package-builder.env", command)
+        self.assertIn("grep -Fqx", command)
+
     def test_external_interrupt_is_forwarded_to_active_child(self) -> None:
         child = mock.Mock()
         child.poll.return_value = None
@@ -617,6 +1032,326 @@ class LifecycleSafetyTests(unittest.TestCase):
             with package_builder.ACTIVE_CHILDREN_LOCK:
                 package_builder.ACTIVE_CHILDREN.discard(child)
         child.send_signal.assert_called_once_with(signal.SIGINT)
+
+
+class InstanceConnectRetryTests(unittest.TestCase):
+    def builder(self) -> package_builder.Builder:
+        return package_builder.Builder(
+            "x64",
+            "i-0aaabbbcccdddeee2",
+            "m4.xlarge",
+            "x86_64",
+            "203.0.113.2",
+            "10.0.0.2",
+            "ami-0123456789abcdef1",
+            availability_zone="us-east-1c",
+            region="us-east-1",
+            ssh_access="ec2-instance-connect",
+        )
+
+    def test_capture_retries_only_instance_connect_public_key_race(self) -> None:
+        denied = subprocess.CompletedProcess(
+            ["ssh", "true"],
+            255,
+            "",
+            "ubuntu@example: Permission denied (publickey).\n",
+        )
+        master_success = subprocess.CompletedProcess(
+            ["ssh", "-fN"], 0, "", ""
+        )
+        command_success = subprocess.CompletedProcess(
+            ["ssh", "true"], 0, "ready\n", ""
+        )
+        master_exit = subprocess.CompletedProcess(
+            ["ssh", "-O", "exit"], 0, "", ""
+        )
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ) as refresh, mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="1" * 16
+        ), mock.patch.object(
+            package_builder,
+            "run_command",
+            side_effect=[denied, master_success, command_success, master_exit],
+        ) as run, mock.patch.object(package_builder.time, "sleep") as sleep:
+            completed = package_builder.ssh_run(
+                self.builder(), Path("/tmp/key"), "true", capture=True
+            )
+
+        self.assertIs(completed, command_success)
+        self.assertEqual(refresh.call_count, 2)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(
+            sum(call.args[0][-1:] == ["true"] for call in run.call_args_list),
+            1,
+        )
+        command = run.call_args_list[2].args[0]
+        self.assertEqual(command[-2:], ["ubuntu@example", "true"])
+        self.assertIn("ProxyCommand=/usr/bin/false", command)
+        self.assertIn("PreferredAuthentications=none", command)
+        self.assertIn("PubkeyAuthentication=no", command)
+        self.assertIn("ControlMaster=no", command)
+        self.assertEqual(run.call_args_list[3].args[0][-3:-1], ["-O", "exit"])
+        sleep.assert_called_once_with(
+            package_builder.INSTANCE_CONNECT_AUTH_RETRY_SECONDS
+        )
+
+    def test_authentication_race_has_bounded_command_free_retries(self) -> None:
+        denied = subprocess.CompletedProcess(
+            ["ssh", "-fN"],
+            255,
+            "",
+            "ubuntu@example: Permission denied (publickey).\n",
+        )
+        master_exit = subprocess.CompletedProcess(
+            ["ssh", "-O", "exit"], 255, "", "missing control socket"
+        )
+
+        def fake_run(argv, **_kwargs):
+            if "-O" in argv:
+                return master_exit
+            return denied
+
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ) as refresh, mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="6" * 16
+        ), mock.patch.object(
+            package_builder, "run_command", side_effect=fake_run
+        ) as run, mock.patch.object(package_builder.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError,
+                "SSH authentication master failed with exit 255",
+            ):
+                package_builder.ssh_run(
+                    self.builder(), Path("/tmp/key"), "work", capture=True
+                )
+
+        attempts = package_builder.INSTANCE_CONNECT_AUTH_ATTEMPTS
+        self.assertEqual(refresh.call_count, attempts)
+        self.assertEqual(sleep.call_count, attempts - 1)
+        self.assertEqual(run.call_count, attempts + 1)
+        self.assertFalse(
+            any(call.args[0][-1:] == ["work"] for call in run.call_args_list)
+        )
+
+    def test_capture_does_not_retry_other_remote_failures(self) -> None:
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ) as refresh, mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="2" * 16
+        ), mock.patch.object(
+            package_builder,
+            "run_command",
+            side_effect=[
+                subprocess.CompletedProcess(["ssh", "-fN"], 0, "", ""),
+                package_builder.PackageBuilderError("remote command failed"),
+                subprocess.CompletedProcess(["ssh", "-O", "exit"], 0, "", ""),
+            ],
+        ) as run, mock.patch.object(package_builder.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "remote command failed"
+            ):
+                package_builder.ssh_run(
+                    self.builder(), Path("/tmp/key"), "false", capture=True
+                )
+
+        refresh.assert_called_once()
+        self.assertEqual(run.call_count, 3)
+        sleep.assert_not_called()
+
+    def test_cleanup_failure_does_not_replace_requested_command_result(self) -> None:
+        master_success = subprocess.CompletedProcess(
+            ["ssh", "-fN"], 0, "", ""
+        )
+        command_success = subprocess.CompletedProcess(
+            ["ssh", "work"], 0, "done\n", ""
+        )
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ), mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="4" * 16
+        ), mock.patch.object(
+            package_builder,
+            "run_command",
+            side_effect=[
+                master_success,
+                command_success,
+                package_builder.PackageBuilderError("cleanup failed"),
+            ],
+        ) as run, mock.patch.object(
+            package_builder,
+            "info",
+            side_effect=BrokenPipeError("output closed"),
+        ), mock.patch.object(Path, "unlink") as unlink:
+            completed = package_builder.ssh_run(
+                self.builder(), Path("/tmp/key"), "work", capture=True
+            )
+
+        self.assertIs(completed, command_success)
+        self.assertEqual(run.call_count, 3)
+        unlink.assert_called_once_with(missing_ok=True)
+
+    def test_interrupted_master_spawn_still_arms_teardown(self) -> None:
+        master_exit = subprocess.CompletedProcess(
+            ["ssh", "-O", "exit"], 0, "", ""
+        )
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ) as refresh, mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="5" * 16
+        ), mock.patch.object(
+            package_builder,
+            "run_command",
+            side_effect=[KeyboardInterrupt(), master_exit],
+        ) as run, mock.patch.object(Path, "unlink") as unlink:
+            with self.assertRaises(KeyboardInterrupt):
+                package_builder.ssh_run(
+                    self.builder(), Path("/tmp/key"), "work", capture=True
+                )
+
+        refresh.assert_called_once()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].args[0][-3:-1], ["-O", "exit"])
+        unlink.assert_called_once_with(missing_ok=True)
+
+    def test_concurrent_calls_use_distinct_fail_closed_control_paths(self) -> None:
+        arm64 = package_builder.Builder(
+            "arm64",
+            "i-0aaabbbcccdddeee1",
+            "c7g.xlarge",
+            "arm64",
+            "203.0.113.1",
+            "10.0.0.1",
+            "ami-0123456789abcdef0",
+            availability_zone="us-east-1c",
+            region="us-east-1",
+            ssh_access="ec2-instance-connect",
+        )
+        builders = (arm64, self.builder())
+        master_barrier = threading.Barrier(len(builders))
+        observed_paths: list[str] = []
+        observed_commands: list[list[str]] = []
+        failures: list[BaseException] = []
+        observation_lock = threading.Lock()
+
+        def fake_ssh_argv(
+            builder: package_builder.Builder, _key_path: Path
+        ) -> list[str]:
+            return ["ssh", f"ubuntu@{builder.architecture}"]
+
+        def fake_run(argv, **_kwargs):
+            command = list(argv)
+            if "-M" in command:
+                control_path = command[command.index("-S") + 1]
+                with observation_lock:
+                    observed_paths.append(control_path)
+                master_barrier.wait(timeout=5)
+            elif "-O" not in command:
+                with observation_lock:
+                    observed_commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "ready\n", "")
+
+        def invoke(builder: package_builder.Builder) -> None:
+            try:
+                package_builder.ssh_run(
+                    builder,
+                    Path("/tmp/key"),
+                    "true",
+                    capture=True,
+                )
+            except BaseException as error:  # pragma: no cover - assertion aid
+                with observation_lock:
+                    failures.append(error)
+
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ), mock.patch.object(
+            package_builder, "ssh_argv", side_effect=fake_ssh_argv
+        ), mock.patch.object(package_builder, "run_command", side_effect=fake_run):
+            threads = [
+                threading.Thread(target=invoke, args=(builder,))
+                for builder in builders
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        self.assertFalse(failures)
+        self.assertEqual(len(observed_paths), 2)
+        self.assertEqual(len(set(observed_paths)), 2)
+        self.assertTrue(any("-arm64-" in path for path in observed_paths))
+        self.assertTrue(any("-x64-" in path for path in observed_paths))
+        self.assertEqual(len(observed_commands), 2)
+        for command in observed_commands:
+            self.assertIn("ProxyCommand=/usr/bin/false", command)
+
+    def test_capture_never_replays_executed_exit_255_command(self) -> None:
+        master_success = subprocess.CompletedProcess(
+            ["ssh", "-fN"], 0, "", ""
+        )
+        executed_failure = subprocess.CompletedProcess(
+            ["ssh", "work"],
+            255,
+            "",
+            "remote printed: Permission denied (publickey).\n",
+        )
+        with mock.patch.object(
+            package_builder, "refresh_instance_connect_key"
+        ) as refresh, mock.patch.object(
+            package_builder,
+            "ssh_argv",
+            return_value=["ssh", "ubuntu@example"],
+        ), mock.patch.object(
+            package_builder.secrets, "token_hex", return_value="3" * 16
+        ), mock.patch.object(
+            package_builder,
+            "run_command",
+            side_effect=[
+                master_success,
+                executed_failure,
+                subprocess.CompletedProcess(["ssh", "-O", "exit"], 0, "", ""),
+            ],
+        ) as run, mock.patch.object(package_builder.time, "sleep") as sleep:
+            completed = package_builder.ssh_run(
+                self.builder(),
+                Path("/tmp/key"),
+                "work",
+                capture=True,
+                check=False,
+            )
+
+        self.assertIs(completed, executed_failure)
+        refresh.assert_called_once()
+        self.assertEqual(run.call_count, 3)
+        command = run.call_args_list[1].args[0]
+        self.assertEqual(command[-2:], ["ubuntu@example", "work"])
+        self.assertEqual(
+            sum(call.args[0][-1:] == ["work"] for call in run.call_args_list),
+            1,
+        )
+        sleep.assert_not_called()
 
 
 class PoetryEnvironmentTests(unittest.TestCase):
@@ -813,7 +1548,13 @@ class ConcurrencyTests(unittest.TestCase):
             with launch_lock:
                 self.assertEqual(set(launched), {"arm64", "x64"})
                 waited.append(handle.builder.architecture)
-            return {"schema_revision": 1, "status": "success"}
+            return {
+                "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
+                "status": "success",
+                "compiler_optimization": compiler_optimization_evidence(
+                    handle.builder.architecture
+                ),
+            }
 
         outputs = {
             "package_bucket_name": "bucket",
@@ -835,6 +1576,8 @@ class ConcurrencyTests(unittest.TestCase):
             side_effect=lambda builder, _key, _revision: f"/source/{builder.architecture}",
         ), mock.patch.object(package_builder, "wait_for_ssh"), mock.patch.object(
             package_builder, "reconcile_remote_bootstrap"
+        ), mock.patch.object(
+            package_builder, "force_remote_package_reconfigure"
         ), mock.patch.object(
             package_builder,
             "prepare_remote_poetry_environment",
@@ -920,7 +1663,7 @@ class RemoteUnitCompletionTests(unittest.TestCase):
         self, *, status: str = "success", errors: list[str] | None = None,
     ) -> dict[str, object]:
         return {
-            "schema_revision": 1,
+            "schema_revision": package_builder.WORKER_PACKAGE_MANIFEST_SCHEMA_REVISION,
             "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
             "architecture": self.builder.architecture,
             "status": status,
@@ -952,22 +1695,37 @@ class RemoteUnitCompletionTests(unittest.TestCase):
             package_builder, "ssh_run", side_effect=self.ssh_results(manifest)
         ), mock.patch.object(
             package_builder, "require_exact_worker_absent"
-        ) as absent, mock.patch.object(package_builder.time, "sleep"):
+        ) as absent, mock.patch.object(
+            package_builder,
+            "attest_remote_compiler_optimization",
+            return_value=compiler_optimization_evidence("arm64"),
+        ), mock.patch.object(package_builder.time, "sleep"):
             result = package_builder.wait_remote_build(
                 self.handle(tmp, launch_acknowledged=True),
                 Path("/tmp/key"),
                 timeout_seconds=60,
             )
 
-        self.assertEqual(result, manifest)
+        self.assertEqual(
+            result,
+            {
+                **manifest,
+                "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
+                "compiler_optimization": compiler_optimization_evidence("arm64"),
+            },
+        )
         absent.assert_called_once_with(self.builder, Path("/tmp/key"), self.worker_argv)
 
     def test_manifest_root_rejects_legacy_revision_and_unknown_keys(self) -> None:
-        current = self.manifest()
+        current = {
+            **self.manifest(),
+            "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
+            "compiler_optimization": compiler_optimization_evidence("arm64"),
+        }
         mutations = {
             "legacy": lambda value: value.update(
                 schema_version=value.pop("schema_revision")),
-            "wrong": lambda value: value.update(schema_revision=2),
+            "wrong": lambda value: value.update(schema_revision=1),
             "boolean": lambda value: value.update(schema_revision=True),
             "unknown": lambda value: value.update(unexpected=True),
         }
@@ -1407,10 +2165,11 @@ class FinalizeRunTests(unittest.TestCase):
         }
         self.manifests = {
             name: {
-                "schema_revision": 1,
+                "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
                 "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
                 "status": "success",
                 "architecture": name,
+                "compiler_optimization": compiler_optimization_evidence(name),
                 "started_at": "2026-08-10T00:00:00Z",
                 "completed_at": "2026-08-10T00:01:00Z",
                 "requested": {
@@ -2071,7 +2830,7 @@ class ManifestTests(unittest.TestCase):
             f"bioseq-postgresql17_{package_builder.EXPECTED_PACKAGE_VERSION}_amd64.deb"
         )
         manifest = {
-            "schema_revision": 1,
+            "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
             "status": "success",
             "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
             "started_at": "2026-08-10T00:00:00Z",
@@ -2080,6 +2839,9 @@ class ManifestTests(unittest.TestCase):
             "poetry_lock_sha256": lock_sha256,
             "python_environment": python_environment.manifest_value(),
             "architecture": "x64",
+            "compiler_optimization": compiler_optimization_evidence(
+                "x64", distros=("debian_13",)
+            ),
             "requested": {"postgres": [17], "distros": ["debian_13"]},
             "s3": {
                 "bucket": "bucket",
@@ -2505,20 +3267,308 @@ class ReleaseAutomationTests(unittest.TestCase):
             s3_prefix=package_builder.DEFAULT_S3_PREFIX,
             existing_only=True,
             ssh_key="/tmp/ephemeral-key",
+            lifecycle_receipt="/tmp/access.json",
         )
-        outputs = {"ssh_private_key_path": "/tmp/ephemeral-key"}
+        outputs = {
+            "account_id": "123456789012",
+            "caller_arn": "arn:aws:iam::123456789012:user/release",
+            "ssh_private_key_path": "/tmp/ephemeral-key",
+        }
         with mock.patch.object(
             package_builder,
             "discover_existing_infrastructure",
             return_value=(outputs, builders, records),
-        ), mock.patch.object(package_builder, "ssh_key_path"), mock.patch.object(
-            package_builder, "start_builders", return_value=records
         ), mock.patch.object(
+            package_builder, "read_ci_lifecycle_receipt"
+        ) as read_receipt, mock.patch.object(
+            package_builder, "ssh_key_path"
+        ), mock.patch.object(
+            package_builder, "start_builders", return_value=records
+        ) as start, mock.patch.object(
             package_builder, "refreshed_builders", return_value=builders
         ), mock.patch.object(package_builder, "tofu_apply") as tofu_apply:
             observed = package_builder.provision_and_start(args, self.matrix)
         self.assertEqual(observed[0], outputs)
+        read_receipt.assert_called_once()
+        self.assertEqual(
+            start.call_args.kwargs["lifecycle_receipt"],
+            Path("/tmp/access.json").resolve(),
+        )
         tofu_apply.assert_not_called()
+
+    def test_start_records_stop_ownership_only_for_builder_it_starts(self) -> None:
+        initial = {
+            name: {
+                **self.builder_record(name),
+                "State": {"Name": "running" if name == "arm64" else "stopped"},
+            }
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in initial.items()
+        }
+        running = {
+            name: {**record, "State": {"Name": "running"}}
+            for name, record in initial.items()
+        }
+        identity = {
+            "Account": "123456789012",
+            "Arn": "arn:aws:iam::123456789012:user/release",
+        }
+        lifecycle_events: list[str] = []
+        with mock.patch.object(
+            package_builder, "validate_builders", side_effect=(initial, running)
+        ), mock.patch.object(
+            package_builder,
+            "record_builder_stop_ownership",
+            side_effect=lambda **_kwargs: lifecycle_events.append("own"),
+        ) as own, mock.patch.object(
+            package_builder,
+            "aws_no_output",
+            side_effect=lambda *_args: lifecycle_events.append("start"),
+        ) as start, mock.patch.object(package_builder, "run_command"):
+            package_builder.start_builders(
+                "us-east-1",
+                builders,
+                self.matrix,
+                lifecycle_receipt=Path("/tmp/access.json"),
+                caller_identity=identity,
+            )
+        own.assert_called_once()
+        self.assertEqual(own.call_args.kwargs["architecture"], "x64")
+        start.assert_called_once()
+        self.assertIn(builders["x64"].instance_id, start.call_args.args)
+        self.assertNotIn(builders["arm64"].instance_id, start.call_args.args)
+        self.assertEqual(lifecycle_events, ["own", "start"])
+
+    def test_pending_builder_remains_externally_owned(self) -> None:
+        initial = {
+            name: {
+                **self.builder_record(name),
+                "State": {"Name": "pending" if name == "arm64" else "running"},
+            }
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in initial.items()
+        }
+        running = {
+            name: {**record, "State": {"Name": "running"}}
+            for name, record in initial.items()
+        }
+        identity = {
+            "Account": "123456789012",
+            "Arn": "arn:aws:iam::123456789012:user/release",
+        }
+        with mock.patch.object(
+            package_builder, "validate_builders", side_effect=(initial, running)
+        ), mock.patch.object(
+            package_builder, "record_builder_stop_ownership"
+        ) as own, mock.patch.object(
+            package_builder, "aws_no_output"
+        ) as start, mock.patch.object(package_builder, "run_command"):
+            package_builder.start_builders(
+                "us-east-1",
+                builders,
+                self.matrix,
+                lifecycle_receipt=Path("/tmp/access.json"),
+                caller_identity=identity,
+            )
+        own.assert_not_called()
+        start.assert_not_called()
+
+    def test_stopping_builder_is_claimed_only_after_it_reaches_stopped(self) -> None:
+        initial = {
+            name: {
+                **self.builder_record(name),
+                "State": {"Name": "stopping" if name == "arm64" else "running"},
+            }
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in initial.items()
+        }
+        running = {
+            name: {**record, "State": {"Name": "running"}}
+            for name, record in initial.items()
+        }
+        identity = {
+            "Account": "123456789012",
+            "Arn": "arn:aws:iam::123456789012:user/release",
+        }
+        events: list[str] = []
+
+        def command(argv, **_kwargs):
+            if "instance-stopped" in argv:
+                events.append("wait-stopped")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with mock.patch.object(
+            package_builder, "validate_builders", side_effect=(initial, running)
+        ), mock.patch.object(
+            package_builder,
+            "record_builder_stop_ownership",
+            side_effect=lambda **_kwargs: events.append("own"),
+        ) as own, mock.patch.object(
+            package_builder,
+            "aws_no_output",
+            side_effect=lambda *_args: events.append("start"),
+        ) as start, mock.patch.object(
+            package_builder, "run_command", side_effect=command
+        ):
+            package_builder.start_builders(
+                "us-east-1",
+                builders,
+                self.matrix,
+                lifecycle_receipt=Path("/tmp/access.json"),
+                caller_identity=identity,
+            )
+        self.assertEqual(events[:3], ["wait-stopped", "own", "start"])
+        self.assertEqual(own.call_args.kwargs["architecture"], "arm64")
+        self.assertIn(builders["arm64"].instance_id, start.call_args.args)
+
+    def test_stop_ownership_receipt_persists_only_the_claimed_builder(self) -> None:
+        records = {
+            name: self.builder_record(name) for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        identity = {
+            "Account": "123456789012",
+            "Arn": "arn:aws:iam::123456789012:user/release",
+        }
+        payload = {
+            "schema_revision": package_builder.CI_ACCESS_SCHEMA_REVISION,
+            "account": identity["Account"],
+            "caller_arn": identity["Arn"],
+            "region": "us-east-1",
+            "security_group_id": "sg-0aaabbbcccdddeee1",
+            "cidr": "203.0.113.10/32",
+            "description": "bioseq package release ephemeral SSH",
+            "rule_added": True,
+            "closed": False,
+            "builders": {
+                name: {
+                    "instance_id": builder.instance_id,
+                    "initial_state": "stopped",
+                    "stop_owned": False,
+                }
+                for name, builder in builders.items()
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / "access.json"
+            package_builder.write_json_atomic(receipt, payload)
+            for _retry in range(2):
+                package_builder.record_builder_stop_ownership(
+                    receipt=receipt,
+                    region="us-east-1",
+                    identity=identity,
+                    builders=builders,
+                    architecture="x64",
+                )
+            observed = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertFalse(observed["builders"]["arm64"]["stop_owned"])
+        self.assertTrue(observed["builders"]["x64"]["stop_owned"])
+
+    def test_receipt_scoped_stop_leaves_externally_running_builder_unchanged(self) -> None:
+        records = {
+            name: {**self.builder_record(name), "State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
+        final = {
+            "arm64": records["arm64"],
+            "x64": {**records["x64"], "State": {"Name": "stopped"}},
+        }
+        receipt = {
+            "builders": {
+                "arm64": {"stop_owned": False},
+                "x64": {"stop_owned": True},
+            }
+        }
+        with mock.patch.object(
+            package_builder,
+            "aws_preflight",
+            return_value={
+                "Account": "123456789012",
+                "Arn": "arn:aws:iam::123456789012:user/release",
+            },
+        ), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(builders, records),
+        ), mock.patch.object(
+            package_builder, "read_ci_lifecycle_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online"
+        ), mock.patch.object(
+            package_builder,
+            "aws_json",
+            return_value={"Command": {"CommandId": "cmd-x64"}},
+        ) as aws, mock.patch.object(
+            package_builder, "run_command"
+        ) as wait, mock.patch.object(
+            package_builder, "validate_builders", return_value=final
+        ):
+            states = package_builder.stop_existing_builders(
+                "us-east-1",
+                self.matrix,
+                lifecycle_receipt=Path("/tmp/access.json"),
+            )
+        self.assertEqual(states, {"arm64": "running", "x64": "stopped"})
+        aws.assert_called_once()
+        self.assertIn(builders["x64"].instance_id, aws.call_args.args)
+        self.assertNotIn(builders["arm64"].instance_id, aws.call_args.args)
+        self.assertEqual(wait.call_count, 1)
 
     def test_stop_uses_instance_initiated_poweroff_for_both_builders(self) -> None:
         records = {
@@ -2576,6 +3626,18 @@ class ReleaseAutomationTests(unittest.TestCase):
         records = {
             name: self.builder_record(name) for name in self.matrix.architectures
         }
+        builders = {
+            name: package_builder.Builder(
+                name,
+                record["InstanceId"],
+                record["InstanceType"],
+                record["Architecture"],
+                record["PublicIpAddress"],
+                record["PrivateIpAddress"],
+                record["ImageId"],
+            )
+            for name, record in records.items()
+        }
         group = {
             "Tags": [
                 {"Key": key, "Value": value}
@@ -2598,7 +3660,14 @@ class ReleaseAutomationTests(unittest.TestCase):
             with mock.patch.object(
                 package_builder,
                 "discover_existing_infrastructure",
-                return_value=({"account_id": "123456789012"}, {}, records),
+                return_value=(
+                    {
+                        "account_id": "123456789012",
+                        "caller_arn": "arn:aws:iam::123456789012:user/release",
+                    },
+                    builders,
+                    records,
+                ),
             ), mock.patch.object(
                 package_builder,
                 "validated_builder_security_group",
@@ -2611,6 +3680,14 @@ class ReleaseAutomationTests(unittest.TestCase):
                     receipt=receipt,
                 )
             self.assertTrue(opened["rule_added"])
+            self.assertEqual(opened["schema_revision"], 2)
+            self.assertEqual(
+                opened["caller_arn"],
+                "arn:aws:iam::123456789012:user/release",
+            )
+            self.assertFalse(any(
+                value["stop_owned"] for value in opened["builders"].values()
+            ))
             self.assertTrue(receipt.is_file())
             mutate.assert_called_once()
 
@@ -2625,7 +3702,10 @@ class ReleaseAutomationTests(unittest.TestCase):
             with mock.patch.object(
                 package_builder,
                 "aws_preflight",
-                return_value={"Account": "123456789012", "Arn": "arn"},
+                return_value={
+                    "Account": "123456789012",
+                    "Arn": "arn:aws:iam::123456789012:user/release",
+                },
             ), mock.patch.object(
                 package_builder,
                 "aws_json",
@@ -2637,6 +3717,27 @@ class ReleaseAutomationTests(unittest.TestCase):
             self.assertTrue(closed["closed"])
             mutate.assert_called_once()
             self.assertIn("revoke-security-group-ingress", mutate.call_args.args)
+
+            wrong_identity = json.loads(receipt.read_text(encoding="utf-8"))
+            wrong_identity["caller_arn"] = (
+                "arn:aws:iam::123456789012:user/different-release-principal"
+            )
+            receipt.write_text(json.dumps(wrong_identity), encoding="utf-8")
+            with mock.patch.object(
+                package_builder,
+                "aws_preflight",
+                return_value={
+                    "Account": "123456789012",
+                    "Arn": "arn:aws:iam::123456789012:user/release",
+                },
+            ), mock.patch.object(package_builder, "aws_json") as aws, self.assertRaisesRegex(
+                package_builder.PackageBuilderError,
+                "different AWS credential identity",
+            ):
+                package_builder.close_ci_access(
+                    region="us-east-1", receipt=receipt
+                )
+            aws.assert_not_called()
 
     def test_collection_enumerates_ten_exact_packages_and_four_json_receipts(self) -> None:
         revision = "a" * 40
@@ -2653,6 +3754,8 @@ class ReleaseAutomationTests(unittest.TestCase):
                 )
                 filename = f"bioseq-postgresql17-4.2.3-{architecture}{suffix}"
                 upload = {
+                    "published": True,
+                    "bucket": "bucket",
                     "key": f"bioseq/packages/{architecture}/postgresql17/{distro}/{filename}",
                     "version_id": f"version-{architecture}-{distro}",
                     "etag": f"etag-{architecture}-{distro}",
@@ -2673,6 +3776,9 @@ class ReleaseAutomationTests(unittest.TestCase):
                 "schema_revision": package_builder.PACKAGE_MANIFEST_SCHEMA_REVISION,
                 "package_version": package_builder.EXPECTED_PACKAGE_VERSION,
                 "architecture": architecture,
+                "compiler_optimization": compiler_optimization_evidence(
+                    architecture
+                ),
                 "status": "success",
                 "started_at": "2026-08-15T12:00:00+00:00",
                 "completed_at": "2026-08-15T12:01:00+00:00",
@@ -2690,7 +3796,7 @@ class ReleaseAutomationTests(unittest.TestCase):
                 },
                 "source_revision": revision,
                 "poetry_lock_sha256": lock_sha256,
-                "python_environment": {"python": "3.12", "poetry": "2.1"},
+                "python_environment": {"python": "3.12.8", "poetry": "1.8.5"},
                 "cells": cells,
                 "errors": [],
             }
@@ -2713,10 +3819,22 @@ class ReleaseAutomationTests(unittest.TestCase):
             "bucket": "bucket",
             "s3_prefix": "bioseq/packages",
             "artifact_count": 10,
-            "python_environments": {},
+            "python_environments": {
+                architecture: {
+                    "venv_path": (
+                        f"{package_builder.REMOTE_POETRY_VENV_ROOT}/{lock_sha256}"
+                    ),
+                    "python": "3.12.8",
+                    "poetry": "1.8.5",
+                }
+                for architecture in self.matrix.architectures
+            },
             "worker_units": {},
             "worker_launch_acknowledged": {},
             "manifests": manifests,
+            "optimization": package_builder.package_run_optimization_receipt(
+                manifests
+            ),
             "builders_left_running": {},
         }
 
@@ -2757,13 +3875,44 @@ class ReleaseAutomationTests(unittest.TestCase):
                 (output / f"package-run-{release_identity}.json").is_file()
             )
             self.assertFalse(any(run_id in path.name for path in output.iterdir()))
-            verified = package_builder.verify_release_asset_directory(
-                asset_dir=output, expected_revision=revision
-            )
+            with mock.patch.object(
+                package_builder, "validate_manifest", side_effect=validate
+            ) as offline_validate:
+                verified = package_builder.verify_release_asset_directory(
+                    asset_dir=output, expected_revision=revision
+                )
             self.assertEqual(verified["package_count"], 10)
             self.assertEqual(verified["asset_count"], 15)
-            next(iter(output.glob("*.deb"))).write_bytes(b"tampered")
+            self.assertEqual(offline_validate.call_count, 2)
             with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "was not uploaded"
+            ):
+                package_builder.verify_release_asset_directory(
+                    asset_dir=output, expected_revision=revision
+                )
+
+            collection_path = output / f"package-assets-{release_identity}.json"
+            original_collection = collection_path.read_text(encoding="utf-8")
+            stale_collection = json.loads(original_collection)
+            stale_collection["assets"][0]["s3"]["etag"] = "stale-etag"
+            collection_path.write_text(
+                json.dumps(stale_collection, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                package_builder, "validate_manifest", side_effect=validate
+            ), self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "cross-linked"
+            ):
+                package_builder.verify_release_asset_directory(
+                    asset_dir=output, expected_revision=revision
+                )
+            collection_path.write_text(original_collection, encoding="utf-8")
+
+            next(iter(output.glob("*.deb"))).write_bytes(b"tampered")
+            with mock.patch.object(
+                package_builder, "validate_manifest", side_effect=validate
+            ), self.assertRaisesRegex(
                 package_builder.PackageBuilderError,
                 "package bytes do not match receipt",
             ):
@@ -2807,6 +3956,185 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
+    def step_script(self, name: str) -> str:
+        lines = self.workflow.splitlines()
+        start = lines.index(f"      - name: {name}")
+        run = next(
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index] == "        run: |"
+        )
+        body: list[str] = []
+        for line in lines[run + 1:]:
+            if line.startswith("      - name:"):
+                break
+            if line and not line.startswith("          "):
+                break
+            body.append(line[10:] if line else "")
+        return "\n".join(body) + "\n"
+
+    @staticmethod
+    def write_fake_gh(path: Path) -> None:
+        script = f"""#!{sys.executable}
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+
+state_path = Path(os.environ["GH_STATE"])
+state = json.loads(state_path.read_text(encoding="utf-8"))
+args = sys.argv[1:]
+
+def save():
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+def record(value):
+    state.setdefault("calls", []).append(value)
+    save()
+
+def repository_path():
+    for value in args[1:]:
+        if value.startswith("repos/"):
+            return value
+    raise SystemExit("missing repository API path")
+
+if args[0] == "api":
+    path = repository_path()
+    if "/git/matching-refs/tags/" in path:
+        print(state["tag_target"])
+    elif "--method" in args and args[args.index("--method") + 1] == "DELETE":
+        asset_id = int(path.rsplit("/", 1)[-1])
+        state["assets"] = [
+            asset for asset in state["assets"] if asset["id"] != asset_id
+        ]
+        record(f"delete:{{asset_id}}")
+    elif "/assets?per_page=" in path:
+        for asset in state["assets"]:
+            print(asset["id"])
+    elif "/releases/tags/" in path:
+        query = args[args.index("--jq") + 1]
+        if "select(.draft == true)" in query:
+            if state["draft"]:
+                print(state["release_id"])
+        elif ".assets[]" in query:
+            for asset in state["assets"]:
+                print(f"{{asset['name']}}\\t{{asset['digest']}}")
+        else:
+            raise SystemExit(f"unsupported release API query: {{query}}")
+    else:
+        raise SystemExit(f"unsupported API path: {{path}}")
+elif args[:2] == ["release", "view"]:
+    if not state["exists"]:
+        raise SystemExit(1)
+    if "--json" in args:
+        query = args[args.index("--jq") + 1]
+        if query == ".isDraft":
+            print("true" if state["draft"] else "false")
+        elif query == ".assets | length":
+            print(len(state["assets"]))
+        else:
+            raise SystemExit(f"unsupported release view query: {{query}}")
+elif args[:2] == ["release", "upload"]:
+    repo_index = args.index("--repo")
+    files = [Path(value) for value in args[3:repo_index]]
+    uploaded = []
+    next_id = int(state.get("next_id", 1000))
+    for source in files:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        uploaded.append(
+            {{"id": next_id, "name": source.name, "digest": "sha256:" + digest}}
+        )
+        next_id += 1
+    if state.get("corrupt_upload") and uploaded:
+        uploaded[0]["digest"] = "sha256:" + "0" * 64
+    state["assets"] = uploaded
+    state["next_id"] = next_id
+    record("upload")
+elif args[:2] == ["release", "edit"]:
+    if "--draft=false" not in args:
+        raise SystemExit("release edit did not publish")
+    state["draft"] = False
+    record("publish")
+elif args[:2] == ["release", "create"]:
+    state["exists"] = True
+    state["draft"] = True
+    record("create")
+else:
+    raise SystemExit(f"unsupported gh invocation: {{args}}")
+
+save()
+"""
+        path.write_text(textwrap.dedent(script), encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_release_step(
+        self,
+        *,
+        draft: bool,
+        corrupt_upload: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], set[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assets = root / "release-assets"
+            assets.mkdir()
+            expected_names = set()
+            for index in range(15):
+                path = assets / f"asset-{index:02d}.bin"
+                path.write_bytes(f"package-{index}\n".encode("ascii"))
+                expected_names.add(path.name)
+            binary = root / "bin"
+            binary.mkdir()
+            self.write_fake_gh(binary / "gh")
+            fake_python = binary / "python3"
+            fake_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            revision = "a" * 40
+            state_path = root / "gh-state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "exists": True,
+                        "draft": draft,
+                        "tag_target": revision,
+                        "release_id": 77,
+                        "assets": [
+                            {
+                                "id": 9,
+                                "name": "stale-extra.bin",
+                                "digest": "sha256:" + "f" * 64,
+                            }
+                        ],
+                        "next_id": 100,
+                        "corrupt_upload": corrupt_upload,
+                        "calls": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment = {
+                **os.environ,
+                "PATH": f"{binary}:{os.environ['PATH']}",
+                "RUNNER_TEMP": str(root),
+                "PACKAGE_VERSION": package_builder.EXPECTED_PACKAGE_VERSION,
+                "GITHUB_SHA": revision,
+                "GITHUB_REPOSITORY": "bioseq/repository",
+                "GH_STATE": str(state_path),
+            }
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    self.step_script("Create deterministic GitHub release"),
+                ],
+                cwd=WORKFLOW_PATH.parents[2],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            return completed, state, expected_names
+
     def test_workflow_is_main_only_serial_and_exact_revision_bound(self) -> None:
         self.assertIn("branches:\n      - main", self.workflow)
         self.assertIn("if: github.ref == 'refs/heads/main'", self.workflow)
@@ -2834,6 +4162,7 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("package_builder.py matrix --require-complete", self.workflow)
         self.assertIn("package_builder.py run \\", self.workflow)
         self.assertIn("--existing-only", self.workflow)
+        self.assertEqual(self.workflow.count("--optimization O3"), 1)
         self.assertNotIn("--architectures", self.workflow)
         self.assertNotIn("--distros", self.workflow)
         self.assertNotIn("--postgres", self.workflow)
@@ -2841,6 +4170,7 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(
             self.workflow.count("package_builder.py close-ci-access"), 2
         )
+        self.assertEqual(self.workflow.count("--lifecycle-receipt"), 3)
         self.assertIn("if: always()", self.workflow)
         self.assertGreaterEqual(
             self.workflow.count("if: env.RELEASE_ALREADY_COMPLETE != '1'"), 5
@@ -2850,9 +4180,98 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
             self.workflow,
         )
         self.assertLess(
-            self.workflow.index("- name: Stop builders before publishing"),
+            self.workflow.index(
+                "- name: Revoke ephemeral access and stop owned builders before publishing"
+            ),
             self.workflow.index("- name: Create deterministic GitHub release"),
         )
+        close_positions = [
+            match.start()
+            for match in re.finditer("package_builder.py close-ci-access", self.workflow)
+        ]
+        stop_positions = [
+            match.start()
+            for match in re.finditer("package_builder.py stop", self.workflow)
+        ]
+        self.assertEqual(len(close_positions), len(stop_positions))
+        self.assertTrue(all(
+            close < stop for close, stop in zip(close_positions, stop_positions)
+        ))
+
+    def test_cleanup_attempts_revoke_and_stop_independently_on_either_failure(self) -> None:
+        steps = (
+            "Revoke ephemeral access and stop owned builders before publishing",
+            "Revoke ephemeral access and stop owned builders (always)",
+        )
+        for step in steps:
+            for failing_command in ("close-ci-access", "stop"):
+                with self.subTest(step=step, failing_command=failing_command), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    binary = root / "bin"
+                    binary.mkdir()
+                    fake_python = binary / "python3"
+                    fake_python.write_text(
+                        "#!/bin/bash\n"
+                        "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
+                        "if [[ \"${2:-}\" == \"$FAIL_COMMAND\" ]]; then exit 17; fi\n",
+                        encoding="utf-8",
+                    )
+                    fake_python.chmod(0o755)
+                    (root / "package-builder-access.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+                    environment = {
+                        **os.environ,
+                        "PATH": f"{binary}:{os.environ['PATH']}",
+                        "RUNNER_TEMP": str(root),
+                        "AWS_REGION": "us-east-1",
+                        "GITHUB_ENV": str(root / "github-env"),
+                        "CALL_LOG": str(root / "calls"),
+                        "FAIL_COMMAND": failing_command,
+                    }
+                    completed = subprocess.run(
+                        ["bash", "-c", self.step_script(step)],
+                        cwd=WORKFLOW_PATH.parents[2],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 17, completed.stderr)
+                    calls = (root / "calls").read_text(encoding="utf-8")
+                    self.assertLess(
+                        calls.index("close-ci-access"), calls.index(" stop ")
+                    )
+
+    def test_stale_draft_deletes_every_old_asset_and_reuploads_complete_set(self) -> None:
+        completed, state, expected_names = self.run_release_step(draft=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(state["draft"])
+        self.assertEqual(
+            {asset["name"] for asset in state["assets"]}, expected_names
+        )
+        self.assertEqual(len(state["assets"]), 15)
+        self.assertEqual(state["calls"], ["delete:9", "upload", "publish"])
+
+    def test_stale_draft_digest_mismatch_remains_unpublished(self) -> None:
+        completed, state, expected_names = self.run_release_step(
+            draft=True, corrupt_upload=True
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertTrue(state["draft"])
+        self.assertEqual(
+            {asset["name"] for asset in state["assets"]}, expected_names
+        )
+        self.assertEqual(state["calls"], ["delete:9", "upload"])
+
+    def test_published_release_with_stale_assets_refuses_all_mutation(self) -> None:
+        completed, state, _expected_names = self.run_release_step(draft=False)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(state["draft"])
+        self.assertEqual(
+            [asset["name"] for asset in state["assets"]], ["stale-extra.bin"]
+        )
+        self.assertEqual(state["calls"], [])
 
     def test_third_party_actions_are_immutable_sha_pinned(self) -> None:
         uses = re.findall(
@@ -2877,6 +4296,9 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("[.name, .digest]", self.workflow)
         self.assertIn("sha256sum", self.workflow)
         self.assertIn("verify-release-assets", self.workflow)
+        self.assertIn("stale-draft-asset-ids.txt", self.workflow)
+        self.assertIn("gh api --method DELETE", self.workflow)
+        self.assertIn("select(.draft == true)", self.workflow)
         self.assertIn("RELEASE_ALREADY_COMPLETE=1", self.workflow)
         self.assertIn("git/matching-refs/tags/$tag", self.workflow)
         self.assertIn('test "$tag_target" = "$GITHUB_SHA"', self.workflow)
@@ -2888,6 +4310,11 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
             self.workflow.index("git/matching-refs/tags/$tag"),
             self.workflow.index("gh release create"),
         )
+        convergence = self.workflow.index("stale-draft-asset-ids.txt")
+        self.assertLess(
+            self.workflow.index("select(.draft == true)"), convergence
+        )
+        self.assertLess(convergence, self.workflow.index("gh release upload"))
 
 
 if __name__ == "__main__":

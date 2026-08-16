@@ -119,6 +119,22 @@ for forbidden_lifecycle in \
 done
 assert_literal "$CONTROLLER" '"AWS-RunShellScript"'
 assert_literal "$CONTROLLER" '{"commands": ["/usr/bin/systemctl poweroff"]}'
+assert_literal "$CONTROLLER" 'committed_source_tree_sha256'
+assert_literal "$CONTROLLER" '.bioseq-source-tree-sha256'
+assert_literal "$CONTROLLER" 'record_builder_stop_ownership'
+assert_literal "$CONTROLLER" 'if payload["builders"][name]["stop_owned"]'
+assert_literal "$CONTROLLER" 'REMOTE_OPTIMIZATION_EVIDENCE_SCRIPT'
+assert_literal "$CONTROLLER" 'production package compile command must resolve to only -O3'
+assert_literal "$CONTROLLER" 'require_compiler_optimization_evidence'
+assert_literal "$CONTROLLER" '"optimization_flags": ["-O3"]'
+assert_literal "$CONTROLLER" '"forbidden_optimization_flags": []'
+assert_literal "$CONTROLLER" 'force_remote_package_reconfigure'
+assert_literal "$CONTROLLER" '*/build-repository-root/CMakeCache.txt'
+assert_literal "$CONTROLLER" '.pre-o3-${token}'
+assert_literal "$CONTROLLER" 'cmake/verify_o3_compile_database.py'
+assert_literal "$CONTROLLER" '"language_compile_commands"'
+assert_literal "$CONTROLLER" '"cmake_cache_paths"'
+assert_literal "$CONTROLLER" '"compile_databases"'
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.
