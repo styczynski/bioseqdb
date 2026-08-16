@@ -34,7 +34,6 @@ import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support.datums;
 import bioseq.postgres.support;
 import bioseq.postgres.support.runtime_diagnostics;
-import bioseq.parallelism.memory_admission;
 
 /** Maximum scalar rows stored in one vector batch. */
 export constexpr std::uint32_t vector_column_capacity = 10'000;
@@ -207,21 +206,22 @@ void note_owned_varlena_source_form(Datum source) noexcept {
     if (!bioseq::postgres::support::runtime_diagnostics::is_bpchar_source_observation_active())
         return;
 
-    const Pointer raw = DatumGetPointer(source);
+    const Pointer raw_varlena = DatumGetPointer(source);
     using enum bioseq::postgres::support::runtime_diagnostics::bpchar_source_form;
-    auto form = unknown;
-    if (raw != nullptr) {
-        if (VARATT_IS_EXTERNAL_ONDISK(raw))
-            form = external;
-        else if (VARATT_IS_COMPRESSED(raw))
-            form = compressed;
-        else if (VARATT_IS_4B_U(raw))
-            form = four_byte_uncompressed;
-        else if (VARATT_IS_SHORT(raw))
-            form = short_header;
+    auto source_form = unknown;
+    if (raw_varlena != nullptr) {
+        if (VARATT_IS_EXTERNAL_ONDISK(raw_varlena))
+            source_form = external;
+        else if (VARATT_IS_COMPRESSED(raw_varlena))
+            source_form = compressed;
+        else if (VARATT_IS_4B_U(raw_varlena))
+            source_form = four_byte_uncompressed;
+        else if (VARATT_IS_SHORT(raw_varlena))
+            source_form = short_header;
     }
     bioseq::postgres::support::runtime_diagnostics::record_bpchar_source_form(
-        form, bioseq::postgres::support::runtime_diagnostics::bpchar_source_site::vector_copy);
+        source_form,
+        bioseq::postgres::support::runtime_diagnostics::bpchar_source_site::vector_copy);
 }
 
 /** Releases owned lane values and restores an empty batch state. */
@@ -229,11 +229,11 @@ void cleanup_vector_slot_contents(
     vector_tuple_table_slot_storage* vector_slot,
     bioseq::postgres::support::runtime_diagnostics::vector_payload_cleanup_kind cleanup_kind) {
     bioseq::postgres::support::runtime_diagnostics::record_vector_cleanup(cleanup_kind);
-    TupleDesc tuple_desc = vector_slot->virtual_slot.base.tts_tupleDescriptor;
-    if (tuple_desc == nullptr)
+    TupleDesc tuple_descriptor = vector_slot->virtual_slot.base.tts_tupleDescriptor;
+    if (tuple_descriptor == nullptr)
         return;
 
-    for (int attribute_index = 0; attribute_index < tuple_desc->natts; ++attribute_index) {
+    for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
         vector_column_storage* column = reinterpret_cast<vector_column_storage*>(
             DatumGetPointer(vector_slot->virtual_slot.base.tts_values[attribute_index]));
         if (column == nullptr)
@@ -274,12 +274,12 @@ void release_vector_tuple_slot(TupleTableSlot* slot) {
         bioseq::postgres::support::runtime_diagnostics::vector_payload_cleanup_kind::slot_release);
     TTSOpsVirtual.clear(slot);
 
-    TupleDesc tuple_desc = slot->tts_tupleDescriptor;
-    if (tuple_desc == nullptr) {
+    TupleDesc tuple_descriptor = slot->tts_tupleDescriptor;
+    if (tuple_descriptor == nullptr) {
         TTSOpsVirtual.release(slot);
         return;
     }
-    for (int attribute_index = 0; attribute_index < tuple_desc->natts; ++attribute_index) {
+    for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
         vector_column_storage* column = reinterpret_cast<vector_column_storage*>(
             DatumGetPointer(slot->tts_values[attribute_index]));
         if (column == nullptr)
@@ -323,15 +323,15 @@ MinimalTuple copy_vector_minimal_tuple(TupleTableSlot*) {
 /** Returns the stable vector slot method table after all callbacks exist. */
 [[nodiscard]] const TupleTableSlotOps* vector_tuple_slot_ops() {
     static const TupleTableSlotOps operations = [] {
-        TupleTableSlotOps result = TTSOpsVirtual;
-        result.base_slot_size = sizeof(vector_tuple_table_slot_storage);
-        result.clear = clear_vector_tuple_slot;
-        result.release = release_vector_tuple_slot;
-        result.materialize = materialize_vector_tuple_slot;
-        result.copyslot = copy_vector_tuple_slot;
-        result.copy_heap_tuple = copy_vector_heap_tuple;
-        result.copy_minimal_tuple = copy_vector_minimal_tuple;
-        return result;
+        TupleTableSlotOps configured_operations = TTSOpsVirtual;
+        configured_operations.base_slot_size = sizeof(vector_tuple_table_slot_storage);
+        configured_operations.clear = clear_vector_tuple_slot;
+        configured_operations.release = release_vector_tuple_slot;
+        configured_operations.materialize = materialize_vector_tuple_slot;
+        configured_operations.copyslot = copy_vector_tuple_slot;
+        configured_operations.copy_heap_tuple = copy_vector_heap_tuple;
+        configured_operations.copy_minimal_tuple = copy_vector_minimal_tuple;
+        return configured_operations;
     }();
     return &operations;
 }
@@ -348,7 +348,7 @@ export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     TupleTableSlot* slot =
         MakeTupleTableSlot(CreateTupleDescCopy(tuple_desc), vector_tuple_slot_ops());
 
-    TupleDesc slot_tuple_desc = slot->tts_tupleDescriptor;
+    TupleDesc slot_tuple_descriptor = slot->tts_tupleDescriptor;
 
     vector_tuple_table_slot_storage* vector_slot =
         reinterpret_cast<vector_tuple_table_slot_storage*>(slot);
@@ -356,8 +356,9 @@ export TupleTableSlot* create_vector_tuple_table_slot(TupleDesc tuple_desc) {
     /* No rows are active before the first batch is populated. */
     std::fill_n(vector_slot->row_is_active.data(), vector_column_capacity, false);
 
-    for (int attribute_index = 0; attribute_index < slot_tuple_desc->natts; attribute_index++) {
-        const Oid column_type_oid = TupleDescAttr(slot_tuple_desc, attribute_index)->atttypid;
+    for (int attribute_index = 0; attribute_index < slot_tuple_descriptor->natts;
+         ++attribute_index) {
+        const Oid column_type_oid = TupleDescAttr(slot_tuple_descriptor, attribute_index)->atttypid;
 
         int16_t declared_type_width = 0;
         bool declared_stored_by_value = false;
@@ -438,10 +439,10 @@ export void write_datum_to_vector_column(vector_column_storage* column,
     if (!is_null) {
         if (column->storage_kind == vector_storage_kind::owned_varlena_datum) {
             note_owned_varlena_source_form(input_datum);
-            Pointer original_pointer = DatumGetPointer(input_datum);
+            const Pointer original_pointer = DatumGetPointer(input_datum);
             auto* varlena_source = bioseq::postgres::support::invoke_pg_as_cpp(
                 [input_datum] { return PG_DETOAST_DATUM_PACKED(input_datum); });
-            Size data_length = VARSIZE_ANY(varlena_source);
+            const Size data_length = VARSIZE_ANY(varlena_source);
             void* owned_copy = bioseq::postgres::support::invoke_pg_as_cpp([column, data_length] {
                 return MemoryContextAlloc(column->storage_context, data_length);
             });
@@ -468,9 +469,9 @@ export void write_datum_to_vector_column(vector_column_storage* column,
 export void write_tuple_to_vector_slot(TupleTableSlot* input_slot,
                                        vector_tuple_table_slot_storage* vector_slot,
                                        std::int32_t row_index) {
-    TupleDesc tuple_desc = input_slot->tts_tupleDescriptor;
+    TupleDesc tuple_descriptor = input_slot->tts_tupleDescriptor;
 
-    for (int attribute_index = 0; attribute_index < tuple_desc->natts; attribute_index++) {
+    for (int attribute_index = 0; attribute_index < tuple_descriptor->natts; ++attribute_index) {
         vector_column_storage* column = reinterpret_cast<vector_column_storage*>(
             vector_slot->virtual_slot.base.tts_values[attribute_index]);
         write_datum_to_vector_column(column,
