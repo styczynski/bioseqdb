@@ -45,13 +45,13 @@ static void begin_vector_aggregate(CustomScanState* custom_scan_state,
 }
 
 /** Produces the next vector aggregate result tuple. */
-static TupleTableSlot* execute_vector_aggregate(CustomScanState* node) {
-    return execute_aggregate_plan(reinterpret_cast<PlanState*>(node));
+static TupleTableSlot* execute_vector_aggregate(CustomScanState* custom_scan_state) {
+    return execute_aggregate_plan(reinterpret_cast<PlanState*>(custom_scan_state));
 }
 
 /** Releases the copied aggregate executor. */
-static void end_vector_aggregate(CustomScanState* node) {
-    ExecEndAgg(reinterpret_cast<vector_aggregate_state*>(node)->aggregate_state);
+static void end_vector_aggregate(CustomScanState* custom_scan_state) {
+    ExecEndAgg(reinterpret_cast<vector_aggregate_state*>(custom_scan_state)->aggregate_state);
 }
 
 /** Returns the stable executor callback table for vector aggregation. */
@@ -73,7 +73,7 @@ static const CustomExecMethods* vector_aggregate_exec_methods() noexcept {
 /** Allocates the PostgreSQL custom-scan state for vector aggregation. */
 static Node* create_vector_aggregate_state(CustomScan* custom_plan) {
     (void)custom_plan;
-    auto* vector_state = allocate_zeroed_object<vector_aggregate_state>();
+    vector_aggregate_state* vector_state = allocate_zeroed_object<vector_aggregate_state>();
     NodeSetTag(&vector_state->custom_scan_state, T_CustomScanState);
 
     CustomScanState* custom_scan_state = &vector_state->custom_scan_state;
