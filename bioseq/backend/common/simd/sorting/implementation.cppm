@@ -32,7 +32,7 @@ namespace detail {
 /// Active target namespace for shared vector-stream primitives.
 namespace vector_stream_target = ::bioseq::simd::HWY_NAMESPACE;
 
-/** Returns whether `left` precedes `right` in ascending 128-bit order. */
+/** @brief Returns whether `left` precedes `right` in ascending 128-bit order. */
 [[nodiscard]] inline bool unsigned_128_less(
     const hwy::uint128_t& left,
     const hwy::uint128_t& right) noexcept
@@ -42,7 +42,7 @@ namespace vector_stream_target = ::bioseq::simd::HWY_NAMESPACE;
         : left.hi < right.hi;
 }
 
-/** Returns whether `left` precedes `right` in the requested order. */
+/** @brief Returns whether `left` precedes `right` in the requested order. */
 template <bool p_ascending>
 [[nodiscard]] inline bool unsigned_128_precedes(
     const hwy::uint128_t& left,
@@ -55,7 +55,7 @@ template <bool p_ascending>
     }
 }
 
-/** Loads one 128-bit key as two adjacent unsigned 64-bit lanes. */
+/** @brief Loads one 128-bit key as two adjacent unsigned 64-bit lanes. */
 template <class p_descriptor_type>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto load_unsigned_128(
@@ -65,7 +65,7 @@ auto load_unsigned_128(
     return highway_target::LoadU(descriptor, &key.lo);
 }
 
-/** Sorts 128-bit keys with the standard library in the requested order. */
+/** @brief Sorts 128-bit keys with the standard library in the requested order. */
 template <bool p_ascending>
 inline void sort_unsigned_128_with_standard_library(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -79,7 +79,7 @@ inline void sort_unsigned_128_with_standard_library(
         });
 }
 
-/** Insertion-sorts a small 128-bit key array in the requested order. */
+/** @brief Insertion-sorts a small 128-bit key array in the requested order. */
 template <bool p_ascending>
 inline void insertion_sort_unsigned_128(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -279,7 +279,7 @@ std::size_t first_all_false_mask_slot(
     return first_false_slot;
 }
 
-/** Chooses the median of the first, middle, and final 128-bit keys. */
+/** @brief Chooses the median of the first, middle, and final 128-bit keys. */
 template <bool p_ascending>
 [[nodiscard]] inline hwy::uint128_t choose_unsigned_128_pivot(
     const hwy::uint128_t* HWY_RESTRICT keys,
@@ -306,7 +306,7 @@ template <bool p_ascending>
     return middle_candidate;
 }
 
-/** Partitions 128-bit keys around a pivot with streamed comparison scans. */
+/** @brief Partitions 128-bit keys around a pivot with streamed comparison scans. */
 template <std::size_t p_stream_width,
           bool p_ascending,
           class p_descriptor_type>
@@ -427,7 +427,7 @@ template <std::size_t p_stream_width,
     return static_cast<std::size_t>(left_index);
 }
 
-/** Computes the depth limit used by the streamed introsort. */
+/** @brief Computes the depth limit used by the streamed introsort. */
 [[nodiscard]] inline std::size_t introsort_depth_limit(
     std::size_t key_count) noexcept
 {
@@ -439,7 +439,7 @@ template <std::size_t p_stream_width,
     return depth * 2u;
 }
 
-/** Implements streamed 128-bit introsort for a non-scalar Highway target. */
+/** @brief Implements streamed 128-bit introsort for a non-scalar Highway target. */
 template <std::size_t p_stream_width, bool p_ascending>
 void sort_unsigned_128_vector_stream_impl(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -496,7 +496,7 @@ void sort_unsigned_128_vector_stream_impl(
 
 #else
 
-/** Uses standard sorting when the active Highway target is scalar. */
+/** @brief Uses standard sorting when the active Highway target is scalar. */
 template <std::size_t p_stream_width, bool p_ascending>
 void sort_unsigned_128_vector_stream_impl(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -508,7 +508,7 @@ void sort_unsigned_128_vector_stream_impl(
 
 #endif // HWY_TARGET != HWY_SCALAR || HWY_IDE
 
-/** Selects the scalar or streamed 128-bit sorting path by input size. */
+/** @brief Selects the scalar or streamed 128-bit sorting path by input size. */
 template <std::size_t p_stream_width, bool p_ascending>
 inline void sort_unsigned_128_vector_stream(
     hwy::uint128_t* HWY_RESTRICT keys,
@@ -527,7 +527,7 @@ inline void sort_unsigned_128_vector_stream(
         introsort_depth_limit(key_count));
 }
 
-/** Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_ascending_stream_width_1(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -535,7 +535,7 @@ void sort_unsigned_128_ascending_stream_width_1(
     sort_unsigned_128_vector_stream<1u, true>(keys, key_count);
 }
 
-/** Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_ascending_stream_width_2(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -543,7 +543,7 @@ void sort_unsigned_128_ascending_stream_width_2(
     sort_unsigned_128_vector_stream<2u, true>(keys, key_count);
 }
 
-/** Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_ascending_stream_width_3(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -551,7 +551,7 @@ void sort_unsigned_128_ascending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, true>(keys, key_count);
 }
 
-/** Ascending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Ascending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_ascending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -559,7 +559,7 @@ void sort_unsigned_128_ascending_stream_width_4(
     sort_unsigned_128_vector_stream<4u, true>(keys, key_count);
 }
 
-/** Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_descending_stream_width_1(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -567,7 +567,7 @@ void sort_unsigned_128_descending_stream_width_1(
     sort_unsigned_128_vector_stream<1u, false>(keys, key_count);
 }
 
-/** Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_descending_stream_width_2(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -575,7 +575,7 @@ void sort_unsigned_128_descending_stream_width_2(
     sort_unsigned_128_vector_stream<2u, false>(keys, key_count);
 }
 
-/** Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_descending_stream_width_3(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -583,7 +583,7 @@ void sort_unsigned_128_descending_stream_width_3(
     sort_unsigned_128_vector_stream<3u, false>(keys, key_count);
 }
 
-/** Descending fixed-width bridge used by the module-interface dispatcher. */
+/** @brief Descending fixed-width bridge used by the module-interface dispatcher. */
 void sort_unsigned_128_descending_stream_width_4(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -593,7 +593,7 @@ void sort_unsigned_128_descending_stream_width_4(
 
 } // namespace detail
 
-/** Sorts unsigned 64-bit keys ascending through the static Highway target. */
+/** @brief Sorts unsigned 64-bit keys ascending through the static Highway target. */
 void sort_unsigned_64_ascending(
     std::uint64_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -604,7 +604,7 @@ void sort_unsigned_64_ascending(
         hwy::SortAscending());
 }
 
-/** Sorts unsigned 64-bit keys descending through the static Highway target. */
+/** @brief Sorts unsigned 64-bit keys descending through the static Highway target. */
 void sort_unsigned_64_descending(
     std::uint64_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -615,7 +615,7 @@ void sort_unsigned_64_descending(
         hwy::SortDescending());
 }
 
-/** Sorts unsigned 128-bit keys ascending with static-target VQSort. */
+/** @brief Sorts unsigned 128-bit keys ascending with static-target VQSort. */
 void sort_unsigned_128_ascending_vqsort(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -626,7 +626,7 @@ void sort_unsigned_128_ascending_vqsort(
         hwy::SortAscending());
 }
 
-/** Sorts unsigned 128-bit keys descending with static-target VQSort. */
+/** @brief Sorts unsigned 128-bit keys descending with static-target VQSort. */
 void sort_unsigned_128_descending_vqsort(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -637,7 +637,7 @@ void sort_unsigned_128_descending_vqsort(
         hwy::SortDescending());
 }
 
-/** Sorts unsigned 128-bit keys ascending with the default vector stream. */
+/** @brief Sorts unsigned 128-bit keys ascending with the default vector stream. */
 void sort_unsigned_128_ascending(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -647,7 +647,7 @@ void sort_unsigned_128_ascending(
         true>(keys, key_count);
 }
 
-/** Sorts unsigned 128-bit keys descending with the default vector stream. */
+/** @brief Sorts unsigned 128-bit keys descending with the default vector stream. */
 void sort_unsigned_128_descending(
     hwy::uint128_t* HWY_RESTRICT keys,
     std::size_t key_count)
@@ -657,7 +657,7 @@ void sort_unsigned_128_descending(
         false>(keys, key_count);
 }
 
-/** Sorts packed 32-bit key/value records ascending. */
+/** @brief Sorts packed 32-bit key/value records ascending. */
 void sort_key_value_32_ascending(
     hwy::K32V32* HWY_RESTRICT records,
     std::size_t record_count)
@@ -668,7 +668,7 @@ void sort_key_value_32_ascending(
         hwy::SortAscending());
 }
 
-/** Sorts packed 32-bit key/value records descending. */
+/** @brief Sorts packed 32-bit key/value records descending. */
 void sort_key_value_32_descending(
     hwy::K32V32* HWY_RESTRICT records,
     std::size_t record_count)
@@ -679,7 +679,7 @@ void sort_key_value_32_descending(
         hwy::SortDescending());
 }
 
-/** Partially sorts packed 32-bit key/value records descending. */
+/** @brief Partially sorts packed 32-bit key/value records descending. */
 void partial_sort_key_value_32_descending(
     hwy::K32V32* HWY_RESTRICT records,
     std::size_t record_count,
@@ -692,7 +692,7 @@ void partial_sort_key_value_32_descending(
         hwy::SortDescending());
 }
 
-/** Sorts 64-bit key/value records ascending. */
+/** @brief Sorts 64-bit key/value records ascending. */
 void sort_key_value_64_ascending(
     hwy::K64V64* HWY_RESTRICT records,
     std::size_t record_count)
@@ -703,7 +703,7 @@ void sort_key_value_64_ascending(
         hwy::SortAscending());
 }
 
-/** Sorts 64-bit key/value records descending. */
+/** @brief Sorts 64-bit key/value records descending. */
 void sort_key_value_64_descending(
     hwy::K64V64* HWY_RESTRICT records,
     std::size_t record_count)

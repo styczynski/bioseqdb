@@ -17,7 +17,7 @@ export module bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting {
 
-/** Minimum input size at which callers should consider Highway VQSort. */
+/** @brief Minimum input size at which callers should consider Highway VQSort. */
 inline constexpr std::size_t vqsort_minimum_bytes = 100u * 1024u;
 
 /**
@@ -37,10 +37,10 @@ template <>
 inline constexpr std::size_t vqsort_minimum_keys<hwy::uint128_t> =
     static_cast<std::size_t>(-1);
 
-/** Default independent-vector count for streamed 128-bit partition scans. */
+/** @brief Default independent-vector count for streamed 128-bit partition scans. */
 inline constexpr std::size_t unsigned_128_default_stream_width = 2u;
 
-/** Largest 128-bit key count handled by the scalar insertion-sort path. */
+/** @brief Largest 128-bit key count handled by the scalar insertion-sort path. */
 inline constexpr std::size_t unsigned_128_scalar_key_limit = 8u;
 
 /**
@@ -53,39 +53,39 @@ concept supported_unsigned_128_stream_width =
 
 namespace detail {
 
-/** Sorts 128-bit keys ascending with a stream width of one. */
+/** @brief Sorts 128-bit keys ascending with a stream width of one. */
 auto sort_unsigned_128_ascending_stream_width_1(hwy::uint128_t* HWY_RESTRICT keys,
                                                 std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys ascending with a stream width of two. */
+/** @brief Sorts 128-bit keys ascending with a stream width of two. */
 auto sort_unsigned_128_ascending_stream_width_2(hwy::uint128_t* HWY_RESTRICT keys,
                                                 std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys ascending with a stream width of three. */
+/** @brief Sorts 128-bit keys ascending with a stream width of three. */
 auto sort_unsigned_128_ascending_stream_width_3(hwy::uint128_t* HWY_RESTRICT keys,
                                                 std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys ascending with a stream width of four. */
+/** @brief Sorts 128-bit keys ascending with a stream width of four. */
 auto sort_unsigned_128_ascending_stream_width_4(hwy::uint128_t* HWY_RESTRICT keys,
                                                 std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys descending with a stream width of one. */
+/** @brief Sorts 128-bit keys descending with a stream width of one. */
 auto sort_unsigned_128_descending_stream_width_1(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys descending with a stream width of two. */
+/** @brief Sorts 128-bit keys descending with a stream width of two. */
 auto sort_unsigned_128_descending_stream_width_2(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys descending with a stream width of three. */
+/** @brief Sorts 128-bit keys descending with a stream width of three. */
 auto sort_unsigned_128_descending_stream_width_3(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** Sorts 128-bit keys descending with a stream width of four. */
+/** @brief Sorts 128-bit keys descending with a stream width of four. */
 auto sort_unsigned_128_descending_stream_width_4(hwy::uint128_t* HWY_RESTRICT keys,
                                                  std::size_t key_count) -> void;
 
-/** Dispatches an ascending streamed sort to its fixed-width implementation. */
+/** @brief Dispatches an ascending streamed sort to its fixed-width implementation. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                    std::size_t key_count) -> void {
@@ -101,7 +101,7 @@ inline auto dispatch_unsigned_128_ascending_stream(hwy::uint128_t* HWY_RESTRICT 
     }
 }
 
-/** Dispatches a descending streamed sort to its fixed-width implementation. */
+/** @brief Dispatches a descending streamed sort to its fixed-width implementation. */
 template <std::size_t p_stream_width>
 inline auto dispatch_unsigned_128_descending_stream(hwy::uint128_t* HWY_RESTRICT keys,
                                                     std::size_t key_count) -> void {

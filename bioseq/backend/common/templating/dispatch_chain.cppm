@@ -30,7 +30,7 @@ export namespace bioseq::common::templating {
 
 namespace detail_dispatch_chain {
 
-/** Reports whether every forwarded chain argument is a reference type. */
+/** @brief Reports whether every forwarded chain argument is a reference type. */
 template <class... p_argument_types>
 concept chain_arguments_are_references =
     (std::is_reference_v<p_argument_types> && ...);
