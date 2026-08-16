@@ -1291,9 +1291,19 @@ struct resolved_enum_default {
             const std::string resolved_name =
                 qualified_identifier_leaf(
                     constant->initializer_text);
-            if (parsed.values.contains(resolved_name)) {
-                resolved_values.emplace(resolved_name);
+            if (!parsed.values.contains(resolved_name)) continue;
+            if (!program.compiler_profile.empty()
+                && std::ranges::none_of(
+                    values,
+                    [&resolved_name](
+                        const collected_guc_enum_value& value) {
+                        return value.name == resolved_name
+                            && value.compiled && !value.hidden
+                            && !value.alias_of;
+                    })) {
+                continue;
             }
+            resolved_values.emplace(resolved_name);
         }
         if (resolved_values.size() == 1) {
             value_name = *resolved_values.begin();

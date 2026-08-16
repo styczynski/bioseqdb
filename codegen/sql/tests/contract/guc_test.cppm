@@ -103,6 +103,26 @@ inline void require(bool condition, std::string_view message) {
     return *found;
 }
 
+template <typename p_mutator>
+[[nodiscard]] inline guc_detail::resolved_enum_default
+resolve_compression_default(
+    collected_program& program,
+    p_mutator&& mutate_values) {
+    collected_entity& entity = annotated_guc(
+        program,
+        "bioseq::settings::storage::compression::algorithm");
+    const guc_detail::enum_type_reference enum_type =
+        guc_detail::enum_type_from_storage(entity.cpp_return_type);
+    const guc_detail::parsed_enum parsed = guc_detail::parse_enum(
+        program, entity, enum_type);
+    std::vector<collected_guc_enum_value> values =
+        guc_detail::collect_enum_values(
+            program, entity, parsed, guc_profile::production);
+    std::forward<p_mutator>(mutate_values)(values);
+    return guc_detail::resolve_enum_default(
+        program, entity, parsed, values);
+}
+
 template <typename p_operation>
 inline void require_rejected(
     p_operation&& operation,
@@ -261,6 +281,17 @@ inline void run_guc_generator_contract_self_tests() {
             compiler_profile_program, guc_profile::production);
     require_typed_maximums(
         compiler_profile_inventory, "compiler-profile collection");
+    const collected_guc& compiler_profile_compression =
+        guc_contract_detail::guc(
+            compiler_profile_inventory,
+            "bioseq.storage.compression.algorithm");
+    require(
+        compiler_profile_compression.enum_default_name == "pglz"
+            && compiler_profile_compression.generated_live_authority
+                    .visible_enum_values
+                == std::vector<std::string>{"none", "pglz"},
+        "compiler-profile collection did not select its sole compiled "
+        "constexpr default candidate");
 
     const auto resolved_integer_bound = [&program](
         std::string_view option_name,
@@ -356,6 +387,135 @@ inline void run_guc_generator_contract_self_tests() {
                 == std::vector<std::string>{"none", "pglz"},
         "qualified constexpr enum default did not resolve from annotations");
     {
+        collected_program active_profile = program;
+        active_profile.compiler_profile = "production";
+        const auto unqualified =
+            guc_contract_detail::resolve_compression_default(
+                active_profile, [](auto&) {});
+        require(
+            unqualified.cpp_expression
+                    == "bioseq::k_default_compression_algorithm"
+                && unqualified.value_name == "pglz",
+            "unqualified constexpr alias did not resolve exactly");
+
+        collected_program qualified_profile = active_profile;
+        std::string& qualified_initializer =
+            guc_contract_detail::annotated_guc(
+                qualified_profile,
+                "bioseq::settings::storage::compression::algorithm")
+                .initializer_expression;
+        const std::size_t alias_offset = qualified_initializer.find(
+            "k_default_compression_algorithm");
+        require(
+            alias_offset != std::string::npos,
+            "fixture lacks the compression-default alias spelling");
+        qualified_initializer.replace(
+            alias_offset,
+            std::string_view{"k_default_compression_algorithm"}.size(),
+            "bioseq::k_default_compression_algorithm");
+        const auto qualified =
+            guc_contract_detail::resolve_compression_default(
+                qualified_profile, [](auto&) {});
+        require(
+            qualified.cpp_expression
+                    == "bioseq::k_default_compression_algorithm"
+                && qualified.value_name == "pglz",
+            "qualified constexpr alias did not resolve exactly");
+
+        guc_contract_detail::require_rejected(
+            [&active_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        active_profile,
+                        [](auto& values) {
+                            const auto zstd = std::ranges::find(
+                                values,
+                                "zstd",
+                                &collected_guc_enum_value::name);
+                            require(
+                                zstd != values.end(),
+                                "fixture lacks the zstd enum value");
+                            zstd->compiled = true;
+                        }));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "two compiled constexpr candidates were not rejected");
+
+        guc_contract_detail::require_rejected(
+            [&active_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        active_profile,
+                        [](auto& values) {
+                            for (auto& value : values) {
+                                value.compiled = false;
+                            }
+                        }));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "zero compiled constexpr candidates did not fail closed");
+
+        for (const bool hidden : {false, true}) {
+            guc_contract_detail::require_rejected(
+                [&active_profile, hidden] {
+                    static_cast<void>(
+                        guc_contract_detail::resolve_compression_default(
+                            active_profile,
+                            [hidden](auto& values) {
+                                const auto pglz = std::ranges::find(
+                                    values,
+                                    "pglz",
+                                    &collected_guc_enum_value::name);
+                                require(
+                                    pglz != values.end(),
+                                    "fixture lacks the pglz enum value");
+                                if (hidden) {
+                                    pglz->hidden = true;
+                                } else {
+                                    pglz->alias_of = "none";
+                                }
+                            }));
+                },
+                {"enum GUC 'bioseq.storage.compression.algorithm'",
+                 "cannot resolve constexpr default "
+                 "'k_default_compression_algorithm' to one enum value"},
+                hidden
+                    ? "hidden constexpr candidate became the default"
+                    : "alias constexpr candidate became the default");
+        }
+
+        collected_program malformed_profile = active_profile;
+        const auto corrupt_alias_initializers = [](auto& units) {
+            for (auto& unit : units) {
+                for (auto& declaration : unit.declarations) {
+                    if (declaration.qualified_name
+                        == "bioseq::k_default_compression_algorithm") {
+                        declaration.initializer_text =
+                            "compression_algorithm::pglz | "
+                            "compression_algorithm::none";
+                    }
+                }
+            }
+        };
+        corrupt_alias_initializers(malformed_profile.translation_units);
+        corrupt_alias_initializers(
+            malformed_profile.enum_authority_units);
+        guc_contract_detail::require_rejected(
+            [&malformed_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        malformed_profile, [](auto&) {}));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "malformed constexpr alias initializer was accepted");
+    }
+    {
         collected_program structural_constexpr = program;
         const auto core_authority = std::ranges::find_if(
             structural_constexpr.enum_authority_units,
@@ -379,8 +539,9 @@ inline void run_guc_generator_contract_self_tests() {
             ++default_declarations;
         }
         require(
-            default_declarations != 0,
-            "fixture lacks the compression-default declarations");
+            default_declarations == 3,
+            "source-only fixture lost a conditional compression-default "
+            "declaration");
         const guc_inventory structural_inventory = collect_guc_inventory(
             structural_constexpr, guc_profile::production);
         require(
@@ -430,8 +591,14 @@ inline void run_guc_generator_contract_self_tests() {
             && minimizer.member == "minimizer_algorithm"
             && minimizer.enum_cpp_name
                 == "bioseq::aligner::minimizer_algorithm"
-            && minimizer.enum_default_name == "scalar",
-        "nested aligner enum registration changed");
+            && minimizer.enum_default_name == "scalar"
+            && guc_contract_detail::guc(
+                   compiler_profile_inventory,
+                   "bioseq.aligner.minimizer.algorithm")
+                   .enum_default_name
+                == minimizer.enum_default_name,
+        "direct enum default changed across source-only and "
+        "compiler-profile collection");
 
     const collected_guc& fragment_lookup_route =
         guc_contract_detail::guc(
