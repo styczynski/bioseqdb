@@ -94,6 +94,7 @@ namespace {
 
 } // namespace
 
+/// @copydoc bioseq::external::json::parse_document
 std::expected<value, std::string> parse_document(std::string_view bytes) {
     simdjson::dom::parser parser;
     simdjson::padded_string buffer(bytes);

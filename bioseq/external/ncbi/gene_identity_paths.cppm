@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_identity_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene identity report path entries. */
+/** @brief Deprecated gene-report paths keyed by GeneID, accession, symbol, or taxon. */
 inline constexpr std::string_view gene_identity_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}:
     get:

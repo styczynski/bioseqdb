@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_sequence_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Genome sequence, link, and CheckM catalog path entries. */
+/** @brief Assembly, sequence, link, and CheckM catalog paths. */
 inline constexpr std::string_view genome_sequence_catalog_paths =
     R"bioseq_openapi(  /genome/dataset_report:
     post:

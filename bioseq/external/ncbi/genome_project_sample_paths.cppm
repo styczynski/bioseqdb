@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_project_sample_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Genome BioProject and BioSample catalog path entries. */
+/** @brief Assembly-report paths filtered by BioProject or BioSample accession. */
 inline constexpr std::string_view genome_project_sample_catalog_paths =
     R"bioseq_openapi(  /genome/bioproject/{bioprojects}/dataset_report:
     get:

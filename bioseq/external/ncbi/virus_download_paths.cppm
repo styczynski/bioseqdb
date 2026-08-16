@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:virus_download_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Virus genome and protein package download path entries. */
+/** @brief Virus genome and SARS-CoV-2 protein package-download paths. */
 inline constexpr std::string_view virus_download_paths =
     R"bioseq_openapi(  /virus/taxon/{taxon}/genome/download:
     get:

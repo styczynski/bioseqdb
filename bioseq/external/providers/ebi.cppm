@@ -82,6 +82,7 @@ struct ebi_plan {
     /// Returns the deterministic execution identity for this plan.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
+        // Mix one plan component into the stable execution fingerprint.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -195,6 +196,7 @@ class ebi_session {
 
         const bool taxonomy_domain = plan_.domain == "taxonomy";
 
+        // Parse provider taxonomy text for normalized row emission.
         const auto parse_taxon = [](std::string_view text) -> std::optional<std::int64_t> {
             std::int64_t numeric_identifier = 0;
             const char* const first = text.data();
@@ -317,7 +319,9 @@ struct ebi_provider {
     static constexpr auto name = bioseq::common::templating::compile_time_string("EBI");
     static constexpr bool supports_sequence_retrieval = false;
 
+    /// Request plan prepared by this adapter.
     using plan_type = ebi_plan;
+    /// Session executing a prepared request plan.
     using session_type = ebi_session;
 
     /// Returns statically available EBI capabilities.

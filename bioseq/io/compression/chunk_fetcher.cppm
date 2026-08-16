@@ -272,6 +272,7 @@ plan_chunks(std::span<const std::uint8_t> compressed_view,
 
     const std::size_t total_bits = compressed_view.size() * 8u;
 
+    // Skip false-positive headers until a complete dynamic-Huffman block validates.
     auto find_validated_block = [&compressed_view](std::size_t start_bit,
                                                    std::size_t until_bit) noexcept -> std::size_t {
         std::size_t cursor = start_bit;

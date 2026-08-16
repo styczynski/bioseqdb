@@ -98,6 +98,7 @@ run_async_pipeline(p_source source,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
+    // Retain and report only the first terminal pipeline error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -110,6 +111,7 @@ run_async_pipeline(p_source source,
                                                    ? options.concurrency.batch_target_record_count
                                                    : 4096;
 
+    // Prime offsets and reserve storage for the next output batch.
     auto prepare_fresh_batch = [&current_batch, &flush_record_threshold]() {
         current_batch.prepare(flush_record_threshold, is_fastq_format);
         current_batch.reserve_storage(
@@ -119,6 +121,7 @@ run_async_pipeline(p_source source,
     };
     prepare_fresh_batch();
 
+    // Move a nonempty batch to the worker pool and prepare its replacement.
     auto dispatch_batch = [&current_batch, &handler_fn, &prepare_fresh_batch, &task_group]() {
         if (current_batch.empty())
             return;
@@ -136,6 +139,7 @@ run_async_pipeline(p_source source,
         parser_state.attach_to_batch(current_batch.header_storage(),
                                      current_batch.sequence_storage());
 
+        // Finalize one FASTA record and dispatch a full batch.
         auto emit_fasta_record = [&current_batch,
                                   &dispatch_batch,
                                   &records_emitted,
@@ -221,6 +225,7 @@ run_async_pipeline(p_source source,
                                      current_batch.sequence_storage(),
                                      current_batch.quality_storage());
 
+        // Finalize one FASTQ record and dispatch a full batch.
         auto emit_fastq_record = [&current_batch,
                                   &dispatch_batch,
                                   &records_emitted,

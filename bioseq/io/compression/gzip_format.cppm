@@ -97,6 +97,7 @@ parse_gzip_header(bit_reader& reader, std::span<const std::uint8_t> compressed_v
         }
     }
 
+    // Consume one optional NUL-terminated gzip header field.
     auto skip_zero_terminated = [&compressed_view, &reader]() -> std::expected<void, std::string> {
         // Use SIMD scan when the underlying compressed view's tail is
         // available. Fall back to a byte-by-byte read.

@@ -299,6 +299,7 @@ class tls_connection_provider final : public oatpp::network::ClientConnectionPro
     [[nodiscard]] oatpp::async::CoroutineStarterForResult<
         const oatpp::provider::ResourceHandle<oatpp::data::stream::IOStream>&>
     getAsync() override {
+        /** Completes an asynchronous request with one synchronously acquired connection. */
         class ready_connection final
             : public oatpp::async::CoroutineWithResult<
                   ready_connection,

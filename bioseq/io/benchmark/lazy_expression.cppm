@@ -520,6 +520,7 @@ expected_lazy_expression_payload_bytes(bool eager, lazy_expression_size logical_
 /// Compute the exact admitted-byte total expected from one algorithm.
 [[nodiscard]] std::uint64_t
 expected_lazy_expression_admitted_bytes(bool eager, lazy_expression_size logical_length) {
+    // Convert one logical interval to its packed admission charge.
     const auto admitted = [](lazy_expression_size bp) {
         return bioseq::storage::packed_region_admission_bytes<seq::dna4>(
             bp, lazy_expression_storage_width);

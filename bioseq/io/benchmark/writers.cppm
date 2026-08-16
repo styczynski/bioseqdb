@@ -112,10 +112,12 @@ template <bool p_is_fasta>
     out_batches.clear();
     out_record_count = 0;
 
+    // Retain each decoded batch for the subsequent writer measurement.
     auto handler_fn = [&out_batches, &out_record_count](benchmark_batch&& batch) {
         out_record_count += batch.size();
         out_batches.push_back(std::move(batch));
     };
+    // Report fixture-read failures with their source path.
     auto failure_fn = [&path](std::string&& msg) {
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] slurp failed on '{}': {}", path, msg);
@@ -232,6 +234,7 @@ run_bioseq_writer(const writer_input& input, std::size_t thread_count, bool use_
         const std::size_t resolved_threads =
             thread_count > batches_total ? batches_total : thread_count;
         std::atomic<bool> any_failure{false};
+        // Write one disjoint range of batches from a producer thread.
         auto run_shard = [&any_failure, &batches_total, &input, &resolved_threads, &writer](
                              std::size_t shard_index) {
             const std::size_t shard_start = (batches_total * shard_index) / resolved_threads;
@@ -405,6 +408,7 @@ template <bool p_is_fasta>
         p_is_fasta ? sequence_file_format::fasta : sequence_file_format::fastq;
     std::atomic<std::size_t> record_count{0};
     std::atomic<std::uint64_t> content_hash{0};
+    // Fold each decoded batch into the round-trip count and content hash.
     auto handler_fn = [&record_count, &content_hash](benchmark_batch&& batch) {
         record_count.fetch_add(batch.size(), std::memory_order_relaxed);
         // Hash this batch's contribution and XOR into the global
@@ -414,6 +418,7 @@ template <bool p_is_fasta>
             hash_batches_xor<!p_is_fasta>(std::vector<benchmark_batch>{std::move(batch)});
         content_hash.fetch_xor(batch_hash, std::memory_order_relaxed);
     };
+    // Report round-trip read failures with their output path.
     auto failure_fn = [&output_path](std::string&& msg) {
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] roundtrip read failed on '{}': {}", output_path, msg);

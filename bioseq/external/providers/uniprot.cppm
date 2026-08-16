@@ -76,6 +76,7 @@ struct uniprot_plan {
     /// Returns the deterministic execution identity for this plan.
     [[nodiscard]] prov::external_execution_key execution_fingerprint() const noexcept {
         std::uint64_t hash = 1469598103934665603ULL;
+        // Mix one plan component into the stable execution fingerprint.
         const auto mix = [&hash](std::string_view text) {
             for (const char symbol : text) {
                 hash ^= static_cast<unsigned char>(symbol);
@@ -307,7 +308,9 @@ struct uniprot_provider {
     static constexpr auto name = bioseq::common::templating::compile_time_string("UniProt");
     static constexpr bool supports_sequence_retrieval = true;
 
+    /// Request plan prepared by this adapter.
     using plan_type = uniprot_plan;
+    /// Session executing a prepared request plan.
     using session_type = uniprot_session;
 
     /// Returns statically available UniProt capabilities.

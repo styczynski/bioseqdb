@@ -95,6 +95,7 @@ template <bool p_is_fasta>
     std::atomic<std::size_t> record_count_atomic{0};
     std::atomic<std::size_t> body_bytes_atomic{0};
 
+    // Accumulate record and decoded-body totals from one delivered batch.
     auto handler_fn = [&record_count_atomic, &body_bytes_atomic](batch_t&& batch) {
         const std::size_t local_records = batch.size();
         std::size_t local_body_bytes = 0;
@@ -106,6 +107,7 @@ template <bool p_is_fasta>
         record_count_atomic.fetch_add(local_records, std::memory_order_relaxed);
         body_bytes_atomic.fetch_add(local_body_bytes, std::memory_order_relaxed);
     };
+    // Report a failed benchmark read with its corpus path.
     auto failure_fn = [&path](std::string&& msg) {
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] read failed on '{}': {}", path, msg);
@@ -175,6 +177,7 @@ template <bool p_is_fasta>
         return out;
     }
     std::string line;
+    /// Expected line role in the four-line FASTQ baseline parser.
     enum class fastq_step : std::uint8_t { header, sequence, separator, quality };
     fastq_step step = fastq_step::header;
     while (std::getline(in, line)) {
@@ -431,6 +434,7 @@ run_identifier_bench(std::string_view algo,
     bench_identifier_writer parsed_writer{input.mapping.routing.destination_count, out};
     const auto writer_ref = make_identifier_writer_reference(parsed_writer);
 
+    // Apply the selected identifier algorithm to every delivered header.
     auto handler_fn =
         [&algo, &dumb_header_copy, &input, &out, &parse_state, &parsed_writer, &writer_ref](
             batch_t&& batch) {
@@ -459,6 +463,7 @@ run_identifier_bench(std::string_view algo,
                 }
             }
         };
+    // Report identifier benchmark read failures.
     auto failure_fn = [](std::string&& msg) {
         bioseq_log<logging_level::error>(
             "[bioseq.io.benchmark] identifier benchmark read failed: {}", msg);

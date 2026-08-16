@@ -226,6 +226,7 @@ read_bool_field(simdjson::dom::element data, std::string_view name, bool fallbac
     std::string buffer;
     buffer.reserve(64 * 1024);
     std::size_t bytes_written = 0;
+    // Write the accumulated fixture bytes and reuse the allocation.
     auto flush_buffer = [&buffer, &bytes_written, &out]() {
         if (buffer.empty())
             return;

@@ -154,6 +154,7 @@ class posix_read_source {
     std::string _last_error_message;
 };
 
+/// Mapping-backed source returned alongside its initial magic-byte probe.
 struct mmap_source;
 
 /// Result of `mmap_source::try_open` when extended with magic-byte

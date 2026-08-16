@@ -201,6 +201,7 @@ class gcra_request_policy {
     /// Hashes origin, credential identity, and tier into a conservative shared bucket.
     [[nodiscard]] std::size_t bucket_index(const policy_request_view& request) const noexcept {
         std::uint64_t h = 1469598103934665603ull;
+        // Mix one byte into the shared-bucket FNV-1a hash.
         const auto mix = [&h](unsigned char byte) noexcept {
             h ^= byte;
             h *= 1099511628211ull;

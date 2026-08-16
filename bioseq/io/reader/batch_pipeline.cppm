@@ -62,6 +62,7 @@ run_sync_pipeline(p_source source,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
+    // Retain and report only the first terminal pipeline error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -75,6 +76,7 @@ run_sync_pipeline(p_source source,
                                                    : 4096;
 
     constexpr bool is_fastq_format = p_file_format == sequence_file_format::fastq;
+    // Prime offsets and reserve storage for the next output batch.
     auto prepare_fresh_batch = [&batch, &flush_record_threshold]() {
         batch.prepare(flush_record_threshold, is_fastq_format);
         // Reserve for approximately 256 bases per record. Larger batches grow
@@ -82,9 +84,10 @@ run_sync_pipeline(p_source source,
         batch.reserve_storage(
             /*header_bytes*/ flush_record_threshold * 32,
             /*seq_words*/ flush_record_threshold * 8,
-            /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
+        /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
     };
 
+    // Deliver a nonempty batch synchronously and prepare its replacement.
     auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
         if (batch.empty())
             return;
@@ -99,6 +102,7 @@ run_sync_pipeline(p_source source,
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
+        // Finalize one FASTA record and flush a full batch.
         auto emit_fasta_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
                                      std::size_t header_start,
                                      std::size_t header_size,
@@ -190,6 +194,7 @@ run_sync_pipeline(p_source source,
         parser_state.attach_to_batch(
             batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
+        // Finalize one FASTQ record and flush a full batch.
         auto emit_fastq_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
                                      std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
@@ -322,6 +327,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     bool aborted = false;
     std::string captured_error;
 
+    // Retain and report only the first terminal direct-path error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -343,6 +349,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
     const std::size_t header_bytes_hint =
         std::max<std::size_t>(file_size / 256, flush_record_threshold * 32);
 
+    // Prime offsets and reserve file-scaled storage for the next batch.
     auto prepare_fresh_batch =
         [&batch, &flush_record_threshold, &header_bytes_hint, &sequence_words_hint]() {
             batch.prepare(flush_record_threshold, is_fastq_format);
@@ -351,6 +358,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
                                   is_fastq_format ? flush_record_threshold * 256 : 0);
         };
 
+    // Deliver a nonempty direct-path batch and prepare its replacement.
     auto flush_batch = [&batch, &handler_fn, &prepare_fresh_batch]() {
         if (batch.empty())
             return;
@@ -365,6 +373,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
         parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
+        // Finalize one mapped FASTA record and flush a full batch.
         auto emit_fasta_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
                                      std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
@@ -412,6 +421,7 @@ run_sync_pipeline_mmap_direct(mmap_source source,
         parser_state.attach_to_batch(
             batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
+        // Finalize one mapped FASTQ record and flush a full batch.
         auto emit_fastq_record = [&batch, &flush_batch, &records_emitted, &flush_record_threshold](
                                      std::size_t /*header_start*/,
                                      std::size_t /*header_size*/,
@@ -658,6 +668,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
     std::mutex error_mutex;
     std::string captured_error;
 
+    // Serialize and report only the first shard failure.
     auto failure_capture =
         [&aborted, &captured_error, &error_mutex, &failure_fn](std::string&& msg) {
             std::lock_guard guard{error_mutex};
@@ -667,6 +678,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             }
         };
 
+    // Parse one disjoint mapped shard into independently owned batches.
     auto run_shard = [&aborted,
                       &base_ptr,
                       &boundaries,
@@ -709,6 +721,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             is_fastq_format ? std::max<std::size_t>(shard_size / 4, flush_record_threshold * 256)
                             : 0;
 
+        // Prime offsets and reserve shard-scaled storage for the next batch.
         auto prepare_fresh_batch = [&batch,
                                     &flush_record_threshold,
                                     &shard_header_bytes_hint,
@@ -722,6 +735,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
 
         std::size_t shard_records = 0;
 
+        // Serialize batch delivery while keeping parsing shard-local.
         auto flush_batch = [&batch, &emit_mutex, &handler_fn, &prepare_fresh_batch]() {
             if (batch.empty())
                 return;
@@ -741,6 +755,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
             parser_state.attach_to_batch(batch.header_storage(), batch.sequence_storage());
 
+            // Finalize one sharded FASTA record and flush a full batch.
             auto emit_fasta_record = [&batch,
                                       &flush_batch,
                                       &shard_records,
@@ -784,6 +799,7 @@ run_sync_pipeline_mmap_parallel(mmap_source source,
             parser_state.attach_to_batch(
                 batch.header_storage(), batch.sequence_storage(), batch.quality_storage());
 
+            // Finalize one sharded FASTQ record and flush a full batch.
             auto emit_fastq_record = [&batch,
                                       &flush_batch,
                                       &shard_records,

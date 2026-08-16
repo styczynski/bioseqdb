@@ -45,7 +45,7 @@ enum class header_format : std::uint8_t {
     genbank,
     gisaid,
     imgt,
-    count // sentinel; never a real format
+    count // Sentinel value that does not represent a real format.
 };
 
 /// Where a field's bytes come from inside a header.
@@ -112,10 +112,10 @@ inline constexpr std::uint16_t no_position = 0xFFFF;
 struct header_field_definition {
     std::string_view canonical;      // long name, e.g. "organism_name"
     std::string_view token;          // header token, e.g. "OS" ("" if none)
-    std::string_view normalised_key; // = norm(canonical); the emitted routing key
+    std::string_view normalised_key; // Normalized canonical key emitted for routing.
     std::span<const std::string_view> aliases;
     field_origin origin;
-    std::uint16_t position; // positional only; else no_position
+    std::uint16_t position; // Positional index, or no_position for other origins.
 };
 
 /// A complete format definition. `fields` spans a per-format static array.

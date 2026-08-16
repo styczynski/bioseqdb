@@ -52,6 +52,7 @@ read_sequences_file(p_path&& file_path,
                   "file_path must be convertible to std::string_view");
     const std::string_view path_view = std::string_view{std::forward<p_path>(file_path)};
 
+    // Report the backend selected by the source-dispatch tree.
     const auto record_backend = [&observed_backend](reader_backend backend) noexcept {
         if (observed_backend)
             *observed_backend = backend;
@@ -182,6 +183,7 @@ stream_sequences_file(const char* path,
 read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_options& options) {
     const std::string_view path_view{path};
     std::string open_error;
+    // Retain the first source-open diagnostic across fallback attempts.
     auto on_open_fail = [&open_error](std::string&& msg) {
         if (open_error.empty())
             open_error = std::move(msg);
@@ -229,11 +231,13 @@ sample_sequence_headers(const char* path,
 
     std::vector<std::string> headers;
     headers.reserve(max_headers);
+    // Normalize sampled headers from CRLF and LF inputs.
     auto strip_trailing_carriage_return = [](std::string_view text) {
         if (!text.empty() && text.back() == '\r')
             text.remove_suffix(1);
         return text;
     };
+    // Locate the next line boundary within the sampled prefix.
     auto line_end_at = [&base, &prefix_size](std::size_t cursor) {
         return cursor + simd::scan_first_byte('\n', base + cursor, prefix_size - cursor);
     };

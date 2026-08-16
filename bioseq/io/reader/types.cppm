@@ -63,9 +63,13 @@ enum class reader_backend : std::uint8_t {
 /// In practice the handler always processes the batch in scope.
 template <supports_compact_sequence_range p_range> class compact_sequence_view {
   public:
+    /// Traits of the packed sequence range represented by this view.
     using traits = typename compact_sequence_range<p_range>::traits;
+    /// Packed storage word type borrowed from the owning batch.
     using storage_unit = typename traits::storage_unit;
+    /// Read-only iterator over packed storage words.
     using iterator = const storage_unit*;
+    /// Read-only iterator over packed storage words.
     using const_iterator = const storage_unit*;
 
     /// Construct an empty view.
@@ -151,8 +155,11 @@ template <typename p_storage_unit> struct packed_sequence_chunk {
 /// Returned views remain valid as long as the batch.
 template <supports_compact_sequence_range p_range> class sequence_batch {
   public:
+    /// Owning compact range used to define the batch alphabet and packing.
     using sequence_range = compact_sequence_range<p_range>;
+    /// Borrowed packed sequence returned for one record.
     using sequence_view = compact_sequence_view<p_range>;
+    /// Packed storage word retained by the batch.
     using storage_unit = typename sequence_view::storage_unit;
 
     /// Return the number of logical records in the batch.
@@ -277,12 +284,12 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
   private:
     std::vector<char> _header_storage;
     std::vector<std::size_t>
-        _header_offsets; // size N+1; header[i] = [_header_offsets[i], _header_offsets[i+1])
+        _header_offsets; // Size N+1, with each adjacent pair delimiting one header.
     std::vector<storage_unit> _sequence_storage;
     std::vector<std::size_t> _sequence_offsets;  // size N+1
     std::vector<std::size_t> _sequence_paddings; // size N
     std::vector<std::uint8_t> _quality_storage;
-    std::vector<std::size_t> _quality_offsets; // size N+1 if FASTQ; size 0 if FASTA
+    std::vector<std::size_t> _quality_offsets; // Size N+1 for FASTQ and zero for FASTA.
 };
 
 /// Handler contract for accepting a batch rvalue.

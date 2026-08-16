@@ -34,7 +34,10 @@ import bioseq.external.io.sequence_stream;
 
 namespace bioseq::external::io::detail {
 
-/// Computes an MD5 digest through the private OpenSSL implementation unit.
+/// Computes a lowercase MD5 digest through the private OpenSSL implementation unit.
+/// @param data First byte of the contiguous input region.
+/// @param length Number of bytes available from `data`.
+/// @return The hexadecimal digest, or an empty string when OpenSSL rejects the operation.
 [[nodiscard]] std::string compute_md5_hex_with_openssl(const unsigned char* data,
                                                        std::size_t length);
 
@@ -276,6 +279,7 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
                                        std::stop_token stop,
                                        std::string_view emit_accession = {},
                                        prov::external_execution_key execution_key = {}) {
+    // Bind archive failures to the NCBI Datasets operation identity.
     const auto make_failure = [](prov::external_error_kind kind, std::string_view message) {
         return std::unexpected(prov::make_external_error(
             kind, detail::get_archive_provider_id(), "ncbi_datasets_zip", message));

@@ -112,13 +112,21 @@ struct writer_producer_state {
 /// Thread-safe FASTA / FASTQ writer.
 template <sequence_alphabet p_alphabet, sequence_file_format p_file_format> class sequence_writer {
   public:
+    /// Packed alphabet configuration accepted by this writer.
     using alphabet_config = sequence_custom_alphabet<p_alphabet, std::uint64_t>;
+    /// Batch type consumed by the concurrent append path.
     using batch_t = sequence_batch<alphabet_config>;
+    /// Borrowed view of one packed sequence in a batch.
     using sequence_view = compact_sequence_view<alphabet_config>;
+    /// Packing traits shared with the sequence view.
     using traits = typename compact_sequence_range<alphabet_config>::traits;
+    /// Number of bits used for one encoded letter.
     static constexpr std::size_t bits_per_char = traits::bits_per_char;
+    /// Number of encoded letters stored in one packed word.
     static constexpr std::size_t letters_per_unit = traits::letters_per_unit;
+    /// Packed storage word type decoded by this writer.
     using storage_unit = typename traits::storage_unit;
+    /// Storage backend selected when the output is opened.
     using sink_variant = std::variant<posix_pwrite_sink, mmap_pwrite_sink>;
 
     /// Open `path` for writing. When `options.output_capacity_hint`

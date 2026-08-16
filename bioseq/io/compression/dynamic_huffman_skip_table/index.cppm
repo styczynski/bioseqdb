@@ -22,6 +22,7 @@ inline constexpr std::array<std::int8_t, 32768> dynamic_huffman_skip_table = [](
     std::array<std::int8_t, 32768> table{};
     std::size_t offset = 0;
 
+    // Append one generated table partition while retaining descriptor order.
     const auto append = [&table, &offset]<std::size_t p_part_size>(
                             const std::array<std::int8_t, p_part_size>& part) constexpr {
         for (const std::int8_t value : part) {

@@ -57,6 +57,7 @@ template <sequence_alphabet p_alphabet,
     std::string captured_error;
     std::size_t global_offset_base = 0;
 
+    // Retain and report only the first terminal pipeline error.
     auto failure_capture = [&aborted, &captured_error, &failure_fn](std::string&& msg) {
         if (!aborted) {
             captured_error = msg;
@@ -73,7 +74,7 @@ template <sequence_alphabet p_alphabet,
     // leaves) `seq_scratch` empty.
     std::vector<char> header_scratch;
     std::vector<p_storage_unit> seq_scratch;
-    std::vector<std::uint8_t> quality_scratch; // FASTQ; content ignored
+    std::vector<std::uint8_t> quality_scratch; // FASTQ content is ignored here.
 
     bool record_open = false; // begin_record already called
     std::size_t completed_header_start = 0;
@@ -83,6 +84,7 @@ template <sequence_alphabet p_alphabet,
                                        // callback (fires BEFORE the FSM
                                        // resets its per-record counters)
 
+    // Clear bounded scratch after one record has been delivered.
     auto reset_record =
         [&completed_padding, &header_scratch, &quality_scratch, &record_open, &seq_scratch]() {
             header_scratch.clear();
@@ -92,6 +94,7 @@ template <sequence_alphabet p_alphabet,
             completed_padding = 0;
         };
 
+    // Deliver one packed chunk and release its reusable scratch storage.
     auto emit_stream_chunk = [&options, &quality_scratch, &seq_scratch, &sink](
                                  std::uint64_t chunk_bp, bool end_of_record) {
         if constexpr (requires(p_sink& sink_ref,
@@ -162,6 +165,7 @@ template <sequence_alphabet p_alphabet,
         reset_record();
     };
 
+    // Preserve completion offsets before the parser resets its record state.
     auto capture_completion =
         [&completed_header_size, &completed_header_start, &completed_padding](
             std::size_t header_start, std::size_t header_size, std::size_t padding) {
@@ -172,6 +176,7 @@ template <sequence_alphabet p_alphabet,
 
     if constexpr (p_file_format == sequence_file_format::fasta) {
         fasta_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
+        // Capture the completed FASTA header and final-word padding.
         auto emit_fasta = [&capture_completion](std::size_t header_start,
                                                 std::size_t header_size,
                                                 std::size_t,
@@ -246,6 +251,7 @@ template <sequence_alphabet p_alphabet,
 
     } else {
         fastq_parser_state<p_storage_unit, bits_per_char, letters_per_unit> parser_state;
+        // Capture the completed FASTQ header and final-word padding.
         auto emit_fastq = [&capture_completion](std::size_t header_start,
                                                 std::size_t header_size,
                                                 std::size_t,

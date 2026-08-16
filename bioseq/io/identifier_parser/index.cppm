@@ -198,6 +198,7 @@ struct header_lexer {
     /// Replace the token list with delimiters found in `header`.
     void lex(std::string_view header) {
         tokens.clear();
+        /// Borrowed callback state for the SIMD delimiter scan.
         struct lexer_context {
             header_lexer* self;
             const char* base;
@@ -250,6 +251,7 @@ namespace bc = boost::container;
 /// with no scratch buffer. Reuses the single ASCII-fold rule (`lowercase_ascii_character`).
 [[nodiscard]] constexpr bool names_match_normalised(string_view a, string_view b) noexcept {
     std::size_t i = 0, j = 0;
+    // Consume the next normalized name byte while skipping separators.
     auto advance = [](string_view s, std::size_t& k) -> int {
         while (k < s.size()) {
             const char c = s[k++];
@@ -547,6 +549,7 @@ bracket_tags(string_view header, const header_lexer& lex) {
     std::sort(remove.begin(), remove.end());
 
     scratch.clear();
+    // Append retained description text while collapsing repeated spaces.
     auto append_collapsed = [&scratch](string_view chunk) {
         for (char c : chunk) {
             if (c == ' ') {
@@ -1117,6 +1120,7 @@ resolve_identifier_mapping(header_format requested_format,
     std::vector<destination_slot> column_to_slot(column_count, -1);
     bool has_key_or_position_route = false;
 
+    // Allocate one destination slot per source column on first use.
     auto slot_of = [&column_to_slot, &destination_columns](std::size_t i) -> destination_slot {
         if (column_to_slot[i] >= 0)
             return column_to_slot[i];
@@ -1125,10 +1129,12 @@ resolve_identifier_mapping(header_format requested_format,
         column_to_slot[i] = s;
         return s;
     };
+    // Prevent duplicate destinations within one routing rule.
     auto contains_slot = [](const std::vector<destination_slot>& slots,
                             destination_slot s) -> bool {
         return std::find(slots.begin(), slots.end(), s) != slots.end();
     };
+    // Merge one destination into the canonical key route.
     auto add_key_route = [&contains_slot, &has_key_or_position_route, &routing](
                              std::string key, destination_slot s) {
         for (identifier_key_route& route : routing.key_routes) {
@@ -1146,6 +1152,7 @@ resolve_identifier_mapping(header_format requested_format,
         });
         has_key_or_position_route = true;
     };
+    // Merge one destination into the positional route.
     auto add_position_route = [&contains_slot, &has_key_or_position_route, &routing](
                                   std::uint32_t p, destination_slot s) {
         for (identifier_position_route& route : routing.position_routes) {
@@ -1163,6 +1170,7 @@ resolve_identifier_mapping(header_format requested_format,
         });
         has_key_or_position_route = true;
     };
+    // Resolve a normalized column name to its source descriptor index.
     auto find_column = [&column_count, &columns](std::string_view raw_name) -> std::size_t {
         for (std::size_t i = 0; i < column_count; ++i)
             if (detail::names_match_normalised(columns[i].name, raw_name))

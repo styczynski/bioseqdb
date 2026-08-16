@@ -123,6 +123,7 @@ template <sequence_alphabet p_alphabet,
 
     std::size_t parse_cursor = cursor;
 
+    // Preserve the current cursor when the next slab must resume this record.
     auto need_more = [&parse_cursor]() -> record_parse_result {
         return record_parse_result{parse_outcome::incomplete, parse_cursor};
     };

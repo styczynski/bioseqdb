@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:genome_name_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Genome WGS and assembly-name catalog path entries. */
+/** @brief Assembly-report paths keyed by WGS accession or assembly name. */
 inline constexpr std::string_view genome_name_catalog_paths =
     R"bioseq_openapi(  /genome/wgs/{wgs_accessions}/dataset_report:
     get:

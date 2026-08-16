@@ -10,7 +10,7 @@ export module bioseq.external.ncbi:gene_summary_paths;
 
 export namespace bioseq::external::ncbi::descriptor {
 
-/** @brief Gene download-summary, count, ortholog, link, and chromosome path entries. */
+/** @brief Gene download-summary, count, ortholog, link, and chromosome paths. */
 inline constexpr std::string_view gene_summary_paths =
     R"bioseq_openapi(  /gene/id/{gene_ids}/download_summary:
     get:

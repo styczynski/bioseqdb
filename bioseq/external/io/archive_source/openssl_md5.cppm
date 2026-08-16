@@ -14,6 +14,7 @@ module bioseq.external.io.archive_source;
 
 namespace bioseq::external::io::detail {
 
+/// @copydoc compute_md5_hex_with_openssl
 std::string compute_md5_hex_with_openssl(const unsigned char *data,
                                          std::size_t length) {
   std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
