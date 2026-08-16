@@ -94,6 +94,7 @@ append_json_escaped(std::string& output, std::string_view text)
 	}
 }
 
+/** @brief Writes SQL null into one virtual-slot attribute. */
 inline void
 set_null(TupleTableSlot* slot, std::size_t column_index)
 {
@@ -101,6 +102,7 @@ set_null(TupleTableSlot* slot, std::size_t column_index)
 	slot->tts_values[column_index] = static_cast<Datum>(0);
 }
 
+/** @brief Copies text into the current PostgreSQL memory context for one attribute. */
 inline void
 set_text(TupleTableSlot* slot, std::size_t column_index, std::string_view text)
 {
@@ -110,7 +112,10 @@ set_text(TupleTableSlot* slot, std::size_t column_index, std::string_view text)
 	slot->tts_isnull[column_index] = false;
 }
 
-/* Any bounded string optional -> text, null when absent. */
+/**
+ * @brief Writes an optional bounded string as text or SQL null.
+ * @tparam p_capacity Maximum bytes accepted by the provider field.
+ */
 template <std::size_t p_capacity>
 inline void
 set_text_opt(TupleTableSlot* slot, std::size_t column_index,
@@ -122,6 +127,7 @@ set_text_opt(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
+/** @brief Writes a signed 64-bit PostgreSQL integer attribute. */
 inline void
 set_int64(TupleTableSlot* slot, std::size_t column_index, std::int64_t value)
 {
@@ -129,6 +135,7 @@ set_int64(TupleTableSlot* slot, std::size_t column_index, std::int64_t value)
 	slot->tts_isnull[column_index] = false;
 }
 
+/** @brief Writes an optional signed 64-bit integer or SQL null. */
 inline void
 set_int64_opt(TupleTableSlot* slot, std::size_t column_index,
 			  const std::optional<std::int64_t>& value)
@@ -139,7 +146,7 @@ set_int64_opt(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
-/* uint64 (e.g. sequence_length) -> bigint, null when absent. */
+/** @brief Writes an optional unsigned provider value through PostgreSQL bigint. */
 inline void
 set_uint64_opt_as_int64(TupleTableSlot* slot, std::size_t column_index,
 						const std::optional<std::uint64_t>& value)
@@ -150,6 +157,7 @@ set_uint64_opt_as_int64(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
+/** @brief Writes a signed 32-bit PostgreSQL integer attribute. */
 inline void
 set_int32(TupleTableSlot* slot, std::size_t column_index, std::int32_t value)
 {
@@ -157,7 +165,7 @@ set_int32(TupleTableSlot* slot, std::size_t column_index, std::int32_t value)
 	slot->tts_isnull[column_index] = false;
 }
 
-/* uint32 (e.g. accession version) -> int4, null when absent. */
+/** @brief Writes an optional unsigned provider value through PostgreSQL integer. */
 inline void
 set_uint32_opt_as_int32(TupleTableSlot* slot, std::size_t column_index,
 						const std::optional<std::uint32_t>& value)
@@ -168,6 +176,7 @@ set_uint32_opt_as_int32(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
+/** @brief Writes a signed 16-bit PostgreSQL integer attribute. */
 inline void
 set_int16(TupleTableSlot* slot, std::size_t column_index, std::int16_t value)
 {
@@ -175,6 +184,7 @@ set_int16(TupleTableSlot* slot, std::size_t column_index, std::int16_t value)
 	slot->tts_isnull[column_index] = false;
 }
 
+/** @brief Writes a non-null PostgreSQL Boolean attribute. */
 inline void
 set_bool(TupleTableSlot* slot, std::size_t column_index, bool value)
 {
@@ -182,6 +192,7 @@ set_bool(TupleTableSlot* slot, std::size_t column_index, bool value)
 	slot->tts_isnull[column_index] = false;
 }
 
+/** @brief Writes an optional Boolean or SQL null. */
 inline void
 set_bool_opt(TupleTableSlot* slot, std::size_t column_index,
 			 const std::optional<bool>& value)
@@ -192,8 +203,12 @@ set_bool_opt(TupleTableSlot* slot, std::size_t column_index,
 		set_null(slot, column_index);
 }
 
-/* external_timestamp is microseconds since 1970-01-01; PG TimestampTz is
- * microseconds since 2000-01-01. 946684800000000 = us between the two epochs. */
+/**
+ * @brief Converts a provider timestamp to PostgreSQL timestamptz storage.
+ *
+ * Provider timestamps count microseconds from 1970-01-01 while PostgreSQL
+ * counts microseconds from 2000-01-01.
+ */
 inline void
 set_timestamptz(TupleTableSlot* slot, std::size_t column_index,
 				provider::external_timestamp timestamp)
@@ -205,8 +220,7 @@ set_timestamptz(TupleTableSlot* slot, std::size_t column_index,
 	slot->tts_isnull[column_index] = false;
 }
 
-/* external_date{year:int16, month:uint8, day:uint8} -> PG DateADT (days since
- * 2000-01-01), null when absent. */
+/** @brief Converts an optional provider calendar date to PostgreSQL DateADT. */
 inline void
 set_date_opt(TupleTableSlot* slot, std::size_t column_index,
 			 const std::optional<provider::external_date>& date)
@@ -226,10 +240,15 @@ set_date_opt(TupleTableSlot* slot, std::size_t column_index,
 /* jsonb helpers                                                             */
 /* ------------------------------------------------------------------------ */
 
+/**
+ * @brief Parses a null-terminated JSON document through PostgreSQL jsonb input.
+ * @return A jsonb datum owned by the current PostgreSQL memory context.
+ */
 inline auto jsonb_datum_from_cstring(const char* text) -> Datum {
 	return DirectFunctionCall1(jsonb_in, CStringGetDatum(text));
 }
 
+/** @brief Parses a JSON buffer and assigns the resulting jsonb datum. */
 inline void
 set_jsonb_from_string(TupleTableSlot* slot, std::size_t column_index,
 					  const std::string& json)
@@ -238,7 +257,7 @@ set_jsonb_from_string(TupleTableSlot* slot, std::size_t column_index,
 	slot->tts_isnull[column_index] = false;
 }
 
-/* The SQL provenance column always carries the provider identity. */
+/** @brief Writes the provider identity as the row's provenance jsonb object. */
 inline void
 set_provenance(TupleTableSlot* slot, std::size_t column_index,
 			   provider::provider_id provider_identity)
@@ -249,9 +268,10 @@ set_provenance(TupleTableSlot* slot, std::size_t column_index,
 	set_jsonb_from_string(slot, column_index, json);
 }
 
-/* provider_attributes_json is already a JSON document: pass it through jsonb_in
- * (copied to a NUL-terminated buffer). Guard: skip (null) anything that does
- * not begin with '{' or '['. */
+/**
+ * @brief Parses optional provider attributes when they have JSON container syntax.
+ * @tparam p_capacity Maximum bytes accepted by the provider field.
+ */
 template <std::size_t p_capacity>
 inline void
 set_provider_attributes(
@@ -277,6 +297,7 @@ set_provider_attributes(
 /* array helpers                                                             */
 /* ------------------------------------------------------------------------ */
 
+/** @brief Writes an optional signed-bigint vector as a PostgreSQL array. */
 inline void
 set_bigint_array_opt(TupleTableSlot* slot, std::size_t column_index,
 					 const std::optional<std::vector<std::int64_t>>& values)
@@ -300,6 +321,10 @@ set_bigint_array_opt(TupleTableSlot* slot, std::size_t column_index,
 	slot->tts_isnull[column_index] = false;
 }
 
+/**
+ * @brief Writes an optional bounded-string vector as a PostgreSQL text array.
+ * @tparam p_capacity Maximum bytes accepted by each provider field.
+ */
 template <std::size_t p_capacity>
 inline void
 set_text_array_opt(
@@ -360,12 +385,14 @@ set_json_array_opt(TupleTableSlot* slot, std::size_t column_index,
 	set_jsonb_from_string(slot, column_index, json);
 }
 
+/** @brief Encodes alternate record identities as a jsonb array. */
 inline void
 set_aliases_jsonb(TupleTableSlot* slot, std::size_t column_index,
 				  const std::optional<std::vector<provider::owning_record_key>>& aliases)
 {
 	set_json_array_opt(
 		slot, column_index, aliases,
+		/* Append one record identity without allocating a temporary JSON object. */
 		[](std::string &json, const provider::owning_record_key &alias)
 		{
 			json += "{\"domain\":\"";
@@ -383,12 +410,14 @@ set_aliases_jsonb(TupleTableSlot* slot, std::size_t column_index,
 		});
 }
 
+/** @brief Encodes provider gene references as a jsonb array. */
 inline void
 set_genes_jsonb(TupleTableSlot* slot, std::size_t column_index,
 				const std::optional<std::vector<provider::owning_gene_reference>>& genes)
 {
 	set_json_array_opt(
 		slot, column_index, genes,
+		/* Append one gene reference directly to the shared JSON buffer. */
 		[](std::string &json, const provider::owning_gene_reference &gene)
 		{
 			json += "{\"namespace\":\"";
@@ -396,6 +425,7 @@ set_genes_jsonb(TupleTableSlot* slot, std::size_t column_index,
 			json += "\",\"id\":\"";
 			append_json_escaped(json, gene.identifier.view());
 			json += '"';
+			/* Add an optional named string member when the provider supplied it. */
 			const auto append_optional = [&json](
 				std::string_view field_name, const auto &value)
 			{
@@ -416,12 +446,14 @@ set_genes_jsonb(TupleTableSlot* slot, std::size_t column_index,
 		});
 }
 
+/** @brief Encodes provider genomic intervals as a jsonb array. */
 inline void
 set_locations_jsonb(TupleTableSlot* slot, std::size_t column_index,
 					const std::optional<std::vector<provider::owning_genomic_interval>>& locations)
 {
 	set_json_array_opt(
 		slot, column_index, locations,
+		/* Append one genomic interval using zero-based half-open coordinates. */
 		[](std::string &json,
 		   const provider::owning_genomic_interval &location)
 		{
@@ -433,6 +465,7 @@ set_locations_jsonb(TupleTableSlot* slot, std::size_t column_index,
 			json += std::to_string(location.end0);
 			json += ",\"strand\":";
 			json += std::to_string(static_cast<int>(location.orientation));
+			/* Add optional assembly identifiers to the interval object. */
 			const auto append_optional = [&json](
 				std::string_view field_name, const auto &value)
 			{
@@ -452,6 +485,10 @@ set_locations_jsonb(TupleTableSlot* slot, std::size_t column_index,
 		});
 }
 
+/**
+ * @brief Writes the provider and record-key columns shared by catalog rows.
+ * @tparam p_row Provider row type exposing a record key.
+ */
 template <class p_row>
 void
 set_record_identity(TupleTableSlot *slot, const p_row &row)
@@ -464,6 +501,10 @@ set_record_identity(TupleTableSlot *slot, const p_row &row)
 	set_uint32_opt_as_int32(slot, 5, row.key.version);
 }
 
+/**
+ * @brief Writes provider version, provenance, and retrieval time columns.
+ * @tparam p_row Provider row type exposing audit metadata.
+ */
 template <class p_row>
 void
 set_audit_columns(TupleTableSlot *slot, const p_row &row,
@@ -476,6 +517,7 @@ set_audit_columns(TupleTableSlot *slot, const p_row &row,
 	set_timestamptz(slot, retrieved_at_column, row.audit.completed_at);
 }
 
+/** @brief Writes the coordinate and molecule columns shared by sequence rows. */
 void
 set_sequence_region(TupleTableSlot *slot,
 					const provider::owning_sequence_payload &row)
@@ -599,7 +641,7 @@ fill_record_location(const provider::owning_catalog_row& row, std::size_t sub_in
 	set_audit_columns(slot, row, 14, 15, 16);
 }
 
-/* Builds an unbound bioseq.seq datum for typmodless provider input. */
+/** @brief Builds an unbound sequence datum from provider ASCII bases. */
 inline void
 set_sequence_value(TupleTableSlot* slot, std::size_t column_index,
 				   std::string_view bases)

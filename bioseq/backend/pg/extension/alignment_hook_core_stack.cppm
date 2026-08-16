@@ -20,8 +20,10 @@ import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
+/** Executor frame stored by the backend-local lifecycle stacks. */
 struct alignment_executor_frame;
 
+/** @brief Removes every occurrence of a frame pointer from a lifecycle stack. */
 void erase_frame_pointer(
 		std::vector<alignment_executor_frame*>& frames,
 		alignment_executor_frame* frame) noexcept
@@ -31,6 +33,7 @@ void erase_frame_pointer(
 		frames.end());
 }
 
+/** @brief Pops the expected top frame or reports a PostgreSQL lifecycle error. */
 void pop_exact_alignment_stack(
 		std::vector<alignment_executor_frame*>& stack,
 		alignment_executor_frame* frame,
@@ -45,6 +48,7 @@ void pop_exact_alignment_stack(
 	stack.pop_back();
 }
 
+/** @brief Removes a frame without raising while PostgreSQL unwinds an error. */
 void pop_alignment_stack_on_error(
 		std::vector<alignment_executor_frame*>& stack,
 		alignment_executor_frame* frame) noexcept

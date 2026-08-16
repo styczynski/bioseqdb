@@ -70,6 +70,13 @@ void call_previous_or_standard_executor_run(
 
 } // namespace
 
+/**
+ * @brief Chains ExecutorRun while tracking the active frame and output-drain state.
+ * @param[in,out] query_desc PostgreSQL query descriptor for this executor invocation.
+ * @param[in] direction Requested scan direction.
+ * @param[in] count Maximum tuples to emit, or zero for an unbounded run.
+ * @param[in] execute_once PostgreSQL execute-once hint forwarded unchanged.
+ */
 void bioseq_alignment_executor_run(
 		QueryDesc* query_desc,
 		ScanDirection direction,

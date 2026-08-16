@@ -19,6 +19,10 @@ import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
+/**
+ * @brief Invalidates nested collector bindings that outlive their root frame.
+ * @param[in,out] root Root frame whose collector is being retired.
+ */
 void retire_escaped_nested_bindings(alignment_executor_frame* root) noexcept
 {
 	if (root == nullptr
