@@ -8,7 +8,6 @@
 module;
 
 #include <cstddef>
-#include <cstdint>
 
 export module bioseq.instrumentation.arena;
 

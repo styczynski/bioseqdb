@@ -8,7 +8,6 @@
 module;
 
 #include <array>
-#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <limits>
@@ -17,7 +16,6 @@ module;
 export module bioseq.instrumentation.aggregation;
 
 import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 

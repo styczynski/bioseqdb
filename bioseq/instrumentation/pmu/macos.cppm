@@ -13,8 +13,7 @@ module;
 #include <mutex>
 
 #if defined(__APPLE__)
-#  include <dlfcn.h>
-#  include <sys/sysctl.h>
+#include <dlfcn.h>
 #endif
 
 export module bioseq.instrumentation.pmu.macos;
