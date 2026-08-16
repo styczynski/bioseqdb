@@ -26,6 +26,9 @@ struct persisted_grouped_soa_coordinate_publication_stats {
     std::uint64_t staged_jobs = 0;
 };
 
+/// @brief Validate the exact persisted grouped-SoA coordinate publication equation.
+/// @param[in] counts Publication counters to validate.
+/// @return `true` when every publication count proves complete, unburned staging.
 [[nodiscard]] constexpr bool is_persisted_grouped_soa_coordinate_publication_consistent(
     const persisted_grouped_soa_coordinate_publication_stats& counts) noexcept {
     return counts.expected_jobs != 0 && counts.expected_jobs <= k_sql_bigint_value_max &&
@@ -48,6 +51,8 @@ struct persisted_gpu_submission_stats {
     std::uint64_t ordinal = 0u;
     std::uint64_t submit_wait_identity = 0u;
 
+    /// @brief Return whether the submission carries complete SQL-bound causal identities.
+    /// @return `true` when every causal identity is present and the ordinal is SQL-bound.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         return operation_identity != 0u && ordinal != 0u && ordinal <= k_sql_bigint_value_max &&
                submit_wait_identity != 0u;
@@ -68,6 +73,8 @@ struct persisted_gpu_environment_snapshot {
     std::uint64_t seed_size = 0u;
     std::uint64_t manifest_checksum = 0u;
 
+    /// @brief Validate presence and bounds of every immutable Vulkan and cache identity.
+    /// @return `true` when all environment identities satisfy the persisted-GPU contract.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         return api_version != 0u && driver_version != 0u && seed_size != 0u &&
                seed_size <= k_sql_bigint_value_max && manifest_checksum != 0u &&
@@ -125,13 +132,19 @@ struct persisted_gpu_cache_validation_result {
     std::uint64_t manifest_checksum = 0u;
     bool is_saturated = false;
 
+    /// @brief Return the validated helper build identity without its zero padding.
+    /// @return View over the bounded helper build identity bytes.
     [[nodiscard]] std::string_view helper_build_identity_text() const noexcept {
         return {helper_build_identity.data(), helper_build_identity_size};
     }
+    /// @brief Return the validated helper source identity without its zero padding.
+    /// @return View over the bounded helper source identity bytes.
     [[nodiscard]] std::string_view helper_source_text() const noexcept {
         return {helper_source.data(), helper_source_size};
     }
 
+    /// @brief Validate the complete immutable archive, helper, device, and cache receipt.
+    /// @return `true` when every receipt field satisfies the fixed qualification contract.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         const auto nonzero = [](const auto& p_bytes) noexcept {
             return std::any_of(
@@ -183,6 +196,8 @@ struct persisted_gpu_cache_metrics {
     std::uint64_t pipeline_creates = 0u;
     std::uint64_t pipeline_creation_ns = 0u;
 
+    /// @brief Validate the report-once cache counter shape and SQL bounds.
+    /// @return `true` when the cache token and optional counter groups are valid.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         const bool load_shape =
             pipeline_cache_loads == 0u
@@ -215,6 +230,10 @@ struct persisted_gpu_coordinate_result_stats {
     bool is_reverse = false;
     bool is_valid = false;
 
+    /// @brief Validate a positive coordinate result against its query and target extents.
+    /// @param[in] query_length Logical query length in bases.
+    /// @param[in] target_length Logical target length in bases.
+    /// @return `true` when the coordinate is positive, bounded, and length-consistent.
     [[nodiscard]] constexpr bool
     is_internally_consistent(const std::uint64_t query_length,
                              const std::uint64_t target_length) const noexcept {
@@ -264,6 +283,9 @@ struct persisted_gpu_job_stats {
     std::uint64_t fallback_calls = 0u;
     persisted_gpu_coordinate_result_stats coordinate{};
 
+    /// @brief Validate the causal dispatch, submission, and coordinate record for one job.
+    /// @param[in] shape_operation_identity Required identity for every shape submission.
+    /// @return `true` when all fixed dispatch counts and causal identities are consistent.
     [[nodiscard]] constexpr bool
     is_internally_consistent(const std::uint64_t shape_operation_identity) const noexcept {
         if (logical_target_row > k_sql_bigint_value_max ||
@@ -323,6 +345,9 @@ struct persisted_gpu_operation_stats {
     persisted_gpu_cache_validation_result cache_qualification{};
     persisted_gpu_cache_metrics cache_metrics{};
 
+    /// @brief Validate one operation envelope and all uniquely identified job submissions.
+    /// @param[in] jobs Immutable job records owned by this operation.
+    /// @return `true` when the publication, cache, environment, and jobs form one operation.
     [[nodiscard]] bool
     is_internally_consistent(const std::span<const persisted_gpu_job_stats> jobs) const noexcept {
         if (operation_identity == 0u ||
@@ -416,9 +441,14 @@ class persisted_gpu_operation_append_authorization {
         const persisted_gpu_operation_append_authorization&) = delete;
     persisted_gpu_operation_append_authorization&
     operator=(const persisted_gpu_operation_append_authorization&) = delete;
+    /// @brief Move the single-use authorization and invalidate the source.
+    /// @param[in,out] other Authorization consumed into this object.
     persisted_gpu_operation_append_authorization(
         persisted_gpu_operation_append_authorization&& other) noexcept
         : owner_(std::exchange(other.owner_, nullptr)) {}
+    /// @brief Replace this authorization with the source authority and invalidate the source.
+    /// @param[in,out] other Authorization consumed into this object.
+    /// @return This authorization after replacement.
     persisted_gpu_operation_append_authorization&
     operator=(persisted_gpu_operation_append_authorization&& other) noexcept {
         if (this != &other) {
@@ -427,11 +457,15 @@ class persisted_gpu_operation_append_authorization {
         return *this;
     }
 
+    /// @brief Return whether this token still authorizes an originating-accumulator append.
+    /// @return `true` while this token retains an originating accumulator.
     [[nodiscard]] bool is_valid() const noexcept {
         return owner_ != nullptr;
     }
 
   private:
+    /// @brief Mint an append authorization bound to one accumulator.
+    /// @param[in] owner Accumulator authorized for one append.
     explicit persisted_gpu_operation_append_authorization(
         persisted_gpu_operation_accumulator& owner) noexcept
         : owner_(&owner) {}
@@ -450,7 +484,9 @@ class persisted_gpu_operation_chunk {
     persisted_gpu_operation_chunk(persisted_gpu_operation_chunk&&) = delete;
     persisted_gpu_operation_chunk& operator=(persisted_gpu_operation_chunk&&) = delete;
 
-    /// Admit and allocate one exact operation/job image before finalization.
+    /// @brief Admit and allocate one exact operation/job image before finalization.
+    /// @param[in] job_count Exact number of job records to retain.
+    /// @return Admitted chunk, or null when bounds, admission, or allocation fails.
     [[nodiscard]] static std::unique_ptr<persisted_gpu_operation_chunk>
     prepare(const std::size_t job_count) noexcept {
         using bioseq::common::saturating_add;
@@ -492,38 +528,56 @@ class persisted_gpu_operation_chunk {
         }
     }
 
+    /// @brief Return mutable operation-envelope storage before sealing.
+    /// @return Mutable operation-envelope reference owned by this chunk.
     [[nodiscard]] persisted_gpu_operation_stats& operation() noexcept {
         return operation_;
     }
+    /// @brief Return mutable job storage before sealing.
+    /// @return Mutable view over all job records owned by this chunk.
     [[nodiscard]] std::span<persisted_gpu_job_stats> jobs() noexcept {
         return jobs_;
     }
+    /// @brief Return the immutable operation envelope.
+    /// @return Const operation-envelope reference owned by this chunk.
     [[nodiscard]] const persisted_gpu_operation_stats& operation() const noexcept {
         return operation_;
     }
+    /// @brief Return the immutable job records.
+    /// @return Const view over all job records owned by this chunk.
     [[nodiscard]] std::span<const persisted_gpu_job_stats> jobs() const noexcept {
         return jobs_;
     }
+    /// @brief Return the next linked operation chunk, if present.
+    /// @return Borrowed next-chunk pointer, or null at the chain tail.
     [[nodiscard]] const persisted_gpu_operation_chunk* next() const noexcept {
         return next_.get();
     }
 
-    /// Freeze populated fields after every full-stage/range/equation check.
+    /// @brief Freeze populated fields after every full-stage/range/equation check.
+    /// @return `true` when the operation and all jobs pass internal validation.
     [[nodiscard]] bool seal() noexcept {
         is_sealed_ = operation_.is_internally_consistent(jobs_);
         return is_sealed_;
     }
+    /// @brief Return whether all operation and job invariants passed sealing.
+    /// @return `true` after a successful sealing attempt.
     [[nodiscard]] bool is_sealed() const noexcept {
         return is_sealed_;
     }
 
-    /// Publish the runtime-prevalidated final report-once delta. runtime's
+    /// @brief Publish the runtime-prevalidated final report-once delta.
+    ///
+    /// The runtime's
     /// claim plan proves componentwise boundedness before its irreversible
     /// report-once commit, so this post-finalizer step is only a fixed write.
+    /// @param[in] metrics Runtime-prevalidated final cache delta.
     void publish_cache_metrics(const persisted_gpu_cache_metrics& metrics) noexcept {
         operation_.cache_metrics = metrics;
         has_published_cache_metrics_ = true;
     }
+    /// @brief Return whether the final report-once cache delta has been published.
+    /// @return `true` after publication of the final cache metrics.
     [[nodiscard]] bool has_published_cache_metrics() const noexcept {
         return has_published_cache_metrics_;
     }
@@ -547,9 +601,14 @@ class persisted_gpu_operation_accumulator {
     persisted_gpu_operation_accumulator(const persisted_gpu_operation_accumulator&) = delete;
     persisted_gpu_operation_accumulator&
     operator=(const persisted_gpu_operation_accumulator&) = delete;
+    /// @brief Move all admitted chunks and accumulator state without allocating.
+    /// @param[in,out] other Accumulator consumed into this object.
     persisted_gpu_operation_accumulator(persisted_gpu_operation_accumulator&& other) noexcept {
         move_from(other);
     }
+    /// @brief Clear this chain, then move all chunks and state without allocating.
+    /// @param[in,out] other Accumulator consumed into this object.
+    /// @return This accumulator after replacement.
     persisted_gpu_operation_accumulator&
     operator=(persisted_gpu_operation_accumulator&& other) noexcept {
         if (this != &other) {
@@ -558,11 +617,14 @@ class persisted_gpu_operation_accumulator {
         }
         return *this;
     }
+    /// @brief Iteratively release the operation chain and its admission permits.
     ~persisted_gpu_operation_accumulator() {
         clear_iterative();
     }
 
-    /// Complete all duplicate/capacity/range checks before runtime finalizer.
+    /// @brief Complete all duplicate/capacity/range checks before runtime finalizer.
+    /// @param[in] chunk Sealed, unpublished chunk proposed for appending.
+    /// @return Single-use append authority, or an invalid token on rejection.
     [[nodiscard]] persisted_gpu_operation_append_authorization
     prepare_append(const std::unique_ptr<persisted_gpu_operation_chunk>& chunk) noexcept {
         if (is_frozen_ || is_invalid_ || chunk == nullptr || !chunk->is_sealed() ||
@@ -599,7 +661,9 @@ class persisted_gpu_operation_accumulator {
         return persisted_gpu_operation_append_authorization{*this};
     }
 
-    /// Allocation-free/noexcept link after is_accepted runtime authority exists.
+    /// @brief Link allocation-free after accepted runtime authority exists.
+    /// @param[in,out] authority Single-use authorization consumed by this append.
+    /// @param[in,out] chunk Sealed, published chunk consumed into the chain.
     void commit_append(persisted_gpu_operation_append_authorization&& authority,
                        std::unique_ptr<persisted_gpu_operation_chunk>&& chunk) noexcept {
         if (authority.owner_ != this || chunk == nullptr || !chunk->is_sealed() ||
@@ -620,11 +684,13 @@ class persisted_gpu_operation_accumulator {
         authority.owner_ = nullptr;
     }
 
-    /// Freeze at ExecutorFinish before move into the immutable snapshot.
+    /// @brief Freeze at ExecutorFinish before moving into the immutable snapshot.
     void freeze() noexcept {
         is_frozen_ = true;
     }
 
+    /// @brief Return whether the frozen chain is complete, bounded, and fully published.
+    /// @return `true` when all linked counts and publication state reconcile.
     [[nodiscard]] bool is_complete() const noexcept {
         if (!is_frozen_ || is_invalid_ || is_saturated_ || dropped_operation_count_ != 0u ||
             operation_count_ > k_persisted_gpu_operation_capacity ||
@@ -643,10 +709,14 @@ class persisted_gpu_operation_accumulator {
         }
         return operations == operation_count_ && jobs == job_count_;
     }
+    /// @brief Return whether a complete accumulator contains at least one operation and job.
+    /// @return `true` for a nonempty complete accumulator.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         return operation_count_ != 0u && job_count_ != 0u && is_complete();
     }
-    /// Bind the immutable operation set back to the canonical statement aggregate.
+    /// @brief Bind the immutable operation set back to the canonical statement aggregate.
+    /// @param[in] stats Canonical statement aggregate to reconcile.
+    /// @return `true` when identities and selected operational counters match exactly.
     [[nodiscard]] bool is_pipeline_match(const pipeline_execution_stats& stats) const noexcept {
         if (!is_internally_consistent() ||
             !pipeline_execution_stats::can_retain_full_attestation(stats) ||
@@ -727,23 +797,36 @@ class persisted_gpu_operation_accumulator {
                chain_dispatches == stats.operational.gpu_chain_dispatches &&
                backtrack_dispatches == stats.operational.gpu_chain_backtrack_dispatches;
     }
+    /// @brief Return whether any accumulator count or capacity decision saturated.
+    /// @return Retained saturation state.
     [[nodiscard]] bool is_saturated() const noexcept {
         return is_saturated_;
     }
+    /// @brief Return the number of operation records rejected before publication.
+    /// @return Saturating dropped-operation count.
     [[nodiscard]] std::uint64_t dropped_operation_count() const noexcept {
         return dropped_operation_count_;
     }
+    /// @brief Return the number of linked operation chunks.
+    /// @return Linked operation count.
     [[nodiscard]] std::uint64_t operation_count() const noexcept {
         return operation_count_;
     }
+    /// @brief Return the number of job records across all linked chunks.
+    /// @return Aggregate job count.
     [[nodiscard]] std::uint64_t job_count() const noexcept {
         return job_count_;
     }
+    /// @brief Return the first immutable operation chunk, if present.
+    /// @return Borrowed head pointer, or null for an empty accumulator.
     [[nodiscard]] const persisted_gpu_operation_chunk* head() const noexcept {
         return head_.get();
     }
 
   private:
+    /// @brief Permanently invalidate the accumulator and count drops saturatingly.
+    /// @param[in] dropped Additional rejected-operation count.
+    /// @param[in] is_saturated Whether the rejecting condition is a capacity failure.
     void invalidate(const std::uint64_t dropped, const bool is_saturated) noexcept {
         is_invalid_ = true;
         is_saturated_ = is_saturated_ || is_saturated;
@@ -755,6 +838,7 @@ class persisted_gpu_operation_accumulator {
         }
     }
 
+    /// @brief Iteratively release the linked chain without recursive destruction.
     void clear_iterative() noexcept {
         tail_ = nullptr;
         while (head_ != nullptr) {
@@ -763,6 +847,8 @@ class persisted_gpu_operation_accumulator {
         }
     }
 
+    /// @brief Transfer the complete chain and reset the source accumulator to empty.
+    /// @param[in,out] other Accumulator consumed into this object.
     void move_from(persisted_gpu_operation_accumulator& other) noexcept {
         head_ = std::move(other.head_);
         tail_ = std::exchange(other.tail_, nullptr);
@@ -787,10 +873,15 @@ class persisted_gpu_operation_accumulator {
 static_assert(!std::is_copy_constructible_v<persisted_gpu_operation_accumulator>);
 static_assert(std::is_nothrow_move_constructible_v<persisted_gpu_operation_accumulator>);
 
-/// Convert the runtime-minted fixed GPU identity into the statement stats
+/// @brief Convert the runtime-minted fixed GPU identity into statement stats.
+///
+/// The conversion occurs
 /// without allocating or inferring cache state from descriptive counters.
 /// Only the immutable all-hit policy is_accepted by the persisted operation can
 /// become an all-GPU execution environment.
+/// @param[in] binding Runtime-minted immutable GPU environment binding.
+/// @param[in] effective_cpu_workers Effective statement worker count.
+/// @return Validated environment snapshot, or no value when the binding fails closed.
 [[nodiscard]] inline std::optional<execution_environment_snapshot>
 make_persisted_grouped_soa_gpu_environment_snapshot(
     const ::bioseq::gpu::vulkan::runtime_gpu_execution_environment_snapshot& binding,
@@ -819,10 +910,13 @@ make_persisted_grouped_soa_gpu_environment_snapshot(
                : std::nullopt;
 }
 
-/// Convert the separately-owned report-once cache token into an operational
-/// delta.  The descriptive environment stats is intentionally insufficient to
+/// @brief Convert the separately owned report-once cache token into an operational delta.
+///
+/// Descriptive environment stats are intentionally insufficient to
 /// manufacture these counters, and the token identity itself is not replayed
 /// into the SQL aggregate.
+/// @param[in] audit Separately owned report-once cache token and counters.
+/// @return Operational cache delta, or no value when the audit is invalid or out of range.
 [[nodiscard]] inline std::optional<pipeline_operational_stats>
 make_persisted_grouped_soa_gpu_cache_metrics_delta(
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& audit) noexcept {
@@ -843,9 +937,14 @@ make_persisted_grouped_soa_gpu_cache_metrics_delta(
     return delta;
 }
 
+/// @brief Compare the final GPU environment with its immutable preview.
+///
 /// The runtime's sealed stats exposes an immutable environment preview before
 /// it commits report-once cache bits.  Final authority must reproduce every
 /// fixed field exactly. Descriptive equivalence is not enough.
+/// @param[in] actual Final runtime environment authority.
+/// @param[in] preview Immutable pre-finalizer environment preview.
+/// @return `true` when both snapshots are valid and byte-for-field equal.
 [[nodiscard]] inline bool is_persisted_grouped_soa_gpu_environment_consistent(
     const ::bioseq::gpu::vulkan::runtime_gpu_execution_environment_snapshot& actual,
     const ::bioseq::gpu::vulkan::runtime_gpu_execution_environment_snapshot& preview) noexcept {
@@ -853,20 +952,32 @@ make_persisted_grouped_soa_gpu_cache_metrics_delta(
            actual == preview;
 }
 
+/// @brief Check final cache metrics against the pre-finalizer maximum claim.
+///
 /// The pre-finalizer cache audit is a componentwise maximum claim, not the
 /// counter delta to publish.  An is_accepted final report-once token may publish
 /// only the same operation identity and values bounded by that validated
 /// maximum.
+/// @param[in] actual Final report-once cache token and counters.
+/// @param[in] preview Pre-finalizer componentwise maximum claim.
+/// @return `true` when the actual audit is componentwise bounded by the preview.
 [[nodiscard]] inline bool is_persisted_grouped_soa_gpu_cache_metrics_bounded_by(
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& actual,
     const ::bioseq::gpu::vulkan::runtime_gpu_cache_metrics_audit& preview) noexcept {
     return actual.is_componentwise_bounded_by(preview);
 }
 
-/// Validate a staged persisted-GPU stats delta and the prospective aggregate
+/// @brief Validate staged persisted-GPU stats and their prospective aggregate.
+///
+/// Validate the delta
 /// without mutating the caller.  The scheduler performs this check before the
 /// allocation-free commit so environment or persisted-generation drift cannot
 /// revoke earlier jobs after any result/source/lifecycle state is published.
+/// @param[in] before Aggregate before the staged operation.
+/// @param[in] staged Fully attested staged-operation delta.
+/// @param[in] prospective Aggregate produced by merging `before` and `staged`.
+/// @param[in] expected_jobs Exact job count attributed to `staged`.
+/// @return `true` when staged and prospective stats preserve full attestation exactly.
 [[nodiscard]] constexpr bool is_persisted_grouped_soa_coordinate_prospective_stats_consistent(
     const pipeline_execution_stats& before,
     const pipeline_execution_stats& staged,

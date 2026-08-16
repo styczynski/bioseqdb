@@ -253,17 +253,23 @@ struct pipeline_operational_stats {
     [[nodiscard]] constexpr bool
     operator==(const pipeline_operational_stats&) const noexcept = default;
 
-    /// Authentic vector activity may originate from the continuation kernel
+    /// @brief Report authentic vector activity from either permitted nthash kernel.
+    ///
+    /// Activity may originate from the continuation kernel
     /// or the whole-range resident vector_stream kernel. The two counts remain
     /// separately interpretable above.
+    /// @return `true` when either authentic vector execution counter is nonzero.
     [[nodiscard]] constexpr bool has_nthash_vector_activity() const noexcept {
         return nthash_vector_batches != 0 || nthash_resident_vector_stream_kernel_calls != 0;
     }
 
-    /// Merge one completed operation-local prefilter stats. The authoritative
+    /// @brief Merge one completed operation-local prefilter stats.
+    ///
+    /// The authoritative
     /// stats type owns all counter arithmetic and invariants. The statement
     /// aggregate only retains its presence and propagates invalidity into the
     /// existing fail-closed operational saturation signal.
+    /// @param[in] stats Completed operation-local prefilter statistics.
     void record_prefilter_execution_stats(
         const ::bioseq::prefilter::prefilter_execution_stats& stats) noexcept {
         prefilter_stats.merge(stats);
@@ -274,7 +280,8 @@ struct pipeline_operational_stats {
         }
     }
 
-    /// Merge one operational delta without multiplying it by logical jobs.
+    /// @brief Merge one operational delta without multiplying it by logical jobs.
+    /// @param[in] rhs Operation-local delta to merge.
     void merge(const pipeline_operational_stats& rhs) noexcept {
         using prefilter_stats_type = ::bioseq::prefilter::prefilter_execution_stats;
         const prefilter_stats_type empty_prefilter_stats{};
@@ -583,6 +590,8 @@ struct pipeline_execution_stats {
     pipeline_job_stage_coverage stages{};
     pipeline_operational_stats operational{};
 
+    /// @brief Reclassify every attempted job after aggregate stats become lossy.
+    ///
     /// Once aggregate arithmetic or a report-once identity becomes lossy, no
     /// subset may continue to appear fully attested. Preserve the first
     /// attempted coordinates so the fail-closed transition remains diagnosable.
@@ -598,7 +607,8 @@ struct pipeline_execution_stats {
         first_unattested_query_ordinal = first_attempted_query_ordinal;
     }
 
-    /// Validate and merge one logical target-query stats exactly once.
+    /// @brief Validate and merge one logical target-query stats exactly once.
+    /// @param[in] job Complete job-level attestation to merge.
     void merge_job(const pipeline_job_execution_stats& job) noexcept {
         bool attested = is_job_execution_stats_valid(job);
         if ((requested_backend != executed_backend::none &&
@@ -683,7 +693,8 @@ struct pipeline_execution_stats {
         }
     }
 
-    /// Merge a once-per-buffer operational delta.
+    /// @brief Merge a once-per-buffer operational delta.
+    /// @param[in] batch Once-per-buffer operational delta.
     void merge_operational(const pipeline_operational_stats& batch) noexcept {
         operational.merge(batch);
         if (operational.are_stats_saturated || operational.has_operational_identity_conflict ||
@@ -694,8 +705,11 @@ struct pipeline_execution_stats {
         }
     }
 
-    /// Detect actual Vulkan work before interpreting a mixed diagnostic's
-    /// environment. Selection labels alone are intentionally insufficient.
+    /// @brief Detect actual Vulkan work before interpreting a mixed diagnostic.
+    ///
+    /// Selection labels alone are intentionally insufficient.
+    /// @param[in] stats Aggregate statistics to inspect.
+    /// @return `true` when stage timing or operational counters prove Vulkan execution.
     [[nodiscard]] static constexpr bool
     has_gpu_execution_stats(const pipeline_execution_stats& stats) noexcept {
         const auto& operational = stats.operational;
@@ -735,7 +749,9 @@ struct pipeline_execution_stats {
                operational.gpu_pipeline_creates != 0;
     }
 
-    /// Validate an all-unattested diagnostic without promoting it to stats.
+    /// @brief Validate an all-unattested diagnostic without promoting it to stats.
+    /// @param[in] stats Aggregate diagnostic to validate.
+    /// @return `true` when the mixed diagnostic retains a valid concrete environment.
     [[nodiscard]] static constexpr bool
     is_diagnostic_environment_valid(const pipeline_execution_stats& stats) noexcept {
         if (stats.actual_backend != executed_backend::mixed_invalid ||
@@ -755,7 +771,9 @@ struct pipeline_execution_stats {
         return is_environment_valid_for_backend(stats.environment, environment_backend);
     }
 
-    /// Validate environment presence before aggregate stats adoption.
+    /// @brief Validate environment presence before aggregate stats adoption.
+    /// @param[in] stats Aggregate operand to validate.
+    /// @return `true` when environment presence matches the operand's job/backend state.
     [[nodiscard]] static constexpr bool
     is_aggregate_environment_operand_valid(const pipeline_execution_stats& stats) noexcept {
         if (stats.attempted_alignment_jobs == 0) {
@@ -772,11 +790,13 @@ struct pipeline_execution_stats {
         return is_diagnostic_environment_valid(stats);
     }
 
-    /// Validate the exact per-stage aggregate implied by a concrete
-    /// backend/source and the number of attempted logical jobs. Optional,
-    /// data-dependent stages may cover any subset. Unconditional front-end
+    /// @brief Validate per-stage aggregation for a concrete backend, source, and job count.
+    ///
+    /// Optional, data-dependent stages may cover any subset. Unconditional front-end
     /// stages must cover every job. No forbidden engine or fallback lane may
     /// carry work.
+    /// @param[in] stats Aggregate statistics to validate.
+    /// @return `true` when every stage aggregate matches its required engine and eligibility.
     [[nodiscard]] static constexpr bool
     is_aggregate_stage_coverage_valid(const pipeline_execution_stats& stats) noexcept {
         if (!is_concrete_backend(stats.actual_backend) ||
@@ -815,9 +835,13 @@ struct pipeline_execution_stats {
         return true;
     }
 
-    /// Canonical identity element for stats aggregation. A zero-job value with
+    /// @brief Identify the canonical identity element for stats aggregation.
+    ///
+    /// A zero-job value with
     /// selected backend/source labels or a captured environment is not empty.
-    /// allowing it to behave as the identity would erase malformed input.
+    /// Allowing it to behave as the identity would erase malformed input.
+    /// @param[in] stats Aggregate operand to inspect.
+    /// @return `true` only for the exact value-initialized aggregation identity.
     [[nodiscard]] static constexpr bool
     is_exact_empty_stats_operand(const pipeline_execution_stats& stats) noexcept {
         return stats.attempted_alignment_jobs == 0 && stats.fully_attested_alignment_jobs == 0 &&
@@ -842,9 +866,13 @@ struct pipeline_execution_stats {
                stats.operational == pipeline_operational_stats{};
     }
 
+    /// @brief Decide whether an operand may retain full attestation during merging.
+    ///
     /// Only a canonical empty value or an internally complete concrete stats
     /// may retain fully-attested counts across an aggregate merge. Mixed
     /// diagnostics remain readable, but can never promote a clean sibling.
+    /// @param[in] stats Aggregate operand to validate.
+    /// @return `true` when the operand may preserve full attestation during merging.
     [[nodiscard]] static constexpr bool
     can_retain_full_attestation(const pipeline_execution_stats& stats) noexcept {
         if (is_exact_empty_stats_operand(stats))
@@ -887,7 +915,8 @@ struct pipeline_execution_stats {
         return stats.persisted_generation_id == 0 && stats.persisted_source_identity == 0;
     }
 
-    /// Merge one completed buffer/node aggregate without laundering stats gaps.
+    /// @brief Merge one completed buffer/node aggregate without laundering stats gaps.
+    /// @param[in] rhs Completed aggregate to merge.
     void merge(const pipeline_execution_stats& rhs) noexcept {
         // Validate both operands before first-stats adoption. In particular, a
         // missing environment on a nonempty left accumulator must not disappear
