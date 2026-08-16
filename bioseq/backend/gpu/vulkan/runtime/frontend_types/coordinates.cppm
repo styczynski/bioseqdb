@@ -86,6 +86,8 @@ struct gpu_seed_coordinate_job {
     const gpu_grouped_soa_resident_view* grouped_soa = nullptr;
 };
 
+/// @brief Determines which mutually exclusive resident-index representation a job uses.
+/// @return The selected representation, or `invalid` for mixed or incomplete inputs.
 [[nodiscard]] inline constexpr gpu_seed_index_representation
 classify_gpu_seed_index_representation(const gpu_seed_coordinate_job& job) noexcept {
     const bool grouped_soa_only = job.grouped_soa != nullptr && job.slots == nullptr &&
@@ -130,15 +132,20 @@ struct persisted_grouped_soa_coordinate_config_identity {
     std::int32_t min_seed_count = 0;
     std::uint32_t probe_limit = 0u;
 
+    /// @brief Validates the complete dispatch-affecting configuration identity.
+    /// @return `true` when all required tiled-DP fields are supported and nonzero.
     [[nodiscard]] constexpr bool is_valid() const noexcept {
         return kmer_size != 0u && kmer_size <= 255u && max_occ >= 0 &&
                coordinate_algorithm == gpu_seed_coordinate_algorithm::vulkan_tiled_dp &&
                chain_key.tile_size != 0u && chain_key.local_size != 0u && probe_limit != 0u;
     }
+    /// @brief Compares every dispatch-affecting configuration field exactly.
     [[nodiscard]] bool
     operator==(const persisted_grouped_soa_coordinate_config_identity&) const = default;
 };
 
+/// @brief Builds an exact configuration identity, preserving float bit patterns.
+/// @return Fully populated configuration identity.
 [[nodiscard]] inline persisted_grouped_soa_coordinate_config_identity
 make_persisted_grouped_soa_coordinate_config_identity(
     std::uint32_t kmer_size,
@@ -188,6 +195,8 @@ struct gpu_seed_coordinate_batch_stats {
     std::uint64_t coordinate_vote_dispatches = 0;
 };
 
+/// @brief Compares every coordinate-result wire field.
+/// @return `true` when the two wire values are bitwise-field equivalent.
 [[nodiscard]] inline constexpr bool
 are_coordinate_result_wires_equal(const gpu_coordinate_result_wire& lhs,
                                   const gpu_coordinate_result_wire& rhs) noexcept {
@@ -198,6 +207,8 @@ are_coordinate_result_wires_equal(const gpu_coordinate_result_wire& lhs,
            lhs.is_reverse == rhs.is_reverse && lhs.is_valid == rhs.is_valid;
 }
 
+/// @brief Validates a coordinate result against query and target bounds.
+/// @return `true` for the canonical empty result or a bounded valid alignment.
 [[nodiscard]] inline constexpr bool
 is_coordinate_result_wire_well_formed(const gpu_coordinate_result_wire& result,
                                       const std::uint64_t query_len,
@@ -304,6 +315,8 @@ struct persisted_grouped_soa_coordinate_job_audit {
     std::uint64_t recompute_calls = 0;
     std::uint64_t fallback_calls = 0;
 
+    /// @brief Validates identities, dispatch causality, and result shape for one job.
+    /// @return `true` when the audit proves a complete supported GPU path.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         const bool identity_and_query =
             operation_identity != 0u && query_authority_identity != 0u &&
@@ -394,15 +407,21 @@ struct persisted_grouped_soa_coordinate_job_audit {
 /// @brief Unforgeable consumed view of one accepted audit record.
 class persisted_grouped_soa_coordinate_job_receipt {
   public:
+    /// @brief Constructs an empty invalid job receipt.
     persisted_grouped_soa_coordinate_job_receipt() = default;
+    /// @brief Prevents copying one-shot receipt authority.
     persisted_grouped_soa_coordinate_job_receipt(
         const persisted_grouped_soa_coordinate_job_receipt&) = delete;
+    /// @brief Prevents copy-assignment of one-shot receipt authority.
     persisted_grouped_soa_coordinate_job_receipt&
     operator=(const persisted_grouped_soa_coordinate_job_receipt&) = delete;
+    /// @brief Transfers receipt authority and invalidates the source.
     persisted_grouped_soa_coordinate_job_receipt(
         persisted_grouped_soa_coordinate_job_receipt&& other) noexcept {
         move_from(other);
     }
+    /// @brief Replaces this receipt with transferred authority.
+    /// @return This receipt.
     persisted_grouped_soa_coordinate_job_receipt&
     operator=(persisted_grouped_soa_coordinate_job_receipt&& other) noexcept {
         if (this != &other) {
@@ -414,9 +433,13 @@ class persisted_grouped_soa_coordinate_job_receipt {
         return *this;
     }
 
+    /// @brief Validates issuance, operation identity, and the sealed audit.
+    /// @return `true` when this object carries consumable job evidence.
     [[nodiscard]] bool is_valid() const noexcept {
         return issued_ && pipeline_operation_identity_ != 0u && audit_.is_internally_consistent();
     }
+    /// @brief Returns the immutable job audit.
+    /// @return Audit bound to this receipt.
     [[nodiscard]] const persisted_grouped_soa_coordinate_job_audit& audit() const noexcept {
         return audit_;
     }
@@ -424,6 +447,7 @@ class persisted_grouped_soa_coordinate_job_receipt {
   private:
     friend class persisted_grouped_soa_coordinate_operation_receipt;
 
+    /// @brief Transfers receipt fields and clears the source.
     void move_from(persisted_grouped_soa_coordinate_job_receipt& other) noexcept {
         audit_ = other.audit_;
         issued_ = other.issued_;
@@ -450,6 +474,8 @@ struct persisted_grouped_soa_coordinate_operation_acceptance_audit {
     std::uint64_t committed_submission_count = 0u;
     std::uint64_t seed_receipt_identity = 0u;
 
+    /// @brief Validates aggregate one-shot acceptance and receipt accounting.
+    /// @return `true` when every expected job was accepted without burning.
     [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
         return operation_identity != 0u && expected_job_count != 0u &&
                consumed_count == expected_job_count && accepted_count == expected_job_count &&
@@ -457,6 +483,7 @@ struct persisted_grouped_soa_coordinate_operation_acceptance_audit {
                shape_pipeline_receipt_count >= 7u && shape_pipeline_receipt_count <= 10u &&
                committed_submission_count >= 3u && seed_receipt_identity != 0u;
     }
+    /// @brief Compares all aggregate acceptance counters and identities.
     [[nodiscard]] constexpr bool
     operator==(const persisted_grouped_soa_coordinate_operation_acceptance_audit&) const noexcept =
         default;
@@ -486,6 +513,8 @@ struct persisted_grouped_soa_coordinate_operation_receipt_preview {
     runtime_metal_archive_process_qualification cache_qualification{};
     runtime_gpu_cache_metrics_audit maximum_cache_metrics{};
 
+    /// @brief Validates operation identities, environment binding, and cache metrics.
+    /// @return `true` when the preview is complete and causally consistent.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         return acceptance.is_internally_consistent() && query_pipeline_operation_identity != 0u &&
                shape_pipeline_operation_identity == acceptance.operation_identity &&
@@ -515,6 +544,7 @@ struct persisted_grouped_soa_coordinate_operation_receipt_preview {
                    return value != 0u;
                });
     }
+    /// @brief Compares every operation-preview field.
     [[nodiscard]] constexpr bool operator==(
         const persisted_grouped_soa_coordinate_operation_receipt_preview&) const noexcept = default;
 };
@@ -525,6 +555,8 @@ struct persisted_grouped_soa_coordinate_job_receipt_preview {
     std::uint64_t shape_pipeline_operation_identity = 0u;
     std::array<std::uint64_t, 4> shape_submission_ordinals{};
 
+    /// @brief Validates full-stage job evidence and unique submission ordinals.
+    /// @return `true` when the job proves the complete shape pipeline.
     [[nodiscard]] bool is_internally_consistent() const noexcept {
         if (!audit.is_internally_consistent() || audit.anchor_count == 0u ||
             audit.range_count == 0u || audit.result.is_valid != 1u ||
@@ -547,17 +579,23 @@ struct persisted_grouped_soa_coordinate_job_receipt_preview {
 /// @brief Move-only accepted operation and its immutable environment identity.
 class persisted_grouped_soa_coordinate_accepted_operation {
   public:
+    /// @brief Constructs an empty invalid accepted operation.
     persisted_grouped_soa_coordinate_accepted_operation() = default;
+    /// @brief Prevents copying accepted-operation authority.
     persisted_grouped_soa_coordinate_accepted_operation(
         const persisted_grouped_soa_coordinate_accepted_operation&) = delete;
+    /// @brief Prevents copy-assignment of accepted-operation authority.
     persisted_grouped_soa_coordinate_accepted_operation&
     operator=(const persisted_grouped_soa_coordinate_accepted_operation&) = delete;
+    /// @brief Transfers acceptance, environment, and cache-metric authority.
     persisted_grouped_soa_coordinate_accepted_operation(
         persisted_grouped_soa_coordinate_accepted_operation&& other) noexcept
         : audit_(std::exchange(other.audit_, {})),
           environment_(std::exchange(other.environment_, {})),
           cache_metrics_(std::move(other.cache_metrics_)),
           issued_(std::exchange(other.issued_, false)) {}
+    /// @brief Replaces this object with transferred accepted-operation authority.
+    /// @return This accepted operation.
     persisted_grouped_soa_coordinate_accepted_operation&
     operator=(persisted_grouped_soa_coordinate_accepted_operation&& other) noexcept {
         if (this != &other) {
@@ -569,21 +607,28 @@ class persisted_grouped_soa_coordinate_accepted_operation {
         return *this;
     }
 
+    /// @brief Validates the acceptance audit, environment, and metric delta.
+    /// @return `true` when all accepted-operation evidence is usable.
     [[nodiscard]] bool is_valid() const noexcept {
         return issued_ && audit_.is_internally_consistent() &&
                environment_.is_internally_consistent() && cache_metrics_.is_valid();
     }
+    /// @brief Returns immutable aggregate acceptance evidence.
     [[nodiscard]] const persisted_grouped_soa_coordinate_operation_acceptance_audit&
     audit() const noexcept {
         return audit_;
     }
+    /// @brief Returns the immutable GPU execution-environment binding.
     [[nodiscard]] const runtime_gpu_execution_environment_snapshot&
     environment_binding() const noexcept {
         return environment_;
     }
+    /// @brief Returns the immutable cache-metrics audit.
     [[nodiscard]] const runtime_gpu_cache_metrics_audit& cache_metrics_audit() const noexcept {
         return cache_metrics_.audit();
     }
+    /// @brief Transfers the one-shot cache-metrics delta to the caller.
+    /// @return Move-owned cache-metrics delta.
     [[nodiscard]] runtime_gpu_cache_metrics_delta take_cache_metrics_delta() noexcept {
         return std::move(cache_metrics_);
     }
@@ -605,15 +650,21 @@ static_assert(
 /// query-record and result identities.
 class persisted_grouped_soa_coordinate_operation_receipt {
   public:
+    /// @brief Constructs an empty unsealed operation receipt.
     persisted_grouped_soa_coordinate_operation_receipt() = default;
+    /// @brief Prevents copying operation-receipt authority.
     persisted_grouped_soa_coordinate_operation_receipt(
         const persisted_grouped_soa_coordinate_operation_receipt&) = delete;
+    /// @brief Prevents copy-assignment of operation-receipt authority.
     persisted_grouped_soa_coordinate_operation_receipt&
     operator=(const persisted_grouped_soa_coordinate_operation_receipt&) = delete;
+    /// @brief Transfers operation authority and invalidates the source.
     persisted_grouped_soa_coordinate_operation_receipt(
         persisted_grouped_soa_coordinate_operation_receipt&& other) noexcept {
         move_from(other);
     }
+    /// @brief Releases current records, then transfers another operation receipt.
+    /// @return This operation receipt.
     persisted_grouped_soa_coordinate_operation_receipt&
     operator=(persisted_grouped_soa_coordinate_operation_receipt&& other) noexcept {
         if (this != &other) {
@@ -625,37 +676,47 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         return *this;
     }
 
+    /// @brief Reports whether runtime sealed a nonzero operation identity.
     [[nodiscard]] bool is_sealed() const noexcept {
         return sealed_ && operation_identity_ != 0u;
     }
+    /// @brief Returns the number of jobs in a sealed receipt.
     [[nodiscard]] std::size_t job_count() const noexcept {
         return is_sealed() ? records_.size() : 0u;
     }
+    /// @brief Returns accepted plus burned jobs in a sealed receipt.
     [[nodiscard]] std::size_t consumed_count() const noexcept {
         return is_sealed() ? accepted_count_ + burned_count_ : 0u;
     }
+    /// @brief Returns successfully accepted jobs in a sealed receipt.
     [[nodiscard]] std::size_t accepted_count() const noexcept {
         return is_sealed() ? accepted_count_ : 0u;
     }
+    /// @brief Returns jobs permanently burned by failed validation.
     [[nodiscard]] std::size_t burned_count() const noexcept {
         return is_sealed() ? burned_count_ : 0u;
     }
+    /// @brief Reports whether every job is accepted or burned.
     [[nodiscard]] bool is_fully_consumed() const noexcept {
         return is_sealed() && !records_.empty() &&
                std::all_of(records_.begin(), records_.end(), [](const auto& record) {
                    return record.state != record_state::fresh;
                });
     }
+    /// @brief Reports whether every job was accepted with valid causal tokens.
     [[nodiscard]] bool are_all_jobs_accepted() const noexcept {
         return is_sealed() && is_fully_consumed() && accepted_count_ == records_.size() &&
                burned_count_ == 0u && has_valid_causal_tokens();
     }
+    /// @brief Derives the authenticated execution environment without consuming authority.
     [[nodiscard]] runtime_gpu_execution_environment_snapshot environment_preview() const noexcept {
         return preview_environment();
     }
+    /// @brief Derives maximum cache metrics without consuming authority.
     [[nodiscard]] runtime_gpu_cache_metrics_audit cache_metrics_preview() const noexcept {
         return maximum_cache_metrics();
     }
+    /// @brief Builds an allocation-free aggregate receipt preview.
     [[nodiscard]] persisted_grouped_soa_coordinate_operation_receipt_preview
     operation_receipt_preview() const noexcept {
         persisted_grouped_soa_coordinate_operation_receipt_preview result{};
@@ -703,6 +764,8 @@ class persisted_grouped_soa_coordinate_operation_receipt {
                    ? result
                    : persisted_grouped_soa_coordinate_operation_receipt_preview{};
     }
+    /// @brief Builds full-stage evidence for one accepted job.
+    /// @return Job evidence when the operation and submission record are valid.
     [[nodiscard]] std::optional<persisted_grouped_soa_coordinate_job_receipt_preview>
     job_evidence_preview(const std::size_t problem_index) const noexcept {
         if (!are_all_jobs_accepted() || problem_index >= records_.size() ||
@@ -799,6 +862,8 @@ class persisted_grouped_soa_coordinate_operation_receipt {
                all_valid.records_capacity_permit_ && all_valid.are_all_jobs_accepted();
     }
 
+    /// @brief Consumes one fresh job after exact identity validation.
+    /// @return One-shot job receipt on acceptance; otherwise no value and the job is burned.
     [[nodiscard]] std::optional<persisted_grouped_soa_coordinate_job_receipt>
     consume(const persisted_grouped_soa_coordinate_job_expectation& expected) noexcept {
         if (!is_sealed() || expected.problem_index >= records_.size()) {
@@ -873,6 +938,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         bool valid = false;
     };
 
+    /// @brief Merges distinct immutable pipeline receipts from query and shape tokens.
     [[nodiscard]] pipeline_receipt_union receipt_union() const noexcept {
         pipeline_receipt_union result{};
         if (!sealed_ || test_causal_accepted_ ||
@@ -910,6 +976,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         return result;
     }
 
+    /// @brief Validates shared pipeline identity and constructs an environment snapshot.
     [[nodiscard]] runtime_gpu_execution_environment_snapshot preview_environment() const noexcept {
         const pipeline_receipt_union union_receipts = receipt_union();
         if (!union_receipts.valid)
@@ -947,6 +1014,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
                                                  : runtime_gpu_execution_environment_snapshot{};
     }
 
+    /// @brief Aggregates unique pipeline creation metrics for this operation.
     [[nodiscard]] runtime_gpu_cache_metrics_audit maximum_cache_metrics() const noexcept {
         const pipeline_receipt_union union_receipts = receipt_union();
         if (!union_receipts.valid)
@@ -975,6 +1043,7 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         return result.is_internally_consistent() ? result : runtime_gpu_cache_metrics_audit{};
     }
 
+    /// @brief Admits and allocates the fixed one-shot record vector.
     void admit_records(std::size_t record_count) {
         using bioseq::common::saturating_mul;
         if (record_count == 0u || !records_.empty() || records_capacity_permit_ ||
@@ -1020,17 +1089,20 @@ class persisted_grouped_soa_coordinate_operation_receipt {
         records_capacity_permit_ = std::move(*permit);
     }
 
+    /// @brief Releases record capacity before returning its admission permit.
     void release_records() noexcept {
         bioseq::parallelism::release_admitted_vector_capacity_before_permit(
             records_, records_capacity_permit_);
     }
 
+    /// @brief Validates the query and grouped-SoA pipeline tokens.
     [[nodiscard]] bool has_valid_causal_tokens() const noexcept {
         return test_causal_accepted_ ||
                (query_pipeline_token_.is_valid_for_query_sketch() &&
                 grouped_soa_pipeline_token_.is_valid_for_grouped_soa_coordinate());
     }
 
+    /// @brief Transfers all receipt state and invalidates the source.
     void move_from(persisted_grouped_soa_coordinate_operation_receipt& other) noexcept {
         operation_identity_ = other.operation_identity_;
         records_ = std::move(other.records_);
@@ -1076,6 +1148,8 @@ struct persisted_grouped_soa_coordinate_finalization_plan {
     persisted_grouped_soa_coordinate_operation_acceptance_audit acceptance{};
     bool valid = false;
 
+    /// @brief Validates every prepared finalization component.
+    /// @return `true` when the plan can be committed atomically.
     [[nodiscard]] bool is_valid() const noexcept {
         return valid && cache_claim_plan.is_valid() && environment.is_internally_consistent() &&
                acceptance.is_internally_consistent();
