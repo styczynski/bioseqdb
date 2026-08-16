@@ -6523,6 +6523,7 @@ class satisfiable_compilation_database final
 
 struct lexical_module_description {
     std::string provided_module;
+    bool provides_named_implementation_partition{};
     std::vector<std::string> imports;
 };
 
@@ -6599,6 +6600,8 @@ struct lexical_module_description {
                     + ": provides more than one named module");
             }
             result.provided_module = name;
+            result.provides_named_implementation_partition =
+                !exported && named_module_partition;
         }
         index = end;
     }
@@ -10538,9 +10541,29 @@ prepare_compilation_environment(
     std::ostringstream compile_database_json;
     compile_database_json << "[\n";
     bool first_command = true;
+    std::vector<std::string> compile_database_modules;
+    compile_database_modules.reserve(
+        roots.size() + build_order.size());
+    std::set<std::string, std::less<>> recorded_modules;
     for (const std::filesystem::path& root : roots) {
+        const std::string& module_name = module_by_source.at(root);
+        if (recorded_modules.insert(module_name).second) {
+            compile_database_modules.push_back(module_name);
+        }
+    }
+    for (const std::string& module_name : build_order) {
         const clang_backend::module_build_record& record =
-            modules.at(module_by_source.at(root));
+            modules.at(module_name);
+        if (record.description
+                .provides_named_implementation_partition
+            && recorded_modules.insert(module_name).second) {
+            compile_database_modules.push_back(module_name);
+        }
+    }
+    for (const std::string& module_name :
+         compile_database_modules) {
+        const clang_backend::module_build_record& record =
+            modules.at(module_name);
         if (!first_command) compile_database_json << ",\n";
         first_command = false;
         compile_database_json
@@ -11495,24 +11518,26 @@ void validate_dependency_compilation_roots(
         clang_backend::load_compile_database(compile_database);
     const std::vector<clang::tooling::CompileCommand> all_commands =
         database->getAllCompileCommands();
-    if (all_commands.size() != authority.root_source_paths.size()) {
-        throw std::runtime_error(
-            "dependency-only owned compile database root count is stale");
-    }
+    const std::set<std::filesystem::path> expected_roots{
+        authority.root_source_paths.begin(),
+        authority.root_source_paths.end()};
     std::set<std::filesystem::path> actual_roots;
     for (const clang::tooling::CompileCommand& command : all_commands) {
         const std::filesystem::path source =
             clang_backend::absolute_normalized_path(
                 clang_backend::absolute_command_path(
                     command.Directory, command.Filename));
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(source);
+        if (provider.provides_named_implementation_partition
+            && !expected_roots.contains(source)) {
+            continue;
+        }
         if (!actual_roots.insert(source).second) {
             throw std::runtime_error(
                 "dependency-only owned compile database duplicates a root command");
         }
     }
-    const std::set<std::filesystem::path> expected_roots{
-        authority.root_source_paths.begin(),
-        authority.root_source_paths.end()};
     if (actual_roots != expected_roots) {
         throw std::runtime_error(
             "dependency-only owned compile database root authority is stale");
@@ -12756,6 +12781,39 @@ validate_dependency_compilation_environment(
         != normalized_sources.end()) {
         throw std::runtime_error(
             "generation source list contains duplicate identities");
+    }
+    std::set<std::filesystem::path> expected_database_sources{
+        normalized_sources.begin(), normalized_sources.end()};
+    for (const auto& [name, module] : modules) {
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(module.source);
+        if (provider.provided_module != name) {
+            throw std::runtime_error(
+                "PREPARE source provider identity is stale for module '"
+                + name + "'");
+        }
+        if (provider.provides_named_implementation_partition) {
+            expected_database_sources.insert(module.source);
+        }
+    }
+    const std::vector<clang::tooling::CompileCommand>
+        all_database_commands = database->getAllCompileCommands();
+    std::set<std::filesystem::path> actual_database_sources;
+    for (const clang::tooling::CompileCommand& command :
+         all_database_commands) {
+        const std::filesystem::path source =
+            clang_backend::weakly_canonical_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (!actual_database_sources.insert(source).second) {
+            throw std::runtime_error(
+                "owned compile database duplicates a source command");
+        }
+    }
+    if (actual_database_sources != expected_database_sources) {
+        throw std::runtime_error(
+            "owned compile database source/provider boundary differs "
+            "from the PREPARE manifest");
     }
     for (const std::filesystem::path& source :
          normalized_sources) {
