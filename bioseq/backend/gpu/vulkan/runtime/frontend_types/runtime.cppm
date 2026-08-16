@@ -30,7 +30,9 @@ class runtime {
   public:
     /// @brief Initializes the Vulkan device and immutable runtime resources.
     runtime();
+    /// @brief Prevents copying the process-wide Vulkan runtime.
     runtime(const runtime&) = delete;
+    /// @brief Prevents copy-assignment of the process-wide Vulkan runtime.
     runtime& operator=(const runtime&) = delete;
     /// @brief Releases pipelines, synchronization objects, buffers, and the device.
     ~runtime();
@@ -402,6 +404,8 @@ class runtime {
     }
 
   private:
+    /// @brief Validates a completed receipt and prepares side-effect-free finalization state.
+    /// @return Valid finalization plan, or an invalid plan when any identity check fails.
     [[nodiscard]] static runtime_detail::persisted_grouped_soa_coordinate_finalization_plan
     prepare_persisted_grouped_soa_coordinate_finalization(
         const persisted_grouped_soa_coordinate_operation_receipt& receipt,
@@ -411,9 +415,13 @@ class runtime {
 
     struct pipeline_cache_admission_scope {
         runtime* owner = nullptr;
+        /// @brief Begins a scope that reconciles pipeline-cache admission on exit.
         explicit pipeline_cache_admission_scope(runtime& runtime) noexcept : owner(&runtime) {}
+        /// @brief Prevents copying a reconciliation scope.
         pipeline_cache_admission_scope(const pipeline_cache_admission_scope&) = delete;
+        /// @brief Prevents copy-assignment of a reconciliation scope.
         pipeline_cache_admission_scope& operator=(const pipeline_cache_admission_scope&) = delete;
+        /// @brief Reconciles retained pipeline-cache metadata when active.
         ~pipeline_cache_admission_scope() {
             if (owner != nullptr) {
                 owner->reconcile_pipeline_cache_metadata_locked();
@@ -429,10 +437,15 @@ class runtime {
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
 
+        /// @brief Constructs an empty handle owner.
         owned_pipeline_handles() = default;
+        /// @brief Constructs an empty handle owner associated with a device.
         explicit owned_pipeline_handles(VkDevice owner) noexcept : device(owner) {}
+        /// @brief Prevents copying Vulkan handle ownership.
         owned_pipeline_handles(const owned_pipeline_handles&) = delete;
+        /// @brief Prevents copy-assignment of Vulkan handle ownership.
         owned_pipeline_handles& operator=(const owned_pipeline_handles&) = delete;
+        /// @brief Transfers all Vulkan handles and clears the source.
         owned_pipeline_handles(owned_pipeline_handles&& other) noexcept
             : device(std::exchange(other.device, VK_NULL_HANDLE)),
               set_layout(std::exchange(other.set_layout, VK_NULL_HANDLE)),
@@ -440,6 +453,8 @@ class runtime {
               descriptor_pool(std::exchange(other.descriptor_pool, VK_NULL_HANDLE)),
               module(std::exchange(other.module, VK_NULL_HANDLE)),
               pipeline(std::exchange(other.pipeline, VK_NULL_HANDLE)) {}
+        /// @brief Resets current handles, then transfers another owner.
+        /// @return This handle owner.
         owned_pipeline_handles& operator=(owned_pipeline_handles&& other) noexcept {
             if (this != &other) {
                 reset();
@@ -452,10 +467,12 @@ class runtime {
             }
             return *this;
         }
+        /// @brief Destroys every still-owned Vulkan handle.
         ~owned_pipeline_handles() {
             reset();
         }
 
+        /// @brief Destroys every handle in dependency-safe order and clears the owner.
         void reset() noexcept;
     };
 
@@ -467,10 +484,15 @@ class runtime {
         std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{};
         std::uint64_t pipeline_create_ns = 0u;
 
+        /// @brief Constructs an empty cached pipeline entry.
         pipeline_entry() = default;
+        /// @brief Prevents copying cached pipeline ownership.
         pipeline_entry(const pipeline_entry&) = delete;
+        /// @brief Prevents copy-assignment of cached pipeline ownership.
         pipeline_entry& operator=(const pipeline_entry&) = delete;
+        /// @brief Transfers a cached pipeline entry.
         pipeline_entry(pipeline_entry&&) noexcept = default;
+        /// @brief Move-assigns a cached pipeline entry.
         pipeline_entry& operator=(pipeline_entry&&) noexcept = default;
     };
 
@@ -512,12 +534,19 @@ class runtime {
         std::unique_ptr<const runtime_metal_archive_pipeline_receipt> metal_archive_receipt{};
         std::uint64_t pipeline_create_ns = 0u;
 
+        /// @brief Constructs an empty owned compute pipeline.
         owned_compute_pipeline() = default;
+        /// @brief Prevents copying compute-pipeline ownership.
         owned_compute_pipeline(const owned_compute_pipeline&) = delete;
+        /// @brief Prevents copy-assignment of compute-pipeline ownership.
         owned_compute_pipeline& operator=(const owned_compute_pipeline&) = delete;
+        /// @brief Transfers compute-pipeline ownership.
         owned_compute_pipeline(owned_compute_pipeline&&) noexcept = default;
+        /// @brief Move-assigns compute-pipeline ownership.
         owned_compute_pipeline& operator=(owned_compute_pipeline&&) noexcept = default;
 
+        /// @brief Projects the owner into a non-owning dispatch view.
+        /// @return POD view of the current pipeline handles and receipt.
         [[nodiscard]] compute_pipeline view() const noexcept {
             return compute_pipeline{
                 .kind = kind,
@@ -538,13 +567,17 @@ class runtime {
 
     // Returns a POD non-owning view. Canonical move-only owners remain in the
     // cache and transfer Vulkan handles exactly once across reallocation.
+    /// @brief Finds or creates a cached compute pipeline and returns its borrowed view.
     compute_pipeline
     get_compute_pipeline_locked(shader_kind kind, std::uint32_t local_size, std::uint32_t max_span);
+    /// @brief Prepares every finite pipeline variant required by target indexing.
     void prepare_target_index_pipelines_locked(const vulkan_sketch_params& params);
+    /// @brief Writes whole-buffer storage descriptors for a compute pipeline.
     void bind_compute_pipeline_descriptors_locked(const compute_pipeline& entry,
                                                   std::span<const VkBuffer> buffers);
     // GPU frontend — bind storage descriptors as explicit (buffer, offset,
     // range) so arena-backed slices that share a physical buffer bind correctly.
+    /// @brief Writes explicit buffer-offset-range storage descriptors.
     void bind_descriptors_offsets_locked(const compute_pipeline& entry,
                                          std::span<const VkDescriptorBufferInfo> infos);
 
@@ -552,10 +585,15 @@ class runtime {
     // buffer record many dispatches of the same pipeline with different buffer
     // bindings (ping-pong sort passes) without re-updating a single set in
     // flight. Reset once per frontend op.
+    /// @brief Creates the per-operation dispatch descriptor pool when absent.
     void ensure_dispatch_descriptor_pool_locked();
+    /// @brief Resets all descriptor sets allocated for the current operation.
     void reset_dispatch_descriptor_pool_locked();
+    /// @brief Allocates one fresh descriptor set from the dispatch pool.
+    /// @return Newly allocated descriptor set.
     [[nodiscard]] VkDescriptorSet
     allocate_dispatch_descriptor_set_locked(VkDescriptorSetLayout layout);
+    /// @brief Records one bound compute dispatch and optional receipt evidence.
     void record_compute_dispatch_locked(VkCommandBuffer cmd,
                                         const compute_pipeline& pipe,
                                         std::span<const VkDescriptorBufferInfo> infos,
@@ -566,6 +604,7 @@ class runtime {
                                         std::size_t collector_job_index = 0u);
     // record one full device radix sort (all passes) into an open command
     // buffer. Sorts the key/value arena slices in place via ping-pong scratch.
+    /// @brief Records all passes of one device radix sort.
     void record_radix_sort_locked(VkCommandBuffer cmd,
                                   const gpu_arena_slice& keys,
                                   const gpu_arena_slice& values,
@@ -582,6 +621,7 @@ class runtime {
     // Two-key stable sort: radix by value (encoded_pos) then
     // radix by key (kmer). Because the second sort is stable the result is
     // (kmer, encoded_pos) ordered.
+    /// @brief Records stable value-then-key sorting over ping-pong slices.
     void record_stable_pair_sort_by_value_then_key_locked(VkCommandBuffer command_buffer,
                                                           sorted_pair_device_views& views,
                                                           gpu_arena_slice hist,
@@ -590,18 +630,31 @@ class runtime {
                                                           std::uint32_t num_workgroups,
                                                           std::uint32_t elems_per_workgroup);
 
+    /// @brief Initializes Vulkan, selects a device, and creates runtime resources.
     void init();
+    /// @brief Releases all runtime-owned Vulkan resources.
     void shutdown() noexcept;
+    /// @brief Resolves optional MoltenVK private entry points.
     void resolve_moltenvk_private_api() noexcept;
+    /// @brief Reports whether the runtime should use its external shader provider.
     [[nodiscard]] bool should_use_shader_provider_locked() const noexcept;
+    /// @brief Selects a memory type satisfying the required property flags.
+    /// @return Compatible Vulkan memory-type index.
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
+    /// @brief Queries physical allocation bytes for a logical buffer request.
+    /// @return Required Vulkan allocation size.
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(std::uint64_t bytes,
                                                                  VkBufferUsageFlags usage) const;
+    /// @brief Computes retained allocation bytes for all rank-prefilter workspaces.
     [[nodiscard]] std::uint64_t prefilter_workspace_allocation_bytes_locked() const noexcept;
+    /// @brief Ensures one reusable prefilter buffer satisfies a logical request.
     void ensure_prefilter_workspace_buffer_locked(buffer& allocation,
                                                   std::uint64_t bytes,
                                                   VkBufferUsageFlags usage);
+    /// @brief Releases all rank-prefilter workspace buffers and admission.
     void release_prefilter_workspace_locked() noexcept;
+    /// @brief Runs one serialized rank-prefilter batch through a selected shader route.
+    /// @return One conservative prefilter result per job.
     [[nodiscard]] std::vector<bioseq::prefilter::prefilter_result>
     run_rank_prefilter_batch_roundtrip_locked(
         shader_kind kind,
@@ -610,16 +663,25 @@ class runtime {
         std::span<const std::uint8_t> query_ranks,
         std::span<const std::uint8_t> target_ranks,
         std::span<const bioseq::prefilter::prefilter_job> jobs);
+    /// @brief Computes retained metadata bytes across both pipeline caches.
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked() const noexcept;
+    /// @brief Admits proposed capacities for both pipeline caches.
     void admit_pipeline_cache_growth_locked(std::size_t normal_capacity,
                                             std::size_t compute_pipeline_capacity);
+    /// @brief Reconciles the metadata permit with current retained capacities.
     void reconcile_pipeline_cache_metadata_locked() noexcept;
+    /// @brief Creates and owns one tiled-chaining pipeline.
+    /// @return Borrowed dispatch handles plus immutable shader identity.
     chaining_pipeline create_pipeline_locked(const chaining_pipeline_key& key);
+    /// @brief Uploads bytes through transfer scratch into a device buffer.
     void upload_locked(buffer& transfer_scratch,
                        buffer& dst,
                        std::span<const std::byte> bytes,
                        VkAccessFlags dst_access);
+    /// @brief Downloads bytes through transfer scratch from a device buffer.
     void download_locked(buffer& transfer_scratch, const buffer& src, std::span<std::byte> bytes);
+    /// @brief Atomically reserves the next nonzero operation identity.
+    /// @return Unique operation identity.
     [[nodiscard]] std::uint64_t next_operation_identity_locked() {
         constexpr std::uint64_t exhausted = (std::numeric_limits<std::uint64_t>::max)();
         std::uint64_t identity = operation_token_identity_.load(std::memory_order_relaxed);
@@ -713,10 +775,13 @@ class runtime {
     std::mutex mu_;
 };
 
+/// @brief Reports whether runtime initialization selected a hardware Vulkan device.
+/// @return `true` for an available non-software device.
 [[nodiscard]] inline bool hardware_device_available(const runtime& runtime) noexcept {
     return runtime.is_usable() && !runtime.features().software_device;
 }
 
+/// @brief Rejects an unavailable or software-only Vulkan runtime for an operation.
 inline void require_hardware_device(const runtime& runtime, const char* operation) {
     if (!runtime.is_usable()) {
         throw vulkan_runtime_error(fmt::format("{} selected but Vulkan runtime is unavailable: {}",
@@ -733,6 +798,8 @@ inline void require_hardware_device(const runtime& runtime, const char* operatio
     }
 }
 
+/// @brief Computes saturated device and host scratch bytes for anchor sorting.
+/// @return Total reserved bytes, saturated at the maximum `uint64_t` value.
 [[nodiscard]] inline std::uint64_t
 seed_anchor_reserved_bytes(std::uint64_t anchor_count, std::uint64_t workgroup_count) noexcept {
     using bioseq::common::saturating_mul;
