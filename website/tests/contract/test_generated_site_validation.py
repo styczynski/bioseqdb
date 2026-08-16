@@ -53,7 +53,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 try:
     import html5lib
@@ -85,15 +85,6 @@ _EXPECTED_TUTORIAL_IDS = {
     "tutorial:highway_runtime_dispatch",
     "tutorial:reading_bioseq_explain",
 }
-_EXPECTED_BENCHMARK_ARTIFACTS = (
-    "alignment_benchmark_configuration.json",
-    "bench_e2e_configuration.json",
-    "io_benchmark_configuration.json",
-    "report_138.json",
-    "report_159.json",
-    "report_154.json",
-    "report_7.json",
-)
 _BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
 # HTML namespace used by html5lib's etree treebuilder; the ``id`` attribute key
@@ -120,6 +111,66 @@ _ABSOLUTE_PATH_TOKENS = ("/home/", "/root/", ".s.PGSQL", "dbname=", "postgresql:
 
 def _fail(path: Path, reason: str) -> str:
     return f"{path}: {reason}"
+
+
+def _benchmark_data_inventory_problems(
+    benchmark_manifest: Path,
+    local_targets: set[Path],
+    *,
+    has_local_source: bool,
+    remote_count: int,
+) -> list[str]:
+    """Validate every staged benchmark-data entry against the manifest mode."""
+
+    problems: list[str] = []
+    lexical_data_root = benchmark_manifest.parent / "benchmark-data"
+    display_root = benchmark_manifest.parent.resolve()
+    staged_files: set[Path] = set()
+    if lexical_data_root.is_symlink():
+        problems.append(_fail(
+            lexical_data_root,
+            "benchmark-data root must not be a symlink",
+        ))
+    elif lexical_data_root.exists() and not lexical_data_root.is_dir():
+        problems.append(_fail(
+            lexical_data_root,
+            "benchmark-data root must be a directory",
+        ))
+    elif lexical_data_root.is_dir():
+        for entry in sorted(lexical_data_root.rglob("*")):
+            if entry.is_symlink():
+                problems.append(_fail(
+                    entry, "benchmark-data must not contain a symlink"))
+            elif entry.is_dir():
+                continue
+            elif not entry.is_file():
+                problems.append(_fail(
+                    entry, "benchmark-data contains a special file"))
+            else:
+                staged_files.add(entry.resolve())
+    if has_local_source and local_targets != staged_files:
+        missing = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in staged_files - local_targets
+        )
+        extra = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in local_targets - staged_files
+        )
+        problems.append(_fail(
+            benchmark_manifest,
+            f"benchmark inventory mismatch missing={missing}, extra={extra}",
+        ))
+    elif not has_local_source and remote_count and staged_files:
+        unexpected = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in staged_files
+        )
+        problems.append(_fail(
+            benchmark_manifest,
+            f"remote benchmark override retains local data: {unexpected}",
+        ))
+    return problems
 
 
 def _route_to_relpath(route: str, base_path: str) -> str | None:
@@ -297,9 +348,8 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         except Exception as error:  # noqa: BLE001
             problems.append(_fail(path, f"is not valid XML: {error}"))
 
-    # The default benchmark manifest is a same-origin static-data index. An
-    # explicit build override may instead contain public raw HTTPS URLs, but a
-    # mixed or private/blob/file/data source set is never a deployable contract.
+    # The default benchmark manifest is a content-classified same-origin index.
+    # An explicit override may contain only immutable public raw HTTPS URLs.
     benchmark_manifests = sorted(site.rglob("benchmarks-manifest.json"))
     if len(benchmark_manifests) != 1:
         problems.append(_fail(
@@ -321,63 +371,220 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             problems.append(_fail(
                 benchmark_manifest, "has no non-empty sources array"))
         else:
-            local_names: list[str] = []
+            local_records: list[tuple[str, str, int]] = []
+            local_targets: set[Path] = set()
             remote_count = 0
+            has_local_source = False
+            source_values: set[str] = set()
+            data_root = (benchmark_manifest.parent / "benchmark-data").resolve()
             for source in sources:
-                value = (source if isinstance(source, str)
-                         else source.get("url", "") if isinstance(source, dict)
-                         else "")
-                parsed = urlsplit(value)
+                if isinstance(source, str):
+                    value = source
+                elif isinstance(source, dict) and set(source).issubset(
+                        {"url", "path"}) and len(source) == 1:
+                    value = source.get("url", source.get("path", ""))
+                else:
+                    value = ""
+                if not isinstance(value, str) or not value:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is invalid: {source!r}",
+                    ))
+                    continue
+                if value in source_values:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is duplicated: {value!r}",
+                    ))
+                    continue
+                source_values.add(value)
+                try:
+                    parsed = urlsplit(value)
+                except ValueError as error:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source URL is invalid: {value!r}: {error}",
+                    ))
+                    continue
                 if parsed.scheme or parsed.netloc:
                     remote_count += 1
-                    if (parsed.scheme != "https"
-                            or parsed.hostname not in _BENCHMARK_REMOTE_HOSTS
-                            or "/blob/" in parsed.path):
+                    decoded_path = unquote(parsed.path)
+                    decoded_parts = tuple(
+                        part for part in decoded_path.split("/") if part)
+                    try:
+                        port = parsed.port
+                    except ValueError:
+                        port = -1
+                    immutable_revision = (
+                        len(decoded_parts) >= 4
+                        and re.fullmatch(
+                            r"[0-9a-f]{40}", decoded_parts[2]) is not None
+                    )
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.hostname not in _BENCHMARK_REMOTE_HOSTS
+                        or port is not None
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or parsed.query
+                        or parsed.fragment
+                        or ".." in decoded_parts
+                        or "\\" in decoded_path
+                        or "%" in decoded_path
+                        or "/blob/" in parsed.path
+                        or not immutable_revision
+                    ):
                         problems.append(_fail(
                             benchmark_manifest,
                             f"unsupported benchmark override URL {value!r}",
                         ))
                     continue
-                if (not value or parsed.path.startswith("/") or parsed.query
-                        or parsed.fragment):
+                has_local_source = True
+                decoded_path = unquote(parsed.path)
+                relative_parts = Path(decoded_path).parts
+                if (
+                    decoded_path.startswith("/")
+                    or parsed.query
+                    or parsed.fragment
+                    or "\\" in decoded_path
+                    or "%" in decoded_path
+                    or ".." in relative_parts
+                ):
                     problems.append(_fail(
                         benchmark_manifest,
                         f"benchmark source is not a plain relative path: {value!r}",
                     ))
                     continue
-                if Path(parsed.path).parts != (
-                        "benchmark-data", Path(parsed.path).name):
+                if len(relative_parts) < 2 or relative_parts[0] != "benchmark-data":
                     problems.append(_fail(
                         benchmark_manifest,
                         f"benchmark source is outside benchmark-data: {value!r}",
                     ))
                     continue
-                target = (benchmark_manifest.parent / parsed.path).resolve()
+                lexical_target = benchmark_manifest.parent / decoded_path
+                current = benchmark_manifest.parent
+                traverses_symlink = False
+                for part in relative_parts:
+                    current = current / part
+                    if current.is_symlink():
+                        traverses_symlink = True
+                        break
+                if traverses_symlink:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source traverses a symlink: {value!r}",
+                    ))
+                    continue
+                target = lexical_target.resolve()
                 try:
-                    target.relative_to(site.resolve())
+                    target.relative_to(data_root)
                 except ValueError:
                     problems.append(_fail(
                         benchmark_manifest,
-                        f"benchmark source escapes the site: {value!r}",
+                        f"benchmark source escapes benchmark-data: {value!r}",
                     ))
                     continue
-                if not target.is_file():
+                if target.suffix != ".json" or not target.is_file():
                     problems.append(_fail(
                         benchmark_manifest,
                         f"benchmark source does not resolve: {value!r}",
                     ))
-                local_names.append(Path(parsed.path).name)
-            if local_names and remote_count:
+                    continue
+                if target in local_targets:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark target is duplicated: {value!r}",
+                    ))
+                    continue
+                local_targets.add(target)
+
+                try:
+                    document = json.loads(target.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                report_claim = (
+                    isinstance(document, dict)
+                    and isinstance(document.get("benchmarks"), dict)
+                    and bool(document["benchmarks"])
+                    and isinstance(document.get("meta"), dict)
+                )
+                config_blocks = []
+                if isinstance(document, dict):
+                    config_blocks = [
+                        block for key, block in document.items()
+                        if key not in {"params", "test_cases", "regression_rules"}
+                        and isinstance(block, dict)
+                        and isinstance(block.get("matrix"), dict)
+                    ]
+                config_claim = (
+                    isinstance(document, dict)
+                    and isinstance(document.get("params"), dict)
+                    and bool(document["params"])
+                    and isinstance(document.get("test_cases"), dict)
+                    and bool(document["test_cases"])
+                    and isinstance(document.get("regression_rules"), list)
+                    and bool(config_blocks)
+                )
+                if report_claim == config_claim:
+                    problems.append(_fail(
+                        target,
+                        "is not exactly one supported benchmark report/configuration",
+                    ))
+                    continue
+                if config_claim:
+                    local_records.append((decoded_path, "configuration", 0))
+                    continue
+                meta = document["meta"]
+                report_shape_valid = (
+                    type(meta.get("timestamp")) is int
+                    and meta["timestamp"] >= 0
+                    and isinstance(meta.get("created"), str)
+                    and isinstance(meta.get("fast"), bool)
+                    and isinstance(meta.get("history_eligible"), bool)
+                    and all(
+                        isinstance(benchmark, dict)
+                        and isinstance(benchmark.get("execution_tuples"), list)
+                        and bool(benchmark["execution_tuples"])
+                        for benchmark in document["benchmarks"].values()
+                    )
+                )
+                if not report_shape_valid:
+                    problems.append(_fail(
+                        target, "does not expose validated framework report metadata"))
+                    continue
+                local_records.append(
+                    (decoded_path, "report", meta["timestamp"]))
+            if has_local_source and remote_count:
                 problems.append(_fail(
                     benchmark_manifest,
                     "must not mix same-origin data with remote overrides",
                 ))
-            if local_names and tuple(local_names) != _EXPECTED_BENCHMARK_ARTIFACTS:
-                problems.append(_fail(
-                    benchmark_manifest,
-                    f"same-origin benchmark inventory is {local_names}, expected "
-                    f"{list(_EXPECTED_BENCHMARK_ARTIFACTS)}",
-                ))
+            problems.extend(_benchmark_data_inventory_problems(
+                benchmark_manifest,
+                local_targets,
+                has_local_source=has_local_source,
+                remote_count=remote_count,
+            ))
+            if has_local_source:
+                if not any(kind == "configuration"
+                           for _, kind, _ in local_records):
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        "same-origin benchmark inventory has no configuration",
+                    ))
+                expected_records = sorted(
+                    (record for record in local_records
+                     if record[1] == "configuration"),
+                    key=lambda record: record[0],
+                ) + sorted(
+                    (record for record in local_records if record[1] == "report"),
+                    key=lambda record: (-record[2], record[0]),
+                )
+                if local_records != expected_records:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        "benchmark sources are not in deterministic config/newest-report order",
+                    ))
 
     # (2) site-manifest set-equality + per-file SHA-256 verification (§16). The
     #     external layer re-derives the tree so a typed-model manifest cannot

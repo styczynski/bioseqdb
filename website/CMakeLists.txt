@@ -114,40 +114,50 @@ set(_site_config "${_source_dir}/site.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
-# The deployed default is a self-contained, same-origin benchmark bundle.  The
-# selected report payloads are immutable byte copies of their corresponding
-# main/reporting artifacts; they are copied, never parsed or rewritten.  Current
-# configuration owners are used directly so a renamed/refactored configuration
-# cannot drift behind a website-only copy.
+# The deployed default is a self-contained, same-origin benchmark bundle.
+# Configurations keep their current source owners. Reports are discovered below
+# from the repository reporting area and admitted by their validated framework
+# content, never by a filename list.
 set(_benchmark_configuration_sources
   "${CMAKE_SOURCE_DIR}/bench/alignment_benchmark_configuration.json"
   "${CMAKE_SOURCE_DIR}/bench/bench_e2e_configuration.json"
   "${CMAKE_SOURCE_DIR}/bioseq/io/benchmark/configuration.json")
-set(_benchmark_report_fixture_dir
-  "${_source_dir}/tests/fixtures/benchmark_artifacts")
-set(_benchmark_report_sources
-  "${_benchmark_report_fixture_dir}/report_138.json"
-  "${_benchmark_report_fixture_dir}/report_159.json"
-  "${_benchmark_report_fixture_dir}/report_154.json"
-  "${_benchmark_report_fixture_dir}/report_7.json")
-set(_benchmark_payload_sources
-  ${_benchmark_configuration_sources} ${_benchmark_report_sources})
+set(_benchmark_reporting_root "${CMAKE_SOURCE_DIR}/reporting")
+set(_benchmark_bundle_generator
+  "${_source_dir}/tools/generate_benchmark_bundle.py")
+
+# CONFIGURE_DEPENDS makes an added or deleted committed JSON trigger CMake's
+# glob verification and regeneration.  The build-time generator independently
+# enumerates the directory and performs the content/schema decision. This glob
+# exists only to give Ninja exact filesystem invalidation edges.
+file(GLOB_RECURSE _benchmark_reporting_candidates CONFIGURE_DEPENDS
+  LIST_DIRECTORIES false "${_benchmark_reporting_root}/*.json")
+list(SORT _benchmark_reporting_candidates)
+set(_benchmark_discovery_inputs
+  ${_benchmark_configuration_sources} ${_benchmark_reporting_candidates})
+list(SORT _benchmark_discovery_inputs)
+string(JOIN "\n" _benchmark_discovery_inventory_text
+  ${_benchmark_discovery_inputs})
+set(_benchmark_discovery_inventory
+  "${_output_root}/benchmark-discovery-inputs.txt")
+file(GENERATE OUTPUT "${_benchmark_discovery_inventory}"
+  CONTENT "${_benchmark_discovery_inventory_text}\n")
+
+set(_benchmark_configuration_arguments "")
+foreach(_benchmark_configuration IN LISTS _benchmark_configuration_sources)
+  list(APPEND _benchmark_configuration_arguments
+    --configuration "${_benchmark_configuration}")
+endforeach()
 
 # An override is a checked/local manifest file whose entries may point at a
 # separately published raw HTTP endpoint.  It is intentionally a file rather
 # than a token or download URL: website builds never acquire credentials or
 # perform a network fetch while assembling the static bundle.
 set(BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE "" CACHE FILEPATH
-  "Optional benchmark manifest file; empty generates same-origin URLs")
-set(_benchmark_default_manifest
-  "${_output_root}/benchmarks-manifest.default.json")
-configure_file(
-  "${_static_dir}/benchmarks-manifest.json"
-  "${_benchmark_default_manifest}"
-  COPYONLY)
-if(BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE STREQUAL "")
-  set(_benchmark_manifest_input "${_benchmark_default_manifest}")
-else()
+  "Optional benchmark manifest file. Empty generates same-origin URLs")
+set(_benchmark_manifest_override_arguments "")
+set(_benchmark_manifest_override_dependency "")
+if(NOT BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE STREQUAL "")
   get_filename_component(_benchmark_manifest_input
     "${BIOSEQ_WEBSITE_BENCHMARK_MANIFEST_OVERRIDE}" ABSOLUTE
     BASE_DIR "${CMAKE_SOURCE_DIR}")
@@ -156,6 +166,10 @@ else()
       "website: benchmark manifest override does not exist: "
       "${_benchmark_manifest_input}")
   endif()
+  list(APPEND _benchmark_manifest_override_arguments
+    --manifest-override "${_benchmark_manifest_input}")
+  set(_benchmark_manifest_override_dependency
+    "${_benchmark_manifest_input}")
 endif()
 
 # --- Config inputs that must reconfigure on author additions -------------------
@@ -474,55 +488,66 @@ add_custom_command(
   COMMENT "website: verify non-mutating supplied-design translation parity"
   VERBATIM)
 
+# Generate the validated benchmark bundle independently of the static design
+# projection.  The generator replaces only this build-owned tree after complete
+# validation/staging, retains every admitted byte, and writes the production manifest.
+set(_benchmark_bundle_contract
+  "${_source_dir}/tests/contract/test_benchmark_bundle.py")
+set(_benchmark_bundle_contract_stamp
+  "${_output_root}/benchmark-bundle-contract.stamp")
+add_custom_command(
+  OUTPUT "${_benchmark_bundle_contract_stamp}"
+  COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+          "${Python3_EXECUTABLE}" "${_benchmark_bundle_contract}"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_benchmark_bundle_contract_stamp}"
+  DEPENDS "${_benchmark_bundle_contract}" "${_benchmark_bundle_generator}"
+  COMMENT "website: verify dynamic benchmark bundle contract"
+  VERBATIM)
+
+set(_benchmark_bundle_dir "${_output_root}/benchmark-bundle")
+set(_benchmark_bundle_stamp "${_output_root}/benchmark-bundle.stamp")
+add_custom_command(
+  OUTPUT "${_benchmark_bundle_stamp}"
+  BYPRODUCTS "${_benchmark_bundle_dir}/benchmarks-manifest.json"
+  COMMAND "${Python3_EXECUTABLE}" "${_benchmark_bundle_generator}"
+          --repository-root "${CMAKE_SOURCE_DIR}"
+          --output-root "${_benchmark_bundle_dir}"
+          --reporting-root "${_benchmark_reporting_root}"
+          ${_benchmark_configuration_arguments}
+          ${_benchmark_manifest_override_arguments}
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_benchmark_bundle_stamp}"
+  DEPENDS "${_benchmark_bundle_contract_stamp}"
+          "${_benchmark_bundle_generator}"
+          "${_benchmark_discovery_inventory}"
+          ${_benchmark_discovery_inputs}
+          ${_benchmark_manifest_override_dependency}
+  COMMENT "website: discover and validate public benchmark artifacts"
+  VERBATIM)
+
 # Prepare the exact static tree consumed by every render.  The source static
-# directory remains the mechanical projection of the supplied design; benchmark
-# deployment adaptation happens only in this confined build-tree copy.
+# directory remains the mechanical projection of the supplied design.
+# benchmark deployment adaptation happens only in this confined build-tree copy.
 set(_render_static_dir "${_output_root}/render-static")
 set(_render_static_stamp "${_output_root}/render-static.stamp")
-set(_render_benchmark_dir "${_render_static_dir}/benchmark-data")
 set(_render_benchmark_manifest
   "${_render_static_dir}/benchmarks-manifest.json")
 add_custom_command(
   OUTPUT "${_render_static_stamp}"
-  BYPRODUCTS
-    "${_render_benchmark_manifest}"
-    "${_render_benchmark_dir}/alignment_benchmark_configuration.json"
-    "${_render_benchmark_dir}/bench_e2e_configuration.json"
-    "${_render_benchmark_dir}/io_benchmark_configuration.json"
-    "${_render_benchmark_dir}/report_138.json"
-    "${_render_benchmark_dir}/report_159.json"
-    "${_render_benchmark_dir}/report_154.json"
-    "${_render_benchmark_dir}/report_7.json"
+  BYPRODUCTS "${_render_benchmark_manifest}"
   COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_render_static_dir}"
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
           "${_static_dir}" "${_render_static_dir}"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_render_benchmark_dir}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+          "${_render_static_dir}/benchmark-data"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory
+          "${_benchmark_bundle_dir}/benchmark-data"
+          "${_render_static_dir}/benchmark-data"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/bench/alignment_benchmark_configuration.json"
-          "${_render_benchmark_dir}/alignment_benchmark_configuration.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/bench/bench_e2e_configuration.json"
-          "${_render_benchmark_dir}/bench_e2e_configuration.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${CMAKE_SOURCE_DIR}/bioseq/io/benchmark/configuration.json"
-          "${_render_benchmark_dir}/io_benchmark_configuration.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_benchmark_report_fixture_dir}/report_138.json"
-          "${_render_benchmark_dir}/report_138.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_benchmark_report_fixture_dir}/report_159.json"
-          "${_render_benchmark_dir}/report_159.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_benchmark_report_fixture_dir}/report_154.json"
-          "${_render_benchmark_dir}/report_154.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_benchmark_report_fixture_dir}/report_7.json"
-          "${_render_benchmark_dir}/report_7.json"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-          "${_benchmark_manifest_input}" "${_render_benchmark_manifest}"
+          "${_benchmark_bundle_dir}/benchmarks-manifest.json"
+          "${_render_benchmark_manifest}"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_render_static_stamp}"
-  DEPENDS "${_design_translation_stamp}" "${_benchmark_manifest_input}"
-          ${_static_files} ${_benchmark_payload_sources}
+  DEPENDS "${_design_translation_stamp}" "${_benchmark_bundle_stamp}"
+          ${_static_files}
   COMMENT "website: prepare same-origin benchmark data in the static bundle"
   VERBATIM)
 
@@ -1071,7 +1096,7 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
   set(_browser_root_stamp "${_output_root}/browser-root-base.stamp")
   set(_browser_bioseqdb_stamp "${_output_root}/browser-bioseqdb-base.stamp")
   set(_benchmark_browser_fixtures
-      ${_benchmark_payload_sources})
+      "${_benchmark_bundle_stamp}")
   set(_fixture_root_slash "${_output_root}/fixture-root")
   set(_fixture_root_bioseqdb "${_output_root}/fixture-bioseqdb")
   add_custom_command(

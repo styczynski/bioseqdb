@@ -1,12 +1,8 @@
 {
-  "_comment": "The website build copies selected bench_framework artifacts beside this manifest. Entries stay relative so browsers fetch them from the deployed site's own HTTP origin.",
+  "_comment": "The website build replaces this configuration-only design projection with a generated same-origin index of validated repository benchmark artifacts.",
   "sources": [
     "benchmark-data/alignment_benchmark_configuration.json",
     "benchmark-data/bench_e2e_configuration.json",
-    "benchmark-data/io_benchmark_configuration.json",
-    "benchmark-data/report_138.json",
-    "benchmark-data/report_159.json",
-    "benchmark-data/report_154.json",
-    "benchmark-data/report_7.json"
+    "benchmark-data/io_benchmark_configuration.json"
   ]
 }
