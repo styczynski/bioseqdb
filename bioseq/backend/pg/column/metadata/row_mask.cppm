@@ -361,9 +361,3 @@ flush_row_mask_cache(bioseq::storage::metadata::catalog_rows::row_mask* row_mask
 
     CommandCounterIncrement();
 }
-
-/*
- * find_stripe_by_row_number returns stripe_metadata for the stripe whose
- * first_row_number is greater than given row_number. If no such stripe
- * exists, then returns null.
- */

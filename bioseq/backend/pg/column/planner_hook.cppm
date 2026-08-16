@@ -37,10 +37,6 @@ static ProcessUtility_hook_type previous_process_utility_hook = nullptr;
 
 static Oid column_table_access_method_oid = InvalidOid;
 
-static PlannedStmt* column_planner_hook(Query* parse, const char* query_string,
-										int cursor_options, ParamListInfo bound_params);
-static bool query_may_be_create_table_as(const char* query);
-
 struct plan_tree_mutator_context
 {
 	bool vectorized_aggregation;
@@ -476,6 +472,52 @@ static void process_utility_hook(
 }
 
 /*
+ * query_may_be_create_table_as returns true if the query string (case-insensitively)
+ * contains the keywords CREATE, TABLE, AS in order. This is a textual
+ * heuristic; false positives are possible but minimised by requiring the
+ * three tokens to appear sequentially.
+ */
+static bool query_may_be_create_table_as(const char* query) {
+    bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() entered");
+    const size_t query_length = strlen(query);
+    char* haystack = static_cast<char*>(palloc(query_length + 1));
+
+    for (size_t character_index = 0; character_index < query_length; character_index++) {
+        haystack[character_index] = tolower(query[character_index]);
+    }
+    haystack[query_length] = '\0';
+
+    char* create_ptr = strstr(haystack, "create");
+    if (create_ptr == nullptr) {
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: query_may_be_create_table_as() returning false; 'create' not found");
+        pfree(haystack);
+        return false;
+    }
+
+    char* table_ptr = strstr(create_ptr + 6, "table");
+    if (table_ptr == nullptr) {
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: query_may_be_create_table_as() returning false; 'table' not found");
+        pfree(haystack);
+        return false;
+    }
+
+    char* as_ptr = strstr(table_ptr + 5, "as");
+    if (as_ptr == nullptr) {
+        bioseq_log<logging_level::debug>(
+            "[bioseq] pg: query_may_be_create_table_as() returning false; 'as' not found");
+        pfree(haystack);
+        return false;
+    }
+
+    pfree(haystack);
+
+    bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() returning true");
+    return true;
+}
+
+/*
  * column_planner_hook is invoked once per SELECT plan. It delegates to the
  * previous hook (or standard_planner) and then runs the plan-tree mutator
  * over the result to splice in the vectorised aggregator / IndexScan. If
@@ -597,55 +639,6 @@ column_planner_hook(Query* parse,
 	bioseq::postgres::extension::cache_provider::
 		bioseq_cache_provider_after_planned_statement(stmt);
 	return stmt;
-}
-
-/*
- * query_may_be_create_table_as returns true if the query string (case-insensitively)
- * contains the keywords CREATE, TABLE, AS in order. This is a textual
- * heuristic; false positives are possible but minimised by requiring the
- * three tokens to appear sequentially.
- */
-static bool
-query_may_be_create_table_as(const char* query)
-{
-	bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() entered");
-	const size_t query_length = strlen(query);
-	char* haystack = static_cast<char*>(palloc(query_length + 1));
-
-	for (size_t character_index = 0; character_index < query_length; character_index++)
-	{
-		haystack[character_index] = tolower(query[character_index]);
-	}
-	haystack[query_length] = '\0';
-
-	char* create_ptr = strstr(haystack, "create");
-	if (create_ptr == nullptr)
-	{
-		bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() returning false; 'create' not found");
-		pfree(haystack);
-		return false;
-	}
-
-	char* table_ptr = strstr(create_ptr + 6, "table");
-	if (table_ptr == nullptr)
-	{
-		bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() returning false; 'table' not found");
-		pfree(haystack);
-		return false;
-	}
-
-	char* as_ptr = strstr(table_ptr + 5, "as");
-	if (as_ptr == nullptr)
-	{
-		bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() returning false; 'as' not found");
-		pfree(haystack);
-		return false;
-	}
-
-	pfree(haystack);
-
-	bioseq_log<logging_level::debug>("[bioseq] pg: query_may_be_create_table_as() returning true");
-	return true;
 }
 
 /** @brief Installs the Bioseq planner and utility hooks.

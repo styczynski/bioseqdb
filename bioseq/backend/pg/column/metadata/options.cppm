@@ -265,8 +265,3 @@ export bool delete_column_table_options(Oid regclass, bool missing_ok) {
 
     return result;
 }
-
-/*
- * save_stripe_skip_list saves chunk_list for a given stripe as rows
- * of bioseq.chunk.
- */

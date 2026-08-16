@@ -798,9 +798,9 @@ export struct sequence_sub_table_row {
 
     sequence_sub_table_row() = default;
 
-    sequence_sub_table_row(HeapTuple heap_tuple, TupleDesc td) {
+    sequence_sub_table_row(HeapTuple heap_tuple, TupleDesc tuple_descriptor) {
         const seq_sub_table_row row =
-            seq_sub_table_codec::deform(heap_tuple, td, CurrentMemoryContext);
+            seq_sub_table_codec::deform(heap_tuple, tuple_descriptor, CurrentMemoryContext);
         database_oid = row.database_oid;
         tablespace_oid = row.tablespace_oid;
         main_relfilenode = row.main_relfilenode;
@@ -839,7 +839,7 @@ export struct sequence_sub_table_manager {
             return std::nullopt;
         }
         Relation rel = bioseq::postgres::support::open_postgres_relation(rel_oid, AccessShareLock);
-        TupleDesc td = RelationGetDescr(rel);
+        TupleDesc tuple_descriptor = RelationGetDescr(rel);
 
         const Oid idx_oid = active_shard_index_relid();
         const bool idx_ok = OidIsValid(idx_oid);
@@ -855,9 +855,9 @@ export struct sequence_sub_table_manager {
         SysScanDesc scan = systable_beginscan(
             rel, idx_oid, idx_ok, nullptr, static_cast<int>(keys.size()), keys.data());
         std::optional<sequence_sub_table_row> result;
-        HeapTuple tup = nullptr;
-        while (HeapTupleIsValid(tup = systable_getnext(scan))) {
-            sequence_sub_table_row row(tup, td);
+        HeapTuple heap_tuple = nullptr;
+        while (HeapTupleIsValid(heap_tuple = systable_getnext(scan))) {
+            sequence_sub_table_row row(heap_tuple, tuple_descriptor);
             if (!row.is_full) {
                 result = row;
                 break;
@@ -879,7 +879,7 @@ export struct sequence_sub_table_manager {
             return std::nullopt;
         }
         Relation rel = bioseq::postgres::support::open_postgres_relation(rel_oid, AccessShareLock);
-        TupleDesc td = RelationGetDescr(rel);
+        TupleDesc tuple_descriptor = RelationGetDescr(rel);
 
         const Oid idx_oid = pkey_index_relid();
         const bool idx_ok = OidIsValid(idx_oid);
@@ -896,9 +896,9 @@ export struct sequence_sub_table_manager {
         SysScanDesc scan = systable_beginscan(
             rel, idx_oid, idx_ok, nullptr, static_cast<int>(keys.size()), keys.data());
         std::optional<sequence_sub_table_row> result;
-        HeapTuple tup = systable_getnext(scan);
-        if (HeapTupleIsValid(tup)) {
-            result = sequence_sub_table_row(tup, td);
+        HeapTuple heap_tuple = systable_getnext(scan);
+        if (HeapTupleIsValid(heap_tuple)) {
+            result = sequence_sub_table_row(heap_tuple, tuple_descriptor);
         }
         systable_endscan(scan);
         table_close(rel, AccessShareLock);
@@ -937,7 +937,7 @@ export struct sequence_sub_table_manager {
         }
 
         Relation rel = bioseq::postgres::support::open_postgres_relation(rel_oid, RowExclusiveLock);
-        TupleDesc td = RelationGetDescr(rel);
+        TupleDesc tuple_descriptor = RelationGetDescr(rel);
 
         const seq_sub_table_row catalog_row{
             .database_oid = database_oid,
@@ -952,10 +952,10 @@ export struct sequence_sub_table_manager {
             .is_full = false,
             .total_payload_bytes = 0,
         };
-        HeapTuple tup =
-            seq_sub_table_codec::encode(catalog_row, CurrentMemoryContext).form_tuple(td);
-        CatalogTupleInsert(rel, tup);
-        heap_freetuple(tup);
+        HeapTuple heap_tuple = seq_sub_table_codec::encode(catalog_row, CurrentMemoryContext)
+                                   .form_tuple(tuple_descriptor);
+        CatalogTupleInsert(rel, heap_tuple);
+        heap_freetuple(heap_tuple);
         table_close(rel, RowExclusiveLock);
         CommandCounterIncrement();
 
@@ -993,7 +993,7 @@ export struct sequence_sub_table_manager {
         }
 
         Relation rel = bioseq::postgres::support::open_postgres_relation(rel_oid, RowExclusiveLock);
-        TupleDesc td = RelationGetDescr(rel);
+        TupleDesc tuple_descriptor = RelationGetDescr(rel);
 
         std::array<ScanKeyData, 6> keys{
             seq_sub_table_codec::scan_key<&seq_sub_table_row::database_oid>(database_oid),
@@ -1025,7 +1025,7 @@ export struct sequence_sub_table_manager {
                 });
         }
 
-        sequence_sub_table_row current(old_tuple, td);
+        sequence_sub_table_row current(old_tuple, tuple_descriptor);
         const std::uint64_t new_bytes_written = current.bytes_written + delta_bytes;
         const std::uint64_t new_total_payload = current.total_payload_bytes + delta_bytes;
         // is_full is driven only by a real byte cap. The zero-cap
@@ -1046,7 +1046,7 @@ export struct sequence_sub_table_manager {
                 static_cast<std::int64_t>(new_total_payload))
             .set<&seq_sub_table_row::is_full>(now_full);
 
-        HeapTuple new_tuple = update.modify(old_tuple, td);
+        HeapTuple new_tuple = update.modify(old_tuple, tuple_descriptor);
         CatalogTupleUpdate(rel, &old_tuple->t_self, new_tuple);
         systable_endscan(scan);
         heap_freetuple(new_tuple);
@@ -1061,18 +1061,18 @@ export struct sequence_sub_table_manager {
 
     [[nodiscard]] static std::vector<sequence_sub_table_row>
     list_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
-        std::vector<sequence_sub_table_row> out;
+        std::vector<sequence_sub_table_row> shards;
         const Oid rel_oid = bioseq::postgres::support::invoke_pg_as_cpp([] { return relid(); });
         if (!OidIsValid(rel_oid)) {
-            return out;
+            return shards;
         }
         Relation rel = bioseq::postgres::support::invoke_pg_as_cpp([rel_oid] {
             return bioseq::postgres::support::try_open_postgres_relation(rel_oid, AccessShareLock);
         });
         if (rel == nullptr) {
-            return out;
+            return shards;
         }
-        TupleDesc td = RelationGetDescr(rel);
+        TupleDesc tuple_descriptor = RelationGetDescr(rel);
 
         std::array<ScanKeyData, 3> keys{};
         SysScanDesc scan = nullptr;
@@ -1093,9 +1093,11 @@ export struct sequence_sub_table_manager {
                     [scan] { return systable_getnext(scan); });
                 if (!HeapTupleIsValid(tuple))
                     break;
-                sequence_sub_table_row row = bioseq::postgres::support::invoke_pg_as_cpp(
-                    [tuple, td] { return sequence_sub_table_row(tuple, td); });
-                out.push_back(std::move(row));
+                sequence_sub_table_row row =
+                    bioseq::postgres::support::invoke_pg_as_cpp([tuple, tuple_descriptor] {
+                        return sequence_sub_table_row(tuple, tuple_descriptor);
+                    });
+                shards.push_back(std::move(row));
             }
         } catch (...) {
             failure = std::current_exception();
@@ -1111,7 +1113,7 @@ export struct sequence_sub_table_manager {
         });
         if (failure != nullptr)
             std::rethrow_exception(failure);
-        return out;
+        return shards;
     }
 
     static void delete_shards_for_main(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode) {
@@ -1133,9 +1135,9 @@ export struct sequence_sub_table_manager {
 
         SysScanDesc scan = systable_beginscan(
             rel, InvalidOid, false, nullptr, static_cast<int>(keys.size()), keys.data());
-        HeapTuple tup = nullptr;
-        while (HeapTupleIsValid(tup = systable_getnext(scan))) {
-            CatalogTupleDelete(rel, &tup->t_self);
+        HeapTuple heap_tuple = nullptr;
+        while (HeapTupleIsValid(heap_tuple = systable_getnext(scan))) {
+            CatalogTupleDelete(rel, &heap_tuple->t_self);
         }
         systable_endscan(scan);
         table_close(rel, RowExclusiveLock);

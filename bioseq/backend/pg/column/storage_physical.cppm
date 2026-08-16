@@ -295,11 +295,13 @@ validate_logical_storage_range(
  * true, don't check pd_lower; useful when reading a metapage whose format
  * has not yet been validated.
  */
-static void
-read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *buf,
-			  uint32_t len, bool force)
-{
-	Buffer buffer = ReadBuffer(rel, block_number);
+static void read_from_block(Relation rel,
+                            BlockNumber block_number,
+                            uint32_t offset,
+                            char* destination,
+                            uint32_t len,
+                            bool force) {
+    Buffer buffer = ReadBuffer(rel, block_number);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	Page page = BufferGetPage(buffer);
 	PageHeader phdr = reinterpret_cast<PageHeader>(page);
@@ -322,8 +324,8 @@ read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *b
 			});
 	}
 
-	memcpy_s(buf, len, page + offset, len);
-	UnlockReleaseBuffer(buffer);
+    memcpy_s(destination, len, page + offset, len);
+    UnlockReleaseBuffer(buffer);
 }
 
 /*
@@ -333,11 +335,13 @@ read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *b
  * be equal to pd_lower and pd_lower will be set to the end of the written
  * data.
  */
-static void
-write_to_block(Relation rel, BlockNumber block_number, uint32_t offset, const char *buf,
-			 uint32_t len, bool clear)
-{
-	Buffer buffer = ReadBuffer(rel, block_number);
+static void write_to_block(Relation rel,
+                           BlockNumber block_number,
+                           uint32_t offset,
+                           const char* source,
+                           uint32_t len,
+                           bool clear) {
+    Buffer buffer = ReadBuffer(rel, block_number);
 	GenericXLogState *state = GenericXLogStart(rel);
 
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
@@ -381,8 +385,8 @@ write_to_block(Relation rel, BlockNumber block_number, uint32_t offset, const ch
 		phdr->pd_lower = offset;
 	}
 
-	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-	phdr->pd_lower = static_cast<LocationIndex>(*write_end);
+    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, source, len);
+    phdr->pd_lower = static_cast<LocationIndex>(*write_end);
 
 	GenericXLogFinish(state);
 

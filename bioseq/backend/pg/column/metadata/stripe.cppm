@@ -521,8 +521,3 @@ void insert_empty_stripe_metadata_row(uint64_t storage_id,
 
     table_close(bioseq_column_stripes, RowExclusiveLock);
 }
-
-/*
- * list_stripes_for_relation returns a list of stripe_metadata for stripes
- * of the given relfilelocator.
- */
