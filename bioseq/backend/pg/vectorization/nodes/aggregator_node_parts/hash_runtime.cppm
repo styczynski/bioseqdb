@@ -28,33 +28,6 @@ using bioseq::postgres::support::walk_pg_expression_including_root;
 import :support;
 import :transitions;
 
-/** Allocates one grouping-set hash table. */
-static void build_hash_table(AggState* aggregate_state, int set_index, long bucket_count);
-/** Chooses a bucket count within the available hash memory. */
-static long
-choose_hash_bucket_count(double hash_entry_size, long estimated_bucket_count, Size memory_budget);
-/** Chooses the spill partition count and consumed hash bits. */
-static int choose_hash_partition_count(double input_groups,
-                                       double hash_entry_size,
-                                       int used_bits,
-                                       int* partition_bits_out);
-/** Switches every grouping set to partitioned spill mode. */
-static void enter_hash_aggregate_spill_mode(AggState* aggregate_state);
-/** Creates the logical tapes and cardinality state for one spill. */
-export void initialize_hash_aggregate_spill(hash_aggregate_spill* spill,
-                                            LogicalTapeSet* tape_set,
-                                            int used_bits,
-                                            double input_groups,
-                                            double hash_entry_size);
-/** Writes one minimal tuple to its spill partition. */
-export Size spill_hash_aggregate_tuple(AggState* aggregate_state,
-                                       hash_aggregate_spill* spill,
-                                       TupleTableSlot* slot,
-                                       uint32_t hash_value);
-/** Seals populated spill partitions as queued batches. */
-export void
-finish_hash_aggregate_spill(AggState* aggregate_state, hash_aggregate_spill* spill, int set_index);
-
 /**
  * Classifies OUTER_VAR references exactly once while tracking Aggref nesting.
  */
@@ -115,33 +88,24 @@ static void find_aggregate_columns(AggState* aggregate_state,
 }
 
 /**
- * Recreates the per-grouping-set hash tables in the shared hash context.
+ * Choose a reasonable number of buckets for the initial hash table size.
  */
-export void build_hash_tables(AggState* aggregate_state) {
-    int set_index;
+static long choose_hash_bucket_count(double hash_entry_size, long group_count, Size memory_budget) {
+    long maximum_bucket_count;
+    long bucket_count = group_count;
 
-    for (set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
-        AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
-        long bucket_count;
-        Size memory_budget;
+    maximum_bucket_count = memory_budget / hash_entry_size;
 
-        if (hash_state->hashtable != nullptr) {
-            ResetTupleHashTable(hash_state->hashtable);
-            continue;
-        }
+    /**
+     * Underestimating is better than overestimating. Too many buckets crowd
+     * out space for group keys and transition state values.
+     */
+    maximum_bucket_count >>= 1;
 
-        Assert(hash_state->aggnode->numGroups > 0);
+    if (bucket_count > maximum_bucket_count)
+        bucket_count = maximum_bucket_count;
 
-        memory_budget = aggregate_state->hash_mem_limit / aggregate_state->num_hashes;
-
-        /* choose reasonable number of buckets per hash_table */
-        bucket_count = choose_hash_bucket_count(
-            aggregate_state->hashentrysize, hash_state->aggnode->numGroups, memory_budget);
-
-        build_hash_table(aggregate_state, set_index, bucket_count);
-    }
-
-    aggregate_state->hash_ngroups_current = 0;
+    return std::max<long>(bucket_count, 1);
 }
 
 /**
@@ -176,6 +140,36 @@ static void build_hash_table(AggState* aggregate_state, int set_index, long buck
                                       hash_context,
                                       temporary_context,
                                       DO_AGGSPLIT_SKIPFINAL(aggregate_state->aggsplit));
+}
+
+/**
+ * Recreates the per-grouping-set hash tables in the shared hash context.
+ */
+export void build_hash_tables(AggState* aggregate_state) {
+    int set_index;
+
+    for (set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
+        AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
+        long bucket_count;
+        Size memory_budget;
+
+        if (hash_state->hashtable != nullptr) {
+            ResetTupleHashTable(hash_state->hashtable);
+            continue;
+        }
+
+        Assert(hash_state->aggnode->numGroups > 0);
+
+        memory_budget = aggregate_state->hash_mem_limit / aggregate_state->num_hashes;
+
+        /* choose reasonable number of buckets per hash_table */
+        bucket_count = choose_hash_bucket_count(
+            aggregate_state->hashentrysize, hash_state->aggnode->numGroups, memory_budget);
+
+        build_hash_table(aggregate_state, set_index, bucket_count);
+    }
+
+    aggregate_state->hash_ngroups_current = 0;
 }
 
 /**
@@ -369,175 +363,6 @@ export void recompile_hash_aggregate_expressions(AggState* aggregate_state,
 }
 
 /**
- * Derives hash memory and group-count spill limits from the expected partitions.
- */
-extern "C" void hash_agg_set_limits(double hash_entry_size,
-                                    double input_groups,
-                                    int used_bits,
-                                    Size* mem_limit,
-                                    uint64* ngroups_limit,
-                                    int* num_partitions) {
-    int partition_count;
-    Size partition_buffer_memory;
-    const Size hash_memory_limit = get_hash_memory_limit();
-
-    /* if not expected to spill, use all of hash_mem */
-    if (input_groups * hash_entry_size <= hash_memory_limit) {
-        if (num_partitions != nullptr)
-            *num_partitions = 0;
-        *mem_limit = hash_memory_limit;
-        *ngroups_limit = hash_memory_limit / hash_entry_size;
-        return;
-    }
-
-    /**
-     * Reserves tape-buffer memory before assigning the hash-table limit.
-     */
-    partition_count =
-        choose_hash_partition_count(input_groups, hash_entry_size, used_bits, nullptr);
-    if (num_partitions != nullptr)
-        *num_partitions = partition_count;
-
-    partition_buffer_memory =
-        hash_aggregate_read_buffer_bytes + hash_aggregate_write_buffer_bytes * partition_count;
-
-    /**
-     * Keeps at least three quarters of hash memory at the minimum partition count.
-     */
-    if (hash_memory_limit > 4 * partition_buffer_memory)
-        *mem_limit = hash_memory_limit - partition_buffer_memory;
-    else
-        *mem_limit = hash_memory_limit * 0.75;
-
-    if (*mem_limit > hash_entry_size)
-        *ngroups_limit = *mem_limit / hash_entry_size;
-    else
-        *ngroups_limit = 1;
-}
-
-/**
- * Enters spill mode when a newly added group crosses a hash limit.
- */
-static void check_hash_aggregate_limits(AggState* aggregate_state) {
-    const uint64_t group_count = aggregate_state->hash_ngroups_current;
-    const Size metadata_memory = MemoryContextMemAllocated(aggregate_state->hash_metacxt, true);
-    const Size hash_key_memory =
-        MemoryContextMemAllocated(aggregate_state->hashcontext->ecxt_per_tuple_memory, true);
-
-    /**
-     * Don't spill unless there's at least one group in the hash table so we
-     * can be sure to make progress even in edge cases.
-     */
-    if (aggregate_state->hash_ngroups_current > 0 &&
-        (metadata_memory + hash_key_memory > aggregate_state->hash_mem_limit ||
-         group_count > aggregate_state->hash_ngroups_limit)) {
-        enter_hash_aggregate_spill_mode(aggregate_state);
-    }
-}
-
-/**
- * Enter "spill mode", meaning that no new groups are added to any of the hash
- * tables. Tuples that would create a new group are instead spilled, and
- * processed later.
- */
-static void enter_hash_aggregate_spill_mode(AggState* aggregate_state) {
-    aggregate_state->hash_spill_mode = true;
-    recompile_hash_aggregate_expressions(aggregate_state, aggregate_state->table_filled, true);
-
-    if (!aggregate_state->hash_ever_spilled) {
-        Assert(aggregate_state->hash_tapeset == nullptr);
-        Assert(aggregate_state->hash_spills == nullptr);
-
-        aggregate_state->hash_ever_spilled = true;
-
-        aggregate_state->hash_tapeset = LogicalTapeSetCreate(true, nullptr, -1);
-
-        aggregate_state->hash_spills =
-            allocate_zeroed_array<hash_aggregate_spill>(aggregate_state->num_hashes);
-
-        for (int set_index = 0; set_index < aggregate_state->num_hashes; set_index++) {
-            AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
-            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
-
-            initialize_hash_aggregate_spill(spill,
-                                            aggregate_state->hash_tapeset,
-                                            0,
-                                            hash_state->aggnode->numGroups,
-                                            aggregate_state->hashentrysize);
-        }
-    }
-}
-
-/**
- * Update metrics after filling the hash table.
- *
- * If reading from the outer plan, reading_from_tape is false. When reading
- * another tape, it is true.
- */
-export void update_hash_aggregate_metrics(AggState* aggregate_state,
-                                          bool reading_from_tape,
-                                          int partition_count) {
-    Size buffer_memory;
-    Size total_memory;
-
-    if (aggregate_state->aggstrategy != AGG_MIXED && aggregate_state->aggstrategy != AGG_HASHED)
-        return;
-
-    /* memory for the hash table itself */
-    const Size metadata_memory = MemoryContextMemAllocated(aggregate_state->hash_metacxt, true);
-
-    /* memory for the group keys and transition states */
-    const Size hash_key_memory =
-        MemoryContextMemAllocated(aggregate_state->hashcontext->ecxt_per_tuple_memory, true);
-
-    /* memory for read/write tape buffers, if spilled */
-    buffer_memory = partition_count * hash_aggregate_write_buffer_bytes;
-    if (reading_from_tape)
-        buffer_memory += hash_aggregate_read_buffer_bytes;
-
-    /* update peak mem */
-    total_memory = metadata_memory + hash_key_memory + buffer_memory;
-    if (total_memory > aggregate_state->hash_mem_peak)
-        aggregate_state->hash_mem_peak = total_memory;
-
-    /* update disk usage */
-    if (aggregate_state->hash_tapeset != nullptr) {
-        uint64_t disk_used = LogicalTapeSetBlocks(aggregate_state->hash_tapeset) * (BLCKSZ / 1024);
-
-        if (aggregate_state->hash_disk_used < disk_used)
-            aggregate_state->hash_disk_used = disk_used;
-    }
-
-    /* update hash_entry_size estimate based on contents */
-    if (aggregate_state->hash_ngroups_current > 0) {
-        aggregate_state->hashentrysize =
-            sizeof(TupleHashEntryData) +
-            (hash_key_memory / static_cast<double>(aggregate_state->hash_ngroups_current));
-    }
-}
-
-/**
- * Choose a reasonable number of buckets for the initial hash table size.
- */
-static long choose_hash_bucket_count(double hash_entry_size, long group_count, Size memory_budget) {
-    long maximum_bucket_count;
-    long bucket_count = group_count;
-
-    maximum_bucket_count = memory_budget / hash_entry_size;
-
-    /**
-     * Underestimating is better than overestimating. Too many buckets crowd
-     * out space for group keys and transition state values.
-     */
-    maximum_bucket_count >>= 1;
-
-    if (bucket_count > maximum_bucket_count)
-        bucket_count = maximum_bucket_count;
-
-    return std::max<long>(bucket_count, 1);
-}
-
-/**
  * Determine the number of partitions to create when spilling, which will
  * always be a power of two. When partition_bits_out is non-null, it receives
  * the base-two logarithm of the partition count.
@@ -593,80 +418,50 @@ static int choose_hash_partition_count(double input_groups,
 }
 
 /**
- * Initialize a freshly-created TupleHashEntry.
+ * Derives hash memory and group-count spill limits from the expected partitions.
  */
-export void
-initialize_hash_entry(AggState* aggregate_state, TupleHashTable hash_table, TupleHashEntry entry) {
-    AggStatePerGroup group_state;
-    int transition_index;
+extern "C" void hash_agg_set_limits(double hash_entry_size,
+                                    double input_groups,
+                                    int used_bits,
+                                    Size* mem_limit,
+                                    uint64* ngroups_limit,
+                                    int* num_partitions) {
+    int partition_count;
+    Size partition_buffer_memory;
+    const Size hash_memory_limit = get_hash_memory_limit();
 
-    aggregate_state->hash_ngroups_current++;
-    check_hash_aggregate_limits(aggregate_state);
-
-    /* no need to allocate or initialize per-group state */
-    if (aggregate_state->numtrans == 0)
+    /* if not expected to spill, use all of hash_mem */
+    if (input_groups * hash_entry_size <= hash_memory_limit) {
+        if (num_partitions != nullptr)
+            *num_partitions = 0;
+        *mem_limit = hash_memory_limit;
+        *ngroups_limit = hash_memory_limit / hash_entry_size;
         return;
-
-    group_state = static_cast<AggStatePerGroup>(bioseq_prepare_tuple_hash_entry_additional(
-        hash_table, entry, sizeof(AggStatePerGroupData) * aggregate_state->numtrans));
+    }
 
     /**
-     * Initialize aggregates for new tuple group, lookup_hash_entries()
-     * already has selected the relevant grouping set.
+     * Reserves tape-buffer memory before assigning the hash-table limit.
      */
-    for (transition_index = 0; transition_index < aggregate_state->numtrans; transition_index++) {
-        AggStatePerTrans transition_state = &aggregate_state->pertrans[transition_index];
-        AggStatePerGroup per_group_state = &group_state[transition_index];
+    partition_count =
+        choose_hash_partition_count(input_groups, hash_entry_size, used_bits, nullptr);
+    if (num_partitions != nullptr)
+        *num_partitions = partition_count;
 
-        initialize_aggregate(aggregate_state, transition_state, per_group_state);
-    }
-}
+    partition_buffer_memory =
+        hash_aggregate_read_buffer_bytes + hash_aggregate_write_buffer_bytes * partition_count;
 
-/**
- * Finds or creates one hash entry per grouping set and spills unavailable groups.
- *
- * The temporary context may reset during each lookup.
- */
-export void lookup_hash_entries(AggState* aggregate_state) {
-    AggStatePerGroup* group_state = aggregate_state->hash_pergroup;
-    TupleTableSlot* outer_slot = aggregate_state->tmpcontext->ecxt_outertuple;
+    /**
+     * Keeps at least three quarters of hash memory at the minimum partition count.
+     */
+    if (hash_memory_limit > 4 * partition_buffer_memory)
+        *mem_limit = hash_memory_limit - partition_buffer_memory;
+    else
+        *mem_limit = hash_memory_limit * 0.75;
 
-    for (int set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
-        AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
-        TupleHashTable hash_table = hash_state->hashtable;
-        TupleTableSlot* hash_slot = hash_state->hashslot;
-        TupleHashEntry entry;
-        uint32_t hash_value;
-        bool entry_is_new = false;
-
-        /* if hash table already spilled, don't create new entries */
-        bool* const entry_is_new_out = aggregate_state->hash_spill_mode ? nullptr : &entry_is_new;
-
-        select_current_set(aggregate_state, set_index, true);
-        prepare_hash_slot(hash_state, outer_slot, hash_slot);
-
-        entry = LookupTupleHashEntry(hash_table, hash_slot, entry_is_new_out, &hash_value);
-
-        if (entry != nullptr) {
-            if (entry_is_new)
-                initialize_hash_entry(aggregate_state, hash_table, entry);
-            group_state[set_index] = static_cast<AggStatePerGroupData*>(
-                bioseq_tuple_hash_entry_additional(hash_table, entry));
-        } else {
-            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
-            TupleTableSlot* spill_input_slot = aggregate_state->tmpcontext->ecxt_outertuple;
-
-            if (spill->partitions == nullptr)
-                initialize_hash_aggregate_spill(spill,
-                                                aggregate_state->hash_tapeset,
-                                                0,
-                                                hash_state->aggnode->numGroups,
-                                                aggregate_state->hashentrysize);
-
-            spill_hash_aggregate_tuple(aggregate_state, spill, spill_input_slot, hash_value);
-            group_state[set_index] = nullptr;
-        }
-    }
+    if (*mem_limit > hash_entry_size)
+        *ngroups_limit = *mem_limit / hash_entry_size;
+    else
+        *ngroups_limit = 1;
 }
 
 /**
@@ -699,6 +494,137 @@ export void initialize_hash_aggregate_spill(hash_aggregate_spill* spill,
 
     for (int partition_index = 0; partition_index < partition_count; ++partition_index)
         initHyperLogLog(&spill->hll_card[partition_index], hash_aggregate_hll_bit_width);
+}
+
+/**
+ * Enter "spill mode", meaning that no new groups are added to any of the hash
+ * tables. Tuples that would create a new group are instead spilled, and
+ * processed later.
+ */
+static void enter_hash_aggregate_spill_mode(AggState* aggregate_state) {
+    aggregate_state->hash_spill_mode = true;
+    recompile_hash_aggregate_expressions(aggregate_state, aggregate_state->table_filled, true);
+
+    if (!aggregate_state->hash_ever_spilled) {
+        Assert(aggregate_state->hash_tapeset == nullptr);
+        Assert(aggregate_state->hash_spills == nullptr);
+
+        aggregate_state->hash_ever_spilled = true;
+
+        aggregate_state->hash_tapeset = LogicalTapeSetCreate(true, nullptr, -1);
+
+        aggregate_state->hash_spills =
+            allocate_zeroed_array<hash_aggregate_spill>(aggregate_state->num_hashes);
+
+        for (int set_index = 0; set_index < aggregate_state->num_hashes; set_index++) {
+            AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
+            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
+
+            initialize_hash_aggregate_spill(spill,
+                                            aggregate_state->hash_tapeset,
+                                            0,
+                                            hash_state->aggnode->numGroups,
+                                            aggregate_state->hashentrysize);
+        }
+    }
+}
+
+/**
+ * Enters spill mode when a newly added group crosses a hash limit.
+ */
+static void check_hash_aggregate_limits(AggState* aggregate_state) {
+    const uint64_t group_count = aggregate_state->hash_ngroups_current;
+    const Size metadata_memory = MemoryContextMemAllocated(aggregate_state->hash_metacxt, true);
+    const Size hash_key_memory =
+        MemoryContextMemAllocated(aggregate_state->hashcontext->ecxt_per_tuple_memory, true);
+
+    /**
+     * Don't spill unless there's at least one group in the hash table so we
+     * can be sure to make progress even in edge cases.
+     */
+    if (aggregate_state->hash_ngroups_current > 0 &&
+        (metadata_memory + hash_key_memory > aggregate_state->hash_mem_limit ||
+         group_count > aggregate_state->hash_ngroups_limit)) {
+        enter_hash_aggregate_spill_mode(aggregate_state);
+    }
+}
+
+/**
+ * Update metrics after filling the hash table.
+ *
+ * If reading from the outer plan, reading_from_tape is false. When reading
+ * another tape, it is true.
+ */
+export void update_hash_aggregate_metrics(AggState* aggregate_state,
+                                          bool reading_from_tape,
+                                          int partition_count) {
+    Size buffer_memory;
+    Size total_memory;
+
+    if (aggregate_state->aggstrategy != AGG_MIXED && aggregate_state->aggstrategy != AGG_HASHED)
+        return;
+
+    /* memory for the hash table itself */
+    const Size metadata_memory = MemoryContextMemAllocated(aggregate_state->hash_metacxt, true);
+
+    /* memory for the group keys and transition states */
+    const Size hash_key_memory =
+        MemoryContextMemAllocated(aggregate_state->hashcontext->ecxt_per_tuple_memory, true);
+
+    /* memory for read/write tape buffers, if spilled */
+    buffer_memory = partition_count * hash_aggregate_write_buffer_bytes;
+    if (reading_from_tape)
+        buffer_memory += hash_aggregate_read_buffer_bytes;
+
+    /* update peak mem */
+    total_memory = metadata_memory + hash_key_memory + buffer_memory;
+    if (total_memory > aggregate_state->hash_mem_peak)
+        aggregate_state->hash_mem_peak = total_memory;
+
+    /* update disk usage */
+    if (aggregate_state->hash_tapeset != nullptr) {
+        uint64_t disk_used = LogicalTapeSetBlocks(aggregate_state->hash_tapeset) * (BLCKSZ / 1024);
+
+        if (aggregate_state->hash_disk_used < disk_used)
+            aggregate_state->hash_disk_used = disk_used;
+    }
+
+    /* update hash_entry_size estimate based on contents */
+    if (aggregate_state->hash_ngroups_current > 0) {
+        aggregate_state->hashentrysize =
+            sizeof(TupleHashEntryData) +
+            (hash_key_memory / static_cast<double>(aggregate_state->hash_ngroups_current));
+    }
+}
+
+/**
+ * Initialize a freshly-created TupleHashEntry.
+ */
+export void
+initialize_hash_entry(AggState* aggregate_state, TupleHashTable hash_table, TupleHashEntry entry) {
+    AggStatePerGroup group_state;
+    int transition_index;
+
+    aggregate_state->hash_ngroups_current++;
+    check_hash_aggregate_limits(aggregate_state);
+
+    /* no need to allocate or initialize per-group state */
+    if (aggregate_state->numtrans == 0)
+        return;
+
+    group_state = static_cast<AggStatePerGroup>(bioseq_prepare_tuple_hash_entry_additional(
+        hash_table, entry, sizeof(AggStatePerGroupData) * aggregate_state->numtrans));
+
+    /**
+     * Initialize aggregates for new tuple group, lookup_hash_entries()
+     * already has selected the relevant grouping set.
+     */
+    for (transition_index = 0; transition_index < aggregate_state->numtrans; transition_index++) {
+        AggStatePerTrans transition_state = &aggregate_state->pertrans[transition_index];
+        AggStatePerGroup per_group_state = &group_state[transition_index];
+
+        initialize_aggregate(aggregate_state, transition_state, per_group_state);
+    }
 }
 
 /**
@@ -759,6 +685,53 @@ export Size spill_hash_aggregate_tuple(AggState* aggregate_state,
         pfree(tuple);
 
     return written_byte_count;
+}
+
+/**
+ * Finds or creates one hash entry per grouping set and spills unavailable groups.
+ *
+ * The temporary context may reset during each lookup.
+ */
+export void lookup_hash_entries(AggState* aggregate_state) {
+    AggStatePerGroup* group_state = aggregate_state->hash_pergroup;
+    TupleTableSlot* outer_slot = aggregate_state->tmpcontext->ecxt_outertuple;
+
+    for (int set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
+        AggStatePerHash hash_state = &aggregate_state->perhash[set_index];
+        TupleHashTable hash_table = hash_state->hashtable;
+        TupleTableSlot* hash_slot = hash_state->hashslot;
+        TupleHashEntry entry;
+        uint32_t hash_value;
+        bool entry_is_new = false;
+
+        /* if hash table already spilled, don't create new entries */
+        bool* const entry_is_new_out = aggregate_state->hash_spill_mode ? nullptr : &entry_is_new;
+
+        select_current_set(aggregate_state, set_index, true);
+        prepare_hash_slot(hash_state, outer_slot, hash_slot);
+
+        entry = LookupTupleHashEntry(hash_table, hash_slot, entry_is_new_out, &hash_value);
+
+        if (entry != nullptr) {
+            if (entry_is_new)
+                initialize_hash_entry(aggregate_state, hash_table, entry);
+            group_state[set_index] = static_cast<AggStatePerGroupData*>(
+                bioseq_tuple_hash_entry_additional(hash_table, entry));
+        } else {
+            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
+            TupleTableSlot* spill_input_slot = aggregate_state->tmpcontext->ecxt_outertuple;
+
+            if (spill->partitions == nullptr)
+                initialize_hash_aggregate_spill(spill,
+                                                aggregate_state->hash_tapeset,
+                                                0,
+                                                hash_state->aggnode->numGroups,
+                                                aggregate_state->hashentrysize);
+
+            spill_hash_aggregate_tuple(aggregate_state, spill, spill_input_slot, hash_value);
+            group_state[set_index] = nullptr;
+        }
+    }
 }
 
 /**
@@ -836,31 +809,6 @@ export MinimalTuple read_hash_aggregate_batch(hash_aggregate_batch* batch,
 }
 
 /**
- * Converts nonempty spill partitions into later hash batches.
- */
-export void finish_initial_hash_aggregate_spills(AggState* aggregate_state) {
-    int total_partition_count = 0;
-
-    if (aggregate_state->hash_spills != nullptr) {
-        for (int set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
-            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
-
-            total_partition_count += spill->npartitions;
-            finish_hash_aggregate_spill(aggregate_state, spill, set_index);
-        }
-
-        /**
-         * Releases initial spill state once execution is limited to queued batches.
-         */
-        pfree(aggregate_state->hash_spills);
-        aggregate_state->hash_spills = nullptr;
-    }
-
-    update_hash_aggregate_metrics(aggregate_state, false, total_partition_count);
-    aggregate_state->hash_spill_mode = false;
-}
-
-/**
  * finish_hash_aggregate_spill
  *
  * Transform spill partitions into new batches.
@@ -896,6 +844,31 @@ finish_hash_aggregate_spill(AggState* aggregate_state, hash_aggregate_spill* spi
     pfree(spill->ntuples);
     pfree(spill->hll_card);
     pfree(spill->partitions);
+}
+
+/**
+ * Converts nonempty spill partitions into later hash batches.
+ */
+export void finish_initial_hash_aggregate_spills(AggState* aggregate_state) {
+    int total_partition_count = 0;
+
+    if (aggregate_state->hash_spills != nullptr) {
+        for (int set_index = 0; set_index < aggregate_state->num_hashes; ++set_index) {
+            hash_aggregate_spill* spill = &aggregate_state->hash_spills[set_index];
+
+            total_partition_count += spill->npartitions;
+            finish_hash_aggregate_spill(aggregate_state, spill, set_index);
+        }
+
+        /**
+         * Releases initial spill state once execution is limited to queued batches.
+         */
+        pfree(aggregate_state->hash_spills);
+        aggregate_state->hash_spills = nullptr;
+    }
+
+    update_hash_aggregate_metrics(aggregate_state, false, total_partition_count);
+    aggregate_state->hash_spill_mode = false;
 }
 
 /**
