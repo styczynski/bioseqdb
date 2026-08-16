@@ -30,6 +30,21 @@ function(_require_contains text needle context)
   endif()
 endfunction()
 
+function(_require_occurrence_count text needle expected context)
+  if("${needle}" STREQUAL "")
+    message(FATAL_ERROR "${context}: occurrence marker must not be empty")
+  endif()
+  string(LENGTH "${text}" _text_length)
+  string(LENGTH "${needle}" _needle_length)
+  string(REPLACE "${needle}" "" _without_needle "${text}")
+  string(LENGTH "${_without_needle}" _without_needle_length)
+  math(EXPR _occurrence_bytes
+    "${_text_length} - ${_without_needle_length}")
+  math(EXPR _occurrence_count
+    "${_occurrence_bytes} / ${_needle_length}")
+  _require_equal("${_occurrence_count}" "${expected}" "${context}")
+endfunction()
+
 function(_verify_profile profile expected_ordinal expected_alphabets
     expected_coordinates expected_adaptive expected_extended expected_full
     expected_units)
@@ -191,15 +206,49 @@ _require_contains("${_bioseq_cmake_source}"
   "set(BIOSEQ_VACUUM_TRUNCATE_LOCK_TIMEOUT_MILLISECONDS \"4500\""
   "vacuum timeout default")
 string(FIND "${_bioseq_cmake_source}"
-  "backend/common/bioseq_build_config.cppm" _authored_source_exclusion)
+  [=[set(_bioseq_build_config_authored_input
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")]=]
+  _authored_input_declaration)
+set(_authored_input_path "backend/common/bioseq_build_config.cppm")
+_require_occurrence_count("${_bioseq_cmake_source}" "${_authored_input_path}" 1
+  "canonical authored build-config path declaration count")
+_require_occurrence_count("${_bioseq_cmake_source}"
+  "bioseq_add_build_config_module(" 1
+  "generated build-config provider registration count")
+string(FIND "${_bioseq_cmake_source}"
+  [=[list(REMOVE_ITEM SRC_MOD_FILES
+  "${_bioseq_build_config_authored_input}")]=]
+  _authored_source_exclusion)
 string(FIND "${_bioseq_cmake_source}"
   "bioseq_add_build_config_module(" _generator_registration)
-if(_authored_source_exclusion LESS 0
+string(FIND "${_bioseq_cmake_source}"
+  "file(GLOB_RECURSE BIOSEQ_NOPG_MODULES" _nopg_inventory)
+string(FIND "${_bioseq_cmake_source}"
+  [=[list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
+  "${_bioseq_build_config_authored_input}")]=]
+  _authored_nopg_exclusion)
+string(FIND "${_bioseq_cmake_source}"
+  "Authored build-config generator input escaped into broad module"
+  _authored_ownership_guard)
+if(_authored_input_declaration LESS 0
+    OR _authored_source_exclusion LESS 0
     OR _generator_registration LESS 0
-    OR _authored_source_exclusion GREATER _generator_registration)
+    OR _nopg_inventory LESS 0
+    OR _authored_nopg_exclusion LESS 0
+    OR _authored_ownership_guard LESS 0
+    OR _authored_input_declaration GREATER _authored_source_exclusion
+    OR _authored_source_exclusion GREATER _generator_registration
+    OR _generator_registration GREATER _nopg_inventory
+    OR _nopg_inventory GREATER _authored_nopg_exclusion
+    OR _authored_nopg_exclusion GREATER _authored_ownership_guard)
   message(FATAL_ERROR
-    "Authored build config is not excluded before generated-module registration")
+    "Authored build config is not generator-only in both broad module inventories")
 endif()
+_require_contains("${_bioseq_cmake_source}"
+  [=[bioseq_add_build_config_module(
+  TARGET bioseq_build_config
+  SOURCE "${_bioseq_build_config_authored_input}"]=]
+  "canonical generated build-config provider")
 
 file(READ
   "${_repository_root}/bioseq/backend/pg/include/bioseq/pg_build_profile.h"

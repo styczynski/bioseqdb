@@ -132,8 +132,12 @@ file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
-list(REMOVE_ITEM SRC_MOD_FILES
+# The authored interface is generator input only. The generated target below
+# is the sole compiled provider of bioseq.build_config.
+set(_bioseq_build_config_authored_input
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm")
+list(REMOVE_ITEM SRC_MOD_FILES
+  "${_bioseq_build_config_authored_input}")
 _bioseq_build_config_bool(
   "${BIOSEQ_TEST_INDEXES}" _bioseq_build_config_test_indexes)
 _bioseq_build_config_bool(
@@ -144,7 +148,7 @@ _bioseq_build_config_cache_testing(
   _bioseq_build_config_cache_testing)
 bioseq_add_build_config_module(
   TARGET bioseq_build_config
-  SOURCE "${CMAKE_CURRENT_LIST_DIR}/backend/common/bioseq_build_config.cppm"
+  SOURCE "${_bioseq_build_config_authored_input}"
   OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/generated/build_config"
   PROFILE "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}"
   TEST_INDEXES "${_bioseq_build_config_test_indexes}"
@@ -1052,8 +1056,24 @@ file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
 list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/backend/pg/")
 list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/common/testing\.cppm$")
 list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
+  "${_bioseq_build_config_authored_input}")
+list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
   ${BIOSEQ_GPU_ARCHIVE_MODULE_UNITS}
   ${BIOSEQ_GPU_ARCHIVE_ORDINARY_UNITS})
+
+foreach(_bioseq_build_config_broad_inventory IN ITEMS
+    SRC_MOD_FILES BIOSEQ_NOPG_MODULES)
+  list(FIND ${_bioseq_build_config_broad_inventory}
+    "${_bioseq_build_config_authored_input}"
+    _bioseq_build_config_broad_owner_index)
+  if(NOT _bioseq_build_config_broad_owner_index EQUAL -1)
+    message(FATAL_ERROR
+      "Authored build-config generator input escaped into broad module "
+      "ownership: ${_bioseq_build_config_broad_inventory}")
+  endif()
+endforeach()
+unset(_bioseq_build_config_broad_owner_index)
+unset(_bioseq_build_config_broad_inventory)
 
 # Highway generator inputs are authored module interfaces whose namespace and
 # callable structure are validated by Clang. They are never final providers:
