@@ -83,17 +83,26 @@ public:
         sql_example const& example) {
         try {
             bioseq::libpq::client_connection connection(connection_info_);
-            try {
-                std::expected<sql_example_result, diagnostic> outcome =
-                    execute_on_connection(
+            std::expected<sql_example_result, diagnostic> outcome = [&]() {
+                try {
+                    return execute_on_connection(
                         connection, example, /*run_teardown=*/false);
-                run_direct_teardown(connection, example);
-                return outcome;
-            } catch (const bioseq::libpq::command_error& error) {
-                run_direct_teardown(connection, example);
-                return std::unexpected(make_command_diagnostic(
-                    diagnostic_operation::sql_execution, error));
+                } catch (const bioseq::libpq::command_error& error) {
+                    return std::expected<sql_example_result, diagnostic>(
+                        std::unexpected(make_command_diagnostic(
+                            diagnostic_operation::sql_execution, error)));
+                }
+            }();
+            if (std::optional<diagnostic> teardown =
+                    run_direct_teardown(connection, example)) {
+                teardown->message = "tutorial teardown failed: " + teardown->message;
+                if (!outcome) {
+                    outcome.error().notes.push_back(teardown->message);
+                } else {
+                    outcome = std::unexpected(std::move(*teardown));
+                }
             }
+            return outcome;
         } catch (const bioseq::libpq::command_error& error) {
             return std::unexpected(make_command_diagnostic(
                 diagnostic_operation::sql_execution, error));
@@ -167,7 +176,7 @@ public:
             (void)admin.execute("CREATE ROLE " + quoted_peer
                 + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
             // Clone-ACL verification and negative connection assertions run
-            // before the example; a violated security guarantee fails the example.
+            // before the example. A violated security guarantee fails the example.
             if (std::optional<diagnostic> violation =
                     check_clone_connection_acl(admin, role, clone)) {
                 result = std::unexpected(std::move(*violation));
@@ -257,17 +266,17 @@ private:
         // deterministic session settings also install.
         const std::chrono::milliseconds deadline = execution_deadline(example);
         // Deterministic session settings precede setup so formatting,
-        // search_path, and the defense-in-depth server timeouts are fixed for
-        // every command; the bounded example timeout drives statement_timeout.
+        // search_path, and server timeouts are fixed for
+        // every command. The bounded example timeout drives statement_timeout.
         configure_tutorial_session(connection, example);
         if (!example.setup_sql.empty()) {
             (void)connection.execute(example.setup_sql, deadline);
         }
-        // Only notices from visible SQL may render; discard session-configuration
+        // Only notices from visible SQL may render. Discard session-configuration
         // and setup notices before running it.
         (void)connection.drain_notices();
         // The visible SQL is where the success/error expectation applies. A
-        // success example must not raise; an error example must raise the expected
+        // success example must not raise. An error example must raise the expected
         // SQLSTATE (or any error, when unspecified). Completed result sets remain
         // in execution order.
         if (example.expectation == sql_expectation::error) {
@@ -276,7 +285,7 @@ private:
                 return std::unexpected(std::move(*failure));
             }
         } else {
-            // The retention limits bound chunked accumulation as it streams; a
+            // The retention limits bound chunked accumulation as it streams. A
             // breach is still reported by check_result_limits below with its
             // author-facing message rather than a silent truncation.
             const bioseq::libpq::command_batch_result visible_batch =
@@ -321,7 +330,7 @@ private:
             try {
                 (void)connection.execute(example.teardown_sql, deadline);
             } catch (const bioseq::libpq::command_error&) {
-                // Teardown is best-effort after a captured expected error.
+                // Teardown failure is ignored after a captured expected error.
             }
         }
         return outcome;
@@ -331,15 +340,16 @@ private:
     ///
     /// A failed visible statement can leave an explicit transaction aborted.
     /// Roll it back before teardown so objects created by earlier autocommit
-    /// setup statements are still removed. Teardown stays best-effort because
-    /// the original execution diagnostic is the result callers need to see.
+    /// setup statements are still removed. A teardown error fails the example.
+    /// When execution also failed, its diagnostic remains the primary error.
     /// @param connection Direct tutorial connection that owns the session.
     /// @param example Example whose teardown SQL should run.
-    static void run_direct_teardown(
+    /// @return A teardown diagnostic when rollback or cleanup fails.
+    [[nodiscard]] static std::optional<diagnostic> run_direct_teardown(
         bioseq::libpq::client_connection& connection,
         sql_example const& example) {
         if (example.teardown_sql.empty()) {
-            return;
+            return std::nullopt;
         }
         const std::chrono::milliseconds deadline = execution_deadline(example);
         try {
@@ -347,9 +357,11 @@ private:
                 (void)connection.execute("ROLLBACK", deadline);
             }
             (void)connection.execute(example.teardown_sql, deadline);
-        } catch (const bioseq::libpq::command_error&) {
-            // Best effort preserves the original execution outcome.
+        } catch (const bioseq::libpq::command_error& error) {
+            return make_command_diagnostic(
+                diagnostic_operation::sql_execution, error);
         }
+        return std::nullopt;
     }
 
     /// @brief Returns the bounded client deadline for one tutorial SQL step.
@@ -706,7 +718,7 @@ private:
     /// @param role_connection Connection authenticated as the restricted role.
     /// @param sql Security-sensitive command to attempt.
     /// @param violation Message returned if the command succeeds.
-    /// @return No value for SQLSTATE 42501; otherwise an isolation error.
+    /// @return No value for SQLSTATE 42501. Otherwise an isolation error.
     [[nodiscard]] static std::optional<diagnostic> check_command_denied(
         bioseq::libpq::client_connection& role_connection, const std::string& sql,
         std::string violation) {
@@ -1033,7 +1045,7 @@ private:
         return std::nullopt;
     }
 
-    /// @brief Runs best-effort teardown before administrative clone cleanup.
+    /// @brief Runs author teardown before administrative clone cleanup.
     /// @param settings Private-cluster connection settings.
     /// @param role Restricted example role.
     /// @param clone Per-example database.
@@ -1054,7 +1066,7 @@ private:
             try {
                 (void)role_connection->execute(example.teardown_sql, deadline);
             } catch (const bioseq::libpq::command_error&) {
-                // Best-effort; the clone is dropped next regardless.
+                // The clone is dropped next even when teardown fails.
             }
             return;
         }
@@ -1078,7 +1090,7 @@ private:
             try_cleanup_command(admin, "GRANT CONNECT ON DATABASE " + quoted_clone
                 + " TO " + quoted_role);
         } catch (const bioseq::libpq::command_error&) {
-            return;  // Could not restore; cleanup drops the clone/role next.
+            return;  // Cleanup drops the clone and role when restoration fails.
         }
         try {
             bioseq::libpq::client_connection reconnect(bioseq::libpq::make_unix_socket_conninfo(
@@ -1086,7 +1098,7 @@ private:
             configure_tutorial_session(reconnect, example);
             (void)reconnect.execute(example.teardown_sql, deadline);
         } catch (const bioseq::libpq::command_error&) {
-            // Best-effort; the clone is dropped next regardless.
+            // The clone is dropped next even when teardown fails.
         }
     }
 

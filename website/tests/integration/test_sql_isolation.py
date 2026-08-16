@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""Isolation + multi-result checks for the website SQL executor (spec 13.3-13.6).
+"""Exercise the website SQL executor in a disposable PostgreSQL cluster.
 
-Runs as the single child of run_private_postgres.py, so PGHOST/PGPORT/PGUSER
-already point at a disposable private cluster. It exercises the built
-`bioseq_codegen website execute-sql` command with PLAIN SQL (the bioseq
-extension DSO is not staged here) to prove:
-
-  M4 - a multi-statement visible phase renders every result set in order, and an
-       expect=error phase retains the successful results before the failure;
-  M3 - a per-example clone runs as a restricted role that is rejected connecting
-       to postgres / the extension template / a foreign role's clone and cannot
-       CREATE ROLE / DATABASE / TABLESPACE / SUBSCRIPTION, ALTER SYSTEM, COPY TO
-       PROGRAM, or SET ROLE to the administrator, while cleanup always drops the
-       clone+roles (0 leftover) even when the example errors or kills its backend.
-
-A direct psql transcript of the same ACL rejections is printed for the record.
+The checks cover ordered visible results, retained errors, PostgreSQL type names,
+restricted clone roles, and cleanup after ordinary errors or a dead backend. The
+Bioseq extension is not needed for these executor-level checks.
 """
 
 from __future__ import annotations
@@ -97,7 +86,7 @@ def _prepared_count(pg_bin: Path) -> int:
     return _scalar_int(prepared, "leftover prepared-transaction count")
 
 
-def check_m4_direct(generator: str) -> None:
+def check_direct_multi_result(generator: str) -> None:
     """A direct (non-isolated) multi-statement visible phase yields two results."""
     result = _run_generator(generator, [
         "--conninfo", _direct_conninfo(os.environ["PGDATABASE"]),
@@ -105,7 +94,7 @@ def check_m4_direct(generator: str) -> None:
     row_lines = [line for line in result.stdout.splitlines() if line.endswith("rows)")]
     ok = (result.returncode == 0 and len(row_lines) == 2
           and "1" in result.stdout and "2 | 3" in result.stdout)
-    _report("M4 direct: SELECT 1; SELECT 2,3 renders two result sets", ok,
+    _report("Direct execution renders two result sets", ok,
             f"rc={result.returncode} results={len(row_lines)}\n{result.stdout.strip()}")
 
 
@@ -192,8 +181,27 @@ def check_direct_cleanup_on_setup_error(generator: str, pg_bin: Path) -> None:
     _psql(pg_bin, database, f"DROP TABLE IF EXISTS {audit}")
 
 
-def check_m4_isolated(generator: str) -> None:
-    """An isolated multi-statement visible phase yields two results (M4 + M3)."""
+def check_direct_teardown_failure(generator: str) -> None:
+    """A direct teardown error fails an otherwise successful example."""
+    result = _run_generator(generator, [
+        "--conninfo", _direct_conninfo(os.environ["PGDATABASE"]),
+        "--visible", "SELECT 1 AS visible_result",
+        "--teardown", "SELECT * FROM website_missing_teardown_relation",
+    ])
+    reported = (
+        result.returncode == 3
+        and "tutorial teardown failed" in result.stderr
+        and "website_missing_teardown_relation" in result.stderr
+    )
+    _report(
+        "Direct cleanup: teardown failures are reported",
+        reported,
+        f"rc={result.returncode}\nstderr:\n{result.stderr.strip()}",
+    )
+
+
+def check_isolated_multi_result(generator: str) -> None:
+    """An isolated multi-statement visible phase yields two results."""
     result = _run_generator(generator, [
         "--isolated", "--admin-conninfo", _admin_conninfo(),
         "--socket-dir", HOST, "--port", PORT, "--template-db", TEMPLATE,
@@ -203,8 +211,7 @@ def check_m4_isolated(generator: str) -> None:
     row_lines = [line for line in result.stdout.splitlines() if line.endswith("rows)")]
     ok = (result.returncode == 0 and len(row_lines) == 2
           and "10" in result.stdout and "20" in result.stdout and "2" in result.stdout)
-    _report("M4/M3 isolated: two result sets AND all internal isolation "
-            "assertions passed (exit 0)", ok,
+    _report("Isolated execution renders two result sets and passes isolation checks", ok,
             f"rc={result.returncode}\nstdout:\n{result.stdout.strip()}\n"
             f"stderr:\n{result.stderr.strip()}")
 
@@ -224,12 +231,12 @@ def check_preflight_failure_skips_teardown(generator: str) -> None:
           and "extension-backed website isolation requires --sql-manifest "
               "for ACL target discovery" in result.stderr
           and elapsed < 5.0)
-    _report("M3 manifest preflight failure: author teardown is skipped", ok,
+    _report("Manifest preflight failure skips author teardown", ok,
             f"rc={result.returncode} elapsed={elapsed:.2f}s\n"
             f"stderr:\n{result.stderr.strip()}")
 
 
-def check_m4_error_retention(generator: str) -> None:
+def check_error_retention(generator: str) -> None:
     """expect=error retains the success before the failure, then the error."""
     result = _run_generator(generator, [
         "--isolated", "--admin-conninfo", _admin_conninfo(),
@@ -239,7 +246,7 @@ def check_m4_error_retention(generator: str) -> None:
     ok = (result.returncode == 0
           and "7" in result.stdout
           and "ERROR SQLSTATE=22012" in result.stdout)
-    _report("M4 error retention: 'SELECT 7; SELECT 1/0' renders 7 then the error",
+    _report("Error retention renders the completed result before the error",
             ok, f"rc={result.returncode}\n{result.stdout.strip()}")
 
 
@@ -258,7 +265,7 @@ def check_result_metadata(generator: str) -> None:
     ok = (result.returncode == 0
           and "INSERT 0 2 (2 rows affected)" in result.stdout
           and "value [local_positive]" in result.stdout)
-    _report("M4 metadata: clone-local format_type + PQcmdTuples are rendered", ok,
+    _report("Clone-local type names and affected-row counts are rendered", ok,
             f"rc={result.returncode}\nstdout:\n{result.stdout.strip()}\n"
             f"stderr:\n{result.stderr.strip()}")
 
@@ -276,7 +283,7 @@ def check_prepared_transaction_cleanup(generator: str, pg_bin: Path) -> None:
     ok = (result.returncode == 0
           and "41" in result.stdout and "42" in result.stdout
           and databases == 0 and roles == 0 and prepared == 0)
-    _report("M3 prepared transaction: rollback + zero clone/role/2PC leftovers",
+    _report("Prepared transaction cleanup leaves no clone, role, or transaction",
             ok, f"rc={result.returncode} leftover_dbs={databases} "
                 f"leftover_roles={roles} prepared={prepared}\n"
                 f"stdout:\n{result.stdout.strip()}\n"
@@ -293,7 +300,7 @@ def check_cleanup_on_error(generator: str, pg_bin: Path) -> None:
         "--teardown", "DROP TABLE t"])
     databases, roles = _leftover_counts(pg_bin)
     ok = result.returncode == 3 and databases == 0 and roles == 0
-    _report("M3 cleanup on error: example fails, 0 leftover clones/roles", ok,
+    _report("Failed isolated example leaves no clone or role", ok,
             f"rc={result.returncode} leftover_dbs={databases} leftover_roles={roles}\n"
             f"stderr:\n{result.stderr.strip()}")
 
@@ -308,13 +315,13 @@ def check_teardown_recovery(generator: str, pg_bin: Path) -> None:
         "--teardown", "DROP TABLE t"])
     databases, roles = _leftover_counts(pg_bin)
     ok = result.returncode != 0 and databases == 0 and roles == 0
-    _report("M3 teardown recovery: backend-killed example, 0 leftover, no hang",
+    _report("Backend failure recovery leaves no clone or role",
             ok, f"rc={result.returncode} leftover_dbs={databases} leftover_roles={roles}")
 
 
 def check_acl_transcript(pg_bin: Path) -> None:
-    """Direct psql transcript reproducing the exact ACL rejections (§13.3)."""
-    print("\n--- direct psql transcript of the §13.3 ACL guarantees ---")
+    """Print the direct PostgreSQL transcript for the role restrictions."""
+    print("\n--- direct PostgreSQL role restriction transcript ---")
     role, clone, peer = "biosite_r_probe", "biosite_d_probe", "biosite_p_probe"
     # CREATE DATABASE cannot run inside a transaction block, so each administrative
     # statement is issued as its own autocommit psql command (exactly as the
@@ -382,12 +389,13 @@ def main() -> int:
         print(f"failed to create template database: {created.stderr}", file=sys.stderr)
         return 2
 
-    check_m4_direct(args.generator)
+    check_direct_multi_result(args.generator)
     check_direct_cleanup_on_error(args.generator, pg_bin)
     check_direct_cleanup_on_setup_error(args.generator, pg_bin)
-    check_m4_isolated(args.generator)
+    check_direct_teardown_failure(args.generator)
+    check_isolated_multi_result(args.generator)
     check_preflight_failure_skips_teardown(args.generator)
-    check_m4_error_retention(args.generator)
+    check_error_retention(args.generator)
     check_result_metadata(args.generator)
     check_prepared_transaction_cleanup(args.generator, pg_bin)
     check_cleanup_on_error(args.generator, pg_bin)
@@ -396,7 +404,7 @@ def main() -> int:
 
     databases, roles = _leftover_counts(pg_bin)
     prepared = _prepared_count(pg_bin)
-    _report("M3 final cleanup guard: zero clone/role/prepared-xact leftovers",
+    _report("Final cleanup leaves no clone, role, or prepared transaction",
             databases == 0 and roles == 0 and prepared == 0,
             f"leftover_dbs={databases} leftover_roles={roles} prepared={prepared}")
 
