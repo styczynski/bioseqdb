@@ -2,6 +2,9 @@
  * @file compact_direct/reader/direct_execution.cppm
  * @brief Compact-direct selection traversal and exact anchor emission.
  */
+module;
+
+#include <new>
 
 export module bioseq.indexing.minimizer_hashmap:compact_direct.reader_direct_execution;
 
@@ -36,6 +39,11 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
+
+// Merge libc++'s aligned allocation declaration into this module attachment.
+static_assert(requires {
+    ::operator new(std::size_t{}, std::align_val_t{});
+});
 
 export namespace bioseq::indexing {
 
