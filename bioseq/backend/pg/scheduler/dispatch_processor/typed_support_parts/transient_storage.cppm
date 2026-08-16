@@ -97,7 +97,7 @@ struct opportunistic_fragment_index_storage {
 
     [[nodiscard]] bioseq::indexing::minimizer_hashmap_fragment_index::encoded_header
     validate_minimizer_blob_or_error(
-        const char* p,
+        const char* blob_data,
         std::size_t bytes,
         std::optional<std::uint32_t> expected_bucket_count = std::nullopt) const {
         using header_type = bioseq::indexing::minimizer_hashmap_fragment_index::encoded_header;
@@ -105,22 +105,23 @@ struct opportunistic_fragment_index_storage {
         if (bytes < sizeof(header_type)) {
             index_error("minimizer blob truncated header");
         }
-        header_type h{};
-        std::memcpy(&h, p, sizeof(header_type));
-        if (h.magic != bioseq::indexing::minimizer_hashmap_fragment_index::k_encoded_magic ||
-            h.layout_revision !=
+        header_type header{};
+        std::memcpy(&header, blob_data, sizeof(header_type));
+        if (header.magic != bioseq::indexing::minimizer_hashmap_fragment_index::k_encoded_magic ||
+            header.layout_revision !=
                 bioseq::indexing::minimizer_hashmap_fragment_index::k_encoded_layout_revision) {
             index_error("minimizer blob magic/layout");
         }
-        const std::size_t expect = sizeof(header_type) + sizeof(bucket_type) * h.bucket_count +
-                                   sizeof(std::uint64_t) * h.total_positions;
-        if (bytes != expect) {
+        const std::size_t expected_bytes = sizeof(header_type) +
+                                           sizeof(bucket_type) * header.bucket_count +
+                                           sizeof(std::uint64_t) * header.total_positions;
+        if (bytes != expected_bytes) {
             index_error("minimizer blob size mismatch");
         }
-        if (expected_bucket_count && h.bucket_count != *expected_bucket_count) {
+        if (expected_bucket_count && header.bucket_count != *expected_bucket_count) {
             index_error("minimizer blob bucket_count mismatch");
         }
-        return h;
+        return header;
     }
 
     void validate_minimizer_directory_or_error(const char*, std::size_t bytes) const {

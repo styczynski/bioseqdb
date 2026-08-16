@@ -312,22 +312,22 @@ template <class p_sequence>
                                 raise_vulkan_pg_error("persisted query minimizer sketch",
                                                       err.what());
                             }
-                            sketch_collector qc;
-                            const minimizer_sketch_backend backend =
+                            sketch_collector query_collector;
+                            const minimizer_sketch_backend sketch_backend =
                                 pipe::target_index_sketch_backend_from_params(idx_params);
-                            auto stats = pipe::minimizer_dispatch_range<minimap_sketch_data>(
-                                qc,
+                            auto sketch_stats = pipe::minimizer_dispatch_range<minimap_sketch_data>(
+                                query_collector,
                                 lazy_query_view,
                                 0,
                                 query_bp_size,
                                 static_cast<size_t>(idx_params.window_size),
                                 static_cast<size_t>(idx_params.kmer_size),
-                                backend,
+                                sketch_backend,
                                 pipe::exact_simd_range_route::require_continuation,
                                 idx_params.highway_kernels);
                             if (!pipe::minimizer_range_stats_matches_backend(
-                                    backend,
-                                    stats,
+                                    sketch_backend,
+                                    sketch_stats,
                                     /*require_nonempty_vector_work=*/false,
                                     pipe::exact_simd_range_route::require_continuation)) {
                                 raise_typed_dispatch_pg_error_as_cpp(
@@ -335,8 +335,9 @@ template <class p_sequence>
                                     "persisted query sketch stats do not match the selected "
                                     "minimizer backend");
                             }
-                            query_minimizers.emplace(std::move(qc).extract_sketches_data());
-                            query_minimizer_stats.emplace(std::move(stats));
+                            query_minimizers.emplace(
+                                std::move(query_collector).extract_sketches_data());
+                            query_minimizer_stats.emplace(std::move(sketch_stats));
                             query_sketch_host_wall_ns =
                                 elapsed_dispatch_host_ns(query_sketch_started_ns);
                         } else if (!query_minimizer_stats.has_value()) {
