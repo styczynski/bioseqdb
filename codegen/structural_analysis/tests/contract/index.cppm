@@ -2480,8 +2480,12 @@ inline int invoke() {
 
     const std::filesystem::path partition_source =
         source_root / "partitioned_entities.cppm";
+    const std::filesystem::path partition_implementation =
+        source_root / "partitioned_implementation.cppm";
     const std::filesystem::path partitioned_primary =
         source_root / "partitioned.cppm";
+    const std::filesystem::path ordinary_implementation =
+        source_root / "partitioned_ordinary_implementation.cppm";
     const std::filesystem::path partition_consumer =
         source_root / "partition_consumer.cppm";
     write_file(
@@ -2489,9 +2493,23 @@ inline int invoke() {
         "export module fixture.partitioned:entities;\n"
         "export inline constexpr int partition_value = 42;\n");
     write_file(
+        partition_implementation,
+        "module;\n"
+        "#include <cstdint>\n"
+        "module fixture.partitioned:implementation;\n"
+        "inline constexpr std::int32_t implementation_value = 7;\n");
+    write_file(
         partitioned_primary,
         "export module fixture.partitioned;\n"
-        "export import :entities;\n");
+        "export import :entities;\n"
+        "import :implementation;\n"
+        "static_assert(implementation_value == 7);\n"
+        "module :private;\n"
+        "inline constexpr int private_value = 9;\n");
+    write_file(
+        ordinary_implementation,
+        "module fixture.partitioned;\n"
+        "inline constexpr int ordinary_implementation_value = 11;\n");
     write_file(
         partition_consumer,
         "export module fixture.partition_consumer;\n"
@@ -2506,7 +2524,11 @@ inline int invoke() {
                 make_command(
                     toolchain, root, partition_source),
                 make_command(
+                    toolchain, root, partition_implementation),
+                make_command(
                     toolchain, root, partitioned_primary),
+                make_command(
+                    toolchain, root, ordinary_implementation),
                 make_command(
                     toolchain, root, partition_consumer),
             }));
@@ -2520,7 +2542,16 @@ inline int invoke() {
             partition_pcm_root);
     require(
         partition_prepared.compile_database_json.contains(
+            partition_implementation.string())
+            && !partition_prepared.compile_database_json.contains(
+                ordinary_implementation.string()),
+        "owned compile database did not preserve the named implementation "
+        "partition provider boundary");
+    require(
+        partition_prepared.compile_database_json.contains(
             "-fmodule-file=fixture.partitioned:entities=")
+            && partition_prepared.compile_database_json.contains(
+                "-fmodule-file=fixture.partitioned:implementation=")
             && partition_prepared.compile_database_json.contains(
                 "-fmodule-file=fixture.partitioned="),
         "consumer command omitted a transitive partition PCM mapping");
@@ -2529,7 +2560,8 @@ inline int invoke() {
             "\"direct_imports\": [\"fixture.partitioned\"]")
             && partition_prepared.pcm_manifest_json.contains(
                 "\"direct_imports\": "
-                "[\"fixture.partitioned:entities\"]"),
+                "[\"fixture.partitioned:entities\", "
+                "\"fixture.partitioned:implementation\"]"),
         "partition fixture flattened the manifest's direct import graph");
     const std::filesystem::path partition_owned_database =
         root / "partition-owned-compile-commands.json";

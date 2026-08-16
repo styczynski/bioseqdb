@@ -6584,7 +6584,14 @@ struct lexical_module_description {
         }
         const std::string name =
             module_name_from_tokens(tokens, index + 1, end);
-        if (module_declaration && exported && !name.empty()) {
+        const std::size_t partition_separator = name.find(':');
+        const bool named_module_partition =
+            partition_separator != std::string::npos
+            && partition_separator != 0
+            && partition_separator + 1 < name.size();
+        if (module_declaration
+            && !name.empty()
+            && (exported || named_module_partition)) {
             if (!result.provided_module.empty()
                 && result.provided_module != name) {
                 throw std::runtime_error(
