@@ -10,6 +10,8 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
@@ -26,7 +28,8 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
-          "CMAKE_CXX_FLAGS": "-O2 -fno-omit-frame-pointer -fsanitize=address -g",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fsanitize=address -g",
           "CMAKE_LINKER_FLAGS": "-fno-omit-frame-pointer -fsanitize=address -g",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
@@ -44,7 +47,8 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
-          "CMAKE_CXX_FLAGS": "-O2",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
@@ -156,8 +160,8 @@
         "description": "Isolated local arm64 ownership and lifetime qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
-          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
           "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
           "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
           "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address"
@@ -170,8 +174,8 @@
         "description": "Isolated local arm64 arithmetic, representation, and lifecycle qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
-          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
           "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined",
           "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=undefined",
           "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=undefined"
@@ -184,8 +188,8 @@
         "description": "Isolated local arm64 async-owner, TBB, and DSM publication qualification tree. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the dna4_uint64 profile, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
-          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
-          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
           "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
           "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
           "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
@@ -490,6 +494,7 @@
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_C_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
           "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -fpermissive -fabi-version=0 -Wno-expose-global-module-tu-local -Wno-external-tu-local -Wno-template-names-tu-local -Wno-global-module -Wno-template-body",
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",

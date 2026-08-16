@@ -40,7 +40,7 @@ SANITIZERS = {
 }
 SANITIZER_BASE = "test-opt-sanitizer"
 COMMON_COMPILE_FLAGS = {
-    "-O1",
+    "-O3",
     "-DNDEBUG",
     "-g",
     "-fno-omit-frame-pointer",
