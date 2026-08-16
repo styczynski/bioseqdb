@@ -33,8 +33,8 @@ enum class reader_backend : std::uint8_t {
 };
 
 /// Return the stable benchmark label for a selected reader backend.
-[[nodiscard]] constexpr const char* reader_backend_name(reader_backend b) noexcept {
-    switch (b) {
+[[nodiscard]] constexpr const char* reader_backend_name(reader_backend backend) noexcept {
+    switch (backend) {
     case reader_backend::unknown:
         return "unknown";
     case reader_backend::memory_mapped:
@@ -68,35 +68,51 @@ template <supports_compact_sequence_range p_range> class compact_sequence_view {
     using iterator = const storage_unit*;
     using const_iterator = const storage_unit*;
 
+    /// Construct an empty view.
     constexpr compact_sequence_view() = default;
+
+    /// Construct a view over `word_count` packed units with trailing padding.
     constexpr compact_sequence_view(const storage_unit* base,
                                     std::size_t word_count,
                                     std::size_t padding) noexcept
         : _base(base), _word_count(word_count), _padding(padding) {}
 
+    /// Return the number of packed storage units.
     [[nodiscard]] constexpr std::size_t size() const noexcept {
         return _word_count;
     }
+
+    /// Return the number of unused letters in the final storage unit.
     [[nodiscard]] constexpr std::size_t padding() const noexcept {
         return _padding;
     }
+
+    /// Return the first packed storage unit.
     [[nodiscard]] constexpr const storage_unit* data() const noexcept {
         return _base;
     }
 
+    /// Return an iterator to the first packed storage unit.
     [[nodiscard]] constexpr iterator begin() const noexcept {
         return _base;
     }
+
+    /// Return an iterator one past the final packed storage unit.
     [[nodiscard]] constexpr iterator end() const noexcept {
         return _base + _word_count;
     }
+
+    /// Return a const iterator to the first packed storage unit.
     [[nodiscard]] constexpr const_iterator cbegin() const noexcept {
         return begin();
     }
+
+    /// Return a const iterator one past the final packed storage unit.
     [[nodiscard]] constexpr const_iterator cend() const noexcept {
         return end();
     }
 
+    /// Return one packed storage unit without bounds checking.
     [[nodiscard]] constexpr storage_unit operator[](std::size_t index) const noexcept {
         return _base[index];
     }
@@ -139,19 +155,24 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
     using sequence_view = compact_sequence_view<p_range>;
     using storage_unit = typename sequence_view::storage_unit;
 
+    /// Return the number of logical records in the batch.
     [[nodiscard]] std::size_t size() const noexcept {
         return _sequence_paddings.size();
     }
+
+    /// Return whether the batch contains no logical records.
     [[nodiscard]] bool empty() const noexcept {
         return _sequence_paddings.empty();
     }
 
+    /// Return the borrowed header bytes for one record.
     [[nodiscard]] std::string_view header(std::size_t index) const noexcept {
         const std::size_t start = _header_offsets[index];
         const std::size_t stop = _header_offsets[index + 1];
         return std::string_view{_header_storage.data() + start, stop - start};
     }
 
+    /// Return the borrowed packed sequence for one record.
     [[nodiscard]] sequence_view sequence(std::size_t index) const noexcept {
         const std::size_t start = _sequence_offsets[index];
         const std::size_t stop = _sequence_offsets[index + 1];
@@ -159,6 +180,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
             _sequence_storage.data() + start, stop - start, _sequence_paddings[index]};
     }
 
+    /// Return the borrowed quality bytes for one record, or an empty span.
     [[nodiscard]] std::span<const std::uint8_t> quality(std::size_t index) const noexcept {
         if (_quality_offsets.empty())
             return {};
@@ -171,24 +193,37 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
     /// FSM appends through raw pointers. The batch is only
     /// observed through the public `header(i)` / `sequence(i)` /
     /// `quality(i)` views once handed to the user handler.
+    /// Return mutable header storage for the parser callback.
     [[nodiscard]] std::vector<char>& header_storage() noexcept {
         return _header_storage;
     }
+
+    /// Return mutable header offsets for the parser callback.
     [[nodiscard]] std::vector<std::size_t>& header_offsets() noexcept {
         return _header_offsets;
     }
+
+    /// Return mutable packed-sequence storage for the parser callback.
     [[nodiscard]] std::vector<storage_unit>& sequence_storage() noexcept {
         return _sequence_storage;
     }
+
+    /// Return mutable packed-sequence offsets for the parser callback.
     [[nodiscard]] std::vector<std::size_t>& sequence_offsets() noexcept {
         return _sequence_offsets;
     }
+
+    /// Return mutable per-record padding counts for the parser callback.
     [[nodiscard]] std::vector<std::size_t>& sequence_paddings() noexcept {
         return _sequence_paddings;
     }
+
+    /// Return mutable quality storage for the parser callback.
     [[nodiscard]] std::vector<std::uint8_t>& quality_storage() noexcept {
         return _quality_storage;
     }
+
+    /// Return mutable quality offsets for the parser callback.
     [[nodiscard]] std::vector<std::size_t>& quality_offsets() noexcept {
         return _quality_offsets;
     }
@@ -228,6 +263,7 @@ template <supports_compact_sequence_range p_range> class sequence_batch {
         }
     }
 
+    /// Release every logical record while retaining each vector's allocation.
     void clear() noexcept {
         _header_storage.clear();
         _header_offsets.clear();

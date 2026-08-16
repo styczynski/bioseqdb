@@ -190,22 +190,23 @@ read_decompressed_prefix(const char* path, std::size_t max_bytes, const reader_o
         path_view,
         options,
         on_open_fail,
-        [&max_bytes](auto&& src) -> std::expected<std::string, std::string> {
-            std::string out;
-            out.resize(max_bytes);
+        [&max_bytes](auto&& source) -> std::expected<std::string, std::string> {
+            std::string prefix_bytes;
+            prefix_bytes.resize(max_bytes);
             std::size_t total = 0;
             while (total < max_bytes) {
-                const auto r = src.read_into(reinterpret_cast<std::uint8_t*>(out.data()) + total,
-                                             max_bytes - total);
-                if (r.has_error)
+                const auto read_result = source.read_into(
+                    reinterpret_cast<std::uint8_t*>(prefix_bytes.data()) + total,
+                    max_bytes - total);
+                if (read_result.has_error)
                     return std::unexpected(
                         std::string{"bioseq.load: failed to read file prefix for header sampling"});
-                total += r.bytes_read;
-                if (r.is_eof || r.bytes_read == 0)
+                total += read_result.bytes_read;
+                if (read_result.is_eof || read_result.bytes_read == 0)
                     break;
             }
-            out.resize(total);
-            return out;
+            prefix_bytes.resize(total);
+            return prefix_bytes;
         });
 }
 
@@ -219,19 +220,19 @@ sample_sequence_headers(const char* path,
                         const reader_options& options,
                         std::size_t max_headers = 16,
                         std::size_t max_bytes = 256 * 1024) {
-    auto prefix_or = read_decompressed_prefix(path, max_bytes, options);
-    if (!prefix_or)
-        return std::unexpected(prefix_or.error());
-    const std::string& prefix = *prefix_or;
+    auto prefix_result = read_decompressed_prefix(path, max_bytes, options);
+    if (!prefix_result)
+        return std::unexpected(prefix_result.error());
+    const std::string& prefix = *prefix_result;
     const auto* base = reinterpret_cast<const std::uint8_t*>(prefix.data());
     const std::size_t prefix_size = prefix.size();
 
     std::vector<std::string> headers;
     headers.reserve(max_headers);
-    auto rstrip_cr = [](std::string_view s) {
-        if (!s.empty() && s.back() == '\r')
-            s.remove_suffix(1);
-        return s;
+    auto strip_trailing_carriage_return = [](std::string_view text) {
+        if (!text.empty() && text.back() == '\r')
+            text.remove_suffix(1);
+        return text;
     };
     auto line_end_at = [&base, &prefix_size](std::size_t cursor) {
         return cursor + simd::scan_first_byte('\n', base + cursor, prefix_size - cursor);
@@ -241,47 +242,51 @@ sample_sequence_headers(const char* path,
     if (file_type == sequence_file_format::fasta) {
         while (headers.size() < max_headers && cursor < prefix_size) {
             if ((cursor == 0 || prefix[cursor - 1] == '\n') && prefix[cursor] == '>') {
-                const std::size_t le = line_end_at(cursor);
-                headers.emplace_back(rstrip_cr(std::string_view{prefix}.substr(
-                    cursor + 1, le > cursor + 1 ? le - (cursor + 1) : 0)));
-                cursor = le + 1;
+                const std::size_t line_end = line_end_at(cursor);
+                headers.emplace_back(strip_trailing_carriage_return(std::string_view{prefix}.substr(
+                    cursor + 1, line_end > cursor + 1 ? line_end - (cursor + 1) : 0)));
+                cursor = line_end + 1;
             } else {
-                const std::size_t le = line_end_at(cursor);
-                if (le >= prefix_size)
+                const std::size_t line_end = line_end_at(cursor);
+                if (line_end >= prefix_size)
                     break;
-                cursor = le + 1;
+                cursor = line_end + 1;
             }
         }
     } else { // FASTQ: records may have multiline sequence / quality sections.
         while (headers.size() < max_headers && cursor < prefix_size) {
             if (prefix[cursor] != '@')
                 break; // truncated/garbled prefix
-            const std::size_t he = line_end_at(cursor);
-            headers.emplace_back(rstrip_cr(std::string_view{prefix}.substr(
-                cursor + 1, he > cursor + 1 ? he - (cursor + 1) : 0)));
-            cursor = he + 1;
+            const std::size_t header_end = line_end_at(cursor);
+            headers.emplace_back(strip_trailing_carriage_return(std::string_view{prefix}.substr(
+                cursor + 1, header_end > cursor + 1 ? header_end - (cursor + 1) : 0)));
+            cursor = header_end + 1;
 
-            std::size_t seq_bytes = 0;
+            std::size_t sequence_byte_count = 0;
             while (cursor < prefix_size && prefix[cursor] != '+') {
-                const std::size_t le = line_end_at(cursor);
-                for (std::size_t i = cursor; i < le && i < prefix_size; ++i)
-                    if (prefix[i] != '\r')
-                        ++seq_bytes;
-                cursor = le + 1;
+                const std::size_t line_end = line_end_at(cursor);
+                for (std::size_t byte_index = cursor;
+                     byte_index < line_end && byte_index < prefix_size;
+                     ++byte_index)
+                    if (prefix[byte_index] != '\r')
+                        ++sequence_byte_count;
+                cursor = line_end + 1;
             }
             if (cursor >= prefix_size || prefix[cursor] != '+')
                 break;
             cursor = line_end_at(cursor) + 1; // skip the '+' line
 
-            std::size_t qual_bytes = 0;
-            while (cursor < prefix_size && qual_bytes < seq_bytes) {
-                const std::size_t le = line_end_at(cursor);
-                for (std::size_t i = cursor; i < le && i < prefix_size; ++i)
-                    if (prefix[i] != '\r')
-                        ++qual_bytes;
-                cursor = le + 1;
+            std::size_t quality_byte_count = 0;
+            while (cursor < prefix_size && quality_byte_count < sequence_byte_count) {
+                const std::size_t line_end = line_end_at(cursor);
+                for (std::size_t byte_index = cursor;
+                     byte_index < line_end && byte_index < prefix_size;
+                     ++byte_index)
+                    if (prefix[byte_index] != '\r')
+                        ++quality_byte_count;
+                cursor = line_end + 1;
             }
-            if (qual_bytes < seq_bytes)
+            if (quality_byte_count < sequence_byte_count)
                 break; // prefix ended mid-record
         }
     }
