@@ -807,6 +807,16 @@ class prepared_minimizer_fragment_reader {
                                    std::uint64_t max_occ,
                                    const owned_compact_hash32_direct_index_view& compact_direct);
 
+    /// Materialize every planned query occurrence and establish its route-specific hash order.
+    template <bool p_oracle, bool p_compact_direct>
+    [[gnu::always_inline]] void prepare_query_occurrences_(
+        std::span<const fragment_seed_query> queries,
+        const std::expected<query_occurrence_packing_layout,
+                            minimizer_generation_encoding_error>& occurrence_layout,
+        std::size_t occurrence_count,
+        query_wave_scratch& scratch,
+        prepared_fragment_anchor_batch& batch) const;
+
     void
     prepare_compact_direct_anchors_(bioseq::parallelism::memory_admission_controller& admission,
                                     std::span<const fragment_seed_query> queries,
