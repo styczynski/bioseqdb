@@ -83,6 +83,7 @@ from cache_modes import (
     _validate_failed_cache_terminal_report,
     _verified_native_command_execution,
 )
+from doxygen_toolchain import ensure_exact_doxygen
 from integrity import (
     canonical_json_sha256,
     sha256_file,
@@ -391,6 +392,7 @@ def _cmake_configure_stamp_document(
         managed_arguments: List[str],
         environment: Mapping[str, str],
         cmake_executable_identity: Mapping[str, object],
+        managed_toolchain_identity: Mapping[str, object] | None = None,
         presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
     """Seal every MCP-owned input which can select a CMake configuration."""
     preset_graph = _cmake_preset_payload_graph(
@@ -479,6 +481,9 @@ def _cmake_configure_stamp_document(
             for name in managed_environment_names
         },
     }
+    if managed_toolchain_identity:
+        inputs["managed_toolchain_identity"] = dict(
+            managed_toolchain_identity)
     canonical_inputs = json.dumps(
         inputs,
         ensure_ascii=True,
@@ -643,6 +648,48 @@ def _ensure_local_toolchain_environment(
         if (candidate / "scripts" / "buildsystems" / "vcpkg.cmake").is_file():
             env["VCPKG_ROOT"] = str(candidate)
             return
+
+
+def _prepare_mode_toolchain(
+        mode: str,
+        *,
+        environment: dict[str, str],
+        log_handle) -> tuple[dict[str, str], dict[str, object]]:
+    """Provision and expose exact tools owned by one managed build mode.
+
+    Website provisioning runs before any CMake configure command. Other modes
+    remain independent of Doxygen and therefore return empty contracts.
+    """
+    if mode != "website":
+        return {}, {}
+
+    provisioned = ensure_exact_doxygen()
+    executable = str(provisioned.executable)
+    executable_directory = str(provisioned.executable.parent)
+    existing_path = environment.get("PATH", "")
+    path_entries = [
+        entry
+        for entry in existing_path.split(os.pathsep)
+        if entry and entry != executable_directory
+    ]
+    environment["PATH"] = os.pathsep.join(
+        [executable_directory, *path_entries])
+    identity = provisioned.configure_identity()
+    log_handle.write(
+        "# exact website Doxygen provisioned: "
+        f"path={executable} version={provisioned.version_output!r} "
+        f"platform={provisioned.platform_name} "
+        f"architecture={provisioned.architecture} "
+        f"archive_sha256={provisioned.archive_sha256} "
+        f"executable_sha256={provisioned.executable_sha256} "
+        f"cache_hit={provisioned.cache_hit}.\n"
+    )
+    log_handle.flush()
+    return (
+        {"DOXYGEN_EXECUTABLE": executable},
+        {"doxygen": identity},
+    )
+
 
 def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
     _invalidate_cmake_configure_stamp(build_dir)
@@ -2860,6 +2907,22 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # VCPKG_ROOT from an existing configured tree for a fresh sibling
         # test/debug tree.
         _ensure_local_toolchain_environment(env, active_build_dir)
+        if mode == "website":
+            _update_entry(
+                mode,
+                step="provisioning exact Doxygen 1.9.8",
+                build_only=build_only,
+                debug=debug,
+                preset=active_preset,
+                build_dir=str(active_build_dir),
+            )
+        managed_cache_variables, managed_toolchain_identity = (
+            _prepare_mode_toolchain(
+                mode,
+                environment=env,
+                log_handle=log_handle,
+            )
+        )
         if _is_aws_clang_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
         elif _is_aws_gcc_preset(active_preset):
@@ -2896,7 +2959,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # RERUN_CMAKE dependency graph, so relying on build.ninja alone can
         # silently retain stale include/toolchain cache values. Conversely,
         # configuring every run regenerates all module dyndep/modmap edges.
-        required_cache = mode_details.required_cache_variables or {}
+        required_cache = dict(mode_details.required_cache_variables or {})
+        overlapping_cache_variables = (
+            set(required_cache) & set(managed_cache_variables)
+        )
+        if overlapping_cache_variables:
+            raise RuntimeError(
+                "managed mode toolchain cache variables overlap the static "
+                "mode contract: "
+                f"{sorted(overlapping_cache_variables)}"
+            )
+        required_cache.update(managed_cache_variables)
         preset_cache_contract = _cmake_preset_cache_contract(
             active_preset,
             ("PostgreSQL_CONFIG",),
@@ -2924,6 +2997,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             managed_arguments=initial_clang_rt_args,
             environment=env,
             cmake_executable_identity=cmake_identity,
+            managed_toolchain_identity=managed_toolchain_identity,
         )
         build_ninja = active_build_dir / "build.ninja"
         build_phase_started_at = time.time()
@@ -3263,12 +3337,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "# verified BIOSEQ_TEST_INDEXES="
             f"{verified_test_indexes} preset={active_preset}.\n")
         log_handle.flush()
+        final_managed_toolchain_identity = managed_toolchain_identity
+        if mode == "website":
+            (
+                final_managed_cache_variables,
+                final_managed_toolchain_identity,
+            ) = _prepare_mode_toolchain(
+                mode,
+                environment=env,
+                log_handle=log_handle,
+            )
+            if final_managed_cache_variables != managed_cache_variables:
+                raise RuntimeError(
+                    "website Doxygen cache selection changed during configure"
+                )
         final_configure_stamp = _cmake_configure_stamp_document(
             active_preset,
             mode_cache_variables=configure_cache_contract,
             managed_arguments=initial_clang_rt_args,
             environment=env,
             cmake_executable_identity=_cmake_executable_identity(env),
+            managed_toolchain_identity=final_managed_toolchain_identity,
         )
         configure_seal = _finalize_cmake_configure_stamp(
             active_build_dir,

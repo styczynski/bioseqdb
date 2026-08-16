@@ -90,7 +90,6 @@ apt-get install -y --no-install-recommends \
   rsync ninja-build \
   zlib1g-dev libssl-dev \
   minimap2 \
-  doxygen \
   xorg-dev libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
   libxfixes-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-util-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-image0-dev \
@@ -231,13 +230,36 @@ chown -R "$TARGET_USER:$TARGET_USER" "$VCPKG_ROOT" 2>/dev/null || true
 # Shared binary cache so reconfigures (and a clean re-provision sharing a snapshot) stay fast.
 mkdir -p /opt/vcpkg-cache && chmod 0777 /opt/vcpkg-cache
 
-# --- 7b. Website validation toolchain (§4.4/§11.1): Doxygen 1.9.8 is installed
-# above via apt (Ubuntu Noble). The generated-site validators (html5lib) and the
-# pinned Playwright browser acceptance run from a hash-locked virtualenv the build
-# creates from website/tests/requirements.lock; pre-cache its wheels and the
-# Chromium browser here so an offline `bioseq_website` build never reaches the
-# network. Non-fatal: the build re-resolves against the lock if the cache is cold.
-echo "[bootstrap] website validation toolchain (Doxygen $(doxygen --version 2>/dev/null || echo '?'), Playwright, html5lib)"
+# --- 7b. Website validation toolchain (§4.4/§11.1) --------------------------
+# Prewarm the same archive/member/hash-locked Doxygen cache that website mode
+# owns before CMake configure.  The system package is deliberately not the
+# authority: bootstrap fails closed unless the provisioned executable reports
+# exactly 1.9.8.  The generated-site validators (html5lib) and pinned Playwright
+# browser acceptance run from a hash-locked virtualenv created from
+# website/tests/requirements.lock; pre-cache its wheels and Chromium here so an
+# offline `bioseq_website` build never reaches the network.
+DOXYGEN_PROVISIONER="$REPO_DEST/build_mcp/doxygen_toolchain.py"
+DOXYGEN_CACHE_ROOT="$REPO_DEST/build/toolchains/doxygen"
+[ -f "$DOXYGEN_PROVISIONER" ] \
+  || fail "missing exact Doxygen provisioner: $DOXYGEN_PROVISIONER"
+mkdir -p "$DOXYGEN_CACHE_ROOT" \
+  || fail "create Doxygen cache root: $DOXYGEN_CACHE_ROOT"
+chown "$TARGET_USER:$TARGET_USER" "$DOXYGEN_CACHE_ROOT" \
+  || fail "set Doxygen cache ownership: $DOXYGEN_CACHE_ROOT"
+chmod 0700 "$DOXYGEN_CACHE_ROOT" \
+  || fail "set Doxygen cache permissions: $DOXYGEN_CACHE_ROOT"
+DOXYGEN_EXECUTABLE="$(
+  sudo -u "$TARGET_USER" -H python3 "$DOXYGEN_PROVISIONER" \
+    --cache-root "$DOXYGEN_CACHE_ROOT"
+)" || fail "provision exact Doxygen 1.9.8"
+[ -x "$DOXYGEN_EXECUTABLE" ] \
+  || fail "provisioned Doxygen is not executable: $DOXYGEN_EXECUTABLE"
+DOXYGEN_VERSION_OUTPUT="$("$DOXYGEN_EXECUTABLE" --version 2>&1)" \
+  || fail "query provisioned Doxygen version"
+[ "$DOXYGEN_VERSION_OUTPUT" = "1.9.8" ] \
+  || fail "provisioned Doxygen must report exactly 1.9.8; observed: $DOXYGEN_VERSION_OUTPUT"
+echo "[bootstrap] website validation toolchain: Doxygen $DOXYGEN_VERSION_OUTPUT"
+echo "[bootstrap] Doxygen path: $DOXYGEN_EXECUTABLE; Playwright + html5lib pre-cache"
 WEBSITE_LOCK="$REPO_DEST/website/tests/requirements.lock"
 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 mkdir -p /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH" && chmod 0777 /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH"
