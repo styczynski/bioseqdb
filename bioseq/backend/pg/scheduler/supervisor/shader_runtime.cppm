@@ -667,11 +667,11 @@ try_release_completed_shader_compile_slot(const std::size_t slot_index,
  * @brief Publishes one shader compilation result and wakes slot ownership cleanup.
  * @param[in] claim Claimed slot generation and variant key.
  * @param[in] errc Stable shader-cache result code.
- * @param[in] ok Whether compilation completed successfully.
+ * @param[in] compile_succeeded Whether compilation completed successfully.
  */
 void finish_shader_compile_slot(const compile_claim& claim,
                                 bioseq::gpu::vulkan::shader_cache_error errc,
-                                bool ok) noexcept {
+                                bool compile_succeeded) noexcept {
     if (g_shared == nullptr || claim.slot_index >= scheduler_shared_state::k_compile_queue_size) {
         return;
     }
@@ -680,15 +680,17 @@ void finish_shader_compile_slot(const compile_claim& claim,
     pg_atomic_fetch_add_u32(&slot.generation, 1);
     pg_write_barrier();
     pg_atomic_write_u32(&slot.state,
-                        static_cast<std::uint32_t>(ok ? compile_slot_state::done_ok
-                                                      : compile_slot_state::done_error));
+                        static_cast<std::uint32_t>(compile_succeeded
+                                                       ? compile_slot_state::done_ok
+                                                       : compile_slot_state::done_error));
     pg_read_barrier();
     // A cancelled waiter marks its request orphaned.  Whichever side observes
     // the cancellation after the Done publication owns returning the slot to the
     // queue; this prevents cancellation from permanently exhausting the queue.
     if (slot.requester_pid == 0) {
         (void)try_release_completed_shader_compile_slot(
-            claim.slot_index, ok ? compile_slot_state::done_ok : compile_slot_state::done_error);
+            claim.slot_index,
+            compile_succeeded ? compile_slot_state::done_ok : compile_slot_state::done_error);
     }
 }
 

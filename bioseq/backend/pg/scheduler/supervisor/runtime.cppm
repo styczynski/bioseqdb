@@ -454,9 +454,9 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
                        static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns()));
 
     while (!got_sigterm) {
-        const int rc = WaitLatch(
+        const int latch_events = WaitLatch(
             MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1000L, PG_WAIT_EXTENSION);
-        if ((rc & WL_LATCH_SET) != 0) {
+        if ((latch_events & WL_LATCH_SET) != 0) {
             ResetLatch(MyLatch);
         }
         CHECK_FOR_INTERRUPTS();
