@@ -91,6 +91,8 @@ prepared_minimizer_fragment_reader::with_query_group_occurrences_(
     return minimizer_generation_encoding_error::partition_id;
 }
 
+/// Adds forward and reverse anchor counts for one query occurrence using target strand
+/// posting tallies.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_(
     query_occurrence_reference occurrence, const orientation_occurrence_context& context) noexcept {
@@ -121,6 +123,8 @@ prepared_minimizer_fragment_reader::accumulate_orientation_(
     return std::nullopt;
 }
 
+/// Builds one fragment anchor for a block-bounded reference interval and stores it in
+/// the shard query layout slice.
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::emit_fragment_anchor_(
     std::uint64_t packed_target_position,
@@ -198,6 +202,7 @@ prepared_minimizer_fragment_reader::emit_fragment_anchor_(
 [[nodiscard]] inline prepared_minimizer_fragment_reader::packed_occurrence_radix_partition
 prepared_minimizer_fragment_reader::partition_packed_occurrence_top_byte_(
     std::span<packed_query_occurrence> occurrences) noexcept {
+    /// In-place radix bucket with begin/end pointers into packed occurrences.
     struct bucket {
         packed_query_occurrence* begin = nullptr;
         packed_query_occurrence* end = nullptr;
@@ -291,6 +296,7 @@ prepared_minimizer_fragment_reader::visit_control_counts_planned_(
     return {};
 }
 
+/// Authenticates grouped-SoA control bytes and invokes a visitor for each decoded control.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_controls_(std::span<const std::byte> input,
@@ -368,6 +374,8 @@ prepared_minimizer_fragment_reader::visit_controls_(std::span<const std::byte> i
     return {};
 }
 
+/// Decodes encoded positions for one control span within a reference core and invokes a
+/// visitor with each global encoded position.
 template <class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_position_range_(
@@ -412,6 +420,7 @@ prepared_minimizer_fragment_reader::visit_position_range_(
     return {};
 }
 
+/// Maps a packed target position and query minimizer sketch into one chaining anchor.
 [[nodiscard]] inline std::expected<bioseq::chaining::anchor, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_target,
                                                           const minimap_sketch_data& minimizer,
@@ -440,6 +449,8 @@ prepared_minimizer_fragment_reader::make_fragment_anchor_(std::uint64_t packed_t
     };
 }
 
+/// Scans trusted control counts for one block entry range and invokes a visitor for
+/// each matched query group.
 template <bool p_oracle, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_matched_control_counts_(
@@ -483,6 +494,12 @@ prepared_minimizer_fragment_reader::visit_matched_control_counts_(
     return {};
 }
 
+/**
+ * Scans matched controls in a block with prefix authentication.
+ *
+ * Optionally accumulates accepted or rejected prefix byte totals and can validate
+ * rejected-prefix geometry without walking positions.
+ */
 template <bool p_oracle, class p_visitor>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::visit_matched_controls_(
@@ -608,6 +625,11 @@ prepared_minimizer_fragment_reader::visit_matched_controls_(
     return {};
 }
 
+/**
+ * Looks up the query occurrence group for a hash.
+ *
+ * \tparam p_oracle Uses oracle scratch radix plans instead of the production matcher view.
+ */
 template <bool p_oracle>
 [[nodiscard, gnu::always_inline]] inline std::optional<
     prepared_minimizer_fragment_reader::query_occurrence_group>
@@ -703,6 +725,7 @@ prepared_minimizer_fragment_reader::match_query_group_(std::uint32_t hash,
     }
 }
 
+/// Tallies forward and reverse anchor counts for every occurrence in one hash group.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
@@ -738,6 +761,8 @@ prepared_minimizer_fragment_reader::accumulate_orientation_for_group_(
         });
 }
 
+/// Counts strand orientations from fixed p16 positions and updates layout counts for one
+/// matched group.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::process_fixed_orientation_control_(
@@ -773,6 +798,8 @@ prepared_minimizer_fragment_reader::process_fixed_orientation_control_(
         context, group, target_strand_zero, target_strand_one);
 }
 
+/// Emits fragment anchors from fixed p16 positions for every occurrence in one matched
+/// group.
 template <bool p_oracle>
 [[nodiscard]] inline std::optional<minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::process_fixed_emission_control_(
@@ -832,6 +859,7 @@ prepared_minimizer_fragment_reader::process_fixed_emission_control_(
     return std::nullopt;
 }
 
+/// Pass-1 probe that reserves occurrence counters for matched hashes in one H32/C16 entry.
 template <bool p_oracle>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
@@ -901,6 +929,11 @@ prepared_minimizer_fragment_reader::probe_entry_h32_c16_count_(
     return {};
 }
 
+/**
+ * Matched-control probe for fixed H32/C16/P16 entries.
+ *
+ * \tparam p_offset_width Prefix offset width for the entry shape.
+ */
 template <bool p_oracle, minimizer_scalar_width p_offset_width>
 [[nodiscard]] inline std::expected<void, minimizer_generation_encoding_error>
 prepared_minimizer_fragment_reader::probe_entry_h32_c16_p16_matched_(

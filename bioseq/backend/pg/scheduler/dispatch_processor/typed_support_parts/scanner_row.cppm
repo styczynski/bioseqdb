@@ -79,6 +79,20 @@ import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
+/**
+ * Aligns one typed scanner batch row through PostgreSQL lazy query and target
+ * views.
+ *
+ * Routes by locator, target recipe, or inline header through persisted-index,
+ * prepared-target, recompute, opportunistic RAM-index, resident-segment, or
+ * direct minimap ports according to the scanner context index policy.
+ * Sketches or reuses query minimizers per row, or shares cached batch sketches
+ * when per-row query mode is off.
+ * Sets consumed_shared_cached_query_stats when batch-shared sketch execution
+ * stats are applied on this row.
+ *
+ * Returns alignment matches and minimizer-route execution stats for the row.
+ */
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class p_sequence>

@@ -137,6 +137,16 @@ using cpu_preparation_detail::admitted_canonical_u32_query_collector;
 
 } // namespace
 
+/**
+ * @brief Admits and builds query-hash unions or retained query sketches for CPU batch join.
+ *
+ * Resets @p prepared_target union state, validates query column shapes and exclusive
+ * header-or-recipe ownership, and admits memory for union and optional sketch-cache
+ * retention. Groups queries by minimizer parameters, or a persisted k15 w10 group when
+ * requested, optionally preparing sketches in parallel for uniform batches. Finalizes each
+ * group with deduplicated unions or retained sketches per @p union_storage and records
+ * admission bytes and checksums on @p prepared_target.
+ */
 void batch_processor::prepare_cpu_shared_query_unions(
     const std::uint8_t alphabet_code,
     const std::uint8_t storage_unit_byte_width,
@@ -879,6 +889,11 @@ void batch_processor::prepare_cpu_shared_query_unions(
     prepared_target.unions_ready = true;
 }
 
+/**
+ * @brief Publishes compact-direct query-set totals when retained-only preparation deferred validation.
+ * @return True when @p prepared_target, @p group, and @p query_set_stats match the
+ *         retained-sketch-only single-group contract and the stats were applied.
+ */
 bool batch_processor::publish_compact_direct_query_set_stats(
     cpu_prepared_target& prepared_target,
     cpu_prepared_index_group& group,
@@ -928,6 +943,13 @@ bool batch_processor::publish_compact_direct_query_set_stats(
     return true;
 }
 
+/**
+ * @brief Recomputes compact-direct query-set stats from retained sketches when async validation did not run.
+ *
+ * No-op when query-set validation is already ready. Otherwise derives canonical u32 hashes
+ * from the sole retained-sketch group and publishes stats via publish_compact_direct_query_set_stats.
+ * @throws bioseq::indexing::persisted_minimizer_lookup_error when state is incomplete or admission fails.
+ */
 void batch_processor::finalize_pending_compact_direct_query_set_validation_fallback(
     cpu_prepared_target& prepared_target) {
     if (prepared_target.query_set_validation_ready())

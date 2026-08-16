@@ -45,6 +45,22 @@ import bioseq.parallelism.pipeline_ops;
 
 export namespace bioseq::indexing {
 
+/**
+ * Prepares one immutable anchor batch for a single query wave.
+ *
+ * \tparam p_oracle Selects the oracle query-plan matcher instead of the production
+ *     bucket-direct matcher view.
+ * \tparam p_compact_direct Selects the compact-H32 direct route without grouped-SoA
+ *     control scans.
+ *
+ * Validates query descriptors, packs occurrence references, admits scratch and batch
+ * memory, then either plans compact-direct anchors or runs grouped-SoA control-count,
+ * orientation, emission, and per-block sort passes. Scratch moves to outstanding on
+ * success. Each prepared query carries a compositional sortedness receipt.
+ *
+ * \throws persisted_minimizer_lookup_error when readiness, policy, admission, decode,
+ *     or pass-equation checks fail.
+ */
 template <bool p_oracle, bool p_compact_direct>
 [[nodiscard]] inline prepared_fragment_anchor_batch
 prepared_minimizer_fragment_reader::prepare_fragment_anchor_batch_impl_(

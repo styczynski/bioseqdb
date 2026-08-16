@@ -36,6 +36,7 @@ import bioseq.storage.coordinates;
 import bioseq.storage.lazy_sequence;
 
 #ifdef BIOSEQ_TEST_INDEXES
+/** Fault injection sites for sequence facade test instrumentation. */
 export enum class sequence_facade_test_fault : std::uint8_t {
   none = 0u,
   resident_probe = 1u,
@@ -43,6 +44,7 @@ export enum class sequence_facade_test_fault : std::uint8_t {
   contiguous_access = 3u,
 };
 
+/** Counters recorded by sequence facade test hooks. */
 export struct sequence_facade_test_counters {
   std::uint64_t source_stream_callbacks = 0u;
   std::uint64_t source_resident_probes = 0u;
@@ -51,40 +53,49 @@ export struct sequence_facade_test_counters {
   std::uint64_t poison_hits = 0u;
 };
 
+/** Active fault mask for the current thread's facade tests. */
 inline thread_local sequence_facade_test_fault
     g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
+/** Per-thread facade operation counts for tests. */
 inline thread_local sequence_facade_test_counters
     g_pg_sequence_facade_test_counters{};
 
+/** Returns whether @p bit is set in the thread-local facade test poison mask. */
 [[nodiscard]] inline bool
 pg_sequence_facade_test_poison_has(sequence_facade_test_fault bit) noexcept {
   return (static_cast<std::uint8_t>(g_pg_sequence_facade_test_poison) &
           static_cast<std::uint8_t>(bit)) != 0u;
 }
 
+/** Sets the thread-local facade test poison to @p poison. */
 export inline void
 arm_pg_sequence_facade_test_poison(sequence_facade_test_fault poison) noexcept {
   g_pg_sequence_facade_test_poison = poison;
 }
 
+/** Clears the thread-local facade test poison. */
 export inline void disarm_pg_sequence_facade_test_poison() noexcept {
   g_pg_sequence_facade_test_poison = sequence_facade_test_fault::none;
 }
 
+/** Clears poison and resets all thread-local facade test counters. */
 export inline void reset_pg_sequence_facade_test_counters() noexcept {
   disarm_pg_sequence_facade_test_poison();
   g_pg_sequence_facade_test_counters = {};
 }
 
+/** Returns a copy of the thread-local facade test counters. */
 export [[nodiscard]] inline sequence_facade_test_counters
 pg_sequence_facade_test_counters() noexcept {
   return g_pg_sequence_facade_test_counters;
 }
 
+/** Increments the source-stream callback test counter. */
 export inline void note_pg_sequence_facade_source_stream_callback() noexcept {
   ++g_pg_sequence_facade_test_counters.source_stream_callbacks;
 }
 
+/** Increments the resident-probe counter and possibly the poison-hit counter. */
 export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
   ++g_pg_sequence_facade_test_counters.source_resident_probes;
   if (pg_sequence_facade_test_poison_has(
@@ -93,6 +104,7 @@ export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
   }
 }
 
+/** Records contiguous flat access and possibly increments poison hits. */
 export inline void note_pg_sequence_facade_contiguous_access() noexcept {
   if (pg_sequence_facade_test_poison_has(
           sequence_facade_test_fault::contiguous_access)) {
@@ -100,6 +112,7 @@ export inline void note_pg_sequence_facade_contiguous_access() noexcept {
   }
 }
 
+/** Records materialization start and throws when materialization poison is armed. */
 export inline void note_pg_sequence_facade_materialization_begin() {
   ++g_pg_sequence_facade_test_counters.declared_materializations;
   if (pg_sequence_facade_test_poison_has(
@@ -110,6 +123,7 @@ export inline void note_pg_sequence_facade_materialization_begin() {
   }
 }
 
+/** Increments the completed-materialization test counter. */
 export inline void note_pg_sequence_facade_materialization_complete() noexcept {
   ++g_pg_sequence_facade_test_counters.completed_materializations;
 }
@@ -117,6 +131,7 @@ export inline void note_pg_sequence_facade_materialization_complete() noexcept {
 
 namespace {
 
+/** Reports corrupted flat bioseq.seq data and does not return. */
 [[noreturn]] inline void invalid_flat_sequence(char const *detail) {
   ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
                   errmsg("invalid flat bioseq.seq representation"),
@@ -124,6 +139,7 @@ namespace {
   __builtin_unreachable();
 }
 
+/** Reports that a locator cannot be used outside an owning table scan. */
 [[noreturn]] inline void unresolved_locator_error()
 {
     ereport(ERROR,
@@ -134,6 +150,7 @@ namespace {
     __builtin_unreachable();
 }
 
+/** Returns the expected on-disk size of an unbound flat value with @p length letters. */
 [[nodiscard]] inline std::size_t expected_unbound_size(std::uint64_t length)
 {
     if (length > std::numeric_limits<std::size_t>::max() - 7u) {
@@ -143,6 +160,7 @@ namespace {
         + round_up_to_uint64(static_cast<std::size_t>(length));
 }
 
+/** Verifies bound-flat header, padding, and payload size against @p value. */
 inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 {
     bool valid = false;
@@ -176,6 +194,7 @@ inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 
 } // namespace
 
+/** Returns the read-only expanded header for a bioseq.seq expanded datum, or nullptr. */
 export [[nodiscard]] inline pg_sequence_expanded const*
 get_pg_sequence_expanded_ro(Datum datum)
 {
@@ -191,6 +210,7 @@ get_pg_sequence_expanded_ro(Datum datum)
     return reinterpret_cast<pg_sequence_expanded const*>(header);
 }
 
+/** Returns the read-write expanded header for a bioseq.seq expanded datum, or nullptr. */
 export [[nodiscard]] inline pg_sequence_expanded*
 get_pg_sequence_expanded_rw(Datum datum)
 {
@@ -200,6 +220,7 @@ get_pg_sequence_expanded_rw(Datum datum)
     return const_cast<pg_sequence_expanded*>(get_pg_sequence_expanded_ro(datum));
 }
 
+/** Classifies a detoasted or expanded datum and fills a descriptor with alphabet and length metadata. */
 export [[nodiscard]] pg_sequence_descriptor
 classify_and_describe_sequence(Datum detoasted_or_expanded)
 {
@@ -429,6 +450,7 @@ classify_and_describe_sequence_header(Datum input)
 
 namespace {
 
+/** Opaque facade state passed to lazy_sequence_view backend callbacks. */
 struct pg_sequence_facade_state {
     pg_sequence_read_session* session;
     pg_sequence_descriptor descriptor;
@@ -437,6 +459,7 @@ struct pg_sequence_facade_state {
 };
 
 template<class p_alphabet>
+/** Returns the complement rank for @p rank in alphabet @p p_alphabet. */
 [[nodiscard]] inline std::uint8_t complement_rank(std::uint8_t rank)
 {
     return static_cast<std::uint8_t>(
@@ -445,6 +468,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
+/** Writes letter ranks from a packed literal subtree into @p output for [@p from, @p to). */
 [[nodiscard]] bool emit_literal_range(
     piece_edge edge,
     std::uint64_t from,
@@ -492,6 +516,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
+/** Recursively emits letter ranks from a piece tree into @p output. */
 [[nodiscard]] bool emit_tree_range(
     pg_sequence_read_session& session,
     piece_edge edge,
@@ -548,6 +573,7 @@ template<class p_alphabet>
 }
 
 template<class p_alphabet>
+/** Writes letter ranks from a flat bound sequence into @p output for [@p from, @p to). */
 [[nodiscard]] bool emit_flat_range(
     bioseq::pg_types::seq const& flat,
     std::uint64_t from,
@@ -582,6 +608,7 @@ template<class p_alphabet>
 }
 
 template <class p_alphabet>
+/** Fills @p output with ranks for [@p from, @p from+count) using flat or tree backing in @p state. */
 [[nodiscard]] std::uint8_t const *
 facade_ptr_at(pg_sequence_facade_state const &state,
               bool mirror_coordinates, bool reverse_output,
@@ -644,12 +671,14 @@ facade_ptr_at_callback(void const *opaque,
       from, count, output);
 }
 
+/** Returns logical sequence length from facade opaque state. */
 [[nodiscard]] inline bioseq::storage::sequence_size_t
 facade_bp_size(void const *opaque) noexcept {
   return static_cast<pg_sequence_facade_state const *>(opaque)
       ->descriptor.bp_length;
 }
 
+/** Returns whether every source leaf in @p edge can be shared across worker threads. */
 [[nodiscard]] inline bool tree_worker_shareable(piece_edge edge) noexcept {
   if (!edge) {
     return true;
@@ -666,12 +695,14 @@ facade_bp_size(void const *opaque) noexcept {
   return true;
 }
 
+/** Returns whether the facade opaque state is safe for worker-thread sharing. */
 [[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
 template <class p_alphabet>
+/** Attempts to expose a resident packed slice of flat backing without copying. */
 [[nodiscard]] auto facade_resident_probe(void const *opaque,
                                          bioseq::storage::sequence_size_t from,
                                          bioseq::storage::sequence_size_t to,
@@ -719,6 +750,7 @@ template <class p_alphabet>
 }
 
 template<class p_alphabet>
+/** Lazy-sequence backend ops wired to PostgreSQL flat or expanded sequence storage. */
 struct facade_adapter {
     using view = bioseq::storage::lazy_sequence_view<p_alphabet>;
     static inline const typename view::backend_ops ops{
@@ -736,6 +768,7 @@ struct facade_adapter {
 };
 
 template<class p_alphabet, std::size_t p_storage_unit_byte_width>
+/** Compile-time check that a facade adapter matches the lazy_sequence_view backend contract. */
 consteval bool facade_adapter_profile_contract()
 {
     using adapter = facade_adapter<p_alphabet>;
@@ -765,15 +798,18 @@ static_assert(facade_adapter_profile_contract<seq::dna5, 4u>());
 #endif
 
 template<class p_alphabet>
+/** Destroys a retained_lazy_sequence_view owner allocated in the read-session context. */
 inline void release_facade_owner(void* opaque) noexcept
 {
     using owner = bioseq::storage::retained_lazy_sequence_view<p_alphabet>;
     static_cast<owner*>(opaque)->~owner();
 }
 
+/** No-op release hook when facade backing is owned by the read session. */
 inline void release_facade_backing_noop(void*) noexcept {}
 
 #ifdef BIOSEQ_TEST_INDEXES
+/** Returns whether @p edge contains a source leaf node. */
 [[nodiscard]] inline bool
 facade_probe_tree_contains_source(piece_edge edge) noexcept {
   if (!edge) {
@@ -790,6 +826,7 @@ facade_probe_tree_contains_source(piece_edge edge) noexcept {
 }
 
 template <bool p_is_reversed, bool p_write_reversed, class p_view>
+/** Compares facade orientations against a baseline view and sets bits in @p match_mask. */
 void record_orientation_matches(
     p_view baseline, p_view flat_facade, p_view source_facade,
     std::size_t from, std::size_t to, std::uint8_t& match_mask) {
@@ -819,6 +856,7 @@ void record_orientation_matches(
 
 } // namespace
 
+/** Builds a session-scoped retained lazy view over a bound flat or expanded bioseq.seq datum. */
 export template <sequence_alphabet p_alphabet>
 [[nodiscard]] inline bioseq::storage::retained_lazy_sequence_view<p_alphabet>*
 make_pg_sequence_call_owner(
@@ -985,11 +1023,13 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
 }
 #endif
 
+/** True when @p p_result is a view or iterator type that must not escape a callback. */
 export template <typename p_result>
 inline constexpr bool is_borrowed_view_result_v =
     std::ranges::view<std::remove_cvref_t<p_result>>
     || std::input_or_output_iterator<std::remove_cvref_t<p_result>>;
 
+/** Detoasts if needed, opens a read session, and runs @p view_callback on a single lazy view. */
 export template <typename p_result, typename p_function>
 p_result with_pg_sequence_view(
     Datum datum,
@@ -1061,6 +1101,7 @@ p_result with_pg_sequence_view(
     return std::move(*result);
 }
 
+/** Opens one read session and runs @p callback on lazy views for two bound sequences of the same alphabet. */
 export template <typename p_result, typename p_function>
 p_result with_pg_sequence_views(
     Datum left_datum,
@@ -1146,6 +1187,7 @@ p_result with_pg_sequence_views(
     return std::move(*result);
 }
 
+/** Alphabet code and symbol rank returned by single-element sequence reads. */
 export struct pg_sequence_rank_value {
     std::uint8_t alphabet_code;
     std::uint8_t rank;
