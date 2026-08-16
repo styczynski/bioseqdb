@@ -879,6 +879,10 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_bioseq_io_source_inventory.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_server.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1

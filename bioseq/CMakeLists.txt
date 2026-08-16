@@ -5,6 +5,8 @@ set(VCPKG_CMAKE_CONFIGURE_OPTIONS ${VCPKG_CMAKE_CONFIGURE_OPTIONS} -DSQLGEN_POST
 
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
+include(
+  "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_source_inventory.cmake")
 option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
   "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
 option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
@@ -1697,15 +1699,19 @@ unset(_bioseq_pipeline_dispatch_owner)
 # The IO reader closure is PostgreSQL-independent and is shared by the
 # extension, external providers, and the IO benchmark. The benchmark launcher
 # and logic module are target-private and removed from this broad owner below.
-file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_LIST_DIR}/io/*.cppm")
-list(REMOVE_ITEM BIOSEQ_IO_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/main.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/common.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/lazy_expression.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/readers.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/io/benchmark/writers.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_IO_MODULES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/io"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS
+    "benchmark/common.cppm"
+    "benchmark/index.cppm"
+    "benchmark/lazy_expression.cppm"
+    "benchmark/main.cppm"
+    "benchmark/readers.cppm"
+    "benchmark/writers.cppm"
+  EXPECTED_COUNT 34)
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
