@@ -60,10 +60,12 @@ jobs:
           case "$GITHUB_REF" in
             refs/heads/main)
               release_prerelease=false
+              release_tag_suffix=""
               release_title="Bioseq native packages ${package_version} (${short_sha})"
               ;;
             refs/heads/refactor/start-massive-refactor)
               release_prerelease=true
+              release_tag_suffix="-refactor-validation"
               release_title="Bioseq native packages ${package_version} (${short_sha}) [refactor validation]"
               ;;
             *)
@@ -73,6 +75,7 @@ jobs:
           esac
           printf 'PACKAGE_VERSION=%s\n' "$package_version" >> "$GITHUB_ENV"
           printf 'RELEASE_PRERELEASE=%s\n' "$release_prerelease" >> "$GITHUB_ENV"
+          printf 'RELEASE_TAG_SUFFIX=%s\n' "$release_tag_suffix" >> "$GITHUB_ENV"
           printf 'RELEASE_TITLE=%s\n' "$release_title" >> "$GITHUB_ENV"
 
       - name: Reuse an already published exact-commit release
@@ -83,7 +86,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           short_sha=${GITHUB_SHA:0:12}
-          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}${RELEASE_TAG_SUFFIX}"
           tag_target=$(gh api \
             "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
             -H "Accept: application/vnd.github+json" \
@@ -210,13 +213,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           short_sha=${GITHUB_SHA:0:12}
-          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"
+          tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}${RELEASE_TAG_SUFFIX}"
           notes="$RUNNER_TEMP/release-notes.md"
           if [[ "$RELEASE_PRERELEASE" = true ]]; then
             printf '%s\n' \
               "Validation prerelease for refactor/start-massive-refactor." \
               "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
-              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
+              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>-refactor-validation." \
               "Source commit: ${GITHUB_SHA}" > "$notes"
           else
             test "$RELEASE_PRERELEASE" = false

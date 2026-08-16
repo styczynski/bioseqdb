@@ -4871,7 +4871,9 @@ def repository_path():
 if args[0] == "api":
     path = repository_path()
     if "/git/matching-refs/tags/" in path:
-        print(state["tag_target"])
+        requested_tag = path.rsplit("/", 1)[-1]
+        if requested_tag == state["tag"]:
+            print(state["tag_target"])
     elif "--method" in args and args[args.index("--method") + 1] == "DELETE":
         asset_id = int(path.rsplit("/", 1)[-1])
         state["assets"] = [
@@ -4934,6 +4936,7 @@ elif args[:2] == ["release", "create"]:
     state["exists"] = True
     state["draft"] = True
     state["prerelease"] = "--prerelease" in args
+    state["tag"] = args[2]
     state["name"] = args[args.index("--title") + 1]
     state["tag_target"] = os.environ["GITHUB_SHA"]
     record("create")
@@ -4982,6 +4985,14 @@ save()
                 release_prerelease = expected_prerelease
             if release_name is None:
                 release_name = expected_title
+            release_tag_suffix = (
+                "-refactor-validation" if expected_prerelease else ""
+            )
+            expected_tag = (
+                "bioseq-packages-v"
+                f"{package_builder.EXPECTED_PACKAGE_VERSION}-{short_revision}"
+                f"{release_tag_suffix}"
+            )
             state_path = root / "gh-state.json"
             state_path.write_text(
                 json.dumps(
@@ -4989,6 +5000,7 @@ save()
                         "exists": exists,
                         "draft": draft,
                         "prerelease": release_prerelease,
+                        "tag": expected_tag,
                         "name": release_name,
                         "tag_target": revision if exists else "",
                         "release_id": 77,
@@ -5024,6 +5036,7 @@ save()
                 "GITHUB_REPOSITORY": "bioseq/repository",
                 "GH_STATE": str(state_path),
                 "RELEASE_PRERELEASE": str(expected_prerelease).lower(),
+                "RELEASE_TAG_SUFFIX": release_tag_suffix,
                 "RELEASE_TITLE": expected_title,
             }
             completed = subprocess.run(
@@ -5250,6 +5263,15 @@ save()
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertFalse(state["draft"])
                 self.assertEqual(state["prerelease"], expected_prerelease)
+                expected_suffix = (
+                    "-refactor-validation" if expected_prerelease else ""
+                )
+                self.assertEqual(
+                    state["tag"],
+                    "bioseq-packages-v"
+                    f"{package_builder.EXPECTED_PACKAGE_VERSION}-"
+                    f"{'a' * 12}{expected_suffix}",
+                )
                 self.assertEqual(
                     state["name"].endswith("[refactor validation]"),
                     expected_prerelease,
@@ -5311,8 +5333,14 @@ save()
             self.assertRegex(revision, r"^[0-9a-f]{40}$")
 
     def test_release_is_draft_until_asset_count_is_complete(self) -> None:
+        tag_assignment = (
+            'tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}'
+            '${RELEASE_TAG_SUFFIX}"'
+        )
+        self.assertEqual(self.workflow.count(tag_assignment), 2)
+        self.assertIn('release_tag_suffix=""', self.workflow)
         self.assertIn(
-            'tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"', self.workflow
+            'release_tag_suffix="-refactor-validation"', self.workflow
         )
         self.assertIn("gh release create", self.workflow)
         self.assertIn("--draft", self.workflow)
