@@ -1672,37 +1672,47 @@ source_only_integer_initializer(
             throw std::runtime_error(
                 "cannot resolve generated integer GUC owner source");
         }
-        const auto declaration = std::ranges::find_if(
-            unit->declarations,
-            [expression](
-                const structural_analysis::declaration_record& candidate) {
-                return candidate.kind
-                        == structural_analysis::declaration_kind::variable
-                    && candidate.name == expression
-                    && !candidate.initializer_text.empty();
-            });
-        if (declaration == unit->declarations.end()) {
-            if (program.compiler_profile.empty()) {
-                if (const std::optional<std::string> initializer =
-                        source_only_integer_initializer(
-                            *unit, expression)) {
-                    return resolve_integer_expression(
-                        program,
-                        owner,
-                        *initializer,
-                        depth + 1);
-                }
+        const structural_analysis::declaration_record* declaration =
+            nullptr;
+        for (const structural_analysis::declaration_record& candidate :
+             unit->declarations) {
+            if (candidate.kind
+                    != structural_analysis::declaration_kind::variable
+                || candidate.name != expression
+                || canonical_feature_predicate(
+                       candidate.active_condition)
+                    != "true") {
+                continue;
             }
-            throw std::runtime_error(
-                "cannot resolve generated integer GUC identifier '"
-                + std::string{expression} + "' in "
-                + owner.source_path.string());
+            if (declaration != nullptr
+                || candidate.initializer_text.empty()
+                || !candidate.specifiers.is_constexpr) {
+                throw std::runtime_error(
+                    "cannot resolve generated integer GUC identifier '"
+                    + std::string{expression} + "' in "
+                    + owner.source_path.string());
+            }
+            declaration = &candidate;
         }
-        return resolve_integer_expression(
-            program,
-            owner,
-            declaration->initializer_text,
-            depth + 1);
+        if (declaration != nullptr) {
+            return resolve_integer_expression(
+                program,
+                owner,
+                declaration->initializer_text,
+                depth + 1);
+        }
+        if (const std::optional<std::string> initializer =
+                source_only_integer_initializer(*unit, expression)) {
+            return resolve_integer_expression(
+                program,
+                owner,
+                *initializer,
+                depth + 1);
+        }
+        throw std::runtime_error(
+            "cannot resolve generated integer GUC identifier '"
+            + std::string{expression} + "' in "
+            + owner.source_path.string());
     }
     const std::int64_t value =
         integer_expression_parser{expression}.parse();

@@ -2,6 +2,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <filesystem>
 #include <initializer_list>
 #include <optional>
@@ -100,6 +101,19 @@ inline void require(bool condition, std::string_view message) {
     require(
         found != entity.options.end(),
         "fixture GUC lacks an expected annotation option");
+    return *found;
+}
+
+[[nodiscard]] inline structural_analysis::translation_unit& owner_unit(
+    collected_program& program,
+    const std::filesystem::path& source_path) {
+    const auto found = std::ranges::find(
+        program.translation_units,
+        source_path,
+        &structural_analysis::translation_unit::source_path);
+    require(
+        found != program.translation_units.end(),
+        "fixture lacks an expected registered owner unit");
     return *found;
 }
 
@@ -293,6 +307,107 @@ inline void run_guc_generator_contract_self_tests() {
         "compiler-profile collection did not select its sole compiled "
         "constexpr default candidate");
 
+    static constexpr std::array<std::string_view, 8>
+        core_integer_constant_names{
+            "k_minimum_compression_level",
+            "k_maximum_compression_level",
+            "k_minimum_stripe_row_count",
+            "k_maximum_stripe_row_count",
+            "k_default_stripe_row_count",
+            "k_minimum_chunk_group_row_count",
+            "k_maximum_chunk_group_row_count",
+            "k_default_chunk_group_row_count",
+        };
+    const auto omit_structural_integer_constants = [&owners](
+        collected_program& candidate) {
+        auto& core = guc_contract_detail::owner_unit(
+            candidate, owners[2]);
+        std::erase_if(
+            core.declarations,
+            [](const structural_analysis::declaration_record& declaration) {
+                return std::ranges::contains(
+                    core_integer_constant_names, declaration.name);
+            });
+    };
+    const auto require_core_integer_constants = [](
+        const guc_inventory& inventory,
+        std::string_view collection_path) {
+        const collected_guc& compression_level =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.compression.level");
+        const collected_guc& stripe_row_limit =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.stripe.row_limit");
+        const collected_guc& chunk_group_row_limit =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.chunk_group.row_limit");
+        require(
+            compression_level.default_expression == "3"
+                && compression_level.minimum_expression
+                    == "k_minimum_compression_level"
+                && compression_level.maximum_expression
+                    == "k_maximum_compression_level"
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.boot_value,
+                    "3")
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.minimum,
+                    "1")
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.maximum,
+                    "19")
+                && stripe_row_limit.default_expression
+                    == "k_default_stripe_row_count"
+                && stripe_row_limit.minimum_expression
+                    == "k_minimum_stripe_row_count"
+                && stripe_row_limit.maximum_expression
+                    == "k_maximum_stripe_row_count"
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.boot_value,
+                    "150000")
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.minimum,
+                    "1000")
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.maximum,
+                    "100000000")
+                && chunk_group_row_limit.default_expression
+                    == "k_default_chunk_group_row_count"
+                && chunk_group_row_limit.minimum_expression
+                    == "k_minimum_chunk_group_row_count"
+                && chunk_group_row_limit.maximum_expression
+                    == "k_maximum_chunk_group_row_count"
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.boot_value,
+                    "10000")
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.minimum,
+                    "1000")
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.maximum,
+                    "100000000"),
+            std::string{collection_path}
+                + " did not resolve every live authored integer constant");
+    };
+    require_core_integer_constants(
+        production, "source-only structural inventory");
+    collected_program source_token_program = program;
+    omit_structural_integer_constants(source_token_program);
+    const guc_inventory source_token_inventory = collect_guc_inventory(
+        source_token_program, guc_profile::production);
+    require_core_integer_constants(
+        source_token_inventory, "source-only token inventory");
+    collected_program compiler_profile_token_program = program;
+    compiler_profile_token_program.compiler_profile = "production";
+    omit_structural_integer_constants(compiler_profile_token_program);
+    const guc_inventory compiler_profile_token_inventory =
+        collect_guc_inventory(
+            compiler_profile_token_program,
+            guc_profile::production);
+    require_core_integer_constants(
+        compiler_profile_token_inventory,
+        "compiler-profile registered-source token inventory");
+
     const auto resolved_integer_bound = [&program](
         std::string_view option_name,
         std::string_view expression,
@@ -341,7 +456,7 @@ inline void run_guc_generator_contract_self_tests() {
                 == "-2147483648",
         "intentional legacy INT_MAX/INT_MIN compatibility changed");
 
-    static constexpr std::array<std::string_view, 10>
+    static constexpr std::array<std::string_view, 11>
         rejected_integer_bounds{
             "std::numeric_limits<long>::max()",
             "std::numeric_limits<unsigned>::max()",
@@ -351,6 +466,7 @@ inline void run_guc_generator_contract_self_tests() {
             "limits<int>::max()",
             "integer_limits::max()",
             "static_cast<int>(std::numeric_limits<int>::max())",
+            "bioseq::k_minimum_compression_level",
             "2147483648",
             "-2147483649",
         };
@@ -363,6 +479,223 @@ inline void run_guc_generator_contract_self_tests() {
             {"cannot resolve generated integer GUC expression",
              expression},
             "unsupported integer bound escaped the closed resolver");
+    }
+
+    const auto resolve_integer_identifier = [](
+        collected_program& candidate,
+        std::string_view expression) -> std::string {
+        return guc_detail::resolve_integer_expression(
+            candidate,
+            guc_contract_detail::annotated_guc(
+                candidate,
+                "bioseq::settings::storage::compression::level"),
+            expression);
+    };
+    const auto source_declaration_identifier = [](
+        const structural_analysis::translation_unit& unit,
+        std::string_view identifier) -> std::size_t {
+        for (std::size_t index = 0;
+             index + 1 < unit.tokens.size();
+             ++index) {
+            if (unit.tokens[index].spelling == identifier
+                && unit.tokens[index + 1].spelling == "=") {
+                return index;
+            }
+        }
+        require(false, "fixture lacks an expected source declaration token");
+        return 0;
+    };
+    const auto duplicate_source_declaration =
+        [&source_declaration_identifier](
+            structural_analysis::translation_unit& unit,
+            std::string_view identifier) -> std::size_t {
+        const std::size_t identifier_index =
+            source_declaration_identifier(unit, identifier);
+        std::size_t begin = identifier_index;
+        while (begin > 0) {
+            const std::string& prior = unit.tokens[begin - 1].spelling;
+            if (prior == ";" || prior == "{" || prior == "}") break;
+            --begin;
+        }
+        std::size_t end = identifier_index + 1;
+        while (end < unit.tokens.size()
+               && unit.tokens[end].spelling != ";") {
+            ++end;
+        }
+        require(
+            end < unit.tokens.size(),
+            "fixture source declaration has no terminator");
+        const std::vector<structural_analysis::lexical_token> duplicate(
+            unit.tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+            unit.tokens.begin() + static_cast<std::ptrdiff_t>(end + 1));
+        const std::size_t duplicate_identifier =
+            unit.tokens.size() + identifier_index - begin;
+        unit.tokens.insert(
+            unit.tokens.end(), duplicate.begin(), duplicate.end());
+        return duplicate_identifier;
+    };
+    {
+        collected_program non_constexpr_source = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            non_constexpr_source, owners[2]);
+        const std::size_t constant = source_declaration_identifier(
+            core, "k_minimum_compression_level");
+        const std::size_t non_constexpr =
+            source_declaration_identifier(core, "level");
+        core.tokens[constant].spelling =
+            "removed_minimum_compression_level";
+        core.tokens[non_constexpr].spelling =
+            "k_minimum_compression_level";
+        guc_contract_detail::require_rejected(
+            [&non_constexpr_source, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    non_constexpr_source,
+                    "k_minimum_compression_level"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_minimum_compression_level"},
+            "a non-constexpr same-name source token was accepted");
+    }
+    {
+        collected_program duplicate_active_source = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            duplicate_active_source, owners[2]);
+        static_cast<void>(duplicate_source_declaration(
+            core, "k_minimum_compression_level"));
+        guc_contract_detail::require_rejected(
+            [&duplicate_active_source, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    duplicate_active_source,
+                    "k_minimum_compression_level"));
+            },
+            {"ambiguous source-only integer GUC constant",
+             "k_minimum_compression_level"},
+            "duplicate active source constants were accepted");
+    }
+    {
+        collected_program inactive_alternative = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            inactive_alternative, owners[2]);
+        const std::size_t conditional_identifier =
+            source_declaration_identifier(
+                core, "k_default_compression_algorithm");
+        const std::size_t duplicate_identifier =
+            duplicate_source_declaration(
+                core, "k_minimum_compression_level");
+        core.tokens[duplicate_identifier].range =
+            core.tokens[conditional_identifier].range;
+        require(
+            resolve_integer_identifier(
+                inactive_alternative,
+                "k_minimum_compression_level")
+                == "1",
+            "inactive conditional source alternative created ambiguity");
+    }
+    {
+        collected_program missing_identifier = source_token_program;
+        guc_contract_detail::require_rejected(
+            [&missing_identifier, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    missing_identifier,
+                    "k_missing_integer_guc_constant"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_missing_integer_guc_constant"},
+            "missing integer identifier did not fail closed");
+    }
+    {
+        collected_program non_constexpr_structural = program;
+        auto& core = guc_contract_detail::owner_unit(
+            non_constexpr_structural, owners[2]);
+        const auto declaration = std::ranges::find(
+            core.declarations,
+            "k_minimum_compression_level",
+            &structural_analysis::declaration_record::name);
+        require(
+            declaration != core.declarations.end(),
+            "fixture lacks the structural compression minimum");
+        declaration->specifiers.is_constexpr = false;
+        guc_contract_detail::require_rejected(
+            [&non_constexpr_structural, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    non_constexpr_structural,
+                    "k_minimum_compression_level"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_minimum_compression_level"},
+            "registered structural non-constexpr fact was ignored");
+    }
+    const auto add_structural_integer_alias = [&owners](
+        collected_program& candidate,
+        std::string name,
+        std::string initializer) {
+        auto& core = guc_contract_detail::owner_unit(
+            candidate, owners[2]);
+        const auto prototype = std::ranges::find(
+            core.declarations,
+            "k_minimum_compression_level",
+            &structural_analysis::declaration_record::name);
+        require(
+            prototype != core.declarations.end(),
+            "fixture lacks an integer alias prototype");
+        structural_analysis::declaration_record alias = *prototype;
+        alias.name = std::move(name);
+        alias.qualified_name = "bioseq::" + alias.name;
+        alias.initializer_text = std::move(initializer);
+        alias.active_condition.clear();
+        core.declarations.push_back(std::move(alias));
+    };
+    {
+        collected_program chained_aliases = program;
+        add_structural_integer_alias(
+            chained_aliases, "k_integer_alias_two", "1");
+        add_structural_integer_alias(
+            chained_aliases,
+            "k_integer_alias_one",
+            "k_integer_alias_two");
+        require(
+            resolve_integer_identifier(
+                chained_aliases, "k_integer_alias_one")
+                == "1",
+            "bounded chained constexpr integer aliases did not resolve");
+    }
+    {
+        collected_program cyclic_aliases = program;
+        add_structural_integer_alias(
+            cyclic_aliases,
+            "k_integer_cycle_one",
+            "k_integer_cycle_two");
+        add_structural_integer_alias(
+            cyclic_aliases,
+            "k_integer_cycle_two",
+            "k_integer_cycle_one");
+        guc_contract_detail::require_rejected(
+            [&cyclic_aliases, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    cyclic_aliases, "k_integer_cycle_one"));
+            },
+            {"generated integer GUC expression recursion is too deep"},
+            "cyclic constexpr integer aliases were accepted");
+    }
+    {
+        collected_program over_depth_aliases = program;
+        static constexpr std::size_t alias_count = 18;
+        for (std::size_t index = 0; index < alias_count; ++index) {
+            add_structural_integer_alias(
+                over_depth_aliases,
+                "k_integer_depth_" + std::to_string(index),
+                index + 1 == alias_count
+                    ? "1"
+                    : "k_integer_depth_"
+                        + std::to_string(index + 1));
+        }
+        guc_contract_detail::require_rejected(
+            [&over_depth_aliases, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    over_depth_aliases, "k_integer_depth_0"));
+            },
+            {"generated integer GUC expression recursion is too deep"},
+            "over-depth constexpr integer aliases were accepted");
     }
 
     const collected_guc& compression = guc_contract_detail::guc(
