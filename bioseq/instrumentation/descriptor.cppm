@@ -21,8 +21,6 @@ module;
 
 export module bioseq.instrumentation.descriptor;
 
-import bioseq.instrumentation.configuration;
-
 export namespace bioseq::instrumentation {
 
 /** @brief Category encoded in a metric descriptor. */
@@ -55,47 +53,6 @@ struct alignas(64) loop_descriptor : region_descriptor {
 };
 static_assert(sizeof(loop_descriptor) == 128);
 
-/// Cold-path one-time registration. The static-local idiom at the call
-/// site makes the first call run this. Subsequent calls return the cached
-/// pointer.
-[[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_region(
-    std::string_view name,
-    std::source_location loc = std::source_location::current()) noexcept;
-
-/** @brief Register or find a counter descriptor for one source location. */
-[[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_counter(
-    std::string_view name,
-    std::source_location loc = std::source_location::current()) noexcept;
-
-/** @brief Register or find a gauge descriptor for one source location. */
-[[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_gauge(
-    std::string_view name,
-    std::source_location loc = std::source_location::current()) noexcept;
-
-/** @brief Register or find a scalar loop descriptor. */
-[[nodiscard, gnu::cold]]
-inline const loop_descriptor* register_static_loop(
-    std::string_view name,
-    std::source_location loc = std::source_location::current()) noexcept;
-
-/** @brief Register or find a loop descriptor for a SIMD target and lane count. */
-[[nodiscard, gnu::cold]]
-inline const loop_descriptor* register_static_simd_loop(
-    std::string_view base_name,
-    std::string_view target_name,
-    std::uint16_t lanes,
-    std::source_location loc = std::source_location::current()) noexcept;
-
-/// Lookup by id. Used by the summary writer to walk every registered
-/// descriptor.
-[[nodiscard]] inline const region_descriptor* find_descriptor(std::uint32_t id) noexcept;
-
-/// Number of descriptors registered so far.
-[[nodiscard]] inline std::uint32_t registered_descriptor_count() noexcept;
-
 }  // namespace bioseq::instrumentation
 
 namespace bioseq::instrumentation::detail {
@@ -112,6 +69,7 @@ inline constexpr std::uint32_t maximum_descriptor_blocks = 4096;
 inline constexpr std::size_t descriptor_slot_size = sizeof(loop_descriptor);
 inline constexpr std::size_t descriptor_slot_alignment = alignof(loop_descriptor);
 
+/** @brief Own process-lifetime descriptor blocks, strings, and deduplication state. */
 struct descriptor_registry {
     std::array<std::atomic<std::byte*>, maximum_descriptor_blocks> blocks{};
     std::atomic<std::uint32_t> next_id{0};
@@ -119,6 +77,7 @@ struct descriptor_registry {
     std::vector<region_descriptor*> dedup_table;
     std::deque<std::string> owned_strings;
 
+    /** @brief Reserve the expected cold-path descriptor inventory. */
     descriptor_registry() {
         dedup_table.reserve(256);
     }
@@ -142,7 +101,7 @@ inline std::uint32_t fnv1a_32(std::string_view value) noexcept {
 }
 
 /// Cold-path block allocator. Allocates a fresh 256-descriptor block
-/// (16 KiB) when the current block runs out. Allocation uses operator new
+/// (32 KiB) when the current block runs out. Allocation uses operator new
 /// — the descriptor pool is process-wide and never freed.
 [[nodiscard, gnu::cold]]
 inline std::byte* allocate_block() noexcept {
@@ -151,6 +110,16 @@ inline std::byte* allocate_block() noexcept {
         std::align_val_t{descriptor_slot_alignment}));
 }
 
+/**
+ * @brief Register or find one descriptor with stable process-lifetime storage.
+ *
+ * @param[in] name Metric name copied into registry-owned storage.
+ * @param[in] loc Source identity retained by the descriptor.
+ * @param[in] kind Metric category and descriptor-layout selector.
+ * @param[in] target_name SIMD target name, or empty for a scalar site.
+ * @param[in] lanes SIMD lane count, or zero for a scalar site.
+ * @return Stable descriptor pointer, or the first descriptor after capacity exhaustion.
+ */
 [[nodiscard, gnu::cold]]
 inline region_descriptor* register_impl(
     std::string_view name,
@@ -230,52 +199,90 @@ inline region_descriptor* register_impl(
 
 }  // namespace bioseq::instrumentation::detail
 
-namespace bioseq::instrumentation {
+export namespace bioseq::instrumentation {
 
+/**
+ * @brief Register or find a region descriptor for one source location.
+ *
+ * @param[in] name Metric name copied into process-lifetime storage.
+ * @param[in] loc Source identity used for deduplication and reporting.
+ * @return Stable process-lifetime descriptor.
+ */
 [[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_region(
-    std::string_view name,
-    std::source_location loc) noexcept
-{
+inline const region_descriptor*
+register_static_region(std::string_view name,
+                       std::source_location loc = std::source_location::current()) noexcept {
     return detail::register_impl(name, loc, metric_kind::region, {}, 0);
 }
 
+/**
+ * @brief Register or find a counter descriptor for one source location.
+ *
+ * @param[in] name Metric name copied into process-lifetime storage.
+ * @param[in] loc Source identity used for deduplication and reporting.
+ * @return Stable process-lifetime descriptor.
+ */
 [[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_counter(
-    std::string_view name,
-    std::source_location loc) noexcept
-{
+inline const region_descriptor*
+register_static_counter(std::string_view name,
+                        std::source_location loc = std::source_location::current()) noexcept {
     return detail::register_impl(name, loc, metric_kind::counter, {}, 0);
 }
 
+/**
+ * @brief Register or find a gauge descriptor for one source location.
+ *
+ * @param[in] name Metric name copied into process-lifetime storage.
+ * @param[in] loc Source identity used for deduplication and reporting.
+ * @return Stable process-lifetime descriptor.
+ */
 [[nodiscard, gnu::cold]]
-inline const region_descriptor* register_static_gauge(
-    std::string_view name,
-    std::source_location loc) noexcept
-{
+inline const region_descriptor*
+register_static_gauge(std::string_view name,
+                      std::source_location loc = std::source_location::current()) noexcept {
     return detail::register_impl(name, loc, metric_kind::gauge, {}, 0);
 }
 
+/**
+ * @brief Register or find a scalar loop descriptor.
+ *
+ * @param[in] name Metric name copied into process-lifetime storage.
+ * @param[in] loc Source identity used for deduplication and reporting.
+ * @return Stable process-lifetime loop descriptor.
+ */
 [[nodiscard, gnu::cold]]
-inline const loop_descriptor* register_static_loop(
-    std::string_view name,
-    std::source_location loc) noexcept
-{
+inline const loop_descriptor*
+register_static_loop(std::string_view name,
+                     std::source_location loc = std::source_location::current()) noexcept {
     auto* descriptor = detail::register_impl(name, loc, metric_kind::loop, {}, 0);
     return static_cast<const loop_descriptor*>(descriptor);
 }
 
+/**
+ * @brief Register or find a loop descriptor for one SIMD target and lane count.
+ *
+ * @param[in] base_name Metric name copied into process-lifetime storage.
+ * @param[in] target_name SIMD target name copied into process-lifetime storage.
+ * @param[in] lanes Active SIMD lane count recorded with the descriptor.
+ * @param[in] loc Source identity used for deduplication and reporting.
+ * @return Stable process-lifetime loop descriptor.
+ */
 [[nodiscard, gnu::cold]]
-inline const loop_descriptor* register_static_simd_loop(
-    std::string_view base_name,
-    std::string_view target_name,
-    std::uint16_t lanes,
-    std::source_location loc) noexcept
-{
+inline const loop_descriptor*
+register_static_simd_loop(std::string_view base_name,
+                          std::string_view target_name,
+                          std::uint16_t lanes,
+                          std::source_location loc = std::source_location::current()) noexcept {
     auto* descriptor = detail::register_impl(base_name, loc, metric_kind::loop, target_name, lanes);
     return static_cast<const loop_descriptor*>(descriptor);
 }
 
+/**
+ * @brief Find a registered descriptor by its one-based identifier.
+ *
+ * @param[in] id Descriptor identifier, with zero reserved as invalid.
+ * @return Stable descriptor pointer, or null for an invalid or unallocated identifier.
+ */
 [[nodiscard]]
 inline const region_descriptor* find_descriptor(std::uint32_t id) noexcept {
     if (id == 0) return nullptr;
@@ -289,9 +296,10 @@ inline const region_descriptor* find_descriptor(std::uint32_t id) noexcept {
         block + slot_idx * detail::descriptor_slot_size);
 }
 
+/** @brief Return the number of descriptor identifiers issued so far. */
 [[nodiscard]]
 inline std::uint32_t registered_descriptor_count() noexcept {
     return detail::registry().next_id.load(std::memory_order_relaxed);
 }
 
-}  // namespace bioseq::instrumentation
+} // namespace bioseq::instrumentation

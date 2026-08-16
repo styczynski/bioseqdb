@@ -101,8 +101,8 @@ inline loop_scope<p_configuration_type> loop(const loop_descriptor* descriptor) 
 }
 
 /// Non-templated convenience overload — see region.cppm for rationale.
-/// Pins to `benchmark_profiling_configuration` so the per-iteration
-/// loop scope skips the PMU read on construction/destruction.
+/// Pins to `benchmark_profiling_configuration`, including its current PMU
+/// feature gate and independently installed profiler state.
 [[nodiscard, gnu::always_inline]]
 inline loop_scope<benchmark_profiling_configuration>
 loop(const loop_descriptor* descriptor) noexcept {
