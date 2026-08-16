@@ -4,6 +4,7 @@ module;
 #include <array>
 #include <filesystem>
 #include <initializer_list>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,6 +26,12 @@ inline void require(bool condition, std::string_view message) {
         throw std::runtime_error(
             "GUC generator contract: " + std::string{message});
     }
+}
+
+[[nodiscard]] inline bool has_exact_live_value(
+    const std::optional<std::string>& value,
+    std::string_view expected) {
+    return value && *value == expected;
 }
 
 [[nodiscard]] inline std::filesystem::path repository_root() {
@@ -205,40 +212,47 @@ inline void run_guc_generator_contract_self_tests() {
             require(
                 candidate.maximum_expression
                         == "std::numeric_limits<int>::max()"
-                    && candidate.generated_live_authority.maximum
-                        == "2147483647",
+                    && guc_contract_detail::has_exact_live_value(
+                        candidate.generated_live_authority.maximum,
+                        "2147483647"),
                 std::string{collection_path}
                     + " did not preserve and resolve a typed int maximum");
         }
     };
     require_typed_maximums(production, "source-only collection");
     require(
-        guc_contract_detail::guc(
-            production, "bioseq.index.memory_cap_mb")
-                    .generated_live_authority.boot_value
-                == "0"
-            && guc_contract_detail::guc(
+        guc_contract_detail::has_exact_live_value(
+            guc_contract_detail::guc(
                 production, "bioseq.index.memory_cap_mb")
-                    .generated_live_authority.minimum
-                == "0"
-            && guc_contract_detail::guc(
-                production, "bioseq.index_build.run_buffer_bytes")
-                    .generated_live_authority.boot_value
-                == "0"
-            && guc_contract_detail::guc(
-                production, "bioseq.index_build.run_buffer_bytes")
-                    .generated_live_authority.minimum
-                == "0"
-            && guc_contract_detail::guc(
-                production,
-                "bioseq.storage.sequence_shard.max_size_gib")
-                    .generated_live_authority.boot_value
-                == "1024"
-            && guc_contract_detail::guc(
-                production,
-                "bioseq.storage.sequence_shard.max_size_gib")
-                    .generated_live_authority.minimum
-                == "0",
+                .generated_live_authority.boot_value,
+            "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index.memory_cap_mb")
+                    .generated_live_authority.minimum,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.boot_value,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.minimum,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production,
+                    "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.boot_value,
+                "1024")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production,
+                    "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.minimum,
+                "0"),
         "typed-maximum GUC defaults or minimums changed");
     collected_program compiler_profile_program = program;
     compiler_profile_program.compiler_profile = "production";
@@ -334,8 +348,9 @@ inline void run_guc_generator_contract_self_tests() {
             && compression.default_expression
                 == "bioseq::k_default_compression_algorithm"
             && compression.enum_default_name == "pglz"
-            && compression.generated_live_authority.boot_value
-                == "pglz"
+            && guc_contract_detail::has_exact_live_value(
+                compression.generated_live_authority.boot_value,
+                "pglz")
             && compression.generated_live_authority
                     .visible_enum_values
                 == std::vector<std::string>{"none", "pglz"},
@@ -402,7 +417,8 @@ inline void run_guc_generator_contract_self_tests() {
         logging.owner_key == "bioseq"
             && logging.member == "diagnostics_logging_enabled"
             && logging.context == "superuser_set"
-            && logging.generated_live_authority.boot_value == "off"
+            && guc_contract_detail::has_exact_live_value(
+                logging.generated_live_authority.boot_value, "off")
             && logging.source_path.generic_string().contains(
                 "/backend/pg/configuration/core.cppm"),
         "natural GUC name or registered-source provenance changed");
