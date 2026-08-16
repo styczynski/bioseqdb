@@ -85,6 +85,17 @@ inline void require(bool condition, std::string_view message) {
     return *found;
 }
 
+[[nodiscard]] inline option_value& guc_option(
+    collected_entity& entity,
+    std::string_view name) {
+    const auto found = std::ranges::find(
+        entity.options, name, &option_value::name);
+    require(
+        found != entity.options.end(),
+        "fixture GUC lacks an expected annotation option");
+    return *found;
+}
+
 template <typename p_operation>
 inline void require_rejected(
     p_operation&& operation,
@@ -178,6 +189,136 @@ inline void run_guc_generator_contract_self_tests() {
         production.gucs.size() == 73
             && test_indexes.gucs.size() == 76,
         "annotation-derived profile cardinality changed");
+
+    static constexpr std::array<std::string_view, 3>
+        typed_maximum_gucs{
+            "bioseq.index.memory_cap_mb",
+            "bioseq.index_build.run_buffer_bytes",
+            "bioseq.storage.sequence_shard.max_size_gib",
+        };
+    const auto require_typed_maximums = [](
+        const guc_inventory& inventory,
+        std::string_view collection_path) {
+        for (const std::string_view name : typed_maximum_gucs) {
+            const collected_guc& candidate =
+                guc_contract_detail::guc(inventory, name);
+            require(
+                candidate.maximum_expression
+                        == "std::numeric_limits<int>::max()"
+                    && candidate.generated_live_authority.maximum
+                        == "2147483647",
+                std::string{collection_path}
+                    + " did not preserve and resolve a typed int maximum");
+        }
+    };
+    require_typed_maximums(production, "source-only collection");
+    require(
+        guc_contract_detail::guc(
+            production, "bioseq.index.memory_cap_mb")
+                    .generated_live_authority.boot_value
+                == "0"
+            && guc_contract_detail::guc(
+                production, "bioseq.index.memory_cap_mb")
+                    .generated_live_authority.minimum
+                == "0"
+            && guc_contract_detail::guc(
+                production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.boot_value
+                == "0"
+            && guc_contract_detail::guc(
+                production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.minimum
+                == "0"
+            && guc_contract_detail::guc(
+                production,
+                "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.boot_value
+                == "1024"
+            && guc_contract_detail::guc(
+                production,
+                "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.minimum
+                == "0",
+        "typed-maximum GUC defaults or minimums changed");
+    collected_program compiler_profile_program = program;
+    compiler_profile_program.compiler_profile = "production";
+    const guc_inventory compiler_profile_inventory =
+        collect_guc_inventory(
+            compiler_profile_program, guc_profile::production);
+    require_typed_maximums(
+        compiler_profile_inventory, "compiler-profile collection");
+
+    const auto resolved_integer_bound = [&program](
+        std::string_view option_name,
+        std::string_view expression,
+        bool compiler_profile) -> std::string {
+        collected_program candidate = program;
+        if (compiler_profile) {
+            candidate.compiler_profile = "production";
+        }
+        guc_contract_detail::guc_option(
+            guc_contract_detail::annotated_guc(
+                candidate,
+                "bioseq::settings::index::memory_cap_mb"),
+            option_name)
+                .expression = expression;
+        const guc_inventory inventory = collect_guc_inventory(
+            candidate, guc_profile::production);
+        const collected_guc& resolved = guc_contract_detail::guc(
+            inventory, "bioseq.index.memory_cap_mb");
+        return option_name == "minimum"
+            ? *resolved.generated_live_authority.minimum
+            : *resolved.generated_live_authority.maximum;
+    };
+    require(
+        resolved_integer_bound(
+            "maximum", "std::numeric_limits<int>::max()", false)
+            == "2147483647"
+            && resolved_integer_bound(
+                "minimum", "std::numeric_limits<int>::min()", true)
+                == "-2147483648"
+            && resolved_integer_bound(
+                "maximum", "(std::numeric_limits<int>::max)()", true)
+                == "2147483647"
+            && resolved_integer_bound(
+                "minimum", "(std::numeric_limits<int>::min)()", false)
+                == "-2147483648"
+            && resolved_integer_bound(
+                "maximum",
+                " \n std :: numeric_limits < int > :: max ( ) \t",
+                false)
+                == "2147483647",
+        "typed numeric_limits<int> bounds did not resolve exactly");
+    require(
+        resolved_integer_bound("maximum", "INT_MAX", false)
+                == "2147483647"
+            && resolved_integer_bound("minimum", "INT_MIN", true)
+                == "-2147483648",
+        "intentional legacy INT_MAX/INT_MIN compatibility changed");
+
+    static constexpr std::array<std::string_view, 10>
+        rejected_integer_bounds{
+            "std::numeric_limits<long>::max()",
+            "std::numeric_limits<unsigned>::max()",
+            "std::numeric_limits<int>::lowest()",
+            "std::numeric_limits<int>::max() + 1",
+            "(std::numeric_limits<int>::max)() trailing",
+            "limits<int>::max()",
+            "integer_limits::max()",
+            "static_cast<int>(std::numeric_limits<int>::max())",
+            "2147483648",
+            "-2147483649",
+        };
+    for (const std::string_view expression : rejected_integer_bounds) {
+        guc_contract_detail::require_rejected(
+            [&resolved_integer_bound, expression] {
+                static_cast<void>(resolved_integer_bound(
+                    "maximum", expression, false));
+            },
+            {"cannot resolve generated integer GUC expression",
+             expression},
+            "unsupported integer bound escaped the closed resolver");
+    }
 
     const collected_guc& compression = guc_contract_detail::guc(
         production, "bioseq.storage.compression.algorithm");

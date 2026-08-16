@@ -1613,6 +1613,46 @@ source_only_integer_initializer(
     if (expression == "INT_MIN") {
         return std::to_string(std::numeric_limits<int>::min());
     }
+    const auto numeric_limits_int_value = [](std::string_view value)
+        -> std::optional<int> {
+        std::size_t cursor = 0;
+        const auto skip_space = [&value, &cursor] {
+            while (cursor < value.size()
+                   && (value[cursor] == ' ' || value[cursor] == '\t'
+                       || value[cursor] == '\n'
+                       || value[cursor] == '\r')) {
+                ++cursor;
+            }
+        };
+        const auto consume = [&value, &cursor, &skip_space](
+                                 std::string_view token) -> bool {
+            skip_space();
+            if (!value.substr(cursor).starts_with(token)) return false;
+            cursor += token.size();
+            return true;
+        };
+
+        const bool shielded = consume("(");
+        if (!consume("std") || !consume("::")
+            || !consume("numeric_limits") || !consume("<")
+            || !consume("int") || !consume(">")
+            || !consume("::")) {
+            return std::nullopt;
+        }
+        const bool maximum = consume("max");
+        if (!maximum && !consume("min")) return std::nullopt;
+        if (shielded && !consume(")")) return std::nullopt;
+        if (!consume("(") || !consume(")")) return std::nullopt;
+        skip_space();
+        if (cursor != value.size()) return std::nullopt;
+        return maximum
+            ? std::numeric_limits<int>::max()
+            : std::numeric_limits<int>::min();
+    };
+    if (const std::optional<int> value =
+            numeric_limits_int_value(expression)) {
+        return std::to_string(*value);
+    }
     if (bare_numeric_identifier(expression)) {
         const auto unit = std::ranges::find(
             program.translation_units,
@@ -1654,8 +1694,16 @@ source_only_integer_initializer(
             declaration->initializer_text,
             depth + 1);
     }
-    return std::to_string(
-        integer_expression_parser{expression}.parse());
+    const std::int64_t value =
+        integer_expression_parser{expression}.parse();
+    if (value < std::numeric_limits<int>::min()
+        || value > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "cannot resolve generated integer GUC expression '"
+            + std::string{expression}
+            + "': value is outside PostgreSQL GUC int range");
+    }
+    return std::to_string(value);
 }
 
 [[nodiscard]] inline std::string resolve_real_expression(
