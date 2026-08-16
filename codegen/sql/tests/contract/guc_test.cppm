@@ -603,18 +603,56 @@ inline void run_guc_generator_contract_self_tests() {
              "k_missing_integer_guc_constant"},
             "missing integer identifier did not fail closed");
     }
+    // Synthetic aliases retain their registered owner without depending on
+    // which production constants have compiler-derived structural records.
+    const auto add_structural_integer_alias = [&owners](
+        collected_program& candidate,
+        std::string name,
+        std::string initializer)
+        -> structural_analysis::declaration_record& {
+        auto& core = guc_contract_detail::owner_unit(
+            candidate, owners[2]);
+        const std::string qualified_name = "bioseq::" + name;
+        core.declarations.push_back(
+            structural_analysis::declaration_record{
+                .kind = structural_analysis::declaration_kind::variable,
+                .name = std::move(name),
+                .qualified_name = qualified_name,
+                .enclosing_qualified_name = "bioseq",
+                .signature_text =
+                    "inline constexpr int " + qualified_name,
+                .return_type = "int",
+                .initializer_text = std::move(initializer),
+                .active_condition = "true",
+                .owning_module = core.module_name,
+                .source_identity =
+                    structural_analysis::repository_source_identity(
+                        core.source_path)
+                    + "#guc-contract:" + qualified_name,
+                .explicit_declared_type = "int",
+                .linkage = structural_analysis::entity_linkage::module,
+                .attachment =
+                    structural_analysis::module_attachment::named_module,
+                .payload_kind = structural_analysis::
+                    declaration_payload_kind::variable_initializer,
+                .specifiers = {
+                    .direct_namespace_member = true,
+                    .is_definition = true,
+                    .is_variable = true,
+                    .is_constexpr = true,
+                    .is_inline = true,
+                    .has_explicit_type = true,
+                },
+            });
+        return core.declarations.back();
+    };
     {
         collected_program non_constexpr_structural = program;
-        auto& core = guc_contract_detail::owner_unit(
-            non_constexpr_structural, owners[2]);
-        const auto declaration = std::ranges::find(
-            core.declarations,
+        auto& declaration = add_structural_integer_alias(
+            non_constexpr_structural,
             "k_minimum_compression_level",
-            &structural_analysis::declaration_record::name);
-        require(
-            declaration != core.declarations.end(),
-            "fixture lacks the structural compression minimum");
-        declaration->specifiers.is_constexpr = false;
+            "1");
+        declaration.specifiers.is_constexpr = false;
         guc_contract_detail::require_rejected(
             [&non_constexpr_structural, &resolve_integer_identifier] {
                 static_cast<void>(resolve_integer_identifier(
@@ -625,26 +663,6 @@ inline void run_guc_generator_contract_self_tests() {
              "k_minimum_compression_level"},
             "registered structural non-constexpr fact was ignored");
     }
-    const auto add_structural_integer_alias = [&owners](
-        collected_program& candidate,
-        std::string name,
-        std::string initializer) {
-        auto& core = guc_contract_detail::owner_unit(
-            candidate, owners[2]);
-        const auto prototype = std::ranges::find(
-            core.declarations,
-            "k_minimum_compression_level",
-            &structural_analysis::declaration_record::name);
-        require(
-            prototype != core.declarations.end(),
-            "fixture lacks an integer alias prototype");
-        structural_analysis::declaration_record alias = *prototype;
-        alias.name = std::move(name);
-        alias.qualified_name = "bioseq::" + alias.name;
-        alias.initializer_text = std::move(initializer);
-        alias.active_condition.clear();
-        core.declarations.push_back(std::move(alias));
-    };
     {
         collected_program chained_aliases = program;
         add_structural_integer_alias(
