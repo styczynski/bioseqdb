@@ -117,6 +117,40 @@ export {
     }
 
     /*
+     * RelationIdGetNumberOfAttributes returns number of attributes that relation
+     * with relationId has.
+     */
+    int relation_id_get_number_of_attributes(Oid relation_id) {
+        Relation relation = RelationIdGetRelation(relation_id);
+        int nattrs = relation->rd_att->natts;
+        RelationClose(relation);
+        return nattrs;
+    }
+
+    /*
+     * CostBioseqColumnSeqPath sets costs given seq path for columnar table with
+     * relationId.
+     */
+    void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path) {
+        if (!enable_seqscan) {
+            /* costs are already set to disable_cost, don't adjust them */
+            return;
+        }
+
+        /*
+         * Seq scan doesn't support projection or qual pushdown, so we will read
+         * all the stripes and all the columns.
+         */
+        double stripes_to_read = bioseq_column_table_stripe_count(relation_id);
+        int number_of_columns_read = relation_id_get_number_of_attributes(relation_id);
+
+        path->rows = rel->tuples;
+        path->startup_cost = 0;
+        path->total_cost = stripes_to_read * bioseq_column_per_stripe_scan_cost(
+                                                 rel, relation_id, number_of_columns_read);
+    }
+
+    /*
      * CreateBioseqColumnSeqScanPath returns Path for sequential scan on columnar
      * table with relationId.
      */
@@ -299,40 +333,6 @@ export {
                       scan_cost);
 
         return scan_cost;
-    }
-
-    /*
-     * CostBioseqColumnSeqPath sets costs given seq path for columnar table with
-     * relationId.
-     */
-    void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path) {
-        if (!enable_seqscan) {
-            /* costs are already set to disable_cost, don't adjust them */
-            return;
-        }
-
-        /*
-         * Seq scan doesn't support projection or qual pushdown, so we will read
-         * all the stripes and all the columns.
-         */
-        double stripes_to_read = bioseq_column_table_stripe_count(relation_id);
-        int number_of_columns_read = relation_id_get_number_of_attributes(relation_id);
-
-        path->rows = rel->tuples;
-        path->startup_cost = 0;
-        path->total_cost = stripes_to_read * bioseq_column_per_stripe_scan_cost(
-                                                 rel, relation_id, number_of_columns_read);
-    }
-
-    /*
-     * RelationIdGetNumberOfAttributes returns number of attributes that relation
-     * with relationId has.
-     */
-    int relation_id_get_number_of_attributes(Oid relation_id) {
-        Relation relation = RelationIdGetRelation(relation_id);
-        int nattrs = relation->rd_att->natts;
-        RelationClose(relation);
-        return nattrs;
     }
 
     /*

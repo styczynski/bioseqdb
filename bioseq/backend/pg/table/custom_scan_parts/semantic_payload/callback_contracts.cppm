@@ -111,7 +111,6 @@ export {
                                        RelOptInfo* rel,
                                        Oid relation_id,
                                        IndexPath* index_path);
-    void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path);
     void adjust_bioseq_column_parallel_scan_cost(Path* path);
     void cost_bioseq_column_scan(PlannerInfo* root,
                                  RelOptInfo* rel,
@@ -131,7 +130,6 @@ export {
                                                   RelOptInfo* rel,
                                                   Oid relation_id,
                                                   IndexPath* index_path);
-    int relation_id_get_number_of_attributes(Oid relation_id);
     Cost bioseq_column_per_stripe_scan_cost(RelOptInfo* rel,
                                             Oid relation_id,
                                             int number_of_columns_read);
