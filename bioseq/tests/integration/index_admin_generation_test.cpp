@@ -700,56 +700,56 @@ TEST_CASE("fragment-minimizer coordinator executes scalar and SIMD PostgreSQL sc
 }
 
 TEST_CASE("PostgreSQL full-generation reader rejects same-scheme producer relabelling",
-		  "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
-	constexpr std::string_view table =
-		"index_admin_same_scheme_producer_rejection";
-	auto ctx = fresh_context({table});
-	exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
-	exec_sqlf(ctx,
-		"CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
-		table);
-	exec_sqlf(ctx,
-		"INSERT INTO {} VALUES "
-		"(1, (repeat('ACGT', 16391) || 'A')::bioseq.seq('dna4', 64));",
-		table);
-	const auto rowno = only_column_row_number(ctx, table);
-	const auto build = [&ctx, table, rowno](std::string_view backend) {
-		return query_one(ctx, fmt::format(
-			"SELECT * FROM "
-			"bioseq_internal.build_ready_minimizer_fragment_generation("
-			"'{}'::regclass, 'minimizers_per_fragment', {}, '{}');",
-			table, rowno, backend));
-	};
-	const auto read = [table, rowno](std::string_view backend) {
-		return fmt::format(
-			"SELECT * FROM "
-			"bioseq_internal.scan_grouped_soa_minimizer_generation_test("
-			"'{}'::regclass, 'minimizers_per_fragment', {}, "
-			"15::smallint, 10::smallint, 5::smallint, '{}');",
-			table, rowno, backend);
-	};
-	const auto expect_producer_rejection =
-		[&ctx, &read](std::string_view backend) {
-		const auto error = sql_error(ctx, read(backend));
-		REQUIRE(error.contains(
-			"READY generation minimizer storage contract disagrees"));
-		REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-	};
+          "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
+    constexpr std::string_view table =
+        "index_admin_same_scheme_producer_rejection";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
+    exec_sqlf(ctx,
+        "CREATE TABLE {} (id int, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        table);
+    exec_sqlf(ctx,
+        "INSERT INTO {} VALUES "
+        "(1, (repeat('ACGT', 16391) || 'A')::bioseq.seq('dna4', 64));",
+        table);
+    const auto rowno = only_column_row_number(ctx, table);
+    const auto build = [&ctx, table, rowno](std::string_view backend) {
+        return query_one(ctx, fmt::format(
+            "SELECT * FROM "
+            "bioseq_internal.build_ready_minimizer_fragment_generation("
+            "'{}'::regclass, 'minimizers_per_fragment', {}, '{}');",
+            table, rowno, backend));
+    };
+    const auto read = [table, rowno](std::string_view backend) {
+        return fmt::format(
+            "SELECT * FROM "
+            "bioseq_internal.scan_grouped_soa_minimizer_generation_test("
+            "'{}'::regclass, 'minimizers_per_fragment', {}, "
+            "15::smallint, 10::smallint, 5::smallint, '{}');",
+            table, rowno, backend);
+    };
+    const auto expect_producer_rejection =
+        [&ctx, &read](std::string_view backend) {
+        const auto error = sql_error(ctx, read(backend));
+        REQUIRE(error.contains(
+            "READY generation minimizer storage contract disagrees"));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    };
 
-	const row_t scalar = build("scalar");
-	REQUIRE(scalar[6].value() == "scalar");
-	REQUIRE(query_one(ctx, read("scalar")).size() == 16u);
-	// Scalar, two-stack ntHash and Vulkan use the same biological minimizer scheme.
-	// Exact producer identity is nevertheless mandatory, so neither request may
-	// consume a generation produced by Scalar.
-	expect_producer_rejection("exact_simd");
-	expect_producer_rejection("vulkan_segment");
+    const row_t scalar = build("scalar");
+    REQUIRE(scalar[6].value() == "scalar");
+    REQUIRE(query_one(ctx, read("scalar")).size() == 16u);
+    // Scalar, two-stack ntHash and Vulkan use the same biological minimizer scheme.
+    // Exact producer identity is nevertheless mandatory, so neither request may
+    // consume a generation produced by Scalar.
+    expect_producer_rejection("exact_simd");
+    expect_producer_rejection("vulkan_segment");
 
-	const row_t exact = build("exact_simd");
-	REQUIRE(exact[6].value() == "exact_simd");
-	REQUIRE(query_one(ctx, read("exact_simd")).size() == 16u);
-	expect_producer_rejection("scalar");
-	expect_producer_rejection("vulkan_segment");
+    const row_t exact = build("exact_simd");
+    REQUIRE(exact[6].value() == "exact_simd");
+    REQUIRE(query_one(ctx, read("exact_simd")).size() == 16u);
+    expect_producer_rejection("scalar");
+    expect_producer_rejection("vulkan_segment");
 }
 
 TEST_CASE("sequence-minimizer coordinator publishes PostgreSQL spill generations",

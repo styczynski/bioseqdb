@@ -234,9 +234,9 @@ TEST_CASE("source read ERROR crosses every sequence callback boundary",
         " (2, repeat('TGCA',4096)::bioseq.seq('dna4',32)); "
         "CREATE TABLE sequence_acceptance_source_read_heap "
         " (value bioseq.seq('dna4',32));");
-	exec_sql(ctx,
-		"SET bioseq.planner.sequence_sort_scan.enabled = on; "
-		"SET bioseq.aligner.vulkan.enabled = off;");
+    exec_sql(ctx,
+        "SET bioseq.planner.sequence_sort_scan.enabled = on; "
+        "SET bioseq.aligner.vulkan.enabled = off;");
 
     const std::array<const char*, 5> callback_queries{
         /* One canonical-view callback. */
@@ -255,8 +255,8 @@ TEST_CASE("source read ERROR crosses every sequence callback boundary",
         "INSERT INTO sequence_acceptance_source_read_heap "
         "SELECT value[4093:4101] "
         "FROM sequence_acceptance_source_read_faults WHERE id=1;",
-		/* BatchSort canonical-view admission/comparison callback. */
-		"SELECT id FROM sequence_acceptance_source_read_faults ORDER BY value;",
+        /* BatchSort canonical-view admission/comparison callback. */
+        "SELECT id FROM sequence_acceptance_source_read_faults ORDER BY value;",
     };
     for (const char* query : callback_queries) {
         CAPTURE(query);

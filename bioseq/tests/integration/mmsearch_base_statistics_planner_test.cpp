@@ -393,7 +393,7 @@ TEST_CASE("alignment execution SRF publishes one exact stage row set",
                 "WHERE datname=current_database();"));
     for (std::size_t stage_no = 0; stage_no < rows.size(); ++stage_no) {
         const auto& row = rows[stage_no];
-		REQUIRE(row.size() == 151);
+        REQUIRE(row.size() == 151);
         REQUIRE(stats_i64(row, 0) == execution_id);
         REQUIRE(stats_i64(row, 11) == 1);
         REQUIRE(stats_i64(row, 12) == 0);
@@ -632,35 +632,35 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
     const auto plan = explain_text<false>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Bioseq Residual Mmsearch Qual: absent"));
-	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
-	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 5"));
+    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
+    REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 5"));
     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
 
     const auto rows = query_rows(ctx, sql + " ORDER BY q.id, t.pk;");
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
-		REQUIRE(row.size() == 6);
+        REQUIRE(row.size() == 6);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
         REQUIRE(row[2].has_value());
         REQUIRE(row[3].has_value());
-		REQUIRE(row[4].has_value());
-		REQUIRE(row[5].has_value());
-		/* Alignment scores are legitimately zero for this tiny exact fixture, so
-		 * adjusted_score=1 is valid.  The direct-call score stub returns -1 and
-		 * would instead produce the excluded sentinel value zero. */
-		REQUIRE(std::stoll(*row[2]) >= 1);
-		/* query_end() and query_start() have the same BIGINT result type but
-		 * must occupy distinct executor-owned helper slots.  Aliasing helpers
-		 * by result type (or leaving the SQL stubs to execute) collapses this
-		 * positive aligned span to zero. */
-		REQUIRE(std::stoll(*row[3]) > 0);
-		/* has_cigar is both an unprunable Block Aligner consumer and a separate
-		 * no-stub guard: the SQL rendezvous stub returns false. */
-		REQUIRE(*row[4] == "t");
-		/* Identical query/target fixtures require BatchJoin to request and
-		 * publish the exact edit count instead of executing the SQL stub. */
-		REQUIRE(std::stoll(*row[5]) == 0);
+        REQUIRE(row[4].has_value());
+        REQUIRE(row[5].has_value());
+        /* Alignment scores are legitimately zero for this tiny exact fixture, so
+         * adjusted_score=1 is valid.  The direct-call score stub returns -1 and
+         * would instead produce the excluded sentinel value zero. */
+        REQUIRE(std::stoll(*row[2]) >= 1);
+        /* query_end() and query_start() have the same BIGINT result type but
+         * must occupy distinct executor-owned helper slots.  Aliasing helpers
+         * by result type (or leaving the SQL stubs to execute) collapses this
+         * positive aligned span to zero. */
+        REQUIRE(std::stoll(*row[3]) > 0);
+        /* has_cigar is both an unprunable Block Aligner consumer and a separate
+         * no-stub guard: the SQL rendezvous stub returns false. */
+        REQUIRE(*row[4] == "t");
+        /* Identical query/target fixtures require BatchJoin to request and
+         * publish the exact edit count instead of executing the SQL stub. */
+        REQUIRE(std::stoll(*row[5]) == 0);
     }
     require_batch_join_stats(ctx, 1, 2);
 
@@ -688,11 +688,11 @@ TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
         "rejects_unrelated_phv::text, "
         "rejects_volatile_mixed_expression::text, "
         "preserves_wrapper_cost_owner::text, "
-		"accepts_plain_target_var::text, "
-		"rejects_plain_target_sequence_var::text, "
-		"rejects_whole_row_var::text, "
-		"rejects_system_var::text, "
-		"rejects_nulling_var::text "
+        "accepts_plain_target_var::text, "
+        "rejects_plain_target_sequence_var::text, "
+        "rejects_whole_row_var::text, "
+        "rejects_system_var::text, "
+        "rejects_nulling_var::text "
         "FROM bioseq_internal.batch_join_projection_guard_probe();");
     REQUIRE(guard_diagnostics.size() == 9);
     for (const auto& field : guard_diagnostics) {
@@ -707,35 +707,35 @@ TEST_CASE("BioseqBatchJoin headline metrics are one target crossed with 16 queri
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 16);
 
-	const std::string zero_placeholder_sql =
-		batch_join_sql(1, "count(*)::bigint");
-	const auto zero_placeholder_plan =
-		explain_text<false>(ctx, zero_placeholder_sql);
-	REQUIRE(plan_contains(
-		zero_placeholder_plan, "Custom Scan (BioseqBatchJoin)"));
-	REQUIRE(plan_contains(
-		zero_placeholder_plan, "Bioseq Batch ABI Version: 3"));
-		/* count(*) has no match-result helper. NIL is the encoded empty placeholder
-		 * list. This shape elides base alignment, so only plan structure is checked. */
-	REQUIRE(plan_contains(
-		zero_placeholder_plan, "Bioseq Match Placeholder Sites: 0"));
+    const std::string zero_placeholder_sql =
+        batch_join_sql(1, "count(*)::bigint");
+    const auto zero_placeholder_plan =
+        explain_text<false>(ctx, zero_placeholder_sql);
+    REQUIRE(plan_contains(
+        zero_placeholder_plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(
+        zero_placeholder_plan, "Bioseq Batch ABI Version: 3"));
+        /* count(*) has no match-result helper. NIL is the encoded empty placeholder
+         * list. This shape elides base alignment, so only plan structure is checked. */
+    REQUIRE(plan_contains(
+        zero_placeholder_plan, "Bioseq Match Placeholder Sites: 0"));
 
-	const std::string sql = batch_join_sql(
-		1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
-	const auto plan = explain_text<false>(ctx, sql);
-	REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
-	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
-	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
-	/* Ownership is structural; all exposed cost metrics remain finite and
-	 * nonnegative. */
-	REQUIRE(plan_contains(plan, "Bioseq Honest Startup Cost"));
-	REQUIRE(plan_contains(plan, "Bioseq Honest Total Cost"));
-	REQUIRE(plan_contains(plan, "Bioseq Incumbent Cost Floor"));
-	const auto incumbent_floor = find_explain_property(
-		plan, "Bioseq Incumbent Cost Floor");
-	REQUIRE(incumbent_floor.has_value());
-	REQUIRE(std::stod(*incumbent_floor) >= 0.0);
-	require_batch_join_aligned_query_rows(ctx, sql, 16, "t");
+    const std::string sql = batch_join_sql(
+        1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
+    REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
+    /* Ownership is structural; all exposed cost metrics remain finite and
+     * nonnegative. */
+    REQUIRE(plan_contains(plan, "Bioseq Honest Startup Cost"));
+    REQUIRE(plan_contains(plan, "Bioseq Honest Total Cost"));
+    REQUIRE(plan_contains(plan, "Bioseq Incumbent Cost Floor"));
+    const auto incumbent_floor = find_explain_property(
+        plan, "Bioseq Incumbent Cost Floor");
+    REQUIRE(incumbent_floor.has_value());
+    REQUIRE(std::stod(*incumbent_floor) >= 0.0);
+    require_batch_join_aligned_query_rows(ctx, sql, 16, "t");
     require_batch_join_stats(ctx, 1, 16);
 }
 
@@ -1171,9 +1171,9 @@ TEST_CASE("BioseqBatchJoin dispatches exactly one full 8192-query wave",
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 8192);
 
-	const std::string sql = batch_join_sql(
-		1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
-	require_batch_join_aligned_query_rows(ctx, sql, 8192, "t");
+    const std::string sql = batch_join_sql(
+        1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
+    require_batch_join_aligned_query_rows(ctx, sql, 8192, "t");
     require_batch_join_stats(ctx, 1, 8192);
 }
 
@@ -1191,17 +1191,17 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
     auto ctx = fresh_context({k_batch_join_target});
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 8193);
-	const auto reserved_bytes = [&ctx] {
-		return query_scalar_int(ctx,
-			"SELECT index_memory_reserved_bytes FROM bioseq.scheduler_stats();");
-	};
-	const long long admission_baseline = reserved_bytes();
+    const auto reserved_bytes = [&ctx] {
+        return query_scalar_int(ctx,
+            "SELECT index_memory_reserved_bytes FROM bioseq.scheduler_stats();");
+    };
+    const long long admission_baseline = reserved_bytes();
 
-	const std::string sql = batch_join_sql(
-		1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
-	require_batch_join_aligned_query_rows(ctx, sql, 8193, "t");
+    const std::string sql = batch_join_sql(
+        1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
+    require_batch_join_aligned_query_rows(ctx, sql, 8193, "t");
     require_batch_join_stats(ctx, 1, 8193);
-	REQUIRE(reserved_bytes() == admission_baseline);
+    REQUIRE(reserved_bytes() == admission_baseline);
 
     const auto analyzed = explain_text<true>(ctx, sql);
     REQUIRE(plan_contains(analyzed, "Custom Scan (BioseqBatchJoin)"));
@@ -1209,16 +1209,16 @@ TEST_CASE("BioseqBatchJoin resumes after 8192 and merges the one-row tail",
     REQUIRE(plan_contains(
         analyzed, "attempted=8193 fully_attested=8193 unattested=0"));
 
-	// A later much smaller preparation in the same backend must neither retain
-	// nor inherit the 8193-query union's outer/inner vector capacities.
-	exec_sqlf(ctx, "DROP TABLE {};", k_batch_join_queries);
-	load_batch_join_queries(ctx, 1);
-	require_batch_join_aligned_query_rows(
-		ctx,
-		batch_join_sql(1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
-		1,
-		"t");
-	REQUIRE(reserved_bytes() == admission_baseline);
+    // A later much smaller preparation in the same backend must neither retain
+    // nor inherit the 8193-query union's outer/inner vector capacities.
+    exec_sqlf(ctx, "DROP TABLE {};", k_batch_join_queries);
+    load_batch_join_queries(ctx, 1);
+    require_batch_join_aligned_query_rows(
+        ctx,
+        batch_join_sql(1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
+        1,
+        "t");
+    REQUIRE(reserved_bytes() == admission_baseline);
 }
 
 TEST_CASE("BioseqBatchJoin emits a match after a zero-match full first wave",
@@ -1227,72 +1227,72 @@ TEST_CASE("BioseqBatchJoin emits a match after a zero-match full first wave",
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 8193, /*only_last_can_match=*/true);
 
-	const auto rows = query_rows(
-		ctx,
-		batch_join_sql(
-			1,
-			"DISTINCT q.id, bioseq.has_cigar(t.pk) AS has_cigar")
-			+ " ORDER BY q.id;");
+    const auto rows = query_rows(
+        ctx,
+        batch_join_sql(
+            1,
+            "DISTINCT q.id, bioseq.has_cigar(t.pk) AS has_cigar")
+            + " ORDER BY q.id;");
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
-		REQUIRE(row.size() == 2);
+        REQUIRE(row.size() == 2);
         REQUIRE(row[0].has_value());
-		REQUIRE(row[1].has_value());
+        REQUIRE(row[1].has_value());
         REQUIRE(std::stoll(*row[0]) == 8192);
-		REQUIRE(*row[1] == "t");
+        REQUIRE(*row[1] == "t");
     }
 
-	/* The first wave deliberately uses 10-bp queries, shorter than k=15. They
-	 * cannot produce the non-empty sketch/chain/Block activity required for a
-	 * simd_cpu attestation, so the aggregate must stay diagnostic rather than
-	 * laundering those 8192 jobs. The final eligible query still has to carry
-	 * positive end-to-end SIMD counters and zero fallback counters. */
-	const auto stats = last_alignment_stats(ctx);
-	REQUIRE(stats.size() == 20);
-	REQUIRE(stats.front()[16].value_or("") == "simd_cpu");
-	REQUIRE(stats.front()[17].value_or("") == "mixed_invalid");
-	REQUIRE(stats.front()[18].value_or("") == "recomputed");
-	REQUIRE(stats.front()[19].value_or("") == "recomputed");
-	REQUIRE(stats_i64(stats.front(), 32) == 1);
-	REQUIRE(stats_i64(stats.front(), 33) == 8193);
-	REQUIRE(stats_i64(stats.front(), 34) == 0);
-	REQUIRE(stats_i64(stats.front(), 35) == 8193);
-	REQUIRE(stats_i64(stats.front(), 37) == 0);
-	REQUIRE(stats_i64(stats.front(), 45) == 0);
-	REQUIRE(stats_i64(stats.front(), 46) == 0);
-	REQUIRE(stats_i64(stats.front(), 47) == 1);
-	REQUIRE(stats_i64(stats.front(), 94) > 0);
-	REQUIRE(stats_i64(stats.front(), 95) == 0);
-	REQUIRE(stats_i64(stats.front(), 96) == 0);
-	REQUIRE(stats_i64(stats.front(), 98) > 0);
-	REQUIRE(stats_i64(stats.front(), 99) > 0);
-	REQUIRE(stats_i64(stats.front(), 100) == 0);
-	REQUIRE(stats_i64(stats.front(), 101) == 0);
-	for (std::size_t gpu_counter = 103; gpu_counter <= 138; ++gpu_counter) {
-		REQUIRE(stats_i64(stats.front(), gpu_counter) == 0);
-	}
-	REQUIRE(stats_i64(stats.front(), 139) == 0);
-	REQUIRE(stats_i64(stats.front(), 140) == 0);
-	REQUIRE_FALSE(stats_bool(stats.front(), 141));
-	for (const std::size_t stage_no : {std::size_t{0}, std::size_t{1},
-			 std::size_t{7}, std::size_t{8}}) {
-		REQUIRE(stats_i64(stats[stage_no], 24) == 1);
-		REQUIRE(stats_i64(stats[stage_no], 25) == 0);
-		REQUIRE(stats_i64(stats[stage_no], 26) == 0);
-		REQUIRE(stats_i64(stats[stage_no], 27) == 1);
-		REQUIRE(stats_i64(stats[stage_no], 28) == 0);
-		REQUIRE(stats_i64(stats[stage_no], 29) == 0);
-	}
-	long long tail_block_simd_executions = 0;
-	for (std::size_t stage_no = 17; stage_no <= 19; ++stage_no) {
-		REQUIRE(stats_i64(stats[stage_no], 26) == 0);
-		REQUIRE(stats_i64(stats[stage_no], 27)
-			== stats_i64(stats[stage_no], 24));
-		REQUIRE(stats_i64(stats[stage_no], 28) == 0);
-		REQUIRE(stats_i64(stats[stage_no], 29) == 0);
-		tail_block_simd_executions += stats_i64(stats[stage_no], 27);
-	}
-	REQUIRE(tail_block_simd_executions >= 1);
+    /* The first wave deliberately uses 10-bp queries, shorter than k=15. They
+     * cannot produce the non-empty sketch/chain/Block activity required for a
+     * simd_cpu attestation, so the aggregate must stay diagnostic rather than
+     * laundering those 8192 jobs. The final eligible query still has to carry
+     * positive end-to-end SIMD counters and zero fallback counters. */
+    const auto stats = last_alignment_stats(ctx);
+    REQUIRE(stats.size() == 20);
+    REQUIRE(stats.front()[16].value_or("") == "simd_cpu");
+    REQUIRE(stats.front()[17].value_or("") == "mixed_invalid");
+    REQUIRE(stats.front()[18].value_or("") == "recomputed");
+    REQUIRE(stats.front()[19].value_or("") == "recomputed");
+    REQUIRE(stats_i64(stats.front(), 32) == 1);
+    REQUIRE(stats_i64(stats.front(), 33) == 8193);
+    REQUIRE(stats_i64(stats.front(), 34) == 0);
+    REQUIRE(stats_i64(stats.front(), 35) == 8193);
+    REQUIRE(stats_i64(stats.front(), 37) == 0);
+    REQUIRE(stats_i64(stats.front(), 45) == 0);
+    REQUIRE(stats_i64(stats.front(), 46) == 0);
+    REQUIRE(stats_i64(stats.front(), 47) == 1);
+    REQUIRE(stats_i64(stats.front(), 94) > 0);
+    REQUIRE(stats_i64(stats.front(), 95) == 0);
+    REQUIRE(stats_i64(stats.front(), 96) == 0);
+    REQUIRE(stats_i64(stats.front(), 98) > 0);
+    REQUIRE(stats_i64(stats.front(), 99) > 0);
+    REQUIRE(stats_i64(stats.front(), 100) == 0);
+    REQUIRE(stats_i64(stats.front(), 101) == 0);
+    for (std::size_t gpu_counter = 103; gpu_counter <= 138; ++gpu_counter) {
+        REQUIRE(stats_i64(stats.front(), gpu_counter) == 0);
+    }
+    REQUIRE(stats_i64(stats.front(), 139) == 0);
+    REQUIRE(stats_i64(stats.front(), 140) == 0);
+    REQUIRE_FALSE(stats_bool(stats.front(), 141));
+    for (const std::size_t stage_no : {std::size_t{0}, std::size_t{1},
+             std::size_t{7}, std::size_t{8}}) {
+        REQUIRE(stats_i64(stats[stage_no], 24) == 1);
+        REQUIRE(stats_i64(stats[stage_no], 25) == 0);
+        REQUIRE(stats_i64(stats[stage_no], 26) == 0);
+        REQUIRE(stats_i64(stats[stage_no], 27) == 1);
+        REQUIRE(stats_i64(stats[stage_no], 28) == 0);
+        REQUIRE(stats_i64(stats[stage_no], 29) == 0);
+    }
+    long long tail_block_simd_executions = 0;
+    for (std::size_t stage_no = 17; stage_no <= 19; ++stage_no) {
+        REQUIRE(stats_i64(stats[stage_no], 26) == 0);
+        REQUIRE(stats_i64(stats[stage_no], 27)
+            == stats_i64(stats[stage_no], 24));
+        REQUIRE(stats_i64(stats[stage_no], 28) == 0);
+        REQUIRE(stats_i64(stats[stage_no], 29) == 0);
+        tail_block_simd_executions += stats_i64(stats[stage_no], 27);
+    }
+    REQUIRE(tail_block_simd_executions >= 1);
 }
 
 TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-generation failure",

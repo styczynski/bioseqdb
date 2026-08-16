@@ -102,9 +102,9 @@ TEST_CASE("nested SPI BatchJoin attaches once to its executor root",
     REQUIRE(stats_i64(stats.front(), 12) == 1);
     REQUIRE(stats_i64(stats.front(), 32) == 1);
     REQUIRE(stats_i64(stats.front(), 33) == 2);
-	REQUIRE(stats_i64(stats.front(), 45) == 0);
-	REQUIRE(stats_i64(stats.front(), 46) == 0);
-	REQUIRE(stats_i64(stats.front(), 47) == 1);
+    REQUIRE(stats_i64(stats.front(), 45) == 0);
+    REQUIRE(stats_i64(stats.front(), 46) == 0);
+    REQUIRE(stats_i64(stats.front(), 47) == 1);
     REQUIRE(stats_bool(stats.front(), 13));
 }
 

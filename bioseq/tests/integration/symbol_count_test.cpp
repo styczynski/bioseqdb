@@ -172,7 +172,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             REQUIRE(std::stoll(row[0].value()) == 4);
             REQUIRE_FALSE(ctx.notice_contains("resource was not closed"));
 
-			// Abort the executor after BioseqScan has populated the placeholder.
+            // Abort the executor after BioseqScan has populated the placeholder.
             // The helper has already performed its normal cleanup at this
             // point; this verifies that it leaves no ResourceOwner debt for a
             // later projection error. The helper's internal PG_CATCH path is

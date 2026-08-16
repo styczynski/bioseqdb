@@ -202,7 +202,7 @@ TEST_CASE("bridged PostgreSQL build and publication leaves preserve published st
 }
 
 TEST_CASE("ordinary update_index publishes fragment-minimizer metadata and a reopenable hash-major generation",
-		  "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
+          "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     constexpr std::array<std::pair<std::string_view, std::string_view>, 2>
         cases{{
             {"index_admin_update_fragment_minimizer", "minimizers_per_fragment"},
@@ -422,7 +422,7 @@ TEST_CASE("hash-major replacement reuses its sidecar and retains the replaced ge
 }
 
 TEST_CASE("ordinary locator-backed bounded ntHash update publishes hash-major without fallback",
-		  "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
+          "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     constexpr std::string_view table = "index_admin_bounded_nthash_publication";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
@@ -455,24 +455,24 @@ TEST_CASE("ordinary locator-backed bounded ntHash update publishes hash-major wi
         /*expected_scheme_identity=*/1,
         /*expected_scheme_revision=*/1,
         /*expected_producer_identity=*/3) > 0);
-	exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
-	const auto wrong_backend = sql_error(ctx, fmt::format(
-		"SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
-		"'{}'::regclass,'minimizers_per_sequence',{});",
-		table, rowno));
-	REQUIRE(wrong_backend.contains(
-		"bioseq hash-major inspection source/profile identity disagrees"));
-	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-	exec_sql(ctx,
-		"SET bioseq.aligner.minimizer.algorithm = 'bounded_nthash_simd';");
-	REQUIRE(query_scalar_int(ctx, fmt::format(
-		"SELECT count(bioseq.inspect_ready_hash_major_minimizer_generation("
-		"'{}'::regclass,'minimizers_per_sequence',{}));",
-		table, rowno)) == 1);
+    exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
+    const auto wrong_backend = sql_error(ctx, fmt::format(
+        "SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
+        "'{}'::regclass,'minimizers_per_sequence',{});",
+        table, rowno));
+    REQUIRE(wrong_backend.contains(
+        "bioseq hash-major inspection source/profile identity disagrees"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    exec_sql(ctx,
+        "SET bioseq.aligner.minimizer.algorithm = 'bounded_nthash_simd';");
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(bioseq.inspect_ready_hash_major_minimizer_generation("
+        "'{}'::regclass,'minimizers_per_sequence',{}));",
+        table, rowno)) == 1);
 }
 
 TEST_CASE("ordinary hash-major replacement preserves its active generation when a locator source is corrupt",
-		  "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
+          "[component:bioseq][layer:integration][feature:index][resource:postgres]") {
     constexpr std::string_view table = "index_admin_update_source_rollback";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");

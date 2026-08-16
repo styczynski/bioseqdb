@@ -715,64 +715,64 @@ TEST_CASE("require_compatible_persisted rejects a complete minimizers_per_sequen
 }
 
 TEST_CASE("active-read policy preserves configured versus authoritative no-row source",
-		  "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
-	auto ctx = fresh_context({k_hoe});
-	seed_hoe_fixture(ctx, k_hoe);
-	exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
-	const std::string search = index_requirement_sql(k_hoe, 0);
+          "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
+    auto ctx = fresh_context({k_hoe});
+    seed_hoe_fixture(ctx, k_hoe);
+    exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
+    const std::string search = index_requirement_sql(k_hoe, 0);
 
-	const auto policy_debug = [&ctx] {
-		const auto rows = query_rows(
-			ctx, "SELECT * FROM bioseq_internal.active_read_policy_debug();");
-		REQUIRE(rows.size() == 1);
-		REQUIRE(rows.front().size() == 9);
-		REQUIRE(rows.front()[7].value_or("") == "0");
-		REQUIRE(rows.front()[8].value_or("") == "0");
-		return rows.front();
-	};
-	const auto value = [](const row_t& row, const std::size_t column) {
-		REQUIRE(column < row.size());
-		REQUIRE(row[column].has_value());
-		return std::stoll(*row[column]);
-	};
+    const auto policy_debug = [&ctx] {
+        const auto rows = query_rows(
+            ctx, "SELECT * FROM bioseq_internal.active_read_policy_debug();");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows.front().size() == 9);
+        REQUIRE(rows.front()[7].value_or("") == "0");
+        REQUIRE(rows.front()[8].value_or("") == "0");
+        return rows.front();
+    };
+    const auto value = [](const row_t& row, const std::size_t column) {
+        REQUIRE(column < row.size());
+        REQUIRE(row[column].has_value());
+        return std::stoll(*row[column]);
+    };
 
-	// An authoritative zero-row result selects the transient minimizers_per_fragment
-	// shape, but its source must not be relabelled as a configured row.
-	exec_sqlf(ctx,
-		"UPDATE bioseq_internal.index_policy SET is_active_read = false "
-		"WHERE user_relid = '{}'::regclass;",
-		k_hoe);
-	exec_sql(ctx,
-		"SELECT bioseq_internal.reset_active_read_policy_debug();");
-	(void)query_rows(ctx, search);
-	const row_t authoritative = policy_debug();
-	REQUIRE(value(authoritative, 0) == 0);
-	REQUIRE(value(authoritative, 1) > 0);
-	REQUIRE(value(authoritative, 2) == 0);
-	REQUIRE(value(authoritative, 3) == 0);
-	REQUIRE(value(authoritative, 4) > 0);
-	REQUIRE(value(authoritative, 5) == 0);
-	REQUIRE(authoritative[6].value_or("")
-		== "authoritative_no_row_default");
+    // An authoritative zero-row result selects the transient minimizers_per_fragment
+    // shape, but its source must not be relabelled as a configured row.
+    exec_sqlf(ctx,
+        "UPDATE bioseq_internal.index_policy SET is_active_read = false "
+        "WHERE user_relid = '{}'::regclass;",
+        k_hoe);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_active_read_policy_debug();");
+    (void)query_rows(ctx, search);
+    const row_t authoritative = policy_debug();
+    REQUIRE(value(authoritative, 0) == 0);
+    REQUIRE(value(authoritative, 1) > 0);
+    REQUIRE(value(authoritative, 2) == 0);
+    REQUIRE(value(authoritative, 3) == 0);
+    REQUIRE(value(authoritative, 4) > 0);
+    REQUIRE(value(authoritative, 5) == 0);
+    REQUIRE(authoritative[6].value_or("")
+        == "authoritative_no_row_default");
 
-	// Setting the same physical minimizers_per_fragment choice creates an explicit configured-row
-	// source. The algorithm name may match the default; the attestation source
-	// and both resolver/dispatch counters still must differ.
-	exec_sqlf(ctx,
-		"SELECT bioseq.set_active_read_index('{}'::regclass, "
-		"'minimizers_per_fragment');",
-		k_hoe);
-	exec_sql(ctx,
-		"SELECT bioseq_internal.reset_active_read_policy_debug();");
-	(void)query_rows(ctx, search);
-	const row_t configured = policy_debug();
-	REQUIRE(value(configured, 0) > 0);
-	REQUIRE(value(configured, 1) == 0);
-	REQUIRE(value(configured, 2) == 0);
-	REQUIRE(value(configured, 3) > 0);
-	REQUIRE(value(configured, 4) == 0);
-	REQUIRE(value(configured, 5) == 0);
-	REQUIRE(configured[6].value_or("") == "configured_row");
+    // Setting the same physical minimizers_per_fragment choice creates an explicit configured-row
+    // source. The algorithm name may match the default; the attestation source
+    // and both resolver/dispatch counters still must differ.
+    exec_sqlf(ctx,
+        "SELECT bioseq.set_active_read_index('{}'::regclass, "
+        "'minimizers_per_fragment');",
+        k_hoe);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_active_read_policy_debug();");
+    (void)query_rows(ctx, search);
+    const row_t configured = policy_debug();
+    REQUIRE(value(configured, 0) > 0);
+    REQUIRE(value(configured, 1) == 0);
+    REQUIRE(value(configured, 2) == 0);
+    REQUIRE(value(configured, 3) > 0);
+    REQUIRE(value(configured, 4) == 0);
+    REQUIRE(value(configured, 5) == 0);
+    REQUIRE(configured[6].value_or("") == "configured_row");
 }
 
 TEST_CASE("require_compatible_persisted errors when target chunks are missing",
@@ -844,7 +844,7 @@ TEST_CASE("require_compatible_persisted rejects before alternate scanner and GPU
 }
 
 TEST_CASE("require_absent preserves on-insert policy and prohibits external async files",
-		  "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
+          "[component:bioseq][layer:integration][feature:prefilter][resource:postgres]") {
     auto ctx = fresh_context({k_missing_index});
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
     create_seq_table(
@@ -884,26 +884,26 @@ TEST_CASE("require_absent preserves on-insert policy and prohibits external asyn
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.recompute_async_persistence.enabled;") == "on");
     REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "off");
 
-	// No minimizers_per_fragment recompute producer is available, so queue
-	// rejection creates neither external payloads nor asynchronous rows, and
-	// both constructor/writer entry counters stay exactly zero.
-	REQUIRE(index_table_row_count(
-		ctx, "minimizers_per_fragment", k_missing_index) == 0);
-	const auto producer = query_one(
-		ctx,
-		"SELECT prohibited_file_constructor_entries, "
-		"prohibited_file_writer_entries "
-		"FROM bioseq_internal.active_read_policy_debug();");
-	REQUIRE(producer.size() == 2);
-	REQUIRE(producer[0].value_or("") == "0");
-	REQUIRE(producer[1].value_or("") == "0");
+    // No minimizers_per_fragment recompute producer is available, so queue
+    // rejection creates neither external payloads nor asynchronous rows, and
+    // both constructor/writer entry counters stay exactly zero.
+    REQUIRE(index_table_row_count(
+        ctx, "minimizers_per_fragment", k_missing_index) == 0);
+    const auto producer = query_one(
+        ctx,
+        "SELECT prohibited_file_constructor_entries, "
+        "prohibited_file_writer_entries "
+        "FROM bioseq_internal.active_read_policy_debug();");
+    REQUIRE(producer.size() == 2);
+    REQUIRE(producer[0].value_or("") == "0");
+    REQUIRE(producer[1].value_or("") == "0");
 
     exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
     exec_sql(ctx, fmt::format(
         "INSERT INTO {} VALUES "
         "(2, repeat('TGCA', 2000)::bioseq.seq('dna4', 32));",
         k_missing_index));
-	REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "on");
-	REQUIRE(index_table_row_count(
-		ctx, "minimizers_per_fragment", k_missing_index) > 0);
+    REQUIRE(query_scalar(ctx, "SHOW bioseq.index.insert_maintenance.enabled;") == "on");
+    REQUIRE(index_table_row_count(
+        ctx, "minimizers_per_fragment", k_missing_index) > 0);
 }

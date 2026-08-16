@@ -159,26 +159,26 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
         REQUIRE(field.has_value());
         REQUIRE(*field == "true");
     }
-	const auto executor_translation_receipt = query_one(
-		ctx,
-		"SELECT target_offset_accepted::text, "
-		"target_attno_disagreement_rejected::text, "
-		"exact_site_offset_accepted::text, "
-		"lineage_alias_disagreement_rejected::text, "
-		"outer_slot_accepted::text, "
-		"outer_wrong_slot_rejected::text, "
-		"inner_slot_accepted::text, "
-		"inner_wrong_slot_rejected::text, "
-		"index_slot_accepted::text, "
-		"index_wrong_slot_rejected::text, "
-		"special_out_of_range_rejected::text "
-		"FROM bioseq_internal."
-		"base_match_executor_translation_probe();");
-	REQUIRE(executor_translation_receipt.size() == 11u);
-	for (const auto& field : executor_translation_receipt) {
-		REQUIRE(field.has_value());
-		REQUIRE(*field == "true");
-	}
+    const auto executor_translation_receipt = query_one(
+        ctx,
+        "SELECT target_offset_accepted::text, "
+        "target_attno_disagreement_rejected::text, "
+        "exact_site_offset_accepted::text, "
+        "lineage_alias_disagreement_rejected::text, "
+        "outer_slot_accepted::text, "
+        "outer_wrong_slot_rejected::text, "
+        "inner_slot_accepted::text, "
+        "inner_wrong_slot_rejected::text, "
+        "index_slot_accepted::text, "
+        "index_wrong_slot_rejected::text, "
+        "special_out_of_range_rejected::text "
+        "FROM bioseq_internal."
+        "base_match_executor_translation_probe();");
+    REQUIRE(executor_translation_receipt.size() == 11u);
+    for (const auto& field : executor_translation_receipt) {
+        REQUIRE(field.has_value());
+        REQUIRE(*field == "true");
+    }
 
     /* A base BioseqScan is itself a stable match owner.  Its helpers must be
      * finalized against the exact sequence column before executor rewriting. */
@@ -196,60 +196,60 @@ TEST_CASE("sliced mmsearch helpers bind one stable owner",
     REQUIRE(base_owner_rows.front()[2].has_value());
     REQUIRE(*base_owner_rows.front()[2] != "!UNEXPECTED!");
 
-	/* The second materialized CTE is planned after an unrelated query level,
-	 * so its BioseqScan Vars receive a nonzero final-rtable offset.  The
-	 * planner-scope owner image must remain local for ambiguity resolution,
-	 * while the executor image uses the shifted target and helper Vars. */
-	const std::string offset_base_owner_sql = fmt::format(
-		"WITH pad AS MATERIALIZED ("
-		"  SELECT count(*) AS n FROM {}"
-		"), owned AS MATERIALIZED ("
-		"  SELECT bioseq.query_len(t.seq0) AS query_len, "
-		"         bioseq.target_len(t.seq0) AS target_len, "
-		"         bioseq.cigar(t.seq0) AS exact_cigar, "
-		"         bioseq.query_start(t.pk) AS query_start, "
-		"         bioseq.query_end(t.pk) AS query_end, "
-		"         bioseq.cigar(t.pk) AS lineage_cigar "
-		"  FROM {} AS t "
-		"  WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))"
-		") "
-		"SELECT owned.query_len, owned.target_len, owned.exact_cigar, "
-		"       owned.query_start, owned.query_end, owned.lineage_cigar "
-		"FROM pad CROSS JOIN owned WHERE pad.n >= 0",
-		secondary_table, target_table, motif);
-	const auto offset_base_owner_plan = explain_text<false>(
-		ctx, offset_base_owner_sql);
-	REQUIRE(std::any_of(
-		offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
-		[](const std::string& line) {
-			return line.find("CTE Scan on owned") != std::string::npos;
-		}));
-	REQUIRE(std::any_of(
-		offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
-		[](const std::string& line) {
-			return line.find("Custom Scan (BioseqScan)")
-				!= std::string::npos;
-		}));
-	const auto offset_base_owner_rows = query_rows(
-		ctx, offset_base_owner_sql);
-	REQUIRE(offset_base_owner_rows.size() == 1u);
-	REQUIRE(offset_base_owner_rows.front().size() == 6u);
-	REQUIRE(offset_base_owner_rows.front()[0] == base_owner_rows.front()[0]);
-	REQUIRE(offset_base_owner_rows.front()[1] == base_owner_rows.front()[1]);
-	REQUIRE(offset_base_owner_rows.front()[2] == base_owner_rows.front()[2]);
-	REQUIRE(offset_base_owner_rows.front()[3]
-		== std::optional<std::string>{"0"});
-	REQUIRE(offset_base_owner_rows.front()[4]
-		== std::optional<std::string>{"128"});
-	REQUIRE(offset_base_owner_rows.front()[5] == base_owner_rows.front()[2]);
-	exec_sql(ctx,
-		std::string{"PREPARE sequence_acceptance_base_match_owner_offset AS "}
-			+ offset_base_owner_sql);
-	REQUIRE(query_rows(ctx, "EXECUTE sequence_acceptance_base_match_owner_offset;")
-		== offset_base_owner_rows);
-	REQUIRE(query_rows(ctx, "EXECUTE sequence_acceptance_base_match_owner_offset;")
-		== offset_base_owner_rows);
-	exec_sql(ctx, "DEALLOCATE sequence_acceptance_base_match_owner_offset;");
+    /* The second materialized CTE is planned after an unrelated query level,
+     * so its BioseqScan Vars receive a nonzero final-rtable offset.  The
+     * planner-scope owner image must remain local for ambiguity resolution,
+     * while the executor image uses the shifted target and helper Vars. */
+    const std::string offset_base_owner_sql = fmt::format(
+        "WITH pad AS MATERIALIZED ("
+        "  SELECT count(*) AS n FROM {}"
+        "), owned AS MATERIALIZED ("
+        "  SELECT bioseq.query_len(t.seq0) AS query_len, "
+        "         bioseq.target_len(t.seq0) AS target_len, "
+        "         bioseq.cigar(t.seq0) AS exact_cigar, "
+        "         bioseq.query_start(t.pk) AS query_start, "
+        "         bioseq.query_end(t.pk) AS query_end, "
+        "         bioseq.cigar(t.pk) AS lineage_cigar "
+        "  FROM {} AS t "
+        "  WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))"
+        ") "
+        "SELECT owned.query_len, owned.target_len, owned.exact_cigar, "
+        "       owned.query_start, owned.query_end, owned.lineage_cigar "
+        "FROM pad CROSS JOIN owned WHERE pad.n >= 0",
+        secondary_table, target_table, motif);
+    const auto offset_base_owner_plan = explain_text<false>(
+        ctx, offset_base_owner_sql);
+    REQUIRE(std::any_of(
+        offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
+        [](const std::string& line) {
+            return line.find("CTE Scan on owned") != std::string::npos;
+        }));
+    REQUIRE(std::any_of(
+        offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqScan)")
+                != std::string::npos;
+        }));
+    const auto offset_base_owner_rows = query_rows(
+        ctx, offset_base_owner_sql);
+    REQUIRE(offset_base_owner_rows.size() == 1u);
+    REQUIRE(offset_base_owner_rows.front().size() == 6u);
+    REQUIRE(offset_base_owner_rows.front()[0] == base_owner_rows.front()[0]);
+    REQUIRE(offset_base_owner_rows.front()[1] == base_owner_rows.front()[1]);
+    REQUIRE(offset_base_owner_rows.front()[2] == base_owner_rows.front()[2]);
+    REQUIRE(offset_base_owner_rows.front()[3]
+        == std::optional<std::string>{"0"});
+    REQUIRE(offset_base_owner_rows.front()[4]
+        == std::optional<std::string>{"128"});
+    REQUIRE(offset_base_owner_rows.front()[5] == base_owner_rows.front()[2]);
+    exec_sql(ctx,
+        std::string{"PREPARE sequence_acceptance_base_match_owner_offset AS "}
+            + offset_base_owner_sql);
+    REQUIRE(query_rows(ctx, "EXECUTE sequence_acceptance_base_match_owner_offset;")
+        == offset_base_owner_rows);
+    REQUIRE(query_rows(ctx, "EXECUTE sequence_acceptance_base_match_owner_offset;")
+        == offset_base_owner_rows);
+    exec_sql(ctx, "DEALLOCATE sequence_acceptance_base_match_owner_offset;");
 
     /* The base owner and an outer sliced owner share t.seq0 lineage.  A row
      * marker cannot select between their MatchResults and must fail closed. */
