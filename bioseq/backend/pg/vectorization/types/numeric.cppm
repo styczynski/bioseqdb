@@ -263,8 +263,8 @@ void assign_int128_to_numeric_variable(int128 value, numeric_variable* variable)
     numeric_digit* digit_ptr = variable->digits + variable->digit_count;
     int digit_count = 0;
     do {
-        digit_ptr--;
-        digit_count++;
+        --digit_ptr;
+        ++digit_count;
         const uint128 next_value = unsigned_value / numeric_digit_base;
         *digit_ptr = static_cast<numeric_digit>(unsigned_value - next_value * numeric_digit_base);
         unsigned_value = next_value;
@@ -280,7 +280,7 @@ void assign_int128_to_numeric_variable(int128 value, numeric_variable* variable)
  * when display scale and weight fit.
  */
 Numeric pack_numeric(const numeric_variable* variable) {
-    Numeric result;
+    Numeric packed_numeric;
     numeric_digit* digits = variable->digits;
     int weight = variable->weight;
     int sign = variable->sign;
@@ -293,22 +293,22 @@ Numeric pack_numeric(const numeric_variable* variable) {
             bioseq_log<logging_level::error, logging_target::postgres>(
                 "invalid numeric sign value 0x{:x}", sign);
 
-        result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(
+        packed_numeric = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(
             numeric_header_size_short);
-        SET_VARSIZE(result, numeric_header_size_short);
-        result->choice.n_header = sign;
-        return result;
+        SET_VARSIZE(packed_numeric, numeric_header_size_short);
+        packed_numeric->choice.n_header = sign;
+        return packed_numeric;
     }
 
     trimmed_digit_count = variable->digit_count;
 
     while (trimmed_digit_count > 0 && *digits == 0) {
-        digits++;
-        weight--;
-        trimmed_digit_count--;
+        ++digits;
+        --weight;
+        --trimmed_digit_count;
     }
     while (trimmed_digit_count > 0 && digits[trimmed_digit_count - 1] == 0)
-        trimmed_digit_count--;
+        --trimmed_digit_count;
 
     if (trimmed_digit_count == 0) {
         weight = 0;
@@ -317,9 +317,10 @@ Numeric pack_numeric(const numeric_variable* variable) {
 
     if (numeric_can_be_short(variable->display_scale, weight)) {
         total_length = numeric_header_size_short + trimmed_digit_count * sizeof(numeric_digit);
-        result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(total_length);
-        SET_VARSIZE(result, total_length);
-        result->choice.n_short.n_header =
+        packed_numeric =
+            bioseq::postgres::support::allocate_zeroed_storage<NumericData>(total_length);
+        SET_VARSIZE(packed_numeric, total_length);
+        packed_numeric->choice.n_short.n_header =
             (sign == numeric_negative ? (numeric_short_marker | numeric_short_sign_mask)
                                       : numeric_short_marker) |
             (variable->display_scale << numeric_short_scale_shift) |
@@ -327,24 +328,27 @@ Numeric pack_numeric(const numeric_variable* variable) {
             (weight & numeric_short_weight_mask);
     } else {
         total_length = numeric_header_size_long + trimmed_digit_count * sizeof(numeric_digit);
-        result = bioseq::postgres::support::allocate_zeroed_storage<NumericData>(total_length);
-        SET_VARSIZE(result, total_length);
-        result->choice.n_long.n_sign_dscale = sign | (variable->display_scale & numeric_scale_mask);
-        result->choice.n_long.n_weight = weight;
+        packed_numeric =
+            bioseq::postgres::support::allocate_zeroed_storage<NumericData>(total_length);
+        SET_VARSIZE(packed_numeric, total_length);
+        packed_numeric->choice.n_long.n_sign_dscale =
+            sign | (variable->display_scale & numeric_scale_mask);
+        packed_numeric->choice.n_long.n_weight = weight;
     }
 
-    Assert(numeric_digit_count(result) == trimmed_digit_count);
+    Assert(numeric_digit_count(packed_numeric) == trimmed_digit_count);
     if (trimmed_digit_count > 0)
-        std::memcpy(numeric_digits(result), digits, trimmed_digit_count * sizeof(numeric_digit));
+        std::memcpy(
+            numeric_digits(packed_numeric), digits, trimmed_digit_count * sizeof(numeric_digit));
 
-    if (numeric_weight(result) != weight ||
-        numeric_display_scale(result) != variable->display_scale) {
+    if (numeric_weight(packed_numeric) != weight ||
+        numeric_display_scale(packed_numeric) != variable->display_scale) {
         bioseq_report<logging_level::error, logging_target::postgres>()
             .with_sql_error_code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
             .with_message("value overflows numeric format");
     }
 
-    return result;
+    return packed_numeric;
 }
 
 } // namespace
