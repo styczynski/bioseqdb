@@ -85,24 +85,6 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /** @brief Install Bioseq planner hooks and register custom-scan callback tables. */
-    void bioseq_customscan_init() {
-        previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
-        set_rel_pathlist_hook = bioseq_column_set_rel_pathlist_hook;
-        previous_set_join_pathlist_hook = set_join_pathlist_hook;
-        set_join_pathlist_hook = bioseq_batch_join_set_join_pathlist_hook;
-
-        previous_get_relation_info_hook = get_relation_info_hook;
-        get_relation_info_hook = bioseq_column_get_relation_info_hook;
-
-        RegisterCustomScanMethods(bioseq_column_scan_scan_methods());
-        RegisterCustomScanMethods(bioseq_batch_join_scan_methods());
-        RegisterCustomScanMethods(&bioseq_slice_project_scan_methods());
-        bioseq_register_slice_project_upper_path_provider(bioseq_slice_project_create_upper_paths);
-        bioseq_register_batch_sort_source_providers(batch_sort_tag_source_path,
-                                                    batch_sort_attach_source_routes);
-    }
-
     /** @brief Add Bioseq scan paths for a base relation while preserving the prior hook. */
     void bioseq_column_set_rel_pathlist_hook(PlannerInfo* root,
                                              RelOptInfo* rel,
@@ -933,6 +915,24 @@ export {
         joinrel->pathlist = retain_existing_owner(joinrel->pathlist);
         joinrel->partial_pathlist = retain_existing_owner(joinrel->partial_pathlist);
         add_path(joinrel, &join_path->path);
+    }
+
+    /** @brief Install Bioseq planner hooks and register custom-scan callback tables. */
+    void bioseq_customscan_init() {
+        previous_set_rel_pathlist_hook = set_rel_pathlist_hook;
+        set_rel_pathlist_hook = bioseq_column_set_rel_pathlist_hook;
+        previous_set_join_pathlist_hook = set_join_pathlist_hook;
+        set_join_pathlist_hook = bioseq_batch_join_set_join_pathlist_hook;
+
+        previous_get_relation_info_hook = get_relation_info_hook;
+        get_relation_info_hook = bioseq_column_get_relation_info_hook;
+
+        RegisterCustomScanMethods(bioseq_column_scan_scan_methods());
+        RegisterCustomScanMethods(bioseq_batch_join_scan_methods());
+        RegisterCustomScanMethods(&bioseq_slice_project_scan_methods());
+        bioseq_register_slice_project_upper_path_provider(bioseq_slice_project_create_upper_paths);
+        bioseq_register_batch_sort_source_providers(batch_sort_tag_source_path,
+                                                    batch_sort_attach_source_routes);
     }
 
 } // export custom-scan partition declarations

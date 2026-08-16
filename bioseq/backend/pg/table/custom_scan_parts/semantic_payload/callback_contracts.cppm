@@ -149,21 +149,6 @@ export {
                                           int depth_limit);
 
     /* hooks and callbacks */
-    void bioseq_column_set_rel_pathlist_hook(PlannerInfo* root,
-                                             RelOptInfo* rel,
-                                             Index rti,
-                                             RangeTblEntry* rte);
-    void bioseq_column_get_relation_info_hook(PlannerInfo* root,
-                                              Oid relation_object_id,
-                                              bool inhparent,
-                                              RelOptInfo* rel);
-    void bioseq_batch_join_set_join_pathlist_hook(PlannerInfo* root,
-                                                  RelOptInfo* joinrel,
-                                                  RelOptInfo* outerrel,
-                                                  RelOptInfo* innerrel,
-                                                  JoinType jointype,
-                                                  JoinPathExtraData* extra);
-
     Plan* bioseq_column_scan_path_plan_custom_path(PlannerInfo* root,
                                                    RelOptInfo* rel,
                                                    CustomPath* best_path,
