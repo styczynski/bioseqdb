@@ -613,7 +613,7 @@ export inline void reset_extension(const connection_test_context& ctx,
 }
 
 // Same as the span overload, but accepts an initializer list so callers can
-// write `reset_extension(ctx, {"hoe", "x"});` directly.
+// name fixture tables directly at the call site.
 /** @brief Recreates the extension using an initializer-list table set. */
 export inline void reset_extension(
     const connection_test_context& ctx,
@@ -769,9 +769,8 @@ export [[nodiscard]] inline bool is_valid_cigar(std::string_view value) {
 // aligner emits this shape both for self-alignment (mmsearch(A, A))
 // and for an exact substring match (mmsearch(target, query) where
 // query is a contiguous substring of target). This helper is used by
-// the substring-property tests to check that the aligner returned
-// the property "match length == query length" — see §9 of
-// REPORT_POSTGRES_QUERY_BUGFIXING_1.md for the rationale.
+// the substring-property tests to check the present contract that the
+// returned match length equals the query length.
 /** @return True when the CIGAR is one exact match of the expected length. */
 export [[nodiscard]] inline bool is_exact_match_cigar(std::string_view value,
                                                       long long expected_len) {
@@ -919,9 +918,9 @@ export inline std::vector<seq_row> hoe_seed_rows() {
     };
 }
 
-// Drops + creates the named hoe fixture, populates with `hoe_seed_rows()`,
-// engages the columnar AM. Returns the typmod so call sites can build their
-// query literals via `format_literal`.
+// Drops and recreates the named canonical alignment fixture, populates it,
+// and engages the columnar AM. Returns the typmod so call sites can build
+// their query literals via `format_literal`.
 /** @return The typmod used after recreating the canonical alignment fixture. */
 export inline seq_typmod seed_hoe_fixture(
     const connection_test_context& ctx, std::string_view name) {
@@ -947,7 +946,7 @@ export constexpr std::string_view k_hoe_probe_sequence =
     "CTAGTCACTGTAGCCTGATCGTAGCTAGT";
 
 // SQL literal of the canonical probe sequence at the dna4/32 typmod used by
-// the hoe fixture. Saves every mmsearch test from re-typing the typmod.
+// the alignment fixture. Saves every mmsearch test from re-typing the typmod.
 /** @return The canonical probe as a DNA4 32-bit SQL literal. */
 export [[nodiscard]] inline std::string hoe_probe_literal() {
     return format_literal(k_hoe_probe_sequence,

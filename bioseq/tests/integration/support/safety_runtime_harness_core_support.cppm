@@ -1360,6 +1360,7 @@ parse_internal_guc_contract(std::string_view raw) {
     };
 }
 
+/// Validate a sealed GUC property receipt against its generated manifest.
 void validate_guc_property_receipt(
         const json& properties,
         std::string_view properties_sha256,
@@ -1436,6 +1437,7 @@ void validate_guc_property_receipt(
     }
 }
 
+/// Quote one text value as a PostgreSQL SQL literal.
 [[nodiscard]] std::string sql_literal(std::string_view value) {
     std::string result{"'"};
     result.reserve(value.size() + 2);

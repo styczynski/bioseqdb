@@ -74,6 +74,7 @@ inline constexpr std::string_view k_batch_recipe_oracle_32 =
 inline constexpr std::string_view k_batch_recipe_oracle_64 =
     "batch_recipe_oracle64_int";
 
+/** Read one source-lifetime counter for an mmsearch scenario. */
 [[nodiscard]] std::int64_t mmsearch_source_counter(
         const connection_test_context& ctx,
         const std::string_view name) {
@@ -82,12 +83,14 @@ inline constexpr std::string_view k_batch_recipe_oracle_64 =
         "        ->>'{}')::bigint;", name));
 }
 
+/** Reset source-lifetime counters before an isolated mmsearch scenario. */
 void reset_mmsearch_source_counters(
         const connection_test_context& ctx) {
     exec_sql(ctx,
         "SELECT bioseq_internal.reset_sequence_source_counters();");
 }
 
+/** Require every source-lifetime resource created by mmsearch to be released. */
 void require_mmsearch_source_resources_balanced(
         const connection_test_context& ctx) {
     REQUIRE(mmsearch_source_counter(ctx, "registries_created")
@@ -114,10 +117,12 @@ void require_mmsearch_source_resources_balanced(
 }
 #endif
 
-// Mirrors storage::indexing::index_advisory_xact_lock_key(). Integration tests
-// are libpq clients and do not link the PostgreSQL backend module, so this
-// helper derives the production logical-index identity used by
-// pg_advisory_lock(bigint).
+/**
+ * @brief Derive the production logical-index advisory-lock identity.
+ *
+ * Integration tests are libpq clients and do not link the PostgreSQL backend
+ * module that owns the equivalent lock-key implementation.
+ */
 [[nodiscard]] std::uint64_t minimizer_index_advisory_lock_key(
 		const std::uint32_t database_oid,
 		const std::uint32_t tablespace_oid,
@@ -144,6 +149,7 @@ void require_mmsearch_source_resources_balanced(
 	return hash;
 }
 
+/** Report the terminal state of one bounded asynchronous libpq query. */
 struct async_query_outcome {
 	bool consume_ok = true;
 	bool ready = false;
@@ -151,9 +157,12 @@ struct async_query_outcome {
 	bool expected_status = true;
 };
 
-// A Catch2 failure or SQL helper may unwind while another backend is blocked
-// at a lock barrier. This guard cancels and drains such a command before the
-// owning connection can be destroyed, keeping every failure path bounded.
+/**
+ * @brief Cancel and drain a lock-blocked libpq command on every exit path.
+ *
+ * A Catch2 failure or SQL helper may unwind while another backend is blocked
+ * at a lock barrier; the guard keeps that failure path bounded.
+ */
 class scoped_async_query {
 private:
 	PGconn* connection_ = nullptr;
@@ -228,12 +237,14 @@ public:
 	}
 };
 
+/** Return the rows from the latest alignment-execution statistics snapshot. */
 [[nodiscard]] rowset_t last_alignment_stats(
         const connection_test_context& ctx) {
     return query_rows(
         ctx, "SELECT * FROM bioseq.last_alignment_execution_stats();");
 }
 
+/** Parse one required signed-integer statistics cell. */
 [[nodiscard]] long long stats_i64(
         const row_t& row,
         const std::size_t column) {
@@ -242,6 +253,7 @@ public:
     return std::stoll(*row[column]);
 }
 
+/** Parse one required Boolean statistics cell. */
 [[nodiscard]] bool stats_bool(
         const row_t& row,
         const std::size_t column) {
@@ -251,6 +263,7 @@ public:
     return *row[column] == "t";
 }
 
+/** Return whether the selected Vulkan runtime cannot execute trusted work. */
 [[nodiscard]] bool selected_vulkan_runtime_untrusted(
     const connection_test_context& ctx) {
     // Make the status UDF the first Runtime consumer in this backend.
@@ -262,6 +275,7 @@ public:
         "FROM bioseq.vulkan_runtime_status();") == "t";
 }
 
+/** Require the exact primary keys, edit counts, coordinates, and CIGAR rows. */
 void require_gatekeeper_edit_rows(const rowset_t& rows) {
     constexpr std::array<std::string_view, 2u> expected_pks{"1", "2"};
     constexpr std::array<std::string_view, 2u> expected_edits{"0", "4"};
@@ -283,6 +297,7 @@ void require_gatekeeper_edit_rows(const rowset_t& rows) {
     }
 }
 
+/** Require one textual EXPLAIN property to equal its expected value. */
 void require_explain_property_value(
         std::span<const std::string> plan,
         const std::string_view key,
@@ -292,6 +307,7 @@ void require_explain_property_value(
     REQUIRE(*value == expected);
 }
 
+/** Require one textual EXPLAIN property to equal an unsigned value. */
 void require_explain_property_uint(
         std::span<const std::string> plan,
         const std::string_view key,
@@ -301,6 +317,7 @@ void require_explain_property_uint(
     REQUIRE(std::stoull(*value) == expected);
 }
 
+/** Require the complete GateKeeper execution-attestation properties. */
 void require_gatekeeper_explain_attestation(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -348,6 +365,7 @@ void require_gatekeeper_explain_attestation(
         plan, "Prefilter Stats Consistent", "true");
 }
 
+/** Require the planned Vulkan GateKeeper selection properties. */
 void require_gatekeeper_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -363,6 +381,7 @@ void require_gatekeeper_explain_selection(
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
 }
 
+/** Require the planned CPU SIMD prefilter selection properties. */
 void require_cpu_prefilter_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -375,6 +394,7 @@ void require_cpu_prefilter_explain_selection(
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
 }
 
+/** Require a plan with no selected or executed prefilter stage. */
 void require_no_prefilter_explain_selection(
         std::span<const std::string> plan) {
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
@@ -386,6 +406,7 @@ void require_no_prefilter_explain_selection(
         plan, "Prefilter Dispatches").has_value());
 }
 
+/** Build the mmsearch statement for one persisted-index requirement. */
 [[nodiscard]] std::string index_requirement_sql(
         std::string_view table,
         const int ordinal) {
@@ -397,6 +418,7 @@ void require_no_prefilter_explain_selection(
         ordinal);
 }
 
+/** Require the exact missing-compatible-index SQLSTATE and diagnostic. */
 void require_no_current_compatible_persisted_index(
         const connection_test_context& ctx,
         std::string_view sql) {
@@ -406,12 +428,14 @@ void require_no_current_compatible_persisted_index(
         "required compatible persisted minimizer index unavailable"));
 }
 
+/** Return the canonical batch-join target as a typed SQL literal. */
 [[nodiscard]] std::string batch_join_target_literal() {
     return format_literal(
         hoe_seed_rows().front().sequences.front(),
         seq_typmod{.alphabet = "dna4", .width = 32});
 }
 
+/** Build the transformed-target mmsearch projection statement. */
 [[nodiscard]] std::string transformed_mmsearch_sql(
         std::string_view table) {
     return fmt::format(
@@ -425,6 +449,7 @@ void require_no_current_compatible_persisted_index(
         table, k_lazy_queries);
 }
 
+/** Build the eager-target mmsearch coordinate statement. */
 [[nodiscard]] std::string eager_mmsearch_coordinate_sql(
         std::string_view table) {
     return fmt::format(
@@ -437,6 +462,7 @@ void require_no_current_compatible_persisted_index(
         table, k_lazy_queries);
 }
 
+/** Build one base-alignment projection with an optional residual predicate. */
 [[nodiscard]] std::string base_alignment_sql(
         const std::string_view table,
         const std::string_view target_expression,
@@ -456,6 +482,7 @@ void require_no_current_compatible_persisted_index(
         table, residual, target_expression, query_expression);
 }
 
+/** Generate stable high-entropy DNA4 input of the requested length. */
 [[nodiscard]] std::string high_entropy_sequence(
         const std::size_t length) {
     constexpr std::string_view bases = "ACGT";
@@ -470,11 +497,13 @@ void require_no_current_compatible_persisted_index(
     return result;
 }
 
+/** Return the supplied sequence in reverse order. */
 [[nodiscard]] std::string reverse_sequence(
         const std::string_view value) {
     return std::string{value.rbegin(), value.rend()};
 }
 
+/** Return the reverse complement of a valid DNA4 fixture sequence. */
 [[nodiscard]] std::string reverse_complement_sequence(
         const std::string_view value) {
     std::string result;
@@ -491,6 +520,7 @@ void require_no_current_compatible_persisted_index(
     return result;
 }
 
+/** Describe one transformed-target coordinate scenario. */
 struct transform_case {
     std::string_view name;
     std::string target_expression;
@@ -502,6 +532,7 @@ struct transform_case {
     bool expected_reverse = false;
 };
 
+/** Build every transformed-target coordinate scenario for one source. */
 [[nodiscard]] std::vector<transform_case>
 transform_cases(const std::string& source) {
     std::vector<transform_case> cases;
@@ -568,6 +599,7 @@ transform_cases(const std::string& source) {
     return cases;
 }
 
+/** Build the alignment projection for one target alias and key. */
 [[nodiscard]] std::string alignment_projection(
         const std::string_view target_alias,
         const std::string_view target_key) {
@@ -582,9 +614,10 @@ transform_cases(const std::string& source) {
         target_alias, target_key);
 }
 
+/** Build a deterministic wide target spanning several index partitions. */
 [[nodiscard]] std::string batch_join_wide_target_sequence() {
     /* A reproducible high-entropy target large enough to produce several
-     * 256-KiB directory partitions.  Repeating the small hoe fixture
+     * 256-KiB directory partitions. Repeating the small alignment fixture
      * would make the prefix minimizer recur in every partition and therefore
      * exercise the full route instead of selective loading. */
     constexpr std::size_t target_bp = 512u * 1024u;
@@ -599,6 +632,7 @@ transform_cases(const std::string& source) {
     return sequence;
 }
 
+/** Seed the single target row and select the deterministic SIMD pipeline. */
 void seed_batch_join_target(
         connection_test_context& ctx,
         std::string_view target_sequence = {}) {
@@ -630,6 +664,7 @@ void seed_batch_join_target(
 		"SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
 }
 
+/** Populate the batch-join query table with deterministic fixture rows. */
 void load_batch_join_queries(
         const connection_test_context& ctx,
         const std::size_t count,
@@ -660,6 +695,7 @@ void load_batch_join_queries(
         count - 1);
 }
 
+/** Populate the batch-join query table with one explicit sequence. */
 void load_batch_join_query(
         const connection_test_context& ctx,
         std::string_view sequence) {
@@ -676,6 +712,7 @@ void load_batch_join_query(
             sequence, seq_typmod{.alphabet = "dna4", .width = 32}));
 }
 
+/** Build the batch-join statement for one index-read requirement. */
 [[nodiscard]] std::string batch_join_sql(
         const int index_requirement,
         std::string_view select_list = "q.id, t.pk") {
@@ -689,6 +726,7 @@ void load_batch_join_query(
         index_requirement);
 }
 
+/** Require exactly one aligned result for every expected query identifier. */
 void require_batch_join_aligned_query_rows(
         const connection_test_context& ctx,
         std::string_view sql,
@@ -713,6 +751,7 @@ void require_batch_join_aligned_query_rows(
     }));
 }
 
+/** Require the exact stage and backend statistics for one batch join. */
 void require_batch_join_stats(
         const connection_test_context& ctx,
         const long long expected_targets,
