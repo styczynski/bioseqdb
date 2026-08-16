@@ -175,7 +175,7 @@ loading and build the sequence index once afterward:
 SET bioseq.index.insert_maintenance.enabled = off;
 ```
 
-Load the rows with `COPY`, application batches, or [[sql:bioseq.load]]. When the
+Load the rows with `COPY`, application batches, or `bioseq.load`. When the
 load has completed, build the search index for the relation:
 
 ```sql
