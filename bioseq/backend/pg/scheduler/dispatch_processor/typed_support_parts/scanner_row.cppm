@@ -700,13 +700,14 @@ template <class p_sequence>
                                 make_cache_key(cache_index_name, clip_lo_bp, clip_hi_bp);
                             const auto gpu_identity = pg_gpu_index_identity(cache_key);
                             if (prepared_group == nullptr)
-                                if (auto hit = bioseq::storage::indexing::lookup_assembled_index(
-                                        cache_key)) {
+                                if (auto cached_index_entry =
+                                        bioseq::storage::indexing::lookup_assembled_index(
+                                            cache_key)) {
                                     return minimap_port_fragment_index_vector_pg_checked(
                                         fq_pg_view,
                                         ft_pg_view,
                                         *query_minimizers,
-                                        *hit->index,
+                                        *cached_index_entry->index,
                                         idx_params,
                                         pg_gpu_index_cache_ptr,
                                         gpu_identity);
@@ -727,14 +728,14 @@ template <class p_sequence>
                                 }
                                 prepared_group->target_index_permit.emplace(std::move(*permit));
                             }
-                            auto idx = assemble_one(cs_u, ce_u);
+                            auto assembled_index = assemble_one(cs_u, ce_u);
                             if (prepared_group != nullptr) {
                                 if (prepared_group->target_index) {
                                     ++prepared_group->duplicate_build_attempts;
                                 } else {
                                     prepared_group->target_index = std::make_shared<
                                         bioseq::indexing::minimizer_hashmap_fragment_index>(
-                                        std::move(idx));
+                                        std::move(assembled_index));
                                     prepared_group->target_index_source =
                                         ::bioseq::pipeline_stats::target_index_source::persisted;
                                     ++prepared_group->target_index_builds;
@@ -758,12 +759,12 @@ template <class p_sequence>
                                     fq_pg_view,
                                     ft_pg_view,
                                     *query_minimizers,
-                                    idx,
+                                    assembled_index,
                                     idx_params,
                                     pg_gpu_index_cache_ptr,
                                     gpu_identity);
-                            bioseq::storage::indexing::store_assembled_index(cache_key,
-                                                                             std::move(idx));
+                            bioseq::storage::indexing::store_assembled_index(
+                                cache_key, std::move(assembled_index));
                             return match_collection;
                         };
                         if (prepared_group != nullptr) {
@@ -888,13 +889,14 @@ template <class p_sequence>
                                                 const auto gpu_identity =
                                                     pg_gpu_index_identity(cache_key);
                                                 if (prepared_group == nullptr)
-                                                    if (auto hit = bioseq::storage::indexing::
-                                                            lookup_assembled_index(cache_key)) {
+                                                    if (auto cached_index_entry =
+                                                            bioseq::storage::indexing::
+                                                                lookup_assembled_index(cache_key)) {
                                                         return minimap_port_fragment_index_vector_pg_checked(
                                                             fq_pg_view,
                                                             ft_pg_view,
                                                             query_vec,
-                                                            *hit->index,
+                                                            *cached_index_entry->index,
                                                             idx_params,
                                                             pg_gpu_index_cache_ptr,
                                                             gpu_identity);
@@ -921,7 +923,7 @@ template <class p_sequence>
                                                     prepared_group->target_index_permit.emplace(
                                                         std::move(*permit));
                                                 }
-                                                auto idx =
+                                                auto assembled_index =
                                                     bioseq::indexing::direct_minimizer_bucket_index<
                                                         index_storage_type>::
                                                         assemble_for_query_segment(
@@ -940,7 +942,7 @@ template <class p_sequence>
                                                             ->target_index = std::make_shared<
                                                             bioseq::indexing::
                                                                 minimizer_hashmap_fragment_index>(
-                                                            std::move(idx));
+                                                            std::move(assembled_index));
                                                         prepared_group->target_index_source =
                                                             ::bioseq::pipeline_stats::
                                                                 target_index_source::persisted;
@@ -968,12 +970,12 @@ template <class p_sequence>
                                                         fq_pg_view,
                                                         ft_pg_view,
                                                         query_vec,
-                                                        idx,
+                                                        assembled_index,
                                                         idx_params,
                                                         pg_gpu_index_cache_ptr,
                                                         gpu_identity);
                                                 bioseq::storage::indexing::store_assembled_index(
-                                                    cache_key, std::move(idx));
+                                                    cache_key, std::move(assembled_index));
                                                 return match_collection;
                                             };
                                             if (prepared_group != nullptr) {
@@ -1164,32 +1166,32 @@ template <class p_sequence>
                                         opportunistic_index_name, clip_lo_bp, clip_hi_bp);
                                     const auto gpu_identity = pg_gpu_index_identity(cache_key);
                                     if (assembled_cache_allowed) {
-                                        if (auto hit =
+                                        if (auto cached_index_entry =
                                                 bioseq::storage::indexing::lookup_assembled_index(
                                                     cache_key)) {
                                             return minimap_port_fragment_index_vector_pg_checked(
                                                 fq_pg_view,
                                                 ft_pg_view,
                                                 *query_minimizers,
-                                                *hit->index,
+                                                *cached_index_entry->index,
                                                 idx_params,
                                                 pg_gpu_index_cache_ptr,
                                                 gpu_identity);
                                         }
                                     }
-                                    auto idx = assemble_ram_one(cs_u, ce_u);
+                                    auto assembled_index = assemble_ram_one(cs_u, ce_u);
                                     match_result_collection match_collection =
                                         minimap_port_fragment_index_vector_pg_checked(
                                             fq_pg_view,
                                             ft_pg_view,
                                             *query_minimizers,
-                                            idx,
+                                            assembled_index,
                                             idx_params,
                                             pg_gpu_index_cache_ptr,
                                             gpu_identity);
                                     if (assembled_cache_allowed) {
                                         bioseq::storage::indexing::store_assembled_index(
-                                            cache_key, std::move(idx));
+                                            cache_key, std::move(assembled_index));
                                     }
                                     return match_collection;
                                 };
