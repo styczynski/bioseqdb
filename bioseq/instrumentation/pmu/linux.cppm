@@ -18,9 +18,9 @@ module;
 #include <unistd.h>
 #endif
 
-export module bioseq.instrumentation.pmu.linux;
+export module bioseq.instrumentation.pmu.linux_backend;
 
-export namespace bioseq::instrumentation::pmu::linux {
+export namespace bioseq::instrumentation::pmu::linux_backend {
 
 /**
  * @brief Hold one Linux backend sample in the public counter order.
@@ -309,4 +309,4 @@ inline void shutdown_thread() noexcept {}
 
 #endif
 
-} // namespace bioseq::instrumentation::pmu::linux
+} // namespace bioseq::instrumentation::pmu::linux_backend

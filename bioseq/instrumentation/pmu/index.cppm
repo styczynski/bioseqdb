@@ -12,7 +12,7 @@ module;
 export module bioseq.instrumentation.pmu;
 
 import bioseq.instrumentation.pmu.macos;
-import bioseq.instrumentation.pmu.linux;
+import bioseq.instrumentation.pmu.linux_backend;
 import bioseq.instrumentation.pmu.unsupported;
 
 export namespace bioseq::instrumentation::pmu {
@@ -46,7 +46,7 @@ static_assert(alignof(counter_sample) == alignof(std::uint64_t));
 #if defined(__APPLE__)
     return macos::initialize_thread();
 #elif defined(__linux__)
-    return linux::initialize_thread();
+    return linux_backend::initialize_thread();
 #else
     return unsupported::initialize();
 #endif
@@ -61,7 +61,7 @@ inline void shutdown_thread_counters() noexcept {
 #if defined(__APPLE__)
     macos::shutdown_thread();
 #elif defined(__linux__)
-    linux::shutdown_thread();
+    linux_backend::shutdown_thread();
 #else
     unsupported::shutdown();
 #endif
@@ -76,7 +76,7 @@ inline void shutdown_thread_counters() noexcept {
 #if defined(__APPLE__)
     return macos::are_thread_counters_available();
 #elif defined(__linux__)
-    return linux::are_thread_counters_available();
+    return linux_backend::are_thread_counters_available();
 #else
     return false;
 #endif
@@ -105,10 +105,10 @@ inline counter_sample read_thread_counters() noexcept {
         .branch_misses = backend_sample.branch_misses,
     };
 #elif defined(__linux__)
-    if (!linux::initialize_thread()) {
+    if (!linux_backend::initialize_thread()) {
         return counter_sample{};
     }
-    const auto backend_sample = linux::read_counters();
+    const auto backend_sample = linux_backend::read_counters();
     return counter_sample{
         .cycles = backend_sample.cycles,
         .instructions = backend_sample.instructions,
