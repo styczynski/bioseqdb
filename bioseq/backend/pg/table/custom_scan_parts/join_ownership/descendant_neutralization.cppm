@@ -83,6 +83,44 @@ import :custom_scan_join_ownership_semantic_admission;
 
 using namespace bioseq::postgres::support;
 
+namespace {
+    /**
+     * Clone one PostgreSQL Path wrapper whose only owned child is a Path pointer.
+     * The tag predicate and makeNode factory stay explicit at each call site because
+     * PostgreSQL encodes both as token-pasting macros rather than C++ type traits.
+     */
+    template <typename PathType,
+              Path* PathType::* ChildMember,
+              typename MatchesPath,
+              typename MakePath,
+              typename CloneChild,
+              typename RewriteTarget>
+    [[nodiscard]] [[gnu::always_inline]] inline Path*
+    per_row_try_clone_unary_path_to_helper_owner(Path* path,
+                                                  bool& applied,
+                                                  bool& invalid,
+                                                  const MatchesPath& matches_path,
+                                                  const MakePath& make_path,
+                                                  const CloneChild& clone_child,
+                                                  const RewriteTarget& rewrite_target) {
+        static_assert(std::is_invocable_r_v<bool, const MatchesPath&, Path*>);
+        static_assert(std::is_invocable_r_v<PathType*, const MakePath&>);
+        static_assert(std::is_invocable_r_v<Path*, const CloneChild&, Path*>);
+        static_assert(std::is_invocable_r_v<PathTarget*, const RewriteTarget&, PathTarget*>);
+        if (!matches_path(path))
+            return nullptr;
+        auto* source = reinterpret_cast<PathType*>(path);
+        Path* child = clone_child(source->*ChildMember);
+        if (!applied || invalid)
+            return path;
+        auto* clone = make_path();
+        *clone = *source;
+        clone->*ChildMember = child;
+        reinterpret_cast<Path*>(clone)->pathtarget = rewrite_target(path->pathtarget);
+        return invalid ? path : reinterpret_cast<Path*>(clone);
+    }
+} // namespace
+
 export {
     [[nodiscard]] List* per_row_without_restriction(List* restrictions, RestrictInfo* owned) {
         List* filtered = NIL;
@@ -711,110 +749,101 @@ export {
                 root, source->jpath.path.pathtarget, identity, invalid);
             return invalid ? path : reinterpret_cast<Path*>(clone);
         }
-        if (IsA(path, ProjectionPath)) {
-            auto* source = reinterpret_cast<ProjectionPath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(ProjectionPath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, ProjectSetPath)) {
-            auto* source = reinterpret_cast<ProjectSetPath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(ProjectSetPath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, SortPath)) {
-            auto* source = reinterpret_cast<SortPath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(SortPath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MaterialPath)) {
-            auto* source = reinterpret_cast<MaterialPath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(MaterialPath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, MemoizePath)) {
-            auto* source = reinterpret_cast<MemoizePath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(MemoizePath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, UniquePath)) {
-            auto* source = reinterpret_cast<UniquePath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(UniquePath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, GatherPath)) {
-            auto* source = reinterpret_cast<GatherPath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(GatherPath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
-        if (IsA(path, GatherMergePath)) {
-            auto* source = reinterpret_cast<GatherMergePath*>(path);
-            Path* child = per_row_clone_path_to_helper_owner(
-                root, source->subpath, owner, identity, applied, invalid);
-            if (!applied || invalid)
-                return path;
-            auto* clone = makeNode(GatherMergePath);
-            *clone = *source;
-            clone->subpath = child;
-            reinterpret_cast<Path*>(clone)->pathtarget =
-                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
-            return invalid ? path : reinterpret_cast<Path*>(clone);
-        }
+        const auto clone_child = [root, owner, identity, &applied, &invalid](Path* child) {
+            return per_row_clone_path_to_helper_owner(
+                root, child, owner, identity, applied, invalid);
+        };
+        const auto rewrite_target = [root, identity, &invalid](PathTarget* target) {
+            return per_row_helper_passthrough_target(root, target, identity, invalid);
+        };
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                ProjectionPath, &ProjectionPath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, ProjectionPath); },
+                []() -> ProjectionPath* { return makeNode(ProjectionPath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                ProjectSetPath, &ProjectSetPath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, ProjectSetPath); },
+                []() -> ProjectSetPath* { return makeNode(ProjectSetPath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                SortPath, &SortPath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, SortPath); },
+                []() -> SortPath* { return makeNode(SortPath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                MaterialPath, &MaterialPath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, MaterialPath); },
+                []() -> MaterialPath* { return makeNode(MaterialPath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                MemoizePath, &MemoizePath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, MemoizePath); },
+                []() -> MemoizePath* { return makeNode(MemoizePath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                UniquePath, &UniquePath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, UniquePath); },
+                []() -> UniquePath* { return makeNode(UniquePath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                GatherPath, &GatherPath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, GatherPath); },
+                []() -> GatherPath* { return makeNode(GatherPath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
+        if (Path* replacement = per_row_try_clone_unary_path_to_helper_owner<
+                GatherMergePath, &GatherMergePath::subpath>(
+                path,
+                applied,
+                invalid,
+                [](Path* candidate) noexcept { return IsA(candidate, GatherMergePath); },
+                []() -> GatherMergePath* { return makeNode(GatherMergePath); },
+                clone_child,
+                rewrite_target);
+            replacement != nullptr)
+            return replacement;
         if (IsA(path, IncrementalSortPath)) {
             auto* source = reinterpret_cast<IncrementalSortPath*>(path);
             Path* child = per_row_clone_path_to_helper_owner(
