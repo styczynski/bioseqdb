@@ -709,29 +709,110 @@ export {
                 root, source->jpath.path.pathtarget, identity, invalid);
             return invalid ? path : reinterpret_cast<Path*>(clone);
         }
-#define BIOSEQ_CLONE_HELPER_UNARY_PATH(PathType, ChildMember)                                      \
-    if (IsA(path, PathType)) {                                                                     \
-        auto* source = reinterpret_cast<PathType*>(path);                                          \
-        Path* child = per_row_clone_path_to_helper_owner(                                          \
-            root, source->ChildMember, owner, identity, applied, invalid);                         \
-        if (!applied || invalid)                                                                   \
-            return path;                                                                           \
-        auto* clone = makeNode(PathType);                                                          \
-        *clone = *source;                                                                          \
-        clone->ChildMember = child;                                                                \
-        reinterpret_cast<Path*>(clone)->pathtarget =                                               \
-            per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);          \
-        return invalid ? path : reinterpret_cast<Path*>(clone);                                    \
-    }
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(ProjectionPath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(ProjectSetPath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(SortPath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(MaterialPath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(MemoizePath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(UniquePath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(GatherPath, subpath)
-        BIOSEQ_CLONE_HELPER_UNARY_PATH(GatherMergePath, subpath)
-#undef BIOSEQ_CLONE_HELPER_UNARY_PATH
+        if (IsA(path, ProjectionPath)) {
+            auto* source = reinterpret_cast<ProjectionPath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(ProjectionPath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, ProjectSetPath)) {
+            auto* source = reinterpret_cast<ProjectSetPath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(ProjectSetPath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, SortPath)) {
+            auto* source = reinterpret_cast<SortPath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(SortPath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, MaterialPath)) {
+            auto* source = reinterpret_cast<MaterialPath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(MaterialPath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, MemoizePath)) {
+            auto* source = reinterpret_cast<MemoizePath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(MemoizePath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, UniquePath)) {
+            auto* source = reinterpret_cast<UniquePath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(UniquePath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, GatherPath)) {
+            auto* source = reinterpret_cast<GatherPath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(GatherPath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
+        if (IsA(path, GatherMergePath)) {
+            auto* source = reinterpret_cast<GatherMergePath*>(path);
+            Path* child = per_row_clone_path_to_helper_owner(
+                root, source->subpath, owner, identity, applied, invalid);
+            if (!applied || invalid)
+                return path;
+            auto* clone = makeNode(GatherMergePath);
+            *clone = *source;
+            clone->subpath = child;
+            reinterpret_cast<Path*>(clone)->pathtarget =
+                per_row_helper_passthrough_target(root, path->pathtarget, identity, invalid);
+            return invalid ? path : reinterpret_cast<Path*>(clone);
+        }
         if (IsA(path, IncrementalSortPath)) {
             auto* source = reinterpret_cast<IncrementalSortPath*>(path);
             Path* child = per_row_clone_path_to_helper_owner(
