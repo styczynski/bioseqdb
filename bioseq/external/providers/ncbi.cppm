@@ -111,6 +111,7 @@ struct ncbi_plan {
 /// Executes one validated NCBI request plan.
 class ncbi_session {
   public:
+    /// Opens a session over borrowed runtime services and an owning plan.
     ncbi_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ncbi_plan plan)
@@ -184,9 +185,7 @@ class ncbi_session {
     }
 
   private:
-    // Bind the single path parameter each supported operation requires. Only
-    // parameters known to the operation are supplied. The generated client
-    // rejects unknown ones.
+    /// Binds only the path parameters accepted by the selected operation.
     [[nodiscard]] std::vector<api::parameter_value> make_parameters() const {
         std::vector<api::parameter_value> parameters;
         if (plan_.operation_id == "tax_name_query") {
@@ -218,12 +217,13 @@ class ncbi_session {
         return parameters;
     }
 
+    /// Returns the current completion timestamp at provider precision.
     static prov::external_timestamp completion_now() noexcept {
         return std::chrono::time_point_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now());
     }
 
-    // Push one warning diagnostic describing an incomplete result set.
+    /// Pushes one warning diagnostic for an incomplete result set.
     std::expected<void, external_error> emit_partial_diagnostic(
         prov::provider_message_sink_ref sink, std::string_view code, std::string_view message) {
         prov::owning_provider_diagnostic diagnostic;
@@ -238,8 +238,7 @@ class ncbi_session {
         return sink.push_fn(sink.object, prov::owning_provider_message{std::move(diagnostic)});
     }
 
-    // Emit a partial-result warning when the plan limit truncated the page or
-    // the payload advertises a further page token.
+    /// Emits a warning when a limit or page token makes the result partial.
     std::expected<void, external_error>
     maybe_emit_partial(const bioseq::external::json::value& document,
                        prov::provider_message_sink_ref sink,
@@ -271,7 +270,7 @@ class ncbi_session {
         std::optional<std::int64_t> numeric_identifier;
     };
 
-    // Reads a taxon identity encoded as either a JSON integer or string.
+    /// Reads a taxon identity encoded as either a JSON integer or string.
     [[nodiscard]] static parsed_taxon_identity
     parse_taxon_identity(const bioseq::external::json::value& node) {
         if (const auto integer = node.read_signed_integer_member("tax_id")) {
@@ -296,8 +295,7 @@ class ncbi_session {
         return {};
     }
 
-    // Normalize a tax_name_query or taxonomy_data_report payload into taxonomy
-    // rows. Field paths are tried defensively. Missing fields are tolerated.
+    /// Normalizes absence-tolerant NCBI taxonomy payloads into taxonomy rows.
     std::expected<void, external_error> emit_taxonomy_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
                                                            prov::provider_statistics& stats,
@@ -449,8 +447,7 @@ class ncbi_session {
         return maybe_emit_partial(*document, sink, stats, truncated);
     }
 
-    // Normalize a genome_dataset_report / genome_dataset_reports_by_taxon
-    // payload into catalog rows.
+    /// Parses an optional unsigned decimal string, returning zero on absence.
     static std::uint64_t parse_u64(std::optional<std::string_view> text) {
         std::uint64_t value = 0;
         if (text.has_value() && !text->empty()) {
@@ -459,16 +456,8 @@ class ncbi_session {
         return value;
     }
 
-    // Parse an NCBI gene dataset report (gene_dataset_reports_by_id) into one
-    // catalog row per gene carrying its genomic intervals across every annotated
-    // assembly. Live shape:
-    //   reports[].gene.annotations[]
-    //     .{assembly_accession, assembly_name}
-    //     .genomic_locations[]
-    //       .{genomic_accession_version, sequence_name}
-    //       .genomic_range.{begin, end, orientation}
-    // NCBI ranges are 1-based inclusive. The record_locations relation is
-    // 0-based half-open, so start0 = begin-1 and end0 = end.
+    /// Parses an NCBI gene dataset report into record-location rows.
+    /// One-based inclusive NCBI ranges become zero-based half-open intervals.
     std::expected<void, external_error> emit_location_rows(std::string_view body,
                                                            prov::provider_message_sink_ref sink,
                                                            prov::provider_statistics& stats,
@@ -584,6 +573,7 @@ class ncbi_session {
         return {};
     }
 
+    /// Normalizes NCBI genome dataset reports into catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -688,9 +678,7 @@ class ncbi_session {
     // multiple of the 21 bases-per-storage-unit not exceeding 1 Mi bases.
     static constexpr std::uint64_t k_sequence_chunk_bases = 1048572;
 
-    // Concatenated bases of the first FASTA record in `body`, dropping header
-    // lines ('>') and interior whitespace. dna5 packing normalizes case and
-    // validates the alphabet downstream.
+    /// Extracts the first FASTA record while dropping headers and whitespace.
     static std::string parse_fasta_bases(std::string_view body) {
         std::string bases;
         bases.reserve(body.size());
@@ -715,7 +703,7 @@ class ncbi_session {
         return bases;
     }
 
-    // Shared owning_sequence_payload identity for the queried record.
+    /// Returns shared sequence identity and audit fields for the queried record.
     prov::owning_sequence_payload sequence_payload_template() const {
         prov::owning_sequence_payload payload;
         payload.provider = ncbi_provider_id();
@@ -731,9 +719,7 @@ class ncbi_session {
         return payload;
     }
 
-    // sequences produces one whole-record row. sequence_chunks produces ordered chunk rows
-    // of at most k_sequence_chunk_bases bases with monotonic index / base_offset
-    // and end_of_record on the final chunk.
+    /// Emits a whole sequence or ordered bounded chunks for the requested target.
     std::expected<std::uint64_t, external_error> emit_sequence_payloads(
         prov::provider_message_sink_ref sink, const std::string& bases, std::stop_token stop) {
         if (plan_.target == prov::query_target::sequence) {
@@ -777,8 +763,7 @@ class ncbi_session {
         return rows;
     }
 
-    // Fetch FASTA for plan_.accession over HTTPS and emit it as one sequences
-    // row or ordered sequence_chunks rows.
+    /// Fetches FASTA over HTTPS and emits sequence rows for the active plan.
     std::expected<prov::provider_statistics, external_error>
     run_sequence_retrieval(prov::provider_message_sink_ref sink, std::stop_token stop) {
         prov::provider_statistics stats;
@@ -862,14 +847,17 @@ struct ncbi_provider {
         return caps;
     }
 
+    /// Returns the request-policy profiles owned by this adapter.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
+    /// Returns the locator-policy profiles owned by this adapter.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
+    /// Estimates the bounded resources required by one NCBI plan.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,

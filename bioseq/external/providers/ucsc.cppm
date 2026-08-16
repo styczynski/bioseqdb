@@ -101,6 +101,7 @@ struct ucsc_plan {
 /// Executes one validated UCSC request plan.
 class ucsc_session {
   public:
+    /// Opens a session over borrowed runtime services and an owning plan.
     ucsc_session(const context::context& memory,
                  const bioseq::parallelism::global_pool& pool,
                  ucsc_plan plan)
@@ -175,9 +176,7 @@ class ucsc_session {
     }
 
   private:
-    // Parse a UCSC /getData/sequence response ({"dna","chrom","start","end",
-    // "genome"}) into one owning_sequence_payload. UCSC returns 0-based
-    // half-open coordinates, matching start0/end0 directly.
+    /// Parses a UCSC sequence response with its zero-based half-open coordinates.
     std::expected<void, external_error> emit_sequence(std::string_view body,
                                                       prov::provider_message_sink_ref sink,
                                                       prov::provider_statistics& stats,
@@ -247,7 +246,7 @@ class ucsc_session {
         return sink.push_fn(sink.object, prov::owning_provider_message{std::move(payload)});
     }
 
-    // Normalize the /list/ucscGenomes or /findGenome payload into catalog rows.
+    /// Normalizes UCSC genome-list or genome-search payloads into catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -365,14 +364,17 @@ struct ucsc_provider {
         return caps;
     }
 
+    /// Returns the request-policy profiles owned by this adapter.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
+    /// Returns the locator-policy profiles owned by this adapter.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
+    /// Estimates the bounded resources required by one UCSC plan.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,

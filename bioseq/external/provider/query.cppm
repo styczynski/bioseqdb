@@ -258,12 +258,8 @@ enum class pushdown_quality : std::uint8_t {
     unsupported // Provider cannot return enough data to evaluate it.
 };
 
-// Maps a projected/recheck field to its canonical SQL column name for the PG
-// bridge. Identical names map directly. Exceptions are name_space ->
-// "namespace", taxon_lineage -> "lineage", taxon_synonyms
-// -> "synonyms", gene_references -> "genes", record_locations -> "locations",
-// the four flags -> is_*, length -> "sequence_length", sequence_bytes ->
-// "sequence"). The `count` sentinel is never selectable and has no column.
+/// Returns the canonical PostgreSQL column for a projected or rechecked field.
+/// The non-selectable `count` sentinel maps to an empty name.
 [[nodiscard]] constexpr std::string_view to_sql_column(external_field field) noexcept {
     switch (field) {
     case external_field::provider:

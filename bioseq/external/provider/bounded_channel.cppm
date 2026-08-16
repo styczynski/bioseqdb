@@ -224,6 +224,7 @@ template <class p_value_type> class bounded_channel {
         std::size_t bytes;
     };
 
+    /// Returns a leased item charge to channel capacity.
     void return_charge(std::size_t bytes) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         if (charged_items_ > 0) {
@@ -233,6 +234,7 @@ template <class p_value_type> class bounded_channel {
         not_full_.notify_one();
     }
 
+    /// Publishes the first terminal state and wakes every waiter.
     void close(channel_state new_state, std::optional<external_error> error) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == channel_state::open) {

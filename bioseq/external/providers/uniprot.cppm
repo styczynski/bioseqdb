@@ -97,6 +97,7 @@ struct uniprot_plan {
 /// Executes one validated UniProt request plan.
 class uniprot_session {
   public:
+    /// Opens a session over borrowed runtime services and an owning plan.
     uniprot_session(const context::context& memory,
                     const bioseq::parallelism::global_pool& pool,
                     uniprot_plan plan)
@@ -165,8 +166,7 @@ class uniprot_session {
     }
 
   private:
-    // Normalize either a single getByAccession entry or a searchCursor result
-    // page into protein catalog rows.
+    /// Normalizes one accession result or cursor page into protein catalog rows.
     std::expected<void, external_error> emit_catalog_rows(std::string_view body,
                                                           prov::provider_message_sink_ref sink,
                                                           prov::provider_statistics& stats,
@@ -216,8 +216,7 @@ class uniprot_session {
         return {};
     }
 
-    // Map one UniProtKBEntry object into an owning_catalog_row and push it.
-    // Every JSON field is optional. Missing members leave the row default.
+    /// Maps one absence-tolerant UniProtKB entry into a catalog row.
     std::expected<void, external_error> emit_entry(const bioseq::external::json::value& entry,
                                                    prov::provider_message_sink_ref sink) {
         namespace json = bioseq::external::json;
@@ -322,14 +321,17 @@ struct uniprot_provider {
         return caps;
     }
 
+    /// Returns the request-policy profiles owned by this adapter.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
+    /// Returns the locator-policy profiles owned by this adapter.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
+    /// Estimates the bounded resources required by one UniProt plan.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query& query,
              const prov::provider_capability_snapshot&,

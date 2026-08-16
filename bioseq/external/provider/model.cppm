@@ -148,7 +148,6 @@ struct owning_record_key {
     std::optional<std::uint32_t> version;
 
     /// Returns fixed and retained dynamic storage in bytes.
-    /// Returns fixed and retained dynamic storage in bytes.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -182,7 +181,6 @@ struct owning_integrity_check {
     bounded_string<maximum_identifier_bytes> value;
     integrity_scope applies_to;
 
-    /// Returns fixed and retained dynamic storage in bytes.
     /// Returns fixed and retained dynamic storage in bytes.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
@@ -568,6 +566,7 @@ struct owning_sequence_payload {
     bool end_of_record{true};
     owning_row_audit audit;
 
+    /// Returns fixed and retained dynamic storage in bytes.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);
@@ -627,6 +626,7 @@ struct owning_catalog_row {
     mutable std::vector<genomic_interval> locations_scratch_;
     mutable row_audit_view_storage audit_view_storage_;
 
+    /// Returns fixed and retained dynamic storage in bytes.
     [[nodiscard]] std::size_t measure_deep_size_bytes() const noexcept {
         std::size_t total = sizeof(*this);
         total += provider_name.measure_deep_size_bytes() - sizeof(provider_name);

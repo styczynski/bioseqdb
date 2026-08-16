@@ -159,14 +159,17 @@ struct external_execution_budget {
 /// Cancellation-aware lease returned by a gate acquisition.
 class external_gate_lease {
   public:
+    /// Constructs an empty lease.
     external_gate_lease() = default;
     external_gate_lease(const external_gate_lease&) = delete;
     external_gate_lease& operator=(const external_gate_lease&) = delete;
+    /// Transfers retained capacity from another lease.
     external_gate_lease(external_gate_lease&& other) noexcept
         : owner_(other.owner_), units_(other.units_), release_fn_(other.release_fn_) {
         other.owner_ = nullptr;
         other.release_fn_ = nullptr;
     }
+    /// Releases current capacity and transfers another lease.
     external_gate_lease& operator=(external_gate_lease&& other) noexcept {
         if (this != &other) {
             release_noexcept();
@@ -178,6 +181,7 @@ class external_gate_lease {
         }
         return *this;
     }
+    /// Releases retained capacity on destruction.
     ~external_gate_lease() {
         release_noexcept();
     }
@@ -320,20 +324,25 @@ class shared_external_gate_state {
     }
 
   private:
+    /// Returns byte units through the erased gate interface.
     static void release_bytes_thunk(void* self, std::uint64_t units) noexcept {
         static_cast<shared_external_gate_state*>(self)->byte_used_.fetch_sub(units);
     }
+    /// Returns one transfer slot through the erased gate interface.
     static void release_transfer_thunk(void* self, std::uint64_t) noexcept {
         static_cast<shared_external_gate_state*>(self)->transfer_used_.fetch_sub(1);
     }
+    /// Acquires byte units through the erased gate interface.
     static std::expected<external_gate_lease, external_error>
     byte_acquire_thunk(void* self, std::uint64_t units, std::stop_token stop) {
         return static_cast<shared_external_gate_state*>(self)->acquire_bytes(units, stop);
     }
+    /// Acquires one transfer slot through the erased gate interface.
     static std::expected<external_gate_lease, external_error>
     transfer_acquire_thunk(void* self, std::stop_token stop) {
         return static_cast<shared_external_gate_state*>(self)->acquire_transfer(stop);
     }
+    /// Cancels gate waiters through the erased interface.
     static void cancel_thunk(void* self) noexcept {
         static_cast<shared_external_gate_state*>(self)->cancel_waiters();
     }
@@ -448,14 +457,17 @@ class owning_external_budget_allocation {
 /// Type-erased memory permit with single-release ownership.
 class erased_memory_permit {
   public:
+    /// Constructs an empty permit.
     erased_memory_permit() = default;
     erased_memory_permit(const erased_memory_permit&) = delete;
     erased_memory_permit& operator=(const erased_memory_permit&) = delete;
+    /// Transfers ownership from another permit.
     erased_memory_permit(erased_memory_permit&& other) noexcept
         : owner_(other.owner_), destroy_fn_(other.destroy_fn_) {
         other.owner_ = nullptr;
         other.destroy_fn_ = nullptr;
     }
+    /// Releases current ownership and transfers another permit.
     erased_memory_permit& operator=(erased_memory_permit&& other) noexcept {
         if (this != &other) {
             release_noexcept();
@@ -466,6 +478,7 @@ class erased_memory_permit {
         }
         return *this;
     }
+    /// Releases the retained permit on destruction.
     ~erased_memory_permit() {
         release_noexcept();
     }

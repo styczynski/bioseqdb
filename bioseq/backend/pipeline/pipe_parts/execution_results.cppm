@@ -273,7 +273,6 @@ export {
             if (gpu_index_cache_ptr != nullptr && is_gpu_target_index_build_active(params) &&
                 allow_gpu_target_index_build && target_index.table_empty() && target_len > 0) {
                 auto& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
-                bool injected = false;
                 bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<p_minimizer>(
                     target_seq,
@@ -302,7 +301,6 @@ export {
                         fmt::format("Stage C GPU target-index cache insertion rejected ({})",
                                     static_cast<unsigned>(inserted.error())));
                 }
-                injected = true;
                 vulkan_target_index_built = true;
                 bioseq_log<logging_level::error>(
                     "[gpu_target_index] GPU index injected: slot_mask={} pos={} target_len={}",
@@ -553,7 +551,6 @@ export {
             if (gpu_index_cache_ptr != nullptr && is_gpu_target_index_build_active(params) &&
                 allow_gpu_target_index_build && target_index.table_empty() && target_len > 0) {
                 auto& gpu_rt = bioseq::gpu::vulkan::runtime::instance();
-                bool injected = false;
                 bioseq::gpu::vulkan::vulkan_sketch_decline decline{};
                 auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<p_minimizer>(
                     target_seq,
@@ -582,7 +579,6 @@ export {
                         fmt::format("Stage C GPU target-index cache insertion rejected ({})",
                                     static_cast<unsigned>(inserted.error())));
                 }
-                injected = true;
                 vulkan_target_index_built = true;
                 bioseq_log<logging_level::error>(
                     "[gpu_target_index] GPU index injected: slot_mask={} pos={} target_len={}",

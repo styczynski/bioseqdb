@@ -52,9 +52,11 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
     }
 
+    /// Transfers an initialized decoder and its source.
     gzip_decode_source(gzip_decode_source&& other) noexcept {
         adopt_state_from(std::move(other));
     }
+    /// Releases current state and transfers another decoder.
     gzip_decode_source& operator=(gzip_decode_source&& other) noexcept {
         if (this != &other) {
             release_zlib_state();
@@ -62,6 +64,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
         return *this;
     }
+    /// Releases the retained zlib stream.
     ~gzip_decode_source() {
         release_zlib_state();
     }
@@ -152,6 +155,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
     }
 
   private:
+    /// Returns whether decoded size and expansion accounting remain admitted.
     [[nodiscard]] bool is_within_limits() const noexcept {
         if (limits_.maximum_decoded_bytes != 0 && decoded_total_ > limits_.maximum_decoded_bytes) {
             return false;
@@ -170,6 +174,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         return true;
     }
 
+    /// Records the first terminal decoder failure.
     void record_failure(std::string message) {
         has_failed_ = true;
         if (error_message_.empty()) {
@@ -177,6 +182,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         }
     }
 
+    /// Transfers source, zlib state, and accounting from another decoder.
     void adopt_state_from(gzip_decode_source&& other) noexcept {
         source_ = std::move(other.source_);
         limits_ = other.limits_;
@@ -192,6 +198,7 @@ template <bioseq::io::io_source p_source_type> class gzip_decode_source {
         other.is_initialized_ = false; // moved-from stream no longer owns zlib state
     }
 
+    /// Releases the owned zlib stream when initialized.
     void release_zlib_state() noexcept {
         if (is_initialized_) {
             ::inflateEnd(&stream_);

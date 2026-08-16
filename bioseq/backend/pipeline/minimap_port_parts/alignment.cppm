@@ -517,6 +517,7 @@ struct align_one_region {
         }
     }
 
+    /// Apply one gap-fill result and report whether Z-drop ended the walk.
     template <bool p_strand_reversed>
     [[gnu::always_inline]] bool apply_gap_fill_result(alignment_region& region,
                                                       const ksw_alignment_result& fill_result,
@@ -555,6 +556,7 @@ struct align_one_region {
         return false;
     }
 
+    /// Execute the three alignment fills for one oriented region.
     template <bool p_strand_reversed>
     [[gnu::always_inline]] void run(alignment_region& region,
                                     std::span<const anchor> anchors,
@@ -876,6 +878,7 @@ struct align_one_region {
     }
 };
 
+/// Align every admitted region through the compile-time selected kernel.
 template <base_alignment_algorithm p_base_alignment_algorithm,
           bool p_enable_diagonal_certificate = true,
           sequence_alphabet p_alphabet>

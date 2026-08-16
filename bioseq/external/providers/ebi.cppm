@@ -103,6 +103,7 @@ struct ebi_plan {
 /// Executes one validated EBI request plan.
 class ebi_session {
   public:
+    /// Opens a session over borrowed runtime services and an owning plan.
     ebi_session(const context::context& memory,
                 const bioseq::parallelism::global_pool& pool,
                 ebi_plan plan)
@@ -172,12 +173,7 @@ class ebi_session {
     }
 
   private:
-    // Normalize the EBI Search JSON hit list into catalog/taxonomy rows. Shape:
-    // {"hitCount":N,"entries":[{"id":"P12345","source":"uniprot",
-    //   "fields":{"name":["..."],"description":["..."],
-    //             "organism":["Homo sapiens"],"tax_id":["9606"]}}]}.
-    // Every field is optional and absence-tolerant. A metadata response with no query
-    // present) carries "domains" instead of "entries" and yields zero rows.
+    /// Normalizes an absence-tolerant EBI Search hit list into provider rows.
     std::expected<void, external_error> emit_rows(std::string_view body,
                                                   prov::provider_message_sink_ref sink,
                                                   prov::provider_statistics& stats,
@@ -335,14 +331,17 @@ struct ebi_provider {
         return caps;
     }
 
+    /// Returns the request-policy profiles owned by this adapter.
     static std::span<const prov::request_policy_profile_view> list_request_policy_profiles() {
         return {};
     }
 
+    /// Returns the locator-policy profiles owned by this adapter.
     static std::span<const prov::locator_policy_profile_view> list_locator_policy_profiles() {
         return {};
     }
 
+    /// Estimates the bounded resources required by one EBI plan.
     static std::expected<prov::provider_plan_estimate, external_error>
     estimate(const prov::normalized_external_query&,
              const prov::provider_capability_snapshot&,

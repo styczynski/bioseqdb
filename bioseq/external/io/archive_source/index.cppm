@@ -405,11 +405,8 @@ extract_fasta_members_from_zip_archive(std::span<const std::uint8_t> zip_bytes,
                                 "archive_read_open_memory failed for sequence members");
         }
         struct ::archive_entry* entry = nullptr;
-        // Global chunk index carried across members so their chunks never collide
-        // on (accession, chunk_index) when more than one FASTA member is selected
-        // under one queried accession. Today the Datasets download requests a
-        // single GENOME_FASTA member, but the selection predicate admits several
-        // file types.
+        // Carry the chunk index across selected members so one queried accession
+        // never receives duplicate `(accession, chunk_index)` coordinates.
         std::uint64_t next_chunk_index = 0;
         for (;;) {
             if (stop.stop_requested()) {

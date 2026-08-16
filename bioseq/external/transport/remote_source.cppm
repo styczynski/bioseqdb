@@ -71,10 +71,12 @@ class remote_byte_source {
         is_handle_added_ = true;
     }
 
+    /// Transfers an active remote source and repoints its callback.
     remote_byte_source(remote_byte_source&& other) noexcept {
         adopt_state_from(std::move(other));
     }
 
+    /// Releases current handles and transfers another active source.
     remote_byte_source& operator=(remote_byte_source&& other) noexcept {
         if (this != &other) {
             release_curl_resources();
@@ -83,6 +85,7 @@ class remote_byte_source {
         return *this;
     }
 
+    /// Releases all retained transfer resources.
     ~remote_byte_source() {
         release_curl_resources();
     }
@@ -191,10 +194,12 @@ class remote_byte_source {
     }
 
   private:
+    /// Returns unread bytes retained in the carry buffer.
     [[nodiscard]] std::size_t count_available_bytes() const noexcept {
         return carry_.size() - carry_read_offset_;
     }
 
+    /// Records the first terminal transfer failure.
     void record_failure(std::string message) {
         has_failed_ = true;
         if (error_message_.empty()) {
@@ -202,10 +207,12 @@ class remote_byte_source {
         }
     }
 
+    /// Adapts libcurl's write callback to this source.
     static std::size_t write_thunk(char* pointer, std::size_t size, std::size_t count, void* user) {
         return static_cast<remote_byte_source*>(user)->on_write(pointer, size * count);
     }
 
+    /// Accepts a bounded libcurl payload chunk or pauses the transfer.
     std::size_t on_write(const char* pointer, std::size_t length) {
         if (length == 0) {
             return 0;
@@ -235,6 +242,7 @@ class remote_byte_source {
         return length;
     }
 
+    /// Collects terminal multi-handle status and response metadata.
     void reap_completions() {
         CURLMsg* message = nullptr;
         int remaining_message_count = 0;
@@ -258,6 +266,7 @@ class remote_byte_source {
         }
     }
 
+    /// Applies the validated request and bounded transport options to libcurl.
     void configure_handle() {
         ::curl_easy_setopt(easy_, CURLOPT_URL, request_.url().data());
         ::curl_easy_setopt(easy_, CURLOPT_WRITEFUNCTION, &write_thunk);
@@ -286,6 +295,7 @@ class remote_byte_source {
         }
     }
 
+    /// Transfers native handles and callback ownership from another source.
     void adopt_state_from(remote_byte_source&& other) noexcept {
         request_ = std::move(other.request_);
         options_ = std::move(other.options_);
@@ -317,6 +327,7 @@ class remote_byte_source {
         }
     }
 
+    /// Releases all owned libcurl resources in dependency order.
     void release_curl_resources() noexcept {
         if (multi_ != nullptr && easy_ != nullptr && is_handle_added_) {
             ::curl_multi_remove_handle(multi_, easy_);

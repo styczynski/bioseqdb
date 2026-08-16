@@ -166,20 +166,19 @@ class gcra_request_policy {
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
                   "GCRA in-flight counter must be lock-free");
 
+    /// Returns the injected monotonic time as a nanosecond count.
     [[nodiscard]] std::int64_t now_ns() const noexcept {
         return clock_.monotonic_now_fn(clock_.object).count();
     }
 
+    /// Returns the active spacing floor for a request tier.
     [[nodiscard]] static std::int64_t
     effective_spacing(const request_rate_tier_view& tier) noexcept {
         const std::int64_t minimum = tier.minimum_spacing.count();
         return minimum > 0 ? minimum : tier.initial_spacing.count();
     }
 
-    // Saturating multiply for the burst window (spacing × burst). Both operands
-    // are non-negative here. Spacing is a nanosecond count and burst is uint32. A
-    // pathological tier can still overflow int64, so clamp instead of wrapping to
-    // a negative tolerance that would make every request appear eligible.
+    /// Multiplies a non-negative burst window and clamps signed overflow.
     [[nodiscard]] static std::int64_t saturating_mul(std::int64_t lhs, std::int64_t rhs) noexcept {
         if (lhs <= 0 || rhs <= 0) {
             return 0;
@@ -188,6 +187,7 @@ class gcra_request_policy {
         return lhs > k_maximum / rhs ? k_maximum : lhs * rhs;
     }
 
+    /// Finds the named rate tier, or returns null when none applies.
     [[nodiscard]] const request_rate_tier_view*
     find_tier(const policy_request_view& request) const noexcept {
         for (const request_rate_tier_view& tier : request.profile.rate_tiers) {
@@ -198,9 +198,7 @@ class gcra_request_policy {
         return nullptr;
     }
 
-    // FNV-1a over origin + credential digest + tier name — the quota identity
-    // based on the policy, tier, origin, and credential digest. Collisions share the stricter
-    // bucket, which is conservative.
+    /// Hashes origin, credential identity, and tier into a conservative shared bucket.
     [[nodiscard]] std::size_t bucket_index(const policy_request_view& request) const noexcept {
         std::uint64_t h = 1469598103934665603ull;
         const auto mix = [&h](unsigned char byte) noexcept {
@@ -219,8 +217,7 @@ class gcra_request_policy {
         return static_cast<std::size_t>(h % k_bucket_count);
     }
 
-    // Release one in-flight slot (idempotent at 0). Not tier-gated: a slot was
-    // reserved on every proceed, so release must always decrement.
+    /// Releases one reserved in-flight slot and remains idempotent at zero.
     static void release_slot(bucket& b) noexcept {
         std::uint32_t cur = b.in_flight.load(std::memory_order_acquire);
         while (cur > 0 && !b.in_flight.compare_exchange_weak(
@@ -228,16 +225,18 @@ class gcra_request_policy {
         }
     }
 
+    /// Returns a retry decision for an absolute monotonic deadline.
     [[nodiscard]] static request_policy_result retry(std::int64_t at_ns) noexcept {
         return request_policy_result{
             request_policy_action::retry_at, std::chrono::nanoseconds{at_ns}, std::nullopt};
     }
 
-    // Erased thunks for request_policy_ref.
+    /// Adapts erased acquisition to this policy instance.
     static std::expected<request_policy_result, external_error>
     acquire_thunk(void* self, const policy_request_view& request, std::stop_token stop) {
         return static_cast<gcra_request_policy*>(self)->acquire(request, std::move(stop));
     }
+    /// Adapts erased response observation to this policy instance.
     static std::expected<request_policy_result, external_error>
     observe_thunk(void* self,
                   policy_attempt_token token,
@@ -245,11 +244,13 @@ class gcra_request_policy {
                   const policy_response_view& response) {
         return static_cast<gcra_request_policy*>(self)->observe(token, request, response);
     }
+    /// Adapts erased attempt abandonment to this policy instance.
     static void abandon_thunk(void* self,
                               policy_attempt_token token,
                               const policy_request_view& request) noexcept {
         static_cast<gcra_request_policy*>(self)->abandon(token, request);
     }
+    /// Adapts erased test reset to this policy instance.
     static void reset_thunk(void* self) noexcept {
         static_cast<gcra_request_policy*>(self)->reset_for_tests();
     }

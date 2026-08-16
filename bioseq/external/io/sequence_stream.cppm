@@ -166,14 +166,8 @@ class fasta_chunk_emitter {
                 multi_record_ ? "NCBI Datasets archive member contained no sequence bases"
                               : "NCBI efetch returned no sequence bases"));
         }
-        // Emit the final record's tail: the whole record for the `sequence` target,
-        // the last held chunk for the `sequence_chunk` target (both branches did
-        // the same emit — they differed only in the return value, which was the
-        // bug). A bare trailing header (empty final record) leaves `rechunk_` empty
-        // and must NOT emit a spurious 0-base row. Return `rows_` — the true
-        // published count. For a multi-record member the earlier records were
-        // already emitted at their
-        // `>` boundaries, so a literal 1 here undercounted `sequence`-target rows.
+        // Emit only a non-empty final tail. Earlier multi-record rows were emitted
+        // at their header boundaries and remain included in `rows_`.
         if (!rechunk_.empty()) {
             auto pushed = emit(rechunk_, /*end_of_record=*/true);
             if (!pushed.has_value()) {
@@ -210,8 +204,7 @@ class fasta_chunk_emitter {
     }
 
   private:
-    // Emit exact chunk_bases chunks while strictly more than one chunk is
-    // buffered, so the last chunk (emitted from finish) is the record end.
+    /// Emits full chunks while retaining the final record-ending chunk.
     [[nodiscard]] std::expected<void, prov::external_error> flush_full_chunks() {
         while (rechunk_.size() > chunk_bases_) {
             const std::string_view chunk(rechunk_.data(), static_cast<std::size_t>(chunk_bases_));
@@ -224,6 +217,7 @@ class fasta_chunk_emitter {
         return {};
     }
 
+    /// Emits one normalized sequence payload and advances row coordinates.
     [[nodiscard]] std::expected<void, prov::external_error> emit(std::string_view letters,
                                                                  bool end_of_record) {
         prov::owning_sequence_payload payload;
