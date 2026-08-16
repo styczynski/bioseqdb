@@ -69,7 +69,7 @@ export {
 
         ::bioseq::simd::minimap2_parameters params;
         sequence_size_t query_len;
-        // — batch/segment-wave-scoped GPU index cache. The outer
+        // Batch- or segment-wave-scoped GPU index cache. The outer
         // wave creates one cache, passes `&cache` here, and clears it at wave end.
         // Null on single-shot paths (then the GPU seed path uploads uncached).
         bioseq::indexing::gpu_minimizer_index_cache* gpu_index_cache = nullptr;
@@ -77,7 +77,7 @@ export {
         post_seed_owned_lifetime* post_seed_lifetime = nullptr;
         match_result_collection* host_timing_dst = nullptr;
 
-        // — host/device accessors for both the std::span CPU shape and
+        // Host/device accessors cover both the std::span CPU shape and
         // the minimizer_batch_view device shape.
         template <class p_minimizer>
         [[nodiscard, gnu::always_inline]] static std::span<const p_minimizer>
@@ -128,7 +128,7 @@ export {
                 post_seed_lifetime == nullptr ? nullptr
                                               : post_seed_lifetime->owned_cpu_index.direct_ledger;
 
-            // — run the selected GPU seed-hit lookup before the CPU
+            // Run the selected GPU seed-hit lookup before the CPU
             // path. If it declines, the selected Vulkan pipeline fails loudly.
             // Only the concrete minimizer_hashmap_fragment_index carries the GPU view.
             if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
@@ -521,8 +521,8 @@ export {
             algo.parameters.push_back({"max_occ", std::to_string(params.max_occ)});
             algo.parameters.push_back({"query_len", std::to_string(query_len)});
             desc.algorithm = std::move(algo);
-            // anchor reserve target — used by seed_hit_stage's slab (
-            // "estimated_anchor_count").  The actual sketch count is unknown at
+            // Reserve the estimated anchor count for the stage slab. The actual
+            // sketch count is unknown at
             // describe time so the reported figure uses query_len/window=10 as
             // the canonical median; the runtime reserve picks a tighter value
             // when the real sketches.size() is available.

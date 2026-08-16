@@ -56,13 +56,13 @@ export {
     namespace bioseq::simd::pipe {
 
     // ---------------------------------------------------------------------------
-    //  — Scanner-aware minimizer dispatch.
+    // Scanner-aware minimizer dispatch.
     // For a plain compact_sequence_range or a no-fragment lazy wrapper, runs the
     // requested in-RAM kernel (scalar / reference-simd / exact-simd) on contiguous storage
     // (zero overhead — the no-fragment lazy forwards to its underlying range). For
     // a fragmented lazy wrapper, streams fragments through the bit-identical scalar
-    // kernel (`collect_minimizers_view`) — see for why the scalar path
-    // is used instead of the simd lane-replay.
+    // kernel (`collect_minimizers_view`) to preserve exact fragment bounds and
+    // positions.
     // ---------------------------------------------------------------------------
     enum class minimizer_kernel_kind { scalar, simd, exact_simd };
 
@@ -553,7 +553,7 @@ export {
         return minimizer_dispatch<p_kind, p_minimizer>(c, seq, p_window_size, p_kmer_size, highway);
     }
 
-    //  — SUB-RANGE minimizer collection over storage units `[lo_unit, hi_unit)`.
+    // Sub-range minimizer collection over storage units `[lo_unit, hi_unit)`.
     // Used by `minimap_port_segmented` to sketch one target SEGMENT at a time,
     // forwarding explicit begin/end iterators (advanced to the unit-aligned segment
     // bounds) so positions come out LOCAL to `lo_unit*lpu`.

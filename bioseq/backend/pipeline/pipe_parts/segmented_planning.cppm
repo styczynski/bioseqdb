@@ -112,7 +112,7 @@ export {
     }
 
     // =============================================================================
-    // — query sketch for persistent-index bucket selection.
+    // Query sketch for persistent-index bucket selection
     // =============================================================================
     //
     // Holds the query minimizers produced for persistent-index bucket filtering,

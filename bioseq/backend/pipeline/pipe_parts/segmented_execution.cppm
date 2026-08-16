@@ -125,8 +125,8 @@ export {
 
         // (1) Sketch the query ONCE as minimap_sketch_data (query <= 2^28 bp; its
         //     positions fit the 28-bit field). Same kmer hashing as the target, so
-        //     `collect_seed_hits` matches identically. — the helper
-        //     sketches on the GPU when vulkan_minimap_integer is selected (byte-identical
+        //     `collect_seed_hits` matches identically. The helper sketches on the GPU
+        //     when vulkan_minimap_integer is selected (byte-identical
         //     minimizers) and otherwise uses the scalar CPU sketch.
         auto query_sketch = sketch_query_for_index_selection<p_minimizer>(query_seq, params, w, k);
         const pipe::minimizer_batch_view<p_minimizer> query_minimizers{

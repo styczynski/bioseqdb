@@ -418,7 +418,7 @@ export {
     } // namespace detail
 
     // =============================================================================
-    // / — top-level runtime cascade entry
+    // Top-level runtime cascade entry
     // =============================================================================
     //
     // The runtime cascade is one `dispatch_chain<...>::run<>(...)` over the
@@ -517,7 +517,7 @@ export {
     }
 
     // =============================================================================
-    // — describe_pipeline_for (EXPLAIN path)
+    // describe_pipeline_for (EXPLAIN path)
     // =============================================================================
     //
     // One chain instantiation over four steps (p_bucket_width, p_kmer_size, p_alignment_algorithm,
@@ -991,7 +991,7 @@ export {
     }
 
     // =============================================================================
-    // — from-sequence cascade leaf and traits
+    // From-sequence cascade leaf and traits
     // =============================================================================
     //
     // `minimap_port` uses one `dispatch_chain<...>::run<>(...)` over

@@ -57,17 +57,15 @@ export {
     namespace bioseq::simd::pipe {
 
     // =============================================================================
-    //  /  — value_sequence (non-type parameter pack carrier)
+    // value_sequence non-type parameter-pack carrier
     // =============================================================================
-    //
-    // `value_sequence<p_type, p_values...>` lives in `bioseq.common.templating` (
-    //); re-exported here so the existing bioseq.pipeline.pipe module body keeps the
-    // unqualified name. See
+    // Re-export the shared carrier so pipeline call sites retain its unqualified
+    // name.
 
     using ::bioseq::common::templating::value_sequence;
 
     // =============================================================================
-    // — minimizer_layout-driven p_bucket_width bucket derivation
+    // minimizer_layout-driven p_bucket_width derivation
     // =============================================================================
     //
     // The bucket list is computed at compile time from the per-p_kmer_size
@@ -283,7 +281,7 @@ export {
                   "the chain's default-value path expects them in sync.");
 
     // =============================================================================
-    // / — Low-level enum/value dispatch primitives
+    // Low-level enum/value dispatch primitives
     // =============================================================================
     //
     // The dispatch primitives live in `bioseq.common.templating` and are
@@ -294,7 +292,7 @@ export {
     using ::bioseq::common::templating::dispatch_smallest_not_less;
 
     // =============================================================================
-    // / — algorithm_enum_values registry + per-dim selectors
+    // algorithm_enum_values registry and per-dimension selectors
     // =============================================================================
     //
     // Each registry exposes:
@@ -471,7 +469,7 @@ export {
     } // namespace detail
 
     // =============================================================================
-    // / / — dispatch_chain primitive and step adapters
+    // dispatch_chain primitive and step adapters
     // =============================================================================
     //
     // The chain primitive and step adapters live in
@@ -508,17 +506,11 @@ export {
     } // namespace detail
 
     // =============================================================================
-    // — p_leaf types and traits aliases
+    // Leaf types and traits aliases
     // =============================================================================
-    //
-    // `pipeline_run_leaf` is the
-    // namespace-scope class template that bottoms out the runtime cascade.
-    // The specialized/fallback parameter branch lives inside the leaf body.
-    //
-    // `pipeline_run_traits::leaf` is the
-    // alias-template wrapper exposing the leaf as an NTTP-only `template
-    // <auto...> class` view — the shape `dispatch_chain` requires for its
-    // `template <auto...> class p_leaf` template-template parameter.
+    // `pipeline_run_leaf` terminates the runtime cascade and selects the
+    // specialized or fallback parameter branch. `pipeline_run_traits::leaf`
+    // exposes it in the NTTP-only form required by `dispatch_chain`.
 
     } // namespace bioseq::simd::pipe
 

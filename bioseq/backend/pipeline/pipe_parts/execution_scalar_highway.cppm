@@ -86,9 +86,8 @@ export {
         bioseq::storage::lazy_sequence_view<p_alphabet> query_seq_;
         int32_t runtime_w;
         int32_t runtime_k;
-        // — runtime flags so the Vulkan kernel can gate on
-        // `vulkan_enabled` without touching runtime when Vulkan is off. CPU kernels
-        // ignore it.
+        // Runtime parameters let the Vulkan kernel inspect `vulkan_enabled`;
+        // CPU kernels ignore them.
         ::bioseq::simd::minimap2_parameters params;
         match_result_collection* stats_dst = nullptr;
         match_result_collection* host_timing_dst = nullptr;
@@ -116,7 +115,7 @@ export {
             // than k is valid and naturally emits an empty minimizer batch.
             require_representable_minimizer_query_length<p_minimizer>(query_seq_.bp_size());
 
-            // — device-minimizer path: only the Vulkan kernel exposes
+            // Only the Vulkan kernel exposes the device-minimizer
             // `call_result`. When it returns a result, copy the host minimizers into
             // the arena slab and forward the resident device span as stage-local
             // metadata so seed_hit_stage can skip a second query-minimizer upload.
@@ -268,8 +267,8 @@ export {
             algo.computed_properties = p_kernel::template static_properties<p_aligner_parameters>();
             algo.highway_kernels = detail::stage_highway_kernels<p_kernel>();
             desc.algorithm = std::move(algo);
-            // Reserve target for the sketch arena slab (
-            // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
+            // Reserve the estimated sketch count for the arena slab. `query_seq_`
+            // is borrowed; on
             // the describe path the proto is empty so bp_size() is zero — which
             // still yields the +64 safety margin from `estimated_sketch_count`.
             desc.estimated_batch_size = detail::estimated_sketch_count(
@@ -298,8 +297,8 @@ export {
         template <is_constexpr_aligner_params p_aligner_parameters, class p_batch, class p_sink>
         [[gnu::always_inline]]
         emitted_token<p_sink> process(p_batch&& sketches, emit_token<p_sink>&& token) {
-            // /  — whole in-memory targets keep pointer
-            // identity (`{}`); segmented recompute/assembly passes a nonzero
+            // Whole in-memory targets keep pointer identity (`{}`); segmented
+            // recompute/assembly passes a nonzero
             // identity so a reused stack index object cannot alias another segment
             // in the GPU resident cache.
             if constexpr (is_minimizer_batch_view_v<p_batch>) {

@@ -643,7 +643,7 @@ export {
         auto _scope = bioseq::instrumentation::region(_desc);
         const sequence_size_t target_len = target_seq.bp_size();
         minimizer_hashmap_fragment_index target_index;
-        // — for the Stage C leaf with the GPU index build active, leave
+        // For the Stage C leaf with GPU index build active, leave
         // the CPU index empty; `pipeline_run_impl_batch` must build it on the
         // device. This is the line that removes the XXL_HIFI
         // `target_index_build` bottleneck from the GPU row.
@@ -1065,7 +1065,7 @@ export {
     }
 
     // =============================================================================
-    // / — sketch leaf and helpers
+    // Sketch leaf and helpers
     // =============================================================================
     //
     // Target and query minimizer sketching use these shared components:

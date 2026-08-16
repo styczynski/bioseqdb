@@ -377,7 +377,7 @@ export {
         return minimizer_sketch_backend::scalar;
     }
 
-    //  — segment GEOMETRY. The minimap_sketch_data position field is 28 bits
+    // Segment geometry. The minimap_sketch_data position field is 28 bits
     // (minimizer_representation<28,15>), so a segment's COLLECTED span — core + an overlap on
     // each side — must stay within that field, or the global position handed back by
     // `add_position_offset` would be silently masked by the packing ctor
@@ -471,8 +471,8 @@ export {
                                                                    : k_segment_min_bp;
     }
 
-    // — the segment geometry of `minimap_port_segmented`, extracted
-    // so `dispatch_buffer`'s stored-index assemble loop reuses the EXACT recompute
+    // Share `minimap_port_segmented` geometry with `dispatch_buffer`'s
+    // stored-index assembly loop so it reuses the exact recompute
     // geometry. NOT a pure function of its args: it reads the runtime budget via
     // `segment_bp_from_budget()` exactly as recompute does. Each entry covers a
     // segment's overlapped collection range `[cs_u, ce_u)` (in units) and its core

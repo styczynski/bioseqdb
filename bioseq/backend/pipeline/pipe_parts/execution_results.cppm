@@ -228,7 +228,7 @@ export {
         // per-query pipeline borrows this immutable typed binding.
         const auto& alignment_kernels = detail::resolve_alignment_kernels<p_alphabet>(params);
 
-        /// — one GPU index cache for the whole batch wave, shared
+        /// One GPU index cache for the whole batch wave, shared
         // across queries that look up the same target index. When a Vulkan seed
         // path is selected, runtime/device failure is reported before scalar work
         // can masquerade as a GPU row.
@@ -250,7 +250,7 @@ export {
                 ? external_gpu_index_cache
                 : (owned_gpu_index_cache ? &*owned_gpu_index_cache : nullptr);
 
-        /// — build the target minimizer index on the GPU and inject
+        /// Build the target minimizer index on the GPU and inject
         // it into the wave cache under the key the seed_hit_stage will compute, so the
         // CPU `minimizer_hashmap_fragment_index` build (skipped upstream in
         // `minimap2_port` for this leaf) is never paid. If the device build declines
