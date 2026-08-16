@@ -4758,6 +4758,71 @@ class PackageReleaseWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
+    def parsed_trigger_contract(self) -> tuple[set[str], list[str]]:
+        """Parse the small workflow trigger mapping without a YAML dependency."""
+        lines = self.workflow.splitlines()
+        trigger_start = lines.index('"on":')
+        trigger_lines: list[str] = []
+        for line in lines[trigger_start + 1:]:
+            if line and not line.startswith("  "):
+                break
+            trigger_lines.append(line)
+        events = {
+            match.group(1)
+            for line in trigger_lines
+            if (match := re.fullmatch(r"  ([a-z_]+):", line)) is not None
+        }
+        push_start = trigger_lines.index("  push:")
+        push_lines: list[str] = []
+        for line in trigger_lines[push_start + 1:]:
+            if re.fullmatch(r"  [a-z_]+:", line):
+                break
+            push_lines.append(line)
+        branches = [
+            match.group(1)
+            for line in push_lines
+            if (match := re.fullmatch(r"      - ([A-Za-z0-9_./-]+)", line))
+            is not None
+        ]
+        return events, branches
+
+    def job_condition(self) -> str:
+        lines = self.workflow.splitlines()
+        start = lines.index("    if: >-")
+        body: list[str] = []
+        for line in lines[start + 1:]:
+            if line and not line.startswith("      "):
+                break
+            if line:
+                body.append(line.strip())
+        return " ".join(body)
+
+    def evaluate_job_condition(
+        self, *, event_name: str, ref: str, head_message: str = ""
+    ) -> bool:
+        """Evaluate the workflow's deliberately narrow GitHub expression."""
+        expression = self.job_condition()
+        expression = re.sub(
+            r"github\.event_name == '([^']+)'",
+            lambda match: str(event_name == match.group(1)),
+            expression,
+        )
+        expression = re.sub(
+            r"github\.ref == '([^']+)'",
+            lambda match: str(ref == match.group(1)),
+            expression,
+        )
+        expression = re.sub(
+            r"contains\(github\.event\.head_commit\.message, '([^']+)'\)",
+            lambda match: str(match.group(1) in head_message),
+            expression,
+        )
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        compact = re.sub(r"\s+", "", expression)
+        tokens = re.findall(r"True|False|and|or|\(|\)", compact)
+        self.assertEqual("".join(tokens), compact)
+        return bool(eval(expression, {"__builtins__": {}}, {}))
+
     def step_script(self, name: str) -> str:
         lines = self.workflow.splitlines()
         start = lines.index(f"      - name: {name}")
@@ -4833,6 +4898,11 @@ elif args[:2] == ["release", "view"]:
         query = args[args.index("--jq") + 1]
         if query == ".isDraft":
             print("true" if state["draft"] else "false")
+        elif query == "[.isDraft, .isPrerelease, .name] | @tsv":
+            print(
+                f"{{str(state['draft']).lower()}}\t"
+                f"{{str(state['prerelease']).lower()}}\t{{state['name']}}"
+            )
         elif query == ".assets | length":
             print(len(state["assets"]))
         else:
@@ -4861,6 +4931,9 @@ elif args[:2] == ["release", "edit"]:
 elif args[:2] == ["release", "create"]:
     state["exists"] = True
     state["draft"] = True
+    state["prerelease"] = "--prerelease" in args
+    state["name"] = args[args.index("--title") + 1]
+    state["tag_target"] = os.environ["GITHUB_SHA"]
     record("create")
 else:
     raise SystemExit(f"unsupported gh invocation: {{args}}")
@@ -4875,6 +4948,10 @@ save()
         *,
         draft: bool,
         corrupt_upload: bool = False,
+        exists: bool = True,
+        expected_prerelease: bool = True,
+        release_prerelease: bool | None = None,
+        release_name: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], set[str]]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4892,21 +4969,38 @@ save()
             fake_python.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
             fake_python.chmod(0o755)
             revision = "a" * 40
+            short_revision = revision[:12]
+            expected_title = (
+                "Bioseq native packages "
+                f"{package_builder.EXPECTED_PACKAGE_VERSION} ({short_revision})"
+            )
+            if expected_prerelease:
+                expected_title += " [refactor validation]"
+            if release_prerelease is None:
+                release_prerelease = expected_prerelease
+            if release_name is None:
+                release_name = expected_title
             state_path = root / "gh-state.json"
             state_path.write_text(
                 json.dumps(
                     {
-                        "exists": True,
+                        "exists": exists,
                         "draft": draft,
-                        "tag_target": revision,
+                        "prerelease": release_prerelease,
+                        "name": release_name,
+                        "tag_target": revision if exists else "",
                         "release_id": 77,
-                        "assets": [
-                            {
-                                "id": 9,
-                                "name": "stale-extra.bin",
-                                "digest": "sha256:" + "f" * 64,
-                            }
-                        ],
+                        "assets": (
+                            [
+                                {
+                                    "id": 9,
+                                    "name": "stale-extra.bin",
+                                    "digest": "sha256:" + "f" * 64,
+                                }
+                            ]
+                            if exists
+                            else []
+                        ),
                         "next_id": 100,
                         "corrupt_upload": corrupt_upload,
                         "calls": [],
@@ -4920,8 +5014,15 @@ save()
                 "RUNNER_TEMP": str(root),
                 "PACKAGE_VERSION": package_builder.EXPECTED_PACKAGE_VERSION,
                 "GITHUB_SHA": revision,
+                "GITHUB_REF": (
+                    "refs/heads/refactor/start-massive-refactor"
+                    if expected_prerelease
+                    else "refs/heads/main"
+                ),
                 "GITHUB_REPOSITORY": "bioseq/repository",
                 "GH_STATE": str(state_path),
+                "RELEASE_PRERELEASE": str(expected_prerelease).lower(),
+                "RELEASE_TITLE": expected_title,
             }
             completed = subprocess.run(
                 [
@@ -4937,10 +5038,55 @@ save()
             state = json.loads(state_path.read_text(encoding="utf-8"))
             return completed, state, expected_names
 
-    def test_workflow_is_main_only_serial_and_exact_revision_bound(self) -> None:
-        self.assertIn("branches:\n      - main", self.workflow)
-        self.assertIn("if: github.ref == 'refs/heads/main'", self.workflow)
-        self.assertIn("group: bioseq-native-package-release-main", self.workflow)
+    def test_workflow_trigger_contract_gates_the_paid_refactor_lane(self) -> None:
+        events, branches = self.parsed_trigger_contract()
+        self.assertEqual(events, {"push", "workflow_dispatch"})
+        self.assertEqual(
+            branches, ["main", "refactor/start-massive-refactor"]
+        )
+        cases = (
+            ("push", "refs/heads/main", "ordinary", True),
+            (
+                "push",
+                "refs/heads/refactor/start-massive-refactor",
+                "ordinary refactor commit",
+                False,
+            ),
+            (
+                "push",
+                "refs/heads/refactor/start-massive-refactor",
+                "Validate native packages [package-release]",
+                True,
+            ),
+            (
+                "push",
+                "refs/heads/refactor/start-massive-refactor",
+                "[PACKAGE-RELEASE] is not the exact marker",
+                False,
+            ),
+            ("workflow_dispatch", "refs/heads/main", "", True),
+            (
+                "workflow_dispatch",
+                "refs/heads/refactor/start-massive-refactor",
+                "",
+                True,
+            ),
+            ("workflow_dispatch", "refs/heads/unrelated", "", False),
+            ("pull_request", "refs/heads/main", "[package-release]", False),
+        )
+        for event_name, ref, head_message, expected in cases:
+            with self.subTest(event_name=event_name, ref=ref, message=head_message):
+                self.assertEqual(
+                    self.evaluate_job_condition(
+                        event_name=event_name,
+                        ref=ref,
+                        head_message=head_message,
+                    ),
+                    expected,
+                )
+
+    def test_workflow_is_globally_serial_and_exact_revision_bound(self) -> None:
+        self.assertIn("group: bioseq-native-package-release", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("timeout-minutes: 360", self.workflow)
         self.assertIn("timeout-minutes: 270", self.workflow)
@@ -5090,6 +5236,46 @@ save()
         )
         self.assertEqual(len(state["assets"]), 15)
         self.assertEqual(state["calls"], ["delete:9", "upload", "publish"])
+
+    def test_new_release_uses_the_ref_specific_prerelease_contract(self) -> None:
+        for expected_prerelease in (False, True):
+            with self.subTest(prerelease=expected_prerelease):
+                completed, state, expected_names = self.run_release_step(
+                    draft=True,
+                    exists=False,
+                    expected_prerelease=expected_prerelease,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertFalse(state["draft"])
+                self.assertEqual(state["prerelease"], expected_prerelease)
+                self.assertEqual(
+                    state["name"].endswith("[refactor validation]"),
+                    expected_prerelease,
+                )
+                self.assertEqual(
+                    {asset["name"] for asset in state["assets"]},
+                    expected_names,
+                )
+                self.assertEqual(
+                    state["calls"], ["create", "upload", "publish"]
+                )
+
+    def test_foreign_or_wrong_channel_draft_refuses_all_mutation(self) -> None:
+        for overrides in (
+            {"release_prerelease": False},
+            {"release_name": "Unrelated draft"},
+        ):
+            with self.subTest(overrides=overrides):
+                completed, state, _expected_names = self.run_release_step(
+                    draft=True, **overrides
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertTrue(state["draft"])
+                self.assertEqual(
+                    [asset["name"] for asset in state["assets"]],
+                    ["stale-extra.bin"],
+                )
+                self.assertEqual(state["calls"], [])
 
     def test_stale_draft_digest_mismatch_remains_unpublished(self) -> None:
         completed, state, expected_names = self.run_release_step(

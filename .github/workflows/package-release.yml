@@ -1,16 +1,22 @@
 name: Native package release
 
-on:
+"on":
   push:
     branches:
       - main
+      # Expensive validation runs on this branch require the exact marker in
+      # the head commit message; ordinary refactor pushes only record a
+      # skipped workflow run.
+      - refactor/start-massive-refactor
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: bioseq-native-package-release-main
+  # Both refs reuse the same two native builders, so serialize them globally.
+  # A release already being uploaded must never be cancelled by a newer push.
+  group: bioseq-native-package-release
   cancel-in-progress: false
 
 env:
@@ -20,12 +26,19 @@ env:
 
 jobs:
   package-release:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/refactor/start-massive-refactor' &&
+       contains(github.event.head_commit.message, '[package-release]')) ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/refactor/start-massive-refactor'))
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Check out the exact main commit
+      - name: Check out the exact release commit
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -42,7 +55,24 @@ jobs:
             > "$RUNNER_TEMP/package-matrix.json"
           package_version=$(jq -r .package_version "$RUNNER_TEMP/package-matrix.json")
           [[ "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          short_sha=${GITHUB_SHA:0:12}
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              release_prerelease=false
+              release_title="Bioseq native packages ${package_version} (${short_sha})"
+              ;;
+            refs/heads/refactor/start-massive-refactor)
+              release_prerelease=true
+              release_title="Bioseq native packages ${package_version} (${short_sha}) [refactor validation]"
+              ;;
+            *)
+              printf 'unsupported package release ref: %s\n' "$GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
           printf 'PACKAGE_VERSION=%s\n' "$package_version" >> "$GITHUB_ENV"
+          printf 'RELEASE_PRERELEASE=%s\n' "$release_prerelease" >> "$GITHUB_ENV"
+          printf 'RELEASE_TITLE=%s\n' "$release_title" >> "$GITHUB_ENV"
 
       - name: Reuse an already published exact-commit release
         timeout-minutes: 10
@@ -65,8 +95,13 @@ jobs:
             exit 0
           fi
           test "$tag_target" = "$GITHUB_SHA"
-          draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-            --json isDraft --jq .isDraft)
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
           if [[ "$draft" = true ]]; then
             exit 0
           fi
@@ -175,12 +210,20 @@ jobs:
           set -Eeuo pipefail
           short_sha=${GITHUB_SHA:0:12}
           tag="bioseq-packages-v${PACKAGE_VERSION}-${short_sha}"
-          title="Bioseq native packages ${PACKAGE_VERSION} (${short_sha})"
           notes="$RUNNER_TEMP/release-notes.md"
-          printf '%s\n' \
-            "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
-            "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
-            "Source commit: ${GITHUB_SHA}" > "$notes"
+          if [[ "$RELEASE_PRERELEASE" = true ]]; then
+            printf '%s\n' \
+              "Validation prerelease for refactor/start-massive-refactor." \
+              "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
+              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
+              "Source commit: ${GITHUB_SHA}" > "$notes"
+          else
+            test "$RELEASE_PRERELEASE" = false
+            printf '%s\n' \
+              "Native PostgreSQL 17 packages for the repository-declared distro and architecture matrix." \
+              "Tag convention: bioseq-packages-v<package-version>-<12-character-source-SHA>." \
+              "Source commit: ${GITHUB_SHA}" > "$notes"
+          fi
           python3 infra/package_builder.py verify-release-assets \
             --asset-dir "$RUNNER_TEMP/release-assets" \
             --expected-revision "$GITHUB_SHA"
@@ -212,19 +255,30 @@ jobs:
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             test "$tag_target" = "$GITHUB_SHA"
-            draft=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-              --json isDraft --jq .isDraft)
+            IFS=$'\t' read -r draft prerelease release_title < <(
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                --json isDraft,isPrerelease,name \
+                --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+            )
+            test "$prerelease" = "$RELEASE_PRERELEASE"
+            test "$release_title" = "$RELEASE_TITLE"
             if [[ "$draft" = false ]]; then
               verify_assets
               exit 0
             fi
           else
+            release_flags=(--draft)
+            if [[ "$RELEASE_PRERELEASE" = true ]]; then
+              release_flags+=(--prerelease)
+            else
+              test "$RELEASE_PRERELEASE" = false
+            fi
             gh release create "$tag" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "$title" \
+              --title "$RELEASE_TITLE" \
               --notes-file "$notes" \
-              --draft
+              "${release_flags[@]}"
           fi
 
           # Converge a retryable draft to the exact local asset set. Deletion is
@@ -237,6 +291,14 @@ jobs:
             -H "X-GitHub-Api-Version: 2026-03-10" \
             --jq ".[] | select(.ref == \"refs/tags/$tag\") | .object.sha")
           test "$tag_target" = "$GITHUB_SHA"
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$draft" = true
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
           release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
@@ -265,6 +327,15 @@ jobs:
           test "$observed" = "$expected"
           verify_assets
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false
+          IFS=$'\t' read -r draft prerelease release_title < <(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,name \
+              --jq '[.isDraft, .isPrerelease, .name] | @tsv'
+          )
+          test "$draft" = false
+          test "$prerelease" = "$RELEASE_PRERELEASE"
+          test "$release_title" = "$RELEASE_TITLE"
+          verify_assets
 
       - name: Revoke access and stop only quiescent owned builders (always)
         if: always()
