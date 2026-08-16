@@ -15,15 +15,8 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
 
-using bioseq::postgres::support::allocate_zeroed_array;
-using bioseq::postgres::support::allocate_zeroed_object;
-using bioseq::postgres::support::allocate_zeroed_storage;
 using bioseq::postgres::support::memory_context_scope;
-using bioseq::postgres::support::pg_expression_walk_cursor;
-using bioseq::postgres::support::pg_node_view;
-using bioseq::postgres::support::pg_walk_step;
 using bioseq::postgres::support::postgres_list;
-using bioseq::postgres::support::walk_pg_expression_including_root;
 
 import :support;
 

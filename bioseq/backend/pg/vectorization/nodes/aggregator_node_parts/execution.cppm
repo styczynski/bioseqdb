@@ -15,16 +15,6 @@ import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
 
-using bioseq::postgres::support::allocate_zeroed_array;
-using bioseq::postgres::support::allocate_zeroed_object;
-using bioseq::postgres::support::allocate_zeroed_storage;
-using bioseq::postgres::support::memory_context_scope;
-using bioseq::postgres::support::pg_expression_walk_cursor;
-using bioseq::postgres::support::pg_node_view;
-using bioseq::postgres::support::pg_walk_step;
-using bioseq::postgres::support::postgres_list;
-using bioseq::postgres::support::walk_pg_expression_including_root;
-
 import :support;
 import :transitions;
 import :hash_runtime;
@@ -45,20 +35,20 @@ static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggrega
  */
 export TupleTableSlot* execute_aggregate_plan(PlanState* plan_state) {
     vector_aggregate_state* vector_state = reinterpret_cast<vector_aggregate_state*>(plan_state);
-    AggState* node = vector_state->aggregate_state;
+    AggState* aggregate_state = vector_state->aggregate_state;
     TupleTableSlot* result = nullptr;
 
     CHECK_FOR_INTERRUPTS();
 
-    if (!node->agg_done) {
+    if (!aggregate_state->agg_done) {
         /* Dispatch based on strategy */
-        switch (node->phase->aggstrategy) {
+        switch (aggregate_state->phase->aggstrategy) {
         case AGG_HASHED:
-            if (!node->table_filled)
-                fill_aggregate_hash_table(node);
+            if (!aggregate_state->table_filled)
+                fill_aggregate_hash_table(aggregate_state);
             /* FALLTHROUGH */
         case AGG_MIXED:
-            result = retrieve_aggregate_hash_table(node);
+            result = retrieve_aggregate_hash_table(aggregate_state);
             break;
         case AGG_PLAIN:
         case AGG_SORTED:
@@ -73,12 +63,10 @@ export TupleTableSlot* execute_aggregate_plan(PlanState* plan_state) {
     return nullptr;
 }
 
-/**
- * execute_aggregate_plan for non-hashed case
- */
+/** Retrieves the next result from sorted or plain aggregation. */
 static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_state) {
     AggState* aggregate_state = vector_state->aggregate_state;
-    Agg* node = aggregate_state->phase->aggnode;
+    Agg* aggregate_plan = aggregate_state->phase->aggnode;
     ExprContext* expression_context;
     ExprContext* temporary_context;
     AggStatePerAgg aggregate_descriptor;
@@ -86,12 +74,11 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
     TupleTableSlot* outer_slot = nullptr;
     TupleTableSlot* first_slot;
     TupleTableSlot* result;
-    bool has_grouping_sets = aggregate_state->phase->numsets > 0;
+    const bool has_grouping_sets = aggregate_state->phase->numsets > 0;
     int grouping_set_count = std::max(aggregate_state->phase->numsets, 1);
     int current_set;
     int next_set_size;
     int reset_count;
-    int i;
 
     /**
      * Selects the output and input expression contexts for sorted aggregation.
@@ -104,7 +91,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
     first_slot = aggregate_state->ss.ss_ScanTupleSlot;
 
     /**
-     * Advances until a group satisfies the node qualification.
+     * Advances until a group satisfies the aggregate qualification.
      */
     while (!aggregate_state->agg_done) {
         bool first_input_is_vector = false;
@@ -128,22 +115,23 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
          * Resets contexts from the old phase before initializing the new phase.
          */
 
-        for (i = 0; i < reset_count; i++) {
-            ReScanExprContext(aggregate_state->aggcontexts[i]);
+        for (int grouping_context_index = 0; grouping_context_index < reset_count;
+             ++grouping_context_index) {
+            ReScanExprContext(aggregate_state->aggcontexts[grouping_context_index]);
         }
 
         /**
          * Check if input is complete and there are no more groups to project
          * in this phase. Move to next phase or mark as done.
          */
-        if (aggregate_state->input_done == true &&
+        if (aggregate_state->input_done &&
             aggregate_state->projected_set >= (grouping_set_count - 1)) {
             if (aggregate_state->current_phase < aggregate_state->numphases - 1) {
                 initialize_phase(aggregate_state, aggregate_state->current_phase + 1);
                 aggregate_state->input_done = false;
                 aggregate_state->projected_set = -1;
                 grouping_set_count = std::max(aggregate_state->phase->numsets, 1);
-                node = aggregate_state->phase->aggnode;
+                aggregate_plan = aggregate_state->phase->aggnode;
                 reset_count = grouping_set_count;
             } else if (aggregate_state->aggstrategy == AGG_MIXED) {
                 /**
@@ -178,7 +166,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
          */
         temporary_context->ecxt_innertuple = expression_context->ecxt_outertuple;
         if (aggregate_state->input_done ||
-            (node->aggstrategy != AGG_PLAIN && aggregate_state->projected_set != -1 &&
+            (aggregate_plan->aggstrategy != AGG_PLAIN && aggregate_state->projected_set != -1 &&
              aggregate_state->projected_set < (grouping_set_count - 1) && next_set_size > 0 &&
              !ExecQualAndReset(aggregate_state->phase->eqfunctions[next_set_size - 1],
                                temporary_context))) {
@@ -201,7 +189,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                 if (!TupIsNull(outer_slot)) {
                     first_input_is_vector = is_vector_tuple_table_slot(outer_slot);
                     if (first_input_is_vector) {
-                        if (node->aggstrategy != AGG_PLAIN) {
+                        if (aggregate_plan->aggstrategy != AGG_PLAIN) {
                             ereport(ERROR,
                                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                                      errmsg("VectorAgg supports only plain aggregation")));
@@ -236,7 +224,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                     } else {
                         aggregate_state->agg_done = true;
                         /* If we are grouping, we should produce no tuples too */
-                        if (node->aggstrategy != AGG_PLAIN)
+                        if (aggregate_plan->aggstrategy != AGG_PLAIN)
                             return nullptr;
                     }
                 }
@@ -282,8 +270,6 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                     /* Advance the aggregates (or combine functions) */
                     advance_aggregates(aggregate_state);
 
-                    int transition_index;
-
                     current_set = aggregate_state->projected_set;
 
                     prepare_projection_slot(
@@ -291,8 +277,8 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
 
                     select_current_set(aggregate_state, current_set, false);
 
-                    for (transition_index = 0; transition_index < aggregate_state->numtrans;
-                         transition_index++) {
+                    for (int transition_index = 0; transition_index < aggregate_state->numtrans;
+                         ++transition_index) {
                         AggStatePerTrans transition_state =
                             &aggregate_state->pertrans[transition_index];
                         AggStatePerGroup per_group_state;
@@ -335,10 +321,11 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
                      * If we are grouping, check whether we've crossed a group
                      * boundary.
                      */
-                    if (node->aggstrategy != AGG_PLAIN) {
+                    if (aggregate_plan->aggstrategy != AGG_PLAIN) {
                         temporary_context->ecxt_innertuple = first_slot;
-                        if (!ExecQual(aggregate_state->phase->eqfunctions[node->numCols - 1],
-                                      temporary_context)) {
+                        if (!ExecQual(
+                                aggregate_state->phase->eqfunctions[aggregate_plan->numCols - 1],
+                                temporary_context)) {
                             aggregate_state->grp_firstTuple = ExecCopySlotHeapTuple(outer_slot);
                             break;
                         }
@@ -376,9 +363,7 @@ static TupleTableSlot* retrieve_direct_aggregate(vector_aggregate_state* vector_
     return nullptr;
 }
 
-/**
- * execute_aggregate_plan for hashed case: read input and build hash table
- */
+/** Consumes the child plan into the initial aggregate hash tables. */
 static void fill_aggregate_hash_table(AggState* aggregate_state) {
     TupleTableSlot* outer_slot;
     ExprContext* temporary_context = aggregate_state->tmpcontext;
@@ -480,25 +465,26 @@ static bool refill_aggregate_hash_table(AggState* aggregate_state) {
         TupleTableSlot* spill_slot = aggregate_state->hash_spill_rslot;
         TupleTableSlot* hash_slot = hash_state->hashslot;
         TupleHashEntry entry;
-        MinimalTuple tuple;
-        uint32_t hash;
-        bool isnew = false;
-        bool* p_isnew = aggregate_state->hash_spill_mode ? nullptr : &isnew;
+        MinimalTuple spilled_tuple;
+        uint32_t hash_value;
+        bool entry_is_new = false;
+        bool* const entry_is_new_out = aggregate_state->hash_spill_mode ? nullptr : &entry_is_new;
 
         CHECK_FOR_INTERRUPTS();
 
-        tuple = read_hash_aggregate_batch(batch, &hash);
-        if (tuple == nullptr)
+        spilled_tuple = read_hash_aggregate_batch(batch, &hash_value);
+        if (spilled_tuple == nullptr)
             break;
 
-        ExecStoreMinimalTuple(tuple, spill_slot, true);
+        ExecStoreMinimalTuple(spilled_tuple, spill_slot, true);
         aggregate_state->tmpcontext->ecxt_outertuple = spill_slot;
 
         prepare_hash_slot(hash_state, aggregate_state->tmpcontext->ecxt_outertuple, hash_slot);
-        entry = LookupTupleHashEntryHash(hash_state->hashtable, hash_slot, p_isnew, hash);
+        entry = LookupTupleHashEntryHash(
+            hash_state->hashtable, hash_slot, entry_is_new_out, hash_value);
 
         if (entry != nullptr) {
-            if (isnew)
+            if (entry_is_new)
                 initialize_hash_entry(aggregate_state, hash_state->hashtable, entry);
             aggregate_state->hash_pergroup[batch->set_index] = static_cast<AggStatePerGroupData*>(
                 bioseq_tuple_hash_entry_additional(hash_state->hashtable, entry));
@@ -517,7 +503,7 @@ static bool refill_aggregate_hash_table(AggState* aggregate_state) {
                                                 aggregate_state->hashentrysize);
             }
             /* no memory for a new group, spill */
-            spill_hash_aggregate_tuple(aggregate_state, &spill, spill_slot, hash);
+            spill_hash_aggregate_tuple(aggregate_state, &spill, spill_slot, hash_value);
 
             aggregate_state->hash_pergroup[batch->set_index] = nullptr;
         }
@@ -604,7 +590,6 @@ static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggrega
      */
     for (;;) {
         TupleTableSlot* hash_slot = hash_state->hashslot;
-        int i;
 
         CHECK_FOR_INTERRUPTS();
 
@@ -613,7 +598,7 @@ static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggrega
          */
         entry = ScanTupleHashTable(hash_state->hashtable, &hash_state->hashiter);
         if (entry == nullptr) {
-            int next_set = aggregate_state->current_set + 1;
+            const int next_set = aggregate_state->current_set + 1;
 
             if (next_set < aggregate_state->num_hashes) {
                 /**
@@ -647,11 +632,12 @@ static TupleTableSlot* retrieve_aggregate_hash_table_in_memory(AggState* aggrega
         ExecClearTuple(first_slot);
         memset(first_slot->tts_isnull, true, first_slot->tts_tupleDescriptor->natts * sizeof(bool));
 
-        for (i = 0; i < hash_state->numhashGrpCols; i++) {
-            int variable_index = hash_state->hashGrpColIdxInput[i] - 1;
+        for (int hash_column_index = 0; hash_column_index < hash_state->numhashGrpCols;
+             ++hash_column_index) {
+            const int variable_index = hash_state->hashGrpColIdxInput[hash_column_index] - 1;
 
-            first_slot->tts_values[variable_index] = hash_slot->tts_values[i];
-            first_slot->tts_isnull[variable_index] = hash_slot->tts_isnull[i];
+            first_slot->tts_values[variable_index] = hash_slot->tts_values[hash_column_index];
+            first_slot->tts_isnull[variable_index] = hash_slot->tts_isnull[hash_column_index];
         }
         ExecStoreVirtualTuple(first_slot);
 
