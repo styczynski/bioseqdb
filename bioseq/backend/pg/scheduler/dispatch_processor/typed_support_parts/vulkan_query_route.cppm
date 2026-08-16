@@ -223,7 +223,7 @@ void prepare_vulkan_query_route(
                 throw bioseq::gpu::vulkan::vulkan_runtime_error(
                     "Vulkan source facade metadata is invalid");
             }
-            auto* owner = bioseq::postgres::support::invoke_pg_as_cpp(
+            auto* source_owner = bioseq::postgres::support::invoke_pg_as_cpp(
                 [scanner_pg_ctx, source_datum, descriptor] {
                     return ::make_pg_sequence_call_owner<gpu_row_alphabet>(
                         *scanner_pg_ctx->read_session, source_datum, descriptor);
@@ -231,7 +231,7 @@ void prepare_vulkan_query_route(
             const auto* observer =
                 query_operand ? std::addressof(scanner_pg_ctx->mmsearch_query_payload_observer)
                               : std::addressof(scanner_pg_ctx->mmsearch_target_payload_observer);
-            return owner->view().with_payload_allocation_observer(observer);
+            return source_owner->view().with_payload_allocation_observer(observer);
         };
         for (std::size_t row = 0u; row < batch_size; ++row) {
             const auto query_source = source_view_for_row(row, /*query_operand=*/true);

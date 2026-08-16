@@ -308,12 +308,12 @@ inline void with_source_provider_pg_locator(batch_processor::scanner_pg_context&
     }
 
     if (active_read_session != nullptr) {
-        auto* owner = bioseq::postgres::support::invoke_pg_as_cpp(
+        auto* sequence_owner = bioseq::postgres::support::invoke_pg_as_cpp(
             [active_read_session, promoted, descriptor] {
                 return ::make_pg_sequence_call_owner<p_alphabet>(
                     *active_read_session, promoted, descriptor);
             });
-        std::forward<p_function>(callback)(owner->view(), active_read_session);
+        std::forward<p_function>(callback)(sequence_owner->view(), active_read_session);
         return;
     }
 
@@ -322,12 +322,12 @@ inline void with_source_provider_pg_locator(batch_processor::scanner_pg_context&
             return ::begin_pg_sequence_read_session(parent_mctx);
         });
     try {
-        auto* owner =
+        auto* sequence_owner =
             bioseq::postgres::support::invoke_pg_as_cpp([local_session, promoted, descriptor] {
                 return ::make_pg_sequence_call_owner<p_alphabet>(
                     *local_session, promoted, descriptor);
             });
-        std::forward<p_function>(callback)(owner->view(), local_session);
+        std::forward<p_function>(callback)(sequence_owner->view(), local_session);
         bioseq::postgres::support::invoke_pg_as_cpp(
             [local_session] { ::finish_pg_sequence_read_session(local_session, true); });
     } catch (...) {
@@ -355,11 +355,11 @@ inline void with_pg_sequence_recipe(batch_processor::scanner_pg_context& context
     }
 
     if (context.read_session != nullptr) {
-        auto* owner = bioseq::postgres::support::invoke_pg_as_cpp(
+        auto* sequence_owner = bioseq::postgres::support::invoke_pg_as_cpp(
             [read_session = context.read_session, recipe, descriptor] {
                 return ::make_pg_sequence_call_owner<p_alphabet>(*read_session, recipe, descriptor);
             });
-        std::forward<p_function>(callback)(owner->view(), context.read_session);
+        std::forward<p_function>(callback)(sequence_owner->view(), context.read_session);
         return;
     }
 
@@ -368,12 +368,12 @@ inline void with_pg_sequence_recipe(batch_processor::scanner_pg_context& context
             return ::begin_pg_sequence_read_session(parent_mctx);
         });
     try {
-        auto* owner =
+        auto* sequence_owner =
             bioseq::postgres::support::invoke_pg_as_cpp([local_session, recipe, descriptor] {
                 return ::make_pg_sequence_call_owner<p_alphabet>(
                     *local_session, recipe, descriptor);
             });
-        std::forward<p_function>(callback)(owner->view(), local_session);
+        std::forward<p_function>(callback)(sequence_owner->view(), local_session);
         bioseq::postgres::support::invoke_pg_as_cpp(
             [local_session] { ::finish_pg_sequence_read_session(local_session, true); });
     } catch (...) {

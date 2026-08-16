@@ -422,10 +422,10 @@ try_materialize_target_for_segment_workers(
     }
 
     const std::uint64_t materialize_started_ns = dispatch_host_now_ns();
-    auto owner = bioseq::storage::materialize_packed_sequence(
+    auto resident_owner = bioseq::storage::materialize_packed_sequence(
         target_view, plan.from, plan.to, requested_width, std::move(*permit));
     const std::uint64_t materialize_elapsed_ns = elapsed_dispatch_host_ns(materialize_started_ns);
-    const auto& descriptor = owner.descriptor();
+    const auto& descriptor = resident_owner.descriptor();
     const std::uint64_t packed_bytes =
         static_cast<std::uint64_t>(descriptor.unit_count) * descriptor.storage_unit_width;
 
@@ -437,7 +437,7 @@ try_materialize_target_for_segment_workers(
         static_cast<unsigned long long>(packed_bytes),
         static_cast<unsigned long long>(materialize_elapsed_ns));
 
-    return resident_target_for_workers<p_alphabet>{std::move(owner)};
+    return resident_target_for_workers<p_alphabet>{std::move(resident_owner)};
 }
 
 } // namespace bioseq::simd::typed_dispatch::typed_support_detail
