@@ -572,6 +572,8 @@ export {
         }
     }
 
+    /* Genuine recursion cycle: the path clone owns unary nodes while its list helper
+     * owns Append/MergeAppend children, and each must call the other. */
     [[nodiscard]] Path* per_row_clone_path_to_helper_owner(PlannerInfo* root,
                                                            Path* path,
                                                            CustomPath* owner,

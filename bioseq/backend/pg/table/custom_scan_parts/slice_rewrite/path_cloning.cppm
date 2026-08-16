@@ -205,6 +205,8 @@ export {
      * immutable leaf paths and expression metadata.  This keeps Path traversal
      * structural and reserves PostgreSQL expression walkers/copying for actual
      * Expr/List nodes. */
+    /* Genuine recursion cycle: the path clone delegates Append/MergeAppend lists,
+     * whose elements recurse back through the path clone. */
     [[nodiscard]] Path* slice_project_clone_mutable_path_spine(Path* path);
 
     [[nodiscard]] List* slice_project_clone_path_list(List* paths) {

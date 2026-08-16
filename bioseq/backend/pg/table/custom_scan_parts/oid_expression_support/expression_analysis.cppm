@@ -113,6 +113,8 @@ export {
         return result;
     }
 
+    /* Genuine Query/Node walker recursion: the Query walker delegates nodes here,
+     * and nested Query nodes delegate back to the Query walker. */
     inline bool contains_volatile_sql_function_node(Node* node, void* context);
 
     [[nodiscard]] inline bool contains_volatile_sql_function_query(Query* query, void* context) {
@@ -144,6 +146,7 @@ export {
         return contains_volatile_sql_function_node(expression, nullptr);
     }
 
+    /* Genuine Query/Node walker recursion, mirroring the volatile-function walk. */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation);
 

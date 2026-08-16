@@ -301,6 +301,8 @@ export {
         return true;
     }
 
+    /* Genuine type-order cycle: the visitor calls this recursive list/RestrictInfo
+     * audit, while the audit constructs the visitor for all other node families. */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata);
 
     [[nodiscard]] bool per_row_path_metadata_node_is_walkable(const NodeTag tag) noexcept {
