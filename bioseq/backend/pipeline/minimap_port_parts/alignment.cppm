@@ -173,10 +173,10 @@ struct scalar_pipeline_execution_stats {
 [[nodiscard]] constexpr bool
 block_aligner_native_penalties_representable(const minimap2_parameters& params) noexcept {
     return params.gap_open1 > 0 && params.gap_ext1 > 0 &&
-           params.gap_open1 <= std::numeric_limits<int8_t>::max() &&
-           params.gap_ext1 <= std::numeric_limits<int8_t>::max() &&
+           params.gap_open1 <= std::numeric_limits<std::int8_t>::max() &&
+           params.gap_ext1 <= std::numeric_limits<std::int8_t>::max() &&
            params.gap_open1 + params.gap_ext1 <=
-               -static_cast<int>(std::numeric_limits<int8_t>::min());
+               -static_cast<int>(std::numeric_limits<std::int8_t>::min());
 }
 
 /// Project pipeline scoring parameters into one Block Aligner stage.
@@ -185,8 +185,8 @@ project_block_aligner_params(const minimap2_parameters& params,
                              block_alignment_stage stage) noexcept {
     const bool is_extension = stage != block_alignment_stage::gap_extension;
     return block_aligner_parameters{
-        .gap_open = static_cast<int8_t>(params.gap_open1),
-        .gap_extend = static_cast<int8_t>(params.gap_ext1),
+        .gap_open = static_cast<std::int8_t>(params.gap_open1),
+        .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
         .minimum_block_size = params.block_min_size,
         .maximum_block_size = params.block_max_size,
         .x_drop_threshold = is_extension ? params.zdrop : 0,
@@ -209,10 +209,10 @@ template <bool p_is_reversed, sequence_alphabet p_alphabet>
 [[nodiscard]] ksw_alignment_result
 ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                 bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                size_t query_start,
-                size_t query_end,
-                size_t target_start,
-                size_t target_end,
+                std::size_t query_start,
+                std::size_t query_end,
+                std::size_t target_start,
+                std::size_t target_end,
                 const scoring_matrix<p_alphabet>& scoring_matrix,
                 const alignment_kernels<p_alphabet>& alignment_kernels,
                 const minimap2_parameters& params,
@@ -234,8 +234,8 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
     }
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         const ksw_single_affine_parameters z2_params{
-            .gap_open = static_cast<int8_t>(params.gap_open1),
-            .gap_extend = static_cast<int8_t>(params.gap_ext1),
+            .gap_open = static_cast<std::int8_t>(params.gap_open1),
+            .gap_extend = static_cast<std::int8_t>(params.gap_ext1),
             .band_width = align_bandwidth,
             .z_drop = zdrop,
             .end_bonus = end_bonus,
@@ -252,10 +252,10 @@ ksw2_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                                                           z2_params);
     }
     const ksw_dual_affine_parameters d2_params{
-        .gap_open_short = static_cast<int8_t>(params.gap_open1),
-        .gap_extend_short = static_cast<int8_t>(params.gap_ext1),
-        .gap_open_long = static_cast<int8_t>(params.gap_open2),
-        .gap_extend_long = static_cast<int8_t>(params.gap_ext2),
+        .gap_open_short = static_cast<std::int8_t>(params.gap_open1),
+        .gap_extend_short = static_cast<std::int8_t>(params.gap_ext1),
+        .gap_open_long = static_cast<std::int8_t>(params.gap_open2),
+        .gap_extend_long = static_cast<std::int8_t>(params.gap_ext2),
         .band_width = align_bandwidth,
         .z_drop = zdrop,
         .end_bonus = end_bonus,
@@ -297,10 +297,10 @@ template <bool p_is_reversed,
 [[nodiscard]] ksw_alignment_result
 block_aligner_align_pair(bioseq::storage::lazy_sequence_view<p_alphabet> query_seq,
                          bioseq::storage::lazy_sequence_view<p_alphabet> target_seq,
-                         size_t query_start,
-                         size_t query_end,
-                         size_t target_start,
-                         size_t target_end,
+                         std::size_t query_start,
+                         std::size_t query_end,
+                         std::size_t target_start,
+                         std::size_t target_end,
                          const scoring_matrix<p_alphabet>& scoring_matrix,
                          const alignment_kernels<p_alphabet>& alignment_kernels,
                          const minimap2_parameters& params,
@@ -482,7 +482,7 @@ struct align_one_region {
     const scoring_matrix<p_alphabet>& scoring_matrix;
     const alignment_kernels<p_alphabet>& alignment_kernels;
     const minimap2_parameters& params;
-    int32_t align_bandwidth;
+    std::int32_t align_bandwidth;
 
     /**
      * Return exact edit accounting for one completed fill.
@@ -560,7 +560,7 @@ struct align_one_region {
     template <bool p_strand_reversed>
     [[gnu::always_inline]] void run(alignment_region& region,
                                     std::span<const anchor> anchors,
-                                    int32_t anchor_begin,
+                                    std::int32_t anchor_begin,
                                     std::int64_t seed_ref_start,
                                     std::int64_t seed_query_start,
                                     std::int64_t seed_ref_end,
@@ -583,10 +583,10 @@ struct align_one_region {
                 left_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq,
                     target_seq,
-                    static_cast<size_t>(outer_query_start),
-                    static_cast<size_t>(seed_query_start),
-                    static_cast<size_t>(outer_ref_start),
-                    static_cast<size_t>(seed_ref_start),
+                    static_cast<std::size_t>(outer_query_start),
+                    static_cast<std::size_t>(seed_query_start),
+                    static_cast<std::size_t>(outer_ref_start),
+                    static_cast<std::size_t>(seed_ref_start),
                     scoring_matrix,
                     alignment_kernels,
                     params,
@@ -596,10 +596,10 @@ struct align_one_region {
                 left_result = ksw2_align_pair<p_strand_reversed>(
                     query_seq,
                     target_seq,
-                    static_cast<size_t>(outer_query_start),
-                    static_cast<size_t>(seed_query_start),
-                    static_cast<size_t>(outer_ref_start),
-                    static_cast<size_t>(seed_ref_start),
+                    static_cast<std::size_t>(outer_query_start),
+                    static_cast<std::size_t>(seed_query_start),
+                    static_cast<std::size_t>(outer_ref_start),
+                    static_cast<std::size_t>(seed_ref_start),
                     scoring_matrix,
                     alignment_kernels,
                     params,
@@ -615,10 +615,10 @@ struct align_one_region {
                 append_cigar(region.cigar, left_result.cigar);
                 region.dp_score += left_result.max;
             }
-            const int32_t left_ref_offset =
+            const std::int32_t left_ref_offset =
                 left_result.has_reached_end ? left_result.mqe_t + 1 : left_result.max_t + 1;
             final_ref_start = seed_ref_start - left_ref_offset;
-            const int32_t left_query_offset = left_result.has_reached_end
+            const std::int32_t left_query_offset = left_result.has_reached_end
                                                   ? seed_query_start - outer_query_start
                                                   : left_result.max_q + 1;
             final_query_start = seed_query_start - left_query_offset;
@@ -644,7 +644,7 @@ struct align_one_region {
             bool packed_gap_plan_ready = false;
             final_ref_end = seed_ref_start;
             final_query_end = seed_query_start;
-            for (int32_t i = 1; i < region.seed_count; ++i) {
+            for (std::int32_t i = 1; i < region.seed_count; ++i) {
                 const anchor& cur_anchor = anchors[anchor_begin + i];
                 const std::int64_t qe = static_cast<std::int64_t>(cur_anchor.query_position) + 1;
                 const std::int64_t re = static_cast<std::int64_t>(cur_anchor.ref_position) + 1;
@@ -680,10 +680,10 @@ struct align_one_region {
                                 alignment_kernels.try_block_certified_gap(p_strand_reversed,
                                                                           query_seq,
                                                                           target_seq,
-                                                                          static_cast<size_t>(qs),
-                                                                          static_cast<size_t>(qe),
-                                                                          static_cast<size_t>(rs),
-                                                                          static_cast<size_t>(re),
+                                                                          static_cast<std::size_t>(qs),
+                                                                          static_cast<std::size_t>(qe),
+                                                                          static_cast<std::size_t>(rs),
+                                                                          static_cast<std::size_t>(re),
                                                                           packed_gap_plan);
                         }
                     }
@@ -727,10 +727,10 @@ struct align_one_region {
                         fill_result = block_aligner_align_pair<p_strand_reversed, false>(
                             query_seq,
                             target_seq,
-                            static_cast<size_t>(qs),
-                            static_cast<size_t>(qe),
-                            static_cast<size_t>(rs),
-                            static_cast<size_t>(re),
+                            static_cast<std::size_t>(qs),
+                            static_cast<std::size_t>(qe),
+                            static_cast<std::size_t>(rs),
+                            static_cast<std::size_t>(re),
                             scoring_matrix,
                             alignment_kernels,
                             params,
@@ -744,10 +744,10 @@ struct align_one_region {
                                                                p_enable_diagonal_certificate>(
                             query_seq,
                             target_seq,
-                            static_cast<size_t>(qs),
-                            static_cast<size_t>(qe),
-                            static_cast<size_t>(rs),
-                            static_cast<size_t>(re),
+                            static_cast<std::size_t>(qs),
+                            static_cast<std::size_t>(qe),
+                            static_cast<std::size_t>(rs),
+                            static_cast<std::size_t>(re),
                             scoring_matrix,
                             alignment_kernels,
                             params,
@@ -763,10 +763,10 @@ struct align_one_region {
                     ksw_alignment_result fill_result = ksw2_align_pair<p_strand_reversed>(
                         query_seq,
                         target_seq,
-                        static_cast<size_t>(qs),
-                        static_cast<size_t>(qe),
-                        static_cast<size_t>(rs),
-                        static_cast<size_t>(re),
+                        static_cast<std::size_t>(qs),
+                        static_cast<std::size_t>(qe),
+                        static_cast<std::size_t>(rs),
+                        static_cast<std::size_t>(re),
                         scoring_matrix,
                         alignment_kernels,
                         params,
@@ -814,10 +814,10 @@ struct align_one_region {
                 right_result = block_aligner_align_pair<p_strand_reversed>(
                     query_seq,
                     target_seq,
-                    static_cast<size_t>(seed_query_end),
-                    static_cast<size_t>(outer_query_end),
-                    static_cast<size_t>(seed_ref_end),
-                    static_cast<size_t>(outer_ref_end),
+                    static_cast<std::size_t>(seed_query_end),
+                    static_cast<std::size_t>(outer_query_end),
+                    static_cast<std::size_t>(seed_ref_end),
+                    static_cast<std::size_t>(outer_ref_end),
                     scoring_matrix,
                     alignment_kernels,
                     params,
@@ -827,10 +827,10 @@ struct align_one_region {
                 right_result =
                     ksw2_align_pair<p_strand_reversed>(query_seq,
                                                        target_seq,
-                                                       static_cast<size_t>(seed_query_end),
-                                                       static_cast<size_t>(outer_query_end),
-                                                       static_cast<size_t>(seed_ref_end),
-                                                       static_cast<size_t>(outer_ref_end),
+                                                       static_cast<std::size_t>(seed_query_end),
+                                                       static_cast<std::size_t>(outer_query_end),
+                                                       static_cast<std::size_t>(seed_ref_end),
+                                                       static_cast<std::size_t>(outer_ref_end),
                                                        scoring_matrix,
                                                        alignment_kernels,
                                                        params,
@@ -846,10 +846,10 @@ struct align_one_region {
                 append_cigar(region.cigar, right_result.cigar);
                 region.dp_score += right_result.max;
             }
-            const int32_t right_ref_offset =
+            const std::int32_t right_ref_offset =
                 right_result.has_reached_end ? right_result.mqe_t + 1 : right_result.max_t + 1;
             final_ref_end = seed_ref_end + right_ref_offset;
-            const int32_t right_query_offset = right_result.has_reached_end
+            const std::int32_t right_query_offset = right_result.has_reached_end
                                                    ? outer_query_end - seed_query_end
                                                    : right_result.max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
@@ -898,7 +898,8 @@ void align_regions(std::span<alignment_region> regions,
     // and the reverse-strand mirror keep working for sequences longer than 2^31.
     const std::int64_t query_length = static_cast<std::int64_t>(query_seq.bp_size());
     const std::int64_t target_length = static_cast<std::int64_t>(target_seq.bp_size());
-    const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
+    const std::int32_t align_bandwidth =
+        static_cast<std::int32_t>(params.bandwidth * 1.5 + 1.0);
 
     // Construct the non-capturing `align_one_region` functor once per region
     // batch with kernel-invariant references. The per-region call surface is
@@ -935,12 +936,13 @@ void align_regions(std::span<alignment_region> regions,
             return;
         }
 
-        const int32_t anchor_begin = region.anchor_start;
+        const std::int32_t anchor_begin = region.anchor_start;
         const anchor& first_anchor = anchors[anchor_begin];
         const anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
         // Inner seed boundaries (where seeds are)
-        const int32_t first_span = static_cast<int32_t>(first_anchor.query_span);
+        const std::int32_t first_span =
+            static_cast<std::int32_t>(first_anchor.query_span);
         std::int64_t seed_ref_start =
             static_cast<std::int64_t>(first_anchor.ref_position) + 1 - first_span;
         std::int64_t seed_query_start =
@@ -1093,10 +1095,10 @@ void align_regions(std::span<alignment_region> regions,
         region.has_alignment = true;
 
         // Compute match_length/block_length from CIGAR
-        int32_t cigar_match_count = 0;
-        int32_t cigar_block_count = 0;
+        std::int32_t cigar_match_count = 0;
+        std::int32_t cigar_block_count = 0;
         for (const auto& cigar_op : region.cigar) {
-            const int32_t op_len = static_cast<int32_t>(cigar_op.length);
+            const std::int32_t op_len = static_cast<std::int32_t>(cigar_op.length);
             if (cigar_op.opcode == cigar_match_opcode || cigar_op.opcode == cigar_equal_opcode) {
                 cigar_match_count += op_len;
                 cigar_block_count += op_len;
@@ -1109,7 +1111,7 @@ void align_regions(std::span<alignment_region> regions,
         }
         if (cigar_match_count > 0) {
             region.match_length = cigar_match_count;
-            const int32_t effective_block =
+            const std::int32_t effective_block =
                 (cigar_block_count > 0) ? cigar_block_count : region.block_length;
             region.block_length = effective_block;
         }
