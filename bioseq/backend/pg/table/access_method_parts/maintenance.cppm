@@ -78,10 +78,14 @@ struct pending_speculative_terminal_quarantine {
 static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
     std::declval<pending_speculative_source_map&>())));
 
+/** @brief Repeatedly acquire or release a relation lock until the bounded deadline expires. */
 static bool try_lock_relation_until_timeout(
     Relation rel, LOCKMODE lock_mode, int timeout, int retry_interval, bool acquire);
+/** @brief Emit relation storage statistics at the requested PostgreSQL log level. */
 static void log_relation_statistics(Relation rel, int elevel);
+/** @brief Remove unused physical storage beyond the relation's last live stripe. */
 static void truncate_column_storage_tail(Relation rel, int elevel);
+/** @brief Compact eligible stripes and report whether physical storage changed. */
 static bool truncate_and_compact_column_stripes(Relation rel, int elevel);
 
 /** Retain impossible speculative authorities without allocating or throwing. */

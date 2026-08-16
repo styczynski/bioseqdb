@@ -52,6 +52,7 @@ extern bool previous_cache_enabled_state;
 static_assert(!std::is_trivially_destructible_v<bioseq::postgres::support::memory_context_scope>);
 
 /** Begin a table scan with explicit projection and executor modes. */
+/** @brief Begin a column scan with explicit projection, qualifier, and vectorization state. */
 export TableScanDesc bioseq_beginscan_extended(Relation relation,
                                                Snapshot snapshot,
                                                int key_count,

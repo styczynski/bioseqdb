@@ -88,6 +88,12 @@ import :custom_scan_join_plan_setrefs_rewrite;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Builds the two-child BatchJoin plan and its serialized executor contract.
+     *
+     * The plan preserves child target identities required by setrefs while assigning each
+     * current-owner match helper to one descriptor-only scan column.
+     */
     Plan* bioseq_batch_join_plan_custom_path(PlannerInfo* root,
                                              RelOptInfo* rel,
                                              CustomPath* best_path,

@@ -80,6 +80,10 @@ void populate_sequence_attributes(table_access_cache& cache, Relation relation) 
 
 } // namespace
 
+/**
+ * @brief Return relation-scoped sequence-column metadata, populating `rd_amcache` on demand.
+ * @return Cache storage owned by PostgreSQL's `CacheMemoryContext`.
+ */
 const table_access_cache& get_table_access_cache(Relation relation) {
     if (relation->rd_amcache != nullptr) {
         auto* cache = static_cast<table_access_cache*>(relation->rd_amcache);
@@ -97,6 +101,7 @@ const table_access_cache& get_table_access_cache(Relation relation) {
     return *cache;
 }
 
+/** @brief Observe relcache invalidation after PostgreSQL has detached the cached pointer. */
 void invalidate_table_access_cache(Datum /*callback_argument*/, Oid /*relation_id*/) {
     // PostgreSQL has already detached rd_amcache. Allocations are bounded by
     // the relations observed by this backend and reclaimed with

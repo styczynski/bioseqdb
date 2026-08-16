@@ -91,6 +91,7 @@ import :custom_scan_batch_join_execution_tuple_production;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Detects the one-child per-row recipe handled by the shared callback table. */
     [[nodiscard]] bool bioseq_batch_join_is_post_join_recipe(CustomScanState const* node) noexcept {
         if (node == nullptr || node->ss.ps.plan == nullptr || !IsA(node->ss.ps.plan, CustomScan))
             return false;
@@ -103,6 +104,10 @@ export {
                intVal(version) == k_bioseq_per_row_join_plan_version;
     }
 
+    /**
+     * @brief Initializes BatchJoin children, serialized contracts, and query-lifetime state.
+     * @throws PostgreSQL ERROR when the plan shape or executor contract is invalid.
+     */
     void bioseq_batch_join_begin_custom_scan(CustomScanState* node, EState* estate, int eflags) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_begin_custom_scan(node, estate, eflags);
@@ -722,6 +727,7 @@ export {
         }
     }
 
+    /** @brief Produces the next accepted batched match inside the C++ exception boundary. */
     TupleTableSlot* bioseq_batch_join_exec_custom_scan_impl(CustomScanState* node) {
         batch_join_runtime* runtime = try_get_batch_join_runtime(node);
         if (runtime == nullptr) {
@@ -800,6 +806,10 @@ export {
         }
     }
 
+    /**
+     * @brief Executes one BatchJoin step while preserving PostgreSQL error semantics.
+     * @return The next projected slot, or an empty slot after the target stream is drained.
+     */
     TupleTableSlot* bioseq_batch_join_exec_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             return bioseq_per_row_join_exec_custom_scan(node);
@@ -865,6 +875,7 @@ export {
         return result;
     }
 
+    /** @brief Releases BatchJoin resources and reports checked cleanup failures as PostgreSQL errors. */
     void bioseq_batch_join_end_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_end_custom_scan(node);
@@ -910,6 +921,7 @@ export {
         }
     }
 
+    /** @brief Resets BatchJoin state and both child plans for a new executor pass. */
     void bioseq_batch_join_rescan_custom_scan(CustomScanState* node) {
         if (bioseq_batch_join_is_post_join_recipe(node)) {
             bioseq_per_row_join_rescan_custom_scan(node);
@@ -987,6 +999,7 @@ export {
         }
     }
 
+    /** @brief Adds the serialized BatchJoin contract and execution statistics to EXPLAIN. */
     void bioseq_batch_join_explain_custom_scan(CustomScanState* node,
                                                List* ancestors,
                                                ExplainState* es) {

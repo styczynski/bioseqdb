@@ -83,10 +83,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /*
-     * RemovePathsByPredicate removes the paths that removePathPredicate
-     * evaluates to true from pathlist of given rel.
-     */
+    /** @brief Removes matching paths from both complete and partial path lists. */
     void remove_paths_by_predicate(RelOptInfo* rel, path_predicate remove_path_predicate) {
         bioseq_log<logging_level::debug>("[bioseq] pg: RemovePathsByPredicate() entered");
         postgres_list<Path> filtered_path_list;
@@ -109,17 +106,12 @@ export {
         rel->partial_pathlist = filtered_partial_path_list.release();
     }
 
-    /*
-     * IsNotIndexPath returns true if given path is not an IndexPath.
-     */
+    /** @brief Reports whether a planner path is not an IndexPath. */
     bool is_not_index_path(Path* path) {
         return !pg_node_view{to_pg_node(path)}.is_type<IndexPath>();
     }
 
-    /*
-     * RelationIdGetNumberOfAttributes returns number of attributes that relation
-     * with relationId has.
-     */
+    /** @brief Returns the number of physical attributes in a relation descriptor. */
     int relation_id_get_number_of_attributes(Oid relation_id) {
         Relation relation = RelationIdGetRelation(relation_id);
         int nattrs = relation->rd_att->natts;
@@ -127,10 +119,7 @@ export {
         return nattrs;
     }
 
-    /*
-     * CostBioseqColumnSeqPath sets costs given seq path for columnar table with
-     * relationId.
-     */
+    /** @brief Re-costs a sequential path for full-stripe columnar reads. */
     void cost_bioseq_column_seq_path(RelOptInfo* rel, Oid relation_id, Path* path) {
         if (!enable_seqscan) {
             /* costs are already set to disable_cost, don't adjust them */
@@ -150,10 +139,7 @@ export {
                                                  rel, relation_id, number_of_columns_read);
     }
 
-    /*
-     * CreateBioseqColumnSeqScanPath returns Path for sequential scan on columnar
-     * table with relationId.
-     */
+    /** @brief Creates and costs a nonparallel sequential path for a columnar relation. */
     Path* create_bioseq_column_seq_scan_path(PlannerInfo* root, RelOptInfo* rel, Oid relation_id) {
         bioseq_log<logging_level::debug>("[bioseq] pg: CreateBioseqColumnSeqScanPath() entered");
         /* columnar doesn't support parallel scan */
@@ -165,10 +151,7 @@ export {
         return path;
     }
 
-    /*
-     * BioseqColumnIndexScanAdditionalCost returns additional cost estimated for
-     * index scan described by IndexPath for columnar table with relationId.
-     */
+    /** @brief Estimates columnar stripe-read cost added to an index access path. */
     Cost bioseq_column_index_scan_additional_cost(PlannerInfo* root,
                                                   RelOptInfo* rel,
                                                   Oid relation_id,
@@ -264,10 +247,7 @@ export {
         return scan_cost;
     }
 
-    /*
-     * CostBioseqColumnIndexPath re-costs given index path for columnar table with
-     * relationId.
-     */
+    /** @brief Adds columnar tuple-fetch cost to an index path when configured. */
     void cost_bioseq_column_index_path(PlannerInfo* root,
                                        RelOptInfo* rel,
                                        Oid relation_id,
@@ -312,10 +292,7 @@ export {
                       index_path->path.total_cost);
     }
 
-    /*
-     * CostBioseqColumnPaths re-costs paths of given RelOptInfo for
-     * columnar table with relationId.
-     */
+    /** @brief Re-costs sequential and index paths admitted for a columnar relation. */
     void cost_bioseq_column_paths(PlannerInfo* root, RelOptInfo* rel, Oid relation_id) {
         bioseq_log<logging_level::debug>("[bioseq] pg: CostBioseqColumnPaths() entered");
         for (auto path : postgres_list<Path>(rel->pathlist)) {
@@ -335,10 +312,12 @@ export {
         }
     }
 
-    /*
-     * CheckVarStats() checks whether a qual involving this Var is likely to be
+    /**
+     * @brief Checks whether column correlation makes a restriction useful for stripe pruning.
+     *
+     * Checks whether a qual involving this Var is likely to be
      * useful based on the correlation stats. If so, or if stats are unavailable,
-     * return true; otherwise return false and sets absVarCorrelation in case
+     * return true. Otherwise return false and set absVarCorrelation when the
      * caller wants to use for logging purposes.
      */
     bool check_var_stats(PlannerInfo* root, Var* var, Oid sortop, float* abs_var_correlation) {
@@ -389,10 +368,7 @@ export {
         return true;
     }
 
-    /*
-     * ExprReferencesRelid returns true if any of the Expr's Vars refer to the
-     * given relid; false otherwise.
-     */
+    /** @brief Reports whether an expression contains a Var belonging to a relation. */
     bool expr_references_relid(Expr* expr, Index relid) {
         List* expr_vars = pull_var_clause(reinterpret_cast<Node*>(expr),
                                           PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS |
@@ -478,6 +454,7 @@ export {
      * BeginCustomScan / ReScanCustomScan already handle Params for the
      * mmsearch second argument.
      */
+    /** @brief Checks whether an mmsearch call can be owned by this base scan path. */
     [[nodiscard]] bool
     is_mmsearch_pushdownable(RelOptInfo* rel, FuncExpr* fe, const bioseq_stub_oids& stub_oids) {
         if (!is_mmsearch_funcid(fe->funcid, stub_oids)) {
@@ -585,6 +562,7 @@ export {
         return true;
     }
 
+    /** @brief Extracts the safe storage or mmsearch frontier owned by a base relation. */
     Expr* extract_pushdown_clause(PlannerInfo* root, RelOptInfo* rel, Node* node) {
         CHECK_FOR_INTERRUPTS();
         check_stack_depth();
@@ -763,10 +741,7 @@ export {
         return reinterpret_cast<Expr*>(node);
     }
 
-    /*
-     * FilterPushdownClauses filters for clauses that are candidates for pushing
-     * down into rel.
-     */
+    /** @brief Copies restrictions whose safe frontier can be pushed into a base scan. */
     List* filter_pushdown_clauses(PlannerInfo* root, RelOptInfo* rel, List* input_clauses) {
         postgres_list<RestrictInfo> filtered_clauses;
         for (auto rinfo : postgres_list<RestrictInfo>(input_clauses)) {
@@ -793,10 +768,7 @@ export {
         return filtered_clauses.release();
     }
 
-    /*
-     * PushdownJoinClauseMatches is a callback that returns true, indicating that
-     * we want all of the clauses from generate_implied_equalities_for_column().
-     */
+    /** @brief Accepts every equivalence member considered for implied join clauses. */
     bool pushdown_join_clause_matches(PlannerInfo* root,
                                       RelOptInfo* rel,
                                       EquivalenceClass* ec,
@@ -805,10 +777,7 @@ export {
         return true;
     }
 
-    /*
-     * FindPushdownJoinClauses finds join clauses, including those implied by ECs,
-     * that may be pushed down.
-     */
+    /** @brief Finds explicit and implied join restrictions eligible for pushdown. */
     List* find_pushdown_join_clauses(PlannerInfo* root, RelOptInfo* rel) {
         postgres_list<RestrictInfo> join_clauses{copyObject(rel->joininfo)};
 
@@ -827,8 +796,10 @@ export {
         return filter_pushdown_clauses(root, rel, join_clauses.release());
     }
 
-    /*
-     * FindCandidateRelids identifies candidate rels for parameterization from the
+    /**
+     * @brief Finds useful outer relations for parameterized base-scan paths.
+     *
+     * Identifies candidate rels for parameterization from the
      * list of join clauses.
      *
      * Some rels cannot be considered for parameterization, such as a partitioned
@@ -847,8 +818,10 @@ export {
         return candidate_relids;
     }
 
-    /*
-     * Combinations() calculates the number of combinations of n things taken k at
+    /**
+     * @brief Estimates the binomial coefficient used to bound path enumeration.
+     *
+     * Calculates the number of combinations of n things taken k at
      * a time. When the correct result is large, the calculation may produce a
      * non-integer result, or overflow to inf, which caller should handle
      * appropriately.
@@ -884,8 +857,10 @@ export {
         return v;
     }
 
-    /*
-     * ChooseDepthLimit() calculates the depth limit for the parameterization
+    /**
+     * @brief Chooses a parameterization depth that stays within the configured path limit.
+     *
+     * Calculates the depth limit for the parameterization
      * search, given the number of candidate relations.
      *
      * The maximum number of paths generated for a given depthLimit is:

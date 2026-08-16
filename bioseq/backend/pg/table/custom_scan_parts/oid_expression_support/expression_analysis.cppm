@@ -82,26 +82,17 @@ import :custom_scan_oid_expression_support_oid_catalog;
 using namespace bioseq::postgres::support;
 
 export {
-    /*
-     * Classifier used by planner ownership and BeginCustomScan discovery. Returns
-     * true if funcid
-     * matches any of the bioseq projection stubs (i.e. anything that
-     * VarInjectorMutator will rewrite into a placeholder Const).
-     */
-    /*
-     * Accepts either the 2-arg mmsearch(seq, seq) or the 3-arg
-     * mmsearch(seq, seq, bioseq_aligner_options). Call sites care about
-     * "is this a match qual" rather than the arity, so funnelling both
-     * overloads here avoids scattering the same disjunction everywhere.
-     */
+    /** @brief Tests whether an OID names either supported mmsearch overload. */
     [[nodiscard]] inline bool is_mmsearch_funcid(Oid funcid, const bioseq_stub_oids& o) {
         return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
     }
 
+    /** @brief Carries cached stub OIDs through the raw-query validation walk. */
     struct raw_mmsearch_options_validation {
         const bioseq_stub_oids* oids = nullptr;
     };
 
+    /** @brief Tests whether a procedure is a volatile SQL-language function. */
     [[nodiscard]] inline bool is_volatile_sql_function(const Oid function_oid) {
         HeapTuple procedure_tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(function_oid));
         if (!HeapTupleIsValid(procedure_tuple))
@@ -113,16 +104,17 @@ export {
         return result;
     }
 
-    /* Genuine Query/Node walker recursion: the Query walker delegates nodes here,
-     * and nested Query nodes delegate back to the Query walker. */
+    /** @brief Visits expression nodes while delegating nested queries to the query walker. */
     inline bool contains_volatile_sql_function_node(Node* node, void* context);
 
+    /** @brief Searches a query tree and its range-table expressions for volatile SQL calls. */
     [[nodiscard]] inline bool contains_volatile_sql_function_query(Query* query, void* context) {
         return query != nullptr &&
                query_tree_walker(
                    query, contains_volatile_sql_function_node, context, QTW_EXAMINE_RTES_BEFORE);
     }
 
+    /** @brief Searches one expression subtree for a volatile SQL-language call. */
     [[nodiscard]] inline bool contains_volatile_sql_function_node(Node* node, void* context) {
         if (node == nullptr)
             return false;
@@ -139,17 +131,16 @@ export {
         return expression_tree_walker(node, contains_volatile_sql_function_node, context);
     }
 
-    /* Identify only volatile SQL functions whose wrapper provenance can be lost
-     * when standard_planner simplifies their options subtree.  This catalog walk
-     * inspects nodes without invoking any expression. */
+    /** @brief Detects volatile SQL calls without evaluating the supplied expression. */
     [[nodiscard]] inline bool contains_volatile_sql_function(Node* expression) {
         return contains_volatile_sql_function_node(expression, nullptr);
     }
 
-    /* Genuine Query/Node walker recursion, mirroring the volatile-function walk. */
+    /** @brief Validates mmsearch option expressions while walking non-query nodes. */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation);
 
+    /** @brief Validates raw mmsearch options throughout one query and its nested queries. */
     inline void validate_raw_mmsearch_options_query(Query* query,
                                                     raw_mmsearch_options_validation* validation) {
         if (query == nullptr) {
@@ -159,6 +150,10 @@ export {
             query, validate_raw_mmsearch_options_node, validation, QTW_EXAMINE_RTES_BEFORE);
     }
 
+    /**
+     * @brief Rejects volatile options on a three-argument mmsearch expression.
+     * @throws PostgreSQL ERROR when a volatile SQL wrapper occurs in the options argument.
+     */
     inline bool validate_raw_mmsearch_options_node(Node* node,
                                                    raw_mmsearch_options_validation* validation) {
         if (node == nullptr) {
@@ -205,11 +200,14 @@ export {
         validate_raw_mmsearch_options_query(query, &validation);
     }
 
+    /** @brief Carries stub OIDs through the mmsearch-presence expression walk. */
     struct mmsearch_qualifier_walker {
         const bioseq_stub_oids* oids = nullptr;
     };
 
+    /** @brief Stops an expression walk at the first mmsearch call. */
     struct mmsearch_qualifier_visitor {
+        /** @brief Classifies the current node for the mmsearch-presence walk. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               mmsearch_qualifier_walker& data) const {
@@ -222,18 +220,22 @@ export {
         }
     };
 
+    /** @brief Tests whether an expression tree contains an mmsearch call. */
     [[nodiscard]] bool contains_mmsearch_qualifier(Node* node, const bioseq_stub_oids& oids) {
         mmsearch_qualifier_walker data{&oids};
         mmsearch_qualifier_visitor visitor;
         return walk_pg_expression_including_root(node, data, visitor);
     }
 
+    /** @brief Accumulates the number of mmsearch calls in an expression tree. */
     struct mmsearch_occurrence_counter {
         const bioseq_stub_oids* oids = nullptr;
         std::size_t count = 0;
     };
 
+    /** @brief Counts every mmsearch node while descending through an expression tree. */
     struct mmsearch_occurrence_visitor {
+        /** @brief Records a call at the current node and continues traversal. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               mmsearch_occurrence_counter& data) const {
@@ -245,6 +247,7 @@ export {
         }
     };
 
+    /** @brief Counts mmsearch calls, including nested occurrences and the root node. */
     [[nodiscard]] std::size_t count_mmsearch_occurrences(Node* node, const bioseq_stub_oids& oids) {
         mmsearch_occurrence_counter data{&oids, 0};
         mmsearch_occurrence_visitor visitor;
@@ -252,6 +255,7 @@ export {
         return data.count;
     }
 
+    /** @brief Holds an owned mmsearch restriction and additional clauses extracted with it. */
     struct owned_mmsearch_restriction {
         RestrictInfo* restriction = nullptr;
         FuncExpr* normalized_expr = nullptr;
@@ -259,14 +263,12 @@ export {
         List* extra_normalized_exprs = NIL;
     };
 
-    /* Cheap prefilter used by the early clause-ownership pass.  The complete
-     * grammar/nulling/type validation lives beside the per-row recipe validator
-     * (which
-     * is declared later in this translation unit); this predicate only keeps a
-     * potentially base-local sequence expression alive until that validation can
-     * run in AddBioseqColumnScanPath.  Volatility inside an operand is deliberately
-     * not rejected: the expression remains at its original baserel frontier and is
-     * evaluated once by its authoritative ExprState. */
+    /**
+     * @brief Applies the inexpensive base-local shape filter used before full operand validation.
+     *
+     * Volatile subexpressions remain admissible because the authoritative expression state
+     * evaluates them at the original base-relation frontier.
+     */
     [[nodiscard]] bool coarse_base_mmsearch_operand_candidate(Node* expression,
                                                               RelOptInfo* rel,
                                                               const bioseq_stub_oids& oids,

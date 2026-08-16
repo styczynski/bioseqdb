@@ -86,6 +86,7 @@ import :custom_scan_per_row_join_paths_target_normalization;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Captures a path node tag and custom-path name for rejection diagnostics. */
     void per_row_record_path_identity(Path* path, int& tag, const char*& custom_name) noexcept {
         tag = path == nullptr ? -1 : static_cast<int>(nodeTag(path));
         custom_name = "none";
@@ -97,6 +98,10 @@ export {
         }
     }
 
+    /**
+     * @brief Rebuilds an inner join path after transferring one owned predicate to BatchJoin.
+     * @return A planner-owned replacement path, or null when reconstruction cannot preserve metadata.
+     */
     [[nodiscard]] Path*
     per_row_reconstruct_inner_join_path(PlannerInfo* root,
                                         RelOptInfo* joinrel,
@@ -345,6 +350,7 @@ export {
         return result;
     }
 
+    /** @brief Provides a labeled fail-closed exit for transformed-path admission checks. */
     [[nodiscard]] bool per_row_decline_transformed_path(const char* stage) {
         (void)stage;
         return false;

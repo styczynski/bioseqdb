@@ -87,19 +87,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /*
-     * Per-tuple population for every `bioseq.symbol_count(Var, 'L')`
-     * placeholder. For the current output row (resolved by columnar rowno) it
-     * random-access reads the SEQ column header, then for each site:
-     *   (2) if bioseq.index.sequence_read.enabled = on, tries the stored INLINE
-     *       symbol_counts_index chunk (one heap PK lookup, the only thing the GUC
-     *       gates here);
-     *   (3) otherwise UNCONDITIONALLY recomputes tally_symbol_counts over the row
-     *       (scanner_pg-streamed for a stored stub, in-memory for an inline value).
-     * The recompute guarantees a non-NULL answer for every present row regardless
-     * of the GUC — the GUC only chooses whether the stored chunk is preferred.
-     * Replaces the deleted meta_sidecar / 49-stub path.
-     */
+    /** @brief Owns temporary readers and memory used to materialize symbol counts for one row. */
     struct symbol_count_read_resources {
         MemoryContext caller_context = nullptr;
         MemoryContext scratch = nullptr;
@@ -107,6 +95,7 @@ export {
         column_read_state* row_read_state = nullptr;
     };
 
+    /** @brief Closes symbol-count readers before deleting their scratch memory context. */
     void release_symbol_count_read_resources_checked(symbol_count_read_resources* resources) {
         if (resources == nullptr) {
             return;
@@ -137,6 +126,7 @@ export {
         }
     }
 
+    /** @brief Discharges C++ ownership after PostgreSQL has unwound resource-managed objects. */
     void abandon_symbol_count_read_resources_after_error(
         symbol_count_read_resources* resources) noexcept {
         if (resources == nullptr) {
@@ -163,6 +153,7 @@ export {
         resources->scratch = nullptr;
     }
 
+    /** @brief Raises a symbol-count failure through the PostgreSQL-to-C++ bridge. */
     [[noreturn]] void symbol_count_error_as_cpp(int sqlstate, std::string_view message) {
         bioseq::postgres::support::invoke_pg_as_cpp([sqlstate, message] {
             ereport(ERROR,
@@ -172,6 +163,15 @@ export {
         pg_unreachable();
     }
 
+    /**
+     * @brief Populates symbol-count placeholders for one columnar row.
+     *
+     * When index reads are enabled, stored counts are preferred for locator-backed sequences.
+     * Missing counts are recomputed from the sequence, so a present row produces a value
+     * regardless of the index-read setting.
+     *
+     * @param registered_snapshot Registered MVCC snapshot used by all storage reads.
+     */
     void populate_symbol_count_placeholders(placeholder_constants& consts,
                                             Relation main,
                                             int64_t rowno,
@@ -192,6 +192,7 @@ export {
                     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
                     "bioseq symbol-count read requires a registered MVCC executor snapshot");
             }
+            // Marks every installed placeholder null when no physical row can be read.
             auto set_all_null = [&consts]() {
                 for (auto& s : consts.symbol_count_sites)
                     if (s.placeholder != nullptr)

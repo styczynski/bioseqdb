@@ -90,6 +90,7 @@ import :custom_scan_match_analysis_descendant_neutralization;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Records the first unowned-helper audit failure with plan-boundary context. */
     void
     record_batch_join_plan_helper_audit_failure(batch_join_plan_helper_audit_first_failure& failure,
                                                 Plan* plan,
@@ -162,12 +163,16 @@ export {
         failure.current_parent_matches = first_helper_parent_matches;
     }
 
-    /* Final setrefs must replace every propagated helper identity in an
+    /**
+     * @brief Detects match helpers that remain executable without a finalized owner.
+     *
+     * Final setrefs must replace every propagated helper identity in an
      * executable Plan expression with the descendant owner's scan-slot Var.
      * A non-projecting node may retain the whole identity in its dummy targetlist,
      * but only when exactly one finalized descendant or current PerRow owner site
      * supplies that column.  Mixed parent/descendant ownership remains ambiguous.
-     * Descriptor-only custom_scan_tlist/custom_private fields remain excluded. */
+     * Descriptor-only custom_scan_tlist/custom_private fields remain excluded.
+     */
     [[nodiscard]] bool batch_join_plan_has_unowned_executable_match_helper(
         Plan* plan,
         const bioseq_stub_oids& oids,
@@ -280,6 +285,7 @@ export {
             }
             return false;
         }
+        // Recursively audits one PostgreSQL plan-child list.
         auto search_plan_list =
             [&oids, current_parent, &first_failure, boundary_encountered](List* plans) {
                 for (Plan* child : postgres_list<Plan>(plans)) {
@@ -317,13 +323,16 @@ export {
                     innerPlan(plan), oids, current_parent, first_failure, boundary_encountered));
     }
 
-    /*
-     * reparameterize_mutator changes all varnos referencing the topmost parent
+    /**
+     * @brief Rewrites parent Vars and copied restrictions for a partition child.
+     *
+     * Changes all varnos referencing the topmost parent
      * of child_rel to instead reference child_rel directly. Both the Var and the
      * RestrictInfo are deep copied before being written (copy-before-write), and
      * a RestrictInfo's clause is recursively rewritten via the cursor.
      */
     struct reparameterize_mutator {
+        /** @brief Copy-on-write rewrites one Var or RestrictInfo node. */
         [[nodiscard]] pg_node_mutation operator()(pg_expression_mutation_cursor cursor,
                                                   pg_node_view node,
                                                   RelOptInfo& child_rel) const {
@@ -347,8 +356,10 @@ export {
         }
     };
 
-    /*
-     * BioseqColumnScanPath_ReparameterizeCustomPathByChild is a method called when a
+    /**
+     * @brief Rewrites base-scan private expressions for direct child parameterization.
+     *
+     * This method is called when a
      * path is reparameterized directly to a child relation, rather than the
      * top-level parent.
      *
@@ -371,6 +382,7 @@ export {
             mutate_pg_expression(reinterpret_cast<Node*>(custom_private), *child_rel, mutator));
     }
 
+    /** @brief Rewrites the complete per-row path ABI for a partition child relation. */
     List* bioseq_per_row_join_path_reparameterize_custom_path_by_child(PlannerInfo* root,
                                                                        List* custom_private,
                                                                        RelOptInfo* child_rel) {
@@ -463,7 +475,7 @@ export {
         return rewritten;
     }
 
-    /** Returns the stable PostgreSQL path callbacks for base Bioseq scans. */
+    /** @brief Returns the stable PostgreSQL path callbacks for base Bioseq scans. */
     [[nodiscard]] const CustomPathMethods* bioseq_column_scan_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqScan",
@@ -474,7 +486,7 @@ export {
         return &methods;
     }
 
-    /** Returns the stable PostgreSQL path callbacks for per-row joins. */
+    /** @brief Returns the stable PostgreSQL path callbacks for per-row joins. */
     [[nodiscard]] const CustomPathMethods* bioseq_per_row_join_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqBatchJoin",

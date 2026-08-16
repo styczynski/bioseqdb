@@ -87,6 +87,13 @@ import :custom_scan_join_runtime_parameter_binding;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Validates a base-scan plan and constructs its query-owned execution runtime.
+     *
+     * The runtime and its cleanup callback are bound to the executor query memory context.
+     *
+     * @throws PostgreSQL ERROR when serialized planner state or scan admission is invalid.
+     */
     void bioseq_column_scan_begin_custom_scan_impl(CustomScanState* cscanstate,
                                                    EState* estate,
                                                    int eflags) {
@@ -510,6 +517,7 @@ export {
          * be accounted for below: unsupported combinations fail closed rather
          * rather than reaching the fail-closed SQL rendezvous stub.
          */
+        // Records the admitted query-source shape of one top-level mmsearch qualifier.
         struct classified_mmsearch_qualifier {
             FuncExpr* fe;
             Node* arg0;
@@ -583,6 +591,7 @@ export {
             classified_quals.begin(),
             classified_quals.end(),
             [](const classified_mmsearch_qualifier& lhs, const classified_mmsearch_qualifier& rhs) {
+                // Orders query sources so the single primary slot is selected deterministically.
                 auto pri = [](const classified_mmsearch_qualifier& q) {
                     if (q.is_var_same_rel)
                         return 0;

@@ -64,6 +64,7 @@ namespace {
 batch_sort_source_path_provider batch_sort_source_path_provider_callback = nullptr;
 batch_sort_source_route_provider batch_sort_source_route_provider_callback = nullptr;
 
+/** @brief Defines stable positions in the planner-to-executor private payload. */
 enum class batch_sort_private_field : int {
     descending = 0,
     nulls_first,

@@ -996,6 +996,7 @@ read_next_column_vector(column_read_state *read_state,  Datum *column_values,
 }
 
 
+/** @brief Materialize visible rows from one stripe into the caller's vector columns. */
 static bool
 read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
 					 bool *column_nulls, int *new_vector_size,

@@ -89,6 +89,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Adds available prefilter counters and resolved routes to EXPLAIN. */
     void explain_prefilter_execution_stats(
         const bioseq::pipeline_stats::pipeline_operational_stats& operational, ExplainState* es) {
         if (!operational.prefilter_execution_stats_available)
@@ -129,6 +130,7 @@ export {
         ExplainPropertyBool("Prefilter Stats Consistent", stats.is_internally_consistent(), es);
     }
 
+    /** @brief Appends the names selected by a Highway target mask. */
     void append_highway_target_names(std::string& destination, const std::int64_t mask) {
         const auto names = bioseq::simd_dispatch::highway_target_names(mask);
         if (names.empty()) {
@@ -142,12 +144,14 @@ export {
         }
     }
 
+    /** @brief Formats every target selected by a Highway mask. */
     [[nodiscard]] std::string highway_target_names(const std::int64_t mask) {
         std::string names;
         append_highway_target_names(names, mask);
         return names.empty() ? std::string{"none"} : names;
     }
 
+    /** @brief Formats the first target selected by a single-target mask. */
     [[nodiscard]] std::string highway_target_name(const std::int64_t target) {
         if (target == 0)
             return "none";
@@ -155,6 +159,7 @@ export {
         return names.empty() ? std::string{"none"} : std::string{names.front()};
     }
 
+    /** @brief Resolves the planned query-minimizer Highway kernels for EXPLAIN. */
     [[nodiscard]] bioseq::simd_dispatch::highway_kernel_mask
     planned_query_minimizer_highway_kernels(
         const bioseq::simd::minimap2_parameters* params,
@@ -181,17 +186,23 @@ export {
         return *resolved;
     }
 
+    /** @brief Returns the Highway kernels attached to one planned pipeline stage. */
     [[nodiscard]] bioseq::simd_dispatch::highway_kernel_mask
     highway_kernels_for_explain_stage(const bioseq::simd::pipe::stage_description& stage) {
         return stage.algorithm.has_value() ? stage.algorithm->highway_kernels
                                            : bioseq::simd_dispatch::highway_kernel_mask{};
     }
 
+    /**
+     * @brief Visits every planned Highway kernel together with its stage name.
+     * @tparam p_visitor Callable accepting a kernel identifier and stage name.
+     */
     template <class p_visitor>
     void visit_planned_highway_functions(
         const bioseq::simd_dispatch::highway_kernel_mask& top_level_query_kernels,
         const bioseq::simd::pipe::pipeline_description* pipeline_desc,
         p_visitor&& visitor) {
+        // Expands one kernel mask into individual visitor calls.
         const auto visit_kernel_set =
             [&visitor](const bioseq::simd_dispatch::highway_kernel_mask& kernels,
                        const char* stage_name) {
@@ -215,6 +226,7 @@ export {
         }
     }
 
+    /** @brief Renders pipeline routing, timing, dispatch, and operational counters. */
     void explain_pipeline_execution_stats(
         const bioseq::pipeline_stats::pipeline_execution_stats& stats,
         ExplainState* es,
@@ -509,6 +521,7 @@ export {
         ExplainCloseGroup("Bioseq Execution Statistics", "Bioseq Execution Statistics", true, es);
     }
 
+    /** @brief Adds base-scan projection, pushdown, alignment, and execution details to EXPLAIN. */
     void bioseq_column_scan_explain_custom_scan(CustomScanState* node,
                                                 List* ancestors,
                                                 ExplainState* es) {

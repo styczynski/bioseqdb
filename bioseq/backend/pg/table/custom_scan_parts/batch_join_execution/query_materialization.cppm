@@ -89,6 +89,14 @@ import :custom_scan_batch_join_execution_resource_lifecycle;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Materializes the query child once into slots owned by the query tuple context.
+     *
+     * Memory permits cover retained tuples, expanded objects, and dispatch references until
+     * the query tuple context is reset or deleted.
+     *
+     * @throws PostgreSQL ERROR when the child shape, sequence value, or admission bound is invalid.
+     */
     void batch_join_materialize_queries(batch_join_runtime& runtime) {
         if (runtime.queries_materialized) {
             return;

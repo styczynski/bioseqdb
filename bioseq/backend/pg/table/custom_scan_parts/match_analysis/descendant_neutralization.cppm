@@ -89,6 +89,7 @@ import :custom_scan_match_analysis_semantic_analysis;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Replaces base-scan dummy helper carriers owned solely by an ancestor with NULLs. */
     void neutralize_bioseq_scan_ancestor_helper_carriers(CustomScan* scan,
                                                          List* ancestor_stack,
                                                          const bioseq_stub_oids& oids) {
@@ -247,6 +248,7 @@ export {
         }
     }
 
+    /** @brief Traverses one query scope while tracking finalized ancestor match owners. */
     void
     neutralize_ancestor_owned_dummy_match_helpers_plan(Plan* plan,
                                                        std::span<match_owner_finalization> owners,
@@ -293,6 +295,7 @@ export {
                 list_free(child_ancestors);
             return;
         }
+        // Applies neutralization to one PostgreSQL plan-child list.
         auto visit_plan_list = [owners, ancestor_stack, &oids](List* plans) {
             for (Plan* child : postgres_list<Plan>(plans)) {
                 neutralize_ancestor_owned_dummy_match_helpers_plan(
@@ -323,6 +326,7 @@ export {
         }
     }
 
+    /** @brief Neutralizes ancestor-owned dummy helpers in the main plan and every subplan. */
     void neutralize_ancestor_owned_dummy_match_helpers(PlannedStmt* statement,
                                                        std::span<match_owner_finalization> owners) {
         if (statement == nullptr || statement->planTree == nullptr)
@@ -334,6 +338,7 @@ export {
         }
     }
 
+    /** @brief Checks that every helper in a dummy target list has exactly one finalized owner. */
     [[nodiscard]] bool dummy_targetlist_has_only_unique_finalized_owner_helpers(
         Plan* plan, const bioseq_stub_oids& oids, CustomScan* current_parent) {
         if (plan == nullptr || is_projection_capable_plan(plan))
@@ -353,6 +358,7 @@ export {
                     ? 0u
                     : finalized_batch_owner_matching_site_count(current_parent, identity, oids);
             std::size_t descendant_matches = 0u;
+            // Merges one child subtree's owner count with saturation at ambiguity.
             auto count_child = [&descendant_matches, identity, &oids](Plan* child) {
                 const std::size_t additional =
                     finalized_descendant_match_owner_site_count(child, identity, oids);
@@ -398,6 +404,7 @@ export {
         return true;
     }
 
+    /** @brief Captures the first executable-helper ownership failure in a plan audit. */
     struct batch_join_plan_helper_audit_first_failure {
         const char* reason = "none";
         const char* store = "none";

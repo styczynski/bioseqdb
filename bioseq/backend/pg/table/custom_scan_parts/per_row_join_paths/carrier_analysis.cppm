@@ -84,6 +84,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Counts descendant base scans that can supply one match-helper identity. */
     void per_row_analyze_descendant_base_helper_owner(Path* path,
                                                       FuncExpr* helper,
                                                       per_row_base_helper_ownership& ownership) {
@@ -114,6 +115,7 @@ export {
             }
             return;
         }
+        // Visit both inputs of a supported binary join wrapper.
         auto descend_join = [helper, &ownership](JoinPath* join) {
             if (join == nullptr)
                 return;
@@ -174,6 +176,7 @@ export {
         }
     }
 
+    /** @brief Collects helper identities supplied uniquely by descendant custom paths. */
     [[nodiscard]] bool per_row_collect_available_path_helpers(Path* path,
                                                               List* candidate_helpers,
                                                               List* validated_inherited_helpers,
@@ -225,6 +228,7 @@ export {
         return true;
     }
 
+    /** @brief Tracks whether an expression references unavailable match helpers. */
     struct per_row_path_helper_audit {
         bioseq_stub_oids const* oids = nullptr;
         List* available = NIL;
@@ -232,7 +236,9 @@ export {
         bool unavailable = false;
     };
 
+    /** @brief Validates helper and placeholder references against a supplied identity list. */
     struct per_row_path_helper_audit_visitor {
+        /** @brief Audits the current expression node and stops at an unavailable helper. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_path_helper_audit& audit) const {
@@ -267,6 +273,7 @@ export {
         }
     };
 
+    /** @brief Checks one expression against available helper identities and reports their use. */
     [[nodiscard]] bool
     per_row_expression_uses_available_helpers(Node* expression, List* available, bool& saw_helper) {
         per_row_path_helper_audit audit{&get_cached_stub_oids(), available, false, false};
@@ -276,6 +283,7 @@ export {
         return !audit.unavailable;
     }
 
+    /** @brief Checks that relevant pathkey equivalence members use only available helpers. */
     [[nodiscard]] bool
     per_row_pathkeys_use_available_helpers(Path* scope, List* pathkeys, List* available) {
         if (pathkeys == NIL)
@@ -301,10 +309,10 @@ export {
         return true;
     }
 
-    /* Genuine type-order cycle: the visitor calls this recursive list/RestrictInfo
-     * audit, while the audit constructs the visitor for all other node families. */
+    /** @brief Checks recursively that opaque path metadata contains no match helper. */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata);
 
+    /** @brief Tests whether a node tag is supported by the metadata expression walker. */
     [[nodiscard]] bool per_row_path_metadata_node_is_walkable(const NodeTag tag) noexcept {
         switch (tag) {
         case T_Var:
@@ -393,17 +401,21 @@ export {
         }
     }
 
+    /** @brief Tests whether a metadata node tag can be accepted without recursion. */
     [[nodiscard]] bool per_row_path_metadata_node_is_scalar(const NodeTag tag) noexcept {
         return tag == T_Integer || tag == T_Float || tag == T_Boolean || tag == T_String ||
                tag == T_BitString || tag == T_IntList || tag == T_OidList || tag == T_XidList;
     }
 
+    /** @brief Records an unsupported node shape or match helper found in path metadata. */
     struct per_row_path_metadata_audit {
         const bioseq_stub_oids* oids = nullptr;
         bool invalid = false;
     };
 
+    /** @brief Recursively audits expression-like path metadata for helper references. */
     struct per_row_path_metadata_audit_visitor {
+        /** @brief Classifies the current metadata node and controls recursive traversal. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               per_row_path_metadata_audit& audit) const {
@@ -441,6 +453,7 @@ export {
         }
     };
 
+    /** @brief Checks recursively that opaque path metadata contains no match helper. */
     [[nodiscard]] bool per_row_path_metadata_has_no_helper(Node* metadata) {
         if (metadata == nullptr)
             return true;
@@ -469,6 +482,7 @@ export {
         return !audit.invalid;
     }
 
+    /** @brief Checks that every RestrictInfo clause and or-clause contains no helper. */
     [[nodiscard]] bool per_row_restrictinfo_list_has_no_helper(List* restrictions) {
         for (Node* item : postgres_list<Node>(restrictions)) {
             RestrictInfo* restriction = try_cast_pg_node<RestrictInfo>(item);
@@ -482,11 +496,7 @@ export {
         return true;
     }
 
-    /* PathTarget does not record the allocated length of sortgrouprefs.  The
-     * processed targetlist is the authoritative representation whose TLEs carry
-     * their refs inline, so never index a possibly extended/shared PathTarget
-     * array while rebuilding descendant targets.  Support-only expressions that
-     * are absent from the processed targetlist correctly receive ref zero. */
+    /** @brief Reconstructs sort-group references from the processed target list by occurrence. */
     [[nodiscard]] bool per_row_authoritative_sortgrouprefs(PlannerInfo* root,
                                                            List* expressions,
                                                            std::vector<Index>& results) {

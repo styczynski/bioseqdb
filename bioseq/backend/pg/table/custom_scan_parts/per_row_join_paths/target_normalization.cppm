@@ -85,6 +85,11 @@ import :custom_scan_per_row_join_paths_carrier_analysis;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Builds a child target containing available helpers and required carrier Vars.
+     * @param changed Set when the returned target differs from the source target.
+     * @param invalid Set when helper or carrier metadata cannot be preserved.
+     */
     [[nodiscard]] PathTarget* per_row_normalized_path_target(PlannerInfo* root,
                                                              Path* path,
                                                              List* available,
@@ -155,6 +160,7 @@ export {
         }
         PathTarget* target = create_empty_pathtarget();
         target->exprs = expressions;
+        // Avoid allocating the optional PathTarget array when every reference is zero.
         const bool has_sortgroupref = std::any_of(sortgrouprefs.begin(),
                                                   sortgrouprefs.end(),
                                                   [](Index value) noexcept { return value != 0; });
@@ -176,6 +182,7 @@ export {
         return target;
     }
 
+    /** @brief Checks that append children expose the parent's output types in the same order. */
     [[nodiscard]] bool per_row_append_targets_are_ordinally_compatible(PathTarget* parent,
                                                                        List* children) {
         if (parent == nullptr || children == NIL)
@@ -199,6 +206,7 @@ export {
         return true;
     }
 
+    /** @brief Compares target expressions and their authoritative sort-group references. */
     [[nodiscard]] bool
     per_row_authoritative_targets_match(PlannerInfo* root, PathTarget* left, PathTarget* right) {
         if (root == nullptr || left == nullptr || right == nullptr ||
@@ -212,6 +220,10 @@ export {
                left_sortgrouprefs == right_sortgrouprefs;
     }
 
+    /**
+     * @brief Normalizes every node in a private path spine to its available helper carriers.
+     * @return True when all metadata and wrapper contracts remain valid after normalization.
+     */
     [[nodiscard]] bool per_row_normalize_private_path_spine(PlannerInfo* root,
                                                             Path* path,
                                                             List* candidate_helpers,
@@ -380,13 +392,7 @@ export {
         return false;
     }
 
-    /* SQL cannot deterministically retain each of these core wrapper Path types:
-     * PostgreSQL commonly folds ProjectionPath, chooses Material/Memoize by cost,
-     * and represents SELECT DISTINCT with an upper path rather than UniquePath.
-     * This integration fixture constructs their real node types and invokes
-     * the same exact-owner analysis and copy-on-write propagation used by transformed
-     * mmsearch planning.  A genuine nested sliced-mmsearch execution in the
-     * acceptance suite separately validates final setrefs/executor helper binding. */
+    /** @brief Returns methods for the unsupported-wrapper integration probe path. */
     [[nodiscard]] CustomPathMethods const&
     match_helper_wrapper_probe_unknown_path_methods() noexcept {
         static const CustomPathMethods methods{
@@ -397,6 +403,7 @@ export {
         return methods;
     }
 
+    /** @brief Initializes common Path fields for a wrapper integration probe. */
     void match_helper_wrapper_probe_init_path(Path* path,
                                               NodeTag plan_tag,
                                               RelOptInfo* parent,
@@ -415,6 +422,7 @@ export {
         path->pathkeys = NIL;
     }
 
+    /** @brief Allocates a minimal planner relation for wrapper integration probes. */
     [[nodiscard]] RelOptInfo*
     match_helper_wrapper_probe_rel(RelOptKind kind, Index relid, Relids relids) {
         auto* rel = makeNode(RelOptInfo);
@@ -426,6 +434,7 @@ export {
         return rel;
     }
 
+    /** @brief Accumulates per-stage rejection and reconstruction counts for path admission. */
     struct per_row_reconstruction_rejections {
         std::size_t incumbents = 0u;
         std::size_t unsupported_path = 0u;

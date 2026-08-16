@@ -87,6 +87,7 @@ import :custom_scan_join_plan_placeholder_lineage;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Finds the last exact scan-target expression within a validated result range. */
     [[nodiscard]] TargetEntry*
     batch_join_find_exact_scan_entry(List* scan_tlist,
                                      const Node* expression,
@@ -106,6 +107,7 @@ export {
         return nullptr;
     }
 
+    /** @brief Finds the unique semantically equal helper entry within a scan-target range. */
     [[nodiscard]] TargetEntry*
     batch_join_find_unique_semantic_helper_entry(List* scan_tlist,
                                                  Node* identity,
@@ -140,6 +142,7 @@ export {
         return result;
     }
 
+    /** @brief Finds a scan-target Var with the same complete planner identity. */
     [[nodiscard]] TargetEntry* batch_join_find_compatible_var_entry(List* scan_tlist,
                                                                     const Var* var) noexcept {
         if (var == nullptr)
@@ -159,14 +162,19 @@ export {
         return nullptr;
     }
 
-    /* CustomScan setrefs resolves output Vars against the unfixed scan tlist.
+    /**
+     * @brief Normalizes output expressions to identities present in the unfixed scan target.
+     *
+     * CustomScan setrefs resolves output Vars against the unfixed scan tlist.
      * Normalize harmless base-Var spelling deltas, but preserve the exact raw
      * helper/PHV identity in both lists.  Upper setrefs fixes a parent before it
      * recurses into this child, so hiding that identity here makes Sort/Result
      * fail to bind the whole helper expression.  PostgreSQL's normal CustomScan
      * setrefs pass then maps those identities to INDEX_VAR against
-     * custom_scan_tlist before executor initialization. */
+     * custom_scan_tlist before executor initialization.
+     */
     struct batch_join_output_setrefs_rewrite_mutator {
+        /** @brief Rewrites one Var or helper identity to its supplied scan-target spelling. */
         [[nodiscard]] pg_node_mutation
         operator()(pg_expression_mutation_cursor,
                    pg_node_view node,
@@ -230,6 +238,7 @@ export {
         }
     };
 
+    /** @brief Rewrites one output expression for PostgreSQL's CustomScan setrefs pass. */
     [[nodiscard]] Expr*
     batch_join_rewrite_output_for_setrefs(Expr* expression,
                                           List* scan_tlist,
@@ -249,6 +258,7 @@ export {
         return result;
     }
 
+    /** @brief Returns the result number of an exact expression in a plan target list. */
     [[nodiscard]] AttrNumber find_plan_tlist_expression_resno(List* targetlist,
                                                               const void* expression) noexcept {
         for (TargetEntry* entry : postgres_list<TargetEntry>(targetlist)) {
@@ -259,6 +269,7 @@ export {
         return InvalidAttrNumber;
     }
 
+    /** @brief Records the first output dependency absent from a scan target list. */
     struct batch_join_setrefs_coverage {
         List* scan_tlist = NIL;
         const bioseq_stub_oids* oids = nullptr;
@@ -266,12 +277,17 @@ export {
         Node* missing_helper_identity = nullptr;
     };
 
-    /* Mirror the relevant fix_upper_expr() lookup order before PostgreSQL's final
+    /**
+     * @brief Validates output dependencies against PostgreSQL's setrefs lookup order.
+     *
+     * Mirror the relevant fix_upper_expr() lookup order before PostgreSQL's final
      * setrefs pass.  A CustomScan with scanrelid == 0 must make every output Var
      * discoverable in custom_scan_tlist; diagnosing that invariant here preserves
      * the exact offending varno/attno instead of reducing it to PostgreSQL's
-     * generic "variable not found in subplan target list" error. */
+     * generic "variable not found in subplan target list" error.
+     */
     struct batch_join_setrefs_coverage_visitor {
+        /** @brief Checks one Var, PHV, helper, or expression against the scan target list. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               batch_join_setrefs_coverage& coverage) const {
@@ -321,6 +337,7 @@ export {
         }
     };
 
+    /** @brief Raises a precise PostgreSQL error when an output dependency lacks scan coverage. */
     void validate_batch_join_setrefs_coverage(List* output_tlist, List* scan_tlist) {
         const bioseq_stub_oids& oids = get_cached_stub_oids();
         batch_join_setrefs_coverage coverage{scan_tlist, &oids, nullptr, nullptr};
@@ -355,10 +372,14 @@ export {
         }
     }
 
-    /* The same helper is commonly represented by a positive-id PHV in the
+    /**
+     * @brief Resolves the authoritative PHV id for a Plan-only helper carrier.
+     *
+     * The same helper is commonly represented by a positive-id PHV in the
      * processed target and by its stripped FuncExpr in a non-projecting locator
      * child.  Preserve the authoritative PHV id in the site codec when present;
-     * finalized binding then accepts only that exact PHV-to-bare transition. */
+     * finalized binding then accepts only that exact PHV-to-bare transition.
+     */
     [[nodiscard]] bool batch_join_plan_only_helper_phid(List* authoritative_identities,
                                                         Node* carrier_identity,
                                                         FuncExpr* carrier_helper,

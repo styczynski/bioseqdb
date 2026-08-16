@@ -86,6 +86,10 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /**
+     * @brief Allocates a base-scan state while deferring query-owned runtime construction.
+     * @return A PostgreSQL node allocated in the current memory context.
+     */
     Node* bioseq_column_scan_create_custom_scan_state(CustomScan* cscan) {
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: BioseqColumnScan_CreateCustomScanState() entered");
@@ -109,12 +113,14 @@ export {
         return bioseq_scan_state->as_node();
     }
 
-    /*
-     * eval_params_mutator evaluates Params in the expression and replaces them
-     * with Consts, preserving the existing ExecInitExprWithParams / ExecEvalExpr
-     * folding path for every Param (not a PARAM_EXEC-only direct lookup).
+    /**
+     * @brief Replaces executor Params with Const nodes evaluated in one expression context.
+     *
+     * It preserves the ExecInitExprWithParams and ExecEvalExpr folding path for
+     * every Param instead of performing a PARAM_EXEC-only direct lookup.
      */
     struct eval_params_mutator {
+        /** @brief Evaluates a Param node and preserves its declared type metadata. */
         [[nodiscard]] pg_node_mutation
         operator()(pg_expression_mutation_cursor, pg_node_view node, ExprContext& econtext) const {
             if (Param* param = node.try_cast<Param>()) {
@@ -143,23 +149,27 @@ export {
         }
     };
 
-    /*
-     * Thin wrapper for the direct callers (qual folding at Begin/ReScan and the
-     * per-Param rebind fold) so they keep the (node, econtext) call shape.
-     */
+    /** @brief Evaluates every Param in an expression against the supplied executor context. */
     [[nodiscard]] Node* eval_params(Node* node, ExprContext* econtext) {
         eval_params_mutator mutator;
         return mutate_pg_expression(node, *econtext, mutator);
     }
 
+    /** @brief Distinguishes a configured query from SQL NULL during parameter rebinding. */
     enum class mmsearch_parameter_resolution : std::uint8_t {
         configured,
         null_value,
     };
 
-    /* Resolve the exact Param that registered the primary mmsearch query.  Both
+    /**
+     * @brief Resolves and validates the Param registered as the primary mmsearch query.
+     *
+     * Both
      * supported Param kinds use PostgreSQL's expression machinery so PARAM_EXEC
-     * and PARAM_EXTERN read from their correct executor-owned storage. */
+     * and PARAM_EXTERN read from their correct executor-owned storage.
+     *
+     * @throws PostgreSQL ERROR for stale metadata, incompatible typmods, or invalid storage width.
+     */
     [[nodiscard]] mmsearch_parameter_resolution resolve_mmsearch_param_query(
         bioseq_scan_runtime& runtime, ExprContext* econtext, const char* stage) {
         if (!runtime.param_rebind.active || econtext == nullptr ||
@@ -335,6 +345,7 @@ export {
         return mmsearch_parameter_resolution::configured;
     }
 
+    /** @brief Raises a Vulkan execution failure through the PostgreSQL-to-C++ bridge. */
     [[noreturn]] void raise_column_scan_vulkan_error_as_cpp(std::string_view detail,
                                                             std::string_view hint) {
         const std::string owned_detail{detail};

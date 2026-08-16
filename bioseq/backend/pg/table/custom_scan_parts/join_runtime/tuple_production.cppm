@@ -88,6 +88,7 @@ import :custom_scan_join_runtime_scan_admission;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Initializes a base scan and translates all C++ failures to PostgreSQL errors. */
     void
     bioseq_column_scan_begin_custom_scan(CustomScanState* cscanstate, EState* estate, int eflags) {
         ErrorData* exact_error = nullptr;
@@ -129,8 +130,8 @@ export {
         }
     }
 
-    /*
-     * ExecScanFetch -- check interrupts & fetch next potential tuple
+    /**
+     * @brief Fetches a scan tuple while honoring EvalPlanQual replacement semantics.
      *
      * This routine is concerned with substituting a test tuple if we are
      * inside an EvalPlanQual recheck.  If we aren't, just execute
@@ -228,10 +229,11 @@ export {
         return (*access_mtd)(node);
     }
 
-    /*
-     * Dispatch table: given a matched funcid, which placeholder Const do we
-     * substitute in? bioseq.score is an alias for bioseq.dp_score so both
-     * resolve to the same Const* (paradedb's score/pdb.score alias pattern).
+    /**
+     * @brief Maps a supported match-helper function to its executor placeholder.
+     *
+     * bioseq.score aliases bioseq.dp_score, so both identifiers resolve to the
+     * same placeholder.
      */
     Const* lookup_bioseq_placeholder_const(Oid funcid, const var_injector_context* ctx) {
         const bioseq_stub_oids* o = ctx->oids;
@@ -279,6 +281,7 @@ export {
         return nullptr;
     }
 
+    /** @brief Checks that a helper has a serialized binding for this base scan. */
     [[nodiscard]] bool
     base_match_helper_is_finalized_for_scan(FuncExpr* function,
                                             const var_injector_context& context) {
@@ -311,7 +314,9 @@ export {
         return false;
     }
 
-    /*
+    /**
+     * @brief Rewrites an eligible symbol-count call to a per-row placeholder.
+     *
      * Rewrite a single `bioseq.symbol_count(Var, 'L')` call site into a
      * placeholder Const that the executor populates per-row from meta_sidecar.
      * Returns the replacement Const*, or nullptr when the FuncExpr does not
@@ -324,6 +329,8 @@ export {
      * outside this shape — e.g. symbol_count('ACGT'::bioseq.seq, 'A') — keeps
      * its original FuncExpr and runs through the scalar entry point in
      * mod.cppm, which is cost-inflated by bioseq_symbol_count_support.
+     *
+     * @return The replacement Const, or null when the scalar call must remain.
      */
     Const* try_rewrite_symbol_count(FuncExpr* fe, var_injector_context* ctx) {
         if (ctx == nullptr || fe == nullptr || ctx->consts == nullptr) {
@@ -434,7 +441,9 @@ export {
         return placeholder;
     }
 
+    /** @brief Replaces finalized match helpers and eligible symbol counts with placeholders. */
     struct var_injector_mutator {
+        /** @brief Mutates one expression node while preserving unresolved PHV semantics. */
         [[nodiscard]] pg_node_mutation operator()(pg_expression_mutation_cursor,
                                                   pg_node_view node,
                                                   var_injector_context& injector_context) const {
@@ -496,16 +505,15 @@ export {
         }
     };
 
-    /*
-     * Thin wrapper for the direct callers (execution-time targetlist rewrite)
-     * so they keep the (node, ctx) call shape.
-     */
+    /** @brief Applies execution-time placeholder injection to an expression tree. */
     [[nodiscard]] Node* var_injector(Node* node, var_injector_context* injector_context) {
         var_injector_mutator mutator;
         return mutate_pg_expression(node, *injector_context, mutator);
     }
 
-    /*
+    /**
+     * @brief Updates all installed placeholder Const nodes from one match result.
+     *
      * Per-tuple update of every placeholder Const* from a match_result's
      * fields. Fields we don't have a Const for (because the query didn't
      * project them) are skipped thanks to the nullptr guard. The cigar text
@@ -527,6 +535,7 @@ export {
         // reaches the int64 sign boundary: the project's pessimistic ceiling is
         // 1 Tbp (~2^40), ~23 bits below INT64_MAX, so the uint64→int64 reinterpret
         // is always value-preserving.
+        // Stores a checked match value in an INT4 placeholder when one was installed.
         auto set_int = [](Const* node, int64_t value) {
             if (node == nullptr)
                 return;
@@ -539,6 +548,7 @@ export {
         // Parameter is the underlying type of `sequence_size_t` (std::uint64_t)
         // spelled directly — this TU does not import bioseq_storage_size, so the
         // `sequence_size_t` alias is not in scope here.
+        // Stores an unsigned coordinate in an INT8 placeholder after checking its signed range.
         auto set_bigint = [](Const* node, std::uint64_t value) {
             if (node == nullptr)
                 return;
@@ -548,12 +558,14 @@ export {
                 bioseq::postgres::support::pg_datum::from(static_cast<std::int64_t>(value)).raw();
             node->constisnull = false;
         };
+        // Stores a match flag in a boolean placeholder when one was installed.
         auto set_bool = [](Const* node, bool value) {
             if (node == nullptr)
                 return;
             node->constvalue = bioseq::postgres::support::pg_datum::from(value).raw();
             node->constisnull = false;
         };
+        // Stores a match metric in a FLOAT4 placeholder when one was installed.
         auto set_float = [](Const* node, float value) {
             if (node == nullptr)
                 return;

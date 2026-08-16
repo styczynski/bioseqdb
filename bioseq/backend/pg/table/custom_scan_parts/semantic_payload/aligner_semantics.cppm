@@ -83,6 +83,7 @@ import :custom_scan_semantic_payload_payload_codec;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Reports whether the selected minimizer accepts packed sequence regions. */
     [[nodiscard]] bool mmsearch_plans_admitted_packed_regions(
         bioseq::simd::minimap2_parameters const& params) noexcept {
         using algorithm_type = bioseq::simd::minimizer_algorithm;
@@ -98,6 +99,10 @@ export {
         return false;
     }
 
+    /**
+     * @brief Returns the optional plan-time aligner-options constant from an mmsearch call.
+     * @throws PostgreSQL ERROR when the call shape or option expression is invalid.
+     */
     [[nodiscard]] Const* require_aligner_options_const(FuncExpr* mmsearch_fe,
                                                        const bioseq_stub_oids& oids) {
         if (mmsearch_fe == nullptr) {
@@ -141,13 +146,17 @@ export {
         return opt_const;
     }
 
-    /* The dispatch buffer owns one minimap2_parameters object for every query attached
+    /**
+     * @brief Checks whether a bounded fallback can share the primary query's parameters.
+     *
+     * The dispatch buffer owns one minimap2_parameters object for every query attached
      * to a scan.  Consequently the bounded Param-primary/Const-extra exception can
      * share that buffer only when the primary changes no biological option and the
      * extra requests the default option set.  The sole permitted difference is an
      * explicit require-absent index policy on the primary: the extra's inherited
      * `allow` policy admits the same no-index execution, so this does not alter its
-     * Boolean result or error contract. */
+     * Boolean result or error contract.
+     */
     [[nodiscard]] bool bounded_batch_fallback_options_are_supported(FuncExpr* primary,
                                                                     FuncExpr* extra,
                                                                     const bioseq_stub_oids& oids) {
@@ -164,6 +173,7 @@ export {
 
         HeapTupleHeader header =
             reinterpret_cast<HeapTupleHeader>(PG_DETOAST_DATUM(options->constvalue));
+        // Releases only the temporary copy produced by PostgreSQL detoasting.
         auto free_detoasted_header = [header, options] {
             if (reinterpret_cast<void*>(header) !=
                 reinterpret_cast<void*>(DatumGetPointer(options->constvalue))) {
@@ -222,7 +232,9 @@ export {
         return only_index_policy_is_explicit && requires_absent;
     }
 
-    /*
+    /**
+     * @brief Applies non-null fields from a constant aligner-options record.
+     *
      * If the third argument of a mmsearch FuncExpr is a row-typed Const
      * representing aligner_options(), decode its fields and overlay any
      * non-NULL values on top of `params`. NULL field values signal "inherit
@@ -230,6 +242,9 @@ export {
      *
      * The generated row codec validates and decodes the exact
      * bioseq_aligner_options composite layout.
+     *
+     * @return Whether the options explicitly supplied an index-read requirement.
+     * @throws PostgreSQL ERROR for an invalid call shape, row layout, or option value.
      */
     [[nodiscard]] bool
     apply_aligner_options_override(FuncExpr* mmsearch_fe,
@@ -255,6 +270,7 @@ export {
             reinterpret_cast<HeapTupleHeader>(PG_DETOAST_DATUM(opt_const->constvalue));
         Oid row_typeoid = HeapTupleHeaderGetTypeId(header);
         int32 row_typmod = HeapTupleHeaderGetTypMod(header);
+        // Releases only the temporary copy produced by PostgreSQL detoasting.
         auto free_detoasted_header = [header, opt_const] {
             if (reinterpret_cast<void*>(header) !=
                 reinterpret_cast<void*>(DatumGetPointer(opt_const->constvalue))) {
@@ -439,14 +455,17 @@ export {
         return index_read_requirement_present;
     }
 
-    /*
-     * Resolve the SIMD chaining policy only after the final per-call override.
+    /**
+     * @brief Resolves the SIMD chaining policy after all per-call overrides.
+     *
      * The C++ API deliberately defaults to exact_visited.  PostgreSQL promotes
      * the explicitly selected SIMD_MM2 route to the named bounded candidate so
      * integration and performance gates exercise the real production choice.
      * Every non-SIMD algorithm is reset to exact: a stale bounded value must not
      * leak through a copied parameter object, and no unsupported request may be
      * translated into a different biological algorithm.
+     *
+     * @throws PostgreSQL ERROR when the chaining algorithm has an unknown ordinal.
      */
     void finalize_simd_chaining_policy(bioseq::simd::minimap2_parameters& params) {
         using bioseq::simd::chaining_algorithm;

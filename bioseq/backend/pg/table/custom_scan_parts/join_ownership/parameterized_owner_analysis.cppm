@@ -85,6 +85,7 @@ import :custom_scan_join_ownership_descendant_neutralization;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Records exact owner matches and structural rejection diagnostics for one path tree. */
     struct exact_parameterized_bmo_ownership {
         std::size_t matches = 0u;
         bool invalid = false;
@@ -114,6 +115,7 @@ export {
         std::uint64_t wrapper_child1_relids_low = 0u;
     };
 
+    /** @brief Encodes relation identifiers below 64 into a compact diagnostic mask. */
     [[nodiscard]] std::uint64_t exact_bmo_audit_relids_low(Relids relids) noexcept {
         std::uint64_t mask = 0u;
         int relid = -1;
@@ -124,12 +126,16 @@ export {
         return mask;
     }
 
-    /* PostgreSQL copies RestrictInfo nodes between baserel parameterization and
+    /**
+     * @brief Checks whether two RestrictInfo nodes retain one PostgreSQL planner identity.
+     *
+     * PostgreSQL copies RestrictInfo nodes between baserel parameterization and
      * join-path construction while preserving rinfo_serial specifically so the
      * copies retain one planner identity.  Pointer equality alone therefore
      * misses the BMO path that owns the same qual.  Admit only that documented
      * clone relation plus an exact executable/security shape; equal SQL text with
-     * a different serial remains a distinct restriction. */
+     * a different serial remains a distinct restriction.
+     */
     [[nodiscard]] bool same_planner_restriction_identity(RestrictInfo* candidate,
                                                          RestrictInfo* expected) noexcept {
         if (candidate == expected) {
@@ -156,6 +162,7 @@ export {
                equal(candidate->clause, expected->clause);
     }
 
+    /** @brief Bit flags describing why exact parameterized owner analysis failed. */
     enum exact_parameterized_bmo_owner_rejection : std::uint32_t {
         k_exact_bmo_unknown_custom_path = 1u << 0,
         k_exact_bmo_base_scan_has_children = 1u << 1,
@@ -169,6 +176,7 @@ export {
         k_exact_bmo_known_wrapper_owns_clause = 1u << 9,
     };
 
+    /** @brief Marks owner analysis invalid and records one rejection reason. */
     inline void reject_exact_parameterized_bmo_owner(
         exact_parameterized_bmo_ownership& ownership,
         const exact_parameterized_bmo_owner_rejection reason) noexcept {
@@ -176,6 +184,7 @@ export {
         ownership.rejection_mask |= static_cast<std::uint32_t>(reason);
     }
 
+    /** @brief Validates a known BatchJoin owner that is foreign to the expected restriction. */
     [[nodiscard]] bool foreign_known_join_owner_is_valid(PlannerInfo* root, CustomPath* custom) {
         if (root == nullptr || custom == nullptr)
             return false;
@@ -276,6 +285,7 @@ export {
                custom->path.total_cost >= custom->path.startup_cost;
     }
 
+    /** @brief Recursively counts exact owners while rejecting unmodeled executable path state. */
     void count_exact_parameterized_bmo_owners(PlannerInfo* root,
                                               Path* path,
                                               RestrictInfo* restriction,
@@ -786,6 +796,7 @@ export {
         reject_exact_parameterized_bmo_owner(ownership, k_exact_bmo_unknown_core_path);
     }
 
+    /** @brief Bit flags describing failures while reconstructing a parameterized base owner. */
     enum exact_parameterized_bmo_reconstruction_rejection : std::uint32_t {
         k_exact_bmo_reconstruct_invalid_input = 1u << 0,
         k_exact_bmo_reconstruct_operand_shape = 1u << 1,
@@ -803,6 +814,7 @@ export {
         k_exact_bmo_reconstruct_cost = 1u << 13,
     };
 
+    /** @brief Bit flags describing mismatches in a reconstructed base-owner private ABI. */
     enum exact_parameterized_bmo_reconstruction_abi_mismatch : std::uint32_t {
         k_exact_bmo_reconstruct_abi_invalid_tag = 1u << 0,
         k_exact_bmo_reconstruct_abi_missing_recipe = 1u << 1,
@@ -821,6 +833,7 @@ export {
         k_exact_bmo_reconstruct_abi_incompatible_options = 1u << 14,
     };
 
+    /** @brief Aggregates reconstruction rejection masks and owner multiplicities. */
     struct exact_parameterized_bmo_reconstruction_audit {
         std::uint32_t rejection_mask = 0u;
         std::uint32_t owner_abi_mismatch_mask = 0u;

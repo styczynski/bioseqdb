@@ -88,14 +88,19 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Returns the C++ BatchJoin runtime stored behind a custom scan state. */
     [[nodiscard]] batch_join_runtime* try_get_batch_join_runtime(CustomScanState* node) noexcept {
         auto* state = reinterpret_cast<batch_join_state*>(node);
         return state == nullptr ? nullptr : static_cast<batch_join_runtime*>(state->runtime);
     }
 
-    /* Recipe-aware custom scans expose virtual rows which borrow retained EOH
+    /**
+     * @brief Clears parent-visible references before their retained recipe storage is released.
+     *
+     * Recipe-aware custom scans expose virtual rows which borrow retained EOH
      * wrappers. Clear every parent-visible slot and expression-context pointer
-     * before the owning dispatch arena is reset. */
+     * before the owning dispatch arena is reset.
+     */
     void clear_recipe_scan_parent_tuple_references(CustomScanState* node) {
         if (node == nullptr)
             return;
@@ -122,12 +127,17 @@ export {
         }
     }
 
+    /** @brief Clears parent-visible tuple references and forgets the active target slot. */
     void batch_join_clear_parent_tuple_references(CustomScanState* node,
                                                   batch_join_runtime& runtime) {
         clear_recipe_scan_parent_tuple_references(node);
         runtime.current_target_slot = nullptr;
     }
 
+    /**
+     * @brief Performs ordered BatchJoin cleanup while translating PostgreSQL errors to C++.
+     * @param delete_query_context Whether to delete rather than reset the query memory context.
+     */
     void batch_join_release_executor_resources_checked(CustomScanState* node,
                                                        batch_join_runtime& runtime,
                                                        const bool delete_query_context) {
@@ -194,6 +204,7 @@ export {
         runtime.cleanup_done = true;
     }
 
+    /** @brief Marks executor resources abandoned after PostgreSQL has already unwound them. */
     void batch_join_abandon_executor_resources_after_error(CustomScanState* node,
                                                            batch_join_runtime& runtime) noexcept {
         if (runtime.cleanup_done) {
@@ -228,6 +239,7 @@ export {
         runtime.cleanup_done = true;
     }
 
+    /** @brief Destroys the C++ runtime from its query-memory-context reset callback. */
     void batch_join_runtime_cleanup(void* argument) {
         auto* state = static_cast<batch_join_state*>(argument);
         if (state == nullptr || state->runtime == nullptr) {
@@ -239,6 +251,10 @@ export {
         std::destroy_at(runtime);
     }
 
+    /**
+     * @brief Releases materialized query rows before resetting their owning memory context.
+     * @param drop_slots Whether live PostgreSQL slots must be explicitly dropped first.
+     */
     void batch_join_clear_query_tuples(batch_join_runtime& runtime, const bool drop_slots) {
         if (drop_slots) {
             for (batch_join_query_tuple& query : runtime.query_tuples) {
@@ -265,10 +281,16 @@ export {
         runtime.queries_materialized = false;
     }
 
-    /* A child PlanState may legally return a pass-through scan/child slot rather
+    /**
+     * @brief Validates the physical slot returned by a BatchJoin child plan.
+     *
+     * A child PlanState may legally return a pass-through scan/child slot rather
      * than its ps_ResultTupleSlot.  Validate the slot that ExecProcNode actually
      * returned before reading or copying it; the post-setrefs Plan targetlist is
-     * the planning ABI, while this is the independent executor ABI. */
+     * the planning ABI, while this is the independent executor ABI.
+     *
+     * @throws PostgreSQL ERROR when column counts or sequence and row-number types differ.
+     */
     void batch_join_validate_returned_child_slot(TupleTableSlot* slot,
                                                  const int expected_columns,
                                                  const AttrNumber sequence_resno,
@@ -319,9 +341,13 @@ export {
         }
     }
 
-    /* Convert validation failures raised while automatic C++ row metadata is live
+    /**
+     * @brief Raises a materialization failure through the PostgreSQL-to-C++ bridge.
+     *
+     * Convert validation failures raised while automatic C++ row metadata is live
      * into normal C++ unwinding. A raw PostgreSQL longjmp here would skip the two
-     * retained-attribute vector destructors. */
+     * retained-attribute vector destructors.
+     */
     [[noreturn]] void batch_join_raise_materialization_as_cpp(const int sqlstate,
                                                               const char* message,
                                                               const std::string detail = {}) {

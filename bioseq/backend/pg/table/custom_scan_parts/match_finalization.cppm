@@ -85,6 +85,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Captures one match-producing plan node and its planner-side binding metadata. */
     struct match_owner_finalization {
         CustomScan* scan = nullptr;
         List* descriptor = NIL;
@@ -113,28 +114,35 @@ export {
     /* Backend-local audit that a PostgreSQL ERROR cannot jump across the heap-
      * backed owner vector.  The test hook reads the balance after
      * a user-triggered ambiguous-owner error in the same backend. */
+    /** @brief Counts heap-owner scopes entered by the test-only finalization audit. */
     std::uint64_t match_owner_finalization_scopes_entered = 0u;
+    /** @brief Counts heap-owner scopes exited by the test-only finalization audit. */
     std::uint64_t match_owner_finalization_scopes_exited = 0u;
 
+    /** @brief Records balanced entry and exit of a test-only finalization scope. */
     struct match_owner_finalization_scope_guard {
+        /** @brief Records scope entry without allocating or invoking PostgreSQL. */
         match_owner_finalization_scope_guard() noexcept {
             ++match_owner_finalization_scopes_entered;
         }
         match_owner_finalization_scope_guard(const match_owner_finalization_scope_guard&) = delete;
         match_owner_finalization_scope_guard&
         operator=(const match_owner_finalization_scope_guard&) = delete;
+        /** @brief Records scope exit without allocating or invoking PostgreSQL. */
         ~match_owner_finalization_scope_guard() noexcept {
             ++match_owner_finalization_scopes_exited;
         }
     };
 #endif
 
+    /** @brief Classifies the outcome of resolving one helper site to a match owner. */
     enum class match_site_resolution_status : std::uint8_t {
         bound,
         ambiguous,
         invalid,
     };
 
+    /** @brief Reports the selected owner, binding form, and number of candidates. */
     struct match_site_resolution {
         match_site_resolution_status status = match_site_resolution_status::invalid;
         match_helper_binding_kind kind = match_helper_binding_kind::unresolved;
@@ -142,6 +150,10 @@ export {
         std::size_t candidate_count = 0u;
     };
 
+    /**
+     * @brief Reads and validates an integer cell from a serialized binding list.
+     * @throws PostgreSQL ERROR when the requested cell is absent or has the wrong node type.
+     */
     [[nodiscard]] Integer* match_binding_integer(List* values, const int index, const char* field) {
         Node* node = values == nullptr || index < 0 || index >= list_length(values)
                          ? nullptr
@@ -155,6 +167,7 @@ export {
         return reinterpret_cast<Integer*>(node);
     }
 
+    /** @brief Tests whether a canonical helper argument belongs to an owner's query-local lineage. */
     [[nodiscard]] bool match_owner_lineage_contains(const match_owner_finalization& site_owner,
                                                     const match_owner_finalization& owner,
                                                     Node* argument,
@@ -187,6 +200,7 @@ export {
         return false;
     }
 
+    /** @brief Resolves one canonical helper argument against owners in the registering query scope. */
     [[nodiscard]] match_site_resolution
     resolve_match_helper_site(match_owner_finalization& site_owner,
                               Node* canonical_argument,
@@ -251,6 +265,7 @@ export {
  * same physical relation remains distinct by Var identity.  Duplicate exact
  * recipes fail closed rather than selecting by traversal order. */
 #ifdef BIOSEQ_TEST_INDEXES
+    /** @brief Runs the backend-local query-scope and ambiguity resolver self-test once. */
     void verify_match_owner_scope_resolution(const bioseq_stub_oids& oids) {
         static bool verified = false;
         if (verified)
@@ -388,6 +403,7 @@ export {
     }
 #endif
 
+    /** @brief Allocates a nonzero query-scope identifier and advances its counter. */
     [[nodiscard]] std::uint64_t allocate_match_owner_scope(std::uint64_t& next_scope_id) {
         if (next_scope_id == 0u || next_scope_id == (std::numeric_limits<std::uint64_t>::max)()) {
             ereport(ERROR,
@@ -397,6 +413,7 @@ export {
         return next_scope_id++;
     }
 
+    /** @brief Finds and validates the optional base-scan match-owner tag. */
     [[nodiscard]] List* find_base_match_owner_plan_tag(CustomScan* scan) {
         if (scan == nullptr || scan->methods != bioseq_column_scan_scan_methods()) {
             return NIL;
@@ -451,6 +468,10 @@ export {
         return result;
     }
 
+    /**
+     * @brief Collects match owners recursively while assigning distinct scopes to subplans.
+     * @throws PostgreSQL ERROR when serialized owner metadata violates its plan ABI.
+     */
     void collect_match_owner_plan(Plan* plan,
                                   std::vector<match_owner_finalization>& owners,
                                   const std::uint64_t query_scope_id,
@@ -625,6 +646,7 @@ export {
         }
     }
 
+    /** @brief Checks that setrefs preserved one base-lineage Var's physical attribute identity. */
     [[nodiscard]] bool
     base_match_target_var_translation_agrees(const Var* planner_target,
                                              const Var* executor_target,
@@ -645,6 +667,7 @@ export {
                planner_target->varcollid == executor_target->varcollid;
     }
 
+    /** @brief Checks planner and executor Vars for the selected helper binding form. */
     [[nodiscard]] bool
     base_match_site_var_translation_agrees(const Var* planner_argument,
                                            const Var* executor_argument,
@@ -678,6 +701,7 @@ export {
                planner_argument->varcollid == executor_argument->varcollid;
     }
 
+    /** @brief Checks whether setrefs translated an expression only by its scan relation index. */
     [[nodiscard]] bool base_match_expression_translation_agrees(Node* planner_expression,
                                                                 Node* executor_expression,
                                                                 const Index planner_relid,
@@ -697,6 +721,7 @@ export {
         return equal(translated, executor_expression);
     }
 
+    /** @brief Checks the post-setrefs target recipe and each canonical base-lineage source. */
     [[nodiscard]] bool
     base_match_target_expression_translation_agrees(Node* planner_target,
                                                     Node* executor_target,
@@ -726,6 +751,7 @@ export {
         return true;
     }
 
+    /** @brief Checks one helper argument's planner-to-executor translation. */
     [[nodiscard]] bool
     base_match_site_expression_translation_agrees(Node* planner_argument,
                                                   Node* executor_argument,
@@ -780,10 +806,15 @@ export {
         return planner_member && executor_member;
     }
 
+    /** @brief Tests a finalized helper argument against its canonical planner expression. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(CustomScan* scan,
                                                                           Node* translated,
                                                                           Node* canonical) noexcept;
 
+    /**
+     * @brief Builds the post-setrefs descriptor and helper sites for a base scan owner.
+     * @throws PostgreSQL ERROR when planner and executor identities do not agree.
+     */
     void finalize_base_match_owner_executor_image(match_owner_finalization& owner,
                                                   const bioseq_stub_oids& oids) {
         if (owner.base_owner_tag == NIL)
@@ -915,6 +946,10 @@ export {
             executor_sites;
     }
 
+    /**
+     * @brief Assigns stable owner identifiers and resolves every registered helper site.
+     * @throws PostgreSQL ERROR for invalid, ambiguous, or cross-owner bindings.
+     */
     void finalize_match_owner_bindings(std::span<match_owner_finalization> owners) {
         const bioseq_stub_oids& oids = get_cached_stub_oids();
 #ifdef BIOSEQ_TEST_INDEXES
@@ -1013,6 +1048,7 @@ export {
         }
     }
 
+    /** @brief Rewrites helper placeholders owned by ancestor match plans to inert expressions. */
     void neutralize_ancestor_owned_dummy_match_helpers(PlannedStmt* statement,
                                                        std::span<match_owner_finalization> owners);
 
@@ -1032,8 +1068,9 @@ export {
                 /* This callback is below PostgreSQL's sigsetjmp boundary.  Every local
                  * it reaches is either PostgreSQL-owned (List/Bitmapset) or statically
                  * trivially destructible (span/fixed fixture/scalars).  The sole heap-
-                 * owning C++ container is this outer vector, which remains above the
+                * owning C++ container is this outer vector, which remains above the
                  * boundary and therefore unwinds after a translated PG error. */
+                // Collect and finalize all query-local owners inside the translated error boundary.
                 bioseq::postgres::support::invoke_pg_as_cpp([statement, &owners] {
                     std::uint64_t next_scope_id = 1u;
                     const std::uint64_t statement_scope = allocate_match_owner_scope(next_scope_id);

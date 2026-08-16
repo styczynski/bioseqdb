@@ -87,6 +87,14 @@ import :custom_scan_per_row_join_paths_path_reconstruction;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Builds per-row BatchJoin owners for an admissible transformed mmsearch restriction.
+     *
+     * Successful admission replaces the join relation's competing paths with planner-context
+     * CustomPaths that preserve the reconstructed child metadata and helper carriers.
+     * @return True when at least one owner path was added to the join relation.
+     * @throws PostgreSQL ERROR when reconstruction leaks the transferred RestrictInfo.
+     */
     [[nodiscard]] bool
     per_row_add_transformed_mmsearch_paths(PlannerInfo* root,
                                            RelOptInfo* joinrel,

@@ -82,8 +82,8 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /*
-     * Versioned, self-describing result-semantic snapshot for BioseqScan.
+    /**
+     * @brief Defines the versioned, self-describing semantic snapshot stored in a scan plan.
      *
      * The payload is one named List embedded in CustomScan.custom_private:
      *
@@ -99,6 +99,7 @@ export {
     inline constexpr std::int32_t k_bioseq_semantic_payload_field_count = 42;
     inline constexpr int k_bioseq_semantic_payload_header_nodes = 3;
 
+    /** @brief Identifies each field in the ordered scan-semantic payload. */
     enum class bioseq_semantic_field : int {
         kmer_size = 0,
         window_size,
@@ -147,6 +148,7 @@ export {
     static_assert(static_cast<int>(bioseq_semantic_field::index_read_requirement) + 1 ==
                   k_bioseq_semantic_payload_field_count);
 
+    /** @brief Holds the executor-visible alignment and index policy frozen by the planner. */
     struct frozen_scan_semantics {
         bioseq::simd::minimap2_parameters params{};
         bool read_sequence_index = false;
@@ -154,11 +156,13 @@ export {
             bioseq::indexing::index_read_requirement::allow;
     };
 
+    /** @brief Allocates a PostgreSQL INT4 constant for a semantic payload field. */
     [[nodiscard]] Const* make_semantic_int4_const(const std::int32_t value) {
         return makeConst(
             INT4OID, -1, InvalidOid, sizeof(std::int32_t), Int32GetDatum(value), false, true);
     }
 
+    /** @brief Allocates a PostgreSQL INT8 constant for a semantic payload field. */
     [[nodiscard]] Const* make_semantic_int8_const(const std::int64_t value) {
         return makeConst(INT8OID,
                          -1,
@@ -169,15 +173,21 @@ export {
                          FLOAT8PASSBYVAL);
     }
 
+    /** @brief Allocates a PostgreSQL boolean constant for a semantic payload field. */
     [[nodiscard]] Const* make_semantic_bool_const(const bool value) {
         return makeConst(BOOLOID, -1, InvalidOid, sizeof(bool), BoolGetDatum(value), false, true);
     }
 
+    /** @brief Preserves a binary32 value as exact bits in an INT8 payload constant. */
     [[nodiscard]] Const* make_semantic_float_bits_const(const float value) {
         const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
         return make_semantic_int8_const(static_cast<std::int64_t>(bits));
     }
 
+    /**
+     * @brief Serializes frozen scan semantics into PostgreSQL plan nodes.
+     * @return A list allocated in the current PostgreSQL memory context.
+     */
     [[nodiscard]] List* make_bioseq_semantic_payload(const frozen_scan_semantics& semantics) {
         const auto& params = semantics.params;
         List* payload =
@@ -245,6 +255,7 @@ export {
         return payload;
     }
 
+    /** @brief Checks that a payload constant has the exact expected PostgreSQL representation. */
     [[nodiscard]] bool semantic_const_metadata_valid(const Const* constant,
                                                      const Oid type_oid,
                                                      const int16_t type_length,
@@ -256,6 +267,7 @@ export {
                (by_value || DatumGetPointer(constant->constvalue) != nullptr);
     }
 
+    /** @brief Decodes a validated INT4 payload node into caller-owned storage. */
     [[nodiscard]] bool decode_semantic_int4(const Node* node, std::int32_t* output) noexcept {
         const Const* constant =
             node != nullptr && IsA(node, Const) ? reinterpret_cast<const Const*>(node) : nullptr;
@@ -267,6 +279,7 @@ export {
         return true;
     }
 
+    /** @brief Decodes a validated INT8 payload node into caller-owned storage. */
     [[nodiscard]] bool decode_semantic_int8(const Node* node, std::int64_t* output) noexcept {
         const Const* constant =
             node != nullptr && IsA(node, Const) ? reinterpret_cast<const Const*>(node) : nullptr;
@@ -278,6 +291,7 @@ export {
         return true;
     }
 
+    /** @brief Decodes a canonical PostgreSQL boolean payload node into caller-owned storage. */
     [[nodiscard]] bool decode_semantic_bool(const Node* node, bool* output) noexcept {
         const Const* constant =
             node != nullptr && IsA(node, Const) ? reinterpret_cast<const Const*>(node) : nullptr;
@@ -291,6 +305,7 @@ export {
         return true;
     }
 
+    /** @brief Returns an ordered payload field node, or null when the field is unavailable. */
     [[nodiscard]] const Node* semantic_field_node(const List* payload,
                                                   const bioseq_semantic_field field) noexcept {
         if (payload == nullptr)
@@ -301,6 +316,7 @@ export {
                    : nullptr;
     }
 
+    /** @brief Decodes an INT8-backed payload field after checking the int32 range. */
     [[nodiscard]] bool decode_semantic_int32_field(const List* payload,
                                                    const bioseq_semantic_field field,
                                                    std::int32_t* output) noexcept {
@@ -314,6 +330,7 @@ export {
         return true;
     }
 
+    /** @brief Decodes an INT8-backed payload field after checking the size_t range. */
     [[nodiscard]] bool decode_semantic_size_field(const List* payload,
                                                   const bioseq_semantic_field field,
                                                   std::size_t* output) noexcept {
@@ -327,6 +344,7 @@ export {
         return true;
     }
 
+    /** @brief Decodes an INT8-backed payload field after checking the uint32 range. */
     [[nodiscard]] bool decode_semantic_uint32_field(const List* payload,
                                                     const bioseq_semantic_field field,
                                                     std::uint32_t* output) noexcept {
@@ -339,6 +357,7 @@ export {
         return true;
     }
 
+    /** @brief Restores an exact binary32 value from its INT8-backed bit pattern. */
     [[nodiscard]] bool decode_semantic_float_field(const List* payload,
                                                    const bioseq_semantic_field field,
                                                    float* output) noexcept {
@@ -351,6 +370,7 @@ export {
         return true;
     }
 
+    /** @brief Finds the unique named semantic payload in CustomScan private data. */
     [[nodiscard]] const List* find_bioseq_semantic_payload(const List* custom_private) noexcept {
         const List* found = nullptr;
         for (const Node* candidate : postgres_list<Node>(const_cast<List*>(custom_private))) {
@@ -370,6 +390,10 @@ export {
         return found;
     }
 
+    /**
+     * @brief Validates and decodes the complete semantic payload without throwing C++ exceptions.
+     * @return True only when every header, field, and enum value is valid.
+     */
     [[nodiscard]] bool decode_bioseq_semantic_payload(const List* custom_private,
                                                       frozen_scan_semantics* output) noexcept {
         if (output == nullptr)

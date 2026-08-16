@@ -47,10 +47,14 @@ import :access_common;
 import :access_hooks;
 import :access_method_scan_callbacks;
 
+/** @brief Publish the relation's virtual block count to PostgreSQL index-build progress. */
 static void
 report_total_virtual_blocks(Relation relation, Snapshot snapshot, int progress_arr_index);
+/** @brief Count virtual blocks visible through the supplied snapshot. */
 static BlockNumber column_virtual_block_count(Relation relation, Snapshot snapshot);
+/** @brief Return the greatest visible virtual tuple identifier for progress accounting. */
 static ItemPointerData highest_column_item_pointer(Relation relation, Snapshot snapshot);
+/** @brief Scan visible column rows and pass each admitted index tuple to the index callback. */
 static double
 build_index_from_column_rows(TableScanDesc scan,
                              Relation index_relation,
@@ -61,6 +65,7 @@ build_index_from_column_rows(TableScanDesc scan,
                              EState* estate,
                              ExprState* predicate,
                              bioseq::storage::pg_sequence_source_provider* source_provider);
+/** @brief Insert visible rows absent from the sorted tuple-identifier stream. */
 static void
 validate_missing_index_rows(TableScanDesc scan,
                             Relation index_relation,
@@ -69,6 +74,7 @@ validate_missing_index_rows(TableScanDesc scan,
                             ExprState* predicate,
                             ValidateIndexState* state,
                             bioseq::storage::pg_sequence_source_provider* source_provider);
+/** @brief Advance a sorted tuple-identifier stream to the first entry at or after a target. */
 static ItemPointerData skip_item_pointers_before(Tuplesortstate* tuple_sort,
                                                  ItemPointer target_item_pointer);
 

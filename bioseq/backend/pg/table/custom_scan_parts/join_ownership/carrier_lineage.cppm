@@ -82,6 +82,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Tracks forbidden target references while validating a locator projection. */
     struct batch_join_target_projection_probe {
         Index target_varno = 0;
         AttrNumber target_seq_attno = InvalidAttrNumber;
@@ -90,7 +91,9 @@ export {
         bool forbidden = false;
     };
 
+    /** @brief Finds target sequence Vars that would escape into ordinary SQL evaluation. */
     struct batch_join_target_projection_visitor {
+        /** @brief Examines one projection node while treating owned helpers as atomic. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -119,6 +122,7 @@ export {
         }
     };
 
+    /** @brief Checks whether an expression exposes a locator-backed target sequence. */
     [[nodiscard]] bool batch_join_target_expression_is_forbidden(
         Node* expression, const Var* target_var, const bool allow_mmsearch_qualifier) {
         if (expression == nullptr || target_var == nullptr) {
@@ -134,6 +138,7 @@ export {
         return probe.forbidden;
     }
 
+    /** @brief Checks a restriction list for forbidden target-sequence evaluation. */
     [[nodiscard]] bool batch_join_target_restrictions_are_forbidden(
         List* restrictions, const Var* target_var, const bool allow_mmsearch_qualifier) {
         for (Node* node : postgres_list<Node>(restrictions)) {
@@ -149,6 +154,7 @@ export {
         return false;
     }
 
+    /** @brief Validates a canonical sequence typmod supported by runtime dispatch. */
     [[nodiscard]] bool batch_join_typmod_is_supported(const int32 typmod) noexcept {
         if (typmod < 0) {
             return false;
@@ -161,6 +167,7 @@ export {
         return alphabet_supported && width_supported && decoded.encode() == typmod;
     }
 
+    /** @brief Raises a PostgreSQL datatype error for operands with different alphabets. */
     [[noreturn]] void
     raise_mmsearch_alphabet_mismatch(const compact_sequence_stdc_type_params target,
                                      const compact_sequence_stdc_type_params query,
@@ -185,6 +192,7 @@ export {
         pg_unreachable();
     }
 
+    /** @brief Checks that two supported sequence typmods bind the same alphabet. */
     [[nodiscard]] bool mmsearch_typmods_share_alphabet(const int32 target_typmod,
                                                        const int32 query_typmod) noexcept {
         return batch_join_typmod_is_supported(target_typmod) &&
@@ -193,11 +201,13 @@ export {
                    compact_sequence_stdc_type_params::decode(query_typmod).alphabet_code;
     }
 
+    /** @brief Carries a validated sequence typmod and whether its outer descriptor was erased. */
     struct per_row_sequence_typmod_validation {
         int32 typmod = -1;
         bool descriptor_erased = false;
     };
 
+    /** @brief Checks a function node against its exact catalog argument and result types. */
     [[nodiscard]] bool per_row_function_signature_is_exact(FuncExpr* function) {
         if (function == nullptr || function->funcretset || OidIsValid(function->funcvariadic))
             return false;
@@ -217,6 +227,7 @@ export {
         return true;
     }
 
+    /** @brief Checks an operator node against its exact catalog implementation signature. */
     [[nodiscard]] bool per_row_operator_signature_is_exact(OpExpr* operation) {
         if (operation == nullptr || !OidIsValid(operation->opno) ||
             !OidIsValid(operation->opfuncid) || operation->opretset ||
@@ -238,11 +249,15 @@ export {
         return true;
     }
 
-    /* PostgreSQL does not propagate typmods through ordinary FuncExpr results,
+    /**
+     * @brief Derives one exact typmod through supported sequence-preserving expressions.
+     *
+     * PostgreSQL does not propagate typmods through ordinary FuncExpr results,
      * even when the exact catalog function is sequence-type preserving.  Admit an
      * erased descriptor only after recursively validating one identical concrete
      * typmod at every sequence-valued leaf.  Non-sequence literal/array operands
-     * are neutral only for the exact registered concat overloads. */
+     * are neutral only for the exact registered concat overloads.
+     */
     [[nodiscard]] std::optional<per_row_sequence_typmod_validation>
     per_row_validate_sequence_typmod(Node* expression, bioseq_stub_oids const& oids) {
         check_stack_depth();
@@ -250,6 +265,7 @@ export {
             return std::nullopt;
         }
         const int32 descriptor_typmod = exprTypmod(expression);
+        // Reconciles a validated leaf typmod with the enclosing expression descriptor.
         auto finish =
             [descriptor_typmod](
                 const int32 validated_typmod) -> std::optional<per_row_sequence_typmod_validation> {
@@ -330,10 +346,14 @@ export {
         return common_typmod.has_value() ? finish(*common_typmod) : std::nullopt;
     }
 
-    /* Reject a Gather hidden below the common unary planner wrappers.  Looking
+    /**
+     * @brief Recursively detects parallel execution anywhere below a planner path.
+     *
+     * Reject a Gather hidden below the common unary planner wrappers. Looking
      * only at cheapest_total_path->pathtype misses Projection/Material wrappers
      * and lets a parallel child enter an executor that owns one backend-local
-     * query materialization. */
+     * query materialization.
+     */
     [[nodiscard]] bool batch_join_path_contains_parallel_execution(const Path* path) noexcept {
         if (path == nullptr) {
             return false;
@@ -397,15 +417,18 @@ export {
         }
     }
 
+    /** @brief Couples an eligible base scan with its costing and locator targets. */
     struct batch_join_bioseq_path_candidate {
         CustomPath* scan = nullptr;
         Path* cost_owner = nullptr;
         const PathTarget* locator_target = nullptr;
     };
 
+    /** @brief Reports whether an expression contains any match-result helper. */
     [[nodiscard]] bool batch_join_expression_has_match_helper(Node* expression,
                                                               const bioseq_stub_oids& oids);
 
+    /** @brief Checks whether a path target contains a structurally equal expression. */
     [[nodiscard]] bool path_target_has_equal_expression(const PathTarget* target,
                                                         const Node* expression) noexcept {
         if (target == nullptr || expression == nullptr) {
@@ -419,6 +442,7 @@ export {
         return false;
     }
 
+    /** @brief Decodes a match helper applied directly to the selected target relation. */
     [[nodiscard]] FuncExpr* batch_join_exact_target_helper(Node* expression,
                                                            const Index target_relid) noexcept {
         FuncExpr* helper = try_cast_pg_node<FuncExpr>(expression);
@@ -436,9 +460,13 @@ export {
                    : nullptr;
     }
 
-    /* Decode only the catalog/arity/type contract of a match-result helper.  Its
+    /**
+     * @brief Decodes a match helper with an exact catalog, arity, and result contract.
+     *
+     * Its
      * argument binding is resolved separately against the selected owner recipe
-     * after standard_planner has assigned final plan_node_id values. */
+     * after standard_planner has assigned final plan_node_id values.
+     */
     [[nodiscard]] FuncExpr*
     batch_join_well_formed_match_helper(Node* expression, const bioseq_stub_oids& oids) noexcept {
         FuncExpr* helper = try_cast_pg_node<FuncExpr>(expression);
@@ -451,25 +479,30 @@ export {
         return helper;
     }
 
+    /** @brief Returns the sole argument of a well-formed match helper. */
     [[nodiscard]] Node* batch_join_match_helper_argument(FuncExpr* helper) noexcept {
         return helper == nullptr || list_length(helper->args) != 1
                    ? nullptr
                    : reinterpret_cast<Node*>(linitial(helper->args));
     }
 
+    /** @brief Builds the canonical base-Var lineage for a match target recipe. */
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,
                                                      const bioseq_stub_oids& oids);
 
+    /** @brief Serializes a target recipe and its base lineage as an owner descriptor. */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     Index base_relid,
                                                     const bioseq_stub_oids& oids);
 
+    /** @brief Checks whether a helper names the exact transformed target recipe. */
     [[nodiscard]] bool batch_join_match_helper_names_recipe(FuncExpr* helper,
                                                             Node* target_recipe) noexcept {
         Node* argument = batch_join_match_helper_argument(helper);
         return argument != nullptr && target_recipe != nullptr && equal(argument, target_recipe);
     }
 
+    /** @brief Checks whether a helper names one canonical base source of a recipe. */
     [[nodiscard]] bool batch_join_match_helper_names_base_lineage(FuncExpr* helper,
                                                                   Node* target_recipe,
                                                                   const bioseq_stub_oids& oids) {
@@ -492,10 +525,14 @@ export {
         return false;
     }
 
-    /* Generic PHV shape used by transformed exact-recipe helpers.  Unlike the
+    /**
+     * @brief Decodes a match-helper PHV at a valid transformed-recipe frontier.
+     *
+     * Unlike the
      * base-lineage helper decoder below, the PHV may cover more than one relation when
      * the target recipe is a concat.  The final owner resolver validates the
-     * canonical argument and lineage before any executor sees the site. */
+     * canonical argument and lineage before any executor sees the site.
+     */
     [[nodiscard]] FuncExpr*
     batch_join_match_helper_phv_function(const PlaceHolderVar* placeholder,
                                          const bioseq_stub_oids& oids) noexcept {
@@ -507,9 +544,12 @@ export {
                                                    oids);
     }
 
-    /* Exact shape emitted by try_wrap_in_placeholder() for a direct helper call.
+    /**
+     * @brief Decodes a direct target helper wrapped in its exact single-relation PHV.
+     *
      * Do not accept a generic PHV merely because a helper occurs somewhere below
-     * it: its evaluation level/nulling semantics may belong to unrelated SQL. */
+     * it because its evaluation and nulling frontier may belong to unrelated SQL.
+     */
     [[nodiscard]] FuncExpr*
     batch_join_exact_helper_phv_function(const PlaceHolderVar* placeholder,
                                          const Index target_relid) noexcept {
@@ -524,11 +564,13 @@ export {
                                               target_relid);
     }
 
+    /** @brief Checks for the exact single-relation helper PHV shape. */
     [[nodiscard]] bool batch_join_is_exact_helper_phv(const PlaceHolderVar* placeholder,
                                                       const Index target_relid) noexcept {
         return batch_join_exact_helper_phv_function(placeholder, target_relid) != nullptr;
     }
 
+    /** @brief Tracks whether a projection delta contains only parent-safe helper support. */
     struct batch_join_projection_delta {
         const PathTarget* child_target = nullptr;
         Index target_relid = 0;
@@ -536,7 +578,9 @@ export {
         bool invalid = false;
     };
 
+    /** @brief Validates Vars and helper PHVs introduced by a projection wrapper. */
     struct batch_join_projection_delta_visitor {
+        /** @brief Checks one wrapper-only expression node against the child target. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -560,10 +604,14 @@ export {
         }
     };
 
-    /* Validate that the complete wrapper-only expression can be evaluated by the
+    /**
+     * @brief Checks that a wrapper-only expression can move to the BatchJoin parent.
+     *
+     * Validate that the complete wrapper-only expression can be evaluated by the
      * BatchJoin parent without changing semantics: it is nonvolatile, every Var
      * is already produced by the child, every PHV is the exact helper-support
-     * shape, and at least one such helper PHV explains the wrapper delta. */
+     * shape, and at least one such helper PHV explains the wrapper delta.
+     */
     [[nodiscard]] bool batch_join_projection_delta_is_parent_safe(
         Node* expression, const PathTarget* child_target, const Index target_relid) noexcept {
         if (expression == nullptr || child_target == nullptr ||
@@ -576,10 +624,14 @@ export {
         return !validation.invalid && validation.saw_exact_helper_phv;
     }
 
-    /* A wrapper may also expose an ordinary target attribute needed above the
+    /**
+     * @brief Checks whether an expression is a safe non-sequence target Var.
+     *
+     * A wrapper may also expose an ordinary target attribute needed above the
      * join (for example t.pk).  Carrying that base Var through the locator child
      * is exact; carrying the sequence datum, a whole row, a system attribute, a
-     * nulled outer-join Var, or an expression assembled at this level is not. */
+     * nulled outer-join Var, or an expression assembled at this level is not.
+     */
     [[nodiscard]] bool batch_join_is_safe_plain_target_var(
         Node* expression, const Index target_relid, const AttrNumber target_seq_attno) noexcept {
         Var* var = try_cast_pg_node<Var>(expression);
@@ -588,11 +640,15 @@ export {
                bms_is_empty(var->varnullingrels);
     }
 
-    /* A helper support function can add a ProjectionPath at the base relation.
+    /**
+     * @brief Checks whether a base ProjectionPath can be evaluated by the parent owner.
+     *
+     * A helper support function can add a ProjectionPath at the base relation.
      * BioseqBatchJoin may look through it only when every wrapper-only expression
      * is either an exact helper expression evaluated by the parent or one plain,
      * non-sequence target Var copied into the locator child. Any other expression
-     * is a real evaluation boundary and disqualifies this candidate. */
+     * is a real evaluation boundary and disqualifies this candidate.
+     */
     [[nodiscard]] bool
     batch_join_projection_is_parent_safe(const ProjectionPath* projection,
                                          const AttrNumber target_seq_attno) noexcept {
@@ -626,6 +682,7 @@ export {
         return saw_safe_delta;
     }
 
+    /** @brief Finds the cheapest unparameterized Bioseq scan below parent-safe projection wrappers. */
     [[nodiscard]] batch_join_bioseq_path_candidate
     find_unparameterized_bioseq_custom_path(RelOptInfo* rel,
                                             const AttrNumber target_seq_attno) noexcept {
@@ -668,7 +725,9 @@ export {
         return best;
     }
 
-    /*
+    /**
+     * @brief Holds a synthetic base scan and projection wrapper for eligibility tests.
+     *
      * Integration-only validation seam for the exact production eligibility guard.
      * SQL cannot reliably force an unrelated expression into a base-relation
      * ProjectionPath: PostgreSQL will normally retain it in an upper projection.
@@ -682,6 +741,7 @@ export {
         ProjectionPath* projection = nullptr;
     };
 
+    /** @brief Builds an exact single-relation helper PHV for projection-guard tests. */
     [[nodiscard]] PlaceHolderVar* make_batch_join_projection_guard_phv(const Oid helper_oid,
                                                                        const Oid result_type,
                                                                        const Index relid,
@@ -702,6 +762,7 @@ export {
         return placeholder;
     }
 
+    /** @brief Builds a synthetic projection-wrapped Bioseq path for guard tests. */
     [[nodiscard]] batch_join_projection_guard_fixture
     make_batch_join_projection_guard_fixture(const Index relid,
                                              List* wrapper_delta,
@@ -754,6 +815,7 @@ export {
         return batch_join_projection_guard_fixture{rel, scan, projection};
     }
 
+    /** @brief Checks whether a path target contains an expression equal to a candidate. */
     [[nodiscard]] bool path_target_contains_expression(const PathTarget* target,
                                                        const Expr* expression) noexcept {
         if (target == nullptr || expression == nullptr) {
@@ -767,6 +829,7 @@ export {
         return false;
     }
 
+    /** @brief Collects target Vars needed below a parent-owned projection. */
     struct batch_join_underlying_target_var_collector {
         PathTarget* destination = nullptr;
         Index target_relid = 0;
@@ -774,7 +837,9 @@ export {
         bool invalid = false;
     };
 
+    /** @brief Validates and copies safe target Vars into a locator child target. */
     struct batch_join_underlying_target_var_visitor {
+        /** @brief Processes one Var dependency beneath a wrapper expression. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -811,6 +876,7 @@ export {
         }
     };
 
+    /** @brief Appends all safe underlying target Vars required by a wrapper target. */
     [[nodiscard]] bool batch_join_append_underlying_target_vars(PathTarget* destination,
                                                                 const PathTarget* source,
                                                                 const Index target_relid,

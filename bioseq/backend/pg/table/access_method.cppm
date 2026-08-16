@@ -69,6 +69,7 @@ namespace {
 /** Scope guard for relation pins whose PostgreSQL lock mode is tracked separately. */
 class sql_relation_lock final {
   public:
+    /** @brief Retain a relation pin and remember the matching close routine and lock mode. */
     sql_relation_lock(Relation relation, LOCKMODE close_lock, bool opened_as_table) noexcept
         : locked_relation{relation}, close_lock_mode{close_lock},
           uses_table_close{opened_as_table} {}
@@ -76,6 +77,7 @@ class sql_relation_lock final {
     sql_relation_lock(const sql_relation_lock&) = delete;
     sql_relation_lock& operator=(const sql_relation_lock&) = delete;
 
+    /** @brief Release the relation pin without changing the separately tracked lock policy. */
     ~sql_relation_lock() noexcept {
         if (locked_relation == nullptr)
             return;

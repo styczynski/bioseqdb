@@ -89,10 +89,14 @@ import :custom_scan_scan_runtime_source_lifecycle;
 using namespace bioseq::postgres::support;
 
 export {
-    /* Evaluate the residual frontier and, when configured, both mmsearch operand
+    /**
+     * @brief Evaluates one row's residual qual and any expression-backed mmsearch operands.
+     *
+     * Evaluate the residual frontier and, when configured, both mmsearch operand
      * ExprStates while only their physical sources are promoted.  The scan slot is
      * restored on normal completion, C++ unwind, and PostgreSQL longjmp before a
-     * caller can buffer it. */
+     * caller can buffer it.
+     */
     [[nodiscard]] mmsearch_row_evaluation
     evaluate_mmsearch_input_row(bioseq_scan_runtime& runtime,
                                 TupleTableSlot* slot,
@@ -171,7 +175,9 @@ export {
         return result;
     }
 
-    /*
+    /**
+     * @brief Builds the next projected vector batch for a VectorAgg parent.
+     *
      * VectorAgg consumes one vector_column_storage pointer per projected attribute.
      * The ordinary scan path extracts scalar rows, so build a projected
      * vector batch explicitly when the planner attached VectorAgg.
@@ -266,6 +272,10 @@ export {
         }
     }
 
+    /**
+     * @brief Runs the base scan's scalar or vectorized write/drain state machine.
+     * @return The next projected row or vector batch, or an empty slot at end of scan.
+     */
     static TupleTableSlot* inner_custom_exec_scan(scan_state* bioseq_scan_state,
                                                   ExecScanAccessMtd access_mtd,
                                                   ExecScanRecheckMtd recheck_mtd) {

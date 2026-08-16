@@ -84,8 +84,10 @@ import :custom_scan_scan_paths_admission;
 using namespace bioseq::postgres::support;
 
 export {
-    /*
-     * AddBioseqColumnScanPathsRec is a recursive function to search the
+    /**
+     * @brief Enumerates bounded parameterization subsets and adds columnar custom paths.
+     *
+     * Recursively searches the
      * parameterization space and add CustomPaths for columnar scans.
      *
      * The set paramRelids is the parameterization at the current level, and
@@ -132,6 +134,7 @@ export {
         if (owner_path != nullptr)
             for (RestrictInfo* owner :
                  postgres_list<RestrictInfo>(owner_path->custom_restrictinfo)) {
+                // Removes paths that execute an mmsearch restriction claimed by another owner.
                 auto prune_competing_owner_execution = [rel, owner](List* paths) {
                     postgres_list<Path> survivors;
                     for (Path* candidate : postgres_list<Path>(paths)) {
@@ -252,10 +255,7 @@ export {
         bms_free(tmp_candidate_relids);
     }
 
-    /*
-     * AddBioseqColumnScanPaths is the entry point for recursively generating
-     * parameterized paths. See AddBioseqColumnScanPathsRec() for discussion.
-     */
+    /** @brief Generates bounded parameterized custom paths for a columnar base relation. */
     void add_bioseq_column_scan_paths(PlannerInfo* root, RelOptInfo* rel, RangeTblEntry* rte) {
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() entered");
         List* join_clauses = find_pushdown_join_clauses(root, rel);
@@ -295,6 +295,7 @@ export {
                     owners.append(owner);
             }
         }
+        // Removes paths that execute a restriction now owned by a custom scan.
         auto prune_owned = [rel, &owners](List* paths) {
             postgres_list<Path> survivors;
             for (Path* candidate : postgres_list<Path>(paths)) {
@@ -326,8 +327,10 @@ export {
         bioseq_log<logging_level::debug>("[bioseq] pg: AddBioseqColumnScanPaths() returning");
     }
 
-    /*
-     * ParameterizationAsString returns the string representation of the set of
+    /**
+     * @brief Appends a human-readable parameterization set to caller-owned storage.
+     *
+     * Returns the string representation of the set of
      * rels given in paramRelids.
      *
      * Takes a StringInfo so that it doesn't return palloc'd memory. This makes it
@@ -359,13 +362,12 @@ export {
         return buf->data;
     }
 
-    /*
-     * ContainsExecParams tests whether the node contains any exec params. The
-     * signature accepts an extra argument for use with expression_tree_walker.
-     */
+    /** @brief Stateless context used while searching an expression for PARAM_EXEC nodes. */
     struct exec_params_probe_state {};
 
+    /** @brief Stops an expression walk at the first PARAM_EXEC node. */
     struct exec_params_visitor {
+        /** @brief Examines one expression node for an executor parameter. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor, pg_node_view node, exec_params_probe_state&) const {
             if (Param* param = node.try_cast<Param>()) {
@@ -377,16 +379,17 @@ export {
         }
     };
 
+    /** @brief Reports whether an expression contains any PARAM_EXEC node. */
     [[nodiscard]] bool contains_exec_params(Node* node) {
         exec_params_probe_state state;
         exec_params_visitor visitor;
         return walk_pg_expression_including_root(node, state, visitor);
     }
 
-    /*
-     * fixup_inherited_columns
+    /**
+     * @brief Maps parent permission columns to an inheritance child's attribute numbers.
      *
-     * Exact function Copied from PG16 as it's static.
+     * Adapted from PostgreSQL 16's static fixup_inherited_columns helper.
      *
      * When user is querying on a table with children, it implicitly accesses
      * child tables also. So, we also need to check security label of child
@@ -432,7 +435,9 @@ export {
         return result.release();
     }
 
+    /** @brief Traces relation metadata referenced while diagnosing planner costs. */
     struct cost_test_visitor {
+        /** @brief Logs the range-table entry associated with each visited Var. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor, pg_node_view node, Query& parse) const {
             bioseq_log<logging_level::debug>("[bioseq] pg: cost_test_visitor() entered");
@@ -461,8 +466,8 @@ export {
         }
     };
 
-    /*
-     * Create and add a path with the given parameterization paramRelids.
+    /**
+     * @brief Creates and costs a custom scan path with the requested outer relations.
      *
      * This follows foreign-path construction while supplying parameterization
      * through param_info and custom_private.
@@ -628,6 +633,7 @@ export {
         };
         const bool needs_evaluated_operands = owned_mmsearch_resolution.has_value() &&
                                               owned_mmsearch_resolution->any_evaluated_operand;
+        // Adds a distinct base Var needed to evaluate an owned operand or residual qual.
         auto append_support_var = [&base_operand_sources](Var* variable) {
             if (variable == nullptr)
                 return;
@@ -640,6 +646,7 @@ export {
                 lappend(base_operand_sources.target_leaf_support_vars, variable);
         };
         if (needs_evaluated_operands) {
+            // Registers an evaluated operand and the physical sources that keep it valid.
             auto register_operand = [&base_operand_sources, &append_support_var](
                                         const base_local_mmsearch_operand_resolution& operand) {
                 const std::uint32_t producer =

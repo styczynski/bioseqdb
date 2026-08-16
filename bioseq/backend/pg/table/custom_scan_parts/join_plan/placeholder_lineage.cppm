@@ -86,6 +86,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Accumulates match-result placeholder sites for one BatchJoin plan. */
     struct batch_join_placeholder_registration {
         const bioseq_stub_oids* oids = nullptr;
         Index target_relid = 0;
@@ -101,6 +102,7 @@ export {
         List* inherited_helper_identities = NIL;
     };
 
+    /** @brief Reports whether an expression contains any match-result helper. */
     [[nodiscard]] bool batch_join_expression_has_match_helper(Node* expression,
                                                               const bioseq_stub_oids& oids) {
         if (expression == nullptr) {
@@ -112,10 +114,14 @@ export {
         return detector.flags.any_match_projection;
     }
 
-    /* Multiple output expressions can contain the same current-owner helper, and
+    /**
+     * @brief Finds an existing placeholder site for the same owner identity and PHV id.
+     *
+     * Multiple output expressions can contain the same current-owner helper, and
      * PlanCustomPath may append the same whole identity as a resjunk carrier.
      * One exact identity/phid pair is one match_result slot.  Reuse that slot while
-     * keeping PHV and bare FuncExpr identities distinct. */
+     * keeping PHV and bare FuncExpr identities distinct.
+     */
     [[nodiscard]] AttrNumber
     batch_join_find_same_owner_placeholder_site(Node* identity,
                                                 FuncExpr* function,
@@ -137,6 +143,7 @@ export {
                 registration.invalid = true;
                 return InvalidAttrNumber;
             }
+            // Decodes one required Integer field from the serialized site record.
             auto integer_field = [encoded](const int index) -> Integer* {
                 Node* node = reinterpret_cast<Node*>(list_nth(encoded, index));
                 return node != nullptr && IsA(node, Integer) ? reinterpret_cast<Integer*>(node)
@@ -184,6 +191,7 @@ export {
         return result;
     }
 
+    /** @brief Appends a new match-result placeholder column and serialized site record. */
     void batch_join_register_placeholder_site(Node* identity,
                                               FuncExpr* function,
                                               const Index phid,
@@ -230,11 +238,15 @@ export {
         *registration.encoded_sites = lappend(*registration.encoded_sites, encoded);
     }
 
-    /* A raw BatchJoin's locator child can already expose a whole helper as a
+    /**
+     * @brief Binds an existing scan target position as a match-result placeholder site.
+     *
+     * A raw BatchJoin's locator child can already expose a whole helper as a
      * plan-only dummy target even when the callback tlist defers that helper to an
      * upper Result.  Make the existing target-child ordinal the match_result site;
      * adding a second scan column would leave the dummy leaf carrier unowned and
-     * would give setrefs two spellings for one semantic result. */
+     * would give setrefs two spellings for one semantic result.
+     */
     void batch_join_register_existing_placeholder_site(
         Node* identity,
         FuncExpr* function,
@@ -289,6 +301,7 @@ export {
         *registration.encoded_sites = lappend(*registration.encoded_sites, encoded);
     }
 
+    /** @brief Checks a list for a structurally equal helper identity. */
     [[nodiscard]] bool batch_join_identity_list_contains(List* identities,
                                                          Node* identity) noexcept {
         if (identity == nullptr)
@@ -300,6 +313,7 @@ export {
         return false;
     }
 
+    /** @brief Checks whether a helper identity is inherited from a validated descendant. */
     [[nodiscard]] bool
     batch_join_identity_is_inherited(batch_join_placeholder_registration const& registration,
                                      Node* identity) noexcept {
@@ -307,11 +321,16 @@ export {
                                                  identity);
     }
 
+    /** @brief Finds the unique base-owner plan tag in a Bioseq scan. */
     [[nodiscard]] List* find_base_match_owner_plan_tag(CustomScan* scan);
 
-    /* Decode only finalized-plan-independent placeholder ownership.  The stable
+    /**
+     * @brief Checks whether a custom scan structurally owns one helper identity.
+     *
+     * Decode only finalized-plan-independent placeholder ownership. The stable
      * id is deliberately still zero here: this validation runs in PlanCustomPath,
-     * before the top-level planner hook assigns final plan_node_id bindings. */
+     * before the top-level planner hook assigns final plan_node_id bindings.
+     */
     [[nodiscard]] bool batch_join_scan_owns_helper_identity(CustomScan* scan,
                                                             Node* identity) noexcept {
         if (scan == nullptr || identity == nullptr || scan->methods == nullptr) {
@@ -366,6 +385,7 @@ export {
         return false;
     }
 
+    /** @brief Recursively checks whether a descendant custom plan owns a helper identity. */
     [[nodiscard]] bool batch_join_descendant_owns_helper_identity(Plan* plan, Node* identity) {
         if (plan == nullptr || identity == nullptr)
             return false;
@@ -381,6 +401,7 @@ export {
             }
             return false;
         }
+        // Searches one PostgreSQL plan-child list for the same helper owner.
         auto search_plan_list = [identity](List* plans) {
             for (Plan* child : postgres_list<Plan>(plans)) {
                 if (batch_join_descendant_owns_helper_identity(child, identity)) {
@@ -411,6 +432,7 @@ export {
                 batch_join_descendant_owns_helper_identity(innerPlan(plan), identity));
     }
 
+    /** @brief Collects child target identities backed by validated descendant owners. */
     [[nodiscard]] List*
     batch_join_validated_inherited_helper_identities(Plan* child_plan,
                                                      const bioseq_stub_oids& oids) {
@@ -435,7 +457,9 @@ export {
         return result;
     }
 
+    /** @brief Registers current-owner helpers while preserving inherited identities. */
     struct batch_join_placeholder_registration_visitor {
+        /** @brief Validates and registers one plain or PHV-wrapped helper node. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor,
                    pg_node_view node,
@@ -517,6 +541,7 @@ export {
         }
     };
 
+    /** @brief Carries scan target and helper provenance through output setrefs rewriting. */
     struct batch_join_output_setrefs_rewrite {
         List* scan_tlist = NIL;
         const bioseq_stub_oids* oids = nullptr;

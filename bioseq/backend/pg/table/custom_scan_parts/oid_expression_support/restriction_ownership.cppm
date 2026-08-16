@@ -83,18 +83,17 @@ import :custom_scan_oid_expression_support_expression_analysis;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Tests whether a primary and fallback mmsearch use the admitted option pairing. */
     [[nodiscard]] bool bounded_batch_fallback_options_are_supported(FuncExpr* primary,
                                                                     FuncExpr* extra,
                                                                     const bioseq_stub_oids& oids);
 
-    /*
-     * Choose the bounded RestrictInfo set the custom scan is allowed to execute:
-     * either one semantic call, or the narrow BatchJoin-fallback shape consisting
-     * of an ordinary-relation outer Var primary plus one same-target Const base
-     * filter.  The decision is deliberately made against the original planner
-     * nodes: their pointer identities later select exactly which restrictions are
-     * removed from executable quals and which competing paths
-     * would execute them.
+    /**
+     * @brief Selects the bounded set of mmsearch restrictions one custom scan may own.
+     *
+     * Selection uses original planner-node identity so later path construction removes only
+     * the restrictions whose execution the custom scan assumes.
+     * @throws PostgreSQL ERROR when stacked calls cannot satisfy the single admitted fallback shape.
      */
     [[nodiscard]] owned_mmsearch_restriction
     choose_owned_mmsearch_restriction(PlannerInfo* root,
@@ -409,6 +408,7 @@ export {
                                           list_make1(constant_expr)};
     }
 
+    /** @brief Copies a restriction list while excluding the exact clauses owned by mmsearch. */
     [[nodiscard]] List* restrictions_without_owned_mmsearch(List* restrictions,
                                                             List* owned,
                                                             bool restrictions_are_private_copies) {
@@ -429,11 +429,7 @@ export {
         return result.release();
     }
 
-    /*
-     * The owned mmsearch is removed before these storage quals are built. Keep a
-     * defensive filter at the reader boundary so an unowned/nested rendezvous
-     * expression can never be mistaken for a min/max pruning predicate.
-     */
+    /** @brief Removes every remaining mmsearch expression from storage-pruning qualifiers. */
     [[nodiscard]] List* storage_prunable_quals_without_mmsearch(List* quals,
                                                                 const bioseq_stub_oids& oids) {
         postgres_list<Node> filtered;

@@ -89,6 +89,11 @@ import :custom_scan_join_plan_plan_construction;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Builds the one-child per-row join plan and its serialized executor contract.
+     *
+     * Plan-only helper and Var carriers remain resjunk and do not widen the visible owner target.
+     */
     Plan* bioseq_per_row_join_plan_custom_path(PlannerInfo* root,
                                                RelOptInfo* rel,
                                                CustomPath* best_path,
@@ -247,6 +252,7 @@ export {
         List* requested_tlist = list_copy(tlist);
         List* plan_only_passthrough_support = NIL;
         List* plan_only_helper_support = NIL;
+        // Couples a Plan-only target entry with the authoritative helper identity it carries.
         struct per_row_plan_only_helper_binding {
             AttrNumber output_resno = InvalidAttrNumber;
             AttrNumber site_resno = InvalidAttrNumber;
@@ -557,7 +563,7 @@ export {
         return reinterpret_cast<Plan*>(cscan);
     }
 
-    /** Returns the stable PostgreSQL path callbacks for batched joins. */
+    /** @brief Returns the stable PostgreSQL path callbacks for two-child batched joins. */
     [[nodiscard]] const CustomPathMethods* bioseq_batch_join_path_methods() noexcept {
         static const CustomPathMethods methods{
             .CustomName = "BioseqBatchJoin",

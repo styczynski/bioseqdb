@@ -55,9 +55,12 @@ struct pending_speculative_sources {
     std::vector<bioseq::storage::pending_sequence_source> sources;
 };
 
+/** @brief Per-sequence-column authorities produced while preparing one parent row. */
 using pending_sequence_source_slots =
     std::vector<std::optional<bioseq::storage::pending_sequence_source>>;
+/** @brief Identifies speculative publication state by relation and virtual row number. */
 using pending_speculative_key = std::pair<Oid, std::uint64_t>;
+/** @brief Owns unconsumed speculative authorities until confirmation or abort. */
 using pending_speculative_source_map =
     std::map<pending_speculative_key, pending_speculative_sources>;
 

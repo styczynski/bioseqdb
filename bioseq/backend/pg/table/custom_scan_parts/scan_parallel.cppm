@@ -90,10 +90,11 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /* Parallel Execution */
+    /** @brief Shared-memory layout revision for parallel base scans. */
 
     inline constexpr std::uint32_t k_parallel_column_scan_revision = 3u;
 
+    /** @brief Returns a validated worker counter slot in the parallel scan DSM region. */
     [[nodiscard]] slice_dsm_worker_header*
     bioseq_column_parallel_counter_slot(parallel_column_scan_handle pscan,
                                         std::uint32_t slot_index,
@@ -115,6 +116,7 @@ export {
             static_cast<Size>(slot_index) * pscan->slot_stride);
     }
 
+    /** @brief Estimates DSM bytes for the serialized snapshot and per-worker counters. */
     Size bioseq_column_estimate_dsm_custom_scan(CustomScanState* node, ParallelContext* pcxt) {
         scan_state* bioseq_scan_state = scan_state::from_custom_scan_state(node);
         if (pcxt == nullptr || pcxt->nworkers < 0) {
@@ -132,6 +134,7 @@ export {
         return add_size(counters_offset, mul_size(slot_count, slot_stride));
     }
 
+    /** @brief Initializes the leader's parallel scan DSM layout and serialized snapshot. */
     void bioseq_column_initialize_dsm_custom_scan(CustomScanState* node,
                                                   ParallelContext* pcxt,
                                                   void* coordinate) {
@@ -173,6 +176,7 @@ export {
             bioseq_scan_state->parallel_scan = nullptr;
     }
 
+    /** @brief Resets the shared stripe cursor and worker counters for a parallel rescan. */
     void bioseq_column_reinitialize_dsm_custom_scan(CustomScanState* node,
                                                     ParallelContext* pcxt,
                                                     void* coordinate) {
@@ -200,6 +204,7 @@ export {
             bioseq_scan_state->parallel_scan = nullptr;
     }
 
+    /** @brief Restores a worker snapshot and rebinds snapshot-dependent scan resources. */
     void bioseq_column_initialize_worker_custom_scan(CustomScanState* node,
                                                      shm_toc* toc,
                                                      void* coordinate) {
@@ -236,9 +241,7 @@ export {
         runtime.buffer.replace_executor_snapshot(bioseq_scan_state->snapshot);
     }
 
-    /*
-     * BioseqColumnPushdownClausesStr represents the clauses to push down as a string.
-     */
+    /** @brief Deparses storage-pushdown clauses for EXPLAIN output. */
     inline const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses) {
         Expr* conjunction;
 
@@ -259,10 +262,7 @@ export {
                                   show_implicit_cast);
     }
 
-    /*
-     * BioseqColumnProjectedColumnsStr generates projected column string for
-     * explain output.
-     */
+    /** @brief Deparses the projected column list for EXPLAIN output. */
     inline const char* bioseq_column_projected_columns_str(List* context, List* projected_columns) {
         if (list_length(projected_columns) == 0) {
             return "<columnar optimized out all columns>";
@@ -276,11 +276,9 @@ export {
                                   show_implicit_cast);
     }
 
-    /*
-     * BioseqColumnVarNeeded returns a list of Var objects for the ones that are
-     * needed during columnar custom scan.
-     * Throws an error if finds a Var referencing to an attribute not supported
-     * by BioseqColumnScan.
+    /**
+     * @brief Builds EXPLAIN Vars for every attribute required by a columnar scan.
+     * @throws PostgreSQL ERROR when a required attribute is dropped or unsupported.
      */
     List* bioseq_column_var_needed(scan_state* bioseq_scan_state) {
         ScanState* scan_state = &bioseq_scan_state->custom_scan_state.ss;
@@ -342,10 +340,7 @@ export {
         return var_list.release();
     }
 
-    /*
-     * set_deparse_context_planstate forwards to set_deparse_context_plan, going
-     * through the PlanState* indirection that the EXPLAIN code already holds.
-     */
+    /** @brief Builds a deparse context from the PlanState available to EXPLAIN callbacks. */
     List* set_deparse_context_planstate(List* dpcontext, Node* node, List* ancestors) {
         PlanState* ps = reinterpret_cast<PlanState*>(node);
         return set_deparse_context_plan(dpcontext, ps->plan, ancestors);

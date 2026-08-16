@@ -84,6 +84,7 @@ import :custom_scan_oid_expression_support_restriction_ownership;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Tests whether an OID names a match-result projection function. */
     [[nodiscard]] inline bool is_bioseq_projection_funcid(Oid funcid, const bioseq_stub_oids& o) {
         return funcid == o.score_oid || funcid == o.dp_score_oid || funcid == o.query_len_oid ||
                funcid == o.query_start_oid || funcid == o.query_end_oid ||
@@ -96,11 +97,7 @@ export {
                funcid == o.has_cigar_oid || funcid == o.divergence_oid || funcid == o.cigar_oid;
     }
 
-    /* `anyelement` match helpers traditionally accept a target-owned row marker
-     * such as the primary key.  When bioseq.edit is instead given a bioseq.seq
-     * Var, that Var carries biological meaning and must be the exact sequence
-     * column aligned by mmsearch; silently substituting another column's helper
-     * with the shared match_result edit count would return a plausible wrong value. */
+    /** @brief Checks that a sequence-valued edit helper names the base scan's aligned column. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_target(const FuncExpr* function,
                                           Index target_relid,
@@ -127,10 +124,7 @@ export {
                bms_is_empty(argument->varnullingrels);
     }
 
-    /* A transformed target has biological identity in its complete canonical
-     * recipe, not merely in the first storage Var below that recipe.  Preserve the
-     * raw-Var check above for base scans, while allowing bioseq.edit() to
-     * name the exact owned transformed expression. */
+    /** @brief Checks that a sequence-valued edit helper names the complete owned target recipe. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_recipe(const FuncExpr* function,
                                           Node* target_expression,
@@ -157,19 +151,15 @@ export {
             function, target_relid, target_sequence_attno, oids);
     }
 
-    /*
-     * Walk a target list for bioseq.* function calls and set the matching
-     * feature-flags. We also recurse into arg subtrees so "bioseq.cigar(a) + 1"
-     * is still counted. The shape used for detection matches the shape used by
-     * VarInjectorMutator so the flags agree with which placeholders actually
-     * populate at execution time.
-     */
+    /** @brief Accumulates executor feature requirements discovered in expression trees. */
     struct bioseq_feature_detector {
         const bioseq_stub_oids* oids = nullptr;
         scan_feature_flags flags;
     };
 
+    /** @brief Maps mmsearch and projection calls to executor feature flags. */
     struct feature_flag_visitor {
+        /** @brief Updates feature flags for the current node and continues traversal. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               bioseq_feature_detector& detector) const {
@@ -198,6 +188,7 @@ export {
         }
     };
 
+    /** @brief Detects executor features referenced by target-list and qual expressions. */
     [[nodiscard]] scan_feature_flags
     detect_feature_flags(List* targetlist, List* qual, const bioseq_stub_oids& oids) {
         bioseq_feature_detector detector{&oids, scan_feature_flags{}};
@@ -217,20 +208,25 @@ export {
         return detector.flags;
     }
 
+    /** @brief Serialization constants for an extracted strict edit predicate. */
     inline constexpr int k_bioseq_edit_predicate_magic = 0x42534531; /* BSE1 */
     inline constexpr int k_bioseq_edit_predicate_version = 1;
 
+    /** @brief Describes an executor-owned strict upper bound on edit distance. */
     struct strict_edit_predicate {
         std::int64_t exclusive_upper_bound = 0;
         AttrNumber sequence_attno = InvalidAttrNumber;
     };
 
+    /** @brief Tracks whether an expression contains a bioseq.edit call. */
     struct edit_function_probe {
         const bioseq_stub_oids* oids = nullptr;
         bool found = false;
     };
 
+    /** @brief Stops an expression walk at the first bioseq.edit call. */
     struct edit_function_probe_visitor {
+        /** @brief Records an edit call at the current node and controls traversal. */
         [[nodiscard]] pg_walk_step
         operator()(pg_expression_walk_cursor, pg_node_view node, edit_function_probe& probe) const {
             if (FuncExpr* function = node.try_cast<FuncExpr>();
@@ -242,6 +238,7 @@ export {
         }
     };
 
+    /** @brief Tests whether an expression contains a bioseq.edit call. */
     [[nodiscard]] bool contains_bioseq_edit(Node* expression, const bioseq_stub_oids& oids) {
         if (expression == nullptr)
             return false;
@@ -251,9 +248,7 @@ export {
         return probe.found;
     }
 
-    /* Supported SQL contract: one top-level `bioseq.edit(Var) < integer Const`.
-     * The predicate is removed from the pre-alignment qual and enforced against
-     * match_result::edit_distance while draining aligned output. */
+    /** @brief Unwraps the scan-owned placeholder form admitted for an edit predicate operand. */
     [[nodiscard]] Node* strict_edit_operand(Node* operand, Index scan_relid) noexcept {
         PlaceHolderVar* placeholder = try_cast_pg_node<PlaceHolderVar>(operand);
         if (placeholder == nullptr)
@@ -270,6 +265,7 @@ export {
         return reinterpret_cast<Node*>(placeholder->phexpr);
     }
 
+    /** @brief Decodes an executor-owned `bioseq.edit(Var) < integer Const` predicate. */
     [[nodiscard]] std::optional<strict_edit_predicate> decode_strict_edit_upper_bound(
         Node* expression, Index scan_relid, const bioseq_stub_oids& oids) {
         OpExpr* comparison = try_cast_pg_node<OpExpr>(expression);
@@ -323,6 +319,7 @@ export {
         };
     }
 
+    /** @brief Copies qualifiers while excluding expressions containing bioseq.edit. */
     [[nodiscard]] List* quals_without_bioseq_edit(List* quals, const bioseq_stub_oids& oids) {
         postgres_list<Node> filtered;
         for (Node* qual : postgres_list<Node>(quals)) {
@@ -333,10 +330,7 @@ export {
         return filtered.release();
     }
 
-    /* Planner baserestrictinfo is a List<RestrictInfo>, not an expression list.
-     * Expression walkers deliberately do not know how to descend RestrictInfo
-     * (PostgreSQL reports "unrecognized node type"), so unwrap only the exact
-     * clause field and fail closed if a future planner shape violates that ABI. */
+    /** @brief Detects feature flags in RestrictInfo clauses, rejecting unexpected list entries. */
     [[nodiscard]] std::optional<scan_feature_flags>
     detect_restrictinfo_feature_flags(List* restrictions, const bioseq_stub_oids& oids) {
         bioseq_feature_detector detector{&oids, scan_feature_flags{}};
@@ -352,29 +346,21 @@ export {
         return detector.flags;
     }
 
-    /*
-     * Plan-time detection of an mmsearch typmod-coalesce (same alphabet,
-     * different storage width between the bioseq.seq column and the query literal).
-     *
-     * `EXPLAIN` without `ANALYZE` has no populated runtime buffer, while the
-     * coalesce decision is fully determined at plan time by the column Var's
-     * typmod versus the literal's typmod. Derive it from the plan qual here using
-     * the same BeginCustomScan
-     * typmod logic (same `compact_sequence_stdc_type_params::decode`), reading no
-     * runtime state. A mismatch we cannot classify simply yields `active=false`
-     * (no hint, never a crash).
-     */
+    /** @brief Describes a plan-time sequence storage-width coalescing decision. */
     struct explain_typmod_coalesce {
         bool active = false;
         uint8_t col_alpha = 0;
         uint8_t col_byte_width = 0;
     };
+    /** @brief Carries OIDs and the first detected typmod mismatch through an explain walk. */
     struct explain_coalesce_walk_context {
         const bioseq_stub_oids* oids;
         explain_typmod_coalesce result;
     };
 
+    /** @brief Detects an mmsearch whose operands share an alphabet but not storage width. */
     struct typmod_coalesce_visitor {
+        /** @brief Records the first qualifying typmod mismatch and continues traversal. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               explain_coalesce_walk_context& ctx) const {
@@ -416,6 +402,7 @@ export {
         }
     };
 
+    /** @brief Derives typmod coalescing metadata from plan qualifiers without runtime state. */
     [[nodiscard]] explain_typmod_coalesce
     explain_detect_typmod_coalesce(List* qual, const bioseq_stub_oids& oids) {
         explain_coalesce_walk_context ctx{&oids, explain_typmod_coalesce{}};
@@ -428,13 +415,7 @@ export {
         return ctx.result;
     }
 
-    /*
-     * Snapshot the bioseq.aligner.* GUCs into a minimap2_parameters struct.
-     * A subsequent pass (parse_aligner_options_override) may overlay per-call
-     * fields that the user supplied via aligner_options() in the mmsearch
-     * FuncExpr. Keeping the two passes separate makes the precedence order
-     * obvious: GUC → aligner_options() override → size-heuristic → pipeline.
-     */
+    /** @brief Snapshots backend aligner settings into the parameters used to build a pipeline. */
     [[nodiscard]] bioseq::simd::minimap2_parameters build_params_from_gucs() {
         bioseq::simd::minimap2_parameters params;
         params.kmer_size = bioseq::aligner::settings::minimizer::kmer_size;

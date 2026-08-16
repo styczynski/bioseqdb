@@ -136,6 +136,7 @@ export {
         return bioseq_batch_join_scan_methods();
     }
 
+    /** @brief Checks that a private-data position contains a PostgreSQL Integer node. */
     [[nodiscard]] bool bioseq_batch_join_private_integer(const List* nodes,
                                                          const int index) noexcept {
         if (nodes == nullptr || index < 0 || index >= list_length(nodes)) {
@@ -145,6 +146,7 @@ export {
         return node != nullptr && IsA(node, Integer);
     }
 
+    /** @brief Checks target-list shape and consecutive result numbering. */
     [[nodiscard]] bool
     bioseq_batch_join_target_list_is_structural(const List* target_list) noexcept {
         if (target_list == nullptr)
@@ -160,6 +162,7 @@ export {
         return true;
     }
 
+    /** @brief Validates the serialized match-owner descriptor at a private-data position. */
     [[nodiscard]] bool
     bioseq_batch_join_descriptor_is_structural(const CustomScan* scan,
                                                const int descriptor_index) noexcept {
@@ -378,7 +381,9 @@ export {
         bool found;
     };
 
+    /** @brief Stops an expression walk after finding a scan-time Bioseq call. */
     struct projection_presence_visitor {
+        /** @brief Examines one expression node for a projection, mmsearch, or symbol-count call. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               projection_presence_probe& data) const {

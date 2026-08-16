@@ -81,13 +81,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
-    /*
-     * OIDs looked up from pg_proc for the bioseq extension's SQL stubs.
-     * Resolved on demand via LookupStubOids() and cached by
-     * get_cached_stub_oids() for the lifetime of a backend. The cache is
-     * flushed on any relcache invalidation (which covers DROP/CREATE
-     * EXTENSION re-registering the pg_proc rows with new OIDs).
-     */
+    /** @brief Stores exact catalog OIDs for the SQL types and functions used by custom scans. */
     struct bioseq_stub_oids {
         Oid mmsearch_oid;
         Oid mmsearch_with_opts_oid; // mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)
@@ -141,13 +135,7 @@ export {
         Oid seq_cast_oid;
     };
 
-    /*
-     * The create_upper_paths hook is live while CREATE EXTENSION is still
-     * executing.  Its catalog surface is therefore allowed to be absent or only
-     * partially installed.  These missing-ok probes are deliberately separate
-     * from LookupStubOids(): the executor/planner hot paths retain the exact,
-     * throwing lookup once the complete surface is validated and ready.
-     */
+    /** @brief Resolves a fully defined type without failing during partial extension setup. */
     [[nodiscard]] Oid lookup_defined_type_missing_ok(const char* schema_name,
                                                      const char* type_name) {
         const Oid namespace_oid = get_namespace_oid(schema_name, /*missing_ok=*/true);
@@ -167,6 +155,7 @@ export {
         return is_defined ? type_oid : InvalidOid;
     }
 
+    /** @brief Returns the extension installation schema when the extension is available. */
     [[nodiscard]] std::optional<std::string> bioseq_extension_schema_missing_ok() {
         const Oid extension_oid = get_extension_oid("bioseq", /*missing_ok=*/true);
         if (!OidIsValid(extension_oid))
@@ -182,6 +171,7 @@ export {
         return result;
     }
 
+    /** @brief Resolves a function by schema, name, and exact argument OIDs. */
     [[nodiscard]] Oid exact_function_oid(const char* schema_name,
                                          const char* function_name,
                                          std::initializer_list<Oid> argument_types,
@@ -200,6 +190,7 @@ export {
         return function_oid;
     }
 
+    /** @brief Tests whether an exact function signature is present in the catalog. */
     [[nodiscard]] bool exact_function_exists_missing_ok(const char* schema_name,
                                                         const char* function_name,
                                                         std::initializer_list<Oid> argument_types) {
@@ -209,6 +200,7 @@ export {
                                              /*missing_ok=*/true));
     }
 
+    /** @brief Checks that the complete type and function surface needed by custom scans exists. */
     [[nodiscard]] bool bioseq_stub_oid_surface_ready() {
         const std::optional<std::string> extension_schema = bioseq_extension_schema_missing_ok();
         if (!extension_schema)
@@ -276,20 +268,18 @@ export {
                exact_function_exists_missing_ok("bioseq", "seq_cast", {seq_oid, INT4OID, BOOLOID});
     }
 
-    /*
-     * LookupStubOids resolves all bioseq stub OIDs via regprocedurein,
-     * which raises ereport(ERROR, ...) if any function is missing. We
-     * assume CREATE EXTENSION bioseq has already succeeded before any
-     * path below runs. Prefer get_cached_stub_oids() on the hot path —
-     * this builder is kept public so the cache can repopulate on
-     * relcache invalidation.
+    /**
+     * @brief Resolves the complete Bioseq stub catalog after extension installation.
+     * @throws PostgreSQL ERROR when a required type or function is absent.
      */
     [[nodiscard]] bioseq_stub_oids lookup_stub_oids() {
         bioseq_stub_oids result{};
+        // Resolve a required SQL function from its exact regprocedure signature.
         auto resolve = [](const char* signature) {
             return DatumGetObjectId(
                 DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
         };
+        // Resolve a required SQL type from its qualified name.
         auto resolve_type = [](const char* type_name) {
             return DatumGetObjectId(DirectFunctionCall1(regtypein, CStringGetDatum(type_name)));
         };
@@ -372,30 +362,26 @@ export {
         return result;
     }
 
-    /*
-     * Per-backend cache for bioseq_stub_oids. The prior implementation called
-     * LookupStubOids() from every planner path entry (AddBioseqColumnScanPath,
-     * CustomExecScan first-call init, ExplainCustomScan) — that is ~22
-     * regprocedurein syscache hits per query. The cache is backed by pg_proc and
-     * pg_type syscache invalidation, plus relcache invalidation for relation-driven
-     * replans, so DROP/CREATE EXTENSION in one backend flushes the resolved OIDs
-     * before the next lookup.
-     */
+    /** @brief Holds the lazily initialized OID surface for one PostgreSQL backend. */
     struct cached_stub_oids {
         bioseq_stub_oids oids{};
         bool initialised = false;
     };
+    /** @brief Backend-local OID cache invalidated by catalog and relation callbacks. */
     cached_stub_oids g_cached_stub_oids{};
 
+    /** @brief Marks the backend-local OID cache stale after relation invalidation. */
     void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
         g_cached_stub_oids.initialised = false;
     }
 
+    /** @brief Marks the backend-local OID cache stale after procedure or type invalidation. */
     void
     invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/, uint32 /*hashvalue*/) {
         g_cached_stub_oids.initialised = false;
     }
 
+    /** @brief Checks that an OID still names a row in the requested syscache. */
     [[nodiscard]] bool oid_exists_in_syscache(int cache_id, Oid oid) {
         if (!OidIsValid(oid)) {
             return false;
@@ -409,6 +395,7 @@ export {
         return true;
     }
 
+    /** @brief Verifies that every cached function and type OID still exists. */
     [[nodiscard]] bool cached_stub_oids_are_valid(const bioseq_stub_oids& o) {
         const auto func_oids = std::to_array<Oid>({
             o.mmsearch_oid,
@@ -466,6 +453,10 @@ export {
                oid_exists_in_syscache(TYPEOID, o.bioseq_aligner_options_type_oid);
     }
 
+    /**
+     * @brief Returns the backend-local stub OIDs, registering invalidation callbacks on first use.
+     * @throws PostgreSQL ERROR when the complete extension catalog cannot be resolved.
+     */
     [[nodiscard]] const bioseq_stub_oids& get_cached_stub_oids() {
         if (g_cached_stub_oids.initialised && cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {
             return g_cached_stub_oids.oids;
@@ -484,9 +475,7 @@ export {
         return g_cached_stub_oids.oids;
     }
 
-    /* Planner hooks use this entrypoint while CREATE/DROP EXTENSION can expose a
-     * partial catalog surface. A partial probe neither calls the throwing lookup
-     * nor marks the cache initialized. */
+    /** @brief Returns cached stub OIDs only when the extension catalog surface is complete. */
     [[nodiscard]] const bioseq_stub_oids* try_get_cached_stub_oids() {
         if (g_cached_stub_oids.initialised && cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {
             return &g_cached_stub_oids.oids;
@@ -497,10 +486,7 @@ export {
         return &get_cached_stub_oids();
     }
 
-    /* Bitmapsets of relation ids contain only concrete range-table indexes.
-     * PostgreSQL 17 represents INNER/OUTER/INDEX/ROWID_VAR with negative special
-     * varnos (stored through the unsigned Index type), so every Var consumer must
-     * apply this predicate before passing varno to bms_is_member() or rt_fetch(). */
+    /** @brief Tests whether an Index is a concrete range-table identifier rather than a special Var. */
     [[nodiscard]] constexpr bool bioseq_is_concrete_rte_varno(const Index varno) noexcept {
         return varno != 0 && !IS_SPECIAL_VARNO(varno);
     }

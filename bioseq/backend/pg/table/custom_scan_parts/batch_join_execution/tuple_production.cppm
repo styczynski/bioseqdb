@@ -90,6 +90,10 @@ import :custom_scan_batch_join_execution_query_materialization;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Writes one match-derived placeholder into a combined output slot.
+     * @param output_context Memory context that owns any varlena result.
+     */
     void batch_join_set_placeholder_value(TupleTableSlot* slot,
                                           const batch_join_placeholder_site& site,
                                           const bioseq::simd::match_result& match,
@@ -102,6 +106,7 @@ export {
         }
         Datum value = static_cast<Datum>(0);
         bool is_null = false;
+        // Converts an unsigned match coordinate to PostgreSQL bigint with range checking.
         auto bigint = [&value](const std::uint64_t input) {
             if (input >
                 static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
@@ -161,16 +166,22 @@ export {
         slot->tts_isnull[site.resno - 1] = is_null;
     }
 
+    /** @brief Records one borrowed target-source datum for restoration after projection. */
     struct batch_join_target_source_datum {
         AttrNumber resno = InvalidAttrNumber;
         Datum datum = Datum{0};
     };
 
+    /** @brief Describes target-source datums copied into the output memory context. */
     struct batch_join_target_source_restore {
         batch_join_target_source_datum* sources = nullptr;
         std::size_t count = 0u;
     };
 
+    /**
+     * @brief Captures projected target-source datums before temporary source promotion.
+     * @param output_context Context that owns the returned descriptor array.
+     */
     [[nodiscard]] batch_join_target_source_restore capture_batch_join_target_sources(
         bioseq_scan_runtime& target_runtime, TupleTableSlot* slot, MemoryContext output_context) {
         batch_join_target_source_restore restore{};
@@ -220,6 +231,7 @@ export {
         return restore;
     }
 
+    /** @brief Restores borrowed target-source datums after temporary promotion. */
     void
     restore_batch_join_target_sources(TupleTableSlot* slot,
                                       const batch_join_target_source_restore& restore) noexcept {
@@ -233,6 +245,7 @@ export {
         }
     }
 
+    /** @brief Detoasts retained target-source datums into the per-output memory context. */
     void normalize_batch_join_target_sources(TupleTableSlot* slot,
                                              const batch_join_target_source_restore& restore,
                                              MemoryContext output_context) {
@@ -261,6 +274,10 @@ export {
         }
     }
 
+    /**
+     * @brief Combines one target match with its query row and evaluates the parent projection.
+     * @return The projected slot, or null when the executor qual rejects this match.
+     */
     TupleTableSlot*
     batch_join_project_output(CustomScanState* node,
                               batch_join_runtime& runtime,
@@ -387,6 +404,10 @@ export {
         return node->ss.ps.ps_ProjInfo != nullptr ? ExecProject(node->ss.ps.ps_ProjInfo) : combined;
     }
 
+    /**
+     * @brief Allocates the PostgreSQL custom scan state without mutating the stored plan.
+     * @return A state node allocated in the current PostgreSQL memory context.
+     */
     Node* bioseq_batch_join_create_custom_scan_state(CustomScan* cscan) {
         /* A PlannedStmt can outlive every executor context (prepared statements,
          * generic plans, EXPLAIN followed by EXECUTE).  Treat the plan as immutable;

@@ -88,6 +88,11 @@ import :custom_scan_scan_runtime_symbol_count_materialization;
 using namespace bioseq::postgres::support;
 
 export {
+    /**
+     * @brief Promotes bound slice sources into the requested result memory context.
+     * @param allow_locator_passthrough Whether a locator-only parent may request promotion.
+     * @param layout Selects physical-relation or projected-child binding coordinates.
+     */
     void promote_slice_project_sources(scan_state* state,
                                        TupleTableSlot* slot,
                                        MemoryContext result_context,
@@ -222,37 +227,46 @@ export {
         }
     }
 
+    /** @brief Selects the point at which a source datum must remain valid. */
     enum class mmsearch_source_capture_role : std::uint8_t {
         evaluated_operand,
         output_projection,
     };
 
+    /** @brief Records one physical source datum for restoration after promotion. */
     struct mmsearch_source_restore_entry {
         AttrNumber attno = InvalidAttrNumber;
         Datum datum{};
     };
 
-    /* Four physical sources cover the ordinary target/query/output case without
+    /**
+     * @brief Holds source datums that must survive temporary locator promotion.
+     *
+     * Four physical sources cover the ordinary target/query/output case without
      * a per-match_result allocation.  Wider projections spill into the executor
      * per-tuple MemoryContext, which PostgreSQL releases even when ERROR skips C++
-     * destructors.  The object is populated before PG_TRY and never mutated in
-     * its setjmp region, so either storage form is safe to read from PG_CATCH. */
+     * destructors. The object is populated before PG_TRY and never mutated in
+     * its setjmp region, so either storage form is safe to read from PG_CATCH.
+     */
     struct mmsearch_source_restore {
         static constexpr std::size_t inline_capacity = 4u;
         std::array<mmsearch_source_restore_entry, inline_capacity> inline_entries{};
         mmsearch_source_restore_entry* overflow_entries = nullptr;
         std::size_t count = 0u;
 
+        /** @brief Returns a mutable inline or overflow entry by index. */
         [[nodiscard]] mmsearch_source_restore_entry& entry(const std::size_t index) noexcept {
             return overflow_entries == nullptr ? inline_entries[index] : overflow_entries[index];
         }
 
+        /** @brief Returns an inline or overflow entry by index. */
         [[nodiscard]] const mmsearch_source_restore_entry&
         entry(const std::size_t index) const noexcept {
             return overflow_entries == nullptr ? inline_entries[index] : overflow_entries[index];
         }
     };
 
+    /** @brief Marks one physical sequence attribute, or every sequence attribute for whole-row use. */
     void mark_mmsearch_physical_sequence_source(std::vector<std::uint8_t>& roles,
                                                 TupleDesc relation_descriptor,
                                                 const AttrNumber attno,
@@ -279,9 +293,12 @@ export {
         }
     }
 
-    /* Mark physical sequence Vars from one finalized executor expression tree.
+    /**
+     * @brief Marks physical sequence Vars referenced by a finalized executor expression.
+     *
      * This mirrors collect_needed_column_attributes' Var/whole-row rules, but records only
-     * sequence columns and keeps the lifetime role separate from read demand. */
+     * sequence columns and keeps the lifetime role separate from read demand.
+     */
     void mark_mmsearch_sequence_sources_from_expression(std::vector<std::uint8_t>& roles,
                                                         TupleDesc relation_descriptor,
                                                         Node* expression,
@@ -299,11 +316,15 @@ export {
         list_free(variables);
     }
 
-    /* Derive timing from the final executor trees, not the broader BSS3 provider
+    /**
+     * @brief Derives pre-evaluation and output source lifetimes from finalized executor trees.
+     *
+     * Derive timing from the final executor trees, not the broader provider
      * tag.  newtargetlist is the exact per-match_result projection after helper
      * injection; plan.qual is the executable residual frontier.  Operand lineage
      * is added because evaluated submission executes both operand ExprStates even
-     * when only one side is syntactically transformed. */
+     * when only one side is syntactically transformed.
+     */
     void derive_mmsearch_source_lifetime_roles(bioseq_scan_runtime& runtime,
                                                Plan* plan,
                                                TupleDesc relation_descriptor) {
@@ -349,6 +370,7 @@ export {
                         [](const std::uint8_t bound) { return bound != 0u; });
     }
 
+    /** @brief Checks whether one physical attribute participates in a capture role. */
     [[nodiscard]] bool
     mmsearch_source_matches_capture_role(const bioseq_scan_runtime& runtime,
                                          const AttrNumber attno,
@@ -360,10 +382,16 @@ export {
         return index < roles.size() && roles[index] != 0u;
     }
 
-    /* Capture each physical attribute at most once.  Iterating the slot's attno
+    /**
+     * @brief Captures each source attribute required at a selected lifetime boundary.
+     *
+     * Capture each physical attribute at most once. Iterating the slot's attno
      * namespace forms the exact union required by the role: evaluated operand
      * leaves before ExprState execution, or finalized output-projection sources
-     * before per-match_result projection. */
+     * before per-match_result projection.
+     *
+     * @param restore_context Owns overflow entries when inline capacity is exceeded.
+     */
     [[nodiscard]] mmsearch_source_restore
     capture_mmsearch_sources(bioseq_scan_runtime& runtime,
                              TupleTableSlot* slot,
@@ -406,6 +434,10 @@ export {
         return restore;
     }
 
+    /**
+     * @brief Promotes captured locator sources into the per-output memory context.
+     * @return The number of source datums replaced with promoted values.
+     */
     [[nodiscard]] std::size_t promote_mmsearch_sources(bioseq_scan_runtime& runtime,
                                                        TupleTableSlot* slot,
                                                        MemoryContext output_context,
@@ -468,6 +500,7 @@ export {
         return promoted_count;
     }
 
+    /** @brief Restores source datums after temporary promotion or an error path. */
     void restore_mmsearch_sources(TupleTableSlot* slot,
                                   const mmsearch_source_restore& restore) noexcept {
         if (slot == nullptr)
@@ -480,6 +513,7 @@ export {
         }
     }
 
+    /** @brief Verifies that every captured source datum has been restored exactly. */
     [[nodiscard]] bool
     mmsearch_sources_restored_exactly(TupleTableSlot* slot,
                                       const mmsearch_source_restore& restore) noexcept {
@@ -496,6 +530,7 @@ export {
         return true;
     }
 
+    /** @brief Carries the strict qual result and evaluated target/query operands for one row. */
     struct mmsearch_row_evaluation {
         bool qual_passed = false;
         Datum target{};

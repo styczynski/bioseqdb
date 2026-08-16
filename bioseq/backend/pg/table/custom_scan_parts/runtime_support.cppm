@@ -79,10 +79,13 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Catalog row carrying one query's optional aligner overrides. */
     using aligner_options_catalog_row = bioseq::table::composite_rows::bioseq_aligner_options;
+    /** @brief Codec used to decode aligner overrides from their PostgreSQL composite value. */
     using aligner_options_codec =
         bioseq::postgres::table::sql_row_codecs::bioseq_aligner_options_codec;
 
+    /** @brief Describe the runnable pipeline selected for a PostgreSQL alphabet code. */
     [[nodiscard]] inline bioseq::simd::pipe::pipeline_description
     describe_pipeline_for_pg_alphabet(const bioseq::simd::minimap2_parameters& params,
                                       const std::uint8_t alphabet_code,
@@ -112,8 +115,10 @@ export {
      */
     inline constexpr std::size_t k_bioseq_runtime_buffer_reserve = 8192;
 
-    /*
-     * Per-scan projection usage flags. Walked from the plan target list once
+    /**
+     * @brief Records which alignment results a scan must compute.
+     *
+     * Walked from the plan target list once
      * per BeginCustomScan and pushed into minimap2_parameters so the minimap2
      * pipeline can skip expensive stages (divergence estimation, MAPQ, CIGAR
      * base alignment) whose outputs are never projected to the caller.
@@ -137,8 +142,10 @@ export {
         bool any_match_projection = false;
     };
 
-    /*
-     * Per-scan snapshot of the plan-level minimap2_parameters and feature flags.
+    /**
+     * @brief Retains the exact alignment policy and pipeline description used by one scan.
+     *
+     * Stores the plan-level minimap2_parameters and feature flags.
      * Stored here (rather than inside buffer) so BioseqColumnScan_ExplainCustomScan
      * can print the *exact* parameters that were fed to the batch processor —
      * including any aligner_options() overrides — without a second plan walk.
@@ -162,8 +169,10 @@ export {
         std::optional<bioseq::simd::pipe::pipeline_description> pipeline_desc{};
     };
 
-    /*
-     * Param-driven mmsearch query reconfiguration metadata. When the planner
+    /**
+     * @brief Retains a parameterized mmsearch query recipe across executor rescans.
+     *
+     * When the planner
      * rewrites the second mmsearch argument into a Param (the typical shape
      * for parameterized inner-side scans of a Nested Loop join — e.g.
      * `WHERE mmsearch(t2.seq, t1.seq)` becomes `mmsearch(t2.seq, $0)` on the
@@ -201,8 +210,10 @@ export {
         FuncExpr* mmsearch_fe = nullptr;
     };
 
-    /*
-     * One rewritten `bioseq.symbol_count(Var, 'L')` call site. The Const*
+    /**
+     * @brief Binds one rewritten symbol-count call to its mutable result placeholder.
+     *
+     * The Const*
      * replaces the FuncExpr in runtime.newtargetlist; `rank` is resolved once at
      * plan time via seqan3 so the per-row populate path is a single array
      * index into the meta_sidecar counts[]. `letter` + `column_name` are
@@ -216,8 +227,10 @@ export {
         std::string column_name;  // attname for EXPLAIN output
     };
 
-    /*
-     * Placeholder Const nodes injected by VarInjectorMutator into the
+    /**
+     * @brief Owns mutable Const nodes populated immediately before PostgreSQL projection.
+     *
+     * The nodes are injected by VarInjectorMutator into the
      * rewritten target list. Each one stands in for a bioseq.<field>(...)
      * FuncExpr; per-row values are written into constvalue/constisnull
      * before ExecProject runs. All pointers start as nullptr in a fresh
@@ -255,43 +268,26 @@ export {
         std::vector<symbol_count_call_site> symbol_count_sites;
     };
 
-    /*
-     * Per-scan runtime state, owned via a heap pointer from scan_state
-     * (see scan_state.cppm for the void* runtime slot).
-     *
-     * Owning these fields per-scan-state — rather than as file statics —
-     * lets a single backend run two BioseqScan nodes concurrently. The bug
-     * before this refactor: a CROSS JOIN of `samples` against itself shares
-     * the global `output_position` cursor; once the second scan exhausted
-     * its batch the first scan's next ExecCustomScan call would observe
-     * `has_finished_writing() == true` against an empty cursor and return
-     * EOF, capping the join at one outer row instead of four. The same
-     * sharing crashed LEFT JOIN queries that combined a `WHERE mmsearch`
-     * filter with a `bioseq.cigar` projection: the inner scan's
-     * `clear_mmsearch_context()` wiped the outer scan's mmsearch context.
-     *
-     * Lives on the C++ heap so std::vector / std::map free their own
-     * storage. To handle the mid-scan-error case (any longjmp out of an
-     * ereport(ERROR, ...) inside Begin/Exec/End that would otherwise skip
-     * EndCustomScan) we register a MemoryContext reset callback on
-     * `estate->es_query_cxt` from BeginCustomScan. Postgres invokes the
-     * callback when the query context is destroyed — that is, on either
-     * normal end-of-query or transaction abort — so the C++ heap memory
-     * never outlives a single statement. The `abort_cleanup_done` flag
-     * lets EndCustomScan claim the runtime explicitly (so its
-     * `clear_slots()` runs while the per-query ResourceOwner is still
-     * alive) without racing the callback.
-     */
+    /** @brief Maps one projected child column to its physical sequence producer. */
     struct slice_projected_source_binding {
         std::uint32_t producer_id = 0u;
         AttrNumber physical_attno = InvalidAttrNumber;
     };
 
+    /** @brief Selects the attribute-number namespace used to locate deferred sources. */
     enum class slice_project_source_slot_layout : std::uint8_t {
         physical_relation,
         projected_child,
     };
 
+    /**
+     * @brief Owns mutable state for one Bioseq custom-scan execution.
+     *
+     * The object lives on the C++ heap and is reached through the standard-layout
+     * `scan_state`. A reset callback registered on the query memory context destroys it
+     * after normal completion or PostgreSQL ERROR unwinding. PostgreSQL-owned tuple
+     * resources are released only while their query ResourceOwner remains live.
+     */
     struct bioseq_scan_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
         bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
@@ -387,6 +383,7 @@ export {
     inline constexpr int k_bioseq_match_owner_descriptor_version = 1;
     inline constexpr int k_bioseq_match_owner_descriptor_fields = 6;
 
+    /** @brief Defines stable fields in a serialized match-owner descriptor. */
     enum match_owner_descriptor_index : int {
         k_match_owner_magic = 0,
         k_match_owner_version = 1,
@@ -396,6 +393,7 @@ export {
         k_match_owner_base_relid = 5,
     };
 
+    /** @brief Classifies how a match helper resolves to its finalized execution owner. */
     enum class match_helper_binding_kind : int {
         unresolved = 0,
         exact_recipe = 1,
@@ -403,6 +401,7 @@ export {
     };
 
     inline constexpr int k_bioseq_match_helper_site_fields = 8;
+    /** @brief Defines stable fields in one serialized match-helper call site. */
     enum match_helper_site_index : int {
         k_match_site_resno = 0,
         k_match_site_funcid = 1,
@@ -414,6 +413,7 @@ export {
         k_match_site_stable_id = 7,
     };
 
+    /** @brief Defines stable fields in a base-scan match-owner plan payload. */
     enum base_match_owner_plan_index : int {
         k_base_match_plan_magic = 0,
         k_base_match_plan_version = 1,
@@ -424,6 +424,7 @@ export {
         k_base_match_plan_executor_sites = 6,
     };
 
+    /** @brief Defines stable fields in a per-row join planner-to-executor payload. */
     enum per_row_join_private_index : int {
         k_per_row_version = 0,
         k_per_row_target_relation_oid = 1,
@@ -446,6 +447,7 @@ export {
         k_per_row_match_owner_descriptor = 18,
     };
 
+    /** @brief Defines stable fields in a batched-join planner-to-executor payload. */
     enum batch_join_private_index : int {
         k_batch_join_version = 0,
         k_batch_join_token = 1,
@@ -467,6 +469,7 @@ export {
         k_batch_join_match_owner_descriptor = 17,
     };
 
+    /** @brief Identifies one match-result placeholder populated for a batched join row. */
     struct batch_join_placeholder_site {
         AttrNumber resno = InvalidAttrNumber;
         Oid funcid = InvalidOid;
@@ -476,7 +479,9 @@ export {
         int stable_match_id = 0;
     };
 
+    /** @brief Owns a materialized query row and any retained expanded sequence wrappers. */
     struct batch_join_query_tuple {
+        /** @brief Retains an expanded sequence attribute in query-tuple memory. */
         struct retained_expanded_attribute {
             AttrNumber attno = InvalidAttrNumber;
             Datum datum = Datum{0};
@@ -499,6 +504,12 @@ export {
         static_cast<std::uint64_t>(2u * ALLOCSET_SMALL_INITSIZE) +
         static_cast<std::uint64_t>(MAXALIGN(sizeof(pg_sequence_expanded)));
 
+    /**
+     * @brief Owns child plans, query materialization, buffering, and cleanup for one BatchJoin.
+     *
+     * PostgreSQL tuple storage belongs to `query_tuple_context`. The embedded reset callback
+     * guarantees heap cleanup when executor callbacks are bypassed by PostgreSQL ERROR.
+     */
     struct batch_join_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
         bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
@@ -554,6 +565,7 @@ export {
         bool cleanup_done = false;
     };
 
+    /** @brief Standard-layout PostgreSQL custom-scan state for a batched join. */
     struct batch_join_state {
         CustomScanState custom_scan_state;
         void* runtime = nullptr;
@@ -562,6 +574,11 @@ export {
     static_assert(std::is_standard_layout_v<batch_join_state>);
     static_assert(offsetof(batch_join_state, custom_scan_state) == 0);
 
+    /**
+     * @brief Owns the child plan and buffered alignment state for one per-row join execution.
+     *
+     * The query-context callback releases C++ state if PostgreSQL ERROR skips normal shutdown.
+     */
     struct per_row_join_runtime {
         bioseq::scheduler::dispatch_buffer_runtime buffer{k_bioseq_runtime_buffer_reserve};
         bioseq::postgres::table::alignment_execution::alignment_node_registration_handle
@@ -592,6 +609,7 @@ export {
         bool cleanup_callback_registered = false;
     };
 
+    /** @brief Standard-layout PostgreSQL custom-scan state for a per-row join. */
     struct per_row_join_state {
         CustomScanState custom_scan_state;
         void* runtime = nullptr;
@@ -600,6 +618,7 @@ export {
     static_assert(std::is_standard_layout_v<per_row_join_state>);
     static_assert(offsetof(per_row_join_state, custom_scan_state) == 0);
 
+    /** @brief Promote deferred sequence sources into the result context before projection. */
     void promote_slice_project_sources(scan_state* state,
                                        TupleTableSlot* slot,
                                        MemoryContext result_context,
@@ -607,21 +626,12 @@ export {
                                        slice_project_source_slot_layout layout,
                                        TupleDesc expected_descriptor);
 
-    /*
-     * Centralised accessor: each scan_state owns exactly one
-     * bioseq_scan_runtime, allocated by BeginCustomScan via
-     * register_runtime_cleanup_callback and torn down by the per-query
-     * MemoryContext reset callback. The runtime is held as `void*` on
-     * scan_state so the public scan-state header stays
-     * standard-layout; this file is the only one that knows the concrete
-     * bioseq_scan_runtime type and casts back to it.
+    /**
+     * @brief Return the sole runtime owned by a scan state.
      *
-     * If we somehow get here before BeginCustomScan fired (no current
-     * call path does, but future hooks could regress) we lazy-allocate
-     * without registering a cleanup callback — that allocation WILL
-     * leak its std::vector / std::map storage on context teardown
-     * because no callback is wired to call the destructor. The bioseq_log<logging_level::debug>
-     * makes the regression loud so a future maintainer notices.
+     * The concrete object is hidden behind `void*` to preserve the PostgreSQL-facing state
+     * layout. Calling this before normal callback registration creates a diagnostic fallback
+     * allocation that has no automatic query-context cleanup.
      */
     [[nodiscard]] bioseq_scan_runtime& bioseq_runtime(scan_state* state) {
         if (state->runtime_state == nullptr) {
@@ -633,28 +643,12 @@ export {
         return *static_cast<bioseq_scan_runtime*>(state->runtime_state);
     }
 
-    /*
-     * MemoryContext reset callback for bioseq_scan_runtime. Postgres invokes
-     * this when `estate->es_query_cxt` is destroyed — both on normal end
-     * of query and on transaction abort. The callback is the safety net
-     * that prevents leaks when an ereport(ERROR, ...) longjmps over
-     * BioseqColumnScan_EndCustomScan.
+    /**
+     * @brief Destroy scan-owned C++ state when the query memory context resets.
      *
-     * Important lifecycle constraint: the MemoryContextCallback struct
-     * itself is embedded INSIDE the bioseq_scan_runtime, so it must not be
-     * freed before this callback fires. We therefore do NOT `delete
-     * runtime_ptr` in EndCustomScan — that would dangle the callback
-     * pointer in the context's reset-cb chain and crash on context
-     * teardown. Instead EndCustomScan only releases per-tuple resources
-     * (`buffer.clear_slots()`) while the per-query ResourceOwner is still
-     * alive, sets `cleanup_done = true`, and lets this callback do the
-     * actual delete when the context tears down.
-     *
-     * On the abort path (EndCustomScan never ran) we get `cleanup_done =
-     * false` and must skip touching any Postgres tuple-table machinery
-     * because the ResourceOwner is also being torn down. Postgres' own
-     * bookkeeping handles the tuple-desc refcount cleanup; just freeing
-     * the C++ heap is enough.
+     * The callback node is embedded in the runtime, so normal executor shutdown must leave
+     * the allocation alive until this callback is unlinked. During ERROR unwinding the
+     * callback avoids tuple-table operations whose ResourceOwner may already be tearing down.
      */
     void bioseq_runtime_cleanup_callback(void* arg) {
         auto* state = static_cast<scan_state*>(arg);
@@ -683,12 +677,10 @@ export {
         delete runtime_ptr;
     }
 
-    /*
-     * Wire the cleanup callback so Postgres frees the runtime on
-     * transaction abort. Idempotent — callable multiple times across
-     * Begin / ReScan without effect; the callback list is keyed on the
-     * MemoryContextCallback struct address, and we always pass the same
-     * embedded address.
+    /**
+     * @brief Register the scan runtime's idempotent query-context cleanup callback.
+     * @param state Scan state that owns the embedded callback node.
+     * @param estate Executor state whose query context bounds the runtime lifetime.
      */
     void register_runtime_cleanup_callback(scan_state* state, EState* estate) {
         if (state == nullptr || estate == nullptr) {

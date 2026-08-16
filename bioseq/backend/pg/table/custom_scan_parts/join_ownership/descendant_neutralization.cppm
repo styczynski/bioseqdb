@@ -85,7 +85,8 @@ using namespace bioseq::postgres::support;
 
 namespace {
     /**
-     * Clone one PostgreSQL Path wrapper whose only owned child is a Path pointer.
+     * @brief Clones a PostgreSQL Path wrapper whose only owned child is a Path pointer.
+     *
      * The tag predicate and makeNode factory stay explicit at each call site because
      * PostgreSQL encodes both as token-pasting macros rather than C++ type traits.
      */
@@ -122,6 +123,7 @@ namespace {
 } // namespace
 
 export {
+    /** @brief Returns a shallow restriction list without one pointer-owned clause. */
     [[nodiscard]] List* per_row_without_restriction(List* restrictions, RestrictInfo* owned) {
         List* filtered = NIL;
         for (RestrictInfo* candidate : postgres_list<RestrictInfo>(restrictions)) {
@@ -131,11 +133,15 @@ export {
         return filtered;
     }
 
-    /* A RestrictInfo can migrate below a NestLoop through PathParamInfo (or sit
+    /**
+     * @brief Recursively checks whether a path descendant still owns a restriction pointer.
+     *
+     * A RestrictInfo can migrate below a NestLoop through PathParamInfo (or sit
      * in another custom/join child) while still appearing in the incumbent's
      * joinrestrictinfo.  Removing only the top copy would leave a second live
      * mmsearch rendezvous.  The post-join owner therefore accepts an incumbent
-     * only when the exact pointer is absent from every retained descendant. */
+     * only when the exact pointer is absent from every retained descendant.
+     */
     [[nodiscard]] bool per_row_descendant_owns_restriction(Path const* path,
                                                            RestrictInfo const* owned) noexcept {
         if (path == nullptr || owned == nullptr)
@@ -196,18 +202,21 @@ export {
         }
     }
 
+    /** @brief Counts executable mmsearch copies remaining below a transformed owner. */
     struct per_row_mmsearch_plan_audit {
         std::size_t executable_qual_copies = 0u;
         std::size_t vector_qual_copies = 0u;
         std::size_t storage_qual_copies = 0u;
         std::size_t descendant_owner_copies = 0u;
 
+        /** @brief Reports whether no residual or descendant owner copy remains. */
         [[nodiscard]] bool clean() const noexcept {
             return executable_qual_copies == 0u && vector_qual_copies == 0u &&
                    storage_qual_copies == 0u && descendant_owner_copies == 0u;
         }
     };
 
+    /** @brief Adds all mmsearch occurrences in one expression to an audit counter. */
     void per_row_audit_mmsearch_expression(Node* expression,
                                            std::size_t& destination,
                                            bioseq_stub_oids const& oids) {
@@ -219,13 +228,16 @@ export {
                           : destination + additional;
     }
 
+    /** @brief Tracks exact occurrences of one candidate mmsearch expression. */
     struct exact_mmsearch_owner_audit {
         FuncExpr* candidate = nullptr;
         bioseq_stub_oids const* oids = nullptr;
         std::size_t matches = 0u;
     };
 
+    /** @brief Counts exact candidate matches without descending into mmsearch calls. */
     struct exact_mmsearch_owner_audit_visitor {
+        /** @brief Compares one expression node with the candidate owner call. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               exact_mmsearch_owner_audit& audit) const {
@@ -243,6 +255,7 @@ export {
         }
     };
 
+    /** @brief Adds exact candidate-owner occurrences in an expression to a counter. */
     void per_row_audit_exact_mmsearch_owner(Node* expression,
                                             FuncExpr* candidate,
                                             std::size_t& destination,
@@ -257,12 +270,16 @@ export {
                           : destination + audit.matches;
     }
 
-    /* Audit the serialized child plan that will execute below the transformed
+    /**
+     * @brief Audits every executable qual store below a transformed per-row owner.
+     *
+     * Audit the serialized child plan that will execute below the transformed
      * owner.  `Plan::qual` is only one of PostgreSQL's executable-qual stores:
      * join/index/recheck fields and the Bioseq reader's storage/vector lists must
      * be inspected independently.  The fourth BioseqScan expression list is an
      * executor-only mmsearch owner.  A foreign owner is valid nested SQL state;
-     * only an owner equal to the candidate recipe is a duplicate of this owner. */
+     * only an owner equal to the candidate recipe is a duplicate of this owner.
+     */
     void per_row_audit_mmsearch_plan(Plan* plan,
                                      per_row_mmsearch_plan_audit& audit,
                                      bioseq_stub_oids const& oids,
@@ -413,6 +430,7 @@ export {
         }
     }
 
+    /** @brief Finds the cheapest serial path whose descendants do not own a restriction. */
     [[nodiscard]] Path* per_row_path_without_owned_qual(RelOptInfo* rel,
                                                         RestrictInfo* owned,
                                                         const bool require_bioseq_source) noexcept {
@@ -433,11 +451,15 @@ export {
         return best;
     }
 
-    /* A reconstructed join may expose raw sequence Vars that its incumbent child
+    /**
+     * @brief Adds required raw Vars through a private projection above a child path.
+     *
+     * A reconstructed join may expose raw sequence Vars that its incumbent child
      * PathTargets did not need after core pushed the original join predicate.
      * Add only positive, level-zero raw Vars owned by this child's relids.  The
      * projection is a new Path node; shared child paths and PHV/whole-row
-     * semantics are never mutated or synthesized. */
+     * semantics are never mutated or synthesized.
+     */
     [[nodiscard]] Path*
     per_row_project_required_child_vars(PlannerInfo* root, Path* child, List* required_vars) {
         if (root == nullptr || child == nullptr || child->parent == nullptr ||
@@ -467,6 +489,7 @@ export {
             create_projection_path(root, child->parent, child, projected));
     }
 
+    /** @brief Summarizes exact helper ownership found in a path subtree. */
     struct per_row_descendant_ownership {
         CustomPath* owner = nullptr;
         std::size_t matches = 0u;
@@ -474,6 +497,7 @@ export {
         bool unsupported_wrapper = false;
     };
 
+    /** @brief Decodes the target recipe from a known BatchJoin or per-row CustomPath ABI. */
     [[nodiscard]] Node* per_row_known_path_owner_recipe(CustomPath* custom, bool& invalid) {
         if (custom == nullptr)
             return nullptr;
@@ -501,6 +525,7 @@ export {
         return recipe;
     }
 
+    /** @brief Finds exact helper owners through supported planner path wrappers. */
     void per_row_analyze_descendant_exact_owner(Path* path,
                                                 Node* helper_argument,
                                                 per_row_descendant_ownership& ownership) {
@@ -532,6 +557,7 @@ export {
             }
             return;
         }
+        // Visits both children of a supported join wrapper.
         auto descend_join = [helper_argument, &ownership](JoinPath* join) {
             if (join == nullptr)
                 return;
@@ -550,6 +576,7 @@ export {
             descend_join(&reinterpret_cast<HashPath*>(path)->jpath);
             return;
         }
+        // Visits the sole child of a supported unary wrapper.
         auto descend_one = [helper_argument, &ownership](Path* child) {
             per_row_analyze_descendant_exact_owner(child, helper_argument, ownership);
         };
@@ -589,6 +616,7 @@ export {
             descend_one(reinterpret_cast<GatherMergePath*>(path)->subpath);
             return;
         }
+        // Visits every child of a supported append wrapper.
         auto descend_list = [helper_argument, &ownership](List* paths) {
             for (Path* child : postgres_list<Path>(paths)) {
                 per_row_analyze_descendant_exact_owner(child, helper_argument, ownership);
@@ -610,8 +638,7 @@ export {
         }
     }
 
-    /* Genuine recursion cycle: the path clone owns unary nodes while its list helper
-     * owns Append/MergeAppend children, and each must call the other. */
+    /** @brief Clones the path spine down to one helper owner and widens targets on that spine. */
     [[nodiscard]] Path* per_row_clone_path_to_helper_owner(PlannerInfo* root,
                                                            Path* path,
                                                            CustomPath* owner,
@@ -619,6 +646,7 @@ export {
                                                            bool& applied,
                                                            bool& invalid);
 
+    /** @brief Copies a path target and appends one helper identity with matching sort metadata. */
     [[nodiscard]] PathTarget* per_row_helper_passthrough_target(PlannerInfo* root,
                                                                 PathTarget* source,
                                                                 Node* identity,
@@ -654,6 +682,7 @@ export {
         return target;
     }
 
+    /** @brief Clones the first list child subtree containing the selected helper owner. */
     [[nodiscard]] List* per_row_clone_path_list_to_helper_owner(PlannerInfo* root,
                                                                 List* paths,
                                                                 CustomPath* owner,
@@ -673,6 +702,7 @@ export {
         return changed ? result : paths;
     }
 
+    /** @brief Copy-on-write clones supported wrappers down to one helper owner. */
     [[nodiscard]] Path* per_row_clone_path_to_helper_owner(PlannerInfo* root,
                                                            Path* path,
                                                            CustomPath* owner,
@@ -886,13 +916,17 @@ export {
         return path;
     }
 
-    /* A reconstructed transformed owner is deliberately narrower than the
+    /**
+     * @brief Summarizes base-scan helper ownership below a reconstructed owner.
+     *
+     * A reconstructed transformed owner is deliberately narrower than the
      * incumbent join relation: helpers owned by the new PerRow node must not leak
      * into a descendant BioseqScan or an older BatchJoin.  PostgreSQL Path nodes
      * are shared, so normalize only after slice_project_clone_mutable_path_spine()
      * has made every supported container private.  Availability is scoped to the
      * current subtree: a descendant-owned helper is retained at its owner and
-     * above it, but is removed from every child below that owner. */
+     * above it, but is removed from every child below that owner.
+     */
     struct per_row_base_helper_ownership {
         CustomPath* owner = nullptr;
         std::size_t matches = 0u;
@@ -900,6 +934,7 @@ export {
         bool unsupported_wrapper = false;
     };
 
+    /** @brief Decodes the match-helper function from a plain or PHV identity. */
     [[nodiscard]] FuncExpr*
     per_row_helper_identity_function(Node* identity, bioseq_stub_oids const& oids) noexcept {
         if (PlaceHolderVar* placeholder = try_cast_pg_node<PlaceHolderVar>(identity)) {
@@ -908,6 +943,7 @@ export {
         return batch_join_well_formed_match_helper(identity, oids);
     }
 
+    /** @brief Decodes the primary owned target recipe from a base-scan CustomPath ABI. */
     [[nodiscard]] Node* per_row_base_scan_owner_recipe(CustomPath* custom, bool& invalid) {
         if (custom == nullptr || custom->methods != bioseq_column_scan_path_methods()) {
             return nullptr;

@@ -86,11 +86,15 @@ import :custom_scan_join_ownership_parameterized_owner_analysis;
 using namespace bioseq::postgres::support;
 
 export {
-    /* Core may discard a parameterized CustomPath before the higher join frontier
+    /**
+     * @brief Reconstructs the exact parameterized base owner required by a higher join.
+     *
+     * Core may discard a parameterized CustomPath before the higher join frontier
      * is formed.  Rebuild only the exact baserel recipe needed by that frontier;
      * AddBioseqColumnScanPath performs the normal selectivity/alignment costing
      * and does not add the result to RelOptInfo::pathlist.  The returned path is
-     * private to the constructed NestPath below. */
+     * private to the constructed NestPath below.
+     */
     [[nodiscard]] Path*
     reconstruct_exact_parameterized_bmo_inner(PlannerInfo* root,
                                               RelOptInfo* target_input,
@@ -99,6 +103,7 @@ export {
                                               FuncExpr* mmsearch,
                                               exact_parameterized_bmo_reconstruction_audit& audit) {
         audit = {};
+        // Records one reconstruction failure and returns no candidate path.
         auto reject =
             [&audit](
                 const exact_parameterized_bmo_reconstruction_rejection reason) noexcept -> Path* {
@@ -401,6 +406,7 @@ export {
         return candidate;
     }
 
+    /** @brief Captures path, ownership, and ABI diagnostics for the retainer decision. */
     struct exact_parameterized_bmo_retainer_audit {
         std::size_t candidates = 0u;
         std::size_t nest_paths = 0u;
@@ -484,6 +490,7 @@ export {
         std::uint32_t foreign_owner_rejection_mask = 0u;
     };
 
+    /** @brief Bit flags for custom-owner ABI mismatches found by the retainer. */
     enum exact_parameterized_bmo_retainer_abi_mismatch : std::uint32_t {
         k_exact_bmo_retainer_invalid_owner_tag = 1u << 0,
         k_exact_bmo_retainer_missing_custom_restriction = 1u << 1,
@@ -493,6 +500,7 @@ export {
         k_exact_bmo_retainer_multiple_custom_identities = 1u << 5,
     };
 
+    /** @brief Bit flags for parameterized-path identity mismatches found by the retainer. */
     enum exact_parameterized_bmo_retainer_ppi_mismatch : std::uint32_t {
         k_exact_bmo_retainer_missing_param_info = 1u << 0,
         k_exact_bmo_retainer_empty_ppi_clauses = 1u << 1,
@@ -502,6 +510,7 @@ export {
         k_exact_bmo_retainer_multiple_ppi_identities = 1u << 5,
     };
 
+    /** @brief Bit flags for candidate path-shape failures found by the retainer. */
     enum exact_parameterized_bmo_retainer_validation_mismatch : std::uint32_t {
         k_exact_bmo_retainer_candidate_parent = 1u << 0,
         k_exact_bmo_retainer_candidate_owner_analysis = 1u << 1,
@@ -514,6 +523,10 @@ export {
         k_exact_bmo_retainer_candidate_negative_cost = 1u << 8,
     };
 
+    /**
+     * @brief Retains or reconstructs exact join paths for a custom-owned mmsearch restriction.
+     * @return True when at least one safe path is installed for the current join pair.
+     */
     [[nodiscard]] bool retain_join_paths_with_custom_restriction_owner(
         PlannerInfo* root,
         RelOptInfo* joinrel,
@@ -643,6 +656,7 @@ export {
             local_audit.inner_matches += inner.matches;
             local_audit.outer_rejection_mask |= outer.rejection_mask;
             local_audit.inner_rejection_mask |= inner.rejection_mask;
+            // Copies wrapper diagnostics from one exact-owner analysis into the result audit.
             auto capture_wrapper_audit = [&local_audit](
                                              exact_parameterized_bmo_ownership const& ownership,
                                              const std::uint32_t side) {
@@ -712,6 +726,7 @@ export {
             Var* query_var = try_cast_pg_node<Var>(operands.get_second());
             local_audit.target_var_resolved = target_var == nullptr ? 0u : 1u;
             local_audit.query_var_resolved = query_var == nullptr ? 0u : 1u;
+            // Identifies which current join input contains a Var's relation.
             auto relid_side_mask = [left_input, right_input](Var* var) noexcept {
                 std::uint32_t mask = 0u;
                 if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno)) {
@@ -729,6 +744,7 @@ export {
             local_audit.query_relid_side_mask = relid_side_mask(query_var);
             RelOptInfo* target_input = nullptr;
             RelOptInfo* provider_input = nullptr;
+            // Checks whether an input is exactly the target Var's base relation.
             auto input_is_target_base = [target_var](RelOptInfo* input) noexcept {
                 return input != nullptr && target_var != nullptr &&
                        (input->reloptkind == RELOPT_BASEREL ||

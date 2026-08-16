@@ -87,6 +87,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Validates a finalized owner descriptor and returns its stable plan-node id. */
     [[nodiscard]] int validate_finalized_match_owner_descriptor_value(CustomScan* scan,
                                                                       List* descriptor) {
         if (scan == nullptr || descriptor == NIL) {
@@ -120,6 +121,7 @@ export {
         return stable_id;
     }
 
+    /** @brief Validates an owner descriptor stored at a CustomScan private-data index. */
     [[nodiscard]] int validate_finalized_match_owner_descriptor(CustomScan* scan,
                                                                 const int descriptor_index) {
         Node* descriptor_node =
@@ -136,6 +138,10 @@ export {
             scan, reinterpret_cast<List*>(descriptor_node));
     }
 
+    /**
+     * @brief Validates the base-owner executor image and installs its runtime bindings.
+     * @return The finalized target recipe, or null when the scan has no base owner.
+     */
     [[nodiscard]] Node* initialize_base_match_owner_runtime(CustomScan* scan,
                                                             Relation relation,
                                                             bioseq_scan_runtime& runtime) {
@@ -258,6 +264,7 @@ export {
         return target_recipe;
     }
 
+    /** @brief Finds the target entry with an exact positive result number. */
     [[nodiscard]] TargetEntry* finalized_match_helper_resno_entry(List* targetlist,
                                                                   const AttrNumber resno) noexcept {
         if (resno <= 0)
@@ -269,6 +276,7 @@ export {
         return nullptr;
     }
 
+    /** @brief Follows setrefs slot coordinates to verify one canonical helper argument. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees_impl(
         Plan* context, Node* translated, Node* canonical, const unsigned int depth) noexcept {
         if (depth > 16u)
@@ -345,12 +353,14 @@ export {
             source_context, source_expression, canonical, depth + 1u);
     }
 
+    /** @brief Verifies that a translated helper argument resolves to its canonical source. */
     [[nodiscard]] bool finalized_match_helper_argument_translation_agrees(
         CustomScan* scan, Node* translated, Node* canonical) noexcept {
         return finalized_match_helper_argument_translation_agrees_impl(
             scan == nullptr ? nullptr : &scan->scan.plan, translated, canonical, 0u);
     }
 
+    /** @brief Checks allowed PHV and bare-identity shapes for a finalized carrier site. */
     [[nodiscard]] constexpr bool
     finalized_match_helper_carrier_shape_supported(const int site_phid,
                                                    const bool supplied_is_phv,
@@ -376,12 +386,16 @@ export {
     static_assert(finalized_match_helper_carrier_shape_supported(7, false, 0, false, false, false));
     static_assert(!finalized_match_helper_carrier_shape_supported(7, false, 0, false, true, true));
 
-    /* custom_scan_tlist, custom_private, and a descendant dummy targetlist cross
+    /**
+     * @brief Checks whether a scan entry and dummy carrier encode the same finalized helper.
+     *
+     * custom_scan_tlist, custom_private, and a descendant dummy targetlist cross
      * different setrefs coordinate domains.  A phid-zero site accepts only the
      * exact bare identity.  A positive phid accepts either its live non-nulling
      * owner PHV or the bare descriptor produced when setrefs strips that PHV;
      * both require the leaf carrier's exact canonical argument and full function
-     * ABI.  A carrier-side PHV is never a dummy leaf carrier. */
+     * ABI. A carrier-side PHV is never a dummy leaf carrier.
+     */
     [[nodiscard]] bool
     finalized_match_helper_carrier_equivalent(CustomScan* scan,
                                               Node* supplied_identity,
@@ -434,6 +448,7 @@ export {
                    scan, supplied_argument, canonical_argument);
     }
 
+    /** @brief Captures the first finalized-carrier comparison for planner diagnostics. */
     struct finalized_match_helper_carrier_audit {
         bool inspected = false;
         int early_reject = 0;
@@ -458,6 +473,7 @@ export {
         bool equivalent = false;
     };
 
+    /** @brief Counts finalized sites in one BatchJoin that own a helper carrier identity. */
     [[nodiscard]] std::size_t finalized_batch_owner_matching_site_count(
         CustomScan* scan,
         Node* identity,

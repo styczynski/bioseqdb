@@ -90,6 +90,7 @@ import :custom_scan_scan_runtime_tuple_production;
 using namespace bioseq::postgres::support;
 
 export {
+    /** @brief Installs executor placeholders once and advances the base-scan state machine. */
     TupleTableSlot* custom_exec_scan(scan_state* bioseq_scan_state,
                                      ExecScanAccessMtd access_mtd,
                                      ExecScanRecheckMtd recheck_mtd) {
@@ -226,6 +227,10 @@ export {
         return tuple_slot;
     }
 
+    /**
+     * @brief Opens the table-AM scan lazily and fetches its next scalar or vector slot.
+     * @return A populated scan slot, or null when the table scan is exhausted.
+     */
     TupleTableSlot* bioseq_column_scan_next(scan_state* bioseq_scan_state) {
         bioseq_log<logging_level::debug>("[bioseq] pg: BioseqColumnScanNext() entered");
         CustomScanState* node = bioseq_scan_state->as_custom_scan_state();
@@ -330,13 +335,12 @@ export {
         return nullptr;
     }
 
-    /*
-     * SeqRecheck -- access method routine to recheck a tuple in EvalPlanQual
-     */
+    /** @brief Accepts an EvalPlanQual tuple already rechecked by the table access method. */
     bool bioseq_column_scan_recheck(scan_state* node, TupleTableSlot* slot) {
         return true;
     }
 
+    /** @brief Executes one base-scan step and translates C++ failures to PostgreSQL errors. */
     TupleTableSlot* bioseq_column_scan_exec_custom_scan(CustomScanState* node) {
         TupleTableSlot* result = nullptr;
         ErrorData* exact_error = nullptr;
@@ -397,17 +401,17 @@ export {
         return result;
     }
 
+    /**
+     * @brief Releases scan slots, providers, snapshots, and table-AM state in ownership order.
+     *
+     * The C++ runtime remains alive until its query-memory-context callback runs because the
+     * callback record is embedded in that runtime.
+     */
     void bioseq_column_scan_end_custom_scan(CustomScanState* node) {
         TableScanDesc scan_desc = node->ss.ss_currentScanDesc;
         scan_state* bioseq_scan_state = scan_state::from_custom_scan_state(node);
 
-        /*
-         * Profiler summary lives here (not inside the per-batch dispatch
-         * fork) so multi-batch scans emit exactly one block of summary
-         * lines. After dumping, reset_all() clears the persistent
-         * per-process aggregate so the next scan starts with fresh counts.
-         * Part 48.5 / 48.8 of NEW_PROFILING_RESEARCH.md.
-         */
+        /* Emit one profiler summary per scan, then reset process-local counters. */
         if (bioseq::aligner::settings::profiling::enabled) {
             bioseq::instrumentation::summary::write_summary_to_log();
             bioseq::instrumentation::summary::reset_metrics();
@@ -506,6 +510,7 @@ export {
         }
     }
 
+    /** @brief Clears buffered output, folds current Params, and rescans the table access method. */
     void bioseq_column_scan_rescan_custom_scan(CustomScanState* node) {
         CustomScan* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
         scan_state* bioseq_scan_state = scan_state::from_custom_scan_state(node);

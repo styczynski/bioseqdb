@@ -85,10 +85,7 @@ import :custom_scan_scan_paths_path_construction;
 using namespace bioseq::postgres::support;
 
 export {
-    /*
-     * AdjustBioseqColumnParallelScanCost calculates path cost based on
-     * number of parallel workers (based on postgres code).
-     */
+    /** @brief Divides scan cost and row estimates across planned parallel participants. */
     void adjust_bioseq_column_parallel_scan_cost(Path* path) {
         /* Adjust costing for parallelism, if used. */
         if (path->parallel_workers > 0) {
@@ -109,11 +106,7 @@ export {
         }
     }
 
-    /*
-     * CostBioseqColumnScan calculates the cost of scanning the columnar table. The
-     * cost is estimated by using all stripe metadata to estimate based on the
-     * columns to read how many pages need to be read.
-     */
+    /** @brief Costs a custom scan from projected columns, restriction selectivity, and stripes. */
     void cost_bioseq_column_scan(PlannerInfo* root,
                                  RelOptInfo* rel,
                                  Oid relation_id,
@@ -141,11 +134,7 @@ export {
                                                        rel, relation_id, number_of_columns_read);
     }
 
-    /*
-     * BioseqColumnPerStripeScanCost calculates the cost to scan a single stripe
-     * of given columnar table based on number of columns that needs to be
-     * read during scan operation.
-     */
+    /** @brief Estimates the tablespace-adjusted cost of reading selected columns from one stripe. */
     Cost bioseq_column_per_stripe_scan_cost(RelOptInfo* rel,
                                             Oid relation_id,
                                             int number_of_columns_read) {
@@ -191,10 +180,7 @@ export {
         return per_stripe_scan_cost;
     }
 
-    /*
-     * BioseqColumnTableStripeCount returns the number of stripes that columnar
-     * table with relationId has by using stripe metadata.
-     */
+    /** @brief Returns the number of stored stripes for a columnar relation. */
     uint64_t bioseq_column_table_stripe_count(Oid relation_id) {
         Relation relation = RelationIdGetRelation(relation_id);
         List* stripe_list = list_stripes_for_relation(relation->rd_locator, ForwardScanDirection);

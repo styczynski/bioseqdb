@@ -84,6 +84,7 @@ using namespace bioseq::postgres::support;
 
 export {
 
+    /** @brief Accumulates match-helper bindings for one base-scan target list. */
     struct base_match_helper_registration {
         const bioseq_stub_oids* oids = nullptr;
         Node* target_recipe = nullptr;
@@ -94,6 +95,7 @@ export {
         bool invalid = false;
     };
 
+    /** @brief Checks whether a helper identity is already bound to a target-list position. */
     [[nodiscard]] bool base_match_helper_site_already_registered(List* sites,
                                                                  FuncExpr* helper,
                                                                  const AttrNumber resno) noexcept {
@@ -118,7 +120,9 @@ export {
         return false;
     }
 
+    /** @brief Registers valid match helpers that name the owned target recipe or lineage. */
     struct base_match_helper_registration_visitor {
+        /** @brief Validates and serializes one match-helper call in the current target entry. */
         [[nodiscard]] pg_walk_step operator()(pg_expression_walk_cursor,
                                               pg_node_view node,
                                               base_match_helper_registration& registration) const {
@@ -176,6 +180,7 @@ export {
         }
     };
 
+    /** @brief Collects serialized match-helper bindings from a base-scan target list. */
     [[nodiscard]] List* collect_base_match_helper_sites(List* targetlist,
                                                         Node* target_recipe,
                                                         const Index target_relid,
@@ -206,6 +211,11 @@ export {
         return registration.sites;
     }
 
+    /**
+     * @brief Converts an admitted base CustomPath into its immutable executor plan.
+     *
+     * The returned CustomScan and private payload are allocated in the current planner context.
+     */
     Plan* bioseq_column_scan_path_plan_custom_path(PlannerInfo* root,
                                                    RelOptInfo* rel,
                                                    CustomPath* best_path,
@@ -214,7 +224,6 @@ export {
                                                    List* custom_plans) {
         bioseq_log<logging_level::debug>(
             "[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() entered");
-        // PAPIESZ: ADD HERE
         /*
          * Must return a CustomScan, not a larger structure containing a
          * CustomScan as the first field. Otherwise, copyObject() will fail to
@@ -615,6 +624,7 @@ export {
         return reinterpret_cast<Plan*>(cscan);
     }
 
+    /** @brief Orders lineage Vars by stable planner identity fields. */
     [[nodiscard]] int canonical_match_lineage_var_compare(const ListCell* left_cell,
                                                           const ListCell* right_cell) noexcept {
         const Var* left = reinterpret_cast<const Var*>(lfirst(left_cell));
@@ -636,6 +646,7 @@ export {
         return 0;
     }
 
+    /** @brief Builds a deduplicated, stable-order sequence-Var lineage for a target recipe. */
     [[nodiscard]] List* canonical_match_base_lineage(Node* target_recipe,
                                                      const bioseq_stub_oids& oids) {
         if (target_recipe == nullptr)
@@ -671,6 +682,7 @@ export {
         return result;
     }
 
+    /** @brief Serializes a base relation's target recipe and canonical lineage for finalization. */
     [[nodiscard]] List* make_match_owner_descriptor(Node* target_recipe,
                                                     const Index base_relid,
                                                     const bioseq_stub_oids& oids) {
