@@ -198,13 +198,15 @@ void process_vulkan_persisted_route(const size_t batch_size,
                                                                              query_records.size()},
         .device_query_records = nullptr,
     };
-    auto cp = dispatch_params.make_chaining_parameters();
-    const std::int32_t max_dist_x = std::max(cp.max_gap, cp.bandwidth);
-    const std::int32_t max_dist_y = std::max(cp.max_gap, cp.bandwidth);
+    auto chaining_parameters = dispatch_params.make_chaining_parameters();
+    const std::int32_t max_dist_x =
+        std::max(chaining_parameters.max_gap, chaining_parameters.bandwidth);
+    const std::int32_t max_dist_y =
+        std::max(chaining_parameters.max_gap, chaining_parameters.bandwidth);
     const auto chain_key = bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
     constexpr auto coordinate_algorithm =
         bioseq::gpu::vulkan::gpu_seed_coordinate_algorithm::vulkan_tiled_dp;
-    const std::int32_t max_iter = std::min<std::int32_t>(cp.max_chain_iter, 3000);
+    const std::int32_t max_iter = std::min<std::int32_t>(chaining_parameters.max_chain_iter, 3000);
     constexpr std::uint32_t probe_limit = 16u;
     const auto coordinate_configuration =
         bioseq::gpu::vulkan::make_persisted_grouped_soa_coordinate_config_identity(
@@ -214,13 +216,13 @@ void process_vulkan_persisted_route(const size_t batch_size,
             chain_key,
             max_dist_x,
             max_dist_y,
-            cp.bandwidth,
+            chaining_parameters.bandwidth,
             max_iter,
-            cp.gap_penalty,
-            cp.skip_penalty,
-            cp.max_chain_skip,
-            cp.min_chain_score,
-            cp.min_seed_count,
+            chaining_parameters.gap_penalty,
+            chaining_parameters.skip_penalty,
+            chaining_parameters.max_chain_skip,
+            chaining_parameters.min_chain_score,
+            chaining_parameters.min_seed_count,
             probe_limit);
     const std::uint64_t query_authority_identity = query_sketch_authority.identity();
     const auto* const query_minimizer_buffer_identity = query_inputs.device_minimizer_words;
@@ -234,13 +236,13 @@ void process_vulkan_persisted_route(const size_t batch_size,
         chain_key,
         max_dist_x,
         max_dist_y,
-        cp.bandwidth,
+        chaining_parameters.bandwidth,
         max_iter,
-        cp.gap_penalty,
-        cp.skip_penalty,
-        cp.max_chain_skip,
-        cp.min_chain_score,
-        cp.min_seed_count,
+        chaining_parameters.gap_penalty,
+        chaining_parameters.skip_penalty,
+        chaining_parameters.max_chain_skip,
+        chaining_parameters.min_chain_score,
+        chaining_parameters.min_seed_count,
         probe_limit,
         std::move(query_sketch_authority));
 

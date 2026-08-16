@@ -480,14 +480,14 @@ void process_vulkan_resident_route(
         return;
     }
 
-    auto cp = dispatch_params.make_chaining_parameters();
-    std::int32_t max_dist_x = cp.max_gap;
-    std::int32_t max_dist_y = cp.max_gap;
-    if (max_dist_x < cp.bandwidth) {
-        max_dist_x = cp.bandwidth;
+    auto chaining_parameters = dispatch_params.make_chaining_parameters();
+    std::int32_t max_dist_x = chaining_parameters.max_gap;
+    std::int32_t max_dist_y = chaining_parameters.max_gap;
+    if (max_dist_x < chaining_parameters.bandwidth) {
+        max_dist_x = chaining_parameters.bandwidth;
     }
-    if (max_dist_y < cp.bandwidth) {
-        max_dist_y = cp.bandwidth;
+    if (max_dist_y < chaining_parameters.bandwidth) {
+        max_dist_y = chaining_parameters.bandwidth;
     }
     const auto chain_key = bioseq::chaining::choose_vulkan_chaining_pipeline(runtime.features());
     if (query_minimizer_device_span.count() >
@@ -520,13 +520,13 @@ void process_vulkan_resident_route(
         chain_key,
         max_dist_x,
         max_dist_y,
-        cp.bandwidth,
-        std::min<std::int32_t>(cp.max_chain_iter, 3000),
-        cp.gap_penalty,
-        cp.skip_penalty,
-        cp.max_chain_skip,
-        cp.min_chain_score,
-        cp.min_seed_count,
+        chaining_parameters.bandwidth,
+        std::min<std::int32_t>(chaining_parameters.max_chain_iter, 3000),
+        chaining_parameters.gap_penalty,
+        chaining_parameters.skip_penalty,
+        chaining_parameters.max_chain_skip,
+        chaining_parameters.min_chain_score,
+        chaining_parameters.min_seed_count,
         16u);
     add_operational_counter(stats,
                             stats.operational.gpu_seed_dispatches,
