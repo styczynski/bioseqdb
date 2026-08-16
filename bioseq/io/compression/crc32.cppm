@@ -37,18 +37,27 @@ inline constexpr std::uint32_t iso_hdlc_final_xor = 0xFFFFFFFFu;
 /// at each call site.
 namespace detail {
 
+/// Convert a fixed-width running CRC value to zlib's unsigned word type.
 [[nodiscard]] inline uLong to_zlib_ulong(std::uint32_t value) noexcept {
     return static_cast<uLong>(value);
 }
+
+/// Reinterpret borrowed bytes through zlib's byte alias.
 [[nodiscard]] inline const Bytef* to_zlib_bytes(const std::uint8_t* pointer) noexcept {
     return reinterpret_cast<const Bytef*>(pointer);
 }
+
+/// Convert a byte count to the size type accepted by `crc32_z`.
 [[nodiscard]] inline z_size_t to_zlib_size(std::size_t value) noexcept {
     return static_cast<z_size_t>(value);
 }
+
+/// Convert a byte count to the offset type accepted by `crc32_combine`.
 [[nodiscard]] inline z_off_t to_zlib_off(std::size_t value) noexcept {
     return static_cast<z_off_t>(value);
 }
+
+/// Narrow a zlib CRC result to the module's fixed-width representation.
 [[nodiscard]] inline std::uint32_t from_zlib_ulong(uLong value) noexcept {
     return static_cast<std::uint32_t>(value);
 }

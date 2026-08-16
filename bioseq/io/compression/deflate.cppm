@@ -306,11 +306,22 @@ class deflate_block_decoder {
   public:
     using window_buffer_t = std::array<std::uint16_t, predecoded_buffer_size>;
 
+    /// Construct an idle decoder with an empty circular window.
     deflate_block_decoder() noexcept = default;
+
+    /// Decoder instances exclusively own their circular window and tables.
     deflate_block_decoder(const deflate_block_decoder&) = delete;
+
+    /// Decoder state cannot be copied between instances.
     deflate_block_decoder& operator=(const deflate_block_decoder&) = delete;
+
+    /// Decoder state cannot be transferred between instances.
     deflate_block_decoder(deflate_block_decoder&&) = delete;
+
+    /// Decoder state cannot replace another instance through move assignment.
     deflate_block_decoder& operator=(deflate_block_decoder&&) = delete;
+
+    /// Release the decoder's inline window and Huffman tables.
     ~deflate_block_decoder() = default;
 
     // ---------------------------------------------------------------
@@ -627,6 +638,7 @@ class deflate_block_decoder {
     // Uncompressed block decode
     // ---------------------------------------------------------------
 
+    /// Decode the current uncompressed block into marker or direct storage.
     [[nodiscard]] std::pair<decoded_data_view, decode_status>
     read_uncompressed(bit_reader& reader) noexcept {
         // Reader was byte-aligned at the end of the header.
@@ -692,6 +704,7 @@ class deflate_block_decoder {
     // Compressed block decode (marker mode)
     // ---------------------------------------------------------------
 
+    /// Decode compressed symbols while retaining unresolved window markers.
     [[nodiscard]] std::pair<std::size_t, decode_status>
     read_compressed_marker(bit_reader& reader, std::size_t n_max_to_decode) noexcept {
         // Cap to leave room for a max-length back-ref (258).
@@ -746,6 +759,7 @@ class deflate_block_decoder {
         return {produced, decode_status::ok};
     }
 
+    /// Decode compressed symbols against an already resolved circular window.
     [[nodiscard]] std::pair<std::size_t, decode_status>
     read_compressed_direct(bit_reader& reader, std::size_t n_max_to_decode) noexcept {
         const std::size_t uint8_size = _window16.size() * sizeof(std::uint16_t);
@@ -802,6 +816,7 @@ class deflate_block_decoder {
     // Length / distance decode helpers
     // ---------------------------------------------------------------
 
+    /// Decode one literal/length symbol into its RFC 1951 byte count.
     [[nodiscard]] BIOSEQ_DEFLATE_FORCEINLINE std::size_t read_length(bit_reader& reader,
                                                                      std::uint16_t code) noexcept {
         // RFC 1951 §3.2.5: codes 257..285.
@@ -815,6 +830,7 @@ class deflate_block_decoder {
         return static_cast<std::size_t>(length_table[adj]) + static_cast<std::size_t>(extra);
     }
 
+    /// Decode one distance symbol and its extra bits.
     [[nodiscard]] BIOSEQ_DEFLATE_FORCEINLINE std::pair<std::uint16_t, decode_status>
     read_distance(bit_reader& reader) noexcept {
         std::uint16_t distance;
@@ -844,6 +860,7 @@ class deflate_block_decoder {
         return {static_cast<std::uint16_t>(distance_table[distance] + extra), decode_status::ok};
     }
 
+    /// Reverse the five low bits used by the fixed distance alphabet.
     [[nodiscard]] static constexpr std::uint8_t reverse_bits_5(std::uint8_t value) noexcept {
         std::uint8_t result = 0;
         for (int b = 0; b < 5; ++b)
@@ -855,6 +872,7 @@ class deflate_block_decoder {
     // Window appends
     // ---------------------------------------------------------------
 
+    /// Append one literal or marker lane to the marker-mode window.
     BIOSEQ_DEFLATE_FORCEINLINE void append_to_window_uint16(std::uint16_t symbol) noexcept {
         if (symbol > 255u) {
             _distance_to_last_marker_byte = 0;
@@ -865,6 +883,7 @@ class deflate_block_decoder {
         _window_position = (_window_position + 1u) & predecoded_buffer_mask;
     }
 
+    /// Append one resolved byte to the direct-mode window.
     BIOSEQ_DEFLATE_FORCEINLINE void append_to_window_uint8(std::uint8_t byte) noexcept {
         std::uint8_t* uint8_window = reinterpret_cast<std::uint8_t*>(_window16.data());
         const std::size_t uint8_size = _window16.size() * sizeof(std::uint16_t);
@@ -872,6 +891,7 @@ class deflate_block_decoder {
         _window_position = (_window_position + 1u) & (uint8_size - 1u);
     }
 
+    /// Expand one back-reference into marker-mode storage.
     BIOSEQ_DEFLATE_FORCEINLINE void resolve_backreference_uint16(std::uint16_t distance,
                                                                  std::size_t length) noexcept {
         const std::size_t buf_size = _window16.size();
@@ -907,6 +927,7 @@ class deflate_block_decoder {
         }
     }
 
+    /// Expand one back-reference into direct-mode storage.
     BIOSEQ_DEFLATE_FORCEINLINE void resolve_backreference_uint8(std::uint16_t distance,
                                                                 std::size_t length) noexcept {
         std::uint8_t* uint8_window = reinterpret_cast<std::uint8_t*>(_window16.data());
@@ -951,6 +972,7 @@ class deflate_block_decoder {
     // Last-N-bytes view computation
     // ---------------------------------------------------------------
 
+    /// Return the most recently appended direct bytes as at most two spans.
     [[nodiscard]] std::array<std::span<const std::uint8_t>, 2>
     last_buffers_uint8(std::size_t size) const noexcept {
         const std::uint8_t* uint8_window = reinterpret_cast<const std::uint8_t*>(_window16.data());
@@ -969,6 +991,7 @@ class deflate_block_decoder {
         return result;
     }
 
+    /// Return the most recently appended marker lanes as at most two spans.
     [[nodiscard]] std::array<std::span<const std::uint16_t>, 2>
     last_buffers_uint16(std::size_t size) const noexcept {
         const std::size_t total = _window16.size();

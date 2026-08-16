@@ -66,6 +66,7 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
         ((p_alphabet_size * 16) + 15) & ~std::size_t{15};
     static constexpr std::uint16_t invalid_symbol = 0xFFFF;
 
+    /// Construct an invalid decoder with empty lookup tables.
     constexpr canonical_huffman_decoder() noexcept = default;
 
     /// Build a decoder from a span of code lengths. Returns a
@@ -136,6 +137,7 @@ template <std::size_t p_primary_bits, std::size_t p_alphabet_size> class canonic
     }
 
   private:
+    /// Decode a symbol whose code is longer than the primary-table width.
     [[nodiscard]] std::uint16_t decode_fallthrough(bit_reader& reader) const noexcept {
         // Fall back to a slow per-bit walk via the canonical first-code-
         // per-length table. Codes longer than primary_bit_count land here.

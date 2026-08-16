@@ -30,14 +30,23 @@ class bit_reader {
     /// loaded byte fully fits.
     static constexpr std::size_t maximum_peek_bits = sizeof(std::uint64_t) * 8 - 8;
 
+    /// Construct an exhausted reader with no borrowed input.
     bit_reader() = default;
 
+    /// Construct a reader at bit offset zero over borrowed compressed bytes.
     explicit bit_reader(std::span<const std::uint8_t> compressed_view) noexcept
         : _data(compressed_view) {}
 
+    /// Copy the borrowed view and the current bit cursor.
     bit_reader(const bit_reader&) = default;
+
+    /// Transfer the borrowed view and the current bit cursor.
     bit_reader(bit_reader&&) = default;
+
+    /// Replace this reader with a copied view and cursor.
     bit_reader& operator=(const bit_reader&) = default;
+
+    /// Replace this reader with a transferred view and cursor.
     bit_reader& operator=(bit_reader&&) = default;
 
     /// Peek p_bit_count bits from the current position WITHOUT advancing. p_bit_count is a
