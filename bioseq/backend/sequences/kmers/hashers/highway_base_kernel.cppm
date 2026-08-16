@@ -36,12 +36,16 @@ using ::bioseq::simd::supports_scalar_hash;
  */
 template <sequence_alphabet p_alphabet, typename p_input_type, typename p_simd_tag>
 struct simd_hasher_base : hasher_base<p_alphabet, p_input_type> {
+    /** @brief Scalar policy reused for alphabet limits and strand selection. */
     using scalar_base_type = hasher_base<p_alphabet, p_input_type>;
 
     /** @brief Describes the lane, vector, and return types for one fixed target. */
     struct traits : public scalar_base_type::traits {
+        /** @brief Highway descriptor selecting the generated target's operations. */
         using input_simd_tag_type = p_simd_tag;
+        /** @brief SIMD register holding one packed k-mer code per lane. */
         using input_vector_type = hn::Vec<input_simd_tag_type>;
+        /** @brief Per-lane canonical hash produced by `simd_hash::next`. */
         using hasher_return_type = input_vector_type;
     };
 };

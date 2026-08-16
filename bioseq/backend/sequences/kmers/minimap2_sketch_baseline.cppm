@@ -1,3 +1,10 @@
+/**
+ * @file minimap2_sketch_baseline.cppm
+ * @brief Exact Minimap2 minimizer control implementation.
+ *
+ * The implementation preserves Minimap2's comparison, emission, and circular
+ * window order while exposing the result through production C++ types.
+ */
 module;
 
 #include <algorithm>
@@ -13,17 +20,9 @@ export module bioseq.sequences.kmers.minimap2_sketch_baseline;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 
-/**
- * @file
- * @brief Exact Minimap2 minimizer control implementation.
- *
- * The implementation preserves Minimap2's comparison, emission, and circular
- * window order while exposing the result through production C++ types.
- */
-
 export namespace bioseq::minimap2_sketch_baseline_detail {
 
-/// Minimap2 nucleotide-to-rank lookup table, with non-ACGT symbols mapped to four.
+/// @brief Minimap2 nucleotide ranks with non-ACGT symbols mapped to four.
 inline constexpr std::array<unsigned char, 256> k_seq_nt4_table = {
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
@@ -34,7 +33,10 @@ inline constexpr std::array<unsigned char, 256> k_seq_nt4_table = {
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4};
 
-/// Computes Minimap2's masked 64-bit integer hash.
+/// @brief Computes Minimap2's masked 64-bit integer hash.
+/// @param key Canonical two-bit k-mer value.
+/// @param mask Low-bit mask for the selected k-mer width.
+/// @return Mixed hash restricted to `mask`.
 [[nodiscard]] inline constexpr uint64_t hash64(uint64_t key, uint64_t mask) noexcept {
     key = (~key + (key << 21)) & mask; // key = (key << 21) - key - 1;
     key = key ^ key >> 24;
@@ -46,7 +48,7 @@ inline constexpr std::array<unsigned char, 256> k_seq_nt4_table = {
     return key;
 }
 
-/// Encoded Minimap2 minimizer record.
+/// @brief Stores one minimizer in Minimap2's two-word encoding.
 struct minimap2_sketch_record {
     /// Hash and k-mer span packed as `hash << 8 | span`.
     uint64_t x;
@@ -56,13 +58,13 @@ struct minimap2_sketch_record {
 };
 
 /**
- * Collects minimizers with Minimap2's exact rolling-window semantics.
+ * @brief Collects minimizers with Minimap2's exact rolling-window semantics.
  *
- * @param sequence ACGT input bytes, with other symbols resetting rolling state
- * @param sequence_size Number of bytes in `sequence`
- * @param window_size Window size in the range accepted by Minimap2
- * @param kmer_size K-mer length in the range accepted by Minimap2
- * @param sequence_id Identifier packed into each record's high 32 bits
+ * @param sequence ACGT input bytes, with other symbols resetting rolling state.
+ * @param sequence_size Number of bytes in `sequence`.
+ * @param window_size Window size in the range accepted by Minimap2.
+ * @param kmer_size K-mer length in the range accepted by Minimap2.
+ * @param sequence_id Identifier packed into each record's high 32 bits.
  * @return Minimizers in Minimap2 emission order without sorting or deduplication.
  *
  * @pre `0 < window_size < 256` and `0 < kmer_size <= 28`
@@ -184,11 +186,12 @@ collect_minimap2_sketch(const char* sequence,
 export namespace bioseq::simd {
 
 /**
- * Collects sorted, unique Minimap2 minimizer position/hash pairs.
+ * @brief Collects sorted, unique Minimap2 minimizer position/hash pairs.
  *
- * @param sequence Bioseq compact sequence view
- * @param window_size Minimizer window size
- * @param kmer_size K-mer length
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @param sequence Borrowed compact sequence view.
+ * @param window_size Minimizer window length in k-mers.
+ * @param kmer_size K-mer length in biological symbols.
  * @return Sorted, deduplicated `(last_position, kmer_hash)` pairs.
  */
 template <supports_compact_sequence_range p_sequence_range>

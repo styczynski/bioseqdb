@@ -31,7 +31,9 @@ template <sequence_alphabet p_alphabet> struct lexic_hasher {
     template <typename p_input_type>
     class scalar_hash : public hasher_base<p_alphabet, p_input_type> {
       public:
+        /** @brief Scalar hasher base supplying alphabet limits and strand selection. */
         using base_type = hasher_base<p_alphabet, p_input_type>;
+        /** @brief Mask, shift, and alphabet helpers shared by rolling updates. */
         using traits = typename base_type::traits;
 
         /**

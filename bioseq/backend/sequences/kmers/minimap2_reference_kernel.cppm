@@ -37,11 +37,15 @@ using ::bioseq::minimizers::packed_sequence_kernel_view;
 using ::bioseq::minimizers::minimizer_sink_collector;
 using ::bioseq::minimizers::k_minimizer_output_layout;
 
-/// @brief Fixed-capacity circular storage for per-lane minimizer vectors.
+/// @brief Provides fixed-capacity circular storage for per-lane vectors.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_capacity Maximum number of vectors retained.
 template<class p_simd_tag, std::size_t p_capacity>
 class reference_minimizer_ring {
 public:
+    /** @brief Vector stored at each ring position. */
     using value_type = hn::Vec<p_simd_tag>;
+    /** @brief Physical index within the fixed-capacity storage. */
     using iterator = std::size_t;
 
 private:
@@ -51,6 +55,9 @@ private:
     std::size_t capacity_ = 0u;
 
     /// @brief Initializes every target-attributed vector slot as undefined.
+    /// @tparam p_index Static storage indices used to initialize all slots.
+    /// @param simd_tag Active descriptor for the stored vectors.
+    /// @param capacity Runtime capacity within the static allocation.
     template<std::size_t... p_index>
     HWY_INLINE explicit reference_minimizer_ring(
         p_simd_tag simd_tag,
@@ -60,7 +67,12 @@ private:
           capacity_(capacity) {}
 
 public:
-    /** Initialize a ring using a runtime capacity within its static storage. */
+    /**
+     * @brief Initializes a ring using a capacity within its static storage.
+     * @param simd_tag Active descriptor for the stored vectors.
+     * @param capacity Number of slots participating in circular traversal.
+     * @pre `capacity` is in the inclusive range `[1, p_capacity]`.
+     */
     HWY_INLINE explicit reference_minimizer_ring(
         p_simd_tag simd_tag,
         const std::size_t capacity) noexcept
@@ -69,40 +81,55 @@ public:
         HWY_DASSERT(capacity_ != 0u && capacity_ <= p_capacity);
     }
 
-    /** First logical ring position. */
+    /** @brief Returns the first logical ring position. */
     [[nodiscard]] static constexpr iterator get_begin_position() noexcept {
         return 0u;
     }
 
-    /** Active runtime capacity. */
+    /** @brief Returns the active runtime capacity. */
     [[nodiscard]] HWY_INLINE std::size_t get_capacity() const noexcept {
         return capacity_;
     }
 
-    /** Value stored at a physical ring position. */
+    /**
+     * @brief Returns the value stored at a physical ring position.
+     * @param position Index below the active capacity.
+     * @return Borrowed reference valid for the lifetime of the ring.
+     */
     [[nodiscard]] HWY_INLINE const value_type& get_value_at(
         const iterator position) const noexcept {
         return values_[position];
     }
 
-    /** Append a value and advance the circular write cursor. */
+    /**
+     * @brief Appends a value and advances the circular write cursor.
+     * @param value Vector copied into the current write position.
+     */
     HWY_INLINE void push_back(value_type value) noexcept {
         previous_position_ = write_position_;
         values_[write_position_] = value;
         if (++write_position_ == capacity_) write_position_ = 0u;
     }
 
-    /** Physical position written by the most recent append. */
+    /** @brief Returns the physical position written most recently. */
     [[nodiscard]] HWY_INLINE iterator get_last_write_position() const noexcept {
         return previous_position_;
     }
 
-    /** Most recently appended value. */
+    /**
+     * @brief Returns the most recently appended value.
+     * @return Mutable reference valid for the lifetime of the ring.
+     */
     [[nodiscard]] HWY_INLINE value_type& get_last_value() noexcept {
         return values_[previous_position_];
     }
 
-    /** Visit every initialized slot from oldest to newest. */
+    /**
+     * @brief Visits every active slot from oldest to newest.
+     * @tparam p_function Callable accepting position, value, and age.
+     * @param function Visitor invoked once per active slot.
+     * @pre The ring has been filled through its active capacity.
+     */
     template<class p_function>
     HWY_INLINE void for_each_filled_value_unsafe(p_function&& function) {
         std::size_t distance = capacity_ - 1u;
@@ -120,7 +147,7 @@ public:
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** Fixed-target counters exposed only to dispatcher verification code. */
+/** @brief Stores fixed-target counters exposed to dispatcher verification. */
 struct reference_simd_minimizer_test_receipt {
     std::uint64_t kernel_calls = 0u;
     std::uint64_t vector_callback_batches = 0u;
@@ -131,19 +158,36 @@ struct reference_simd_minimizer_test_receipt {
 inline thread_local reference_simd_minimizer_test_receipt
     reference_simd_minimizer_receipt_state{};
 
-/** Reset fixed-target verification counters for the current thread. */
+/** @brief Resets fixed-target verification counters for the current thread. */
 inline void reset_reference_simd_minimizer_test_receipt() noexcept {
     reference_simd_minimizer_receipt_state = {};
 }
 
-/** Snapshot fixed-target verification counters for the current thread. */
+/**
+ * @brief Snapshots fixed-target verification counters for the current thread.
+ * @return Copy of the current thread's receipt.
+ */
 [[nodiscard]] inline reference_simd_minimizer_test_receipt
 reference_simd_minimizer_test_receipt_snapshot() noexcept {
     return reference_simd_minimizer_receipt_state;
 }
 #endif
 
-/** Collect minimizers with the fixed-target minimap2 reference kernel. */
+/**
+ * @brief Collects minimizers with the fixed-target minimap2 reference kernel.
+ * @tparam p_simd_hasher_template SIMD hasher selected for the input alphabet.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @tparam p_iterator Packed storage iterator type.
+ * @tparam p_hash_value Per-lane hash and storage value type.
+ * @tparam p_collector_type Collector receiving selected minimizers.
+ * @param collector Destination for selected minimizers.
+ * @param sequence Borrowed resident packed sequence.
+ * @param sequence_begin First packed unit in the aligned input segment.
+ * @param sequence_end One past the final packed unit in the segment.
+ * @param window_size Minimizer window length in k-mers, at most 256.
+ * @param kmer_size K-mer length in biological symbols.
+ */
 template<
 	template<typename p_hash_alphabet> typename p_simd_hasher_template,
 	class p_minimizer_type,
@@ -329,6 +373,7 @@ inline void collect_minimizers_simd(
         sequence_begin,
         sequence_end,
         kmer_size + window_size - 1u,
+        // Updates per-lane hashes, window minima, and expiry state.
         [&hasher,
          &one_vec,
          &zero_vec,
@@ -579,6 +624,7 @@ inline void collect_minimizers_simd(
             prev_new_min_mask = new_min_mask;
             ++iteration_position;
         },
+        // Flushes the final logical lane after the last decoded matrix.
         [&iteration_position, &prev_new_min_mask, &submit_results, &current_min_strand](
             auto const& offsets, auto& d, auto& mask) {
             hash_mask_type last_lane_mask = hn::Not(hn::FirstN(d, hn::Lanes(d) - 1));
@@ -607,7 +653,21 @@ inline void collect_minimizers_simd(
         },
         0u);
 }
-/** Invoke the reference SIMD kernel with compile-time window parameters. */
+/**
+ * @brief Invokes the reference SIMD kernel with compile-time window parameters.
+ * @tparam p_window_size Minimizer window length in k-mers.
+ * @tparam p_kmer_size K-mer length in biological symbols.
+ * @tparam p_simd_hasher_template SIMD hasher selected for the input alphabet.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @tparam p_iterator Packed storage iterator type.
+ * @tparam p_hash_value Per-lane hash and storage value type.
+ * @tparam p_collector_type Collector receiving selected minimizers.
+ * @param collector Destination for selected minimizers.
+ * @param sequence Borrowed resident packed sequence.
+ * @param sequence_begin First packed unit in the aligned input segment.
+ * @param sequence_end One past the final packed unit in the segment.
+ */
 template <
     std::size_t p_window_size, std::size_t p_kmer_size,
     template<typename p_hash_alphabet> typename p_simd_hasher_template,
@@ -643,6 +703,12 @@ inline void collect_minimizers_simd_constexpr(
 namespace minimizer_kernel_detail {
 
 /// @brief Runs one typed reference-kernel leaf and flushes its neutral sink.
+/// @tparam p_minimizer_type Selected output representation.
+/// @tparam p_alphabet Packed input alphabet.
+/// @tparam p_storage_unit Packed input storage unit.
+/// @param invocation Type-erased kernel request and sink.
+/// @param result Result populated with status and execution evidence.
+/// @return `true` when the borrowed descriptor is internally consistent.
 template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_unit>
 [[nodiscard]] bool run_reference(
     minimizer_kernel_invocation& invocation,
@@ -661,6 +727,7 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<p_alphabet, p_storage_unit>(
         invocation.sequence,
+        // Runs the typed reference collector against the borrowed range.
         [&invocation, &result]<class p_range>(p_range& range) {
             minimizer_sink_collector<p_minimizer_type> collector{
                 invocation.sink};
@@ -729,35 +796,49 @@ template<class p_minimizer_type, sequence_alphabet p_alphabet, class p_storage_u
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_EXTENDED_KMER_COORDINATES)
+/** @brief Generated representation leaf for 7-bit positions and uint32 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 7-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l7_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 17-bit positions and uint32 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l17_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 17-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l17_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 49-bit positions and uint32 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l49_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 49-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l49_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 63-bit positions and uint32 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k7_u32(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 63-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k7_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 27-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l27_k27_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
+/** @brief Generated representation leaf for 63-bit positions and uint64 input. */
 [[nodiscard]] HWY_ATTR bool minimap2_reference_repr_l63_k27_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 #endif
 
 /**
- * One topology-materialized reference-minimizer case.
+ * @brief Dispatches one topology-materialized reference-minimizer case.
  *
- * p_alphabet and storage width are selected by the generated target binder from
- * the scheduler-owned template-flatten topology.  Keeping this leaf typed
+ * The alphabet and storage width are selected by the generated target binder
+ * from the scheduler-owned template-flatten topology. Keeping this leaf typed
  * removes the second hand-maintained runtime alphabet/width registry while the
  * neutral table retains its single concrete function pointer.
+ * @tparam p_alphabet Requested sequence alphabet.
+ * @tparam p_storage_unit Packed input storage unit.
+ * @param invocation Type-erased kernel request for this topology case.
+ * @return Common kernel result with reference-kernel evidence.
  */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (

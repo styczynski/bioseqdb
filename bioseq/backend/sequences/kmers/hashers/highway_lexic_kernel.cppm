@@ -37,7 +37,9 @@ struct lexic_hasher : ::bioseq::simd::lexic_hasher<p_alphabet> {
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
       public:
+        /** @brief Fixed-target SIMD base supplying vector traits. */
         using base_type = simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
+        /** @brief Lane, mask, and alphabet limits for this specialization. */
         using traits = typename base_type::traits;
 
       private:

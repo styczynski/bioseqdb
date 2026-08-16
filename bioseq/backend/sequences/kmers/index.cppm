@@ -120,6 +120,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
     auto iter = sequence.template iter<logical_rank>(sequence_begin);
     const auto end = sequence.template iter<logical_rank>(sequence_end);
 
+    // Consumes one valid rank run while preserving rolling hash and window state.
     auto collect_range = [&collector,
                           &iter,
                           &end,
@@ -191,6 +192,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
             if ((valid_length == window_size + kmer_size - 1 && p_is_initializing) &&
                 !current_min.is_max()) { // first full window
+                // Emits every first-window record tied with the selected minimum.
                 buffer.for_each_filled_value_unsafe(
                     [&collector, &current_min](const auto&, const auto& candidate, const auto&) {
                         if (p_minimizer_type::does_sketch_match(current_min, candidate)) {
@@ -212,6 +214,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
                 }
 
                 current_min.set_max();
+                // Recomputes the rightmost minimum after its ring slot expires.
                 buffer.for_each_filled_value_unsafe(
                     [&current_min,
                      &current_min_pos](const auto& index, const auto& candidate, const auto&) {
@@ -223,6 +226,7 @@ inline void collect_minimizers_view(p_collector_type& collector,
 
                 if ((valid_length >= window_size + kmer_size - 1 || !p_is_initializing) &&
                     !current_min.is_max()) { // write identical k-mers
+                    // Emits all distinct ring records tied with the replacement minimum.
                     buffer.for_each_filled_value_unsafe(
                         [&collector,
                          &current_min](const auto&, const auto& candidate, const auto&) {

@@ -26,10 +26,13 @@ import bioseq.prefilter.sneaky_snake;
 import bioseq.highway.sources.simd_utils;
 
 export namespace bioseq::prefilter {
+/** @brief Fixed-target SneakySnake batch entry points duplicated by codegen per Highway backend. */
 namespace [[bioseq::simd]] target {
 
+/** Highway namespace alias for the generated target's active vector operations. */
 namespace hn = hwy::HWY_NAMESPACE;
 
+/** @brief Target-specific traversal hooks consumed by the shared scalar maze evaluator. */
 namespace sneaky_snake_target_detail {
 
 /**
@@ -125,6 +128,7 @@ template <class p_descriptor> struct highway_traversal final {
       std::span<const std::uint8_t> query, std::uint32_t filter_offset,
       std::uint8_t filter_rank, std::uint32_t position, std::uint32_t lower,
       std::uint32_t upper, p_consumer &&consume) const noexcept {
+    /** @brief Byte-lane descriptor derived from the fixed-target shape. */
     using byte_descriptor_type = hn::Repartition<std::uint8_t, p_descriptor>;
     const byte_descriptor_type byte_descriptor;
     static_assert(hn::MaxLanes(byte_descriptor_type{}) <= 64u);
@@ -179,6 +183,7 @@ sneaky_snake_simd_batch_for(p_descriptor descriptor,
                             sneaky_snake_options options = {}) {
   static_cast<void>(descriptor);
   sneaky_snake_target_detail::highway_traversal<p_descriptor> traversal;
+  // Per-job adapter that runs bounded maze evaluation through the fixed-target traversal.
   return sneaky_snake_detail::evaluate_batch_with(
       input, [&traversal, options](std::span<const std::uint8_t> query,
                                    std::span<const std::uint8_t> target_ranks,

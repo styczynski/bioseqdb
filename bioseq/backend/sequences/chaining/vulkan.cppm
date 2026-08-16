@@ -255,6 +255,11 @@ public:
     vulkan_chaining_memory_plan plan{};
     bioseq::parallelism::memory_admission_failure admission{};
 
+    /**
+     * @brief Builds a Vulkan admission error that retains both diagnostic records.
+     * @param memory_plan Exact byte plan that was rejected.
+     * @param failure Memory-admission snapshot captured at rejection.
+     */
     vulkan_chaining_admission_error(
             vulkan_chaining_memory_plan memory_plan,
             bioseq::parallelism::memory_admission_failure failure)
@@ -352,18 +357,26 @@ constexpr std::uint32_t k_gpu_chain_compact_range_threshold = 131'072u;
 constexpr std::uint32_t k_gpu_chain_compact_range_target = 65'536u;
 constexpr std::size_t k_coordinate_only_fast_probe_limit = 16u;
 
+/** @brief Counts hard ranges and the device anchor population after optional compaction. */
 struct vulkan_chaining_shape_plan {
     std::size_t range_count = 0;
     std::size_t device_anchor_count = 0;
     bool compaction_required = false;
 };
 
+/**
+ * @brief Analyzes range boundaries and long-range compaction without allocating.
+ * @param anchors Canonically ordered anchors.
+ * @param max_ref_dist Maximum reference-coordinate separation within a range.
+ * @return Range count, device anchor count, and compaction decision.
+ */
 [[nodiscard]] inline vulkan_chaining_shape_plan analyze_gpu_chaining_shape(
         std::span<const anchor> anchors,
         std::uint64_t max_ref_dist) noexcept {
     vulkan_chaining_shape_plan shape{};
     if (anchors.empty()) return shape;
 
+    // Adds one range using the same sampling count as device compaction.
     auto add_range = [&shape](std::size_t length) noexcept {
         ++shape.range_count;
         if (length > k_gpu_chain_compact_range_threshold) {
@@ -778,6 +791,14 @@ struct vulkan_chaining_shape_plan {
  *
  * Pins the @ref anchor ABI before dispatch. Once selected, the function never
  * falls back to scalar execution and propagates every unsupported condition.
+ *
+ * @param anchors Canonically ordered anchors to chain.
+ * @param params Chaining distances, penalties, and execution policy.
+ * @param chains_out Arena-backed destination for chain descriptors.
+ * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+ * @return `true` when Vulkan completed the selected operation.
+ * @throws vulkan_runtime_error If the device, shape, dispatch, or result contract is rejected.
+ * @throws vulkan_chaining_admission_error If the exact memory plan is denied.
  */
 inline bool chain_anchors_vulkan(
     std::span<const anchor> anchors,

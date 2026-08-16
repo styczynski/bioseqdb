@@ -156,6 +156,7 @@ HWY_INLINE void merge_packed_chunk_into_partial(
     std::vector<p_storage_unit>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk) noexcept {
     std::size_t appended_letters = 0u;
+    // Flush one completed storage unit into the output vector.
     auto write_unit = [packed_words](p_storage_unit value) {
         packed_words->push_back(value);
         return true;
@@ -185,6 +186,7 @@ HWY_INLINE void merge_variable_chunk_into_partial(
     std::uint32_t packed_chunk,
     std::size_t count) noexcept {
     std::size_t appended_letters = 0u;
+    // Flush one completed storage unit into the output vector.
     auto write_unit = [packed_words](p_storage_unit value) {
         packed_words->push_back(value);
         return true;
@@ -287,9 +289,12 @@ encode_body_chunk_dna4_simd_multiline_until_byte(
 // dna4 SIMD decoder — packed uint64 → ASCII bytes.
 // ============================================================================
 
-/// Decode 16 packed dna4 source bytes (= 2 packed words = 64 letters)
-/// into 64 ASCII bytes via SIMD spread + LUT.
-/// Decode `total_letters` letters from packed dna4 words into `dst`.
+/// Decode `total_letters` dna4 ranks from packed `uint64` words into
+/// ASCII bytes at `dst`. The fast path processes 64 letters per inner
+/// iteration via SIMD spread plus rank-to-letter LUT.
+/// @param words Packed storage units, LSB-first within each word.
+/// @param dst Output buffer sized for at least `total_letters` bytes.
+/// @param total_letters Logical letter count to emit.
 HWY_INLINE void decode_dna4_words_to_ascii(
     const std::uint64_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT dst,
@@ -298,6 +303,14 @@ HWY_INLINE void decode_dna4_words_to_ascii(
 }
 /// Variant of `decode_dna4_words_to_ascii` that injects newline bytes
 /// every `wrap_width` letters.
+/// @param words Packed dna4 storage.
+/// @param total_letters Letters to decode from `words`.
+/// @param wrap_width Line width before inserting `\n`.
+/// @param letters_in_current_line Position within the current output line
+/// before this batch (for resume across calls).
+/// @param scratch Temporary decode buffer sized for `total_letters`.
+/// @param dst Final wrapped output buffer.
+/// @return Updated in-line letter counter after the last output line.
 HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
     const std::uint64_t* HWY_RESTRICT words,
     std::size_t total_letters,
@@ -351,6 +364,12 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd(
 // dna5 SIMD decoder — `(dna5, uint8, 3, 2)`: 16 packed bytes → 32 chars.
 // ============================================================================
 
+/// Decode `total_letters` dna5 ranks from `(uint8, 3, 2)` packed
+/// words into ASCII at `dst`. Uses SIMD spread for the canonical
+/// dna5 uint8 storage shape.
+/// @param words Packed storage units.
+/// @param dst Output buffer sized for at least `total_letters` bytes.
+/// @param total_letters Logical letter count to emit.
 HWY_INLINE void decode_dna5_uint8_words_to_ascii(
     const std::uint8_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT dst,
@@ -464,6 +483,15 @@ HWY_INLINE void encode_body_chunk(
     }
 }
 
+/// Generic decode dispatcher. SIMD for `(dna4, uint64, 2, 32)` and
+/// `(dna5, uint8, 3, 2)`, scalar bit-walk for all other shapes.
+/// @tparam p_alphabet Source alphabet.
+/// @tparam p_storage_unit Packed word type.
+/// @tparam p_bits_per_character Bits per rank in each storage unit.
+/// @tparam p_letters_per_unit Ranks packed per storage unit.
+/// @param words Packed sequence storage.
+/// @param dst Output ASCII buffer for `total_letters` bytes.
+/// @param total_letters Logical letters to decode.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,
@@ -494,6 +522,20 @@ HWY_INLINE void decode_words_to_ascii(
     }
 }
 
+/// Wrapped decode dispatcher. SIMD fast paths mirror
+/// `decode_words_to_ascii`; other shapes delegate to the scalar wrapped
+/// decoder. Returns the updated in-line letter counter.
+/// @tparam p_alphabet Source alphabet.
+/// @tparam p_storage_unit Packed word type.
+/// @tparam p_bits_per_character Bits per rank in each storage unit.
+/// @tparam p_letters_per_unit Ranks packed per storage unit.
+/// @param words Packed sequence storage.
+/// @param total_letters Letters to decode from `words`.
+/// @param wrap_width Line width before inserting `\n`.
+/// @param letters_in_current_line Position within the current output line.
+/// @param scratch Decode scratch for SIMD paths (`total_letters` bytes).
+/// @param dst Wrapped ASCII output buffer.
+/// @return Updated in-line letter counter after the last output line.
 template <sequence_alphabet p_alphabet,
           typename p_storage_unit,
           std::size_t p_bits_per_character,

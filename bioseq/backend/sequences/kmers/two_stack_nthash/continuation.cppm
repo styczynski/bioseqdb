@@ -24,6 +24,17 @@ namespace [[bioseq::simd]] target {
 namespace hn = hwy::HWY_NAMESPACE;
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN reset_two_stack_nthash
+/**
+ * @brief Resets and validates continuation state for a new logical sequence.
+ * @tparam p_window_size Compile-time window size, or zero for runtime selection.
+ * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
+ * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
+ * @param state State replaced with a fresh validated continuation.
+ * @param runtime_w Requested minimizer window length in k-mers.
+ * @param runtime_k Requested k-mer length in biological symbols.
+ * @param emitted_position_base Offset added to emitted sequence coordinates.
+ * @return Admission status retained in @p state.
+ */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 [[nodiscard]] inline two_stack_continuation_status reset_two_stack_nthash(
     two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>& state,
@@ -101,6 +112,22 @@ template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_tr
 
 
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN consume_two_stack_nthash_packed_fragment
+/**
+ * @brief Consumes a contiguous interval from borrowed packed fragment storage.
+ * @tparam p_window_size Compile-time window size, or zero for runtime selection.
+ * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
+ * @tparam p_collector_type Collector receiving selected minimizers.
+ * @param state Continuation state retained across fragment calls.
+ * @param collector Destination for minimizers completed by this interval.
+ * @param packed_fragment Borrowed storage units for the enclosing fragment.
+ * @param fragment_bp_size Logical symbols available in @p packed_fragment.
+ * @param fragment_begin_bp Global coordinate of the fragment's first symbol.
+ * @param consume_begin_bp Global coordinate where consumption begins.
+ * @param consume_end_bp One past the final global coordinate to consume.
+ * @return Continuation status, with failures retained in @p state.
+ */
 template<
     std::size_t p_window_size,
     std::size_t p_kmer_size,
@@ -408,6 +435,21 @@ consume_two_stack_nthash_packed_fragment(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END consume_two_stack_nthash_packed_fragment
 
 
+/**
+ * @brief Consumes a contiguous interval from a compact sequence fragment.
+ * @tparam p_window_size Compile-time window size, or zero for runtime selection.
+ * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_sequence_range Packed fragment configuration.
+ * @tparam p_collector_type Collector receiving selected minimizers.
+ * @param state Continuation state retained across fragment calls.
+ * @param collector Destination for minimizers completed by this interval.
+ * @param fragment Borrowed compact fragment storage.
+ * @param fragment_begin_bp Global coordinate of the fragment's first symbol.
+ * @param consume_begin_bp Global coordinate where consumption begins.
+ * @param consume_end_bp One past the final global coordinate to consume.
+ * @return Continuation status, with failures retained in @p state.
+ */
 template<
     std::size_t p_window_size,
     std::size_t p_kmer_size,
@@ -444,6 +486,16 @@ consume_two_stack_nthash_fragment(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END consume_two_stack_nthash_fragment
 
 
+/**
+ * @brief Flushes pending candidates and closes a continuation exactly once.
+ * @tparam p_window_size Compile-time window size, or zero for runtime selection.
+ * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
+ * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
+ * @tparam p_collector_type Collector receiving the final minimizer.
+ * @param state Continuation state to finalize.
+ * @param collector Destination for pending and final minimizers.
+ * @return Final status and accumulated execution evidence.
+ */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits, class p_collector_type>
 [[nodiscard]] inline two_stack_finalize_result finalize_two_stack_nthash(
     two_stack_continuation_state<p_window_size, p_kmer_size, p_alphabet_traits>& state,

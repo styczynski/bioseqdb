@@ -49,6 +49,15 @@ using bioseq::chaining::simd_chaining_status;
 namespace chaining_simd_detail {
 
 /// @brief Runs policy dispatch, forward scoring, and SIMD backtracking.
+/// @tparam p_collect_stats Whether hot-path counters are collected.
+/// @tparam p_descriptor_type Highway descriptor type for the selected target.
+/// @param d Active Highway descriptor.
+/// @param anchors Canonically ordered anchors to chain.
+/// @param params Scoring, distance, and policy parameters.
+/// @param chains_out Arena-backed destination for chain descriptors.
+/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+/// @param stats Optional full execution counters.
+/// @param route_summary Optional lightweight route counters.
 template<bool p_collect_stats, class p_descriptor_type>
 void run_simd_chaining(
     p_descriptor_type d,
@@ -129,9 +138,19 @@ void run_simd_chaining(
 }  // namespace chaining_simd_detail
 
 /**
- * Named SIMD DP chaining. Supplying stats is optional and does not alter the
+ * @brief Runs named SIMD dynamic-programming chaining on the active target.
+ *
+ * Supplying stats is optional and does not alter the
  * requested policy. Unsupported inputs throw. This entry point never calls a
  * scalar scoring or backtracking implementation.
+ *
+ * @param anchors Canonically ordered anchors to chain.
+ * @param params Scoring, distance, and policy parameters.
+ * @param chains_out Arena-backed destination for chain descriptors.
+ * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+ * @param stats Optional execution counters replaced with this call's values.
+ * @param aggregate_stats Collect lightweight route summaries instead of hot-loop counters.
+ * @throws simd_chaining_runtime_error If the policy, target shape, or workspace is unsupported.
  */
 void chain_anchors_simd(
     std::span<const anchor> anchors,

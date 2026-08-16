@@ -46,11 +46,15 @@ export namespace bioseq::seeding {
 
 /// Move-only completion state and retained output-memory reservation.
 struct vulkan_seed_lookup_completion {
+    /** Whether lookup finished without a recorded decline. */
     bool is_successful = false;
+    /** Transferred permit covering retained anchor slab growth. */
     bioseq::parallelism::memory_permit retained_anchor_permit{};
+    /** Bytes covered by @ref retained_anchor_permit after shrink reconciliation. */
     std::uint64_t retained_anchor_bytes = 0u;
 
     vulkan_seed_lookup_completion() = default;
+    /** @param completed Initial success flag for a mapped-prefix completion handoff. */
     vulkan_seed_lookup_completion(bool completed) noexcept
         : is_successful(completed) {}
     vulkan_seed_lookup_completion(vulkan_seed_lookup_completion&&) noexcept = default;
@@ -70,6 +74,20 @@ struct vulkan_seed_lookup_completion {
  * The function never silently selects a CPU lookup. It returns a false
  * completion only for a structured, caller-visible decline and propagates
  * runtime failures once GPU execution begins.
+ *
+ * @tparam p_minimizer_type Query minimizer record and device wire representation.
+ * @param[in] query_minimizers Host minimizers when no device span is supplied.
+ * @param[in] device_minimizers Optional device-resident minimizer words.
+ * @param[in] target_index Host hashmap used for non-mapped prefix counting.
+ * @param[in] resident_index GPU-resident target index for lookup dispatch.
+ * @param[in] vulkan_enabled Whether the selected execution policy permits Vulkan.
+ * @param[in] query_len Query length in logical symbols.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @param[in] kmer_size Selected k-mer size for lookup validation.
+ * @param[out] anchors_out Chain arena receiving emitted anchors.
+ * @param[in] fused_frontend Whether the fused count-and-sort frontend is selected.
+ * @param[out] decline_out Optional structured decline and telemetry sink.
+ * @return Success completion, or a declined completion when @p decline_out is set.
  */
 template <class p_minimizer_type>
 [[nodiscard]] vulkan_seed_lookup_completion collect_seed_hits_vulkan(
@@ -96,12 +114,14 @@ template <class p_minimizer_type>
             .fused_frontend = fused_frontend,
         };
     }
+    // Record a terminal decline reason when the caller requested diagnostics.
     const auto decline = [decline_out](
             vulkan_seed_lookup_decline_reason reason) noexcept {
         if (decline_out != nullptr) {
             decline_out->reason = reason;
         }
     };
+    // Source-direct indices may run with zero query minimizers.
     const bool source_direct_empty_minimizer_query =
         query_minimizers.empty()
         && resident_index != nullptr

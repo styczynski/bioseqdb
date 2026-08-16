@@ -11,6 +11,7 @@ export module bioseq.sequences.simd_iteration_geometry;
 
 import std;
 
+/** @brief Packed-sequence lane partitioning helpers for SIMD iteration. */
 export namespace bioseq::simd::iteration_geometry {
 
 /**

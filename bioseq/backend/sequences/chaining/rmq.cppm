@@ -1,5 +1,5 @@
 /**
- * @file chaining_rmq.cppm
+ * @file rmq.cppm
  * @brief AVL tree with range-minimum augmentation for chaining.
  *
  * The primary tree holds all in-range anchors and an optional inner tree
@@ -40,7 +40,7 @@ namespace bioseq::chaining {
 /// The priority field enables rmq: each node tracks the minimum-priority
 /// node in its subtree via subtree_minimum.
 struct rmq_node {
-    std::int64_t query_position = 0;   ///< Full-width query coordinate; never truncated.
+    std::int64_t query_position = 0;   ///< Full-width query coordinate that is never truncated.
     int64_t anchor_index   = 0;
     double  priority       = 0.0;  ///< -(best_scores[j] + 0.5 * gap_penalty * (ref_pos + query_pos))
 
@@ -528,6 +528,7 @@ struct rmq_tree {
         const rmq_node** stack_top;
         const rmq_node* current_node = nullptr;
 
+        /** @brief Creates an unpositioned cursor with empty traversal state. */
         reverse_iterator() : stack_top(stack_storage) {}
 
         /// Position the reverse_iterator at the largest node <= key.
@@ -609,7 +610,7 @@ struct rmq_tree {
 ///
 /// @param anchors                  Sorted anchor array. The read-only span
 ///                                  kernel only reads positions and emits a
-///                                  freshly-reordered anchor span).
+///                                  freshly-reordered anchor span.
 /// @param params                   Chaining parameters (must have prepare()
 ///                                  called).
 /// @param chains_out               Output slab — surviving chains are appended

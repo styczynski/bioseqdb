@@ -20,6 +20,7 @@ module;
 
 export module bioseq.sequences.edit_distance_threshold;
 
+/** @brief Banded row evaluation shared by the public threshold predicate. */
 namespace bioseq::sequences::edit_distance_threshold_detail {
 
 /**

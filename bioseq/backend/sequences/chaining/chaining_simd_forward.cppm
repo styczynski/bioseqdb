@@ -43,6 +43,16 @@ using bioseq::chaining::simd_chaining_status;
 namespace chaining_simd_detail {
 
 /// @brief Runs exact visited-set dynamic programming for every anchor.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @param anchors Canonically ordered anchors.
+/// @param soa Structure-of-arrays coordinates for vector loads.
+/// @param best_scores Destination score for every anchor.
+/// @param predecessors Destination predecessor index for every anchor.
+/// @param peak_scores Destination peak score for every anchor.
+/// @param params Chaining distances, penalties, and skip limits.
+/// @param stats Optional full execution counters.
+/// @param route_summary Optional lightweight route counters.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_exact(
     p_descriptor_type d,
@@ -458,6 +468,8 @@ void simd_dp_forward_pass_exact(
 /// including masked tails and the one-candidate rescue, is produced by
 /// the specialized SIMD batch scorer. Scalar work is limited to batch
 /// orchestration and extracting the vector-reduced winning predecessor.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @return Mask of lanes that improved their retained winner.
 template<class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
     p_descriptor_type d,
@@ -488,6 +500,11 @@ HWY_INLINE hn::Mask<p_descriptor_type> update_bounded_lane_best(
 }
 
 /// @brief Scores and folds one bounded predecessor batch into lane winners.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_full_batch Whether every physical lane contains a candidate.
+/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @return Mask of lanes that improved their retained winner.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
     p_descriptor_type d,
@@ -546,6 +563,9 @@ HWY_INLINE hn::Mask<p_descriptor_type> score_bounded_candidate_batch(
 }
 
 /// @brief Runs bounded-batch dynamic programming for one penalty specialization.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
 template<bool p_collect_stats, bool p_has_skip_penalty, class p_descriptor_type>
 void simd_dp_forward_pass_bounded_impl(
     p_descriptor_type d,
@@ -610,6 +630,7 @@ void simd_dp_forward_pass_bounded_impl(
         // strictly greater than window_start.
         std::int32_t unscanned_end_exclusive = window_start;
 
+        // Classifies one scored batch and applies the bounded non-improvement cutoff.
         auto record_batch = [&route_score_vector_batches,
                              &route_score_vector_lanes,
                              &route_score_masked_lanes,
@@ -830,6 +851,8 @@ void simd_dp_forward_pass_bounded_impl(
 }
 
 /// @brief Selects the zero or nonzero skip-penalty bounded kernel.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
 template<bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass_bounded(
     p_descriptor_type d,
@@ -870,8 +893,13 @@ void simd_dp_forward_pass_bounded(
     }
 }
 
+/// @brief Dispatches the selected policy outside the candidate loop.
+///
 /// Compile-time forward dispatch keeps the policy test outside the candidate
 /// loop while sharing allocation, SoA conversion, and backtracking.
+/// @tparam p_policy Forward-search policy selected at compile time.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
 template<simd_chaining_policy p_policy, bool p_collect_stats, class p_descriptor_type>
 void simd_dp_forward_pass(
     p_descriptor_type d,

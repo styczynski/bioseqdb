@@ -75,7 +75,9 @@ struct rank_pack_result {
 template <class p_unit_type>
 class growing_rank_pack_unit_sink {
 public:
+    /** @brief Unsigned word type written by this sink. */
     using storage_unit = p_unit_type;
+    /** @brief Reports vector-growth capacity handling to template callers. */
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::grow_vector;
 
@@ -111,7 +113,9 @@ private:
 template <class p_unit_type>
 class fixed_rank_pack_unit_sink {
 public:
+    /** @brief Unsigned word type written by this sink. */
     using storage_unit = p_unit_type;
+    /** @brief Reports fixed-span capacity handling to template callers. */
     static constexpr pack_capacity_policy capacity_policy =
         pack_capacity_policy::fixed_span;
 
@@ -155,8 +159,11 @@ template <class p_output_instance,
           class p_unit_sink_type>
 class checked_rank_pack_sink {
 public:
+    /** @brief Output compact-sequence range type derived from the instance. */
     using output_range = compact_sequence_range<p_output_instance>;
+    /** @brief Packing traits shared by the output range. */
     using traits = typename output_range::traits;
+    /** @brief Destination storage word selected by the traits. */
     using storage_unit = typename traits::storage_unit;
 
     static_assert(std::is_unsigned_v<storage_unit>);
@@ -195,6 +202,7 @@ public:
             status_ = rank_pack_status::length_mismatch;
             return status_;
         }
+        // Forward each completed storage unit to the configured sink.
         auto write_unit = [this](storage_unit value) {
             return sink_.try_write(value);
         };
@@ -240,6 +248,7 @@ public:
 
         std::uint16_t padding = 0u;
         if (status_ == rank_pack_status::ok && partial_letters_ != 0u) {
+            // Forward the final partial storage unit to the configured sink.
             auto write_unit = [this](storage_unit value) {
                 return sink_.try_write(value);
             };

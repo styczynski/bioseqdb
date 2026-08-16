@@ -23,13 +23,17 @@ namespace hn = hwy::HWY_NAMESPACE;
 namespace two_stack_internal {
 
 #if HWY_TARGET == HWY_SCALAR
+/// @brief Whether the current translation targets Highway's scalar backend.
 inline constexpr bool exact_compiled_target_is_scalar = true;
 #else
+/// @brief Whether the current translation targets Highway's scalar backend.
 inline constexpr bool exact_compiled_target_is_scalar = false;
 #endif
 
 /**
- * The packed K15/W10/B8 kernel stores candidate hashes in u32 lanes and raw
+ * @brief Tests whether an output layout admits the packed K15/W10/B8 kernel.
+ *
+ * The packed kernel stores candidate hashes in u32 lanes and raw
  * minimizers in u64 lanes.  Both persisted-index representations used by the
  * index layouts satisfy that contract:
  *
@@ -40,6 +44,7 @@ inline constexpr bool exact_compiled_target_is_scalar = false;
  * Admission is limited to these two persisted-compatible layouts. The raw
  * construction is parameterized by `k_hash_shift`, `k_position_field_mask`,
  * and `k_position_shift`. Arbitrary `p_minimizer_type` encodings are rejected.
+ * @tparam p_minimizer_type Candidate output representation.
  */
 template <class p_minimizer_type>
 inline constexpr bool exact_k15_w10_b8_representation_v =
@@ -53,6 +58,11 @@ inline constexpr bool exact_k15_w10_b8_representation_v =
       static_cast<std::uint64_t>(p_minimizer_type::k_position_field_mask) == 0x0fffffffull &&
       p_minimizer_type::k_hash_shift == 29u));
 
+/// @brief Selects the exact SIMD kernel admitted by type and input length.
+/// @tparam p_minimizer_type Candidate output representation.
+/// @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
+/// @param consumed_bp Number of biological symbols in the request.
+/// @return Specialized K15/W10 kernel when all layout constraints hold.
 template<class p_minimizer_type, class p_alphabet_traits>
 [[nodiscard]] inline exact_simd_kernel select_exact_simd_kernel_kind(
     std::size_t consumed_bp) noexcept
@@ -70,6 +80,10 @@ template<class p_minimizer_type, class p_alphabet_traits>
     return exact_simd_kernel::generic_u64;
 }
 
+/// @brief Tests whether a u64 lane count has an admitted square geometry.
+/// @param lanes Active u64 lane count.
+/// @param lane_capacity Maximum lanes retained by continuation storage.
+/// @return Whether the lane count is supported and within capacity.
 [[nodiscard]] constexpr bool exact_vector_lane_count_supported(
     std::size_t lanes,
     std::size_t lane_capacity) noexcept
@@ -79,9 +93,18 @@ template<class p_minimizer_type, class p_alphabet_traits>
 }
 
 /**
+ * @brief Validates the target geometry before exact continuation work begins.
+ *
  * The exact continuation is a SIMD-only contract. Target rejection differs
  * from an invalid biological request: it happens before reset/consume work and
  * therefore deliberately leaves every execution-stats counter at zero.
+ * @tparam p_state_type Continuation state carrying rejection status.
+ * @param state State updated when the shape is rejected.
+ * @param lanes Active u64 lane count.
+ * @param lane_capacity Maximum lanes retained by @p state.
+ * @param compiled_target_is_scalar Whether the active backend is scalar.
+ * @param transpose_shape_supported Whether the square transpose is available.
+ * @return Exact continuation admission status.
  */
 template<class p_state_type>
 [[nodiscard]] constexpr two_stack_continuation_status
@@ -106,6 +129,9 @@ validate_exact_vector_shape(
 // Keep the scalar translation entirely free of multi-lane Highway operations.
 // These stubs let the common reset/consume templates compile, but the target
 // gate rejects them before any biological work or stats accounting.
+/// @brief Rejects u64 transpose admission for the scalar Highway target.
+/// @tparam p_simd_tag Highway descriptor with u64 lanes.
+/// @return Always `false` on the scalar target.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag) noexcept
 {
@@ -113,6 +139,9 @@ template<class p_simd_tag>
     return false;
 }
 
+/// @brief Rejects matrix transpose execution for the scalar Highway target.
+/// @tparam p_simd_tag Highway descriptor with u64 lanes.
+/// @return Always `false` on the scalar target.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
     p_simd_tag,
@@ -125,9 +154,14 @@ template<class p_simd_tag>
 #else
 
 /**
- * Whether repeated Half<p_simd_tag> operations exactly describe a power-of-two square
+ * @brief Tests whether recursive half descriptors form a square u64 matrix.
+ *
+ * Repeated half-descriptor operations must exactly describe a power-of-two square
  * for this target. This is checked before any biological work so an unusual
  * scalable-vector shape cannot reach a late transpose failure.
+ * @tparam p_simd_tag Highway descriptor with u64 lanes.
+ * @param d Active u64 descriptor.
+ * @return Whether the recursive in-register transpose supports this shape.
  */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool u64_lane_transpose_shape_supported(p_simd_tag d) noexcept
@@ -149,11 +183,17 @@ template<class p_simd_tag>
 }
 
 /**
- * In-register u64 square transpose. The generic square_lane_matrix widens
+ * @brief Transposes an in-register square matrix of u64 lanes.
+ *
+ * The generic square lane matrix widens
  * lane types between stages, which reaches a nonexistent u128 lane for u64
  * matrices. This network instead recursively transposes four half-width
  * quadrants and joins them with Highway Combine. The only base operation is a
  * two-lane Interleave. There are no scalar lane or event-record stores.
+ * @tparam p_simd_tag Highway descriptor with u64 lanes.
+ * @param d Active u64 descriptor defining both matrix dimensions.
+ * @param matrix Mutable array of at least `Lanes(d)` vectors.
+ * @return Whether the matrix shape was supported and transposed.
  */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE bool transpose_u64_lane_matrix(
@@ -214,6 +254,11 @@ template<class p_simd_tag>
 
 #endif
 
+/// @brief Records a fail-closed continuation status with saturating evidence.
+/// @tparam p_state_type Continuation state carrying status and counters.
+/// @param state State updated with the rejection.
+/// @param status Failure status to retain.
+/// @return @p status.
 template<class p_state_type>
 [[nodiscard]] inline two_stack_continuation_status reject_continuation(
     p_state_type& state,
@@ -227,6 +272,9 @@ template<class p_state_type>
     return status;
 }
 
+/// @brief Adds to an execution counter with saturation at `uint64_t` maximum.
+/// @param counter Counter updated in place.
+/// @param increment Amount to add.
 inline void add_stats_counter(
     std::uint64_t& counter,
     std::uint64_t increment) noexcept

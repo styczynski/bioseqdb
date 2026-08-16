@@ -30,6 +30,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 template <sequence_alphabet p_alphabet>
 struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
   public:
+    /** @brief Lexicographic SIMD hasher that owns canonical rolling state. */
     using base_hasher_type = lexic_hasher<p_alphabet>;
 
     /**
@@ -40,7 +41,9 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
     template <typename p_input_type, typename p_simd_tag>
     class simd_hash : public simd_hasher_base<p_alphabet, p_input_type, p_simd_tag> {
       public:
+        /** @brief Fixed-target SIMD base supplying vector traits. */
         using base_type = simd_hasher_base<p_alphabet, p_input_type, p_simd_tag>;
+        /** @brief Lane, mask, and alphabet limits for this specialization. */
         using traits = typename base_type::traits;
 
       private:
@@ -126,6 +129,7 @@ struct minimap_int_hasher : ::bioseq::simd::minimap_int_hasher<p_alphabet> {
     scramble_simd(p_simd_tag simd_tag, hn::Vec<p_simd_tag> key, hn::Vec<p_simd_tag> mask) {
         using lane_type = hn::TFromD<p_simd_tag>;
         constexpr size_t k_max_storage_shift = sizeof(lane_type) * 8 - 1;
+        // Clamps permutation shifts to the lane bit width.
         constexpr auto clamp = [](size_t shift) constexpr -> size_t {
             return shift > k_max_storage_shift ? k_max_storage_shift : shift;
         };

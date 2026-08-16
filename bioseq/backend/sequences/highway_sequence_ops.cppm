@@ -178,7 +178,8 @@ inline void iterate_sequence_bp_simd_offsets(
 	HWY_ALIGN std::array<vector_type, delay_count> all_bp_vecs{
 		((void)delays, hn::Undefined(d))...};
 
-    auto handle_row_bp = [&delays_state,
+	// Advances one transposed symbol row through delayed lane states and callbacks.
+	auto handle_row_bp = [&delays_state,
                           &buffer,
                           &delays_counters,
                           &main_counter_only_left,
@@ -482,6 +483,7 @@ iterate_sequence_bp_simd(
 
 	for (std::size_t chunk_index = 0;
 		 chunk_index < full_chunks_count; ++chunk_index) {
+        // Loads one full packed matrix for each logical stream.
         for_each_stream<p_stream_count>(
             [&raw_matrix_storage, &descriptor, &offsets_per_stream, &sequence, &iter](
                 auto p_stream_index_constant) [[gnu::always_inline]] {
@@ -491,6 +493,7 @@ iterate_sequence_bp_simd(
                         descriptor, offsets_per_stream[stream], sequence.read_cptr(iter));
             });
         p_sequence_view::advance_iter(iter, lanes_per_stream);
+        // Transposes each stream matrix into biological row order.
         for_each_stream<p_stream_count>([&raw_matrix_storage, &descriptor](
                                             auto p_stream_index_constant) [[gnu::always_inline]] {
             constexpr std::size_t stream = decltype(p_stream_index_constant)::value;
@@ -513,6 +516,7 @@ iterate_sequence_bp_simd(
     }
 
     const std::size_t partial_units_remaining = p_sequence_view::view_distance(iter, end);
+    // Loads the final bounded matrix for each stream without reading past the range.
     for_each_stream<p_stream_count>([&raw_matrix_storage,
                                      &descriptor,
                                      &partial_units_remaining,

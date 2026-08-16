@@ -51,6 +51,7 @@ static_assert(sizeof(scored_anchor_index) == 8u);
 
 /// @brief Orders scored anchors by score and then source index.
 struct score_ascending {
+    /// @brief Compares two scored indices for ascending processing order.
     [[nodiscard]] bool operator()(
         const scored_anchor_index& lhs,
         const scored_anchor_index& rhs) const noexcept
@@ -62,6 +63,17 @@ struct score_ascending {
 };
 
 /// @brief Builds chain paths from SIMD-produced predecessor arrays.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @param anchors Anchors corresponding to the score and predecessor arrays.
+/// @param best_scores Best score ending at each anchor.
+/// @param predecessors Predecessor index for each anchor.
+/// @param min_score Minimum terminal score to consider.
+/// @param min_seed_count Minimum anchors required for an emitted chain.
+/// @param chains_out Arena-backed destination for chain descriptors.
+/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+/// @param stats Optional full execution counters.
+/// @param route_summary Optional lightweight route counters.
 template<bool p_collect_stats, class p_descriptor_type>
 void backtrack_chains_simd(
     p_descriptor_type d,

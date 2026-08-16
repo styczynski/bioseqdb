@@ -2,9 +2,11 @@
  * @file packed_sequence.cppm
  * @brief Packed sequence traits, iteration, dispatch, and storage views.
  *
- * The module keeps alphabet identity at the type level while exposing lazy,
- * zero-copy views over LSB-first packed storage. Width recasting preserves the
- * logical alphabet, padding, and sequence length.
+ * @details Re-exports core alphabet contracts, LSB-first packing helpers,
+ * range implementations, and wire factories. The module keeps alphabet identity
+ * at the type level while exposing lazy, zero-copy views over LSB-first packed
+ * storage. Width recasting preserves the logical alphabet, padding, and
+ * sequence length.
  */
 module;
 
@@ -45,9 +47,13 @@ import bioseq.common.seqan_adapter;
 import bioseq.common.templating;
 import bioseq.sequences.rank_pack_core;
 
+/** Packed alphabet, dispatch, and storage-width contracts. */
 export import :packed_sequence_core;
+/** LSB-first packed-unit extraction and storage-width views. */
 export import :packed_sequence_packing;
+/** Packed and unpacked sequence range implementations. */
 export import :packed_sequence_range;
+/** Standard-layout compact-sequence wire storage and factories. */
 export import :packed_sequence_wire;
 
 export {
@@ -102,6 +108,10 @@ enum class sequence_strand_mode : std::uint8_t {
 
 /**
  * @brief Tests whether a compact range can expose a different storage width.
+ *
+ * The check preserves alphabet identity and `bits_per_char` while permitting
+ * a different packed storage-unit type.
+ *
  * @tparam p_range_configuration Compact-range backing configuration.
  * @tparam p_new_storage_unit_type Requested packed storage-unit type.
  */
@@ -134,6 +144,8 @@ static_assert(is_sequence_bit_castable_to<seq::dna4, uint8_t>);
  *
  * The pointer requirement deliberately uses `convertible_to` so a view may
  * expose a more-qualified compatible pointer without materializing storage.
+ *
+ * @tparam p_view_type Candidate packed-sequence view.
  */
 template <typename p_view_type>
 concept supports_compact_sequence_bitcast_view =
@@ -161,7 +173,11 @@ concept supports_compact_sequence_bitcast_view =
 
 namespace fmt {
 
-/** @brief Disables generic range formatting for compact sequence ranges. */
+/**
+ * @brief Disables generic range formatting for compact sequence ranges.
+ * @tparam p_configuration Compact range backing configuration.
+ * @tparam p_character_type Character type used by the formatting context.
+ */
 template<supports_compact_sequence_range p_configuration, typename p_character_type>
 struct range_format_kind<
     compact_sequence_range<p_configuration>, p_character_type> {
@@ -175,6 +191,7 @@ struct range_format_kind<
 template<supports_compact_sequence_range p_configuration>
 struct formatter<compact_sequence_range<p_configuration>>
     : formatter<std::string> {
+    /** Compact range type rendered by this formatter. */
     using range_type = compact_sequence_range<p_configuration>;
 
     /**

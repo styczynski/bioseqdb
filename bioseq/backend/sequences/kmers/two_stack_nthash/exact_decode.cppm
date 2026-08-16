@@ -22,22 +22,35 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace two_stack_internal {
 
+/// @brief Holds decoded DNA4 ranks and packed-word crossing evidence.
+/// @tparam p_simd_tag Highway descriptor used for the source lane width.
 template<class p_simd_tag>
 struct decoded_dna4_rank_vector {
+    /** @brief Byte descriptor matching the source descriptor's lane count. */
     using byte_simd_tag_type = hn::Rebind<std::uint8_t, p_simd_tag>;
     hn::Vec<byte_simd_tag_type> ranks;
     bool crossed_word = false;
 };
 
+/// @brief Holds normalized nt4 codes, ambiguity lanes, and crossing evidence.
+/// @tparam p_simd_tag Highway descriptor used for the source lane width.
 template<class p_simd_tag>
 struct decoded_nt4_rank_vector {
+    /** @brief Byte descriptor matching the source descriptor's lane count. */
     using byte_simd_tag_type = hn::Rebind<std::uint8_t, p_simd_tag>;
     hn::Vec<byte_simd_tag_type> codes;
     std::uint64_t ambiguous_lanes = 0;
     bool crossed_word = false;
 };
 
-/** Select one lane-sized chunk from the two-word packed decode staging pair. */
+/**
+ * @brief Selects one lane-sized chunk from a two-word decode staging pair.
+ * @tparam p_lane_type Unsigned 32-bit or 64-bit lane type.
+ * @param packed_low Low 64 bits of packed staging storage.
+ * @param packed_high High 64 bits of packed staging storage.
+ * @param origin Bit offset of the requested chunk.
+ * @return Lane-sized chunk beginning at @p origin.
+ */
 template<class p_lane_type>
 [[nodiscard, gnu::always_inline]] HWY_INLINE p_lane_type
 extract_packed_dna4_lane_chunk(
@@ -58,13 +71,20 @@ extract_packed_dna4_lane_chunk(
 }
 
 /**
- * Decode up to Lanes(p_simd_tag) consecutive packed DNA4 ranks in real SIMD lanes.
+ * @brief Decodes consecutive packed DNA4 ranks into SIMD byte lanes.
  *
  * The packed source may use 8/16/32/64-bit storage units.  We assemble at
  * most the 128 source bits covering this lane block, then perform rank
  * extraction with vector variable shifts.  This keeps the biological decode
  * vectorized while allowing scanner fragments to forward their packed span
  * without constructing or re-encoding a compact sequence object.
+ * @tparam p_simd_tag Highway descriptor with 32-bit or 64-bit unsigned lanes.
+ * @tparam p_alphabet_traits DNA4 packed storage traits.
+ * @param d Active source-width descriptor.
+ * @param packed Borrowed packed storage covering the requested ranks.
+ * @param local_bp Fragment-local coordinate of the first rank.
+ * @param rank_count Number of ranks to decode, at most `Lanes(d)`.
+ * @return Decoded byte ranks and whether the request crossed a storage unit.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN decode_packed_dna4_rank_vector
 template<class p_simd_tag, class p_alphabet_traits>
@@ -175,7 +195,7 @@ decode_packed_dna4_rank_vector(
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END decode_packed_dna4_rank_vector
 
 /**
- * Decode packed nucleotide ranks and normalize them to minimap2 nt4 codes.
+ * @brief Decodes packed nucleotide ranks and normalizes them to nt4 codes.
  *
  * Unlike dna4, alphabets such as dna5 leave unused high bits in every packed
  * storage unit (three bits per symbol do not divide 8/16/32/64).  Treating the
@@ -185,6 +205,13 @@ decode_packed_dna4_rank_vector(
  * ambiguity classification all execute as Highway vector operations.  The
  * scalar loop only prepares gather-equivalent addresses and never hashes,
  * canonicalizes, reduces a minimizer window, or emits an event.
+ * @tparam p_simd_tag Highway descriptor with u64 lanes.
+ * @tparam p_alphabet_traits Packed nucleotide alphabet and storage traits.
+ * @param d Active u64 descriptor.
+ * @param packed Borrowed packed storage covering the requested ranks.
+ * @param local_bp Fragment-local coordinate of the first rank.
+ * @param rank_count Number of ranks to decode, at most `Lanes(d)`.
+ * @return Normalized byte codes, ambiguity bits, and word-crossing evidence.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN decode_packed_nt4_rank_vector
 template<class p_simd_tag, class p_alphabet_traits>
@@ -262,6 +289,11 @@ decode_packed_nt4_rank_vector(
 }
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END decode_packed_nt4_rank_vector
 
+/// @brief Loads byte DNA4 codes and promotes them to the active lane width.
+/// @tparam p_simd_tag Highway descriptor with u64 lanes.
+/// @param d Active destination descriptor.
+/// @param codes Pointer to at least `Lanes(d)` byte codes.
+/// @return Promoted DNA4 codes.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> load_promoted_dna4_codes(
     p_simd_tag d,
@@ -276,6 +308,11 @@ template<class p_simd_tag>
     return hn::PromoteTo(d, codes_u32);
 }
 
+/// @brief Loads byte DNA4 codes and promotes them to u32 lanes.
+/// @tparam p_simd_tag Highway descriptor with u32 lanes.
+/// @param d Active destination descriptor.
+/// @param codes Pointer to at least `Lanes(d)` byte codes.
+/// @return Promoted DNA4 codes.
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> load_promoted_dna4_codes_u32(
     p_simd_tag d,
@@ -288,13 +325,32 @@ template<class p_simd_tag>
     return hn::PromoteTo(d, hn::PromoteTo(d_u16, codes_u8));
 }
 
+/// @brief Holds the chronological halves of one u32 decision mask.
+/// @tparam p_uint32_simd_tag Source u32 descriptor type.
+/// @tparam p_uint64_simd_tag Destination u64 descriptor type.
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 struct split_u32_mask_result {
     hn::Mask<p_uint64_simd_tag> lower;
     hn::Mask<p_uint64_simd_tag> upper;
 };
 
-/** Split one u32x4 decision mask into its two chronological u64x2 halves. */
+/**
+ * @brief Splits one u32 decision mask into chronological u64 halves.
+ * @tparam p_uint32_simd_tag Source u32 descriptor type.
+ * @tparam p_uint64_simd_tag Destination u64 descriptor type.
+ * @param d32 Active u32 descriptor.
+ * @param d64 Active u64 descriptor with half as many lanes.
+ * @param mask Source u32 decision mask.
+ * @return Lower and upper chronological halves.
+ */
+/// @brief Joins chronological u64 mask halves into one u32 mask.
+/// @tparam p_uint32_simd_tag Destination u32 descriptor type.
+/// @tparam p_uint64_simd_tag Source u64 descriptor type.
+/// @param d32 Active u32 descriptor.
+/// @param d64 Active u64 descriptor with half as many lanes.
+/// @param lower Earlier chronological mask half.
+/// @param upper Later chronological mask half.
+/// @return Combined u32 decision mask.
 template<class p_uint32_simd_tag, class p_uint64_simd_tag>
 [[nodiscard]] HWY_INLINE split_u32_mask_result<p_uint32_simd_tag, p_uint64_simd_tag> split_u32_mask(
     p_uint32_simd_tag d32,

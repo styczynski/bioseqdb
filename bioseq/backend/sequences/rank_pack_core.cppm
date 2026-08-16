@@ -20,6 +20,7 @@ module;
 
 export module bioseq.sequences.rank_pack_core;
 
+/** @brief Shared LSB-first rank-packing primitives for storage policies. */
 export namespace bioseq::sequences::rank_pack_detail {
 
 /** @brief Unsigned integral counter accepted by the packing primitives. */

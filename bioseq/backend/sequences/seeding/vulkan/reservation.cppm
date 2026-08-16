@@ -185,6 +185,7 @@ template <class p_minimizer_type>
         anchors_out_capacity < sort_plan.anchor_count
             ? sort_plan.anchor_bytes : 0u;
     const auto requirement = [&vulkan_runtime](std::uint64_t bytes) {
+        // Query driver allocation requirements for each nonempty buffer size.
         return bytes == 0u ? 0u : vulkan_runtime.buffer_allocation_requirement(
             bytes, k_vulkan_seed_buffer_usage);
     };

@@ -43,6 +43,15 @@ namespace bioseq::simd::HWY_NAMESPACE {
 // caller can pass either a raw `compact_sequence_range<p_range>` or a
 // `bit_casted_view<base, output>`.
 // ============================================================================
+
+/// Compare two compact-sequence views lexicographically. Walks packed
+/// ranks unit-by-unit and breaks ties on `bp_size`. Both views must
+/// share alphabet and storage-unit type.
+/// @tparam p_left_view Left view satisfying `supports_compact_sequence_bitcast_view`.
+/// @tparam p_right_view Right view with matching alphabet and storage unit.
+/// @param lhs Left sequence view.
+/// @param rhs Right sequence view.
+/// @return Strong ordering of logical symbol sequences.
 template<class p_left_view, class p_right_view>
 requires supports_compact_sequence_bitcast_view<p_left_view>
       && supports_compact_sequence_bitcast_view<p_right_view>
@@ -247,6 +256,7 @@ inline p_sequence_header* stdc_recode_to(
     p_allocator&& allocator)
 {
     std::string ascii;
+    // Decode source to ASCII, then re-encode under the target alphabet.
     source.convert_to([&ascii]<class p_instance>(const compact_sequence_range<p_instance>& view) {
         ascii = decode_sequence_simd<p_instance>(view);
     });
@@ -390,11 +400,17 @@ inline std::strong_ordering stdc_compare(
 HWY_AFTER_NAMESPACE();
 
 namespace bioseq::simd {
-// Target-neutral import surface for code outside HWY_NAMESPACE. This aliases
-// the Highway namespace selected for this module build instead of hardcoding
-// a concrete architecture.
+/// Highway target namespace selected at module build time. Forwards to
+/// the architecture-specific `HWY_NAMESPACE` instantiated in this TU.
 namespace active_target = ::bioseq::simd::HWY_NAMESPACE;
 
+/// Target-neutral entry point for `active_target::stdc_rewidth_to_type_params`.
+/// @tparam p_sequence_header Standard-layout header type.
+/// @tparam p_allocator Byte allocator returning `p_sequence_header*`.
+/// @param source Sequence to recast or round-trip.
+/// @param target Destination alphabet code and storage width.
+/// @param allocator Destination allocator.
+/// @return Newly allocated sequence, or `nullptr` on mismatch or allocation failure.
 template<class p_sequence_header, class p_allocator>
 requires (
     is_compact_sequence_stdc<p_sequence_header>

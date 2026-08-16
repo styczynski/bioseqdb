@@ -1,9 +1,12 @@
 /**
- * @file
+ * @file simd.cppm
  * @brief Streaming and one-shot SIMD codecs for packed biological sequences.
  *
  * The interface selects Highway target implementations while retaining scalar
  * fallbacks for unsupported alphabet and storage-width combinations.
+ *
+ * @details Aggregates vector streaming, streaming codecs, kernel tables,
+ * sequence adapters, and standard-layout helpers through one import surface.
  */
 module;
 

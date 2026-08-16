@@ -39,6 +39,11 @@ namespace bioseq::simd::HWY_NAMESPACE {
 /// One-shot scalar encoder. Adapter around `encode_body_chunk_scalar`.
 /// The default maps unknown bytes to the alphabet's default rank, matching
 /// the permissive SQL literal parser.
+/// @tparam p_destination_configuration Target compact-sequence configuration.
+/// @tparam p_policy Unknown-byte handling for non-alphabet ASCII.
+/// @param input Character bytes to encode (need not be NUL-terminated).
+/// @param length Number of input bytes to encode.
+/// @return Packed sequence with padding metadata from `finalize_encode_state`.
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
@@ -84,6 +89,11 @@ encode_sequence_scalar(
 
 /// One-shot SIMD encoder. Adapter around `encode_body_chunk` —
 /// dispatches to the dna4/dna5 SIMD pipeline when applicable.
+/// @tparam p_destination_configuration Target compact-sequence configuration.
+/// @tparam p_policy Unknown-byte handling for non-alphabet ASCII.
+/// @param input Character bytes to encode (need not be NUL-terminated).
+/// @param length Number of input bytes to encode.
+/// @return Packed sequence with padding metadata from `finalize_encode_state`.
 template <class p_destination_configuration,
           unknown_byte_policy p_policy = unknown_byte_policy::map_to_default>
 requires is_sequence_custom_alphabet<p_destination_configuration>
@@ -133,6 +143,9 @@ encode_sequence_simd(
 /// For other `supports_compact_sequence_range` shapes (e.g.
 /// `compact_sequence_range<std::vector<seq::dna4>>`), falls back to
 /// the iterator-based path so the function works for every range.
+/// @tparam p_source_configuration Source compact-sequence configuration.
+/// @param sequence Input packed sequence view.
+/// @return ASCII string with one byte per logical letter.
 template <class p_source_configuration>
 requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_scalar(
@@ -178,6 +191,9 @@ requires supports_compact_sequence_range<p_source_configuration>
 /// `(dna5, uint8, 3, 2)`. Everything else uses the scalar bit-walk.
 /// Falls back to the iterator-based scalar path for non-custom-alphabet
 /// ranges.
+/// @tparam p_source_configuration Source compact-sequence configuration.
+/// @param sequence Input packed sequence view.
+/// @return ASCII string with one byte per logical letter.
 template <class p_source_configuration>
 requires supports_compact_sequence_range<p_source_configuration>
 [[nodiscard]] std::string decode_sequence_simd(

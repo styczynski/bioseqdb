@@ -39,21 +39,29 @@ export namespace bioseq::seeding {
 
 /// Allocation-free count-pass result for the exclusive seed prefix.
 struct seed_prefix_plan {
+    /** Exclusive-prefix entry count (`query_minimizers + 1`). */
     std::uint64_t prefix_len = 0;
+    /** Exact anchors after per-minimizer occurrence capping. */
     std::uint64_t exact_anchor_count = 0;
+    /** Mapped-index hash lookups performed during the count pass. */
     std::uint64_t mapped_lookup_count = 0;
+    /** Binary-search comparisons performed during the count pass. */
     std::uint64_t mapped_comparison_count = 0;
 };
 
 /// Materialized prefix plus mapped-index validation work counters.
 struct seed_prefix_build_result {
+    /** Exclusive-prefix array materialized after admission. */
     std::vector<std::uint32_t> prefix;
+    /** Mapped-index hash lookups performed during the build pass. */
     std::uint64_t mapped_lookup_count = 0u;
+    /** Binary-search comparisons performed during the build pass. */
     std::uint64_t mapped_comparison_count = 0u;
 };
 
 /// Raised when mapped sorted-dense authority changes or fails validation.
 struct mapped_prefix_invalid_error final : std::exception {
+    /** @return Stable exception description for prefix authority failure. */
     [[nodiscard]] const char* what() const noexcept override {
         return "mapped sorted-dense prefix authority is invalid";
     }
@@ -61,27 +69,46 @@ struct mapped_prefix_invalid_error final : std::exception {
 
 /// Validated, non-owning mapped view used by both prefix passes.
 struct mapped_sorted_dense_prefix_view {
+    /** Resident index owning the mapped control and position buffers. */
     std::shared_ptr<const bioseq::indexing::gpu_resident_minimizer_index>
         resident;
+    /** Sorted-dense control table mapped from the resident index. */
     const bioseq::indexing::gpu_minimizer_slot* controls = nullptr;
+    /** Number of control buckets in @ref controls. */
     std::uint32_t bucket_count = 0u;
+    /** Number of encoded target positions backing the controls. */
     std::uint32_t position_count = 0u;
+    /** Hash lookups accumulated while the view is active. */
     std::uint64_t lookup_count = 0u;
+    /** Binary-search comparisons accumulated while the view is active. */
     std::uint64_t comparison_count = 0u;
 };
 
 /// Full mapped-payload validation result and checksum.
 struct mapped_sorted_dense_payload_validation {
+    /** Rolling checksum over control and position payload words. */
     std::uint64_t checksum =
         bioseq::indexing::k_gpu_source_direct_checksum_seed;
+    /** Positions covered by validated control runs. */
     std::uint64_t covered_position_count = 0u;
+    /** Whether canonical hash and coordinate order was inspected. */
     bool canonical_order_checked = false;
+    /** Whether payload layout and checksum matched the expected authority. */
     bool is_valid = false;
 };
 
-/// Allocation-free authority check used on every mapped-prefix pass.  Stored
-/// metadata is not sufficient: this re-reads the complete mapped control and
-/// position payload so mutation between count/build passes fails closed.
+/**
+ * @brief Revalidate a mapped sorted-dense control and position payload.
+ *
+ * Stored metadata is not sufficient: this re-reads the complete mapped control
+ * and position payload so mutation between count/build passes fails closed.
+ *
+ * @param[in] controls Sorted control table for the resident index.
+ * @param[in] positions Encoded target positions referenced by @p controls.
+ * @param[in] target_len Target length used to bound encoded coordinates.
+ * @param[in] expected_checksum Authority checksum recorded with the resident index.
+ * @return Validation counters and a validity flag without allocating.
+ */
 [[nodiscard]] inline mapped_sorted_dense_payload_validation
 validate_mapped_sorted_dense_payload(
     std::span<const bioseq::indexing::gpu_minimizer_slot> controls,
@@ -131,9 +158,20 @@ validate_mapped_sorted_dense_payload(
     return validation;
 }
 
-/// Host-only validation seam shared by the runtime-resident path and bounded
-/// prefix tests.  It owns no memory: callers must keep both spans alive through
-/// the complete count/build pass.
+/**
+ * @brief Validate span-backed sorted-dense payload and open a prefix view.
+ *
+ * Host-only validation seam shared by the runtime-resident path and bounded
+ * prefix tests. Callers must keep both spans alive through the complete
+ * count/build pass.
+ *
+ * @param[in] controls Sorted control table for the resident index.
+ * @param[in] positions Encoded target positions referenced by @p controls.
+ * @param[in] target_len Target length used to bound encoded coordinates.
+ * @param[in] expected_checksum Authority checksum recorded with the resident index.
+ * @return Non-owning prefix view ready for count and build passes.
+ * @throws mapped_prefix_invalid_error When span bounds or payload authority fail.
+ */
 [[nodiscard]] inline mapped_sorted_dense_prefix_view
 validated_mapped_sorted_dense_prefix_view(
     std::span<const bioseq::indexing::gpu_minimizer_slot> controls,
@@ -160,6 +198,13 @@ validated_mapped_sorted_dense_prefix_view(
     };
 }
 
+/**
+ * @brief Validate a runtime-resident sorted-dense index and open a prefix view.
+ * @param[in] vulkan_runtime Runtime that must own the mapped buffers.
+ * @param[in] resident GPU-resident sorted-dense minimizer index.
+ * @return Non-owning prefix view bound to the resident mapped payload.
+ * @throws mapped_prefix_invalid_error When residency, ABI, or payload authority fail.
+ */
 [[nodiscard]] inline mapped_sorted_dense_prefix_view
 validated_mapped_sorted_dense_prefix_view(
     const bioseq::gpu::vulkan::runtime& vulkan_runtime,
@@ -246,6 +291,13 @@ validated_mapped_sorted_dense_prefix_view(
     return view;
 }
 
+/**
+ * @brief Look up the capped posting count for one minimizer hash.
+ * @param[in,out] view Validated mapped prefix view accumulating lookup counters.
+ * @param[in] hash Minimizer hash to resolve in the sorted control table.
+ * @return Posting count for @p hash, or zero when the hash is absent.
+ * @throws mapped_prefix_invalid_error When a matched control references invalid positions.
+ */
 [[nodiscard]] inline std::uint32_t mapped_sorted_dense_position_count(
     mapped_sorted_dense_prefix_view& view,
     std::uint64_t hash)
@@ -274,6 +326,14 @@ validated_mapped_sorted_dense_prefix_view(
     return view.controls[lo].pos_count;
 }
 
+/**
+ * @brief Count exclusive-prefix length and exact anchors over a mapped view.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] view Validated mapped sorted-dense prefix view.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @return Allocation-free prefix plan and mapped lookup counters.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
     std::span<const p_minimizer_type> query_minimizers,
@@ -303,6 +363,16 @@ template <class p_minimizer_type>
     };
 }
 
+/**
+ * @brief Count prefix geometry from a runtime-resident sorted-dense index.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] vulkan_runtime Runtime that must own the resident mapped buffers.
+ * @param[in] resident GPU-resident sorted-dense minimizer index.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @return Allocation-free prefix plan and mapped lookup counters.
+ * @throws mapped_prefix_invalid_error When resident payload authority fails validation.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
     std::span<const p_minimizer_type> query_minimizers,
@@ -317,6 +387,16 @@ template <class p_minimizer_type>
         query_minimizers, std::move(view), max_occ);
 }
 
+/**
+ * @brief Materialize exclusive-prefix counts over a validated mapped view.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] view Validated mapped sorted-dense prefix view.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
+ * @return Prefix array and mapped lookup counters from the build pass.
+ * @throws mapped_prefix_invalid_error When the build total diverges from @p plan.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
 build_seed_prefix_counts_after_admission(
@@ -346,6 +426,17 @@ build_seed_prefix_counts_after_admission(
     return result;
 }
 
+/**
+ * @brief Materialize prefix counts from a runtime-resident sorted-dense index.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] vulkan_runtime Runtime that must own the resident mapped buffers.
+ * @param[in] resident GPU-resident sorted-dense minimizer index.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
+ * @return Prefix array and mapped lookup counters from the build pass.
+ * @throws mapped_prefix_invalid_error When resident authority or build totals fail.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_build_result
 build_seed_prefix_counts_after_admission(
@@ -362,6 +453,14 @@ build_seed_prefix_counts_after_admission(
         query_minimizers, std::move(view), max_occ, plan);
 }
 
+/**
+ * @brief Count prefix geometry from a host hashmap fragment index.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] target_index Host minimizer hashmap used for occurrence lookup.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @return Allocation-free prefix plan for the hashmap authority path.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] seed_prefix_plan count_seed_prefix_plan(
     std::span<const p_minimizer_type> query_minimizers,
@@ -387,6 +486,15 @@ template <class p_minimizer_type>
     return seed_prefix_plan{.prefix_len = prefix_len64, .exact_anchor_count = total};
 }
 
+/**
+ * @brief Materialize exclusive-prefix counts from a host hashmap fragment index.
+ * @tparam p_minimizer_type Query minimizer record exposing `kmer()`.
+ * @param[in] query_minimizers Query minimizers addressed by the prefix.
+ * @param[in] target_index Host minimizer hashmap used for occurrence lookup.
+ * @param[in] max_occ Per-minimizer occurrence cap, or negative for count-only mode.
+ * @param[in] plan Count-pass plan whose exact anchor total must be reproduced.
+ * @return Exclusive-prefix array for the hashmap authority path.
+ */
 template <class p_minimizer_type>
 [[nodiscard]] std::vector<std::uint32_t> build_seed_prefix_counts_after_admission(
     std::span<const p_minimizer_type> query_minimizers,

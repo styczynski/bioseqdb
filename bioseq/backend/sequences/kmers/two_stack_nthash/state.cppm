@@ -31,8 +31,9 @@ using ::bioseq::minimizers::minimizer_output_position_mask;
 using ::bioseq::minimizers::two_stack_route;
 
 /**
- * Compile-time upper bound on the window size `w` is_internally_consistent by the
- * two-stack collectors in this file. Our minimap2 ports run at the
+ * @brief Compile-time upper bound on the supported two-stack window size.
+ *
+ * The minimap2 ports run at the
  * default `w = 10`. Bumping past 256 also blows the L1-friendly stack
  * footprint of the parallel ring buffers.
  */
@@ -68,20 +69,34 @@ struct borrowed_packed_header {
 };
 
 /// @brief Adapts a borrowed packed header to the compact-sequence protocol.
+/// @tparam p_alphabet Logical alphabet stored by the descriptor.
+/// @tparam p_storage_unit Packed storage unit exposed by the range.
 template <sequence_alphabet p_alphabet, class p_storage_unit>
 struct borrowed_packed_instance {
+    /** @brief Logical alphabet stored by the borrowed sequence. */
     using alphabet_type = p_alphabet;
+    /** @brief Packed unit used to interpret the borrowed storage. */
     using storage_unit = p_storage_unit;
+    /** @brief Header type retained by the compact range. */
     using compact_sequence_stdc_type = borrowed_packed_header;
 
+    /** @brief Logical bits stored for each alphabet symbol. */
     static constexpr std::size_t letter_bit_width =
         bioseq::storage::lazy_sequence_view<p_alphabet>::traits::
             k_logical_bits_per_symbol;
+    /** @brief Width of one packed storage unit in bytes. */
     static constexpr std::size_t byte_width = sizeof(p_storage_unit);
+    /** @brief Marks this adapter as a compact-sequence instance. */
     static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
 
 /// @brief Invokes a function with a typed non-owning compact range.
+/// @tparam p_alphabet Logical alphabet stored by the descriptor.
+/// @tparam p_storage_unit Packed storage unit selected by dispatch.
+/// @tparam p_function Callable accepting the temporary compact range.
+/// @param descriptor Borrowed packed storage and logical geometry.
+/// @param fn Callable invoked synchronously while the temporary header is alive.
+/// @return The callable's result, including reference category.
 template <sequence_alphabet p_alphabet, class p_storage_unit, class p_function>
 decltype(auto) with_borrowed_compact_range(
         const typename bioseq::storage::lazy_sequence_view<p_alphabet>::
@@ -102,27 +117,38 @@ decltype(auto) with_borrowed_compact_range(
 }  // namespace resident_descriptor_detail
 
 /**
- * Fragment continuation for the nt4-normalized nucleotide two-stack kernel.
+ * @brief Retains fragment continuation for the nt4 two-stack kernel.
+ *
  * Pending capacity follows the generated target's Highway lane count.
+ * @tparam p_window_size Compile-time window size, or zero for runtime selection.
+ * @tparam p_kmer_size Compile-time k-mer size, or zero for runtime selection.
+ * @tparam p_alphabet_traits Packed-sequence alphabet and storage traits.
  */
 template<std::size_t p_window_size, std::size_t p_kmer_size, class p_alphabet_traits>
 struct two_stack_continuation_state {
+    /** @brief Maximum u64 lanes supported by the compiled Highway targets. */
     static constexpr std::size_t max_vector_lanes =
         hn::MaxLanes(hn::ScalableTag<std::uint64_t>{});
+    /** @brief Candidate count processed by the fixed 15/10 fast block. */
     static constexpr std::size_t fast_block_candidates = 8;
+    /** @brief Storage available for decoded candidates awaiting SIMD work. */
     static constexpr std::size_t pending_capacity =
         std::max(max_vector_lanes, fast_block_candidates);
 
+    /** @brief Packed-sequence traits carried by this state. */
     using traits = p_alphabet_traits;
+    /** @brief Logical alphabet described by @ref traits. */
     using alphabet_type = typename traits::alphabet_type;
 
     // Static routes retain their own bounded window and k-mer capacities.
     // scratch footprint.  This state is instantiated inside the per-sketch
     // driver, and its arrays participate in the hot candidate-block frame.
+    /** @brief Capacity for symbols preceding the next fragment boundary. */
     static constexpr std::size_t code_tail_capacity =
         p_kmer_size != 0 && p_kmer_size <= k_max_exact_two_stack_kmer
             ? std::max<std::size_t>(p_kmer_size - 1, 1)
             : k_max_exact_two_stack_kmer - 1;
+    /** @brief Capacity for candidates preceding the next window boundary. */
     static constexpr std::size_t candidate_tail_capacity =
         p_window_size != 0 && p_window_size <= k_max_two_stack_window
             ? std::max<std::size_t>(p_window_size - 1, 1)

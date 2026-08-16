@@ -208,6 +208,7 @@ inline void append_implicit_seed_cigar(
     std::size_t query_length,
     std::size_t target_length)
 {
+    // Appends a nonempty operation while coalescing an equal trailing opcode.
     const auto append_op = [&cigar](std::uint32_t opcode, std::size_t length) {
         if (length == 0) return;
         if (!cigar.empty() && cigar.back().opcode == opcode) {

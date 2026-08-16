@@ -49,7 +49,14 @@ inline constexpr std::array<std::uint32_t, 4> k_forward_table{
     0x4be24456u,
 };
 
-/** Look up ACTG ntHash constants in one native u32 register. */
+/**
+ * @brief Looks up ACTG ntHash constants in one native u32 register.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @param simd_tag Active u32 descriptor.
+ * @param table Four ntHash constants arranged for lane lookup.
+ * @param ranks Per-lane DNA4 ranks.
+ * @return Per-lane ntHash constants.
+ */
 template<class p_simd_tag>
 [[nodiscard]] HWY_INLINE hn::Vec<p_simd_tag> lookup_hash_table(
     p_simd_tag simd_tag,
@@ -62,31 +69,36 @@ template<class p_simd_tag>
 
 } // namespace bounded_nthash_internal
 
-/**
- * The packed kernel consumes resident dna4 words, retains bounded k-mer and
- * window-minimum state, and emits directly into the caller's collector.
- */
+// The packed kernel consumes resident dna4 words, retains bounded k-mer and
+// window-minimum state, and emits directly into the caller's collector.
 
 namespace bounded_nthash_internal {
 
 /**
- * Zero-copy u32 interpretation of one base-storage-unit-aligned dna4 range.
+ * @brief Provides a zero-copy u32 view of an aligned DNA4 subrange.
+ *
  * Unlike bit_casted_view itself, size/bp_size/padding describe only the
  * selected [begin,end) interval, so iterator offset zero maps to local
  * position zero and every emitted position is segment-local.
  */
 // BIOSEQ_PRIVATE_PACKED_ACCESS_BEGIN bounded_u32_dna4_view
 struct bounded_u32_dna4_view {
+    /** @brief DNA4 configuration exposed by this view. */
     using output_sequence = sequence_custom_alphabet<
         seq::dna4, std::uint32_t, 2>;
+    /** @brief Compact range whose traits define u32 packing geometry. */
     using output_range = compact_sequence_range<output_sequence>;
+    /** @brief Alphabet and storage traits for the local view. */
     using traits = typename output_range::traits;
+    /** @brief Iterator over borrowed u32 packed units. */
     using iterator = const std::uint32_t*;
 
     std::size_t local_bp_size = 0;
     std::size_t local_view_units = 0;
 
     /// @brief Creates a local view with explicit logical and packed lengths.
+    /// @param bp_size Logical symbols in the selected subrange.
+    /// @param view_units Borrowed u32 units covering the subrange.
     bounded_u32_dna4_view(
         std::size_t bp_size,
         std::size_t view_units)
@@ -130,6 +142,12 @@ struct bounded_u32_dna4_view {
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END bounded_u32_dna4_view
 
 /// @brief Looks up ntHash constants for every logical stream.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @param simd_tag Active u32 descriptor.
+/// @param table Four ntHash constants arranged for lane lookup.
+/// @param ranks Per-stream DNA4 ranks.
+/// @return Per-stream ntHash constants.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
     p_simd_tag simd_tag,
@@ -146,6 +164,11 @@ template<class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Rotates every stream lane left by a compile-time count.
+/// @tparam p_rotation Compile-time bit rotation.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @param value Per-stream values to rotate.
+/// @return Rotated values with the same stream geometry.
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
@@ -158,6 +181,11 @@ template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Rotates every stream lane left by a runtime count.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @param value Per-stream values to rotate.
+/// @param rotation Rotation modulo 32 bits.
+/// @return Rotated values with the same stream geometry.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_left_stream_runtime(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value,
@@ -171,6 +199,11 @@ template<class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Rotates every stream lane right by a compile-time count.
+/// @tparam p_rotation Compile-time bit rotation.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @param value Per-stream values to rotate.
+/// @return Rotated values with the same stream geometry.
 template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto rotate_right_stream(
     const vector_stream<p_simd_tag, std::uint32_t, p_stream_count>& value) noexcept
@@ -182,11 +215,17 @@ template<int p_rotation, class p_simd_tag, std::size_t p_stream_count>
     }
 }
 
-/** One full-u32 minimum plus RC strand at its two extreme positions. */
+/**
+ * @brief Stores one full-u32 minimum and strand at its extreme positions.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_stream_count Number of logical vector streams.
+ */
 template<class p_simd_tag, std::size_t p_stream_count>
 struct minimum_stream {
+    /** @brief Stream bundle containing u32 vectors. */
     using vector_stream_type =
         vector_stream<p_simd_tag, std::uint32_t, p_stream_count>;
+    /** @brief Stream bundle containing per-lane masks. */
     using mask_stream_type = mask_stream<p_simd_tag, p_stream_count>;
 
     vector_stream_type hash;
@@ -199,6 +238,7 @@ struct minimum_stream {
     // This template is instantiated by an ordinary per-target owner unit.
     // Keep every special member explicit so the renderer can attach HWY_ATTR;
     // otherwise Clang synthesizes targetless members around BF16 streams.
+    /** @brief Creates an empty target-attributed stream aggregate. */
     HWY_INLINE minimum_stream() noexcept
         : hash{},
           left_position{},
@@ -207,6 +247,15 @@ struct minimum_stream {
           right_strand{},
           valid{} {}
 
+    /**
+     * @brief Creates a minimum aggregate from complete vector metadata.
+     * @param hash_value Minimum hash in each lane.
+     * @param left_position_value Leftmost position attaining each minimum.
+     * @param right_position_value Rightmost position attaining each minimum.
+     * @param left_strand_value Strand at each leftmost position.
+     * @param right_strand_value Strand at each rightmost position.
+     * @param valid_value Lanes containing a candidate.
+     */
     HWY_INLINE minimum_stream(
         vector_stream_type hash_value,
         vector_stream_type left_position_value,
@@ -221,6 +270,7 @@ struct minimum_stream {
           right_strand(std::move(right_strand_value)),
           valid(std::move(valid_value)) {}
 
+    /** @brief Copies all target-attributed minimum metadata. */
     HWY_INLINE minimum_stream(const minimum_stream& other) noexcept
         : hash(other.hash),
           left_position(other.left_position),
@@ -229,6 +279,7 @@ struct minimum_stream {
           right_strand(other.right_strand),
           valid(other.valid) {}
 
+    /** @brief Moves all target-attributed minimum metadata. */
     HWY_INLINE minimum_stream(minimum_stream&& other) noexcept
         : hash(std::move(other.hash)),
           left_position(std::move(other.left_position)),
@@ -237,6 +288,7 @@ struct minimum_stream {
           right_strand(std::move(other.right_strand)),
           valid(std::move(other.valid)) {}
 
+    /** @brief Replaces this aggregate with copied minimum metadata. */
     HWY_INLINE minimum_stream& operator=(
         const minimum_stream& other) noexcept
     {
@@ -249,6 +301,7 @@ struct minimum_stream {
         return *this;
     }
 
+    /** @brief Replaces this aggregate with moved minimum metadata. */
     HWY_INLINE minimum_stream& operator=(minimum_stream&& other) noexcept
     {
         hash = std::move(other.hash);
@@ -265,6 +318,11 @@ struct minimum_stream {
  * Data-independent lane-wise minimum merge. Equal hashes preserve only the
  * leftmost and rightmost positions, which is the explicit RC-symmetric policy
  * for the even default window of ten candidates.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_stream_count Number of logical vector streams.
+ * @param first Earlier minimum aggregate.
+ * @param second Later minimum aggregate.
+ * @return Lane-wise minimum with equal-hash endpoints merged.
  */
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE minimum_stream<p_simd_tag, p_stream_count> combine_minima(
@@ -322,6 +380,12 @@ template<class p_simd_tag, std::size_t p_stream_count>
  * The iterator supplies one tail mask for the whole vector stream. Only the
  * final logical stream reaches sequence padding, so earlier streams retain a
  * full live mask.
+ * @tparam p_is_full Whether the iterator supplied a complete matrix.
+ * @tparam p_simd_tag Highway descriptor type.
+ * @tparam p_stream_count Number of logical vector streams.
+ * @param simd_tag Active u32 descriptor.
+ * @param iterator_mask Live physical lanes in a partial matrix.
+ * @return Live masks for every logical stream.
  */
 template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto correct_live_stream(
@@ -339,6 +403,11 @@ template<bool p_is_full, class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Loads fixed per-stream u32 metadata into one vector bundle.
+/// @tparam p_simd_tag Highway descriptor type.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @param simd_tag Active u32 descriptor.
+/// @param values Eight logical-lane values in stream-major order.
+/// @return Vector-stream bundle for the active physical lane count.
 template<class p_simd_tag, std::size_t p_stream_count>
 [[nodiscard]] HWY_INLINE auto load_stream_metadata(
     p_simd_tag simd_tag,
@@ -356,6 +425,11 @@ template<class p_simd_tag, std::size_t p_stream_count>
 }
 
 /// @brief Holds rolling hashes, window minima, and output-boundary state.
+/// @tparam p_kmer_size K-mer length in biological symbols.
+/// @tparam p_window_size Minimizer window length in k-mers.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @tparam p_minimizer_type Collector record representation.
+/// @tparam p_collector_type Collector receiving selected records.
 template<
     std::size_t p_kmer_size,
     std::size_t p_window_size,
@@ -363,12 +437,18 @@ template<
     class p_minimizer_type,
     class p_collector_type>
 struct packed_iteration_state {
+    /** @brief Fixed-width u32 descriptor used by the kernel. */
     using simd_tag_type = hn::CappedTag<std::uint32_t, 8>;
+    /** @brief One physical u32 vector. */
     using vector_type = hn::Vec<simd_tag_type>;
+    /** @brief Mask matching one physical u32 vector. */
     using mask_type = hn::Mask<simd_tag_type>;
+    /** @brief Bundle spanning all logical u32 streams. */
     using vector_stream_type =
         vector_stream<simd_tag_type, std::uint32_t, p_stream_count>;
+    /** @brief Mask bundle spanning all logical streams. */
     using mask_stream_type = mask_stream<simd_tag_type, p_stream_count>;
+    /** @brief Hash and endpoint metadata for a lane-wise minimum. */
     using minimum_type = minimum_stream<simd_tag_type, p_stream_count>;
 
     /// @brief Stores the first deferred event of a logical stream.
@@ -413,6 +493,15 @@ struct packed_iteration_state {
     p_collector_type& collector;
     runtime_evidence evidence{};
 
+    /**
+     * @brief Advances all streams by one decoded biological symbol.
+     * @tparam p_is_full Whether every iterator lane is live.
+     * @tparam p_offsets_type Stream-to-sequence offset bundle type.
+     * @param simd_tag Active u32 descriptor.
+     * @param offsets Packed-unit origin for each logical lane.
+     * @param iterator_mask Live lanes in the final partial matrix.
+     * @param incoming_rank Decoded DNA4 rank for every logical lane.
+     */
     template<bool p_is_full, class p_offsets_type>
     [[gnu::always_inline]] [[gnu::flatten]] HWY_INLINE void step(
         simd_tag_type simd_tag,
@@ -558,6 +647,17 @@ struct packed_iteration_state {
     }
 
 private:
+    /**
+     * @brief Appends newly selected lane events and defers cross-stream boundaries.
+     * @tparam p_offsets_type Stream-to-sequence offset bundle type.
+     * @param simd_tag Active u32 descriptor.
+     * @param offsets Packed-unit origin for each logical lane.
+     * @param selected Lanes whose candidate should be considered.
+     * @param hash Selected canonical hashes.
+     * @param position Segment-local k-mer positions.
+     * @param strand Selected strand identifiers.
+     * @param tie_endpoint Whether these events are tied right endpoints.
+     */
     template<class p_offsets_type>
     [[gnu::always_inline]] HWY_INLINE void emit_selected(
         simd_tag_type simd_tag,
@@ -664,12 +764,17 @@ private:
 
 public:
     /**
-     * Complete adjacent dedup across the seven logical-stream joins using
+     * @brief Completes adjacent deduplication across logical-stream joins.
+     *
+     * The operation uses
      * bounded metadata only. The first event of lanes 1..7 was withheld. It
      * is appended here unless it equals the nearest preceding non-empty
-     * lane's final event. p_collector_type append order is intentionally unspecified,
+     * lane's final event. Collector append order is intentionally unspecified,
      * as it already is for eight lock-step SIMD streams. Record identity is
      * globally adjacent-deduplicated.
+     * @tparam p_offsets_type Stream-to-sequence offset bundle type.
+     * @param simd_tag Active u32 descriptor.
+     * @param offsets Packed-unit origin for each logical lane.
      */
     template<class p_offsets_type>
     HWY_INLINE void finalize_stream_boundaries(
@@ -744,6 +849,13 @@ public:
     }
 
 private:
+    /**
+     * @brief Appends one minimizer record and updates emission evidence.
+     * @param hash Canonical ntHash value.
+     * @param absolute_last_position Sequence coordinate of the k-mer end.
+     * @param strand Selected strand identifier.
+     * @param tie_endpoint Whether the record is a tied right endpoint.
+     */
     HWY_INLINE void append_collector_event(
         std::uint32_t hash,
         std::uint64_t absolute_last_position,
@@ -760,7 +872,19 @@ private:
     }
 };
 
-/// @brief Runs the packed dna4 bounded ntHash traversal.
+/// @brief Runs the packed DNA4 bounded ntHash traversal.
+/// @tparam p_kmer_size K-mer length in biological symbols.
+/// @tparam p_window_size Minimizer window length in k-mers.
+/// @tparam p_stream_count Number of logical vector streams.
+/// @tparam p_minimizer_type Collector record representation.
+/// @tparam p_collector_type Collector receiving selected records.
+/// @tparam p_sequence_view Borrowed packed-view type.
+/// @tparam p_iterator Packed storage iterator type.
+/// @param collector Destination for selected minimizers.
+/// @param view Segment-local logical and packed geometry.
+/// @param begin First packed u32 unit to decode.
+/// @param end One past the final packed u32 unit.
+/// @param stats Evidence counters populated for the traversal.
 template<
     std::size_t p_kmer_size,
     std::size_t p_window_size,
@@ -864,6 +988,7 @@ template<
         begin,
         end,
         k_context_base_pairs,
+        // Advances rolling state for each decoded base matrix.
         [&state]<bool p_is_full>(std::bool_constant<p_is_full>,
                                  const auto& iterator_offsets,
                                  const auto& iteration_simd_tag,
@@ -875,6 +1000,7 @@ template<
                 iterator_mask,
                 ranks);
         },
+        // This kernel has no separate transposed-block consumer.
         [](const auto&, const auto&, auto&) {});
     state.finalize_stream_boundaries(simd_tag, offsets);
 
@@ -937,10 +1063,23 @@ template<
 } // namespace bounded_nthash_internal
 
 /**
- * Checked resident entry point for the production-oriented packed bounded_nthash-ntHash
+ * @brief Collects bounded ntHash minimizers from an aligned resident segment.
+ *
+ * This is the checked resident entry point for the packed bounded ntHash
  * kernel. [begin,end) must be ordered and aligned to the resident range's
  * storage units. The zero-copy bounded u32 view emits segment-local positions.
  * Segmented callers add their known global base offset after collection.
+ * @tparam p_kmer_size K-mer length in biological symbols.
+ * @tparam p_window_size Minimizer window length in k-mers.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @tparam p_iterator Packed storage iterator type.
+ * @tparam p_collector_type Collector receiving selected records.
+ * @param collector Destination for selected minimizers.
+ * @param sequence Borrowed resident packed sequence.
+ * @param begin First aligned storage unit in the segment.
+ * @param end One past the final aligned storage unit.
+ * @return Status and execution evidence without throwing for rejected input.
  */
 template<
     std::size_t p_kmer_size = 15,
@@ -961,6 +1100,7 @@ collect_minimizers_bounded_nthash_simd_checked(
     using range_type = compact_sequence_range<p_sequence_range>;
     using traits = typename range_type::traits;
     bounded_nthash_result result;
+    // Records a fail-closed admission result without touching the collector.
     auto reject = [&result](bounded_nthash_status status) {
         result.status = status;
         result.stats.fail_closed_rejections = 1;
@@ -1081,7 +1221,17 @@ collect_minimizers_bounded_nthash_simd_checked(
 }
 // BIOSEQ_PRIVATE_PACKED_ACCESS_END collect_minimizers_bounded_nthash_simd_checked
 
-/** Whole-resident convenience overload. It still performs the checked gate. */
+/**
+ * @brief Collects bounded ntHash minimizers from a whole resident sequence.
+ * @tparam p_kmer_size K-mer length in biological symbols.
+ * @tparam p_window_size Minimizer window length in k-mers.
+ * @tparam p_minimizer_type Collector record representation.
+ * @tparam p_sequence_range Packed sequence configuration.
+ * @tparam p_collector_type Collector receiving selected records.
+ * @param collector Destination for selected minimizers.
+ * @param sequence Borrowed resident packed sequence.
+ * @return Status and execution evidence from the checked gate.
+ */
 template<
     std::size_t p_kmer_size = 15,
     std::size_t p_window_size = 10,
@@ -1101,6 +1251,8 @@ collect_minimizers_bounded_nthash_simd(
 namespace bounded_nthash_kernel_detail {
 
 /// @brief Maps family-specific checked status to the common kernel status.
+/// @param status Bounded ntHash admission result.
+/// @return Equivalent common kernel status.
 [[nodiscard]] constexpr minimizer_kernel_status map_bounded_nthash_status(
     const bounded_nthash_status status) noexcept
 {
@@ -1115,6 +1267,11 @@ namespace bounded_nthash_kernel_detail {
 }
 
 /// @brief Adapts one typed packed descriptor to the bounded ntHash collector.
+/// @tparam p_minimizer_type Selected output representation.
+/// @tparam p_storage_unit Packed source storage unit.
+/// @param invocation Type-erased kernel request and sink.
+/// @param result Result populated with family status and evidence.
+/// @return `true` when the borrowed descriptor is internally consistent.
 template<class p_minimizer_type, class p_storage_unit>
 [[nodiscard]] bool run_bounded_nthash(
     minimizer_kernel_invocation& invocation,
@@ -1135,6 +1292,7 @@ template<class p_minimizer_type, class p_storage_unit>
     return ::bioseq::minimizers::kernel_detail::
         with_borrowed_compact_range<seq::dna4, p_storage_unit>(
             invocation.sequence,
+            // Runs the typed checked collector against the borrowed range.
             [&invocation, &result]<class p_range>(p_range& range) {
                 minimizer_sink_collector<p_minimizer_type> collector{
                     invocation.sink};
@@ -1181,7 +1339,13 @@ template<class p_minimizer_type, class p_storage_unit>
 [[nodiscard]] HWY_ATTR bool bounded_nthash_repr_l63_k15_u64(
     minimizer_kernel_invocation&, minimizer_kernel_result&);
 
-/** Source-topology-owned exact bounded_nthash-ntHash case. */
+/**
+ * @brief Dispatches one source-topology-owned bounded ntHash case.
+ * @tparam p_alphabet Requested sequence alphabet.
+ * @tparam p_storage_unit Packed source storage unit.
+ * @param invocation Type-erased request for the exact 15/10 case.
+ * @return Common kernel result with bounded ntHash family evidence.
+ */
 template<sequence_alphabet p_alphabet, class p_storage_unit>
 requires (
     (std::same_as<p_alphabet, seq::dna4>
@@ -1196,6 +1360,7 @@ requires (
     minimizer_kernel_result result{};
     result.stats.algorithm = minimizer_kernel_algorithm::bounded_nthash;
     result.stats.target = static_cast<std::int64_t>(HWY_TARGET);
+    // Converts an admission failure into the common result representation.
     const auto reject = [&result](const bounded_nthash_status family) {
         result.status = minimizer_kernel_status::invalid_configuration;
         result.family_status = static_cast<std::uint32_t>(family);

@@ -26,6 +26,7 @@ export namespace bioseq::simd {
  * @tparam p_alphabet Sequence alphabet consumed by the canonical rolling hasher.
  */
 template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
+    /** @brief Lexicographic scalar hasher supplying canonical codes and strand tags. */
     using base_hasher_type = lexic_hasher<p_alphabet>;
 
     /**
@@ -35,7 +36,9 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
     template <typename p_input_type>
     class scalar_hash : public hasher_base<p_alphabet, p_input_type> {
       public:
+        /** @brief Scalar hasher base supplying alphabet limits and strand selection. */
         using base_type = hasher_base<p_alphabet, p_input_type>;
+        /** @brief Mask, shift, and alphabet helpers shared by rolling updates. */
         using traits = typename base_type::traits;
 
         /**
@@ -83,6 +86,7 @@ template <sequence_alphabet p_alphabet> struct minimap_int_hasher {
     [[nodiscard]] static constexpr p_input_type scramble(const p_input_type& lex_kmer,
                                                          const p_input_type& kmer_mask) {
         constexpr std::size_t k_max_storage_shift = sizeof(p_input_type) * 8u - 1u;
+        // Clamps permutation shifts to the scalar word bit width.
         constexpr auto clamp = [](std::size_t shift) constexpr {
             return shift > k_max_storage_shift ? k_max_storage_shift : shift;
         };

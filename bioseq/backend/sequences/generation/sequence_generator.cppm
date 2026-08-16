@@ -74,6 +74,7 @@ struct generator_params {
 };
 
 /// @brief Provides a uniform probability model for an alphabet.
+/// @tparam p_alphabet Alphabet whose ranks receive probabilities.
 template <sequence_alphabet p_alphabet>
 struct base_alphabet_probability {
     /// Alphabet described by this probability model.
@@ -91,6 +92,7 @@ struct base_alphabet_probability {
 };
 
 /// @brief Selects the default probability model for an alphabet.
+/// @tparam p_alphabet Alphabet whose default model is selected.
 template <sequence_alphabet p_alphabet>
 struct alphabet_probability : base_alphabet_probability<p_alphabet> {};
 
@@ -112,6 +114,9 @@ struct alphabet_probability<seq::dna5> : base_alphabet_probability<seq::dna5> {
 };
 
 /// @brief Checks that a compile-time probability table sums to one.
+/// @tparam p_probability_count Number of rank probabilities.
+/// @param probabilities Probability assigned to each rank.
+/// @return `true` when the sum is within the compile-time tolerance of one.
 template <std::size_t p_probability_count>
 consteval bool probabilities_sum_to_one(
     const std::array<double, p_probability_count>& probabilities) noexcept {
@@ -123,6 +128,9 @@ consteval bool probabilities_sum_to_one(
 }
 
 /// @brief Checks that a compile-time probability table has no negative entry.
+/// @tparam p_probability_count Number of rank probabilities.
+/// @param probabilities Probability assigned to each rank.
+/// @return `true` when every entry is nonnegative.
 template <std::size_t p_probability_count>
 consteval bool probabilities_nonnegative(
     const std::array<double, p_probability_count>& probabilities) noexcept {
@@ -135,6 +143,7 @@ consteval bool probabilities_nonnegative(
 }
 
 /// @brief Accepts alphabet probability models with a valid normalized table.
+/// @tparam p_probability_model Candidate compile-time probability model.
 template <typename p_probability_model>
 concept is_valid_alphabet_probability =
     sequence_alphabet<typename p_probability_model::alphabet_type> &&
@@ -154,6 +163,7 @@ static_assert(is_valid_alphabet_probability<alphabet_probability<seq::dna5>>);
 static_assert(is_valid_alphabet_probability<alphabet_probability<seq::aa27>>);
 
 /// @brief Accepts sequence configurations that support packed construction.
+/// @tparam p_sequence_config Candidate compact-sequence configuration.
 template <typename p_sequence_config>
 concept packed_sequence_config =
     is_sequence_custom_alphabet<p_sequence_config> &&
@@ -234,6 +244,9 @@ struct taus_lcg_state {
 }
 
 /// @brief Converts rank probabilities to inclusive 32-bit CDF thresholds.
+/// @tparam p_probability_count Number of rank probabilities.
+/// @param probabilities Probability assigned to each rank.
+/// @return Inclusive thresholds in rank order.
 template <std::size_t p_probability_count>
 constexpr std::array<std::uint32_t, p_probability_count> make_integer_cdf(
     const std::array<double, p_probability_count>& probabilities) noexcept {
@@ -319,6 +332,10 @@ inline double next_gaussian(
 }
 
 /// @brief Packs valid logical ranks into one least-significant-bit-first unit.
+/// @tparam p_sequence_traits Packed alphabet and storage traits.
+/// @param ranks First logical rank to pack.
+/// @param valid Number of ranks stored in the returned unit.
+/// @return One packed storage unit with unused high slots cleared.
 template <typename p_sequence_traits>
 [[gnu::always_inline]] constexpr typename p_sequence_traits::storage_unit pack_unit(
     const typename p_sequence_traits::letter_unit* ranks, std::size_t valid) noexcept {
@@ -333,6 +350,9 @@ template <typename p_sequence_traits>
 }
 
 /// @brief Packs a rank span and reports the trailing padding symbol count.
+/// @tparam p_sequence_traits Packed alphabet and storage traits.
+/// @param ranks Logical ranks in sequence order.
+/// @return Packed units and the number of unused trailing symbol slots.
 template <typename p_sequence_traits>
 [[nodiscard]] std::pair<std::vector<typename p_sequence_traits::storage_unit>, std::size_t>
 pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> ranks) {
@@ -354,6 +374,12 @@ pack_ranks_no_sentinel(std::span<const typename p_sequence_traits::letter_unit> 
 }
 
 /// @brief Decodes a forward or reverse-complement reference window to ranks.
+/// @tparam p_sequence_type Compact sequence range type.
+/// @param sequence Source sequence.
+/// @param start Inclusive biological start coordinate.
+/// @param end Exclusive biological end coordinate.
+/// @param is_reverse Decode the reverse complement when true.
+/// @param out_ranks Destination with room for `end - start` ranks.
 template <typename p_sequence_type>
 void extract_window_ranks(
     const p_sequence_type& sequence,
@@ -411,6 +437,12 @@ void extract_window_ranks(
 }
 
 /// @brief Generates packed units for one deterministic CPU sequence stream.
+/// @tparam p_sequence_traits Packed alphabet and storage traits.
+/// @param out_units Destination units for one sequence.
+/// @param symbols_per_seq Logical symbols generated for each sequence.
+/// @param seq_index Sequence stream index.
+/// @param cdf Inclusive rank-selection thresholds.
+/// @param seed Global deterministic seed.
 template <typename p_sequence_traits>
 void generate_units_cpu_for_sequence(
     std::span<typename p_sequence_traits::storage_unit> out_units,
@@ -426,6 +458,7 @@ void generate_units_cpu_for_sequence(
     const std::uint64_t stream_base = seq_index * chunks_per_seq;
 
     auto& pool = bioseq::parallelism::global_pool::instance();
+    // Assigns disjoint packed-unit chunks to deterministic random streams.
     pool.parallel_for(
         0,
         static_cast<std::size_t>(chunks_per_seq),
@@ -487,6 +520,10 @@ void generate_units_cpu_for_sequence(
 }
 
 /// @brief Applies independent substitutions while preserving alphabet ranks.
+/// @tparam p_sequence_traits Alphabet and rank traits.
+/// @param ranks Logical ranks modified in place.
+/// @param rate Independent substitution probability per rank.
+/// @param state Deterministic random state advanced by this operation.
 template <typename p_sequence_traits>
 void apply_substitutions(
     std::span<typename p_sequence_traits::letter_unit> ranks,
@@ -543,6 +580,14 @@ struct indel_event_counts {
 }
 
 /// @brief Applies insertion and deletion events in source-coordinate order.
+/// @tparam p_sequence_traits Alphabet and rank traits.
+/// @tparam p_output_vector Mutable rank vector type.
+/// @param in_ranks Source ranks before indels.
+/// @param params Indel rates and length distributions.
+/// @param cdf Inclusive thresholds for inserted ranks.
+/// @param state Deterministic random state advanced by this operation.
+/// @param out_ranks Destination ranks after indels.
+/// @param counts Optional event counters.
 template <typename p_sequence_traits, typename p_output_vector>
 void apply_indels(
     std::span<const typename p_sequence_traits::letter_unit> in_ranks,
@@ -601,6 +646,8 @@ void apply_indels(
 }
 
 /// @brief Generates deterministic packed references and edited query fragments.
+/// @tparam p_sequence_config Packed sequence configuration produced by the generator.
+/// @tparam p_probability_model Compile-time rank probability model.
 template <
     packed_sequence_config p_sequence_config,
     typename p_probability_model = alphabet_probability<
@@ -623,6 +670,7 @@ public:
                 "probability model must describe the configured sequence alphabet");
 
   /// @brief Creates a generator with a copied immutable parameter set.
+  /// @param params Generation lengths, rates, seed, and backend selector.
   explicit sequence_generator(const generator_params& params) noexcept : params_(params) {}
 
   /// @brief Couples an edited query with its source-reference coordinates.
@@ -644,6 +692,8 @@ public:
   };
 
   /// @brief Generates independent packed sequences of reference length.
+  /// @param count Number of sequences to generate.
+  /// @return Packed sequences in stream-index order.
   [[nodiscard]] std::vector<sequence_type> generate_sequences(std::size_t count) {
       constexpr std::uint32_t letters_per_unit = sequence_traits::letters_per_unit;
       const std::uint64_t symbols = params_.reference_length;
@@ -717,11 +767,14 @@ public:
   }
 
   /// @brief Generates a reference and the requested number of query pairs.
+  /// @param count Number of query fragments.
+  /// @return Edited queries paired with the shared generated reference.
   [[nodiscard]] std::vector<query_target_pair> generate_sequences_pairs(std::size_t count) {
       return generate_fragment_pairs(generate_reference(), 0, count);
   }
 
   /// @brief Generates one shared immutable reference sequence.
+  /// @return Shared owner of the packed reference.
   [[nodiscard]] std::shared_ptr<const sequence_type> generate_reference() {
       constexpr std::uint32_t letters_per_unit = sequence_traits::letters_per_unit;
       const std::uint64_t symbols = params_.reference_length;
@@ -761,6 +814,10 @@ public:
   }
 
   /// @brief Generates an indexed range of query fragments from a reference.
+  /// @param reference Shared source reference that remains owned by every result.
+  /// @param first First deterministic fragment stream index.
+  /// @param count Number of fragments to generate.
+  /// @return Query and truth-coordinate records in fragment-index order.
   [[nodiscard]] std::vector<query_target_pair> generate_fragment_pairs(
       const std::shared_ptr<const sequence_type>& reference, std::size_t first, std::size_t count) {
       DEBUG_ASSERT(reference != nullptr, "generate_fragment_pairs: reference must not be null");
@@ -790,6 +847,7 @@ public:
       static constexpr auto k_cdf = make_integer_cdf(p_probability_model::probability());
       std::vector<query_target_pair> pairs(count);
       auto& pool = bioseq::parallelism::global_pool::instance();
+      // Generates disjoint result indices while sharing immutable reference storage.
       pool.parallel_for_with_context(
           0,
           count,
@@ -846,6 +904,8 @@ public:
   }
 
   /// @brief Generates sequences through the CPU path for parity diagnostics.
+  /// @param count Number of sequences to generate.
+  /// @return Packed sequences in stream-index order.
   [[nodiscard]] std::vector<sequence_type> debug_generate_sequences_cpu_only(std::size_t count) {
       constexpr std::uint32_t letters_per_unit = sequence_traits::letters_per_unit;
       const std::uint64_t symbols = params_.reference_length;
@@ -875,6 +935,9 @@ private:
 };
 
 /// @brief Configures a sequence generator directly from an alphabet and word type.
+/// @tparam p_alphabet Logical sequence alphabet.
+/// @tparam p_storage_unit Packed storage word type.
+/// @tparam p_probability_model Compile-time rank probability model.
 template <
     sequence_alphabet p_alphabet,
     typename p_storage_unit = std::uint32_t,

@@ -29,9 +29,12 @@ export namespace bioseq::simd {
 template <sequence_alphabet p_alphabet, typename p_input_type> struct hasher_base {
     /** @brief Describes the compile-time sequence and scalar return-type contract. */
     struct traits : public compact_sequence_range<p_alphabet>::compact_sequence_range_base::traits {
+        /** @brief Scalar word that stores one rolling k-mer code. */
         using input_type = p_input_type;
+        /** @brief Canonical hash code paired with the winning strand classification. */
         using hasher_return_type = std::pair<input_type, sequence_strand_mode>;
 
+        /** @brief Longest k-mer length storable in `input_type` at the alphabet bit width. */
         static constexpr std::size_t k_max_kmer_length =
             sizeof(p_input_type) * 8u /
             compact_sequence_range<p_alphabet>::compact_sequence_range_base::traits::bits_per_char;

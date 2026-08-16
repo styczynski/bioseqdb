@@ -69,6 +69,10 @@ struct simd_chaining_route_stats {
 };
 
 /// @brief Adds a counter only for instrumented kernel instantiations.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @param stats Optional destination counters.
+/// @param member Counter member to update.
+/// @param value Increment applied when collection is enabled.
 template<bool p_collect_stats>
 HWY_INLINE void stats_add(
     simd_chaining_execution_stats* stats,
@@ -85,6 +89,10 @@ HWY_INLINE void stats_add(
 }
 
 /// @brief Records a checked rejection and throws its typed runtime error.
+/// @param stats Optional counters updated with the rejection.
+/// @param status Typed rejection status.
+/// @param detail Diagnostic detail appended to the exception.
+/// @throws simd_chaining_runtime_error Always.
 [[noreturn]] inline void reject(
     simd_chaining_execution_stats* stats,
     simd_chaining_status status,
@@ -133,6 +141,9 @@ struct soa_anchors {
 };
 
 /// @brief Converts anchors to aligned packed coordinate arrays.
+/// @tparam p_descriptor_type Highway descriptor used to select alignment.
+/// @param anchors Anchor span copied into structure-of-arrays storage.
+/// @return Arena-backed coordinate and span arrays.
 template<class p_descriptor_type>
 [[nodiscard]] soa_anchors create_soa_anchors(
     p_descriptor_type,
@@ -161,6 +172,11 @@ template<class p_descriptor_type>
 }
 
 /// @brief Scores one full or masked predecessor batch with chaining penalties.
+/// @tparam p_full_batch Whether every physical lane contains a candidate.
+/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @tparam p_float_descriptor_type Floating-point Highway descriptor type.
+/// @return Per-lane pair scores with invalid lanes set to the score sentinel.
 template<bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type, class p_float_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
     p_descriptor_type d,
@@ -243,6 +259,11 @@ HWY_INLINE hn::Vec<p_descriptor_type> vectorized_chaining_score(
 }
 
 /// @brief Loads predecessor fields and scores one specialized candidate batch.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_full_batch Whether every physical lane contains a candidate.
+/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @return Per-lane pair scores.
 template<bool p_collect_stats, bool p_full_batch, bool p_has_skip_penalty, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
     p_descriptor_type d,
@@ -319,6 +340,9 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch_specialized(
 }
 
 /// @brief Selects full or masked scoring for one candidate batch.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @return Per-lane pair scores.
 template<bool p_collect_stats, class p_descriptor_type>
 HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
     p_descriptor_type d,
@@ -358,6 +382,10 @@ HWY_INLINE hn::Vec<p_descriptor_type> score_candidate_batch(
 }
 
 /// @brief Scores a single candidate through the masked vector kernel.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_has_skip_penalty Whether skip-penalty arithmetic is enabled.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @return Pair score or the invalid-score sentinel.
 template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descriptor_type>
 [[nodiscard]] std::int32_t score_one_candidate(
     p_descriptor_type d,
@@ -379,6 +407,11 @@ template<bool p_collect_stats, bool p_has_skip_penalty = true, class p_descripto
 }
 
 /// @brief Finds the largest-index maximum score in a bounded interval.
+/// @tparam p_collect_stats Whether this instantiation records counters.
+/// @tparam p_descriptor_type Integer Highway descriptor type.
+/// @param begin Inclusive score index.
+/// @param end Exclusive score index.
+/// @return Largest index whose score is maximal, or negative for an empty interval.
 template<bool p_collect_stats, class p_descriptor_type>
 [[nodiscard]] std::int32_t exact_global_best(
     p_descriptor_type d,
