@@ -299,6 +299,7 @@ collect_minimap_sketch_data_vulkan_upload_batch_result(
         materialization == vulkan_sketch_host_materialization::host_and_device
             ? 2u
             : 0u);
+    /** @brief Returns vector reserved capacity in bytes, or UINT64_MAX on overflow. */
     const auto vector_capacity_bytes = []<class p_value_type>(
         const std::vector<p_value_type>& values) noexcept -> std::uint64_t {
         if (values.capacity()

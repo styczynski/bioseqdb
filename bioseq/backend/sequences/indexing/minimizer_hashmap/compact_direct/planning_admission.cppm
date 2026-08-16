@@ -45,6 +45,7 @@ class query_wave_scratch {
     static constexpr std::size_t query_membership_filter_word_count_ =
         std::size_t{1u} << query_membership_filter_word_bits_;
 
+    /// Query-wave lifecycle state published through atomic compare-exchange.
     enum class wave_state : std::uint8_t {
         idle,
         preparing,
@@ -52,6 +53,7 @@ class query_wave_scratch {
         cleaning,
     };
 
+    /// One sorted unique query hash with occurrence-ref bounds and global count.
     struct query_hash_plan {
         std::uint32_t hash = 0u;
         std::uint32_t occurrence_ref_begin = 0u;
@@ -86,6 +88,7 @@ class query_wave_scratch {
 
     query_wave_scratch() = default;
 
+    /// Returns retained packed and wide occurrence buffer capacity in bytes.
     [[nodiscard]] std::uint64_t retained_occurrence_capacity_bytes_() const noexcept {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -94,6 +97,7 @@ class query_wave_scratch {
             saturating_mul(wide_occurrences_.capacity(), sizeof(wide_query_occurrence)));
     }
 
+    /// Returns total retained scratch capacity in bytes across all owned buffers.
     [[nodiscard]] std::uint64_t retained_capacity_bytes_() const noexcept {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -116,6 +120,7 @@ class query_wave_scratch {
         return bytes;
     }
 
+    /// Drops all retained vectors and arrays and shrinks the memory permit to zero.
     void release_all_capacity_noexcept_() noexcept {
         {
             std::vector<packed_query_occurrence> empty_packed_occurrences;
@@ -146,6 +151,8 @@ class query_wave_scratch {
         permit_.shrink_to(0u);
     }
 
+    /// Allocates or zeroes the fixed-size query membership filter under admission control.
+    /// Throws persisted_minimizer_lookup_error on admission or allocation failure.
     void ensure_query_membership_filter_capacity_() {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -187,6 +194,8 @@ class query_wave_scratch {
         permit_.shrink_to(actual);
     }
 
+    /// Grows one scratch vector to at least required_capacity under permit headroom.
+    /// Shrink-wraps the permit to actual retained bytes after a successful reserve.
     template <class p_value>
     void ensure_vector_capacity_(std::vector<p_value>& values, std::size_t required_capacity) {
         if (required_capacity <= values.capacity())
@@ -237,6 +246,7 @@ class query_wave_scratch {
         permit_.shrink_to(actual);
     }
 
+    /// Resizes the per-occurrence atomic counter array and zeroes active slots.
     void ensure_occurrence_count_capacity_(std::size_t required_capacity) {
         using bioseq::common::saturating_add;
         using bioseq::common::saturating_mul;
@@ -274,6 +284,7 @@ class query_wave_scratch {
         }
     }
 
+    /// Clears transient wave vectors and flags without resetting membership filter counters.
     void clear_wave_storage_noexcept_() noexcept {
         // The next activation zeros its exact U-sized range once. No reader
         // observes inactive counters, so clearing them here would add a second
@@ -293,12 +304,14 @@ class query_wave_scratch {
         bucket_direct_matcher_active_ = false;
     }
 
+    /// Clears wave storage and returns the scratch to idle after a failed preparation.
     void reset_failed_wave_() noexcept {
         clear_wave_storage_noexcept_();
         wave_state_.store(wave_state::idle, std::memory_order_release);
     }
 
   public:
+    /// Moves scratch capacity and leaves the donor idle with no retained bytes.
     query_wave_scratch(query_wave_scratch&& other) noexcept
         : permit_(std::move(other.permit_)),
           packed_occurrences_(std::move(other.packed_occurrences_)),
@@ -335,6 +348,8 @@ class query_wave_scratch {
     query_wave_scratch(const query_wave_scratch&) = delete;
     query_wave_scratch& operator=(const query_wave_scratch&) = delete;
 
+    /// Reserves a zero-byte permit from admission and returns an idle scratch owner.
+    /// Returns minimizer_generation_encoding_error::admission when reservation fails.
     [[nodiscard]] static std::expected<query_wave_scratch, minimizer_generation_encoding_error>
     create(bioseq::parallelism::memory_admission_controller& admission) {
         auto permit = admission.try_reserve(0u);
@@ -347,6 +362,8 @@ class query_wave_scratch {
         return scratch;
     }
 
+    /// Clears outstanding wave storage after synchronous joins finish and returns to idle.
+    /// No-op unless the current state is outstanding.
     void complete_wave_after_join() noexcept {
         wave_state expected = wave_state::outstanding;
         if (wave_state_.compare_exchange_strong(expected,
@@ -358,6 +375,8 @@ class query_wave_scratch {
         }
     }
 
+    /// Releases all retained capacity when idle.
+    /// Throws persisted_minimizer_lookup_error when a wave is still active.
     void release_retained_capacity() {
         wave_state expected = wave_state::idle;
         if (!wave_state_.compare_exchange_strong(expected,
@@ -370,14 +389,17 @@ class query_wave_scratch {
         wave_state_.store(wave_state::idle, std::memory_order_release);
     }
 
+    /// Returns true while the scratch is preparing, outstanding, or cleaning a wave.
     [[nodiscard]] bool wave_outstanding() const noexcept {
         return wave_state_.load(std::memory_order_acquire) != wave_state::idle;
     }
 
+    /// Returns bytes currently covered by the scratch memory permit.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return permit_.bytes();
     }
 
+    /// Returns live sizes, capacities, and route flags for diagnostics and tests.
     [[nodiscard]] query_occurrence_capacity_snapshot occurrence_capacity_snapshot() const noexcept {
         return query_occurrence_capacity_snapshot{
             .route = occurrence_layout_.route,
@@ -418,10 +440,12 @@ class prepared_fragment_anchor_batch {
 
     friend class prepared_minimizer_fragment_reader;
 
+    /// Takes ownership of an admitted permit before query anchors are populated.
     explicit prepared_fragment_anchor_batch(bioseq::parallelism::memory_permit&& permit) noexcept
         : permit_(std::move(permit)) {}
 
   public:
+    /// Borrowed per-query view over one prepared fragment anchor batch.
     class query_handle {
       private:
         const prepared_fragment_anchor_batch* batch_ = nullptr;
@@ -429,16 +453,21 @@ class prepared_fragment_anchor_batch {
 
         friend class prepared_fragment_anchor_batch;
 
+        /// Binds one query ordinal inside a ready batch.
         query_handle(const prepared_fragment_anchor_batch& batch, std::size_t query_index) noexcept
             : batch_(&batch), query_index_(query_index) {}
 
       public:
+        /// Empty handle that reports zero target length and throws on anchor access.
         query_handle() = default;
 
+        /// Returns the batch target length or zero for an empty handle.
         [[nodiscard]] std::uint64_t target_length() const noexcept {
             return batch_ == nullptr ? 0u : batch_->target_length_;
         }
 
+        /// Returns canonical ordered fragment seed anchors after identity checks against the batch.
+        /// Throws persisted_minimizer_lookup_error when arguments or receipts disagree.
         [[nodiscard]] std::span<const bioseq::chaining::anchor>
         ordered_fragment_seed_anchors(std::span<const minimap_sketch_data> minimizers,
                                       sequence_size_t query_length,
@@ -463,6 +492,7 @@ class prepared_fragment_anchor_batch {
         }
     };
 
+    /// Transfers admitted anchors and leaves the donor empty and not ready.
     prepared_fragment_anchor_batch(prepared_fragment_anchor_batch&& other) noexcept
         : permit_(std::move(other.permit_)), queries_(std::move(other.queries_)),
           query_count_(other.query_count_), target_length_(other.target_length_),
@@ -482,6 +512,7 @@ class prepared_fragment_anchor_batch {
     prepared_fragment_anchor_batch(const prepared_fragment_anchor_batch&) = delete;
     prepared_fragment_anchor_batch& operator=(const prepared_fragment_anchor_batch&) = delete;
 
+    /// Returns a query_handle for one query ordinal in a ready batch.
     [[nodiscard]] query_handle query_view(std::size_t query_index) const {
         if (!ready_ || query_index >= query_count_) {
             throw persisted_minimizer_lookup_error(
@@ -490,18 +521,22 @@ class prepared_fragment_anchor_batch {
         return query_handle{*this, query_index};
     }
 
+    /// Returns the number of prepared queries in the batch.
     [[nodiscard]] std::size_t query_count() const noexcept {
         return query_count_;
     }
 
+    /// Returns bytes currently covered by the batch memory permit.
     [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
         return permit_.bytes();
     }
 
+    /// Returns operation stats recorded while preparing this batch.
     [[nodiscard]] const prepared_fragment_anchor_batch_stats& stats() const noexcept {
         return stats_;
     }
 
+    /// Returns compact-direct query-set stats when direct planning produced them.
     [[nodiscard]] const compact_direct_query_set_stats&
     compact_direct_query_stats() const noexcept {
         return compact_direct_query_set_stats_;
