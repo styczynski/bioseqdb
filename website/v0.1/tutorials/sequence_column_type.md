@@ -20,8 +20,8 @@ CREATE EXTENSION bioseq;
 
 > [!NOTE]
 > In `bioseq.seq('dna4', 64)`, `dna4` selects the four-symbol DNA alphabet and
-> `64` selects 64-bit packed storage units. A value may contain more than 64
-> bases.
+> `64` requests the 64-bit packed storage form. A build profile may normalize
+> accepted widths to one physical width. A value may contain more than 64 bases.
 
 ## Reading the type modifier
 
@@ -36,7 +36,7 @@ The `'dna4'` modifier selects the four-symbol DNA alphabet: A, C, G, and T.
 ```
 
 ```annotation target=seq_type_example match="64" title="Storage-unit width"
-The `64` modifier selects 64-bit packed storage units. It does not limit the sequence to 64 bases.
+The `64` modifier requests 64-bit packed storage units. It does not limit the sequence to 64 bases.
 ```
 
 Use `dna4` when every value contains only A, C, G, and T. Use `dna5` when N is
@@ -108,9 +108,16 @@ bioseq.seq('dna4', 32)
 bioseq.seq('dna4', 64)
 ```
 
-The width describes the integer unit used by the packed representation. It is
-not bits per symbol, a row limit, a sequence limit, or a requested CPU vector
-width.
+The width describes the requested integer unit for the packed representation.
+It is not bits per symbol, a row limit, a sequence limit, or a requested CPU
+vector width.
+
+The active build profile decides whether every accepted width remains distinct.
+The everyday profile accepts `8`, `16`, `32`, and `64`, then normalizes them to
+the 64-bit physical form. A profile built to retain all coordinates keeps the
+requested widths. This means that successful type creation proves the width is
+accepted. It does not by itself prove that the installed profile stores that
+width as a distinct physical form.
 
 A 64-bit storage unit does not request a 64-bit-only search path. Highway SIMD
 selection, PostgreSQL plan choice, and Vulkan routing have separate controls and
@@ -140,26 +147,67 @@ Do not label `unit_len` as bases. Do not label `len` as bytes. Names such as
 `sequence_symbols` and `packed_units` keep the result meaningful when width or
 alphabet changes.
 
-Compare widths without changing the symbols:
+Compare widths without changing the symbols. Use stored columns so the catalog
+and the value calculation describe the same table:
 
 ```sql
-SELECT width_name, symbols, packed_units
-FROM (
-    VALUES
-        ('w8',
-         bioseq.len('ACGTACGTACGT'::bioseq.seq('dna4', 8)),
-         bioseq.unit_len('ACGTACGTACGT'::bioseq.seq('dna4', 8))),
-        ('w16',
-         bioseq.len('ACGTACGTACGT'::bioseq.seq('dna4', 16)),
-         bioseq.unit_len('ACGTACGTACGT'::bioseq.seq('dna4', 16))),
-        ('w32',
-         bioseq.len('ACGTACGTACGT'::bioseq.seq('dna4', 32)),
-         bioseq.unit_len('ACGTACGTACGT'::bioseq.seq('dna4', 32))),
-        ('w64',
-         bioseq.len('ACGTACGTACGT'::bioseq.seq('dna4', 64)),
-         bioseq.unit_len('ACGTACGTACGT'::bioseq.seq('dna4', 64)))
-) AS values_by_width(width_name, symbols, packed_units)
-ORDER BY width_name;
+CREATE TABLE width_probe (
+    id integer PRIMARY KEY,
+    w8 bioseq.seq('dna4', 8) NOT NULL,
+    w16 bioseq.seq('dna4', 16) NOT NULL,
+    w32 bioseq.seq('dna4', 32) NOT NULL,
+    w64 bioseq.seq('dna4', 64) NOT NULL
+) USING bioseq;
+```
+
+Inspect the catalog after creating the table:
+
+```sql
+SELECT a.attname AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS active_type
+FROM pg_attribute AS a
+WHERE a.attrelid = 'width_probe'::regclass
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum;
+```
+
+`format_type` shows the active bound type. On the everyday profile, columns
+declared with the four accepted widths can all print as
+`bioseq.seq('dna4',64)`. Treat that output as the database contract seen by the
+current server.
+
+```sql
+INSERT INTO width_probe
+VALUES (
+    1,
+    repeat('ACGT', 25)::bioseq.seq('dna4', 8),
+    repeat('ACGT', 25)::bioseq.seq('dna4', 16),
+    repeat('ACGT', 25)::bioseq.seq('dna4', 32),
+    repeat('ACGT', 25)::bioseq.seq('dna4', 64)
+);
+```
+
+```sql
+SELECT bioseq.len(w8) AS symbols,
+       bioseq.unit_len(w8) AS w8_units,
+       bioseq.unit_len(w16) AS w16_units,
+       bioseq.unit_len(w32) AS w32_units,
+       bioseq.unit_len(w64) AS w64_units,
+       w8::text = w64::text AS same_text
+FROM width_probe;
+```
+
+For the 100-symbol row, the everyday profile reports 100 symbols, four packed
+units for every column, and equal text. A profile that retains every requested
+width can report different packed-unit counts. Always read `unit_len` as the
+active physical unit count. Do not use it as a portable identifier for the
+width written in a migration file.
+
+Remove the probe after checking the deployment:
+
+```sql
+DROP TABLE width_probe;
 ```
 
 An empty sequence has zero symbols and zero packed units:
@@ -186,8 +234,10 @@ SELECT 'ACGTA'::bioseq.seq('dna4', 16)
                ::bioseq.seq('dna4', 64);
 ```
 
-The symbols and alphabet remain the same. Only the packed representation
-changes.
+The symbols and alphabet remain the same. On a profile that retains both
+widths, the packed representation changes. On a profile that normalizes both
+declarations to one width, the cast is still a valid type boundary but may not
+change the physical representation.
 
 Bind application parameters at the target width:
 
@@ -378,8 +428,8 @@ DROP TABLE tutorial_reads;
 ```
 
 > [!TIP]
-> Choose the storage-unit width for the packing and execution characteristics
-> you need. Do not use it as a sequence-length constraint.
+> Choose a requested width only after checking what the active build profile
+> retains. Do not use it as a sequence-length constraint.
 
 ## Loading a FASTA file
 
@@ -464,15 +514,17 @@ this statement fails with SQLSTATE `22P02`:
 SELECT 'ACGN'::bioseq.seq('dna4', 64);
 ```
 
-An explicit cast or assignment between `dna4` and `dna5` fails with SQLSTATE
-`42804`:
+When both alphabets are registered, an explicit cast or assignment between
+bound `dna4` and `dna5` values fails with SQLSTATE `42804`:
 
 ```sql
 SELECT 'A'::bioseq.seq('dna4', 64)::bioseq.seq('dna5', 64);
 ```
 
-An unsupported alphabet or width fails with SQLSTATE `22023`. This can happen
-when a deployment uses a narrower build profile than the schema expects.
+If `dna5` is not registered, the same statement fails earlier with SQLSTATE
+`22023` because the destination type modifier itself is unsupported. An
+unsupported width also uses `22023`. This can happen when a deployment uses a
+narrower build profile than the schema expects.
 
 An unqualified Bioseq operator can fail with SQLSTATE `42883` when `bioseq` is
 not on `search_path`. Qualify the operator instead of broadening a security-
@@ -500,7 +552,7 @@ Before creating a long-lived sequence table, answer these questions:
 
 1. Can N occur, and is it meaningful or invalid
 2. Which alphabets are included in every deployment build
-3. Which packed width will the table use
+3. Which packed width the active profile reports after normalization
 4. Which columns can be NULL and which can hold an empty sequence
 5. Whether ordinary writes maintain the index immediately
 6. How bulk loads publish a completed index generation

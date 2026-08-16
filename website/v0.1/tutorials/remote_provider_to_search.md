@@ -49,6 +49,28 @@ WHERE schemaname = 'bioseq_external'
 ORDER BY tablename;
 ```
 
+For a deployment check, return all three facts in one row:
+
+```sql
+SELECT to_regnamespace('bioseq_external') IS NOT NULL AS schema_ready,
+       EXISTS (
+           SELECT 1
+           FROM pg_am
+           WHERE amname = 'bioseq_external'
+             AND amtype = 't'
+       ) AS table_am_ready,
+       (
+           SELECT count(*)
+           FROM pg_tables
+           WHERE schemaname = 'bioseq_external'
+       ) AS relation_count;
+```
+
+A ready installation reports a schema, a table access method, and six
+relations. A standard build without external-provider support reports false,
+false, and zero. Stop the remote workflow at that point. Do not let an
+application discover the missing feature after it has started an import.
+
 The expected names are:
 
 - `taxonomy`
@@ -380,6 +402,60 @@ Enable index maintenance for a small import:
 SET bioseq.index.insert_maintenance.enabled = on;
 ```
 
+You can rehearse the local half without contacting a provider. This checks the
+table, index maintenance, alignment helpers, and coordinate conversion with one
+small row:
+
+```sql
+INSERT INTO imported_provider_targets (
+    provider,
+    accession,
+    start0,
+    end0,
+    sequence
+)
+VALUES (
+    'local-check',
+    'region-1',
+    1000,
+    1062,
+    'AAAATAGTCACTGTAGCCTGATCGTAGCTAGTCAACGTACGTACGTACGTACGTAAAA'
+);
+```
+
+```sql
+WITH local_matches AS MATERIALIZED (
+    SELECT provider,
+           accession,
+           start0,
+           bioseq.target_start(accession) AS match_start_in_region,
+           bioseq.target_end(accession) AS match_end_in_region,
+           bioseq.cigar(accession) AS cigar
+    FROM imported_provider_targets
+    WHERE public.mmsearch(
+        sequence,
+        'TAGTCACTGTAGCCTGATCGTAGCTAGTCA'::bioseq.seq('dna4', 64),
+        aligner_options(best_n => 3)
+    )
+)
+SELECT provider,
+       accession,
+       start0 + match_start_in_region AS provider_start0,
+       start0 + match_end_in_region AS provider_end0,
+       cigar
+FROM local_matches
+ORDER BY provider, accession, provider_start0;
+```
+
+The row returns the exact match as `[1004, 1034)` with CIGAR `30M`. Remove the
+check row before importing provider data:
+
+```sql
+DELETE FROM imported_provider_targets
+WHERE provider = 'local-check'
+  AND accession = 'region-1';
+```
+
 ## Move a remote region into local storage
 
 Use an explicit text bridge when narrowing from external `dna5` to local
@@ -450,22 +526,37 @@ WHERE public.mmsearch(
 ORDER BY provider, accession, match_start_in_region;
 ```
 
-The returned target coordinates are relative to the staged sequence. Convert
-them to the provider coordinate system by adding the region start:
+The returned target coordinates are relative to the staged sequence. Project
+them at the search level, then convert them to the provider coordinate system
+in an outer query:
 
 ```sql
+WITH local_matches AS MATERIALIZED (
+    SELECT provider,
+           accession,
+           start0,
+           bioseq.target_start(accession) AS match_start_in_region,
+           bioseq.target_end(accession) AS match_end_in_region,
+           bioseq.cigar(accession) AS cigar
+    FROM imported_provider_targets
+    WHERE public.mmsearch(
+        sequence,
+        $1::bioseq.seq('dna4', 64)
+    )
+)
 SELECT provider,
        accession,
-       start0 + bioseq.target_start(accession) AS provider_start0,
-       start0 + bioseq.target_end(accession) AS provider_end0,
-       bioseq.cigar(accession) AS cigar
-FROM imported_provider_targets
-WHERE public.mmsearch(
-    sequence,
-    $1::bioseq.seq('dna4', 64)
-)
+       start0 + match_start_in_region AS provider_start0,
+       start0 + match_end_in_region AS provider_end0,
+       cigar
+FROM local_matches
 ORDER BY provider, accession, provider_start0;
 ```
+
+Keep the alignment helpers as plain projections inside the search level. Do
+arithmetic on their aliases outside it. This gives the custom scan clear match
+placeholder sites and avoids treating a missing placeholder value as a real
+coordinate.
 
 This calculation is valid for a forward region stored without an additional
 orientation transform. If you reverse-complement before staging, record that

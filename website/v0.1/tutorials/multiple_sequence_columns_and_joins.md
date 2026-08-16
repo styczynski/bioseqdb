@@ -185,24 +185,38 @@ For each probe row, Bioseq can rebind `probes.seq1` as the query for target
 rows. The aliases are not cosmetic. They define separate range-table entries
 and make the target and query roles visible to PostgreSQL.
 
-Add ordinary filters on either side:
+Keep the sequence join itself simple, then apply pair filters across a real SQL
+boundary. A materialized CTE is useful when the filter depends on both sides:
 
 ```sql
-SELECT targets.pk AS target_pk,
-       probes.pk AS probe_pk,
-       targets.sample_id AS target_sample,
-       probes.sample_id AS probe_sample
-FROM paired_reads AS targets
-JOIN paired_reads AS probes
-  ON public.mmsearch(targets.seq0, probes.seq1)
-WHERE targets.sample_id <> probes.sample_id
-  AND probes.pk IN (1, 3, 5)
+WITH raw_matches AS MATERIALIZED (
+    SELECT targets.pk AS target_pk,
+           probes.pk AS probe_pk,
+           targets.sample_id AS target_sample,
+           probes.sample_id AS probe_sample
+    FROM paired_reads AS targets
+    CROSS JOIN paired_reads AS probes
+    WHERE public.mmsearch(targets.seq0, probes.seq1)
+)
+SELECT target_pk,
+       probe_pk,
+       target_sample,
+       probe_sample
+FROM raw_matches
+WHERE target_sample <> probe_sample
+  AND probe_pk IN (1, 3, 5)
 ORDER BY target_pk, probe_pk;
 ```
 
-The metadata predicates can reduce the rows participating in the join. Their
-exact placement can change the chosen PostgreSQL join plan, so explain the real
-statement after adding production filters.
+This boundary makes the order explicit. Bioseq first produces alignment rows.
+PostgreSQL then filters those rows. Do not assume that an ordinary predicate
+combined with `mmsearch` inside the same custom join condition will be used as
+a query-side or target-side admission filter.
+
+If a metadata filter must reduce alignment work, stage the selected rows in a
+separate `USING bioseq` target or query table, maintain its index, and join those
+relations. A materialized CTE of sequence values is not a replacement for a
+Bioseq relation because the search predicate needs an executor owner.
 
 ## Project alignment data from a self join
 
@@ -230,15 +244,20 @@ smaller to transfer and easier to aggregate.
 ## Avoid the diagonal when needed
 
 A self join includes each row paired with itself unless another predicate
-removes it:
+removes it. Filter the produced pairs outside the custom join:
 
 ```sql
-SELECT targets.pk AS target_pk,
-       probes.pk AS probe_pk
-FROM paired_reads AS targets
-JOIN paired_reads AS probes
-  ON targets.pk <> probes.pk
- AND public.mmsearch(targets.seq0, probes.seq1)
+WITH raw_matches AS MATERIALIZED (
+    SELECT targets.pk AS target_pk,
+           probes.pk AS probe_pk
+    FROM paired_reads AS targets
+    CROSS JOIN paired_reads AS probes
+    WHERE public.mmsearch(targets.seq0, probes.seq1)
+)
+SELECT target_pk,
+       probe_pk
+FROM raw_matches
+WHERE target_pk <> probe_pk
 ORDER BY target_pk, probe_pk;
 ```
 
@@ -246,12 +265,17 @@ Use `<` instead of `<>` when the relationship is symmetric and each unordered
 pair should appear once:
 
 ```sql
-SELECT left_read.pk AS left_pk,
-       right_read.pk AS right_pk
-FROM paired_reads AS left_read
-JOIN paired_reads AS right_read
-  ON left_read.pk < right_read.pk
- AND public.mmsearch(left_read.seq0, right_read.seq1)
+WITH raw_matches AS MATERIALIZED (
+    SELECT left_read.pk AS left_pk,
+           right_read.pk AS right_pk
+    FROM paired_reads AS left_read
+    CROSS JOIN paired_reads AS right_read
+    WHERE public.mmsearch(left_read.seq0, right_read.seq1)
+)
+SELECT left_pk,
+       right_pk
+FROM raw_matches
+WHERE left_pk < right_pk
 ORDER BY left_pk, right_pk;
 ```
 
@@ -535,15 +559,27 @@ relative target coordinate back to the stored sequence coordinate system.
 For the `[16:-16]` example:
 
 ```sql
-SELECT targets.pk AS target_pk,
-       probes.pk AS probe_pk,
-       16 + bioseq.target_start(targets.pk) AS stored_target_start,
-       16 + bioseq.target_end(targets.pk) AS stored_target_end
-FROM paired_reads AS targets
-JOIN paired_reads AS probes
-  ON public.mmsearch(targets.seq0[16:-16], probes.seq1)
+WITH relative_matches AS MATERIALIZED (
+    SELECT targets.pk AS target_pk,
+           probes.pk AS probe_pk,
+           16 AS slice_origin,
+           bioseq.target_start(targets.pk) AS relative_target_start,
+           bioseq.target_end(targets.pk) AS relative_target_end
+    FROM paired_reads AS targets
+    CROSS JOIN paired_reads AS probes
+    WHERE public.mmsearch(targets.seq0[16:-16], probes.seq1)
+)
+SELECT target_pk,
+       probe_pk,
+       slice_origin + relative_target_start AS stored_target_start,
+       slice_origin + relative_target_end AS stored_target_end
+FROM relative_matches
 ORDER BY target_pk, probe_pk, stored_target_start;
 ```
+
+Project the match helpers as plain columns in the search level. Perform
+coordinate arithmetic in the outer level. This gives the custom node clear
+placeholder sites and keeps coordinate conversion ordinary SQL.
 
 Only apply a fixed offset when the lower slice bound is fixed and nonnegative.
 For negative or row-dependent bounds, compute the resolved origin explicitly.
@@ -593,6 +629,8 @@ to stored probes, answer these questions:
 5. How many `Bioseq Query Batches` and `Bioseq Distinct Targets` execution saw
 6. Which index source and execution backend each custom node actually used
 7. Whether the result needs every alignment or only distinct key pairs
+8. Whether pair filters run after a materialized match boundary or on staged
+   Bioseq input relations
 
 Use `SELECT DISTINCT` only when duplicate alignments are not meaningful to the
 caller. It changes result semantics and may add a sort or hash step.

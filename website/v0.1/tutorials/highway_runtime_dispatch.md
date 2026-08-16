@@ -70,6 +70,12 @@ Use the algorithm settings only when you need a particular supported pipeline
 shape. They select the minimizer, chaining, and base-alignment algorithms, not
 an individual Highway ISA.
 
+Turning the Boolean switch off does not require every Highway label to vanish
+from a plan. A pipeline can still contain a Highway-backed function outside the
+route controlled by that switch. Compare ordered result rows first, then read
+the per-stage `vectorised` labels and the complete dispatch object. Do not use
+the presence of the word `Highway` as the only A/B check.
+
 ## Read every Highway EXPLAIN field
 
 A Bioseq search node with pipeline detail uses the same five stable dispatch
@@ -117,6 +123,25 @@ The following checks are more useful than comparing host-specific names:
 alignment routing and the sequence batch-sort executor. Enabling it permits an
 eligible path to attempt Vulkan. It does not make a GPU available, force a GPU
 kernel, or replace the Highway fields above.
+
+Check the runtime before interpreting a GPU request:
+
+```sql
+SELECT is_available,
+       device_name,
+       max_workgroup_count_x,
+       has_scalar_block_layout,
+       device_local_bytes,
+       is_software_device,
+       initialization_error
+FROM bioseq.vulkan_runtime_status();
+```
+
+`is_available` is the first gate. When it is false, read
+`initialization_error` and expect CPU execution or a strict-route error,
+depending on the operation. When it is true, keep the device name and relevant
+capabilities with the plan. `SHOW bioseq.aligner.vulkan.enabled` only reports a
+session preference. It does not replace this runtime check.
 
 For a supported `mmsearch` all-GPU tuple, the additional public controls are
 `bioseq.aligner.vulkan.seed_lookup.enabled`,
@@ -195,6 +220,51 @@ host, `Bioseq Sort Accelerator: vulkan` and a nonzero `Bioseq GPU Sort
 Dispatches` show that a GPU sort actually occurred. A
 `BioseqBatchSortScan` node alone does not say the GPU ran. Likewise,
 enabling `bioseq.aligner.vulkan.enabled` alone does not say the GPU ran.
+
+Use this plan-shape table before investigating device counters:
+
+| Query shape | Expected planning behavior |
+| --- | --- |
+| `ORDER BY seq0` | Eligible for `BioseqBatchSortScan` when the planner switch is on |
+| `ORDER BY seq0 DESC` | Eligible, with the final permutation reversed |
+| `ORDER BY seq0, pk` | Keep an ordinary PostgreSQL sort because there is more than one ordering key |
+| `ORDER BY seq0::text` | Sorts text and does not request the sequence batch sorter |
+| Planner switch off | Keeps the ordinary PostgreSQL sort |
+
+The selected output columns do not have to include the sequence key. The key
+must still be a direct eligible sequence ordering expression. Always explain
+the exact application query because an extra tie-break key or cast changes the
+plan shape.
+
+For a controlled comparison, run the same ordered query twice. The next
+statements assume the four-row `highway_dispatch_sort_reads` fixture still
+exists, so run them after its `INSERT` and before the teardown `DROP TABLE`:
+
+```sql
+SET bioseq.planner.sequence_sort_scan.enabled = off;
+```
+
+```sql
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+```
+
+```sql
+SET bioseq.planner.sequence_sort_scan.enabled = on;
+```
+
+```sql
+SELECT pk
+FROM highway_dispatch_sort_reads
+ORDER BY seq0;
+```
+
+The ordered primary keys must agree. After correctness agrees, compare
+analyzed plans. On a host without an admitted Vulkan route, the custom plan can
+still run with `Bioseq Sort Accelerator: stdc_compare`, the full source row
+count, and zero GPU dispatches. That is a successful CPU fallback, not a GPU
+measurement.
 
 The GPU sorter can first try a prefix payload when sampled leading units vary.
 It accepts that result only if the runtime recorded a dense-scatter dispatch.

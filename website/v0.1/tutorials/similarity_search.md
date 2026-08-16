@@ -104,6 +104,40 @@ The CIGAR string uses run lengths. `M` consumes query and target symbols. `I`
 consumes query symbols. `D` consumes target symbols. For example, `29M` is an
 aligned run of 29 symbols.
 
+For this fixture, the filtered query returns five rows. Targets 1 and 2 each
+return one `29M` alignment. Target 5 returns three `29M` alignments starting at
+target positions 4, 38, and 84. That is a useful first check that the client
+keeps alignment rows separate instead of silently collapsing them by primary
+key.
+
+## Choose alignment projections for the caller
+
+Coordinates and CIGAR are not the only match projections. Ask for scoring and
+seed fields only when the endpoint uses them:
+
+```sql
+SELECT pk,
+       bioseq.score(pk) AS score,
+       bioseq.divergence(pk) AS divergence,
+       bioseq.edit(pk) AS edits,
+       bioseq.seed_count(pk) AS seed_count,
+       bioseq.target_start(pk) AS target_start,
+       bioseq.cigar(pk) AS cigar
+FROM tutorial_mmsearch
+WHERE public.mmsearch(
+    seq0,
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+    aligner_options(best_n => 3)
+)
+ORDER BY score DESC, pk, target_start;
+```
+
+`score` is useful for ordering alignments under one chosen option set.
+`divergence`, `edit`, and `seed_count` are reported properties of that
+alignment. Do not compare scores produced by different option sets as if they
+were one common scale. Keep the options beside any stored result or exported
+report.
+
 ## Bind query text to the target type
 
 Applications normally receive a query as text. Cast it at the SQL boundary so
@@ -229,18 +263,26 @@ not promise result order.
 Query and target intervals are half-open. Calculate lengths by subtraction:
 
 ```sql
-SELECT pk,
-       bioseq.query_start(pk) AS query_start,
-       bioseq.query_end(pk) AS query_end,
-       bioseq.query_end(pk) - bioseq.query_start(pk) AS query_span,
-       bioseq.target_start(pk) AS target_start,
-       bioseq.target_end(pk) AS target_end,
-       bioseq.target_end(pk) - bioseq.target_start(pk) AS target_span
-FROM tutorial_mmsearch
-WHERE public.mmsearch(
-    seq0,
-    $1::bioseq.seq('dna4', 32)
+WITH match_coordinates AS MATERIALIZED (
+    SELECT pk,
+           bioseq.query_start(pk) AS query_start,
+           bioseq.query_end(pk) AS query_end,
+           bioseq.target_start(pk) AS target_start,
+           bioseq.target_end(pk) AS target_end
+    FROM tutorial_mmsearch
+    WHERE public.mmsearch(
+        seq0,
+        $1::bioseq.seq('dna4', 32)
+    )
 )
+SELECT pk,
+       query_start,
+       query_end,
+       query_end - query_start AS query_span,
+       target_start,
+       target_end,
+       target_end - target_start AS target_span
+FROM match_coordinates
 ORDER BY pk, target_start;
 ```
 
@@ -249,20 +291,28 @@ Do not add one to the difference. A span `[10, 15)` contains five positions.
 If the target is a stored slice, target coordinates are relative to that slice:
 
 ```sql
-SELECT pk,
-       100 + bioseq.target_start(pk) AS stored_target_start,
-       100 + bioseq.target_end(pk) AS stored_target_end
-FROM tutorial_mmsearch
-WHERE public.mmsearch(
-    seq0[100:500],
-    $1::bioseq.seq('dna4', 32)
+WITH relative_matches AS MATERIALIZED (
+    SELECT pk,
+           100 AS slice_origin,
+           bioseq.target_start(pk) AS relative_target_start,
+           bioseq.target_end(pk) AS relative_target_end
+    FROM tutorial_mmsearch
+    WHERE public.mmsearch(
+        seq0[100:500],
+        $1::bioseq.seq('dna4', 32)
+    )
 )
+SELECT pk,
+       slice_origin + relative_target_start AS stored_target_start,
+       slice_origin + relative_target_end AS stored_target_end
+FROM relative_matches
 ORDER BY pk, stored_target_start;
 ```
 
 The fixed lower bound becomes the coordinate offset. For a row-dependent or
 negative lower bound, compute the resolved slice origin rather than adding a
-hard-coded value.
+hard-coded value. Keep match helpers as plain projections in the search level,
+then perform coordinate arithmetic in the outer level.
 
 ## Read a search plan in layers
 
@@ -452,6 +502,10 @@ ready state.
 
 An input error with SQLSTATE `22P02` means the query text does not fit the
 declared alphabet.
+
+A valid query with no matches returns zero rows. It is not an input error and
+does not return one row containing false. Treat an empty result separately from
+planner, index, and provider failures.
 
 An incompatible bound type with SQLSTATE `42804` means target and query
 alphabets do not satisfy the same search contract.

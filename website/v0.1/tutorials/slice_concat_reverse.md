@@ -470,7 +470,10 @@ SELECT bioseq.unit_len('ACGTA'::bioseq.seq('dna4', 32));
 ```
 
 Do not compare the two without naming their units. The number of packed units
-depends on alphabet and storage width. The number of symbols does not.
+depends on alphabet and the active physical storage width. The number of
+symbols does not. A build profile can normalize several accepted SQL widths to
+one physical width, so inspect the bound column type with `format_type` before
+using packed-unit counts to compare deployments.
 
 Measure a transformed expression directly:
 
@@ -617,6 +620,24 @@ WHERE read_id = 1;
 -- bioseq:teardown
 DROP TABLE slice_operation_reads;
 ```
+
+For the stored value `ACGTA`, the symbol operations have these stable results:
+
+| Column | Result |
+| --- | --- |
+| `first_symbol` | `A` |
+| `last_symbol` | `A` |
+| `middle` | `CGT` |
+| `clamped` | `ACGTA` |
+| `empty_length` | `0` |
+| `rejoined` | `ACGTA` |
+| `reversed` | `ATGCA` |
+| `reverse_complement` | `TACGT` |
+| `symbols` | `5` |
+
+`packed_units` is deliberately not fixed in this table. It follows the active
+alphabet and physical width. The other values describe symbols and stay the
+same across compatible storage widths.
 
 ## Common mistakes
 

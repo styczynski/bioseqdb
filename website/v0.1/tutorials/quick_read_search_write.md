@@ -61,11 +61,29 @@ CREATE TABLE sample_reads (
 The sequence declaration has two independent parts:
 
 - `dna4` accepts A, C, G, and T
-- `32` selects 32-bit packed storage units
+- `32` requests 32-bit packed storage units
 
 The number `32` is not a maximum sequence length. A value may contain far more
 than 32 bases. Use `bioseq.len(sequence)` when you need its length in biological
 symbols.
+
+The active build profile can normalize accepted widths to one physical width.
+Check what this server bound to the column instead of assuming that the number
+written in the `CREATE TABLE` text stayed distinct:
+
+```sql
+SELECT a.attname AS column_name,
+       format_type(a.atttypid, a.atttypmod) AS active_type
+FROM pg_attribute AS a
+WHERE a.attrelid = 'sample_reads'::regclass
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+ORDER BY a.attnum;
+```
+
+The everyday build profile reports accepted sequence widths as the 64-bit
+physical form. Profiles that retain all requested widths report them
+separately. This does not change the alphabet or the sequence length.
 
 The table access method matters. A regular heap table can hold a
 `bioseq.seq` value, but the sequence-aware storage, index maintenance, and
@@ -211,7 +229,9 @@ ORDER BY read_id;
 ```
 
 Both results are `bigint`. They describe different units and should have names
-that make the distinction visible in reports.
+that make the distinction visible in reports. `unit_len` follows the active
+physical width, so two declarations can report the same count after build
+profile normalization.
 
 Use a slice when a preview is enough:
 
@@ -379,6 +399,12 @@ If PostgreSQL does not select `BioseqScan`, check these facts in order:
 5. The predicate remains a top-level search condition
 6. The session has not disabled the required custom-scan plan
 
+Do not use elapsed time from a first tiny query as a throughput claim. The
+first execution can include planner, scheduler, index, and dispatch setup. Use
+the plan to confirm the route, check ordered results for correctness, then time
+a representative batch with the same projection and filters as the
+application.
+
 ## Update sequence and metadata together
 
 An update can change ordinary columns and the sequence value in the same row:
@@ -486,6 +512,10 @@ DROP TABLE quick_reads;
 For steady writes, set insert maintenance on in the transaction that changes
 sequence values. For bulk loads, keep maintenance off during the load and run
 one explicit `bioseq.update_index` afterward.
+
+Record the relation name, index recipe, and returned `update_index` value in
+the import log. Publish the table only after that statement succeeds. This
+makes a failed load distinguishable from a ready searchable generation.
 
 Read `bioseq.len`, `bioseq.unit_len`, symbol counts, or slices when those are
 all the caller needs. Avoid returning full text payloads on metadata paths.

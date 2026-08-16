@@ -86,6 +86,38 @@ while a query runs on the CPU. A cache mode can be active while a statement
 bypasses the cache. A custom sort node can execute its CPU comparator. Read the
 actual fields.
 
+## Read the PostgreSQL frame around the custom node
+
+Bioseq fields explain Bioseq work. The surrounding PostgreSQL fields explain
+how that work fits into the whole statement. Read both.
+
+For every node, record:
+
+| PostgreSQL field | Practical question |
+| --- | --- |
+| `actual time` | When did this node produce its first and last row |
+| `rows` | How many rows did one loop produce |
+| `loops` | How many times did a parent execute this node |
+| `Buffers` | Which shared, local, or temporary blocks did the statement touch |
+| `Rows Removed by Filter` | How much work survived the printed ordinary filter |
+| `Sort Method` and `Memory` | Did a parent sort stay in memory |
+| `Planning Time` | Was planning material compared with execution for this small query |
+| `Execution Time` | What PostgreSQL observed for the complete statement |
+
+Rows and node times are per-loop averages. Multiply them by loops when you need
+an aggregate estimate. Do not then add every parent and child time together,
+because a parent includes time spent in its children.
+
+Buffers are not sequence symbols or Bioseq packed units. They are PostgreSQL
+buffer blocks. Keep them separate from `Actual Bytes`, index bytes, cache
+payload bytes, and GPU uploaded bytes.
+
+A parent `Sort`, `Aggregate`, `Materialize`, or `Limit` can change both timing
+and row counts after `BioseqScan`. For example, ordering by
+`bioseq.score(pk) DESC, pk` normally leaves a PostgreSQL `Sort` above the custom
+search node. Read the sort key and method before attributing the whole
+statement time to alignment.
+
 ## Identify the custom node first
 
 In text output, look for a line like:
@@ -175,7 +207,7 @@ reading a prebuilt target index for the original stored column.
 ### Bioseq Typmod Coalesce
 
 `Bioseq Typmod Coalesce` reports a compatible query value being re-encoded to
-the target column's alphabet and storage width. This is visible in plain
+the target column's alphabet and active storage width. This is visible in plain
 planning when the planner can derive it.
 
 The coalesce does not convert between different biological alphabets. It handles
@@ -643,6 +675,10 @@ Dispatches` show actual GPU sort work.
 With Vulkan disabled, expect the CPU comparator and zero GPU dispatch counters.
 The Highway and GPU controls tutorial contains a complete A/B query.
 
+The custom sorter is eligible only for one direct sequence ordering key. A
+second key or a text cast can leave an ordinary `Sort` in the plan. Confirm the
+actual sort key before looking for GPU counters.
+
 ## Exact BioseqCacheScan
 
 The optional SQL query cache wraps a finalized plan in `BioseqCacheScan`. In
@@ -907,6 +943,18 @@ Compare full execution work and time.
 
 Seeing a planned Highway architecture does not mean it executed. Use
 `EXPLAIN ANALYZE` and read `Executed Architecture`.
+
+Alignment helpers such as `bioseq.target_start(pk)` should appear as plain
+projections at the search level. If the application needs to add a slice or
+provider offset, materialize those projected aliases and do arithmetic in an
+outer query. This keeps `Bioseq Match Placeholder Sites` visible and avoids
+mistaking an unrewritten helper value for a coordinate.
+
+An ordinary predicate written beside a sequence join is not proof that it
+reduced query or target admission. Read both child plans, planned and actual
+query rows, distinct targets, and the final result boundary. Stage filtered
+input in Bioseq relations or filter materialized match rows when the boundary
+must be explicit.
 
 Finally, do not read a custom node in isolation from its PostgreSQL parents and
 children. A parent sort, aggregate, materialization, or nested loop can dominate

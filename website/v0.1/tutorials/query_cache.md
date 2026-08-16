@@ -16,8 +16,9 @@ CREATE EXTENSION bioseq_cache;
 CREATE EXTENSION bioseq;
 ```
 
-Setting a cache mode before the preload and restart fails instead of running
-without a cache.
+Creating the SQL extension and reading the mode are not enough to prove that
+shared cache state exists. On a server that did not preload the library, the
+mode setting can still be visible while cache planning is inactive.
 
 Put the libraries in this order in `postgresql.conf`:
 
@@ -27,6 +28,29 @@ shared_preload_libraries = 'bioseq_cache,bioseq'
 
 Restart the server after changing that setting. A reload is not enough because
 the cache allocates shared state during server startup.
+
+Verify the startup state as an administrator:
+
+```sql
+SHOW shared_preload_libraries;
+```
+
+```sql
+SELECT bioseq_cache.version();
+```
+
+```sql
+SELECT count(*)
+FROM bioseq_cache.entries();
+```
+
+The preload list must contain both libraries in the configured order, and the
+entry query must complete. An error such as `requested tranche is not
+registered` means this server did not create the shared cache state at startup.
+Restart with the correct preload setting before testing cache hits. Do not
+treat a successful `SHOW bioseq_cache.query_cache.mode` as a readiness check.
+Before the library registers its GUC, PostgreSQL can treat the name as a custom
+placeholder and accept text that the real cache mode would reject.
 
 The mode is a session setting:
 
@@ -272,16 +296,15 @@ partial-recompute path. It does not return a stale partial result as if it were
 complete.
 
 Start with a related query family, for example searches over the same relation
-and sequence predicate with different metadata coverage:
-
-The `$1` values below are application parameters supplied through a prepared
-statement or PostgreSQL's extended query protocol.
+and sequence predicate with different metadata coverage. Prepare both
+statements so every parameter in the example has a real SQL owner:
 
 ```sql
 SET bioseq_cache.query_cache.mode = 'reusable_fragments';
 ```
 
 ```sql
+PREPARE reusable_coverage_12(text) AS
 SELECT pk
 FROM cache_reusable_reads
 WHERE pk IN (1, 2)
@@ -291,10 +314,8 @@ WHERE pk IN (1, 2)
   );
 ```
 
-Then run a related statement whose requested coverage overlaps but is not
-identical:
-
 ```sql
+PREPARE reusable_coverage_13(text) AS
 SELECT pk
 FROM cache_reusable_reads
 WHERE pk IN (1, 3)
@@ -302,6 +323,14 @@ WHERE pk IN (1, 3)
       seq0,
       $1::bioseq.seq('dna4', 32)
   );
+```
+
+Produce the first coverage request:
+
+```sql
+EXECUTE reusable_coverage_12(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+);
 ```
 
 Whether branches can be reused depends on the provider recipe, parameters,
@@ -312,13 +341,9 @@ Inspect the second statement with analyzed structured output:
 
 ```sql
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, FORMAT JSON)
-SELECT pk
-FROM cache_reusable_reads
-WHERE pk IN (1, 3)
-  AND public.mmsearch(
-      seq0,
-      $1::bioseq.seq('dna4', 32)
-  );
+EXECUTE reusable_coverage_13(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'
+);
 ```
 
 The reusable node reports:
@@ -350,6 +375,13 @@ and the residual predicate before deciding which portion was reused.
 
 The optional `Provider` section contains provider-specific coverage detail. Its
 fields are supplied by that provider rather than by the query-cache core.
+
+Release both prepared statements after the check:
+
+```sql
+DEALLOCATE reusable_coverage_12;
+DEALLOCATE reusable_coverage_13;
+```
 
 ## Inspect the current reusable generation
 
@@ -501,6 +533,34 @@ FROM bioseq_cache.stats();
 Take a before and after snapshot around a controlled query when several
 applications share the server. A single final counter row cannot attribute work
 to one statement.
+
+One SQL-only snapshot pattern is:
+
+```sql
+CREATE TEMP TABLE cache_stats_before AS
+SELECT *
+FROM bioseq_cache.stats();
+```
+
+Run the cold and warm statements, then calculate deltas:
+
+```sql
+SELECT after.produced - before.produced AS produced_delta,
+       after.completed_hits - before.completed_hits AS completed_hit_delta,
+       after.inflight_waits - before.inflight_waits AS inflight_wait_delta,
+       after.reuse_hits - before.reuse_hits AS reuse_hit_delta,
+       after.fallbacks - before.fallbacks AS fallback_delta,
+       after.invalidations - before.invalidations AS invalidation_delta
+FROM cache_stats_before AS before
+CROSS JOIN bioseq_cache.stats() AS after;
+```
+
+```sql
+DROP TABLE cache_stats_before;
+```
+
+Keep the test session otherwise idle. The counters are server-wide, so traffic
+from other sessions can still contribute to the delta.
 
 ## Diagnostic permissions
 
