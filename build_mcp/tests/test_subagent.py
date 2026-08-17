@@ -29,6 +29,7 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.real_reconcile_agents = subject._reconcile_agents
         self.real_refresh_quotas = subject._refresh_quotas
         self.real_launch_runtime = subject._launch_runtime
+        self.real_identity_is_live = subject._identity_is_live
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
@@ -309,6 +310,117 @@ class PersistentSubagentContractTest(unittest.TestCase):
         self.assertIn("disabled", cursor_args)
         self.assertIn("composer-2.5", cursor_args)
         self.assertEqual(cursor_args[-2:], ["--resume", "chat-456"])
+
+    def test_terminal_runtime_cleanup_flushes_logs_and_destroys_session(self) -> None:
+        agent = self._agent_record(1, status="KILLED")
+        agent["runtime_identity"] = {"pid": 42001, "started": "runtime-1"}
+        pane = {
+            "pane_target": "%1",
+            "pane_pid": 42001,
+            "pane_dead": True,
+            "pane_dead_status": 0,
+            "repository_marker": subject._REPOSITORY_KEY,
+            "agent_marker": "1",
+            "pane_command": "true",
+        }
+        dead_pipe = subprocess.CompletedProcess([], 1, "", "pane is dead")
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(
+            subject, "_tmux_session_observation", side_effect=[True, False],
+        ), mock.patch.object(
+            subject, "_tmux_pane_info", return_value=pane,
+        ), mock.patch.object(
+            subject, "_identity_is_live", return_value=False,
+        ), mock.patch.object(
+            subject, "_tmux", side_effect=[dead_pipe, completed],
+        ) as tmux:
+            subject._destroy_owned_tmux_session(agent)
+        self.assertEqual(
+            [call.args[0] for call in tmux.call_args_list],
+            [
+                ["pipe-pane", "-t", "%1"],
+                ["kill-session", "-t", "=test-agent-1"],
+            ],
+        )
+
+    def test_runtime_identity_rejects_reused_pid_in_another_session(self) -> None:
+        expected = {
+            "pid": 42001,
+            "started": "Mon Aug 17 00:00:00 2026",
+            "session": 42001,
+        }
+        reused = subject._ProcessIdentity(
+            pid=42001,
+            ppid=1,
+            pgid=42001,
+            session=0,
+            started="Mon Aug 17 00:00:00 2026",
+            command="aslmanager",
+        )
+        with mock.patch.object(
+            subject, "_capture_process_identity", return_value=reused,
+        ):
+            self.assertFalse(self.real_identity_is_live(expected))
+        self.assertFalse(subject._same_identity_dict(
+            expected,
+            {**expected, "session": 0},
+        ))
+
+    def test_reconcile_reaps_and_skips_stable_killed_agents(self) -> None:
+        self._initialize_root()
+
+        def populate(state) -> None:
+            state["agents"]["1"] = self._agent_record(1, status="KILLED")
+            state["next_agent_id"] = 2
+
+        self._mutate_state(populate)
+        with mock.patch.object(
+            subject, "_destroy_owned_tmux_session",
+        ) as destroy, mock.patch.object(
+            subject, "_tmux_session_observation",
+            side_effect=AssertionError("stable KILLED agent was reconciled twice"),
+        ):
+            self.real_reconcile_agents()
+        destroy.assert_called_once()
+        self.assertEqual(destroy.call_args.args[0]["id"], 1)
+        self.assertEqual(self._state()["agents"]["1"]["status"], "KILLED")
+
+    def test_reconcile_never_captures_a_dead_pane_reused_pid(self) -> None:
+        self._initialize_root()
+        original_identity = {
+            "pid": 42001,
+            "started": "Sun Aug 16 23:59:59 2026",
+            "session": 42001,
+        }
+
+        def populate(state) -> None:
+            record = self._agent_record(1)
+            record["runtime_identity"] = original_identity
+            state["agents"]["1"] = record
+            state["next_agent_id"] = 2
+
+        self._mutate_state(populate)
+        dead_pane = {
+            "pane_target": "%1",
+            "pane_pid": 42001,
+            "pane_dead": True,
+            "pane_dead_status": 0,
+            "repository_marker": subject._REPOSITORY_KEY,
+            "agent_marker": "1",
+            "pane_command": "codex",
+        }
+        with mock.patch.object(
+            subject, "_tmux_session_observation", return_value=True,
+        ), mock.patch.object(
+            subject, "_tmux_pane_info", return_value=dead_pane,
+        ), mock.patch.object(
+            subject, "_capture_process_identity",
+            side_effect=AssertionError("dead pane PID must not be captured"),
+        ):
+            self.real_reconcile_agents()
+        record = self._state()["agents"]["1"]
+        self.assertEqual(record["status"], "KILLED")
+        self.assertEqual(record["runtime_identity"], original_identity)
 
     def test_cursor_stream_init_result_and_usage_are_parsed_exactly(self) -> None:
         log_path = Path(self.temporary.name) / "cursor.jsonl"
