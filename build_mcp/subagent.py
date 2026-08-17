@@ -537,7 +537,13 @@ def _identity_is_live(value: object) -> bool:
     if not isinstance(pid, int) or not isinstance(started, str):
         return False
     observed = _capture_process_identity(pid)
-    return observed is not None and observed.started == started
+    if observed is None or observed.started != started:
+        return False
+    expected_session = value.get("session")
+    return (
+        not isinstance(expected_session, int)
+        or observed.session == expected_session
+    )
 
 
 def _process_anchor() -> _ProcessIdentity | None:
@@ -567,6 +573,11 @@ def _same_identity_dict(left: object, right: object) -> bool:
         and isinstance(right, dict)
         and left.get("pid") == right.get("pid")
         and left.get("started") == right.get("started")
+        and (
+            not isinstance(left.get("session"), int)
+            or not isinstance(right.get("session"), int)
+            or left.get("session") == right.get("session")
+        )
     )
 
 
@@ -1796,49 +1807,71 @@ def _owned_runtime_observation(
     return not bool(pane.get("pane_dead")), pane
 
 
-def _kill_runtime(agent: Mapping[str, Any]) -> None:
-    target = agent.get("tmux_pane") or agent.get("tmux_session")
-    if not isinstance(target, str) or not target:
+def _destroy_owned_tmux_session(agent: Mapping[str, Any]) -> None:
+    """Destroy one terminal agent session after verifying its ownership markers."""
+    session_name = agent.get("tmux_session")
+    if not isinstance(session_name, str) or not session_name:
         return
-    session_observation = _tmux_session_observation(
-        str(agent.get("tmux_session", "")),
-    )
+    session_observation = _tmux_session_observation(session_name)
     if session_observation is None:
         raise SubagentError(
             "RUNTIME_UNKNOWN",
-            "tmux session availability could not be verified; refusing to release budget",
+            "tmux session availability could not be verified; refusing to destroy it",
         )
     if session_observation is False:
         if _identity_is_live(agent.get("runtime_identity")):
-            raise SubagentError(
-                "RUNTIME_UNKNOWN",
-                "tmux reports no session but the persisted process identity is still live; refusing to release budget",
+            runtime_identity = agent.get("runtime_identity")
+            pid = (
+                runtime_identity.get("pid")
+                if isinstance(runtime_identity, dict) else None
             )
+            observed = (
+                _capture_process_identity(pid) if isinstance(pid, int) else None
+            )
+            if observed is not None and _pane_matches_vendor(agent, observed.command):
+                raise SubagentError(
+                    "RUNTIME_UNKNOWN",
+                    "tmux reports no session but the persisted vendor process is still live",
+                )
         return
+
+    target = agent.get("tmux_pane") or session_name
+    if not isinstance(target, str) or not target:
+        raise SubagentError("RUNTIME_MISSING", "agent has no persisted tmux target")
     pane = _tmux_pane_info(target)
     if pane is None:
         raise SubagentError("RUNTIME_MISSING", "agent tmux pane is not observable")
     _verify_tmux_ownership(agent, pane)
-    # respawn-pane -k kills exactly this pane's foreground process tree.  The
-    # short-lived true command exits immediately and remain-on-exit preserves
-    # the dead pane, scrollback and pipe log for later repurpose/logs.
-    killed = _tmux([
-        "respawn-pane", "-k", "-t", target, "--", "/usr/bin/true",
-    ], timeout=10)
+
+    # Closing the pipe first flushes the durable aggregate and generation logs
+    # and lets the tee process exit when the dedicated session is destroyed.
+    # tmux can reject pipe-pane for an already-dead remain-on-exit pane.  The
+    # following session kill still closes that pipe and reaps its tee process.
+    _tmux(["pipe-pane", "-t", str(pane["pane_target"])], timeout=5)
+    killed = _tmux(["kill-session", "-t", f"={session_name}"], timeout=10)
     if killed.returncode != 0:
         raise SubagentError(
-            "RUNTIME_ERROR", "tmux could not kill the agent pane",
+            "RUNTIME_ERROR",
+            "tmux could not destroy the terminal agent session",
             details=killed.stderr.strip(),
         )
+
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
-        observed = _tmux_pane_info(target)
-        if observed is not None and observed.get("pane_dead"):
+        if (
+            _tmux_session_observation(session_name) is False
+            and not _identity_is_live(agent.get("runtime_identity"))
+        ):
             return
         time.sleep(0.05)
     raise SubagentError(
-        "RUNTIME_ERROR", "tmux accepted the kill but the owned pane did not reach a dead state",
+        "RUNTIME_ERROR",
+        "tmux accepted the session kill but the owned runtime did not disappear",
     )
+
+
+def _kill_runtime(agent: Mapping[str, Any]) -> None:
+    _destroy_owned_tmux_session(agent)
 
 
 def _start_idle_runtime(agent: Mapping[str, Any]) -> dict[str, Any]:
@@ -2328,10 +2361,38 @@ def _clear_pending_metadata(agent: dict[str, Any]) -> None:
 def _reconcile_agents() -> None:
     with _registry_lock():
         state = _load_state_locked()
+        cleanup_changed = False
+        for agent in state["agents"].values():
+            if (
+                not isinstance(agent, dict)
+                or agent.get("id") == 0
+                or agent.get("status") != "KILLED"
+            ):
+                continue
+            try:
+                _destroy_owned_tmux_session(agent)
+            except Exception as exc:
+                diagnostic = str(exc)
+                if agent.get("runtime_cleanup_error") != diagnostic:
+                    agent["runtime_cleanup_error"] = diagnostic
+                    cleanup_changed = True
+            else:
+                if agent.pop("runtime_cleanup_error", None) is not None:
+                    cleanup_changed = True
+                for field in ("tmux_pane", "pane_pid", "runtime_identity"):
+                    if agent.get(field) is not None:
+                        agent[field] = None
+                        cleanup_changed = True
+        if cleanup_changed:
+            _save_state_locked(state)
         snapshots = [
             dict(agent)
             for agent in state["agents"].values()
-            if isinstance(agent, dict) and agent.get("id") != 0
+            if (
+                isinstance(agent, dict)
+                and agent.get("id") != 0
+                and agent.get("status") != "KILLED"
+            )
         ]
     observations: dict[int, dict[str, Any]] = {}
     for agent in snapshots:
@@ -2368,7 +2429,10 @@ def _reconcile_agents() -> None:
         if pane is not None and not marker_mismatch:
             observed_identity = (
                 _identity_dict(_capture_process_identity(pane["pane_pid"]))
-                if isinstance(pane.get("pane_pid"), int) else None
+                if (
+                    not pane.get("pane_dead", True)
+                    and isinstance(pane.get("pane_pid"), int)
+                ) else None
             )
             observation.update({
                 "tmux_pane": pane.get("pane_target"),
@@ -3900,6 +3964,9 @@ def _handle_kill(arguments: Mapping[str, object]) -> str:
         current["pending_description"] = None
         current["pending_label"] = None
         current["pending_highest_spawn_tier"] = None
+        current["tmux_pane"] = None
+        current["pane_pid"] = None
+        current["runtime_identity"] = None
         current["last_error"] = None
         _save_state_locked(state)
         budget_used = _live_budget(state)
