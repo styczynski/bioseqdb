@@ -269,7 +269,7 @@ TEST_CASE("grouped-SoA spill-run exact SIMD binds the canonical shape profile",
     }
 
     const auto require_profile_rejection =
-        [&spill_exact, &require_wire_error](grouped_soa_generation_options options) {
+        [&spill_exact](grouped_soa_generation_options options) {
             fake_fragment_storage<> storage;
             auto spill = spill_exact(storage);
             REQUIRE(spill.has_value());

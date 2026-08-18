@@ -26,56 +26,24 @@ extern "C" {
 
 export module bioseq.postgres.table:custom_scan_runtime_support;
 
+export import :custom_scan_plan_abi_constants;
+
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
+import bioseq.common.seqan_adapter;
+import bioseq.indexing.type;
+import bioseq.parallelism.memory_admission;
+import bioseq.pipeline.minimap_port;
+import bioseq.pipeline.pipe;
+import bioseq.pipeline.stats;
+import bioseq.postgres.scheduler.dispatch_buffer.api;
+import bioseq.postgres.storage.scanner;
+import bioseq.postgres.table.alignment_execution;
 import bioseq.postgres.table.scan_state;
 import bioseq.postgres.table.sql_row_codecs;
 import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-using namespace bioseq::postgres::support;
+import bioseq.sequences;
 
 export {
 
@@ -357,31 +325,6 @@ export {
         scan_state* owning_state = nullptr;
         bool cleanup_done = false;
     };
-
-    /* Internal planner/executor ABI for the two-child join. */
-    inline constexpr int k_bioseq_batch_join_plan_version = 3;
-    inline constexpr int k_bioseq_locator_passthrough_magic = 0x424c5031; /* BLP1 */
-    inline constexpr int k_bioseq_slice_source_magic = 0x42535331;        /* BSS1 */
-    inline constexpr int k_bioseq_slice_source_version = 3;
-    inline constexpr int k_bioseq_mmsearch_owner_magic = 0x424d4f31; /* BMO1 */
-    inline constexpr int k_bioseq_mmsearch_owner_version = 2;
-    inline constexpr int k_bioseq_base_match_owner_plan_magic = 0x424d5031; /* BMP1 */
-    inline constexpr int k_bioseq_base_match_owner_plan_version = 2;
-    inline constexpr int k_bioseq_base_match_owner_plan_fields = 7;
-    inline constexpr int k_bioseq_batch_join_path_private_fields = 13;
-    inline constexpr int k_bioseq_batch_join_private_fields = 18;
-
-    /* One-child owner used when either mmsearch operand is a lazy recipe.  The
-     * child is a reconstructed core INNER join with the exact mmsearch
-     * RestrictInfo removed, wrapped in BioseqSliceProject to compute the two
-     * per-row operand Datums. */
-    inline constexpr int k_bioseq_per_row_join_plan_version = 4;
-    inline constexpr int k_bioseq_per_row_join_path_private_fields = 13;
-    inline constexpr int k_bioseq_per_row_join_private_fields = 19;
-
-    inline constexpr int k_bioseq_match_owner_descriptor_magic = 0x424d4231; /* BMB1 */
-    inline constexpr int k_bioseq_match_owner_descriptor_version = 1;
-    inline constexpr int k_bioseq_match_owner_descriptor_fields = 6;
 
     /** @brief Defines stable fields in a serialized match-owner descriptor. */
     enum match_owner_descriptor_index : int {

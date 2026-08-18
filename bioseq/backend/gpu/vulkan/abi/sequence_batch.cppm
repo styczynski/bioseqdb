@@ -7,19 +7,18 @@
  */
 module;
 
-#include <cstdint>
-#include <type_traits>
-
 export module bioseq.gpu.vulkan.abi:sequence_batch;
+
+import std;
 
 export namespace bioseq::gpu::vulkan {
 
 /** @brief Tags the role and strand routing of one packed sequence record. */
 enum class gpu_sequence_record_flags : std::uint32_t {
-    none = 0u,///< No routing flags set.
-    reverse_complement = 1u << 0u,///< Packed bytes are reverse-complemented on read.
-    target_record = 1u << 1u,///< Record describes a target sequence slice.
-    query_record = 1u << 2u,///< Record describes a query sequence slice.
+    none = 0u,                     ///< No routing flags set.
+    reverse_complement = 1u << 0u, ///< Packed bytes are reverse-complemented on read.
+    target_record = 1u << 1u,      ///< Record describes a target sequence slice.
+    query_record = 1u << 2u,       ///< Record describes a query sequence slice.
 };
 
 /**
@@ -28,12 +27,10 @@ enum class gpu_sequence_record_flags : std::uint32_t {
  * @param[in] right Second routing mask.
  * @return Bitwise union of both masks.
  */
-[[nodiscard]] constexpr gpu_sequence_record_flags operator|(
-    gpu_sequence_record_flags left,
-    gpu_sequence_record_flags right) noexcept {
-    return static_cast<gpu_sequence_record_flags>(
-        static_cast<std::uint32_t>(left)
-        | static_cast<std::uint32_t>(right));
+[[nodiscard]] constexpr gpu_sequence_record_flags
+operator|(gpu_sequence_record_flags left, gpu_sequence_record_flags right) noexcept {
+    return static_cast<gpu_sequence_record_flags>(static_cast<std::uint32_t>(left) |
+                                                  static_cast<std::uint32_t>(right));
 }
 
 /**
@@ -56,7 +53,7 @@ struct gpu_sequence_view_wire {
     std::uint32_t char_mask;         ///< traits::char_mask truncated to 32 bits.
     std::uint32_t padding_letters;   ///< sequence padding().
     std::uint32_t alphabet_kind;     ///< alphabet_kernel_kind from the upload view.
-    std::uint32_t reserved;///< Reserved for ABI growth, must be zero on upload.
+    std::uint32_t reserved;          ///< Reserved for ABI growth, must be zero on upload.
 };
 
 /**
@@ -66,15 +63,15 @@ struct gpu_sequence_view_wire {
  * are written by the count pass and consumed by later seed and chain dispatches.
  */
 struct gpu_query_record_wire {
-    gpu_sequence_view_wire sequence;///< Packed query bytes and alphabet traits.
-    std::uint64_t minimizer_offset;  ///< Output minimizer-word offset in records.
-    std::uint64_t minimizer_count;   ///< Minimizer count filled by count submit.
-    std::uint64_t anchor_offset;     ///< Output anchor array offset in records.
-    std::uint64_t anchor_count;      ///< Anchor count filled by count submit.
-    std::uint64_t chain_range_offset;///< Output chain-range array offset in records.
-    std::uint64_t chain_range_count;///< Chain-range count filled by count submit.
-    std::uint32_t record_id;///< Stable query record identifier for the batch.
-    std::uint32_t flags;///< `gpu_sequence_record_flags` bit mask.
+    gpu_sequence_view_wire sequence;  ///< Packed query bytes and alphabet traits.
+    std::uint64_t minimizer_offset;   ///< Output minimizer-word offset in records.
+    std::uint64_t minimizer_count;    ///< Minimizer count filled by count submit.
+    std::uint64_t anchor_offset;      ///< Output anchor array offset in records.
+    std::uint64_t anchor_count;       ///< Anchor count filled by count submit.
+    std::uint64_t chain_range_offset; ///< Output chain-range array offset in records.
+    std::uint64_t chain_range_count;  ///< Chain-range count filled by count submit.
+    std::uint32_t record_id;          ///< Stable query record identifier for the batch.
+    std::uint32_t flags;              ///< `gpu_sequence_record_flags` bit mask.
 };
 
 /**
@@ -84,13 +81,13 @@ struct gpu_query_record_wire {
  * target coordinate space.
  */
 struct gpu_target_record_wire {
-    gpu_sequence_view_wire sequence;///< Packed target bytes and alphabet traits.
-    std::uint64_t target_global_bp_offset;///< Base-pair origin of this slice in the full target.
-    std::uint64_t target_id;///< Stable target identifier within the batch.
-    std::uint64_t minimizer_pair_offset;///< Minimizer-pair array offset in records.
-    std::uint64_t minimizer_pair_count;///< Number of minimizer pairs for this target slice.
-    std::uint32_t record_id;///< Stable target record identifier for the batch.
-    std::uint32_t flags;///< `gpu_sequence_record_flags` bit mask.
+    gpu_sequence_view_wire sequence;       ///< Packed target bytes and alphabet traits.
+    std::uint64_t target_global_bp_offset; ///< Base-pair origin of this slice in the full target.
+    std::uint64_t target_id;               ///< Stable target identifier within the batch.
+    std::uint64_t minimizer_pair_offset;   ///< Minimizer-pair array offset in records.
+    std::uint64_t minimizer_pair_count;    ///< Number of minimizer pairs for this target slice.
+    std::uint32_t record_id;               ///< Stable target record identifier for the batch.
+    std::uint32_t flags;                   ///< `gpu_sequence_record_flags` bit mask.
 };
 static_assert(std::is_standard_layout_v<gpu_sequence_view_wire>);
 static_assert(std::is_standard_layout_v<gpu_query_record_wire>);

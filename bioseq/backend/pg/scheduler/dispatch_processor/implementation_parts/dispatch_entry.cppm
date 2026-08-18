@@ -29,6 +29,7 @@
 export module bioseq.postgres.scheduler.dispatch_processor:dispatch_entry;
 
 import bioseq.postgres.scheduler.dispatch_processor;
+import bioseq.postgres.scheduler.dispatch_processor.effective_minimap_parameters;
 
 import :highway_registry;
 import :cpu_preparation;
@@ -221,24 +222,7 @@ batch_processor::cpu_prepared_index_group* batch_processor::cpu_prepared_target:
  */
 minimap2_parameters batch_processor::effective_params_for_pair(const minimap2_parameters& base,
                                                                const std::size_t min_bp) noexcept {
-    const bool all_defaults = base.kmer_size == 15 && base.window_size == 10 &&
-                              base.min_chain_score == 40 && base.min_seed_count == 3;
-    if (!all_defaults) {
-        return base;
-    }
-    minimap2_parameters scaled = base;
-    if (min_bp < 50) {
-        scaled.kmer_size = 8;
-        scaled.window_size = 3;
-        scaled.min_chain_score = 10;
-        scaled.min_seed_count = 1;
-    } else if (min_bp < 200) {
-        scaled.kmer_size = 10;
-        scaled.window_size = 5;
-        scaled.min_chain_score = 20;
-        scaled.min_seed_count = 2;
-    }
-    return scaled;
+    return effective_minimap_parameters_for_pair(base, min_bp);
 }
 
 } // namespace bioseq::simd

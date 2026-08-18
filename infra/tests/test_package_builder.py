@@ -2286,6 +2286,539 @@ class CommittedInputEquivalenceTests(unittest.TestCase):
             )
 
 
+class ControllerReceiptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.matrix = package_builder.load_matrix()
+        self.revision = "a" * 40
+        self.lock_sha256 = "b" * 64
+        self.run_id = f"20260817T123305Z-{self.revision[:12]}"
+        self.owner_token = "owner/repository:package-release:" + self.revision
+        self.owner_sha256 = hashlib.sha256(
+            self.owner_token.encode("utf-8")
+        ).hexdigest()
+        self.builders = {
+            "arm64": package_builder.Builder(
+                "arm64",
+                "i-0aaabbbcccdddeee1",
+                "c7g.xlarge",
+                "arm64",
+                "203.0.113.1",
+                "10.0.0.1",
+                "ami-0123456789abcdef0",
+                availability_zone="us-east-1a",
+                ssh_access="ec2-instance-connect",
+            ),
+            "x64": package_builder.Builder(
+                "x64",
+                "i-0123456789abcdef0",
+                "m4.xlarge",
+                "x86_64",
+                "203.0.113.2",
+                "10.0.0.2",
+                "ami-0123456789abcdef1",
+                availability_zone="us-east-1b",
+                ssh_access="ec2-instance-connect",
+            ),
+        }
+        self.records = {
+            "arm64": {"State": {"Name": "stopped"}},
+            "x64": {"State": {"Name": "running"}},
+        }
+        self.outputs = {
+            "account_id": "123456789012",
+            "caller_arn": "arn:aws:iam::123456789012:user/ci",
+            "region": "us-east-1",
+            "package_bucket_name": "package-bucket",
+            "signing_key_secret_arn": (
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:key"
+            ),
+            "ssh_private_key_path": "/tmp/key",
+        }
+
+    def receipt(self, *, active: bool = False) -> dict[str, object]:
+        value = package_builder.new_controller_receipt(
+            matrix=self.matrix,
+            records=self.records,
+            builders=self.builders,
+            outputs=self.outputs,
+            region="us-east-1",
+            owner_token=self.owner_token,
+            run_id=self.run_id,
+            source_revision=self.revision,
+            poetry_lock_sha256=self.lock_sha256,
+        )
+        if active:
+            value["state"] = "active"
+            for builder in value["builders"].values():
+                builder["launch_acknowledged"] = True
+                builder["python_environment"] = {
+                    "venv_path": (
+                        package_builder.REMOTE_POETRY_VENV_ROOT
+                        + "/"
+                        + self.lock_sha256
+                    ),
+                    "python": "3.12.3",
+                    "poetry": "1.8.5",
+                }
+            package_builder.require_controller_receipt(
+                value, matrix=self.matrix, label="active receipt"
+            )
+        return value
+
+    def args(self, *, wait_seconds: int = 0) -> argparse.Namespace:
+        return argparse.Namespace(
+            region="us-east-1",
+            existing_only=True,
+            ssh_key="/tmp/key",
+            access_receipt="/tmp/access.json",
+            receipt="/tmp/controller.json",
+            source_revision=self.revision,
+            owner_token=self.owner_token,
+            wait_seconds=wait_seconds,
+            optimization="O3",
+        )
+
+    def test_controller_preparation_proves_quiescence_before_mutation(self) -> None:
+        builder = self.builders["arm64"]
+        key_path = Path("/tmp/key")
+        remote_source = "/opt/bioseq-package-sources/revision"
+        environment = package_builder.PoetryEnvironment(
+            self.lock_sha256,
+            f"{package_builder.REMOTE_POETRY_VENV_ROOT}/{self.lock_sha256}",
+            "3.12.3",
+            "1.8.5",
+        )
+        events: list[str] = []
+
+        with mock.patch.object(
+            package_builder,
+            "wait_for_ssh",
+            side_effect=lambda *_args: events.append("wait"),
+        ), mock.patch.object(
+            package_builder,
+            "remote_package_quiescence_script",
+            return_value="quiescence-probe",
+        ), mock.patch.object(
+            package_builder,
+            "ssh_run",
+            side_effect=lambda *_args, **_kwargs: events.append("quiescence"),
+        ), mock.patch.object(
+            package_builder,
+            "sync_committed_source",
+            side_effect=lambda *_args: events.append("sync") or remote_source,
+        ), mock.patch.object(
+            package_builder,
+            "reconcile_remote_bootstrap",
+            side_effect=lambda *_args: events.append("bootstrap"),
+        ), mock.patch.object(
+            package_builder,
+            "force_remote_package_reconfigure",
+            side_effect=lambda *_args: events.append("reconfigure"),
+        ), mock.patch.object(
+            package_builder,
+            "prepare_remote_poetry_environment",
+            side_effect=lambda *_args: events.append("poetry") or environment,
+        ):
+            observed_source, observed_environment = (
+                package_builder.prepare_controller_builder(
+                    builder,
+                    key_path,
+                    self.revision,
+                    self.lock_sha256,
+                )
+            )
+
+        self.assertEqual(observed_source, remote_source)
+        self.assertIs(observed_environment, environment)
+        self.assertEqual(
+            events,
+            ["wait", "quiescence", "sync", "bootstrap", "reconfigure", "poetry"],
+        )
+
+    def test_receipt_is_strict_versioned_and_contains_no_private_key(self) -> None:
+        receipt = self.receipt()
+        self.assertEqual(receipt["schema_revision"], 1)
+        self.assertEqual(receipt["state"], "prepared")
+        self.assertEqual(
+            receipt["store_key"],
+            f"bioseq/packages/controllers/v1/{self.revision}.json",
+        )
+        self.assertTrue(receipt["builders"]["arm64"]["stop_owned"])
+        self.assertFalse(receipt["builders"]["x64"]["stop_owned"])
+        encoded = json.dumps(receipt)
+        self.assertNotIn("PRIVATE", encoded)
+        self.assertNotIn("ssh_private_key_path", encoded)
+        tampered = {**receipt, "unexpected": True}
+        with self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "unexpected keys"
+        ):
+            package_builder.require_controller_receipt(
+                tampered, matrix=self.matrix, label="tampered receipt"
+            )
+
+    def test_launched_receipt_requires_exact_python_provenance(self) -> None:
+        receipt = self.receipt(active=True)
+        receipt["builders"]["x64"]["python_environment"] = None
+        with self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "lacks Python provenance"
+        ):
+            package_builder.require_controller_receipt(
+                receipt, matrix=self.matrix, label="tampered active receipt"
+            )
+
+    def test_exact_existing_active_receipt_never_relaunches(self) -> None:
+        receipt = self.receipt(active=True)
+        context = (
+            self.outputs,
+            self.builders,
+            self.records,
+            Path("/tmp/key"),
+            Path("/tmp/controller.json"),
+            self.owner_sha256,
+        )
+        with mock.patch.object(
+            package_builder, "controller_context", return_value=context
+        ), mock.patch.object(
+            package_builder, "commit_id", return_value=self.revision
+        ), mock.patch.object(
+            package_builder, "_require_controller_launch_inputs"
+        ), mock.patch.object(
+            package_builder,
+            "committed_poetry_lock_sha256",
+            return_value=self.lock_sha256,
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "start_builders"
+        ) as start, mock.patch.object(
+            package_builder, "launch_remote_build"
+        ) as launch:
+            observed = package_builder.launch_controller_run(self.args())
+        self.assertIs(observed, receipt)
+        start.assert_not_called()
+        launch.assert_not_called()
+
+    def test_prepared_retry_observes_launched_units_before_any_reconfigure(self) -> None:
+        receipt = self.receipt()
+        for builder in receipt["builders"].values():
+            builder["python_environment"] = {
+                "venv_path": (
+                    package_builder.REMOTE_POETRY_VENV_ROOT
+                    + "/"
+                    + self.lock_sha256
+                ),
+                "python": "3.12.3",
+                "poetry": "1.8.5",
+            }
+        context = (
+            self.outputs,
+            self.builders,
+            self.records,
+            Path("/tmp/key"),
+            Path("/tmp/controller.json"),
+            self.owner_sha256,
+        )
+        status = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "running",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        with mock.patch.object(
+            package_builder, "controller_context", return_value=context
+        ), mock.patch.object(
+            package_builder, "commit_id", return_value=self.revision
+        ), mock.patch.object(
+            package_builder, "_require_controller_launch_inputs"
+        ), mock.patch.object(
+            package_builder,
+            "committed_poetry_lock_sha256",
+            return_value=self.lock_sha256,
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "start_builders", return_value=self.records
+        ), mock.patch.object(
+            package_builder, "refreshed_builders", return_value=self.builders
+        ), mock.patch.object(
+            package_builder, "wait_for_ssh"
+        ), mock.patch.object(
+            package_builder, "remote_unit_status", return_value=status
+        ), mock.patch.object(
+            package_builder, "exact_worker_processes", return_value=(123,)
+        ), mock.patch.object(
+            package_builder,
+            "active_package_units",
+            side_effect=lambda builder, _key: (
+                receipt["builders"][builder.architecture]["unit_name"],
+            ),
+        ), mock.patch.object(
+            package_builder,
+            "persist_controller_receipt",
+            side_effect=lambda _path, value, **_kwargs: value,
+        ), mock.patch.object(
+            package_builder, "force_remote_package_reconfigure"
+        ) as reconfigure, mock.patch.object(
+            package_builder, "launch_remote_build"
+        ) as launch:
+            observed = package_builder.launch_controller_run(self.args())
+        self.assertEqual(observed["state"], "active")
+        self.assertTrue(all(
+            value["launch_acknowledged"]
+            for value in observed["builders"].values()
+        ))
+        reconfigure.assert_not_called()
+        launch.assert_not_called()
+
+    def test_active_attach_is_explicitly_nonterminal_and_never_launches(self) -> None:
+        receipt = self.receipt(active=True)
+        context = (
+            self.outputs,
+            self.builders,
+            self.records,
+            Path("/tmp/key"),
+            Path("/tmp/controller.json"),
+            self.owner_sha256,
+        )
+        status = {
+            "LoadState": "loaded",
+            "ActiveState": "active",
+            "SubState": "running",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        with mock.patch.object(
+            package_builder, "controller_context", return_value=context
+        ), mock.patch.object(
+            package_builder,
+            "require_controller_source_equivalence",
+            return_value=self.lock_sha256,
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "wait_for_ssh"
+        ), mock.patch.object(
+            package_builder, "remote_unit_status", return_value=status
+        ), mock.patch.object(
+            package_builder, "exact_worker_processes", return_value=(123,)
+        ), mock.patch.object(
+            package_builder,
+            "active_package_units",
+            side_effect=lambda builder, _key: (
+                receipt["builders"][builder.architecture]["unit_name"],
+            ),
+        ), mock.patch.object(
+            package_builder,
+            "persist_controller_receipt",
+            side_effect=lambda _path, value, **_kwargs: value,
+        ), mock.patch.object(
+            package_builder, "fetch_completed_manifest"
+        ) as fetch, mock.patch.object(
+            package_builder, "launch_remote_build"
+        ) as launch:
+            observed = package_builder.attach_controller_run(self.args())
+        self.assertEqual(observed["state"], "active")
+        fetch.assert_not_called()
+        launch.assert_not_called()
+
+    def test_failed_attach_persists_concise_terminal_diagnostics(self) -> None:
+        receipt = self.receipt(active=True)
+        context = (
+            self.outputs,
+            self.builders,
+            self.records,
+            Path("/tmp/key"),
+            Path("/tmp/controller.json"),
+            self.owner_sha256,
+        )
+        status = {
+            "LoadState": "loaded",
+            "ActiveState": "failed",
+            "SubState": "failed",
+            "Result": "exit-code",
+            "ExecMainStatus": "17",
+        }
+        persisted: list[dict[str, object]] = []
+        with mock.patch.object(
+            package_builder, "controller_context", return_value=context
+        ), mock.patch.object(
+            package_builder,
+            "require_controller_source_equivalence",
+            return_value=self.lock_sha256,
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "wait_for_ssh"
+        ), mock.patch.object(
+            package_builder, "remote_unit_status", return_value=status
+        ), mock.patch.object(
+            package_builder,
+            "_controller_failure_diagnostic",
+            side_effect=lambda builder, *_args: f"{builder.architecture}: failed",
+        ), mock.patch.object(
+            package_builder,
+            "persist_controller_receipt",
+            side_effect=lambda _path, value, **_kwargs: persisted.append(value.copy())
+            or value,
+        ):
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "controller workers failed"
+            ):
+                package_builder.attach_controller_run(self.args())
+        self.assertEqual(receipt["state"], "failed")
+        self.assertEqual(len(receipt["diagnostics"]), 2)
+        self.assertTrue(persisted)
+
+    def test_completed_attach_writes_the_normal_aggregate_contract(self) -> None:
+        receipt = self.receipt(active=True)
+        context = (
+            self.outputs,
+            self.builders,
+            self.records,
+            Path("/tmp/key"),
+            Path("/tmp/controller.json"),
+            self.owner_sha256,
+        )
+        status = {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "SubState": "dead",
+            "Result": "success",
+            "ExecMainStatus": "0",
+        }
+        aggregate = {"status": "success", "run_id": self.run_id}
+        with mock.patch.object(
+            package_builder, "controller_context", return_value=context
+        ), mock.patch.object(
+            package_builder,
+            "require_controller_source_equivalence",
+            return_value=self.lock_sha256,
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=receipt
+        ), mock.patch.object(
+            package_builder, "wait_for_ssh"
+        ), mock.patch.object(
+            package_builder, "remote_unit_status", return_value=status
+        ), mock.patch.object(
+            package_builder, "require_exact_worker_absent"
+        ), mock.patch.object(
+            package_builder, "fetch_completed_manifest", return_value={"ok": True}
+        ), mock.patch.object(
+            package_builder,
+            "_controller_completed_result",
+            return_value=aggregate,
+        ), mock.patch.object(
+            package_builder,
+            "persist_controller_receipt",
+            side_effect=lambda _path, value, **_kwargs: value,
+        ), mock.patch.object(package_builder, "write_last_run") as write:
+            observed = package_builder.attach_controller_run(self.args())
+        self.assertEqual(observed["state"], "completed")
+        self.assertIs(observed["result"], aggregate)
+        write.assert_called_once_with(aggregate)
+
+    def test_controller_cleanup_stops_only_collected_owned_builder(self) -> None:
+        records = {
+            name: {"State": {"Name": "running"}}
+            for name in self.matrix.architectures
+        }
+        final_records = {
+            "arm64": {"State": {"Name": "stopped"}},
+            "x64": {"State": {"Name": "running"}},
+        }
+        controller = {
+            "state": "collected",
+            "builders": {
+                "arm64": {"stop_owned": True},
+                "x64": {"stop_owned": False},
+            },
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def ssm(_region, instance_ids, **_kwargs):
+            calls.append(tuple(instance_ids))
+            return "command-id"
+
+        with mock.patch.object(
+            package_builder,
+            "aws_preflight",
+            return_value={"Account": "123456789012", "Arn": "arn:ci"},
+        ), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(self.builders, records),
+        ), mock.patch.object(
+            package_builder,
+            "validate_existing_artifact_bucket",
+            return_value="package-bucket",
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=controller
+        ), mock.patch.object(
+            package_builder, "require_controller_receipt", return_value=controller
+        ), mock.patch.object(
+            package_builder, "wait_for_ssm_online"
+        ), mock.patch.object(
+            package_builder, "run_ssm_shell_command", side_effect=ssm
+        ), mock.patch.object(
+            package_builder, "wait_for_ec2_state"
+        ), mock.patch.object(
+            package_builder, "validate_builders", return_value=final_records
+        ):
+            states = package_builder.stop_existing_builders(
+                "us-east-1",
+                self.matrix,
+                controller_receipt=Path("/tmp/controller.json"),
+                controller_source_revision=self.revision,
+                controller_owner_token_sha256=self.owner_sha256,
+            )
+        self.assertEqual(states, {"arm64": "stopped", "x64": "running"})
+        self.assertEqual(
+            calls,
+            [
+                tuple(builder.instance_id for builder in self.builders.values()),
+                (self.builders["arm64"].instance_id,),
+            ],
+        )
+
+    def test_controller_cleanup_refuses_before_verified_collection(self) -> None:
+        controller = {
+            "state": "finalized",
+            "builders": {
+                name: {"stop_owned": True} for name in self.matrix.architectures
+            },
+        }
+        with mock.patch.object(
+            package_builder,
+            "aws_preflight",
+            return_value={"Account": "123456789012", "Arn": "arn:ci"},
+        ), mock.patch.object(
+            package_builder,
+            "discover_existing_builders",
+            return_value=(self.builders, self.records),
+        ), mock.patch.object(
+            package_builder,
+            "validate_existing_artifact_bucket",
+            return_value="package-bucket",
+        ), mock.patch.object(
+            package_builder, "fetch_controller_receipt", return_value=controller
+        ), mock.patch.object(
+            package_builder, "require_controller_receipt", return_value=controller
+        ), mock.patch.object(
+            package_builder, "run_ssm_shell_command"
+        ) as ssm, self.assertRaisesRegex(
+            package_builder.PackageBuilderError, "verified collection"
+        ):
+            package_builder.stop_existing_builders(
+                "us-east-1",
+                self.matrix,
+                controller_receipt=Path("/tmp/controller.json"),
+                controller_source_revision=self.revision,
+                controller_owner_token_sha256=self.owner_sha256,
+            )
+        ssm.assert_not_called()
+
+
 class FinalizeRunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.matrix = package_builder.load_matrix()
@@ -4724,10 +5257,30 @@ class ReleaseAutomationTests(unittest.TestCase):
 
     def test_parser_exposes_release_automation_commands(self) -> None:
         parser = package_builder.build_parser()
+        controller_options = [
+            "--existing-only",
+            "--ssh-key",
+            "key",
+            "--access-receipt",
+            "access.json",
+            "--receipt",
+            "controller.json",
+            "--source-revision",
+            "a" * 40,
+            "--owner-token",
+            "bioseq/repository:package-release:" + "a" * 40,
+        ]
         for argv, command in (
             (["matrix", "--require-complete"], "matrix"),
             (["inventory"], "inventory"),
             (["stop"], "stop"),
+            (["launch-run", *controller_options, "--optimization", "O3"], "launch-run"),
+            (["attach-run", *controller_options, "--wait-seconds", "1"], "attach-run"),
+            (
+                ["adopt-run", *controller_options, "--run-id", "20260817T123305Z-aaaaaaaaaaaa"],
+                "adopt-run",
+            ),
+            (["finalize-run", *controller_options], "finalize-run"),
             (
                 [
                     "collect",
@@ -5103,8 +5656,19 @@ save()
     def test_workflow_is_globally_serial_and_exact_revision_bound(self) -> None:
         self.assertIn("group: bioseq-native-package-release", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
-        self.assertIn("timeout-minutes: 360", self.workflow)
-        self.assertIn("timeout-minutes: 270", self.workflow)
+        job_timeouts = [
+            int(value)
+            for value in re.findall(
+                r"^    timeout-minutes: (\d+)$", self.workflow, re.MULTILINE
+            )
+        ]
+        self.assertTrue(job_timeouts)
+        self.assertLess(max(job_timeouts), 360)
+        self.assertEqual(self.workflow.count("--wait-seconds 15600"), 4)
+        self.assertIn("poll_1:", self.workflow)
+        self.assertIn("poll_4:", self.workflow)
+        self.assertIn("wait_budget_exhausted:", self.workflow)
+        self.assertIn("refusing unbounded recursion", self.workflow)
         self.assertIn("timeout-minutes: 25", self.workflow)
         self.assertIn("ref: ${{ github.sha }}", self.workflow)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', self.workflow)
@@ -5130,13 +5694,7 @@ save()
         minimum_with_margin = (worst_case_seconds + 59) // 60 + 2
         self.assertGreaterEqual(
             timeout_minutes(
-                "Revoke access and stop only quiescent owned builders before publishing"
-            ),
-            minimum_with_margin,
-        )
-        self.assertGreaterEqual(
-            timeout_minutes(
-                "Revoke access and stop only quiescent owned builders (always)"
+                "Revoke access and conditionally stop controller-owned builders"
             ),
             minimum_with_margin,
         )
@@ -5144,8 +5702,8 @@ save()
     def test_workflow_uses_only_secret_backed_standard_credential_env(self) -> None:
         access_mapping = "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}"
         secret_mapping = "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}"
-        self.assertEqual(self.workflow.count(access_mapping), 4)
-        self.assertEqual(self.workflow.count(secret_mapping), 4)
+        self.assertEqual(self.workflow.count(access_mapping), 8)
+        self.assertEqual(self.workflow.count(secret_mapping), 8)
         global_environment = self.workflow.split("jobs:", 1)[0]
         self.assertNotIn(access_mapping, global_environment)
         self.assertNotIn(secret_mapping, global_environment)
@@ -5155,57 +5713,61 @@ save()
 
     def test_workflow_reuses_full_matrix_and_has_cost_cleanup(self) -> None:
         self.assertIn("package_builder.py matrix --require-complete", self.workflow)
-        self.assertIn("package_builder.py run \\", self.workflow)
+        self.assertEqual(self.workflow.count("package_builder.py launch-run"), 1)
+        self.assertEqual(self.workflow.count("package_builder.py attach-run"), 4)
+        self.assertEqual(self.workflow.count("package_builder.py finalize-run"), 1)
+        self.assertNotIn("package_builder.py run \\", self.workflow)
         self.assertIn("--existing-only", self.workflow)
         self.assertIn(
-            '--owner-token "$GITHUB_REPOSITORY:$GITHUB_RUN_ID"',
+            '--owner-token "$GITHUB_REPOSITORY:package-release:$GITHUB_SHA"',
             self.workflow,
         )
         self.assertEqual(self.workflow.count("--optimization O3"), 1)
         self.assertNotIn("--architectures", self.workflow)
         self.assertNotIn("--distros", self.workflow)
         self.assertNotIn("--postgres", self.workflow)
-        self.assertGreaterEqual(self.workflow.count("package_builder.py stop"), 2)
-        self.assertGreaterEqual(
-            self.workflow.count("package_builder.py close-ci-access"), 2
+        self.assertEqual(self.workflow.count("package_builder.py stop"), 1)
+        self.assertEqual(
+            self.workflow.count("package_builder.py close-ci-access"), 7
         )
-        self.assertEqual(self.workflow.count("--lifecycle-receipt"), 3)
+        self.assertNotIn("--lifecycle-receipt", self.workflow)
+        self.assertGreaterEqual(
+            self.workflow.count(
+                '--receipt "$RUNNER_TEMP/package-controller.json"'
+            ),
+            6,
+        )
+        self.assertIn("--controller-receipt", self.workflow)
         self.assertIn("if: always()", self.workflow)
-        self.assertGreaterEqual(
-            self.workflow.count("if: env.RELEASE_ALREADY_COMPLETE != '1'"), 5
-        )
         self.assertIn(
-            'if [[ ! -f "$RUNNER_TEMP/package-builder-access.json" ]]',
+            'if [[ -f "$RUNNER_TEMP/package-builder-access.json" ]]',
             self.workflow,
         )
         self.assertLess(
             self.workflow.index(
-                "- name: Revoke access and stop only quiescent owned builders before publishing"
+                "- name: Revoke access and conditionally stop controller-owned builders"
             ),
             self.workflow.index("- name: Create deterministic GitHub release"),
         )
-        close_positions = [
-            match.start()
-            for match in re.finditer("package_builder.py close-ci-access", self.workflow)
-        ]
-        stop_positions = [
-            match.start()
-            for match in re.finditer("package_builder.py stop", self.workflow)
-        ]
-        self.assertEqual(len(close_positions), len(stop_positions))
-        self.assertTrue(all(
-            close < stop for close, stop in zip(close_positions, stop_positions)
-        ))
+        cleanup = self.step_script(
+            "Revoke access and conditionally stop controller-owned builders"
+        )
+        self.assertLess(cleanup.index("close-ci-access"), cleanup.index(" stop "))
+        for step in (
+            "Revoke only launch-job access",
+            "Revoke only poll-1 access",
+            "Revoke only poll-2 access",
+            "Revoke only poll-3 access",
+            "Revoke only poll-4 access",
+            "Revoke only finalizer-job access (always)",
+        ):
+            self.assertNotIn("package_builder.py stop", self.step_script(step))
 
     def test_cleanup_attempts_revoke_and_stop_independently_on_either_failure(self) -> None:
-        steps = (
-            "Revoke access and stop only quiescent owned builders before publishing",
-            "Revoke access and stop only quiescent owned builders (always)",
-        )
-        for step in steps:
-            for failing_command in ("close-ci-access", "stop"):
-                with self.subTest(step=step, failing_command=failing_command), \
-                        tempfile.TemporaryDirectory() as tmp:
+        step = "Revoke access and conditionally stop controller-owned builders"
+        for failing_command in ("close-ci-access", "stop"):
+            with self.subTest(failing_command=failing_command), \
+                    tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     binary = root / "bin"
                     binary.mkdir()
@@ -5228,6 +5790,9 @@ save()
                         "GITHUB_ENV": str(root / "github-env"),
                         "CALL_LOG": str(root / "calls"),
                         "FAIL_COMMAND": failing_command,
+                        "PACKAGE_COLLECTION_SUCCEEDED": "1",
+                        "GITHUB_SHA": "a" * 40,
+                        "GITHUB_REPOSITORY": "bioseq/repository",
                     }
                     completed = subprocess.run(
                         ["bash", "-c", self.step_script(step)],
@@ -5241,6 +5806,43 @@ save()
                     self.assertLess(
                         calls.index("close-ci-access"), calls.index(" stop ")
                     )
+
+    def test_cleanup_revokes_access_without_stopping_before_collection(self) -> None:
+        step = "Revoke access and conditionally stop controller-owned builders"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / "bin"
+            binary.mkdir()
+            fake_python = binary / "python3"
+            fake_python.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            (root / "package-builder-access.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            completed = subprocess.run(
+                ["bash", "-c", self.step_script(step)],
+                cwd=WORKFLOW_PATH.parents[2],
+                env={
+                    **os.environ,
+                    "PATH": f"{binary}:{os.environ['PATH']}",
+                    "RUNNER_TEMP": str(root),
+                    "AWS_REGION": "us-east-1",
+                    "GITHUB_ENV": str(root / "github-env"),
+                    "CALL_LOG": str(root / "calls"),
+                    "GITHUB_SHA": "a" * 40,
+                    "GITHUB_REPOSITORY": "bioseq/repository",
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            calls = (root / "calls").read_text(encoding="utf-8")
+            self.assertIn("close-ci-access", calls)
+            self.assertNotIn(" stop ", calls)
 
     def test_stale_draft_deletes_every_old_asset_and_reuploads_complete_set(self) -> None:
         completed, state, expected_names = self.run_release_step(draft=True)
@@ -5325,12 +5927,35 @@ save()
         uses = re.findall(
             r"^\s*uses:\s*([^\s#]+)(?:\s+#.*)?$", self.workflow, re.MULTILINE
         )
-        self.assertEqual(len(uses), 2)
+        self.assertGreaterEqual(len(uses), 2)
         for value in uses:
             owner_action, separator, revision = value.partition("@")
             self.assertTrue(separator)
             self.assertIn("/", owner_action)
             self.assertRegex(revision, r"^[0-9a-f]{40}$")
+
+    def test_every_workflow_shell_block_parses(self) -> None:
+        lines = self.workflow.splitlines()
+        scripts: list[str] = []
+        for index, line in enumerate(lines):
+            if line != "        run: |":
+                continue
+            body: list[str] = []
+            for candidate in lines[index + 1:]:
+                if candidate and not candidate.startswith("          "):
+                    break
+                body.append(candidate[10:] if candidate else "")
+            scripts.append("\n".join(body) + "\n")
+        self.assertGreaterEqual(len(scripts), 10)
+        for index, script in enumerate(scripts):
+            with self.subTest(script=index):
+                completed = subprocess.run(
+                    ["bash", "-n"],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_release_is_draft_until_asset_count_is_complete(self) -> None:
         tag_assignment = (
@@ -5353,12 +5978,14 @@ save()
         self.assertIn("stale-draft-asset-ids.txt", self.workflow)
         self.assertIn("gh api --method DELETE", self.workflow)
         self.assertIn("select(.draft == true)", self.workflow)
-        self.assertIn("RELEASE_ALREADY_COMPLETE=1", self.workflow)
+        self.assertIn("release_already_complete=1", self.workflow)
+        self.assertIn("printf '%s\\t%s\\n'", self.workflow)
+        self.assertNotIn("printf '%s\\tsha256:%s\\n'", self.workflow)
         self.assertIn("git/matching-refs/tags/$tag", self.workflow)
         self.assertIn('test "$tag_target" = "$GITHUB_SHA"', self.workflow)
         self.assertLess(
             self.workflow.index("Reuse an already published exact-commit release"),
-            self.workflow.index("Create ephemeral builder access"),
+            self.workflow.index("Open launch-job builder access"),
         )
         self.assertLess(
             self.workflow.index("git/matching-refs/tags/$tag"),

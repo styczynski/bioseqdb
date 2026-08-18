@@ -4,127 +4,111 @@
  */
 module;
 #include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
-
 extern "C" {
 #include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
 #include "access/relation.h"
 #include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h" // RelnameGetRelid
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
 #include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
 #include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
 #include "utils/builtins.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
-
-#include "common/relpath.h"
 #include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
 }
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
-#include <utility>
-#include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_catalog;
+import std;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
 import :fragment_image;
 import :generation_writer;
 import :generation_session;
 import :hash_major_writer;
-import :hash_major_session;
-export import :storage_adapter_contract;
-export import :fragment_storage_lifecycle;
+export import :fragment_storage_contract;
 export namespace bioseq::storage::indexing {
+
+/// Parsed bucket and shard from one canonical generation sidecar name.
+struct canonical_generation_sidecar_name {
+    bool valid = false;
+    std::uint8_t bucket_idx = 0;
+    std::uint32_t shard_idx = 0;
+};
+
+/// Parse only the exact suffix spelling emitted by `format_seqidx_name`.
+/// Leading zeroes, signs, trailing decorations, overflow, and extra separators
+/// are rejected without allocation.
+[[nodiscard]] inline canonical_generation_sidecar_name
+parse_canonical_generation_sidecar_name(std::string_view relation_name,
+                                        std::string_view prefix) noexcept {
+    if (!relation_name.starts_with(prefix))
+        return {};
+    const std::string_view suffix = relation_name.substr(prefix.size());
+    const std::size_t separator = suffix.find('_');
+    if (separator == std::string_view::npos || separator == 0 || separator + 1 >= suffix.size() ||
+        suffix.find('_', separator + 1) != std::string_view::npos) {
+        return {};
+    }
+    const std::string_view bucket_text = suffix.substr(0, separator);
+    const std::string_view shard_text = suffix.substr(separator + 1);
+    if ((bucket_text.size() > 1 && bucket_text.front() == '0') ||
+        (shard_text.size() > 1 && shard_text.front() == '0')) {
+        return {};
+    }
+    const auto parse_decimal =
+        [](std::string_view text, std::uint64_t maximum, std::uint64_t& result) noexcept {
+            result = 0;
+            for (const char character : text) {
+                if (character < '0' || character > '9')
+                    return false;
+                const std::uint64_t digit = static_cast<std::uint64_t>(character - '0');
+                if (result > (maximum - digit) / 10u)
+                    return false;
+                result = result * 10u + digit;
+            }
+            return true;
+        };
+    std::uint64_t bucket = 0;
+    std::uint64_t shard = 0;
+    if (!parse_decimal(bucket_text, (std::numeric_limits<std::uint8_t>::max)(), bucket) ||
+        !parse_decimal(shard_text, (std::numeric_limits<std::uint32_t>::max)(), shard)) {
+        return {};
+    }
+    return canonical_generation_sidecar_name{
+        .valid = true,
+        .bucket_idx = static_cast<std::uint8_t>(bucket),
+        .shard_idx = static_cast<std::uint32_t>(shard),
+    };
+}
+
+/// Execute one generation-clear DDL statement through a checked SPI lifetime.
+/// The activity bit stays set if PostgreSQL jumps out of `SPI_execute`, allowing
+/// the enclosing error path to finish the connection.
+inline void run_checked_generation_clear_ddl(const char* ddl, bool& spi_active) {
+    if (ddl == nullptr || *ddl == '\0' || spi_active) {
+        minimizer_generation_storage_error("generation clear DDL state is invalid");
+    }
+    const int connect_rc = SPI_connect();
+    if (connect_rc != SPI_OK_CONNECT) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq current-generation index: generation clear DDL SPI_connect failed"),
+                 errdetail("SPI rc=%d", connect_rc)));
+    }
+    spi_active = true;
+    const int execute_rc = SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0);
+    const int finish_rc = SPI_finish();
+    spi_active = finish_rc != SPI_OK_FINISH;
+    if (execute_rc != SPI_OK_UTILITY || finish_rc != SPI_OK_FINISH) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq current-generation index: generation clear DDL failed"),
+                 errdetail("execute_rc=%d finish_rc=%d", execute_rc, finish_rc)));
+    }
+}
 
 /**
  * @brief Resolves or creates the canonical minimizer-generation sidecar relation.
@@ -775,7 +759,8 @@ fragment_index_storage::clear_minimizer_generation_storage() {
  * @param[in] expected Expected immutable generation identity.
  * @return A read session that borrows this handle and the registered snapshot.
  */
-[[nodiscard]] inline generation_read_session fragment_index_storage::begin_generation_read(
+[[nodiscard]] inline fragment_index_storage::generation_read_session
+fragment_index_storage::begin_generation_read(
     std::uint64_t query_key,
     Snapshot executor_snapshot,
     expected_minimizer_generation_identity expected) const {
@@ -796,7 +781,7 @@ fragment_index_storage::clear_minimizer_generation_storage() {
  * @param[in] generation_id Immutable identifier assigned to the generation.
  * @return A sink bound to the validated canonical generation relation.
  */
-[[nodiscard]] inline generation_row_sink
+[[nodiscard]] inline fragment_index_storage::generation_row_sink
 fragment_index_storage::begin_generation_write(std::uint64_t query_key,
                                                std::uint64_t generation_id) {
     if (query_key != query_key_) {
@@ -822,7 +807,7 @@ fragment_index_storage::begin_generation_write(std::uint64_t query_key,
  * @param[in] generation_id Immutable identifier assigned to the generation.
  * @return A writer bound to the validated canonical generation relation.
  */
-[[nodiscard]] inline hash_major_minimizer_generation_writer
+[[nodiscard]] inline fragment_index_storage::hash_major_minimizer_generation_writer
 fragment_index_storage::begin_hash_major_minimizer_generation_write(std::uint64_t query_key,
                                                                     std::uint64_t generation_id) {
     if (query_key != query_key_) {

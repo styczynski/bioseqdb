@@ -5,15 +5,20 @@
 module;
 
 #include <bioseq/pg_compat.h>
+#include <array>
 #include <cstdint>
+#include <exception>
+#include <type_traits>
 #include <vector>
 
 export module bioseq.postgres.table:access_common;
 
 import bioseq.common.logging;
+import bioseq.postgres.storage.metadata;
 import bioseq.postgres.storage.manager;
 import bioseq.postgres.support;
 import bioseq.postgres.table.am_cache;
+import bioseq.postgres.table.io;
 import bioseq.postgres.table.types;
 import bioseq.postgres.types.compact_sequence;
 
@@ -76,6 +81,19 @@ void copy_column_slot(TupleTableSlot* destination, TupleTableSlot* source) {
 
 } // namespace
 
+/** Fetch the next visible row through the table-AM exception boundary. */
+bool bioseq_getnextslot(TableScanDesc scan,
+                        ScanDirection direction,
+                        TupleTableSlot* slot);
+
+/** Apply speculative-source state changes for one transaction event. */
+void handle_pending_speculative_xact_event(XactEvent event);
+
+/** Apply speculative-source state changes for one subtransaction event. */
+void handle_pending_speculative_subxact_event(SubXactEvent event,
+                                              SubTransactionId my_subid,
+                                              SubTransactionId parent_subid);
+
 /**
  * @brief Initialize the immutable tuple-slot operation table.
  *
@@ -100,6 +118,52 @@ export [[nodiscard]] MemoryContext create_column_scan_memory_context() {
         CurrentMemoryContext, "BioseqColumn Scan Context", ALLOCSET_DEFAULT_SIZES);
 }
 
+/** Return the write-side sequence cache owned by a column write state. */
+[[nodiscard]] inline bioseq::storage::seq_caches*
+ensure_write_side_seq_caches(Relation relation, column_write_state* write_state) {
+    if (relation == nullptr || write_state == nullptr
+        || write_state->stripe_write_context == nullptr) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            bioseq_log<logging_level::error, logging_target::postgres>(
+                "bioseq storage: sequence write cache owner is unavailable");
+        });
+    }
+
+    if (write_state->seq_caches == nullptr) {
+        MemoryContext owner =
+            MemoryContextGetParent(write_state->stripe_write_context);
+        if (owner == nullptr) {
+            bioseq::postgres::support::invoke_pg_as_cpp([] {
+                bioseq_log<logging_level::error, logging_target::postgres>(
+                    "bioseq storage: sequence write cache context is unavailable");
+            });
+        }
+        auto* fresh = bioseq::postgres::support::invoke_pg_as_cpp(
+            [owner] { return bioseq::storage::alloc_seq_caches(owner); });
+        fresh->side = bioseq::storage::seq_caches::access_side::write;
+        fresh->lock_mode = RowExclusiveLock;
+        fresh->main_database_oid = relation->rd_locator.dbOid;
+        fresh->main_tablespace_oid = relation->rd_locator.spcOid;
+        fresh->main_relfilenode = relation->rd_locator.relNumber;
+        fresh->cap_bytes_snapshot =
+            bioseq::storage::read_max_sub_table_cap_bytes();
+        write_state->seq_caches = fresh;
+    }
+
+    auto* caches =
+        static_cast<bioseq::storage::seq_caches*>(write_state->seq_caches);
+    if (caches->side != bioseq::storage::seq_caches::access_side::write
+        || caches->main_database_oid != relation->rd_locator.dbOid
+        || caches->main_tablespace_oid != relation->rd_locator.spcOid
+        || caches->main_relfilenode != relation->rd_locator.relNumber) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            bioseq_log<logging_level::error, logging_target::postgres>(
+                "bioseq storage: sequence write cache relation identity changed");
+        });
+    }
+    return caches;
+}
+
 /**
  * @brief Build one-based attribute numbers selected by a zero-based bitmap.
  * @param tuple_descriptor Relation tuple descriptor.
@@ -119,6 +183,89 @@ build_needed_column_list(TupleDesc tuple_descriptor,
         }
     }
     return columns.release();
+}
+
+/**
+ * @brief Initialize the column reader used by scans and exact-row fetches.
+ * @param relation Relation that owns the column storage.
+ * @param tuple_descriptor Descriptor used to decode returned rows.
+ * @param attributes_needed Zero-based attributes selected by the caller.
+ * @param scan_qualifiers Qualifiers evaluated by the column reader.
+ * @param scan_context Memory context that owns the reader.
+ * @param snapshot Visibility snapshot used for the read.
+ * @param random_access Whether the reader must support nonsequential row access.
+ * @param parallel_scan Optional shared parallel-scan state.
+ * @return Reader owned by @p scan_context.
+ */
+[[nodiscard]] inline column_read_state*
+init_bioseq_read_state(
+    Relation relation,
+    TupleDesc tuple_descriptor,
+    const bioseq::postgres::support::postgres_bitmapset& attributes_needed,
+    List* scan_qualifiers,
+    MemoryContext scan_context,
+    Snapshot snapshot,
+    bool random_access,
+    parallel_column_scan_handle parallel_scan) {
+    bioseq::postgres::support::memory_context_scope context_guard{scan_context};
+    List* needed_columns = build_needed_column_list(tuple_descriptor, attributes_needed);
+    return begin_column_read(relation,
+                             tuple_descriptor,
+                             needed_columns,
+                             scan_qualifiers,
+                             scan_context,
+                             snapshot,
+                             random_access,
+                             parallel_scan);
+}
+
+/**
+ * @brief Translate C++ failures after a table-AM callback unwinds its owners.
+ * @tparam p_function Callback body type.
+ * @param operation Stable operation name used in PostgreSQL diagnostics.
+ * @param function Callback body invoked inside the exception boundary.
+ * @return The callback result when @p function is non-void.
+ */
+template <class p_function>
+decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& function) {
+    ErrorData* exact_error = nullptr;
+    std::array<char, 512> detail{};
+    bool cpp_error = false;
+    bool unknown_cpp_error = false;
+    try {
+        if constexpr (std::is_void_v<std::invoke_result_t<p_function&>>) {
+            function();
+            return;
+        } else {
+            return function();
+        }
+    } catch (bioseq::postgres::support::postgres_error& error) {
+        exact_error = error.release_error_data();
+    } catch (const std::exception& error) {
+        strlcpy(detail.data(),
+                error.what() == nullptr ? "std::exception without detail" : error.what(),
+                detail.size());
+        cpp_error = true;
+    } catch (...) {
+        unknown_cpp_error = true;
+    }
+    // Every callback owner has unwound. Only fixed diagnostic state remains at
+    // this PostgreSQL C boundary.
+    if (exact_error != nullptr) {
+        ReThrowError(exact_error);
+    }
+    if (cpp_error) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("%s raised a C++ exception", operation),
+                 errdetail_internal("%s", detail.data())));
+    }
+    if (unknown_cpp_error) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("%s raised an unknown C++ exception", operation)));
+    }
+    pg_unreachable();
 }
 
 /**

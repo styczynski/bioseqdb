@@ -5,7 +5,6 @@
 export module bioseq.postgres.table:custom_scan_scan_paths;
 
 import :custom_scan_support;
-import :custom_scan_slice_projection;
 import :custom_scan_join_paths;
 
 export import :custom_scan_scan_paths_admission;

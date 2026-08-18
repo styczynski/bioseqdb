@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_lifecycle;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -439,7 +415,8 @@ index_storage_fragment_generation_read_session::cleanup_failed_session_and_rethr
  * @param[in] range Half-open stored sub-key range.
  * @return Logical half-open range and extent kind, or no value for an invalid or mixed range.
  */
-[[nodiscard]] inline std::optional<projected_extent_range>
+[[nodiscard]] inline std::optional<
+    index_storage_fragment_generation_read_session::projected_extent_range>
 index_storage_fragment_generation_read_session::project_extent_range_(
     const index_sub_key_range& range) noexcept {
     if (range.begin < 0 || range.begin >= range.end || range.end > k_temporary_run_sub_key_base) {

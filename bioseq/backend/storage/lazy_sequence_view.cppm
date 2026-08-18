@@ -1,12 +1,12 @@
 /**
- * @file storage/lazy_sequence_parts/view_contract.cppm
+ * @file storage/lazy_sequence_view.cppm
  * @brief Representation-erased lazy-sequence view and allocation observer.
  */
 module;
 
 #include <libassert/assert.hpp>
 
-export module bioseq.storage.lazy_sequence:view_contract;
+export module bioseq.storage.lazy_sequence_view;
 
 import std;
 import bioseq.common.seqan_adapter;
@@ -21,6 +21,7 @@ static_assert(__cplusplus >= 202302L);
 
 namespace lazy_sequence_detail {
 
+/** @brief Requires that one alphabet value supports seqan3 complement. */
 template <class p_alphabet>
 concept complementable_sequence_alphabet =
     requires(p_alphabet value) { seqan3::complement(std::move(value)); };
@@ -57,6 +58,7 @@ struct sequence_payload_allocation_event {
  * non-traced route and costs only the allocation-path null check.
  */
 struct sequence_payload_allocation_observer {
+    /** @brief Publishes one allocation event with caller-owned context and correlations. */
     using publish_fn = void (*)(void*,
                                 sequence_payload_allocation_event const&,
                                 std::uint64_t,
@@ -67,6 +69,7 @@ struct sequence_payload_allocation_observer {
     std::uint64_t correlation_a{};
     std::uint64_t correlation_b{};
 
+    /** @brief Returns whether tracing callbacks are configured. */
     [[nodiscard]] explicit operator bool() const noexcept {
         return context != nullptr && publish != nullptr;
     }
@@ -127,6 +130,7 @@ template <sequence_alphabet p_alphabet> struct lazy_sequence_traits {
     static_assert(k_logical_bits_per_symbol > 0 &&
                   k_logical_bits_per_symbol <= std::numeric_limits<unsigned char>::digits);
 
+    /** @brief Returns the packed logical-rank complement of one storage unit. */
     [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
         return static_cast<storage_unit>(packed_traits::letter_complement(rank));
     }
@@ -159,6 +163,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     using traits = lazy_sequence_traits<p_alphabet>;
     using slice_tag = lazy_sequence_slice_tag;
 
+    /** @brief Reads one logical-rank window through an erased backend. */
     using read_at_fn = std::uint8_t const* (*)(void const*,
                                                sequence_size_t,
                                                std::size_t,
@@ -182,21 +187,29 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     };
 
     using resident_packed_result = std::optional<resident_packed_sequence>;
+    /** @brief Probes whether a subrange can be borrowed as resident packed storage. */
     using resident_probe_fn = resident_packed_result (*)(void const*,
                                                          sequence_size_t,
                                                          sequence_size_t,
                                                          std::uint8_t) noexcept;
+    /** @brief Copies one full packed sequence into an aligned destination buffer. */
     using copy_packed_sequence_fn = bool (*)(void const*, void*, std::size_t, std::uint8_t);
 
     /** @brief Complete callback table implementing one erased sequence backend. */
     struct backend_ops {
+        /** @brief Returns the logical sequence length in base pairs. */
         sequence_size_t (*bp_size)(void const*) noexcept;
+        /** @brief Orientation-specific logical-rank readers indexed by reversal flags. */
         std::array<read_at_fn, 4> read_at;
+        /** @brief Attempts to borrow one resident packed subrange. */
         resident_probe_fn try_resident_packed;
+        /** @brief Copies one packed sequence when the backend exposes a fast path. */
         copy_packed_sequence_fn copy_packed_sequence;
+        /** @brief Reports whether the backend state may be shared across worker tasks. */
         bool (*worker_shareable)(void const*) noexcept;
     };
 
+    /** @brief Binds one erased backend state table and optional allocation observer. */
     explicit lazy_sequence_view(
         void const* state,
         backend_ops const* ops,
@@ -209,18 +222,22 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             "lazy sequence backend table must be complete");
     }
 
+    /** @brief Returns the logical sequence length in base pairs. */
     [[nodiscard]] sequence_size_t bp_size() const noexcept {
         return ops_->bp_size(state_);
     }
 
+    /** @brief Returns the logical sequence length in base pairs. */
     [[nodiscard]] sequence_size_t size() const noexcept {
         return bp_size();
     }
 
+    /** @brief Returns whether the erased backend may enter worker tasks. */
     [[nodiscard]] bool worker_shareable() const noexcept {
         return ops_->worker_shareable(state_);
     }
 
+    /** @brief Returns a copy of this view with a different allocation observer. */
     [[nodiscard]] lazy_sequence_view with_payload_allocation_observer(
         sequence_payload_allocation_observer const* observer) const noexcept {
         auto result = *this;
@@ -228,11 +245,13 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         return result;
     }
 
+    /** @brief Returns the allocation observer currently bound to this view. */
     [[nodiscard]] sequence_payload_allocation_observer const*
     payload_allocation_observer() const noexcept {
         return payload_observer_;
     }
 
+    /** @brief Attempts to borrow one validated resident packed subrange. */
     [[nodiscard]] resident_packed_result try_resident_packed(
         sequence_size_t from, sequence_size_t to, std::uint8_t requested_width) const noexcept {
         if (from > to || to > bp_size() ||
@@ -315,6 +334,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         return ops_->copy_packed_sequence(state_, destination.data(), unit_count, requested_width);
     }
 
+    /** @brief Copies logical ranks for one subrange into caller storage. */
     template <bool p_is_reversed, bool p_write_reversed = false>
     void copy_ranks(std::span<std::uint8_t> output, std::size_t from, std::size_t to) const {
         if (from > to || to > bp_size() || output.size() < to - from) {
@@ -332,6 +352,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         }
     }
 
+    /** @brief Two-slot logical-rank reader over one parent lazy sequence view. */
     template <bool p_is_reversed,
               bool p_write_reversed,
               typename p_stored_type,
@@ -339,6 +360,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
     struct rank_window_reader {
         lazy_sequence_view const* parent{};
 
+        /** @brief Reads one logical-rank window through the parent backend. */
         [[nodiscard]] p_stored_type const* read_at(sequence_size_t bp_from,
                                                    std::size_t required_length,
                                                    std::span<p_stored_type> scratch) const {
@@ -359,6 +381,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         }
     };
 
+    /** @brief Returns a rank window reader configured for the requested orientation. */
     template <bool p_is_reversed,
               bool p_write_reversed,
               typename p_stored_type,
@@ -370,6 +393,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
                                   p_max_loaded_slots>{this};
     }
 
+    /** @brief Chunked forward iterator over logical ranks in one lazy sequence view. */
     class rank_iterator {
         static constexpr std::size_t k_chunk_size = 256;
 
@@ -380,6 +404,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         mutable std::array<std::uint8_t, k_chunk_size> scratch_{};
         mutable std::uint8_t const* loaded_{};
 
+        /** @brief Loads the chunk containing the current iterator position. */
         void ensure_loaded() const {
             if (parent_ == nullptr || position_ >= parent_->bp_size()) {
                 abort_lazy_sequence_access("lazy rank iterator dereferenced outside its sequence");
@@ -404,11 +429,15 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         using iterator_concept = std::forward_iterator_tag;
         using iterator_category = std::forward_iterator_tag;
 
+        /** @brief Constructs an unbound rank iterator. */
         rank_iterator() = default;
+        /** @brief Constructs a rank iterator over one parent view and position. */
         rank_iterator(lazy_sequence_view const* parent, sequence_size_t position) noexcept
             : parent_(parent), position_(position) {}
+        /** @brief Copy-constructs iterator state without sharing loaded chunks. */
         rank_iterator(rank_iterator const& other) noexcept
             : parent_(other.parent_), position_(other.position_) {}
+        /** @brief Copy-assigns iterator state and drops any loaded chunk cache. */
         rank_iterator& operator=(rank_iterator const& other) noexcept {
             if (this != &other) {
                 parent_ = other.parent_;
@@ -420,10 +449,12 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             return *this;
         }
 
+        /** @brief Returns the logical rank at the current iterator position. */
         [[nodiscard]] std::uint8_t operator*() const {
             ensure_loaded();
             return loaded_[static_cast<std::size_t>(position_ - loaded_from_)];
         }
+        /** @brief Advances the iterator by one logical rank. */
         rank_iterator& operator++() noexcept {
             if (parent_ == nullptr || position_ >= parent_->bp_size()) {
                 abort_lazy_sequence_access("lazy rank iterator advanced past end");
@@ -431,11 +462,13 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             ++position_;
             return *this;
         }
+        /** @brief Advances the iterator by one logical rank and returns the previous value. */
         rank_iterator operator++(int) noexcept {
             rank_iterator previous = *this;
             ++*this;
             return previous;
         }
+        /** @brief Advances the iterator by a signed logical-rank offset. */
         rank_iterator& operator+=(difference_type delta) {
             if (parent_ == nullptr) {
                 abort_lazy_sequence_access("unbound lazy rank iterator cannot be advanced");
@@ -458,19 +491,23 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
             loaded_ = nullptr;
             return *this;
         }
+        /** @brief Compares two rank iterators for position equality. */
         [[nodiscard]] friend bool operator==(rank_iterator const& left,
                                              rank_iterator const& right) noexcept {
             return left.parent_ == right.parent_ && left.position_ == right.position_;
         }
     };
 
+    /** @brief Returns a rank iterator at the first logical position. */
     [[nodiscard]] rank_iterator begin() const noexcept {
         return {this, 0u};
     }
+    /** @brief Returns a rank iterator at the past-the-end logical position. */
     [[nodiscard]] rank_iterator end() const noexcept {
         return {this, bp_size()};
     }
 
+    /** @brief Returns the iterator unchanged for logical-rank facade coordinates. */
     template <iterator_mode p_mode>
     [[nodiscard]] rank_iterator iter(rank_iterator value) const noexcept {
         static_assert(p_mode == iterator_mode::logical_rank,
@@ -478,6 +515,7 @@ template <sequence_alphabet p_alphabet> class lazy_sequence_view {
         return value;
     }
 
+    /** @brief Returns a logical-rank iterable subrange over this view. */
     template <iterator_mode p_mode> [[nodiscard]] auto iterable() const noexcept {
         static_assert(p_mode == iterator_mode::logical_rank,
                       "facade iteration is a logical-rank iterator_mode::logical_rank range");
@@ -502,8 +540,10 @@ static_assert(resident_packed_sequence_view<lazy_sequence_view<seq::dna4>>);
 /** @brief Owns one adopted backing retain together with its lazy view. */
 template <sequence_alphabet p_alphabet> class retained_lazy_sequence_view {
   public:
+    /** @brief Releases adopted backing retain state without throwing. */
     using release_fn = void (*)(void*) noexcept;
 
+    /** @brief Adopts one backing retain together with its lazy sequence view. */
     retained_lazy_sequence_view(lazy_sequence_view<p_alphabet> view,
                                 void* lifetime_state,
                                 release_fn release) noexcept
@@ -512,24 +552,31 @@ template <sequence_alphabet p_alphabet> class retained_lazy_sequence_view {
                      "lazy view owner requires an adopted backing retain");
     }
 
+    /** @brief Copying would duplicate unique backing retain ownership. */
     retained_lazy_sequence_view(retained_lazy_sequence_view const&) = delete;
+    /** @brief Assignment would duplicate unique backing retain ownership. */
     retained_lazy_sequence_view& operator=(retained_lazy_sequence_view const&) = delete;
+    /** @brief Move assignment is disabled to keep release semantics explicit. */
     retained_lazy_sequence_view& operator=(retained_lazy_sequence_view&&) = delete;
 
+    /** @brief Move-constructs by transferring backing retain ownership. */
     retained_lazy_sequence_view(retained_lazy_sequence_view&& other) noexcept
         : view_(other.view_), lifetime_state_(other.lifetime_state_), release_(other.release_) {
         other.lifetime_state_ = nullptr;
         other.release_ = nullptr;
     }
 
+    /** @brief Releases adopted backing retain state on destruction. */
     ~retained_lazy_sequence_view() noexcept {
         release_noexcept();
     }
 
+    /** @brief Returns the non-owning lazy sequence view. */
     [[nodiscard]] lazy_sequence_view<p_alphabet> view() const noexcept {
         return view_;
     }
 
+    /** @brief Releases adopted backing retain state and clears local handles. */
     void release_noexcept() noexcept {
         if (release_ == nullptr) {
             return;

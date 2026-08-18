@@ -3,10 +3,7 @@
  * @brief Analyzes projection, edit predicates, feature flags, and default params.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,53 +24,9 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_oid_expression_support_semantic_analysis;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
 import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.postgres.support;
 
 import :custom_scan_runtime_support;
 
@@ -84,19 +37,6 @@ import :custom_scan_oid_expression_support_restriction_ownership;
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Tests whether an OID names a match-result projection function. */
-    [[nodiscard]] inline bool is_bioseq_projection_funcid(Oid funcid, const bioseq_stub_oids& o) {
-        return funcid == o.score_oid || funcid == o.dp_score_oid || funcid == o.query_len_oid ||
-               funcid == o.query_start_oid || funcid == o.query_end_oid ||
-               funcid == o.target_len_oid || funcid == o.target_start_oid ||
-               funcid == o.target_end_oid || funcid == o.num_matches_oid ||
-               funcid == o.block_length_oid || funcid == o.edit_oid || funcid == o.mapq_oid ||
-               funcid == o.chain_score_oid || funcid == o.dp_max_score_oid ||
-               funcid == o.seed_count_oid || funcid == o.secondary_chain_score_oid ||
-               funcid == o.is_reverse_oid || funcid == o.is_primary_oid ||
-               funcid == o.has_cigar_oid || funcid == o.divergence_oid || funcid == o.cigar_oid;
-    }
-
     /** @brief Checks that a sequence-valued edit helper names the base scan's aligned column. */
     [[nodiscard]] bool
     edit_sequence_argument_matches_target(const FuncExpr* function,

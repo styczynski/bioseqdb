@@ -126,63 +126,37 @@ module;
 
 #include <bioseq/pg_compat.h>
 
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <iterator>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
-#include <unistd.h>
-
 export module bioseq.postgres.scheduler.dispatch_processor;
+export import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
 
-import bioseq.common.logging;
+import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
-import bioseq.common.radix_sort;
-import bioseq.common.seqan_adapter;
+export import bioseq.common.seqan_adapter;
+export import bioseq.highway.dispatch_contract;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
 import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
+import bioseq.postgres.storage.indexing.active_read_policy;
+import bioseq.postgres.storage.indexing.executor_read_context;
+import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
+import bioseq.postgres.storage.indexing.minimizer_read_stats;
+export import bioseq.pipeline.minimap_port;
+export import bioseq.pipeline.pipe;
+export import bioseq.pipeline.stats;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
+export import bioseq.sequences.kmers;
+export import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.scanner;
 import bioseq.storage.layout;
 import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
+export import bioseq.parallelism.pool;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
@@ -191,52 +165,6 @@ namespace bioseq::simd {
 /** @brief Maximum number of rows processed by one scheduler dispatch batch. */
 export constexpr size_t dispatch_batch_capacity = 8192;
 
-/**
- * @brief Derives a nonzero diagnostic token from a hash-major source identity.
- *
- * Existing pipeline stats have a frozen u64 source field, while hash-major
- * authenticates a 128-bit source identity.  This domain-separated token is
- * diagnostic only: every hash-major correctness decision retains and compares
- * all 128 authenticated bits.
- *
- * @param[in] source_identity Authenticated 128-bit source identity.
- * @return A stable nonzero token used only in diagnostic statistics.
- */
-export [[nodiscard]] constexpr std::uint64_t
-hash_major_source_diagnostic_token(const std::array<std::byte, 16>& source_identity) noexcept {
-    std::array<std::byte, 32> bytes{std::byte{'B'},
-                                    std::byte{'S'},
-                                    std::byte{'E'},
-                                    std::byte{'Q'},
-                                    std::byte{'F'},
-                                    std::byte{'6'},
-                                    std::byte{'D'},
-                                    std::byte{'I'},
-                                    std::byte{'A'},
-                                    std::byte{'G'},
-                                    std::byte{'v'},
-                                    std::byte{'1'},
-                                    std::byte{0},
-                                    std::byte{0},
-                                    std::byte{0},
-                                    std::byte{0}};
-    for (std::size_t index = 0; index < source_identity.size(); ++index) {
-        bytes[16u + index] = source_identity[index];
-    }
-    const std::uint64_t token = bioseq::indexing::crc64_ecma182(bytes);
-    return token == 0u ? 0x9e3779b97f4a7c15ull : token;
-}
-
-namespace {
-constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_a{std::byte{1}};
-constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_b{std::byte{2}};
-static_assert(hash_major_source_diagnostic_token(std::array<std::byte, 16>{}) != 0u);
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) != 0u);
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) ==
-              hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a));
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) !=
-              hash_major_source_diagnostic_token(hash_major_diagnostic_identity_b));
-} // namespace
 /**
  * @brief Selects whether a batch is the primary query or an additional query.
  */

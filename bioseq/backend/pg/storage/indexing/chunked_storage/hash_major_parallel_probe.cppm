@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
-export module bioseq.postgres.storage.indexing.chunked_storage:hash_major_parallel_probe;
+export module bioseq.postgres.storage.indexing.hash_major_parallel_probe;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -116,8 +92,7 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
-import :catalog;
-import :hash_major_writer;
+import bioseq.postgres.storage.indexing.chunked_storage;
 export namespace bioseq::storage::indexing {
 /// One hash-major read session owns the exact current-generation heap/primary-index
 /// descriptors and borrows one already-registered executor MVCC snapshot.

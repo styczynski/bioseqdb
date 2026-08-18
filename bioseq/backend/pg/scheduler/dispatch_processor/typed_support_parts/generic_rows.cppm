@@ -4,79 +4,27 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
 #include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:generic_rows;
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.generic_rows;
 
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
-import :scanner_row;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
 import bioseq.highway.dispatch_contract;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
-import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -380,7 +328,8 @@ void process_generic_rows(
                                         alphabet_code,
                                         storage_unit_byte_width,
                                         scanner_pg_ctx,
-                                        &pool](row_view query_lazy_view,
+                                        &pool,
+                                        &scanner_row](row_view query_lazy_view,
                                                std::optional<row_view> target_lazy_view,
                                                pg_sequence_read_session* active_session) {
                     return scanner_row(query_lazy_view,

@@ -15,17 +15,10 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <cstddef>
-#include <cstdint>
-#include <expected>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-
 export module bioseq.postgres.scheduler.supervisor;
 
 export import :persist_queue_publish;
+import std;
 import bioseq.indexing.type;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.gpu.vulkan.shader_variants;
@@ -34,7 +27,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.postgres.configuration.core;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.indexing.chunked_storage;
+export import bioseq.postgres.storage.indexing.minimizer_build_stats;
 
 export namespace bioseq::postgres::scheduler {
 

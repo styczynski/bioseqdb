@@ -70,13 +70,12 @@ import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.instrumentation.summary_writer;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.table.batch_sort_scan;
 
+import :custom_scan_execution_method_contracts;
 import :custom_scan_support;
-import :custom_scan_slice_projection;
 import :custom_scan_join_paths;
 import :custom_scan_scan_paths;
 import :custom_scan_plan_builders;

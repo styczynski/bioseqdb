@@ -165,6 +165,15 @@ inline void render_imports(
     output << '\n';
 }
 
+/** Imports the module that owns the declarations copied into a probe. */
+inline void render_signature_donor_import(
+    std::ostringstream& output,
+    const generation_plan& plan) {
+    output << "import "
+           << plan.topology.region.configured_output_module_name
+           << ";\n\n";
+}
+
 [[nodiscard]] inline std::string provenance_attribute(
     const structural_analysis::declaration_record& declaration,
     const materialization_coordinate& coordinate) {
@@ -731,7 +740,11 @@ inline void render_selector_switch(
         + std::to_string(identity.ordinal);
     output << detail::global_module_fragment(plan)
            << "export module " << module << ";\n\n";
-    detail::render_imports(output, plan, true, false);
+    // A body-free probe validates declarations copied from the authenticated
+    // signature donor. Loading every implementation dependency here repeats
+    // large system-header source tables and can exhaust Clang's source-location
+    // address space before the declaration is parsed.
+    detail::render_signature_donor_import(output, plan);
     const std::string identity_key = detail::identity_key(identity);
     for (const materialization_coordinate& coordinate
          : plan.topology.coordinates) {

@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_writer_publication;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -565,7 +541,7 @@ inline void apply_minimizer_generation_storage_transition_pg(
 
 /// Consume the private complete-reread authorization and publish its head atomically.
 /// There is no public overload that accepts an arbitrary relation/generation.
-[[nodiscard]] inline ready_minimizer_generation_published_head_receipt
+[[nodiscard]] ready_minimizer_generation_published_head_receipt
 publish_ready_minimizer_generation_head_pg(ready_minimizer_generation_token&& token) {
     const auto minimizer_generation_storage_error = [](std::string_view message) {
         minimizer_generation_storage_error_as_cpp(message);

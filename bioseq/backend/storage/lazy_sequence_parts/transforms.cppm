@@ -5,9 +5,11 @@
 export module bioseq.storage.lazy_sequence:transforms;
 
 import std;
-import :view_contract;
+import bioseq.storage.lazy_sequence_view;
+import bioseq.common.seqan_adapter;
 import bioseq.storage.coordinates;
 import bioseq.storage.scanner;
+import bioseq.storage.size;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
 

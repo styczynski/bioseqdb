@@ -3,10 +3,7 @@
  * @brief Manages parallel scan DSM state and publishes the stable executor callbacks.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -38,7 +35,6 @@ import bioseq.postgres.vectorization.types;
 import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
 import bioseq.postgres.external.path_builder_slot;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.table.types;
@@ -70,13 +66,13 @@ import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.instrumentation.summary_writer;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.table.batch_sort_scan;
 
 import :custom_scan_support;
-import :custom_scan_slice_projection;
+import :custom_scan_slice_path_runtime_contract;
+import :custom_scan_slice_execution_dsm_protocol;
 import :custom_scan_join_paths;
 import :custom_scan_scan_paths;
 import :custom_scan_plan_builders;
@@ -242,7 +238,7 @@ export {
     }
 
     /** @brief Deparses storage-pushdown clauses for EXPLAIN output. */
-    inline const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses) {
+    const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses) {
         Expr* conjunction;
 
         postgres_list<Expr> clause_list{clauses};
@@ -263,7 +259,7 @@ export {
     }
 
     /** @brief Deparses the projected column list for EXPLAIN output. */
-    inline const char* bioseq_column_projected_columns_str(List* context, List* projected_columns) {
+    const char* bioseq_column_projected_columns_str(List* context, List* projected_columns) {
         if (list_length(projected_columns) == 0) {
             return "<columnar optimized out all columns>";
         }

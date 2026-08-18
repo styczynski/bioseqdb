@@ -1640,9 +1640,17 @@ inline void verify_production_declaration_heads_and_probes() {
                 artifact.logical_coordinate_ordinals.size() == 7U
                     && probe_representatives.insert(
                            artifact.logical_coordinate_ordinals.front()).second
+                    && artifact.content.contains(
+                        "import bioseq.postgres.scheduler.dispatch_processor;")
+                    && !artifact.content.contains(
+                        "import bioseq.common.seqan_adapter;")
+                    && !artifact.content.contains(
+                        "import bioseq.postgres.scheduler.dispatch_processor."
+                        "typed_support.scanner_row;")
                     && !artifact.content.contains(
                         "same_dispatch_target_locator"),
-                "identity probe must cover seven shards without the support island");
+                "identity probe must cover seven shards through the public "
+                "signature owner without implementation dependencies");
         }
     }
     require(

@@ -83,7 +83,6 @@ import bioseq.indexing.type;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.scheduler.supervisor;

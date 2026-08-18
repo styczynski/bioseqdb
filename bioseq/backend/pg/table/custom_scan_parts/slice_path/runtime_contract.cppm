@@ -3,10 +3,7 @@
  * @brief Owns SliceProject DSM, runtime, state, and plan access contracts.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,60 +24,8 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_slice_path_runtime_contract;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
 import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-import :custom_scan_support;
-
-import :custom_scan_slice_path_codec_contract;
-import :custom_scan_slice_path_carrier_lineage;
-
-using namespace bioseq::postgres::support;
+import bioseq.postgres.types.compact_sequence;
 
 export {
     enum class slice_dsm_publish_state : std::uint8_t {
@@ -116,6 +61,17 @@ export {
 
     inline constexpr std::uint32_t k_bioseq_slice_dsm_magic = 0x42534432u; /* BSD2 */
     inline constexpr std::uint16_t k_bioseq_slice_dsm_version = 1u;
+
+    /** @brief Selects a one-shot malformed DSM condition for integration diagnostics. */
+    enum slice_project_dsm_test_fixture : int {
+        k_slice_dsm_test_none = 0,
+        k_slice_dsm_test_incomplete = 1,
+        k_slice_dsm_test_malformed = 2,
+    };
+
+    /* Backend-local, one-shot diagnostic state. The next analyzed SliceProject
+     * consumes the selected mode before any fixture code can raise an error. */
+    int pending_slice_dsm_test_fixture = k_slice_dsm_test_none;
 
     struct slice_dsm_detach_state {
         std::uint32_t refcount;
@@ -199,20 +155,25 @@ export {
     void slice_project_reinitialize_dsm(CustomScanState* custom,
                                         ParallelContext* pcxt,
                                         void* coordinate);
-
-    [[nodiscard]] List* slice_project_header(const slice_project_ir_builder& builder) {
-        List* header = list_make5(makeInteger(k_bioseq_slice_project_magic),
-                                  makeInteger(k_bioseq_slice_project_codec_version),
-                                  makeInteger(list_length(builder.records)),
-                                  makeInteger(list_length(builder.expressions)),
-                                  slice_project_int8_const(builder.piece_boundaries));
-        header = lappend(header, slice_project_int8_const(builder.source_pieces));
-        header = lappend(header, slice_project_int8_const(builder.planned_symbols));
-        header = lappend(header, slice_project_int8_const(builder.planned_bytes));
-        header = lappend(header, makeInteger(list_length(builder.nodes)));
-        header = lappend(header, makeString(pstrdup("none")));
-        return header;
-    }
+    void slice_project_release_detach_state(slice_dsm_detach_state* state) noexcept;
+    void slice_project_source_routes_reset(void* argument) noexcept;
+    [[nodiscard]] TupleTableSlot* slice_project_publish_child(CustomScanState* custom,
+                                                              bool project);
+    void slice_project_apply_dsm_test_fixture(slice_project_state* state);
+    void slice_project_begin(CustomScanState* custom, EState* estate, int eflags);
+    [[nodiscard]] TupleTableSlot* slice_project_exec(CustomScanState* custom);
+    void slice_project_end(CustomScanState* custom);
+    void slice_project_rescan(CustomScanState* custom);
+    void slice_project_mark_pos(CustomScanState* custom);
+    void slice_project_restr_pos(CustomScanState* custom);
+    [[nodiscard]] Size slice_project_estimate_dsm(CustomScanState* custom,
+                                                  ParallelContext* pcxt);
+    void slice_project_initialize_dsm(CustomScanState* custom,
+                                      ParallelContext* pcxt,
+                                      void* coordinate);
+    void slice_project_initialize_worker(CustomScanState* custom,
+                                         shm_toc* toc,
+                                         void* coordinate);
 
     [[nodiscard]] List* slice_project_plan_header(CustomScan* scan) {
         if (scan == nullptr || list_length(scan->custom_private) != 4)

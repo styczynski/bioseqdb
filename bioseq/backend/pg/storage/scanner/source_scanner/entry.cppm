@@ -52,6 +52,8 @@ import :source_registry;
 
 export namespace bioseq::storage {
 
+namespace sequence_source_detail {
+
 /// Compute packed-unit padding for one locator and sequence representation.
 /// @tparam p_sequence_instance Concrete alphabet and storage-unit configuration.
 /// @param locator Locator whose logical length is measured in letters.
@@ -135,15 +137,16 @@ inline void typed_scanner_read_ranks(source_scanner_entry& entry,
         const std::size_t unit_index =
             static_cast<std::size_t>(local_symbol / traits::letters_per_unit);
         if (unit_index >= packed.size()) {
+            const auto packed_unit_count = packed.size();
             bioseq::postgres::support::invoke_pg_as_cpp(
-                [fragment_no, unit_index, packed_size = packed.size()] {
+                [fragment_no, unit_index, packed_unit_count] {
                     ereport(ERROR,
                             (errcode(ERRCODE_DATA_CORRUPTED),
                              errmsg("bioseq source scanner returned a truncated fragment"),
                              errdetail("fragment=%zu unit=%zu available_units=%zu",
                                        fragment_no,
                                        unit_index,
-                                       packed_size)));
+                                       packed_unit_count)));
                 });
         }
         const unit word = packed[unit_index];

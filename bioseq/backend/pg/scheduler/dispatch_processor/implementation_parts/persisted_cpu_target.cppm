@@ -50,6 +50,7 @@ import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
 import bioseq.postgres.storage.indexing.chunked_storage;
+import bioseq.postgres.storage.indexing.hash_major_session;
 import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
@@ -83,8 +84,8 @@ namespace bioseq::simd {
  * Authorizes the minimizer-generation source, tries hash-major canonical-u32 preparation when the
  * READY head matches the CPU sketch backend and storage profile, otherwise opens grouped-SoA for
  * minimizer-fragment or minimizer-sequence indexes. Calls prepare_cpu_shared_query_unions with a
- * route-specific union storage mode, then retains the matching hash-major, fragment, or sequence reader
- * on @p prepared_target.groups.
+ * route-specific union storage mode, then retains the matching hash-major, fragment, or sequence
+ * reader on @p prepared_target.groups.
  */
 void batch_processor::prepare_cpu_persisted_native_target(
     const Oid database_oid,

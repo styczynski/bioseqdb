@@ -1626,4 +1626,6 @@ inline void ensure_callbacks_registered() {
 }
 
 
+}  // namespace sequence_source_detail
+
 }  // namespace bioseq::storage

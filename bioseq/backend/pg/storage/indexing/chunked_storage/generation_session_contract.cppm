@@ -51,37 +51,14 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_contract;
+import std;
+export import bioseq.postgres.storage.indexing.minimizer_read_stats;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -117,8 +94,27 @@ import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
+import :catalog_row_io;
 import :fragment_image;
 export namespace bioseq::storage::indexing {
+/** Setup identity carried across restart inspection of one ready generation. */
+struct ready_minimizer_generation_identity {
+    std::uint64_t generation_id = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t storage_contract_checksum = 0;
+
+    /** Compares every authenticated generation identity field. */
+    [[nodiscard]] bool operator==(const ready_minimizer_generation_identity&) const = default;
+};
+
+/** Inspects the authenticated identity of one ready generation. */
+[[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
+    const minimizer_generation_administration_identity& identity,
+    std::uint64_t sequence_rowno,
+    Snapshot executor_snapshot,
+    expected_minimizer_generation_identity expected);
+
 /// Authenticated head, manifest, and directory returned by metadata discovery.
 struct minimizer_generation_read_metadata {
     minimizer_generation_head head{};
@@ -132,115 +128,6 @@ struct minimizer_generation_read_metadata {
 struct minimizer_generation_payload_read_group {
     index_sub_key_range range{};
     std::vector<index_sub_key_request> requests;
-};
-
-/// Physical and logical counters for one control or position read stage.
-struct minimizer_generation_payload_stage_read_stats {
-    std::uint64_t plan_calls = 0;
-    std::uint64_t planned_request_groups = 0;
-    std::uint64_t executed_request_groups = 0;
-    std::uint64_t range_scan_calls = 0;
-    std::uint64_t physical_heap_rows_read = 0;
-    std::uint64_t physical_bytes_read = 0;
-    std::uint64_t control_authorization_checks = 0;
-    index_chunk_read_stats read{};
-};
-
-/// Authorization counters for the full-generation relation-scan route.  Unlike the
-/// selected-range reader, this route consumes every payload row through one
-/// ordered primary-index scan after metadata/source authorization has completed.
-struct minimizer_generation_full_payload_read_stats {
-    std::uint64_t scan_calls = 0;
-    std::uint64_t planned_extents = 0;
-    std::uint64_t completed_extents = 0;
-    std::uint64_t control_chunks = 0;
-    std::uint64_t position_chunks = 0;
-    std::uint64_t control_bytes = 0;
-    std::uint64_t position_bytes = 0;
-    std::uint64_t payload_row_checksum = 0;
-};
-
-/// Compact hash-major-specific stats nested under the existing generation
-/// read receipt. It carries only correctness/performance gates that cannot be
-/// reconstructed from the control/position extent fields.
-struct hash_major_minimizer_cold_read_stats {
-    std::uint64_t layout_revision = 0;
-    std::uint64_t sessions = 0;
-    std::uint64_t generation_id = 0;
-    std::array<std::byte, 16> source_identity{};
-    std::uint64_t source_content_crc64 = 0;
-    std::array<std::byte, 32> storage_contract_digest{};
-    std::uint64_t directory_rows = 0;
-    std::uint64_t directory_bytes = 0;
-    std::uint64_t control_rows = 0;
-    std::uint64_t control_bytes = 0;
-    std::uint64_t posting_rows = 0;
-    std::uint64_t posting_bytes = 0;
-    std::uint64_t directory_row_crc_receipts = 0;
-    std::uint64_t directory_stream_crc_receipts = 0;
-    std::uint64_t control_row_crc_receipts = 0;
-    std::uint64_t control_block_crc_receipts = 0;
-    std::uint64_t control_semantic_receipts = 0;
-    std::uint64_t posting_row_crc_receipts = 0;
-    std::uint64_t posting_ranges_delivered = 0;
-    std::uint64_t posting_range_crc_receipts = 0;
-    std::uint64_t posting_semantic_receipts = 0;
-    std::uint64_t authorized_posting_bytes = 0;
-    std::uint64_t generic_source_fallback_calls = 0;
-    std::uint64_t query_count = 0;
-    std::uint64_t selected_block_count = 0;
-    std::uint64_t accepted_hash_count = 0;
-    std::uint64_t retained_position_count = 0;
-    std::uint64_t directory_stage_peak_bytes = 0;
-    std::uint64_t control_stage_peak_bytes = 0;
-    std::uint64_t posting_stage_peak_bytes = 0;
-    std::uint64_t peak_admitted_bytes = 0;
-    std::uint64_t retained_owner_bytes = 0;
-    std::uint64_t admitted_bytes = 0;
-    std::uint64_t failures = 0;
-    bool saturated = false;
-};
-
-/// Aggregate receipt for one current-generation relation read session.
-struct minimizer_generation_read_stats {
-    cold_index_preparation_stats cold{};
-    std::uint64_t relation_opens = 0;
-    std::uint64_t index_scans = 0;
-    std::uint64_t head_scans = 0;
-    std::uint64_t head_rows_read = 0;
-    std::uint64_t head_bytes_read = 0;
-    std::uint64_t manifest_directory_scans = 0;
-    std::uint64_t manifest_rows_read = 0;
-    std::uint64_t manifest_bytes_read = 0;
-    std::uint64_t directory_chunks_read = 0;
-    std::uint64_t directory_bytes_read = 0;
-    std::uint64_t metadata_repeated_reads = 0;
-    std::uint64_t metadata_heap_rows_read = 0;
-    std::uint64_t metadata_bytes_read = 0;
-    std::uint64_t payload_heap_rows_read = 0;
-    std::uint64_t payload_bytes_read = 0;
-    std::uint64_t total_heap_rows_read = 0;
-    std::uint64_t total_bytes_read = 0;
-    std::uint64_t toast_values_read = 0;
-    std::uint64_t detoast_bytes = 0;
-    std::uint64_t explicit_copy_bytes = 0;
-    std::uint64_t bulk_read_calls = 0;
-    std::uint64_t planned_request_groups = 0;
-    std::uint64_t executed_request_groups = 0;
-    std::uint64_t range_scan_calls = 0;
-    std::uint64_t cache_lookups = 0;
-    std::uint64_t cache_populations = 0;
-    std::uint64_t source_parent_rows_read = 0;
-    std::uint64_t source_catalog_rows_read = 0;
-    std::uint64_t source_catalog_index_scans = 0;
-    std::uint64_t source_fragment_rows_read = 0;
-    std::uint64_t source_decoded_bp = 0;
-    std::uint64_t source_storage_incarnations_checked = 0;
-    index_chunk_read_stats payload{};
-    minimizer_generation_payload_stage_read_stats controls{};
-    minimizer_generation_payload_stage_read_stats positions{};
-    minimizer_generation_full_payload_read_stats full_generation{};
-    hash_major_minimizer_cold_read_stats hash_major{};
 };
 
 namespace minimizer_generation_full_crc_detail {

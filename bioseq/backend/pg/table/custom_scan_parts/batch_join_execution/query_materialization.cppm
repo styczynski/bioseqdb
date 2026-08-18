@@ -3,10 +3,7 @@
  * @brief Materializes batched join queries within the established PG boundary.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -38,7 +35,6 @@ import bioseq.postgres.vectorization.types;
 import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
 import bioseq.postgres.external.path_builder_slot;
 import bioseq.postgres.storage.metadata;
 import bioseq.postgres.table.types;
@@ -70,13 +66,11 @@ import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.instrumentation.summary_writer;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.table.batch_sort_scan;
 
 import :custom_scan_support;
-import :custom_scan_slice_projection;
 import :custom_scan_join_paths;
 import :custom_scan_scan_paths;
 import :custom_scan_plan_builders;

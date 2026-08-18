@@ -4,73 +4,29 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
+extern "C" {
+#include "postgres.h"
+
+#include "utils/errcodes.h"
+}
 #include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:transient_storage;
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.transient_storage;
 
-import bioseq.postgres.scheduler.dispatch_processor;
+import std;
 import bioseq.highway.dispatch_contract;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
+import bioseq.indexing.minimizer_index;
 import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.minimap_port;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
+import bioseq.postgres.scheduler.persist_target;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -599,18 +555,19 @@ struct opportunistic_sequence_index_storage {
                 return chunk;
             }
         }
-        const std::string detail = fmt::format(
+        const std::string detail = std::format(
             "missing chunk sub_key={} chunk_no={}", static_cast<long long>(sub_key), chunk_no);
         index_error(detail);
     }
 };
 
 /** Builds a persist target for a per-fragment minimizer index row. */
+template <class p_scanner_pg_context>
 [[nodiscard]] bioseq::postgres::scheduler::persist_target make_fragment_index_persist_target(
-    const batch_processor::scanner_pg_context& ctx,
+    const p_scanner_pg_context& ctx,
     const bioseq::storage::sequence_locator& loc,
     std::uint64_t sequence_rowno,
-    std::string_view index_name = minimizers_per_fragment_index_name) {
+    std::string_view index_name = bioseq::indexing::minimizer_hashmap_fragment_index::index_name) {
     return bioseq::postgres::scheduler::persist_target{
         .db_oid = ctx.db_oid,
         .user_relid = ctx.user_relid,
@@ -625,8 +582,9 @@ struct opportunistic_sequence_index_storage {
 }
 
 /** True when async recompute may defer minimizer persistence for this scan context. */
+template <class p_scanner_pg_context>
 [[nodiscard]] bool
-can_defer_recompute_minimizer_persist(const batch_processor::scanner_pg_context& ctx,
+can_defer_recompute_minimizer_persist(const p_scanner_pg_context& ctx,
                                       const minimap2_parameters& params) noexcept {
     return ctx.recompute_async_persist_active && ctx.index_async_persist_active &&
            OidIsValid(ctx.user_relid) && params.kmer_size == 15 &&
@@ -652,7 +610,7 @@ pg_segment_unit_ranges(sequence_size_t total_bp,
                        sequence_size_t query_len,
                        std::size_t lpu,
                        const minimap2_parameters& params) {
-    const auto backend = (pg_vulkan_seed_lookup_selected(params) ||
+    const auto backend = ((params.vulkan_enabled && params.vulkan_seed_hits_enabled) ||
                           target_backend_from_params_for_recompute(params) ==
                               bioseq::minimizers::minimizer_sketch_backend::vulkan_segment)
                              ? bioseq::minimizers::minimizer_sketch_backend::vulkan_segment

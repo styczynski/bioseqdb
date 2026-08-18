@@ -4,11 +4,9 @@
  */
 module;
 
-#include <algorithm>
-#include <cstdint>
-
 export module bioseq.gpu.vulkan.abi:runtime;
 
+import std;
 import bioseq.common.checked_arithmetic;
 
 export namespace bioseq::gpu::vulkan {
@@ -32,16 +30,12 @@ inline constexpr std::uint32_t k_gpu_peak_allocation_alignment = 64u * 1024u;
  *         `id += gl_NumWorkGroups.x` so every logical item remains covered.
  */
 [[nodiscard]] constexpr std::uint32_t grid_stride_dispatch_group_count(
-    std::uint64_t logical_items,
-    std::uint32_t local_size,
-    std::uint32_t max_workgroups) noexcept
-{
+    std::uint64_t logical_items, std::uint32_t local_size, std::uint32_t max_workgroups) noexcept {
     if (logical_items == 0u || local_size == 0u || max_workgroups == 0u) {
         return 0u;
     }
     return static_cast<std::uint32_t>(std::min<std::uint64_t>(
-        bioseq::common::ceil_div(logical_items, local_size),
-        max_workgroups));
+        bioseq::common::ceil_div(logical_items, local_size), max_workgroups));
 }
 /**
  * @brief Aggregates sketch, seed, anchor, and chain counts in the device ABI.

@@ -30,10 +30,9 @@ module;
 export module bioseq.indexing.minimizer_sequence:read_assembly_build;
 
 import :read_assembly_contract;
-import :read_assembly_generation;
-import :admitted_runs;
-import :bucket_codec;
-import :replay_build;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
+import bioseq.indexing.minimizer_sequence.generation;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;

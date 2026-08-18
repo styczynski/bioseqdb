@@ -6,9 +6,11 @@
 // supplies canonical source geometry; it is never attached to a compiler target.
 module;
 
-#include <libassert/assert.hpp>
 #include <bioseq/pg_compat.h>
 
+// This scan-only code-generation input cannot import the toolchain-owned
+// standard-library module. The dependency authority must remain relocatable
+// with the repository and generated PCM roots.
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -25,12 +27,15 @@ module;
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
 export module bioseq.codegen.inputs.dispatch_processor_typed;
 
 import bioseq.postgres.scheduler.dispatch_processor;
-import bioseq.postgres.scheduler.dispatch_processor.typed_support;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.row_adapters;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.scanner_row;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.cpu_batch_route;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.root_coordination;
 import bioseq.highway.dispatch_contract;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
@@ -55,6 +60,7 @@ import bioseq.chaining.vulkan;
 import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
+import bioseq.pipeline.stats;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.instrumentation.clock;
@@ -320,7 +326,7 @@ inline void with_pg_sequence_recipe(
         const std::uint8_t storage_unit_byte_width,
         p_function&& callback) {
     typed_support_detail::with_pg_sequence_recipe<p_alphabet>(
-        context, recipe, descriptor, column_attno, active_read_session,
+        context, recipe, descriptor, alphabet_code, storage_unit_byte_width,
         std::forward<p_function>(callback));
 }
 
@@ -372,7 +378,8 @@ template <class p_sequence>
         target_bp_size, min_bp, dispatch_params, params, per_row_query_mode,
         cached_query_minimizers, cached_query_minimizer_stats,
         consumed_shared_cached_query_stats, alphabet_code,
-        storage_unit_byte_width, scanner_pg_ctx, pool, active_read_session);
+        storage_unit_byte_width, scanner_pg_ctx, pool, active_read_session,
+        bioseq::storage::indexing::open_fragment_storage);
 }
 
 template <class p_sequence>
@@ -500,6 +507,11 @@ template <class p_sequence>
         return process_inmemory_row_typed<p_sequence>(
             std::forward<p_args>(args)...);
     };
+    auto cpu_route = [&scanner_row, &inmemory_row]<class... p_args>(p_args&&... args)
+        -> decltype(auto) {
+        return typed_support_detail::process_cpu_batch_route<p_sequence>(
+            std::forward<p_args>(args)..., scanner_row, inmemory_row);
+    };
     return typed_support_detail::process_sequences_typed_root<p_sequence>(
         batch_size,
         alphabet_code,
@@ -513,8 +525,7 @@ template <class p_sequence>
         broadcast_query_ordinal,
         stats,
         scanner_pg_ctx,
-        scanner_row,
-        inmemory_row);
+        cpu_route);
 }
 
 } // namespace

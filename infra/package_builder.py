@@ -91,6 +91,11 @@ DEFAULT_S3_PREFIX = "bioseq/packages"
 RESOURCE_NAME_PREFIX = "bioseq-package-builder"
 CI_ACCESS_SCHEMA_REVISION = 3
 CI_ACCESS_DESCRIPTION = "bioseq package release ephemeral SSH"
+CONTROLLER_SCHEMA_REVISION = 1
+CONTROLLER_KIND = "bioseq-native-package-run"
+CONTROLLER_STATES = frozenset(
+    {"prepared", "active", "completed", "finalized", "collected", "failed"}
+)
 COLLECTION_SCHEMA_REVISION = 2
 REMOTE_WORKSPACE = "/opt/bioseq-package-builder/workspace"
 REMOTE_ROOT = f"{REMOTE_WORKSPACE}/builds"
@@ -162,10 +167,51 @@ _PACKAGE_RUN_ROOT_SHAPES = (
         "cache_images", "complete_matrix_fingerprint",
     },
 )
+_CONTROLLER_ROOT_KEYS = frozenset({
+    "schema_revision",
+    "kind",
+    "state",
+    "created_at",
+    "updated_at",
+    "account",
+    "launch_caller_arn",
+    "region",
+    "bucket",
+    "s3_prefix",
+    "store_key",
+    "owner_token_sha256",
+    "run_id",
+    "source_revision",
+    "poetry_lock_sha256",
+    "matrix_fingerprint",
+    "selection",
+    "optimization_policy",
+    "worker_generation",
+    "worker_generation_revision",
+    "builders",
+    "diagnostics",
+    "result",
+})
+_CONTROLLER_BUILDER_KEYS = frozenset({
+    "instance_id",
+    "instance_type",
+    "aws_architecture",
+    "source_ami_id",
+    "availability_zone",
+    "initial_state",
+    "stop_owned",
+    "unit_name",
+    "remote_log_path",
+    "manifest_path",
+    "build_root",
+    "launch_acknowledged",
+    "python_environment",
+})
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 SECURITY_GROUP_ID_RE = re.compile(r"^sg-[0-9a-f]{8,17}$")
 S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+CONTROLLER_DIAGNOSTIC_LIMIT = 4000
 
 SOURCE_TREE_HASH_SCRIPT = r"""
 import hashlib
@@ -708,6 +754,7 @@ PACKAGE_CONTAINER_NAME_RE = re.compile(
 )
 FINALIZE_ALLOWED_COMMITTED_DELTAS = frozenset(
     {
+        ".github/workflows/package-release.yml",
         "infra/package_builder.py",
         "infra/tests/test_package_builder.py",
     }
@@ -2736,7 +2783,14 @@ def stop_existing_builders(
     matrix: Matrix,
     *,
     lifecycle_receipt: Path | None = None,
+    controller_receipt: Path | None = None,
+    controller_source_revision: str | None = None,
+    controller_owner_token_sha256: str | None = None,
 ) -> dict[str, str]:
+    if lifecycle_receipt is not None and controller_receipt is not None:
+        raise PackageBuilderError(
+            "stop accepts either a legacy lifecycle receipt or a controller receipt"
+        )
     identity = aws_preflight(region)
     builders, records = discover_existing_builders(
         region, matrix, ephemeral_ssh=False
@@ -2759,6 +2813,52 @@ def stop_existing_builders(
                 info(
                     f"{name} builder {builder.instance_id} was not started by this "
                     "workflow; leaving its lifecycle unchanged"
+                )
+    if controller_receipt is not None:
+        if (
+            controller_source_revision is None
+            or controller_owner_token_sha256 is None
+        ):
+            raise PackageBuilderError(
+                "controller-scoped stop requires source and owner identity"
+            )
+        bucket = validate_existing_artifact_bucket(
+            region, str(identity["Account"])
+        )
+        controller = fetch_controller_receipt(
+            controller_receipt,
+            matrix=matrix,
+            region=region,
+            bucket=bucket,
+            source_revision=controller_source_revision,
+            required=True,
+        )
+        assert controller is not None
+        controller = require_controller_receipt(
+            controller,
+            matrix=matrix,
+            label="package stop controller receipt",
+            expected_region=region,
+            expected_account=str(identity["Account"]),
+            expected_bucket=bucket,
+            builders=builders,
+            expected_source_revision=controller_source_revision,
+            expected_owner_token_sha256=controller_owner_token_sha256,
+        )
+        if controller["state"] != "collected":
+            raise PackageBuilderError(
+                "controller-scoped stop requires verified collection evidence"
+            )
+        targets = {
+            name: builder
+            for name, builder in builders.items()
+            if controller["builders"][name]["stop_owned"]
+        }
+        for name, builder in builders.items():
+            if name not in targets:
+                info(
+                    f"{name} builder {builder.instance_id} is not controller-owned; "
+                    "leaving its lifecycle unchanged"
                 )
     states = {name: instance_state(records[name]) for name in matrix.architectures}
     errors: list[str] = []
@@ -6170,6 +6270,574 @@ def complete_matrix_fingerprint(matrix: Matrix, lock_sha256: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def complete_selection(matrix: Matrix) -> Selection:
+    """Return the repository's canonical release selection."""
+
+    return Selection(
+        tuple(matrix.architectures),
+        tuple(matrix.distributions),
+        matrix.postgresql_majors,
+    )
+
+
+def controller_store_key(source_revision: str) -> str:
+    """Return the one durable controller key for an exact source revision."""
+
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise PackageBuilderError(
+            "controller receipt source revision must be a full lower-case Git SHA-1"
+        )
+    return f"{DEFAULT_S3_PREFIX}/controllers/v1/{source_revision}.json"
+
+
+def controller_builder_paths(run_id: str, architecture: str) -> dict[str, str]:
+    """Return deterministic remote identities for one controller worker."""
+
+    if RUN_ID_RE.fullmatch(run_id) is None or architecture not in {"arm64", "x64"}:
+        raise PackageBuilderError("controller worker identity is malformed")
+    build_root = f"{REMOTE_ROOT}/{run_id}-{architecture}"
+    return {
+        "unit_name": f"bioseq-package-{run_id}-{architecture}.service",
+        "remote_log_path": f"{build_root}/build.log",
+        "manifest_path": f"{REMOTE_ROOT}/{run_id}-{architecture}-manifest.json",
+        "build_root": build_root,
+    }
+
+
+def _require_controller_timestamp(value: object, label: str) -> None:
+    if not isinstance(value, str):
+        raise PackageBuilderError(f"{label} must be an ISO-8601 UTC timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError as error:
+        raise PackageBuilderError(
+            f"{label} must be an ISO-8601 UTC timestamp"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() != dt.timedelta(0):
+        raise PackageBuilderError(f"{label} must be an ISO-8601 UTC timestamp")
+
+
+def new_controller_receipt(
+    *,
+    matrix: Matrix,
+    records: dict[str, dict[str, Any]],
+    builders: dict[str, Builder],
+    outputs: dict[str, Any],
+    region: str,
+    owner_token: str,
+    run_id: str,
+    source_revision: str,
+    poetry_lock_sha256: str,
+    adopt_running: bool = False,
+) -> dict[str, Any]:
+    """Create lifecycle intent before any controller-owned start or launch."""
+
+    run_match = RUN_ID_RE.fullmatch(run_id)
+    if run_match is None or run_match.group("revision") != source_revision[:12]:
+        raise PackageBuilderError("controller run ID does not match its source revision")
+    if re.fullmatch(r"[0-9a-f]{64}", poetry_lock_sha256) is None:
+        raise PackageBuilderError("controller Poetry lock hash is malformed")
+    if set(records) != set(matrix.architectures) or set(builders) != set(
+        matrix.architectures
+    ):
+        raise PackageBuilderError("controller requires both canonical builders")
+    account = str(outputs.get("account_id", ""))
+    caller_arn = str(outputs.get("caller_arn", ""))
+    bucket = str(outputs.get("package_bucket_name", ""))
+    if (
+        re.fullmatch(r"[0-9]{12}", account) is None
+        or not caller_arn.startswith("arn:")
+        or not bucket
+        or outputs.get("region") != region
+    ):
+        raise PackageBuilderError("controller infrastructure identity is incomplete")
+    owner_token_sha256, _description = ci_access_owner(owner_token)
+    now = utc_now()
+    selection = complete_selection(matrix)
+    builder_payload: dict[str, dict[str, Any]] = {}
+    for name, builder in builders.items():
+        initial_state = instance_state(records[name])
+        if initial_state not in {"pending", "running", "stopping", "stopped"}:
+            raise PackageBuilderError(
+                f"controller cannot own {name} from state {initial_state!r}"
+            )
+        if adopt_running and initial_state != "running":
+            raise PackageBuilderError(
+                f"legacy adoption requires {name} already running, got {initial_state!r}"
+            )
+        builder_payload[name] = {
+            "instance_id": builder.instance_id,
+            "instance_type": builder.instance_type,
+            "aws_architecture": builder.aws_architecture,
+            "source_ami_id": builder.source_ami_id,
+            "availability_zone": builder.availability_zone,
+            "initial_state": initial_state,
+            "stop_owned": False if adopt_running else initial_state in {"stopping", "stopped"},
+            **controller_builder_paths(run_id, name),
+            "launch_acknowledged": False,
+            "python_environment": None,
+        }
+    payload = {
+        "schema_revision": CONTROLLER_SCHEMA_REVISION,
+        "kind": CONTROLLER_KIND,
+        "state": "prepared",
+        "created_at": now,
+        "updated_at": now,
+        "account": account,
+        "launch_caller_arn": caller_arn,
+        "region": region,
+        "bucket": bucket,
+        "s3_prefix": DEFAULT_S3_PREFIX,
+        "store_key": controller_store_key(source_revision),
+        "owner_token_sha256": owner_token_sha256,
+        "run_id": run_id,
+        "source_revision": source_revision,
+        "poetry_lock_sha256": poetry_lock_sha256,
+        "matrix_fingerprint": complete_matrix_fingerprint(matrix, poetry_lock_sha256),
+        "selection": {
+            "architectures": list(selection.architectures),
+            "distributions": list(selection.distributions),
+            "postgresql_majors": list(selection.postgresql_majors),
+        },
+        "optimization_policy": {
+            "policy_revision": OPTIMIZATION_POLICY_REVISION,
+            "requested": PRODUCTION_OPTIMIZATION,
+        },
+        "worker_generation": WORKER_GENERATION,
+        "worker_generation_revision": WORKER_GENERATION_REVISION,
+        "builders": builder_payload,
+        "diagnostics": [],
+        "result": None,
+    }
+    return require_controller_receipt(
+        payload,
+        matrix=matrix,
+        label="new package controller receipt",
+        expected_region=region,
+        expected_account=account,
+        expected_bucket=bucket,
+        builders=builders,
+        expected_source_revision=source_revision,
+        expected_owner_token_sha256=owner_token_sha256,
+    )
+
+
+def require_controller_receipt(
+    value: object,
+    *,
+    matrix: Matrix,
+    label: str,
+    expected_region: str | None = None,
+    expected_account: str | None = None,
+    expected_bucket: str | None = None,
+    builders: dict[str, Builder] | None = None,
+    expected_source_revision: str | None = None,
+    expected_owner_token_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Strictly validate a durable controller receipt and all bound identities."""
+
+    if not isinstance(value, dict):
+        raise PackageBuilderError(f"{label} must be an object")
+    require_exact_keys(value, _CONTROLLER_ROOT_KEYS, label)
+    source_revision = value["source_revision"]
+    run_id = value["run_id"]
+    run_match = RUN_ID_RE.fullmatch(str(run_id))
+    lock_sha256 = value["poetry_lock_sha256"]
+    if (
+        type(value["schema_revision"]) is not int
+        or value["schema_revision"] != CONTROLLER_SCHEMA_REVISION
+        or value["kind"] != CONTROLLER_KIND
+        or value["state"] not in CONTROLLER_STATES
+        or re.fullmatch(r"[0-9]{12}", str(value["account"])) is None
+        or not isinstance(value["launch_caller_arn"], str)
+        or not value["launch_caller_arn"].startswith("arn:")
+        or not isinstance(value["region"], str)
+        or not value["region"]
+        or not isinstance(value["bucket"], str)
+        or not value["bucket"]
+        or value["s3_prefix"] != DEFAULT_S3_PREFIX
+        or re.fullmatch(r"[0-9a-f]{64}", str(value["owner_token_sha256"])) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(source_revision)) is None
+        or run_match is None
+        or run_match.group("revision") != str(source_revision)[:12]
+        or re.fullmatch(r"[0-9a-f]{64}", str(lock_sha256)) is None
+        or value["store_key"] != controller_store_key(str(source_revision))
+        or value["matrix_fingerprint"]
+        != complete_matrix_fingerprint(matrix, str(lock_sha256))
+        or value["worker_generation"] != WORKER_GENERATION
+        or type(value["worker_generation_revision"]) is not int
+        or value["worker_generation_revision"] != WORKER_GENERATION_REVISION
+    ):
+        raise PackageBuilderError(f"{label} identity is invalid")
+    _require_controller_timestamp(value["created_at"], f"{label} created_at")
+    _require_controller_timestamp(value["updated_at"], f"{label} updated_at")
+    selection = value["selection"]
+    if not isinstance(selection, dict):
+        raise PackageBuilderError(f"{label} selection must be an object")
+    require_exact_keys(
+        selection,
+        {"architectures", "distributions", "postgresql_majors"},
+        f"{label} selection",
+    )
+    expected_selection = complete_selection(matrix)
+    if selection != {
+        "architectures": list(expected_selection.architectures),
+        "distributions": list(expected_selection.distributions),
+        "postgresql_majors": list(expected_selection.postgresql_majors),
+    }:
+        raise PackageBuilderError(f"{label} does not contain the canonical matrix")
+    if value["optimization_policy"] != {
+        "policy_revision": OPTIMIZATION_POLICY_REVISION,
+        "requested": PRODUCTION_OPTIMIZATION,
+    }:
+        raise PackageBuilderError(f"{label} does not require O3")
+    diagnostics = value["diagnostics"]
+    if (
+        not isinstance(diagnostics, list)
+        or len(diagnostics) > len(matrix.architectures)
+        or any(
+            not isinstance(item, str)
+            or not item
+            or len(item) > CONTROLLER_DIAGNOSTIC_LIMIT
+            for item in diagnostics
+        )
+    ):
+        raise PackageBuilderError(f"{label} diagnostics are invalid")
+    receipt_builders = value["builders"]
+    if not isinstance(receipt_builders, dict) or set(receipt_builders) != set(
+        matrix.architectures
+    ):
+        raise PackageBuilderError(f"{label} builder set is invalid")
+    for name, receipt_builder in receipt_builders.items():
+        if not isinstance(receipt_builder, dict):
+            raise PackageBuilderError(f"{label} {name} builder must be an object")
+        require_exact_keys(
+            receipt_builder, _CONTROLLER_BUILDER_KEYS, f"{label} {name} builder"
+        )
+        expected_architecture = matrix.architectures[name]
+        paths = controller_builder_paths(str(run_id), name)
+        initial_state = receipt_builder["initial_state"]
+        if (
+            INSTANCE_ID_RE.fullmatch(str(receipt_builder["instance_id"])) is None
+            or receipt_builder["instance_type"] != expected_architecture.instance_type
+            or receipt_builder["aws_architecture"]
+            != expected_architecture.aws_architecture
+            or AMI_ID_RE.fullmatch(str(receipt_builder["source_ami_id"])) is None
+            or not isinstance(receipt_builder["availability_zone"], str)
+            or not receipt_builder["availability_zone"].startswith(value["region"])
+            or initial_state not in {"pending", "running", "stopping", "stopped"}
+            or type(receipt_builder["stop_owned"]) is not bool
+            or (
+                receipt_builder["stop_owned"]
+                and initial_state not in {"stopping", "stopped"}
+            )
+            or type(receipt_builder["launch_acknowledged"]) is not bool
+            or any(receipt_builder[key] != expected for key, expected in paths.items())
+        ):
+            raise PackageBuilderError(f"{label} {name} builder identity is invalid")
+        environment = receipt_builder["python_environment"]
+        if environment is not None:
+            if not isinstance(environment, dict):
+                raise PackageBuilderError(
+                    f"{label} {name} Python environment must be an object"
+                )
+            require_exact_keys(
+                environment,
+                {"venv_path", "python", "poetry"},
+                f"{label} {name} Python environment",
+            )
+            if (
+                environment["venv_path"]
+                != f"{REMOTE_POETRY_VENV_ROOT}/{lock_sha256}"
+                or re.fullmatch(r"3\.12\.\d+", str(environment["python"])) is None
+                or re.fullmatch(r"1\.8\.\d+", str(environment["poetry"])) is None
+            ):
+                raise PackageBuilderError(
+                    f"{label} {name} Python environment is invalid"
+                )
+        if receipt_builder["launch_acknowledged"] and environment is None:
+            raise PackageBuilderError(
+                f"{label} {name} launched worker lacks Python provenance"
+            )
+        if builders is not None:
+            actual = builders.get(name)
+            if actual is None or any(
+                (
+                    receipt_builder["instance_id"],
+                    receipt_builder["instance_type"],
+                    receipt_builder["aws_architecture"],
+                    receipt_builder["source_ami_id"],
+                    receipt_builder["availability_zone"],
+                )[index]
+                != expected
+                for index, expected in enumerate(
+                    (
+                        actual.instance_id,
+                        actual.instance_type,
+                        actual.aws_architecture,
+                        actual.source_ami_id,
+                        actual.availability_zone,
+                    )
+                )
+            ):
+                raise PackageBuilderError(
+                    f"{label} does not name the discovered {name} builder"
+                )
+    result = value["result"]
+    terminal_success = value["state"] in {"completed", "finalized", "collected"}
+    if terminal_success:
+        result = require_current_package_run_result(
+            result, label=f"{label} aggregate result"
+        )
+        if (
+            result.get("status") != "success"
+            or result.get("run_id") != run_id
+            or result.get("revision") != source_revision
+            or result.get("source_revision") != source_revision
+            or result.get("poetry_lock_sha256") != lock_sha256
+            or result.get("bucket") != value["bucket"]
+            or result.get("s3_prefix") != DEFAULT_S3_PREFIX
+            or result.get("selection") != selection
+        ):
+            raise PackageBuilderError(f"{label} aggregate identity is invalid")
+        require_package_run_optimization(
+            result.get("optimization"),
+            architectures=matrix.architectures,
+            label=f"{label} aggregate optimization",
+        )
+        if value["state"] in {"finalized", "collected"} and (
+            "cache_images" not in result
+            or result.get("complete_matrix_fingerprint")
+            != value["matrix_fingerprint"]
+        ):
+            raise PackageBuilderError(f"{label} finalization evidence is incomplete")
+    elif result is not None:
+        raise PackageBuilderError(f"{label} nonterminal result must be null")
+    for expected, observed, field in (
+        (expected_region, value["region"], "region"),
+        (expected_account, value["account"], "account"),
+        (expected_bucket, value["bucket"], "bucket"),
+        (expected_source_revision, source_revision, "source revision"),
+        (
+            expected_owner_token_sha256,
+            value["owner_token_sha256"],
+            "owner token",
+        ),
+    ):
+        if expected is not None and observed != expected:
+            raise PackageBuilderError(f"{label} {field} mismatch")
+    return value
+
+
+def controller_poetry_environment(
+    receipt: dict[str, Any], architecture: str
+) -> PoetryEnvironment:
+    value = receipt["builders"][architecture]["python_environment"]
+    if not isinstance(value, dict):
+        raise PackageBuilderError(
+            f"controller receipt has no Python environment for {architecture}"
+        )
+    return PoetryEnvironment(
+        lock_sha256=str(receipt["poetry_lock_sha256"]),
+        venv_path=str(value["venv_path"]),
+        python_version=str(value["python"]),
+        poetry_version=str(value["poetry"]),
+    )
+
+
+def controller_handle(
+    receipt: dict[str, Any], builder: Builder, outputs: dict[str, Any]
+) -> RemoteBuildHandle:
+    """Reconstruct one exact attach handle without a persisted private key."""
+
+    architecture = builder.architecture
+    value = receipt["builders"][architecture]
+    environment = controller_poetry_environment(receipt, architecture)
+    selection = complete_selection(load_matrix())
+    remote_source = _remote_committed_source_path(str(receipt["source_revision"]))
+    worker_argv = remote_worker_argv(
+        builder=builder,
+        remote_source=remote_source,
+        revision=str(receipt["source_revision"]),
+        poetry_environment=environment,
+        selection=selection,
+        region=str(receipt["region"]),
+        bucket=str(receipt["bucket"]),
+        s3_prefix=str(receipt["s3_prefix"]),
+        secret_arn=str(outputs["signing_key_secret_arn"]),
+        manifest_path=str(value["manifest_path"]),
+        build_root=str(value["build_root"]),
+    )
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return RemoteBuildHandle(
+        builder=builder,
+        unit_name=str(value["unit_name"]),
+        remote_log_path=str(value["remote_log_path"]),
+        manifest_path=str(value["manifest_path"]),
+        build_root=str(value["build_root"]),
+        local_log_path=LOG_DIR / f"{receipt['run_id']}-{architecture}.log",
+        worker_argv=worker_argv,
+        launch_acknowledged=value["launch_acknowledged"] is True,
+    )
+
+
+def persist_controller_receipt(
+    receipt_path: Path,
+    payload: dict[str, Any],
+    *,
+    matrix: Matrix,
+) -> dict[str, Any]:
+    """Validate, atomically write, and upload one encrypted versioned receipt."""
+
+    payload["updated_at"] = utc_now()
+    payload = require_controller_receipt(
+        payload, matrix=matrix, label="persisted package controller receipt"
+    )
+    receipt_path = receipt_path.expanduser().resolve()
+    write_json_atomic(receipt_path, payload)
+    digest = sha256_file(receipt_path)
+    response = aws_json(
+        str(payload["region"]),
+        "s3api",
+        "put-object",
+        "--bucket",
+        str(payload["bucket"]),
+        "--key",
+        str(payload["store_key"]),
+        "--body",
+        str(receipt_path),
+        "--content-type",
+        "application/json",
+        "--server-side-encryption",
+        "AES256",
+        "--metadata",
+        (
+            f"receipt-sha256={digest},"
+            f"source-revision={payload['source_revision']},"
+            f"schema-revision={CONTROLLER_SCHEMA_REVISION}"
+        ),
+    )
+    version_id = response.get("VersionId")
+    if (
+        not isinstance(version_id, str)
+        or not version_id
+        or response.get("ServerSideEncryption") != "AES256"
+    ):
+        raise PackageBuilderError(
+            "S3 did not acknowledge an encrypted versioned controller receipt"
+        )
+    head = aws_json(
+        str(payload["region"]),
+        "s3api",
+        "head-object",
+        "--bucket",
+        str(payload["bucket"]),
+        "--key",
+        str(payload["store_key"]),
+        "--version-id",
+        version_id,
+    )
+    if (
+        head.get("VersionId") != version_id
+        or head.get("ServerSideEncryption") != "AES256"
+        or head.get("ContentLength") != receipt_path.stat().st_size
+        or head.get("Metadata")
+        != {
+            "receipt-sha256": digest,
+            "source-revision": payload["source_revision"],
+            "schema-revision": str(CONTROLLER_SCHEMA_REVISION),
+        }
+    ):
+        raise PackageBuilderError("stored controller receipt failed S3 verification")
+    return payload
+
+
+def fetch_controller_receipt(
+    receipt_path: Path,
+    *,
+    matrix: Matrix,
+    region: str,
+    bucket: str,
+    source_revision: str,
+    required: bool,
+) -> dict[str, Any] | None:
+    """Fetch the exact current durable receipt, rejecting prefix ambiguity."""
+
+    key = controller_store_key(source_revision)
+    listing = aws_json(
+        region,
+        "s3api",
+        "list-objects-v2",
+        "--bucket",
+        bucket,
+        "--prefix",
+        key,
+        "--max-keys",
+        "2",
+    )
+    contents = listing.get("Contents", [])
+    if not isinstance(contents, list):
+        raise PackageBuilderError("controller receipt listing is malformed")
+    keys = [str(item.get("Key", "")) for item in contents if isinstance(item, dict)]
+    if keys and keys != [key]:
+        raise PackageBuilderError(
+            f"controller receipt prefix contains ambiguous objects: {keys}"
+        )
+    if not keys:
+        if required:
+            raise PackageBuilderError(
+                f"no durable controller receipt exists for {source_revision}"
+            )
+        return None
+    destination = receipt_path.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".download")
+    temporary.unlink(missing_ok=True)
+    response = aws_json(
+        region,
+        "s3api",
+        "get-object",
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        str(temporary),
+    )
+    try:
+        raw = temporary.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        temporary.unlink(missing_ok=True)
+        raise PackageBuilderError(
+            f"durable controller receipt is unreadable: {error}"
+        ) from error
+    metadata = response.get("Metadata")
+    digest = hashlib.sha256(raw).hexdigest()
+    if (
+        response.get("ServerSideEncryption") != "AES256"
+        or not isinstance(response.get("VersionId"), str)
+        or not response["VersionId"]
+        or metadata
+        != {
+            "receipt-sha256": digest,
+            "source-revision": source_revision,
+            "schema-revision": str(CONTROLLER_SCHEMA_REVISION),
+        }
+    ):
+        temporary.unlink(missing_ok=True)
+        raise PackageBuilderError("durable controller receipt S3 metadata is invalid")
+    payload = require_controller_receipt(
+        payload,
+        matrix=matrix,
+        label="downloaded package controller receipt",
+        expected_region=region,
+        expected_bucket=bucket,
+        expected_source_revision=source_revision,
+    )
+    temporary.replace(destination)
+    return payload
+
+
 def _result_poetry_environment(
     build_result: dict[str, Any], architecture: str, lock_sha256: str
 ) -> PoetryEnvironment:
@@ -6781,6 +7449,838 @@ def finalize_completed_run(
     return result
 
 
+def controller_context(
+    args: argparse.Namespace, matrix: Matrix
+) -> tuple[
+    dict[str, Any],
+    dict[str, Builder],
+    dict[str, dict[str, Any]],
+    Path,
+    Path,
+    str,
+]:
+    """Discover exact existing infrastructure and validate one job's access."""
+
+    if not getattr(args, "existing_only", False):
+        raise PackageBuilderError("controller commands require --existing-only")
+    if not getattr(args, "ssh_key", None):
+        raise PackageBuilderError("controller commands require an ephemeral --ssh-key")
+    if not getattr(args, "access_receipt", None):
+        raise PackageBuilderError("controller commands require --access-receipt")
+    if not getattr(args, "receipt", None):
+        raise PackageBuilderError("controller commands require --receipt")
+    source_revision = str(getattr(args, "source_revision", ""))
+    if re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise PackageBuilderError(
+            "controller commands require a full --source-revision"
+        )
+    key_path = Path(args.ssh_key).expanduser().resolve()
+    access_receipt = Path(args.access_receipt).expanduser().resolve()
+    receipt_path = Path(args.receipt).expanduser().resolve()
+    outputs, builders, records = discover_existing_infrastructure(
+        args.region, matrix, ssh_key=key_path
+    )
+    identity = {"Account": outputs["account_id"], "Arn": outputs["caller_arn"]}
+    read_ci_lifecycle_receipt(
+        access_receipt,
+        region=args.region,
+        identity=identity,
+        builders=builders,
+        require_open=True,
+    )
+    ssh_key_path(outputs)
+    owner_token_sha256, _description = ci_access_owner(str(args.owner_token))
+    return (
+        outputs,
+        builders,
+        records,
+        key_path,
+        receipt_path,
+        owner_token_sha256,
+    )
+
+
+def require_controller_source_equivalence(source_revision: str) -> str:
+    """Bind attach/finalize code to the exact source or reviewed recovery deltas."""
+
+    current_revision = commit_id()
+    require_committed_build_input_equivalence(source_revision, current_revision)
+    lock_sha256 = committed_poetry_lock_sha256(source_revision)
+    if re.fullmatch(r"[0-9a-f]{64}", lock_sha256) is None:
+        raise PackageBuilderError("controller committed Poetry lock is malformed")
+    return lock_sha256
+
+
+def _require_controller_launch_inputs() -> None:
+    require_committed_paths(
+        [
+            HERE / "package_builder.py",
+            HERE / "initialize_package_signing_key.py",
+            HERE / "package_matrix.json",
+            STACK_DIR / "main.tf",
+            STACK_DIR / "variables.tf",
+            STACK_DIR / "outputs.tf",
+            STACK_DIR / "scripts" / "bootstrap.sh",
+            STACK_DIR / "scripts" / "user_data.sh.tftpl",
+            PACKAGING_DIR / "pyproject.toml",
+            PACKAGING_DIR / "poetry.lock",
+            PACKAGING_DIR / "build_packages.py",
+            PACKAGING_DIR / "bioseq_packaging",
+            PACKAGING_DIR / "rpm",
+            PACKAGING_DIR / "deb",
+            PACKAGING_DIR / "pacman",
+            PACKAGING_DIR / "scripts",
+        ]
+    )
+
+
+def prepare_controller_builder(
+    builder: Builder,
+    key_path: Path,
+    source_revision: str,
+    lock_sha256: str,
+) -> tuple[str, PoetryEnvironment]:
+    """Prepare one idle builder without disturbing an existing package run."""
+
+    wait_for_ssh(builder, key_path)
+    quiescence = remote_package_quiescence_script(poweroff=False)
+    ssh_run(builder, key_path, f"bash -lc {shlex.quote(quiescence)}")
+    remote_source = sync_committed_source(builder, key_path, source_revision)
+    reconcile_remote_bootstrap(builder, key_path, remote_source)
+    force_remote_package_reconfigure(builder, key_path)
+    environment = prepare_remote_poetry_environment(
+        builder,
+        key_path,
+        remote_source,
+        source_revision,
+        lock_sha256,
+    )
+    return remote_source, environment
+
+
+def _set_controller_python_environment(
+    receipt: dict[str, Any], architecture: str, environment: PoetryEnvironment
+) -> None:
+    receipt["builders"][architecture]["python_environment"] = {
+        **environment.manifest_value(),
+        "venv_path": environment.venv_path,
+    }
+
+
+def _read_remote_worker_manifest(
+    builder: Builder, key_path: Path, manifest_path: str, *, label: str
+) -> dict[str, Any]:
+    result = ssh_run(
+        builder,
+        key_path,
+        f"cat {shlex.quote(manifest_path)}",
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise PackageBuilderError(f"{label} is missing")
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(f"{label} is invalid JSON: {error}") from error
+    return require_worker_package_manifest(raw, label=label)
+
+
+def _adopt_worker_environment(
+    receipt: dict[str, Any], architecture: str, manifest: dict[str, Any]
+) -> None:
+    requested_paths = requested_package_cmake_cache_paths(
+        manifest.get("requested"),
+        label=f"{architecture} adopted worker requested matrix",
+    )
+    if requested_paths != selected_package_cmake_cache_paths(
+        complete_selection(load_matrix())
+    ):
+        raise PackageBuilderError(
+            f"{architecture} adopted worker does not own the canonical matrix"
+        )
+    environment = manifest.get("python_environment")
+    s3 = manifest.get("s3")
+    if (
+        manifest.get("architecture") != architecture
+        or manifest.get("source_revision") != receipt["source_revision"]
+        or manifest.get("poetry_lock_sha256") != receipt["poetry_lock_sha256"]
+        or not isinstance(environment, dict)
+        or set(environment) != {"python", "poetry"}
+        or not isinstance(s3, dict)
+        or s3
+        != {
+            "bucket": receipt["bucket"],
+            "region": receipt["region"],
+            "base_prefix": receipt["s3_prefix"],
+        }
+    ):
+        raise PackageBuilderError(
+            f"{architecture} adopted worker provenance does not match the receipt"
+        )
+    _set_controller_python_environment(
+        receipt,
+        architecture,
+        PoetryEnvironment(
+            lock_sha256=str(receipt["poetry_lock_sha256"]),
+            venv_path=f"{REMOTE_POETRY_VENV_ROOT}/{receipt['poetry_lock_sha256']}",
+            python_version=str(environment.get("python", "")),
+            poetry_version=str(environment.get("poetry", "")),
+        ),
+    )
+
+
+def launch_controller_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Launch once, or attach to the exact durable receipt without relaunching."""
+
+    matrix = load_matrix()
+    selection = complete_selection(matrix)
+    if getattr(args, "optimization", None) != PRODUCTION_OPTIMIZATION:
+        raise PackageBuilderError("controller launch requires O3")
+    if not is_complete_matrix_selection(selection, matrix):
+        raise PackageBuilderError("controller launch requires the canonical matrix")
+    (
+        outputs,
+        builders,
+        records,
+        key_path,
+        receipt_path,
+        owner_token_sha256,
+    ) = controller_context(args, matrix)
+    source_revision = str(args.source_revision)
+    if commit_id() != source_revision:
+        raise PackageBuilderError(
+            "controller launch source revision must equal the checked-out HEAD"
+        )
+    _require_controller_launch_inputs()
+    lock_sha256 = committed_poetry_lock_sha256(source_revision)
+    existing = fetch_controller_receipt(
+        receipt_path,
+        matrix=matrix,
+        region=args.region,
+        bucket=str(outputs["package_bucket_name"]),
+        source_revision=source_revision,
+        required=False,
+    )
+    if existing is not None:
+        existing = require_controller_receipt(
+            existing,
+            matrix=matrix,
+            label="existing package controller receipt",
+            expected_region=args.region,
+            expected_account=str(outputs["account_id"]),
+            expected_bucket=str(outputs["package_bucket_name"]),
+            builders=builders,
+            expected_source_revision=source_revision,
+            expected_owner_token_sha256=owner_token_sha256,
+        )
+        if existing["poetry_lock_sha256"] != lock_sha256:
+            raise PackageBuilderError("existing controller Poetry lock is stale")
+        if existing["state"] == "failed":
+            raise PackageBuilderError(
+                "existing controller run is failed: "
+                + "; ".join(existing["diagnostics"])
+            )
+        if existing["state"] != "prepared":
+            return existing
+        receipt = existing
+    else:
+        run_id = (
+            dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            + f"-{source_revision[:12]}"
+        )
+        receipt = new_controller_receipt(
+            matrix=matrix,
+            records=records,
+            builders=builders,
+            outputs=outputs,
+            region=args.region,
+            owner_token=str(args.owner_token),
+            run_id=run_id,
+            source_revision=source_revision,
+            poetry_lock_sha256=lock_sha256,
+        )
+        # Lifecycle authority reaches versioned S3 before any instance start.
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+    records = start_builders(args.region, builders, matrix)
+    builders = refreshed_builders(records, builders)
+    remote_sources: dict[str, str] = {}
+    environments: dict[str, PoetryEnvironment] = {}
+    errors: list[str] = []
+    pending_launches: list[str] = []
+
+    # A retry can arrive after systemd accepted a unit but before the runner
+    # persisted its acknowledgement.  Observe exact units before touching any
+    # build cache so an active compile is never reconfigured or relaunched.
+    for name in matrix.architectures:
+        wait_for_ssh(builders[name], key_path)
+        value = receipt["builders"][name]
+        status = remote_unit_status(builders[name], key_path, str(value["unit_name"]))
+        if status["LoadState"] == "not-found":
+            if value["launch_acknowledged"]:
+                errors.append(f"{name}: acknowledged unit is missing")
+            else:
+                pending_launches.append(name)
+            continue
+        if value["python_environment"] is None:
+            errors.append(f"{name}: observed unit lacks persisted Python provenance")
+            continue
+        value["launch_acknowledged"] = True
+        if status["ActiveState"] in {
+            "active", "activating", "reloading", "deactivating"
+        }:
+            handle = controller_handle(receipt, builders[name], outputs)
+            if not exact_worker_processes(builders[name], key_path, handle.worker_argv):
+                errors.append(f"{name}: active unit has no exact receipt-bound worker")
+            if active_package_units(builders[name], key_path) != (handle.unit_name,):
+                errors.append(f"{name}: active package unit set is not exact")
+        elif not successful_terminal_unit_status(status, allow_not_found=False):
+            errors.append(f"{name}: observed unit is terminal failure {status}")
+    if errors:
+        receipt["state"] = "failed"
+        receipt["diagnostics"] = [value[-CONTROLLER_DIAGNOSTIC_LIMIT:] for value in errors]
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+        raise PackageBuilderError("controller resume failed: " + "; ".join(errors))
+    if not pending_launches:
+        receipt["state"] = "active"
+        return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(pending_launches), thread_name_prefix="bioseq-controller-prepare"
+    ) as executor:
+        futures = {
+            executor.submit(
+                prepare_controller_builder,
+                builders[name],
+                key_path,
+                source_revision,
+                lock_sha256,
+            ): name
+            for name in pending_launches
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                remote_sources[name], environments[name] = future.result()
+                _set_controller_python_environment(receipt, name, environments[name])
+            except Exception as error:
+                errors.append(f"{name} preparation: {error}")
+    if errors:
+        receipt["state"] = "failed"
+        receipt["diagnostics"] = [value[-CONTROLLER_DIAGNOSTIC_LIMIT:] for value in errors]
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+        raise PackageBuilderError("controller preparation failed: " + "; ".join(errors))
+    persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+    signing_host = "x64" if "x64" in pending_launches else pending_launches[0]
+    initialize_signing_key(
+        builders[signing_host],
+        key_path,
+        remote_sources[signing_host],
+        args.region,
+        str(outputs["signing_key_secret_arn"]),
+    )
+
+    def launch_or_attach(name: str) -> None:
+        builder = builders[name]
+        value = receipt["builders"][name]
+        status = remote_unit_status(builder, key_path, str(value["unit_name"]))
+        if status["LoadState"] != "not-found":
+            value["launch_acknowledged"] = True
+            return
+        if value["launch_acknowledged"]:
+            raise PackageBuilderError(
+                f"{name} acknowledged unit disappeared before terminal validation"
+            )
+        handle = launch_remote_build(
+            builder=builder,
+            key_path=key_path,
+            remote_source=remote_sources[name],
+            revision=source_revision,
+            poetry_environment=environments[name],
+            selection=selection,
+            region=args.region,
+            bucket=str(outputs["package_bucket_name"]),
+            s3_prefix=DEFAULT_S3_PREFIX,
+            secret_arn=str(outputs["signing_key_secret_arn"]),
+            run_id=str(receipt["run_id"]),
+        )
+        if handle.unit_name != value["unit_name"]:
+            raise PackageBuilderError(f"{name} launched an unexpected unit")
+        value["launch_acknowledged"] = handle.launch_acknowledged
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-controller-launch"
+    ) as executor:
+        futures = {
+            executor.submit(launch_or_attach, name): name
+            for name in pending_launches
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as error:
+                # A lost SSH acknowledgement must not cause a duplicate unit.
+                try:
+                    status = remote_unit_status(
+                        builders[name],
+                        key_path,
+                        str(receipt["builders"][name]["unit_name"]),
+                    )
+                    if status["LoadState"] != "not-found":
+                        receipt["builders"][name]["launch_acknowledged"] = True
+                        continue
+                except Exception:
+                    pass
+                errors.append(f"{name} launch: {error}")
+    if errors or any(
+        not receipt["builders"][name]["launch_acknowledged"]
+        for name in matrix.architectures
+    ):
+        receipt["state"] = "failed"
+        receipt["diagnostics"] = [value[-CONTROLLER_DIAGNOSTIC_LIMIT:] for value in errors]
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+        raise PackageBuilderError("controller launch failed: " + "; ".join(errors))
+    receipt["state"] = "active"
+    receipt["diagnostics"] = []
+    return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+
+def adopt_controller_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Adopt an exact legacy active run without inferring stop ownership."""
+
+    matrix = load_matrix()
+    (
+        outputs,
+        builders,
+        records,
+        key_path,
+        receipt_path,
+        owner_token_sha256,
+    ) = controller_context(args, matrix)
+    source_revision = str(args.source_revision)
+    lock_sha256 = require_controller_source_equivalence(source_revision)
+    existing = fetch_controller_receipt(
+        receipt_path,
+        matrix=matrix,
+        region=args.region,
+        bucket=str(outputs["package_bucket_name"]),
+        source_revision=source_revision,
+        required=False,
+    )
+    if existing is not None:
+        return require_controller_receipt(
+            existing,
+            matrix=matrix,
+            label="existing adopted controller receipt",
+            expected_account=str(outputs["account_id"]),
+            expected_owner_token_sha256=owner_token_sha256,
+            builders=builders,
+            expected_source_revision=source_revision,
+        )
+    receipt = new_controller_receipt(
+        matrix=matrix,
+        records=records,
+        builders=builders,
+        outputs=outputs,
+        region=args.region,
+        owner_token=str(args.owner_token),
+        run_id=str(args.run_id),
+        source_revision=source_revision,
+        poetry_lock_sha256=lock_sha256,
+        adopt_running=True,
+    )
+    for name in matrix.architectures:
+        wait_for_ssh(builders[name], key_path)
+        value = receipt["builders"][name]
+        status = remote_unit_status(builders[name], key_path, str(value["unit_name"]))
+        if status["LoadState"] == "not-found" or status["ActiveState"] not in {
+            "active", "activating", "reloading", "deactivating", "inactive", "failed"
+        }:
+            raise PackageBuilderError(
+                f"cannot adopt {name} unit with status {status}"
+            )
+        manifest = _read_remote_worker_manifest(
+            builders[name],
+            key_path,
+            str(value["manifest_path"]),
+            label=f"{name} adopted worker manifest",
+        )
+        _adopt_worker_environment(receipt, name, manifest)
+        value["launch_acknowledged"] = True
+        if status["ActiveState"] == "failed":
+            raise PackageBuilderError(f"cannot adopt failed {name} unit: {status}")
+        handle = controller_handle(receipt, builders[name], outputs)
+        if status["ActiveState"] != "inactive" and not exact_worker_processes(
+            builders[name], key_path, handle.worker_argv
+        ):
+            raise PackageBuilderError(
+                f"{name} adopted unit has no exact receipt-bound worker"
+            )
+        active_units = active_package_units(builders[name], key_path)
+        if status["ActiveState"] != "inactive" and active_units != (
+            str(value["unit_name"]),
+        ):
+            raise PackageBuilderError(
+                f"{name} adoption found unexpected active package units {active_units}"
+            )
+    receipt["state"] = "active"
+    return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+
+def _controller_failure_diagnostic(
+    builder: Builder,
+    key_path: Path,
+    handle: RemoteBuildHandle,
+    status: dict[str, str],
+) -> str:
+    result = ssh_run(
+        builder,
+        key_path,
+        f"tail -n 40 {shlex.quote(handle.remote_log_path)}",
+        capture=True,
+        check=False,
+    )
+    tail = " ".join((result.stdout or result.stderr or "").split())
+    return (
+        f"{builder.architecture} unit {handle.unit_name} status={status} "
+        f"log_tail={tail[-3000:]!r}"
+    )[-CONTROLLER_DIAGNOSTIC_LIMIT:]
+
+
+def _controller_completed_result(
+    *,
+    receipt: dict[str, Any],
+    matrix: Matrix,
+    builders: dict[str, Builder],
+    manifests: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    selection = complete_selection(matrix)
+    uploads: list[dict[str, Any]] = []
+    environments: dict[str, dict[str, str]] = {}
+    for name in matrix.architectures:
+        environment = controller_poetry_environment(receipt, name)
+        environments[name] = {
+            **environment.manifest_value(),
+            "venv_path": environment.venv_path,
+        }
+        uploads.extend(
+            validate_manifest(
+                manifests[name],
+                architecture=name,
+                selection=selection,
+                matrix=matrix,
+                bucket=str(receipt["bucket"]),
+                region=str(receipt["region"]),
+                s3_prefix=str(receipt["s3_prefix"]),
+                source_revision=str(receipt["source_revision"]),
+                poetry_lock_sha256=str(receipt["poetry_lock_sha256"]),
+                python_environment=environment,
+            )
+        )
+    expected_count = (
+        len(matrix.architectures)
+        * len(matrix.distributions)
+        * len(matrix.postgresql_majors)
+    )
+    if len(uploads) != expected_count:
+        raise PackageBuilderError("controller manifests omit canonical package uploads")
+    verify_s3_uploads(str(receipt["region"]), str(receipt["bucket"]), uploads)
+    result = {
+        "schema_revision": PACKAGE_RUN_SCHEMA_REVISION,
+        "status": "success",
+        "run_id": receipt["run_id"],
+        "revision": receipt["source_revision"],
+        "source_revision": receipt["source_revision"],
+        "poetry_lock_sha256": receipt["poetry_lock_sha256"],
+        "worker_generation": WORKER_GENERATION,
+        "worker_generation_revision": WORKER_GENERATION_REVISION,
+        "completed_at": utc_now(),
+        "selection": receipt["selection"],
+        "bucket": receipt["bucket"],
+        "s3_prefix": receipt["s3_prefix"],
+        "artifact_count": expected_count,
+        "python_environments": environments,
+        "worker_units": {
+            name: receipt["builders"][name]["unit_name"]
+            for name in matrix.architectures
+        },
+        "worker_launch_acknowledged": {
+            name: receipt["builders"][name]["launch_acknowledged"]
+            for name in matrix.architectures
+        },
+        "manifests": manifests,
+        "optimization": package_run_optimization_receipt(manifests),
+        "builders_left_running": {
+            name: builders[name].instance_id for name in matrix.architectures
+        },
+    }
+    return require_current_package_run_result(
+        result, label="controller completed aggregate result"
+    )
+
+
+def attach_controller_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Wait one bounded slice and return explicit active/completed/failed state."""
+
+    matrix = load_matrix()
+    (
+        outputs,
+        builders,
+        records,
+        key_path,
+        receipt_path,
+        owner_token_sha256,
+    ) = controller_context(args, matrix)
+    del records
+    source_revision = str(args.source_revision)
+    lock_sha256 = require_controller_source_equivalence(source_revision)
+    receipt = fetch_controller_receipt(
+        receipt_path,
+        matrix=matrix,
+        region=args.region,
+        bucket=str(outputs["package_bucket_name"]),
+        source_revision=source_revision,
+        required=True,
+    )
+    assert receipt is not None
+    receipt = require_controller_receipt(
+        receipt,
+        matrix=matrix,
+        label="attached package controller receipt",
+        expected_region=args.region,
+        expected_account=str(outputs["account_id"]),
+        expected_bucket=str(outputs["package_bucket_name"]),
+        builders=builders,
+        expected_source_revision=source_revision,
+        expected_owner_token_sha256=owner_token_sha256,
+    )
+    if receipt["poetry_lock_sha256"] != lock_sha256:
+        raise PackageBuilderError("attached controller Poetry lock is stale")
+    if receipt["state"] == "failed":
+        raise PackageBuilderError(
+            "controller run is failed: " + "; ".join(receipt["diagnostics"])
+        )
+    if receipt["state"] in {"finalized", "collected"}:
+        write_last_run(receipt["result"])
+        return receipt
+    wait_seconds = int(args.wait_seconds)
+    if wait_seconds < 0 or wait_seconds > 5 * 60 * 60:
+        raise PackageBuilderError("--wait-seconds must be between 0 and 18000")
+    handles = {
+        name: controller_handle(receipt, builders[name], outputs)
+        for name in matrix.architectures
+    }
+    for name in matrix.architectures:
+        wait_for_ssh(builders[name], key_path)
+    deadline = time.monotonic() + wait_seconds
+    statuses: dict[str, dict[str, str]] = {}
+    while True:
+        statuses = {
+            name: remote_unit_status(builders[name], key_path, handles[name].unit_name)
+            for name in matrix.architectures
+        }
+        active = {
+            name
+            for name, status in statuses.items()
+            if status["ActiveState"]
+            in {"active", "activating", "reloading", "deactivating"}
+            and status["LoadState"] == "loaded"
+        }
+        if not active or time.monotonic() >= deadline:
+            break
+        time.sleep(min(15, max(1, int(deadline - time.monotonic()))))
+    if active:
+        identity_errors: list[str] = []
+        for name in sorted(active):
+            handle = handles[name]
+            if not exact_worker_processes(
+                builders[name], key_path, handle.worker_argv
+            ):
+                identity_errors.append(
+                    f"{name}: active unit has no exact receipt-bound worker"
+                )
+            if active_package_units(builders[name], key_path) != (
+                handle.unit_name,
+            ):
+                identity_errors.append(
+                    f"{name}: active package unit set is not receipt-exact"
+                )
+        if identity_errors:
+            receipt["state"] = "failed"
+            receipt["diagnostics"] = identity_errors
+            persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+            raise PackageBuilderError(
+                "controller active identity failed: "
+                + "; ".join(identity_errors)
+            )
+        receipt["state"] = "active"
+        receipt["diagnostics"] = []
+        return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+    failures: list[str] = []
+    for name, status in statuses.items():
+        allow_not_found = handles[name].launch_acknowledged
+        if successful_terminal_unit_status(status, allow_not_found=allow_not_found):
+            continue
+        failures.append(
+            _controller_failure_diagnostic(
+                builders[name], key_path, handles[name], status
+            )
+        )
+    if failures:
+        receipt["state"] = "failed"
+        receipt["diagnostics"] = failures
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+        raise PackageBuilderError("controller workers failed: " + "; ".join(failures))
+
+    manifests: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+
+    def fetch(name: str) -> dict[str, Any]:
+        handle = handles[name]
+        require_exact_worker_absent(handle.builder, key_path, handle.worker_argv)
+        return fetch_completed_manifest(handle.builder, key_path, str(receipt["run_id"]))
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-controller-fetch"
+    ) as executor:
+        futures = {
+            executor.submit(fetch, name): name for name in matrix.architectures
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                manifests[name] = future.result()
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+    if errors:
+        receipt["state"] = "failed"
+        receipt["diagnostics"] = [value[-CONTROLLER_DIAGNOSTIC_LIMIT:] for value in errors]
+        persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+        raise PackageBuilderError(
+            "controller manifest finalization failed: " + "; ".join(errors)
+        )
+    receipt["result"] = _controller_completed_result(
+        receipt=receipt,
+        matrix=matrix,
+        builders=builders,
+        manifests=manifests,
+    )
+    receipt["state"] = "completed"
+    receipt["diagnostics"] = []
+    receipt = persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+    write_last_run(receipt["result"])
+    return receipt
+
+
+def finalize_controller_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Finalize one completed receipt with exact existing infrastructure."""
+
+    receipt = attach_controller_run(
+        argparse.Namespace(**{**vars(args), "wait_seconds": 0})
+    )
+    if receipt["state"] == "active":
+        raise PackageBuilderError("controller run is still active")
+    if receipt["state"] in {"finalized", "collected"}:
+        write_last_run(receipt["result"])
+        return receipt
+    if receipt["state"] != "completed":
+        raise PackageBuilderError(
+            f"controller run cannot finalize from state {receipt['state']!r}"
+        )
+    matrix = load_matrix()
+    outputs, builders, _records = discover_existing_infrastructure(
+        args.region,
+        matrix,
+        ssh_key=Path(args.ssh_key).expanduser().resolve(),
+    )
+    result = dict(receipt["result"])
+    images = create_post_build_amis(
+        args=argparse.Namespace(region=args.region, s3_prefix=DEFAULT_S3_PREFIX),
+        matrix=matrix,
+        selection=complete_selection(matrix),
+        outputs=outputs,
+        builders=builders,
+        build_result=result,
+        lock_sha256=str(receipt["poetry_lock_sha256"]),
+    )
+    result["cache_images"] = {
+        name: {
+            "image_id": str(image["ImageId"]),
+            "source_instance_id": builders[name].instance_id,
+        }
+        for name, image in images.items()
+    }
+    result["complete_matrix_fingerprint"] = receipt["matrix_fingerprint"]
+    receipt["result"] = require_current_package_run_result(
+        result, label="finalized controller aggregate result"
+    )
+    receipt["state"] = "finalized"
+    receipt = persist_controller_receipt(
+        Path(args.receipt).expanduser().resolve(), receipt, matrix=matrix
+    )
+    write_last_run(receipt["result"])
+    return receipt
+
+
+def mark_controller_collected(
+    *,
+    receipt_path: Path,
+    run_result_path: Path,
+    expected_revision: str,
+    region: str,
+) -> dict[str, Any]:
+    """Persist proof that exact release assets were collected successfully."""
+
+    try:
+        raw_result = json.loads(run_result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PackageBuilderError(
+            f"cannot re-read collected package result: {error}"
+        ) from error
+    result = require_current_package_run_result(
+        raw_result, label="collected controller run result"
+    )
+    if (
+        result.get("source_revision") != expected_revision
+        or result.get("revision") != expected_revision
+    ):
+        raise PackageBuilderError("collected controller source revision mismatch")
+    matrix = load_matrix()
+    receipt = fetch_controller_receipt(
+        receipt_path,
+        matrix=matrix,
+        region=region,
+        bucket=str(result["bucket"]),
+        source_revision=expected_revision,
+        required=True,
+    )
+    assert receipt is not None
+    identity = aws_preflight(region)
+    receipt = require_controller_receipt(
+        receipt,
+        matrix=matrix,
+        label="collected package controller receipt",
+        expected_region=region,
+        expected_account=str(identity["Account"]),
+        expected_bucket=str(result["bucket"]),
+        expected_source_revision=expected_revision,
+    )
+    if receipt["state"] not in {"finalized", "collected"}:
+        raise PackageBuilderError(
+            f"release collection cannot mark controller state {receipt['state']!r}"
+        )
+    if receipt["result"] != result:
+        raise PackageBuilderError(
+            "collected run result differs from the durable controller result"
+        )
+    receipt["state"] = "collected"
+    return persist_controller_receipt(receipt_path, receipt, matrix=matrix)
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     matrix = load_matrix()
     selection = select_matrix(args, matrix)
@@ -6892,19 +8392,40 @@ def cmd_stop(args: argparse.Namespace) -> None:
         if args.lifecycle_receipt
         else None
     )
+    controller_receipt = (
+        Path(args.controller_receipt).expanduser().resolve()
+        if args.controller_receipt
+        else None
+    )
+    owner_token_sha256 = None
+    if args.owner_token:
+        owner_token_sha256, _description = ci_access_owner(args.owner_token)
     states = stop_existing_builders(
-        args.region, load_matrix(), lifecycle_receipt=lifecycle_receipt
+        args.region,
+        load_matrix(),
+        lifecycle_receipt=lifecycle_receipt,
+        controller_receipt=controller_receipt,
+        controller_source_revision=args.source_revision,
+        controller_owner_token_sha256=owner_token_sha256,
     )
     print(json.dumps({"region": args.region, "builders": states}, indent=2, sort_keys=True))
 
 
 def cmd_collect(args: argparse.Namespace) -> None:
+    run_result_path = Path(args.run_result).expanduser().resolve()
     collection = collect_release_assets(
         region=args.region,
-        run_result_path=Path(args.run_result).expanduser().resolve(),
+        run_result_path=run_result_path,
         output_dir=Path(args.output_dir).expanduser().resolve(),
         expected_revision=args.expected_revision,
     )
+    if args.controller_receipt:
+        mark_controller_collected(
+            receipt_path=Path(args.controller_receipt).expanduser().resolve(),
+            run_result_path=run_result_path,
+            expected_revision=args.expected_revision,
+            region=args.region,
+        )
     print(json.dumps(collection, indent=2, sort_keys=True))
 
 
@@ -7008,7 +8529,32 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
+def cmd_launch_run(args: argparse.Namespace) -> None:
+    receipt = launch_controller_run(args)
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+
+
+def cmd_attach_run(args: argparse.Namespace) -> None:
+    receipt = attach_controller_run(args)
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+
+
+def cmd_adopt_run(args: argparse.Namespace) -> None:
+    receipt = adopt_controller_run(args)
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+
+
 def cmd_finalize_run(args: argparse.Namespace) -> None:
+    if getattr(args, "existing_only", False):
+        receipt = finalize_controller_run(args)
+        info("durable controller run finalized; builders remain running")
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return
+    if not args.run_id:
+        raise PackageBuilderError(
+            "legacy finalize-run requires --run-id; durable finalization requires "
+            "--existing-only and a controller receipt"
+        )
     matrix = load_matrix()
     outputs = tofu_outputs()
     if not outputs:
@@ -7067,6 +8613,24 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_controller_options(
+    parser: argparse.ArgumentParser, *, required: bool = True
+) -> None:
+    """Add the receipt-bound options shared by hosted controller jobs."""
+
+    parser.add_argument("--region", default=DEFAULT_REGION)
+    parser.add_argument("--existing-only", action="store_true")
+    parser.add_argument("--ssh-key", required=required)
+    parser.add_argument("--access-receipt", required=required)
+    parser.add_argument("--receipt", required=required)
+    parser.add_argument("--source-revision", required=required)
+    parser.add_argument(
+        "--owner-token",
+        required=required,
+        help="stable non-secret release identity shared by every continuation job",
+    )
+
+
 def add_matrix_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--architectures",
@@ -7115,12 +8679,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(handler=cmd_run)
 
+    launch_parser = subparsers.add_parser(
+        "launch-run",
+        help="durably record lifecycle ownership and launch one exact canonical run",
+    )
+    add_controller_options(launch_parser)
+    launch_parser.add_argument(
+        "--optimization",
+        choices=(PRODUCTION_OPTIMIZATION,),
+        required=True,
+    )
+    launch_parser.set_defaults(handler=cmd_launch_run)
+
+    attach_parser = subparsers.add_parser(
+        "attach-run",
+        help="attach to a durable run and wait one bounded non-launching slice",
+    )
+    add_controller_options(attach_parser)
+    attach_parser.add_argument("--wait-seconds", type=int, default=0)
+    attach_parser.set_defaults(handler=cmd_attach_run)
+
+    adopt_parser = subparsers.add_parser(
+        "adopt-run",
+        help="adopt an exact already-running legacy unit pair without stop ownership",
+    )
+    add_controller_options(adopt_parser)
+    adopt_parser.add_argument("--run-id", required=True)
+    adopt_parser.set_defaults(handler=cmd_adopt_run)
+
     finalize_parser = subparsers.add_parser(
         "finalize-run",
         help="validate and image an already-completed canonical run; leave running",
     )
-    finalize_parser.add_argument("--run-id", required=True)
-    finalize_parser.add_argument("--region", default=DEFAULT_REGION)
+    finalize_parser.add_argument("--run-id")
+    add_controller_options(finalize_parser, required=False)
     finalize_parser.add_argument("--s3-prefix", default=DEFAULT_S3_PREFIX)
     finalize_parser.set_defaults(handler=cmd_finalize_run)
 
@@ -7176,6 +8768,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--lifecycle-receipt",
         help="limit cleanup to builders whose start ownership is recorded in this receipt",
     )
+    stop_parser.add_argument(
+        "--controller-receipt",
+        help="durable collected controller receipt used for lifecycle ownership",
+    )
+    stop_parser.add_argument("--source-revision")
+    stop_parser.add_argument("--owner-token")
     stop_parser.set_defaults(handler=cmd_stop)
 
     collect_parser = subparsers.add_parser(
@@ -7185,6 +8783,10 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--run-result", required=True)
     collect_parser.add_argument("--output-dir", required=True)
     collect_parser.add_argument("--expected-revision", required=True)
+    collect_parser.add_argument(
+        "--controller-receipt",
+        help="durable receipt to mark collected after exact asset verification",
+    )
     collect_parser.set_defaults(handler=cmd_collect)
 
     verify_release_parser = subparsers.add_parser(

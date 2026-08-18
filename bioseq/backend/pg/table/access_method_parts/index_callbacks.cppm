@@ -31,7 +31,6 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;

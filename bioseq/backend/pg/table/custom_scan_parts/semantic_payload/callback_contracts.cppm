@@ -3,10 +3,7 @@
  * @brief Declares planner, executor, hook, EXPLAIN, and test callback contracts.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,56 +24,19 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_semantic_payload_callback_contracts;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
+import bioseq.indexing.type;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.pipeline.stats;
+import bioseq.postgres.table.scan_state;
+import bioseq.postgres.support;
 
 import :custom_scan_runtime_support;
 import :custom_scan_oid_expression_support;
+import :custom_scan_slice_path_runtime_contract;
+export import :custom_scan_execution_method_contracts;
+export import :custom_scan_planner_method_contracts;
 
 import :custom_scan_semantic_payload_payload_codec;
 import :custom_scan_semantic_payload_aligner_semantics;
@@ -198,9 +158,9 @@ export {
                                      bool highway_dispatch_already_rendered);
 
     /** @brief Deparse pushed-down clauses into query-context-owned EXPLAIN text. */
-    inline const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses);
+    const char* bioseq_column_pushdown_clauses_str(List* context, List* clauses);
     /** @brief Deparse projected columns into query-context-owned EXPLAIN text. */
-    inline const char* bioseq_column_projected_columns_str(List* context, List* projected_columns);
+    const char* bioseq_column_projected_columns_str(List* context, List* projected_columns);
     /** @brief Build a deparse context rooted at an executor plan state. */
     List* set_deparse_context_planstate(List* dpcontext, Node* node, List* ancestors);
 
@@ -216,20 +176,6 @@ export {
     [[nodiscard]] int planner_debug_level() noexcept {
         return static_cast<int>(bioseq::settings::planner::diagnostics::log_level.get_value());
     }
-
-#ifdef BIOSEQ_TEST_INDEXES
-    /** @brief Selects a one-shot malformed DSM condition for integration diagnostics. */
-    enum slice_project_dsm_test_fixture : int {
-        k_slice_dsm_test_none = 0,
-        k_slice_dsm_test_incomplete = 1,
-        k_slice_dsm_test_malformed = 2,
-    };
-
-    /* Backend-local, one-shot diagnostic state.  The test hook arms one
-     * mode; the next analyzed SliceProject takes it before running any fixture
-     * code, so ERROR during the fixture cannot leave a latent injection behind. */
-    int pending_slice_dsm_test_fixture = k_slice_dsm_test_none;
-#endif
 
     /** @brief Arm one backend-local SliceProject DSM diagnostic fixture. */
     void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode) {
@@ -266,25 +212,7 @@ export {
 #endif
     }
 
-    /** Returns the stable PostgreSQL path callback table for base Bioseq scans. */
-    [[nodiscard]] const CustomPathMethods* bioseq_column_scan_path_methods() noexcept;
-
-    /** Returns the stable PostgreSQL scan callback table for base Bioseq scans. */
-    [[nodiscard]] const CustomScanMethods* bioseq_column_scan_scan_methods() noexcept;
-
-    /** Returns the stable PostgreSQL path callback table for batched joins. */
-    [[nodiscard]] const CustomPathMethods* bioseq_batch_join_path_methods() noexcept;
-
-    /** Returns the stable PostgreSQL scan callback table for batched joins. */
-    [[nodiscard]] const CustomScanMethods* bioseq_batch_join_scan_methods() noexcept;
-
     /** Returns the stable PostgreSQL executor callback table for batched joins. */
     [[nodiscard]] const CustomExecMethods* bioseq_batch_join_execute_methods() noexcept;
-
-    /** Returns the stable PostgreSQL path callback table for per-row joins. */
-    [[nodiscard]] const CustomPathMethods* bioseq_per_row_join_path_methods() noexcept;
-
-    /** Returns the stable PostgreSQL executor callback table for base Bioseq scans. */
-    [[nodiscard]] const CustomExecMethods* bioseq_column_scan_execute_methods() noexcept;
 
 } // export custom-scan partition declarations

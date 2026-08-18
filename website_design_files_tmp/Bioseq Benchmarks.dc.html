@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:#071320;font-family:'IBM Plex Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;color:#e9f1f8}
+  ::selection{background:rgba(242,101,34,0.30);color:#fff}
+  a{text-decoration:none;color:#46b8de}
+  a:hover{color:#7fd3ee}
+  ::-webkit-scrollbar{width:14px;height:14px}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.13);border-radius:7px;border:3px solid #071320}
+  ::-webkit-scrollbar-track{background:transparent}
+  select,input,button{font-family:inherit}
+  select{appearance:none;-webkit-appearance:none}
+  option{background:#0e2331;color:#e9f1f8}
+  @media (max-width:1080px){ [data-bgrid]{grid-template-columns:1fr !important} [data-bnav]{position:static !important;height:auto !important;border-right:none !important;border-bottom:1px solid rgba(255,255,255,0.08) !important} }
+  @media (max-width:760px){ [data-ctrls]{grid-template-columns:1fr 1fr !important} }
+  @media (max-width:640px){ [data-footcols]{grid-template-columns:1fr 1fr !important;gap:30px !important} [data-ctrls]{grid-template-columns:1fr !important} }
+  @media (max-width:560px){ #bhead > div{padding-left:15px !important;padding-right:15px !important;gap:13px !important} [data-hidesm]{display:none !important} }
+  @media (max-width:430px){ [data-footcols]{grid-template-columns:1fr !important} }
+</style>
+</helmet>
+
+<div data-screen-label="BioseqDB benchmarks" style="min-height:100vh;overflow-x:hidden">
+
+  <header id="bhead" style="position:sticky;top:0;z-index:80;background:rgba(7,19,32,0.86);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid rgba(255,255,255,0.08)">
+    <div style="max-width:1760px;margin:0 auto;padding:0 26px;height:64px;display:flex;align-items:center;gap:22px">
+      <a href="Bioseq.dc.html" style="display:flex;align-items:center;gap:11px;flex:none">
+        <img src="assets/bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" style="display:block">
+        <span style="font-family:'Space Grotesk';font-weight:600;font-size:18px;letter-spacing:-0.01em;color:#f2f7fb">Bioseq<span style="color:#46b8de">DB</span></span>
+        <span data-hidesm style="font-family:'IBM Plex Mono';font-size:10.5px;font-weight:500;letter-spacing:0.06em;color:#ffc9a8;background:rgba(242,101,34,0.14);border:1px solid rgba(242,101,34,0.34);padding:2px 7px;border-radius:6px">BENCH</span>
+      </a>
+      <nav data-hidesm style="display:flex;align-items:center;gap:26px;margin-left:8px">
+        <a href="Bioseq Docs.dc.html" style="font-size:14px;color:#9db1c2" style-hover="color:#f2f7fb">Docs</a>
+        <a href="Bioseq.dc.html" style="font-size:14px;color:#9db1c2" style-hover="color:#f2f7fb">Product</a>
+        <a href="#" style="font-size:14px;color:#f2f7fb">Benchmarks</a>
+      </nav>
+      <div style="flex:1"></div>
+      <div data-hidesm style="display:flex;align-items:center;gap:9px;height:38px;padding:0 13px;border:1px solid rgba(255,255,255,0.14);border-radius:10px;background:rgba(255,255,255,0.04);font-family:'IBM Plex Mono';font-size:12.5px;color:#9db1c2">
+        <span style="width:6px;height:6px;border-radius:50%;background:{{ statusDot }}"></span>{{ statusText }}
+      </div>
+      <button onClick="{{ onReload }}" style="flex:none;height:38px;padding:0 14px;border:1px solid rgba(255,255,255,0.14);border-radius:10px;background:rgba(255,255,255,0.04);color:#dce8f2;font-size:13.5px;font-weight:500;cursor:pointer" style-hover="background:rgba(255,255,255,0.09);border-color:rgba(255,255,255,0.26)">Reload</button>
+    </div>
+  </header>
+
+  <div data-bgrid style="display:grid;grid-template-columns:308px minmax(0,1fr);align-items:start">
+
+    <aside data-bnav style="position:sticky;top:64px;height:calc(100vh - 64px);overflow-y:auto;border-right:1px solid rgba(255,255,255,0.07);padding:22px 14px 60px;background:linear-gradient(180deg,rgba(255,255,255,0.018),transparent 320px)">
+
+      <div style="border:1px solid rgba(255,255,255,0.09);border-radius:12px;background:rgba(255,255,255,0.025);padding:12px 12px 13px;margin-bottom:20px">
+        <button onClick="{{ onToggleSources }}" style="width:100%;display:flex;align-items:center;gap:8px;background:transparent;border:none;padding:0;cursor:pointer;font-family:'IBM Plex Mono';font-size:11px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#7fb4c9">
+          <span style="width:0;height:0;border-left:5px solid #5f93ab;border-top:4px solid transparent;border-bottom:4px solid transparent;transform:{{ srcCaret }};transition:transform .18s"></span>CI artifacts
+          <span style="margin-left:auto;font-size:10.5px;letter-spacing:0.04em;color:#5f7c90;text-transform:none">{{ sourceSummary }}</span>
+        </button>
+        <sc-if value="{{ showSources }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-direction:column;gap:7px;margin-top:12px">
+            <sc-for list="{{ sources }}" as="s" hint-placeholder-count="3">
+              <div onMouseEnter="{{ s.onEnter }}" onMouseLeave="{{ onTipOut }}" style="display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06)">
+                <span style="flex:none;width:7px;height:7px;border-radius:2px;background:{{ s.dot }}"></span>
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'IBM Plex Mono';font-size:11.5px;color:#c2d4e1">{{ s.name }}</span>
+                <span style="flex:none;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.05em;text-transform:uppercase;color:#6f8ba0">{{ s.kind }}</span>
+              </div>
+            </sc-for>
+            <div style="font-family:'IBM Plex Mono';font-size:10.5px;line-height:1.5;color:#5f7c90;margin-top:3px">Discovered from the manifest — new reports appear here with no site change.</div>
+          </div>
+        </sc-if>
+      </div>
+
+      <div style="font-family:'IBM Plex Mono';font-size:11px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#7fb4c9;padding:0 10px 10px">Benchmarks</div>
+
+      <sc-for list="{{ navGroups }}" as="g" hint-placeholder-count="6">
+        <div style="margin-bottom:2px">
+          <button onClick="{{ g.onToggle }}" style="width:100%;display:flex;align-items:center;gap:9px;padding:8px 10px;background:{{ g.headBg }};border:none;border-radius:9px;cursor:pointer;text-align:left;color:{{ g.headColor }}" style-hover="background:rgba(255,255,255,0.05)">
+            <span style="flex:none;width:0;height:0;border-left:5px solid #5f93ab;border-top:4px solid transparent;border-bottom:4px solid transparent;transform:{{ g.caret }};transition:transform .18s"></span>
+            <span style="flex:1;min-width:0;font-family:'IBM Plex Mono';font-size:12px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ g.label }}</span>
+            <span style="flex:none;font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:0.06em;padding:2px 6px;border-radius:5px;color:{{ g.badgeColor }};background:{{ g.badgeBg }}">{{ g.badge }}</span>
+          </button>
+          <sc-if value="{{ g.open }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:3px 0 9px 12px">
+              <sc-for list="{{ g.items }}" as="it" hint-placeholder-count="5">
+                <a onClick="{{ it.onClick }}" href="#" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;font-size:13.5px;color:{{ it.color }};background:{{ it.bg }};border-left:2px solid {{ it.bar }}" style-hover="background:rgba(255,255,255,0.045)">
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ it.label }}</span>
+                  <span style="flex:none;font-family:'IBM Plex Mono';font-size:10.5px;color:#5f7c90">{{ it.count }}</span>
+                </a>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </aside>
+
+    <main style="min-width:0;padding:34px 30px 90px">
+
+      <sc-if value="{{ loading }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;align-items:center;gap:12px;font-family:'IBM Plex Mono';font-size:13px;color:#7d94a6;padding:40px 0">
+          <span style="width:9px;height:9px;border-radius:50%;background:#46b8de"></span>Fetching benchmark artifacts…
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ ready }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:1400px">
+
+          <div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono';font-size:12px;color:#7d94a6">
+            <span>Benchmarks</span><span style="color:#3f5768">/</span><span style="color:#a9bccb">{{ benchKey }}</span><span style="color:#3f5768">/</span><span style="color:#f2a071">{{ viewLabel }}</span>
+          </div>
+          <h1 style="font-family:'Space Grotesk';font-weight:600;font-size:clamp(26px,2.6vw,34px);letter-spacing:-0.025em;color:#f5fafe;margin:14px 0 0;line-height:1.1">{{ benchTitle }}</h1>
+
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:14px">
+            <sc-for list="{{ benchChips }}" as="c" hint-placeholder-count="4">
+              <span onMouseEnter="{{ c.onEnter }}" onMouseLeave="{{ onTipOut }}" style="display:inline-flex;align-items:center;gap:7px;font-family:'IBM Plex Mono';font-size:11.5px;color:{{ c.color }};background:{{ c.bg }};border:1px solid {{ c.border }};padding:4px 9px;border-radius:7px">{{ c.text }}</span>
+            </sc-for>
+          </div>
+
+          <p style="color:#a9bccb;font-size:15px;line-height:1.7;margin:18px 0 0;max-width:96ch;text-wrap:pretty">{{ benchDescription }}</p>
+
+          <sc-if value="{{ isCompare }}" hint-placeholder-val="{{ true }}">
+            <div>
+              <div data-ctrls style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:28px;padding:16px;border:1px solid rgba(255,255,255,0.09);border-radius:14px;background:linear-gradient(180deg,rgba(255,255,255,0.035),rgba(255,255,255,0.012))">
+                <label style="display:block">
+                  <span style="display:block;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6;margin-bottom:7px">Metric</span>
+                  <select value="{{ metric }}" onChange="{{ onMetric }}" style="width:100%;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:9px;background:rgba(255,255,255,0.05);color:#eaf2f9;font-family:'IBM Plex Mono';font-size:12.5px;outline:none;cursor:pointer">
+                    <sc-for list="{{ metricOpts }}" as="o" hint-placeholder-count="3"><option value="{{ o.value }}">{{ o.label }}</option></sc-for>
+                  </select>
+                </label>
+                <label style="display:block">
+                  <span style="display:block;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6;margin-bottom:7px">Statistic</span>
+                  <select value="{{ stat }}" onChange="{{ onStat }}" style="width:100%;height:36px;padding:0 10px;border:1px solid rgba(242,101,34,0.32);border-radius:9px;background:rgba(242,101,34,0.09);color:#ffd9c2;font-family:'IBM Plex Mono';font-size:12.5px;outline:none;cursor:pointer">
+                    <sc-for list="{{ statOpts }}" as="o" hint-placeholder-count="3"><option value="{{ o.value }}">{{ o.label }}</option></sc-for>
+                  </select>
+                </label>
+                <label style="display:block">
+                  <span style="display:block;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6;margin-bottom:7px">Region</span>
+                  <select value="{{ region }}" onChange="{{ onRegion }}" style="width:100%;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:9px;background:rgba(255,255,255,0.05);color:#eaf2f9;font-family:'IBM Plex Mono';font-size:12.5px;outline:none;cursor:pointer">
+                    <sc-for list="{{ regionOpts }}" as="o" hint-placeholder-count="2"><option value="{{ o.value }}">{{ o.label }}</option></sc-for>
+                  </select>
+                </label>
+                <label style="display:block">
+                  <span style="display:block;font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6;margin-bottom:7px">Baseline row</span>
+                  <select value="{{ baseline }}" onChange="{{ onBaseline }}" style="width:100%;height:36px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:9px;background:rgba(255,255,255,0.05);color:#eaf2f9;font-family:'IBM Plex Mono';font-size:12.5px;outline:none;cursor:pointer">
+                    <sc-for list="{{ baselineOpts }}" as="o" hint-placeholder-count="3"><option value="{{ o.value }}">{{ o.label }}</option></sc-for>
+                  </select>
+                </label>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-top:14px">
+                <div style="display:flex;align-items:center;border:1px solid rgba(255,255,255,0.12);border-radius:9px;overflow:hidden">
+                  <sc-for list="{{ dirOpts }}" as="d" hint-placeholder-count="3">
+                    <button onClick="{{ d.onClick }}" style="padding:7px 12px;border:none;background:{{ d.bg }};color:{{ d.color }};font-family:'IBM Plex Mono';font-size:11.5px;cursor:pointer">{{ d.label }}</button>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ multiRun }}" hint-placeholder-val="{{ false }}">
+                  <select value="{{ runIdx }}" onChange="{{ onRun }}" style="height:34px;padding:0 10px;border:1px solid rgba(255,255,255,0.14);border-radius:9px;background:rgba(255,255,255,0.05);color:#eaf2f9;font-family:'IBM Plex Mono';font-size:12px;outline:none;cursor:pointer">
+                    <sc-for list="{{ runOpts }}" as="o" hint-placeholder-count="2"><option value="{{ o.value }}">{{ o.label }}</option></sc-for>
+                  </select>
+                </sc-if>
+                <span style="font-family:'IBM Plex Mono';font-size:11.5px;color:#6f8ba0">{{ tableNote }}</span>
+              </div>
+
+              <div style="margin-top:18px;border:1px solid rgba(255,255,255,0.09);border-radius:14px;overflow:auto;background:rgba(255,255,255,0.018)">
+                <table style="border-collapse:separate;border-spacing:0;width:100%;min-width:640px">
+                  <thead>
+                    <tr>
+                      <th style="position:sticky;left:0;z-index:3;text-align:left;padding:13px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);font-family:'IBM Plex Mono';font-size:10px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6;min-width:270px">Execution tuple</th>
+                      <sc-for list="{{ cols }}" as="c" hint-placeholder-count="4">
+                        <th onMouseEnter="{{ c.onEnter }}" onMouseLeave="{{ onTipOut }}" style="text-align:right;padding:13px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);border-left:1px solid rgba(255,255,255,0.05);font-family:'IBM Plex Mono';font-size:11px;font-weight:600;color:#cfe0ec;white-space:nowrap;cursor:help">{{ c.name }}<span style="display:block;font-weight:400;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:#5f7c90;margin-top:3px">{{ c.sub }}</span></th>
+                      </sc-for>
+                    </tr>
+                  </thead>
+                  <sc-for list="{{ groups }}" as="grp" hint-placeholder-count="3">
+                    <tbody>
+                      <sc-if value="{{ grp.showHeader }}" hint-placeholder-val="{{ true }}">
+                        <tr>
+                          <td colspan="{{ grp.span }}" style="padding:9px 16px;background:rgba(70,184,222,0.055);border-top:1px solid rgba(70,184,222,0.22);border-bottom:1px solid rgba(255,255,255,0.07)">
+                            <span style="font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#6f9db3">parameters</span>
+                            <span style="font-family:'IBM Plex Mono';font-size:12px;color:#a8e2f6;margin-left:10px">{{ grp.label }}</span>
+                          </td>
+                        </tr>
+                      </sc-if>
+                      <sc-for list="{{ grp.rows }}" as="r" hint-placeholder-count="4">
+                        <tr>
+                          <td onMouseEnter="{{ r.onEnter }}" onMouseLeave="{{ onTipOut }}" style="position:sticky;left:0;z-index:2;padding:12px 16px;background:{{ r.rowBg }};border-bottom:1px solid rgba(255,255,255,0.055);cursor:help;vertical-align:top">
+                            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                              <span style="font-family:'IBM Plex Mono';font-size:12.5px;color:{{ r.nameColor }};font-weight:500">{{ r.algo }}</span>
+                              <sc-if value="{{ r.isBaseline }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono';font-size:9.5px;letter-spacing:0.08em;color:#0a2a1f;background:#74c8a8;padding:2px 6px;border-radius:5px">BASE</span></sc-if>
+                            </div>
+                            <sc-if value="{{ r.hasDetail }}" hint-placeholder-val="{{ false }}">
+                              <div style="font-family:'IBM Plex Mono';font-size:10.5px;color:#6f8ba0;margin-top:4px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.detail }}</div>
+                            </sc-if>
+                          </td>
+                          <sc-for list="{{ r.cells }}" as="cell" hint-placeholder-count="4">
+                            <td onMouseEnter="{{ cell.onEnter }}" onMouseLeave="{{ onTipOut }}" style="padding:12px 16px;text-align:right;border-bottom:1px solid rgba(255,255,255,0.055);border-left:1px solid rgba(255,255,255,0.04);background:{{ cell.bg }};box-shadow:{{ cell.ring }};cursor:help;white-space:nowrap">
+                              <div style="font-family:'IBM Plex Mono';font-size:14px;font-weight:500;color:{{ cell.valueColor }};letter-spacing:-0.01em">{{ cell.text }}</div>
+                              <div style="display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-top:5px;font-family:'IBM Plex Mono';font-size:11px;color:{{ cell.chipColor }}">
+                                <span style="font-size:9px;line-height:1">{{ cell.arrow }}</span>{{ cell.ratioText }}
+                              </div>
+                            </td>
+                          </sc-for>
+                        </tr>
+                      </sc-for>
+                    </tbody>
+                  </sc-for>
+                </table>
+              </div>
+
+              <div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:14px;font-family:'IBM Plex Mono';font-size:11px;color:#6f8ba0">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="color:#74c8a8;font-size:9px">▲</span>faster / better than baseline</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="color:#ef7a5a;font-size:9px">▼</span>slower / worse than baseline</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:11px;height:11px;border:2px solid #74c8a8;border-radius:3px"></span>best algorithm for that test case &amp; parameters</span>
+                <span>hover any cell for the full distribution</span>
+              </div>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isCases }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:26px;display:flex;flex-direction:column;gap:12px">
+              <sc-for list="{{ casesList }}" as="tc" hint-placeholder-count="4">
+                <div style="border:1px solid rgba(255,255,255,0.09);border-radius:13px;background:rgba(255,255,255,0.022);padding:16px 18px">
+                  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+                    <span style="font-family:'IBM Plex Mono';font-size:13px;font-weight:600;color:#8fd6ba">{{ tc.name }}</span>
+                    <span style="font-family:'IBM Plex Mono';font-size:10.5px;color:#7d94a6;background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:6px">{{ tc.iterLabel }}</span>
+                    <span style="font-family:'IBM Plex Mono';font-size:10.5px;color:#7d94a6;background:rgba(255,255,255,0.06);padding:2px 7px;border-radius:6px">{{ tc.concLabel }}</span>
+                  </div>
+                  <p style="color:#a9bccb;font-size:14px;line-height:1.65;margin:10px 0 0;max-width:92ch;text-wrap:pretty">{{ tc.description }}</p>
+                  <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:12px">
+                    <sc-for list="{{ tc.fields }}" as="f" hint-placeholder-count="4">
+                      <span style="font-family:'IBM Plex Mono';font-size:11px;color:#c2d4e1;background:rgba(70,184,222,0.08);border:1px solid rgba(70,184,222,0.18);padding:3px 8px;border-radius:6px"><span style="color:#6f9db3">{{ f.k }}</span> {{ f.v }}</span>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isAlgos }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:26px;display:flex;flex-direction:column;gap:12px">
+              <sc-for list="{{ algosList }}" as="a" hint-placeholder-count="4">
+                <div style="border:1px solid rgba(255,255,255,0.09);border-radius:13px;background:rgba(255,255,255,0.022);padding:16px 18px">
+                  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+                    <span style="font-family:'IBM Plex Mono';font-size:13px;font-weight:600;color:#7fd3ee">{{ a.name }}</span>
+                    <span style="font-family:'IBM Plex Mono';font-size:10.5px;color:{{ a.stateColor }};background:{{ a.stateBg }};padding:2px 7px;border-radius:6px">{{ a.state }}</span>
+                  </div>
+                  <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
+                    <sc-for list="{{ a.params }}" as="p" hint-placeholder-count="2">
+                      <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:10px">
+                        <span style="font-family:'IBM Plex Mono';font-size:12px;color:#e2edf5;min-width:190px">{{ p.name }}</span>
+                        <span style="font-family:'IBM Plex Mono';font-size:11px;color:#8fd6ba">{{ p.type }}</span>
+                        <span style="font-family:'IBM Plex Mono';font-size:11px;color:#7d94a6">{{ p.values }}</span>
+                        <span style="font-size:13px;color:#a9bccb;flex:1;min-width:220px">{{ p.description }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isMetrics }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:26px;border:1px solid rgba(255,255,255,0.09);border-radius:14px;overflow:auto;background:rgba(255,255,255,0.018)">
+              <table style="border-collapse:separate;border-spacing:0;width:100%;min-width:620px">
+                <thead>
+                  <tr>
+                    <th style="text-align:left;padding:12px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6">Metric</th>
+                    <th style="text-align:left;padding:12px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6">Kind</th>
+                    <th style="text-align:left;padding:12px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6">Better</th>
+                    <th style="text-align:right;padding:12px 16px;background:#0b1c2b;border-bottom:1px solid rgba(255,255,255,0.11);font-family:'IBM Plex Mono';font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#7d94a6">Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <sc-for list="{{ metricsList }}" as="m" hint-placeholder-count="6">
+                    <tr>
+                      <td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,0.055);font-family:'IBM Plex Mono';font-size:12.5px;color:#e2edf5">{{ m.name }}</td>
+                      <td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,0.055);font-family:'IBM Plex Mono';font-size:11.5px;color:{{ m.kindColor }}">{{ m.kind }}</td>
+                      <td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,0.055);font-family:'IBM Plex Mono';font-size:11.5px;color:#8ba3b6">{{ m.dirLabel }}</td>
+                      <td style="padding:11px 16px;border-bottom:1px solid rgba(255,255,255,0.055);text-align:right"><a onClick="{{ m.onOpen }}" href="#" style="font-family:'IBM Plex Mono';font-size:11.5px;color:#46b8de">compare →</a></td>
+                    </tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </sc-if>
+
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ empty }}" hint-placeholder-val="{{ false }}">
+        <div style="max-width:620px;margin-top:40px;padding:22px;border:1px solid rgba(242,101,34,0.3);border-radius:13px;background:rgba(242,101,34,0.07)">
+          <div style="font-family:'Space Grotesk';font-weight:600;font-size:18px;color:#ffd0b4">No benchmark data reachable</div>
+          <p style="color:#c9d6e2;font-size:14px;line-height:1.6;margin:10px 0 0">The CI manifest returned nothing usable. It should list <span style="font-family:'IBM Plex Mono'">bench_configuration.json</span> and <span style="font-family:'IBM Plex Mono'">report_&lt;N&gt;.json</span> URLs — a plain JSON array of paths is enough.</p>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+
+  <footer style="position:relative;overflow:hidden;background:linear-gradient(180deg,#071320 0%,#082734 12%,#0d5f76 42%,#1ea0ba 72%,#4fd2d8 100%)">
+    <div aria-hidden="true" style="position:absolute;left:50%;transform:translateX(-50%);bottom:-0.16em;font-family:'Space Grotesk';font-weight:700;font-size:clamp(88px,17.5vw,258px);letter-spacing:-0.035em;line-height:0.8;color:rgba(3,40,50,0.17);white-space:nowrap;pointer-events:none;user-select:none">BioseqDB</div>
+    <div style="position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:74px 26px 0">
+      <div data-footcols style="display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr;gap:36px;align-items:start">
+        <div>
+          <div style="display:flex;align-items:center;gap:11px">
+            <img src="assets/bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" style="display:block">
+            <span style="font-family:'Space Grotesk';font-weight:600;font-size:19px;color:#eef7fa">Bioseq<span style="color:#bdeef4">DB</span></span>
+            <span style="font-family:'IBM Plex Mono';font-size:10px;font-weight:500;letter-spacing:0.06em;color:#052b30;background:rgba(255,255,255,0.34);padding:2px 7px;border-radius:6px">BENCH</span>
+          </div>
+          <p style="color:#a7d4dd;font-size:14.5px;line-height:1.6;margin:16px 0 0;max-width:34ch">Every number on this page is read straight from the bench_framework artifacts published by CI — nothing is transcribed by hand.</p>
+        </div>
+        <div>
+          <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#8fc6d1;margin-bottom:16px">Documentation</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <a href="Bioseq Docs.dc.html#installation" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Installation</a>
+            <a href="Bioseq Docs.dc.html#quickstart" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Quick start</a>
+            <a href="Bioseq Docs.dc.html#api-sql" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">SQL reference</a>
+            <a href="Bioseq Docs.dc.html#api-cpp" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">C++ core types</a>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#8fc6d1;margin-bottom:16px">Explore</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <a href="Bioseq.dc.html" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Product home</a>
+            <a href="Bioseq.dc.html#workflow" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Workflow</a>
+            <a href="Bioseq.dc.html#examples" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Examples</a>
+            <a href="Bioseq.dc.html#scale" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Scale</a>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:'IBM Plex Mono';font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#8fc6d1;margin-bottom:16px">Project</div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <a href="Bioseq Docs.dc.html" style="font-size:14.5px;color:#e2f4f7" style-hover="color:#fff">Documentation</a>
+            <a aria-disabled="true" title="Under development" style="font-size:14.5px;color:#9fc9d2;cursor:not-allowed">GitHub</a>
+            <span style="font-family:'IBM Plex Mono';font-size:12.5px;color:#063540;background:rgba(255,255,255,0.28);border-radius:7px;padding:6px 10px;width:max-content">Alpha &middot; Aug 2027</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:0 26px">
+      <div style="height:clamp(90px,12vw,150px)"></div>
+      <div style="border-top:1px solid rgba(4,45,55,0.25);padding:22px 0 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px">
+        <span style="font-family:'IBM Plex Sans';font-size:13.5px;color:#053039;font-weight:500">&copy; 2027 BioseqDB &mdash; an independent open-source project.</span>
+        <nav style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+          <a href="#" style="font-size:13.5px;color:#063a45;font-weight:500" style-hover="color:#00252e">License (MIT)</a>
+          <a href="#" style="font-size:13.5px;color:#063a45;font-weight:500" style-hover="color:#00252e">Privacy</a>
+          <a onClick="{{ onTop }}" href="#" style="font-size:13.5px;color:#063a45;font-weight:500" style-hover="color:#00252e">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div style="position:fixed;z-index:200;pointer-events:none;width:352px;max-width:calc(100vw - 20px);border:1px solid rgba(255,255,255,0.13);border-radius:13px;background:linear-gradient(180deg,#12293d,#0a1826);box-shadow:0 30px 70px -26px rgba(0,0,0,0.92);padding:14px 15px;left:{{ tipX }}px;top:{{ tipY }}px;opacity:{{ tipOpacity }};transition:opacity .12s ease">
+    <sc-if value="{{ hasTip }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="font-family:'IBM Plex Mono';font-size:12.5px;font-weight:600;color:#f2f7fb;word-break:break-word">{{ tipTitle }}</div>
+        <div style="font-family:'IBM Plex Mono';font-size:10.5px;letter-spacing:0.06em;text-transform:uppercase;color:#7d94a6;margin-top:4px">{{ tipSub }}</div>
+        <sc-if value="{{ tipHasNote }}" hint-placeholder-val="{{ false }}">
+          <p style="font-size:12.5px;line-height:1.55;color:#a9bccb;margin:10px 0 0;max-height:190px;overflow:hidden">{{ tipNote }}</p>
+        </sc-if>
+        <div style="display:flex;flex-direction:column;gap:5px;margin-top:11px">
+          <sc-for list="{{ tipRows }}" as="row" hint-placeholder-count="4">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px">
+              <span style="font-family:'IBM Plex Mono';font-size:11px;color:#7d94a6;white-space:nowrap">{{ row.k }}</span>
+              <span style="font-family:'IBM Plex Mono';font-size:11.5px;color:{{ row.color }};text-align:right;word-break:break-word">{{ row.v }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <sc-if value="{{ tipHasHist }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08)">
+            <sc-for list="{{ tipHist }}" as="b" hint-placeholder-count="10">
+              <span style="flex:1;background:{{ b.color }};border-radius:2px 2px 0 0;height:{{ b.h }}%;min-height:2px"></span>
+            </sc-for>
+          </div>
+        </sc-if>
+      </div>
+    </sc-if>
+  </div>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900},&quot;manifestUrl&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Data&quot;,&quot;label&quot;:&quot;CI manifest URL&quot;},&quot;defaultStat&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;P50&quot;,&quot;P01&quot;,&quot;P20&quot;,&quot;P80&quot;,&quot;P99&quot;,&quot;mean&quot;,&quot;min&quot;,&quot;max&quot;],&quot;default&quot;:&quot;P50&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Data&quot;}}">
+class Component extends DCLogic {
+  state = {
+    loading: true, files: [], model: null, sel: null, view: 'compare',
+    metric: null, region: 'all_regions', stat: 'P50', baseline: null,
+    dir: null, runIdx: 0, open: {}, tip: null, showSources: true,
+  };
+
+  async componentDidMount() {
+    this.lib = await import(new URL('bench-loader.js', location.href).href);
+    const manifest = (this.props.manifestUrl || '').trim();
+    this.setState({ stat: this.props.defaultStat || 'P50' });
+    await this.load(manifest ? [manifest] : this.lib.DEFAULT_SOURCES);
+  }
+
+  async load(sources) {
+    this.sourceList = sources;
+    this.setState({ loading: true });
+    const files = await this.lib.loadSources(sources);
+    const model = this.lib.buildModel(files);
+    const richest = model.order
+      .map((k) => {
+        const bm = model.benchmarks[k], r = bm.runs[0];
+        return { k, score: r ? r.rows.length * Math.max(1, r.caseSet.length) : 0 };
+      })
+      .sort((a, z) => z.score - a.score)[0];
+    const sel = (model.benchmarks[this.state.sel] && this.state.sel) || (richest && richest.k) || model.order[0] || null;
+    this.setState({ loading: false, files, model, sel, open: sel ? { [sel]: true } : {} });
+    if (sel) this.resetForBench(sel, model);
+  }
+
+  resetForBench(key, model) {
+    const b = (model || this.state.model).benchmarks[key];
+    if (!b) return;
+    const run = b.runs[0];
+    const avail = run && run.metricSet.length ? run.metricSet : b.metricOrder;
+    const metric = avail.includes('wall_clock_ns') ? 'wall_clock_ns' : (avail[0] || null);
+    const region = run && run.regionSet.includes('all_regions') ? 'all_regions' : (run ? run.regionSet[0] : 'all_regions');
+    this.setState({ metric, region, runIdx: 0, baseline: null, dir: null });
+  }
+
+  bench() { const m = this.state.model; return m && this.state.sel ? m.benchmarks[this.state.sel] : null; }
+  run() { const b = this.bench(); return b && b.runs.length ? b.runs[Math.min(this.state.runIdx, b.runs.length - 1)] : null; }
+  direction() {
+    if (this.state.dir !== null) return this.state.dir;
+    return this.lib ? this.lib.metricDirection(this.state.metric || '') : 0;
+  }
+  fmt(v) { return this.lib ? this.lib.formatValue(v, this.state.metric) : String(v); }
+
+  showTip(e, payload) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const w = 352;
+    let x = Math.max(10, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 10));
+    let y = r.bottom + 12;
+    if (y > window.innerHeight - 280) y = Math.max(10, r.top - 268);
+    this.setState({ tip: Object.assign({ x, y }, payload) });
+  }
+  hideTip = () => { if (this.state.tip) this.setState({ tip: null }); };
+
+  sampleRows(s) {
+    if (!s) return [{ k: 'samples', v: 'none', color: '#7d94a6' }];
+    const f = (v) => (v == null ? '—' : this.fmt(v));
+    return [
+      { k: 'samples', v: s.n == null ? '—' : String(s.n), color: '#cfe0ec' },
+      { k: 'P01 / P20', v: f(s.p.P01) + ' / ' + f(s.p.P20), color: '#cfe0ec' },
+      { k: 'P50', v: f(s.p.P50), color: '#8fd6ba' },
+      { k: 'P80 / P99', v: f(s.p.P80) + ' / ' + f(s.p.P99), color: '#cfe0ec' },
+      { k: 'min / max', v: f(s.min) + ' / ' + f(s.max), color: '#cfe0ec' },
+      { k: 'mean / mean90', v: f(s.mean) + ' / ' + f(s.mean90), color: '#cfe0ec' },
+      { k: 'stddev', v: f(s.stddev), color: '#9db1c2' },
+    ];
+  }
+  histBars(s) {
+    if (!s || !s.hist || !s.hist.length) return [];
+    const max = Math.max(...s.hist.map((h) => h.count)) || 1;
+    return s.hist.map((h) => ({ h: Math.round((h.count / max) * 100), color: h.count ? '#46b8de' : 'rgba(255,255,255,0.08)' }));
+  }
+
+  renderVals() {
+    const st = this.state, model = st.model, lib = this.lib;
+    const tip = st.tip;
+    const out = {
+      loading: st.loading, ready: false, empty: !st.loading && (!model || !model.order.length),
+      onTipOut: this.hideTip,
+      onReload: () => this.load(this.sourceList || []),
+      onToggleSources: () => this.setState({ showSources: !st.showSources }),
+      onTop: (e) => { e.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
+      showSources: st.showSources, srcCaret: st.showSources ? 'rotate(90deg)' : 'none',
+      statusDot: st.loading ? '#f2a071' : (model && model.errors.length ? '#ef7a5a' : '#74c8a8'),
+      statusText: st.loading ? 'loading' : (model ? model.order.length : 0) + ' benchmarks',
+      sourceSummary: (st.files.filter((f) => f.status !== 'error').length) + '/' + st.files.length,
+      sources: (st.files || []).map((f) => ({
+        name: f.name, kind: f.status === 'error' ? 'err' : f.kind,
+        dot: f.status === 'error' ? '#ef7a5a' : (f.kind === 'report' ? '#74c8a8' : f.kind === 'manifest' ? '#f2a071' : '#46b8de'),
+        onEnter: (e) => this.showTip(e, {
+          title: f.name, sub: f.status === 'error' ? 'unreachable' : f.kind,
+          note: f.error || f.url,
+          rows: (f.benchmarkKeys || []).slice(0, 9).map((k) => ({ k: 'benchmark', v: k, color: '#8fd6ba' })),
+        }),
+      })),
+      tipX: tip ? tip.x : -9999, tipY: tip ? tip.y : -9999, tipOpacity: tip ? 1 : 0,
+      hasTip: !!tip, tipTitle: tip ? tip.title : '', tipSub: tip ? (tip.sub || '') : '',
+      tipNote: tip ? (tip.note || '') : '', tipHasNote: !!(tip && tip.note),
+      tipRows: tip ? (tip.rows || []) : [],
+      tipHasHist: !!(tip && tip.hist && tip.hist.length), tipHist: tip ? (tip.hist || []) : [],
+      navGroups: [], metricOpts: [], statOpts: [], regionOpts: [], baselineOpts: [], runOpts: [],
+      dirOpts: [], cols: [], groups: [], benchChips: [], casesList: [], algosList: [],
+      metricsList: [],
+      benchKey: '', benchTitle: '', benchDescription: '', viewLabel: '', tableNote: '',
+      metric: st.metric || '', region: st.region || '', stat: st.stat, baseline: st.baseline || '',
+      runIdx: String(st.runIdx), multiRun: false,
+      isCompare: false, isCases: false, isAlgos: false, isMetrics: false,
+    };
+    if (!model || !model.order.length) return out;
+
+    const VIEWS = [
+      { id: 'compare', label: 'Comparison' },
+      { id: 'cases', label: 'Test cases' }, { id: 'algos', label: 'Algorithms' },
+      { id: 'metrics', label: 'Metrics' },
+    ];
+
+    out.navGroups = model.order.map((key) => {
+      const b = model.benchmarks[key];
+      const active = st.sel === key;
+      const counts = {
+        compare: b.runs.length ? String(b.runs[0].rows.length) : '—',
+        cases: String(b.caseOrder.length), algos: String(b.algoOrder.length),
+        metrics: String(b.metricOrder.length),
+      };
+      return {
+        label: key, open: !!st.open[key],
+        caret: st.open[key] ? 'rotate(90deg)' : 'none',
+        headBg: active ? 'rgba(70,184,222,0.10)' : 'transparent',
+        headColor: active ? '#bfe8f8' : (b.hasResults ? '#c2d4e1' : '#7d94a6'),
+        badge: b.hasResults ? 'DATA' : 'CFG',
+        badgeColor: b.hasResults ? '#0a2a1f' : '#8ba3b6',
+        badgeBg: b.hasResults ? '#74c8a8' : 'rgba(255,255,255,0.07)',
+        onToggle: () => {
+          const open = Object.assign({}, st.open, { [key]: !st.open[key] });
+          if (st.sel !== key) { this.setState({ sel: key, open }); this.resetForBench(key); }
+          else this.setState({ open });
+        },
+        items: VIEWS.map((v) => {
+          const on = active && st.view === v.id;
+          return {
+            label: v.label, count: counts[v.id],
+            color: on ? '#eaf5fb' : '#9db1c2',
+            bg: on ? 'rgba(255,255,255,0.06)' : 'transparent',
+            bar: on ? '#f26522' : 'transparent',
+            onClick: (e) => {
+              e.preventDefault();
+              if (st.sel !== key) { this.setState({ sel: key, view: v.id }); this.resetForBench(key); }
+              else this.setState({ view: v.id });
+            },
+          };
+        }),
+      };
+    });
+
+    const b = this.bench();
+    if (!b) return out;
+    const run = this.run();
+    out.ready = true;
+    out.benchKey = b.key;
+    out.benchTitle = b.title && b.title !== b.key ? b.title : b.key;
+    out.benchDescription = b.description || 'No description declared in the configuration for this benchmark.';
+    out.viewLabel = (VIEWS.find((v) => v.id === st.view) || VIEWS[0]).label;
+    out['is' + st.view.charAt(0).toUpperCase() + st.view.slice(1)] = true;
+
+    const chip = (text, tone, tipPayload) => {
+      const tones = {
+        teal: ['#a8e2f6', 'rgba(70,184,222,0.10)', 'rgba(70,184,222,0.28)'],
+        mint: ['#a9e0c8', 'rgba(116,200,168,0.10)', 'rgba(116,200,168,0.28)'],
+        amber: ['#ffc9a8', 'rgba(242,101,34,0.10)', 'rgba(242,101,34,0.30)'],
+        grey: ['#a9bccb', 'rgba(255,255,255,0.045)', 'rgba(255,255,255,0.10)'],
+      }[tone] || ['#a9bccb', 'rgba(255,255,255,0.045)', 'rgba(255,255,255,0.10)'];
+      return {
+        text, color: tones[0], bg: tones[1], border: tones[2],
+        onEnter: tipPayload ? (e) => this.showTip(e, tipPayload) : () => {},
+      };
+    };
+    out.benchChips = [];
+    (b.tags || []).forEach((t) => out.benchChips.push(chip('#' + t, 'teal')));
+    if (run) {
+      out.benchChips.push(chip(run.id, 'mint', {
+        title: run.id, sub: 'report artifact',
+        note: run.url,
+        rows: [
+          { k: 'created', v: run.created || '—', color: '#cfe0ec' },
+          { k: 'commit', v: run.commit ? run.commit.slice(0, 12) : '—', color: '#8fd6ba' },
+          { k: 'worktree', v: run.dirty ? 'dirty' : 'clean', color: run.dirty ? '#f2a071' : '#8fd6ba' },
+          { k: 'fast mode', v: String(!!run.meta.fast), color: '#cfe0ec' },
+          { k: 'tuples', v: String(run.rows.length), color: '#cfe0ec' },
+        ],
+      }));
+      if (run.commit) out.benchChips.push(chip(run.commit.slice(0, 7) + (run.dirty ? ' ·dirty' : ''), run.dirty ? 'amber' : 'grey'));
+    } else {
+      out.benchChips.push(chip('configuration only — no report published', 'amber'));
+    }
+    if (b.concurrency) out.benchChips.push(chip('bench_lock ' + (b.concurrency.bench_lock ? 'on' : 'off'), 'grey'));
+    if (b.iterationOrder) out.benchChips.push(chip('order ' + b.iterationOrder.mode, 'grey'));
+
+    /* ---- comparison table ---- */
+    if (st.view === 'compare' && run) {
+      const metric = st.metric || run.metricSet[0];
+      const region = run.regionSet.includes(st.region) ? st.region : run.regionSet[0];
+      const dir = this.direction();
+      const table = lib.buildTable(run, {
+        metric, region, stat: st.stat, baselineAlgo: st.baseline, direction: dir,
+        algoOrder: b.algoOrder,
+        cases: b.caseOrder.filter((c) => run.caseSet.includes(c)).concat(run.caseSet.filter((c) => !b.caseOrder.includes(c))),
+      });
+
+      out.metricOpts = run.metricSet.map((m) => ({ value: m, label: m }));
+      out.statOpts = lib.STAT_KEYS.map((s) => ({ value: s.key, label: s.label }));
+      out.regionOpts = run.regionSet.map((r) => ({ value: r, label: r }));
+      out.baselineOpts = table.algos.map((a) => ({ value: a, label: a }));
+      out.groupedBy = table.groupedBy;
+      out.runOpts = b.runs.map((r, i) => ({ value: String(i), label: r.id + (r.created ? ' · ' + r.created.slice(0, 10) : '') }));
+      out.multiRun = b.runs.length > 1;
+      out.metric = metric; out.region = region;
+      out.baseline = table.baseline || '';
+      out.onMetric = (e) => this.setState({ metric: e.target.value, dir: null, tip: null });
+      out.onStat = (e) => this.setState({ stat: e.target.value, tip: null });
+      out.onRegion = (e) => this.setState({ region: e.target.value, tip: null });
+      out.onBaseline = (e) => this.setState({ baseline: e.target.value, tip: null });
+      out.onRun = (e) => this.setState({ runIdx: Number(e.target.value), tip: null });
+      out.dirOpts = [
+        { v: -1, label: '↓ lower is better' }, { v: 1, label: '↑ higher is better' }, { v: 0, label: '– neutral' },
+      ].map((d) => ({
+        label: d.label,
+        bg: dir === d.v ? 'rgba(70,184,222,0.16)' : 'transparent',
+        color: dir === d.v ? '#bfe8f8' : '#7d94a6',
+        onClick: () => this.setState({ dir: d.v }),
+      }));
+      const nRows = table.groups.reduce((a, g) => a + g.rows.length, 0);
+      out.tableNote = nRows + ' tuples × ' + table.cols.length + ' test cases · ' + st.stat + ' of ' + metric +
+        (table.groupedBy.length ? ' · grouped by ' + table.groupedBy.join(', ') : '') +
+        ' · baseline ' + table.baseline;
+
+      const mspec = b.metrics[metric] || {};
+      out.cols = table.cols.map((tc) => {
+        const info = b.testCases[tc] || {};
+        const data = info.data || {};
+        return {
+          name: tc, sub: info.data && info.data.size_label ? info.data.size_label : (b.iterations[tc] != null ? b.iterations[tc] + ' iters' : ''),
+          onEnter: (e) => this.showTip(e, {
+            title: tc, sub: 'test case',
+            note: info.description || 'No description in the configuration.',
+            rows: Object.keys(data).slice(0, 9).map((k) => ({ k, v: String(data[k]), color: '#cfe0ec' }))
+              .concat(b.iterations[tc] != null ? [{ k: 'iterations', v: String(b.iterations[tc]), color: '#8fd6ba' }] : []),
+          }),
+        };
+      });
+
+      out.groups = table.groups.map((grp) => ({
+        label: grp.label || 'no swept parameters',
+        showHeader: table.groups.length > 1 || !!grp.label,
+        span: table.cols.length + 1,
+        rows: grp.rows.map((r) => {
+        const schema = b.algorithms[r.algo] || {};
+        return {
+          algo: r.algo, detail: r.detail, hasDetail: !!r.detail,
+          isBaseline: r.isBaseline,
+          nameColor: r.isBaseline ? '#a9e0c8' : '#e2edf5',
+          rowBg: r.isBaseline ? 'rgba(116,200,168,0.055)' : '#0a1826',
+          onEnter: (e) => this.showTip(e, {
+            title: r.algo, sub: 'execution tuple',
+            note: (schema && Object.values(schema)[0] && Object.values(schema)[0].description) || '',
+            rows: Object.keys(r.params).map((k) => ({
+              k, v: String(r.params[k]),
+              color: k === '_' ? '#7d94a6' : '#8fd6ba',
+            })),
+          }),
+          cells: r.values.map((cell, i) => {
+            const tc = table.cols[i];
+            const ratio = cell.ratio;
+            const better = cell.better || 0;
+            const col = better > 0 ? '#74c8a8' : better < 0 ? '#ef7a5a' : '#7d94a6';
+            return {
+              text: cell.value == null ? '—' : lib.formatValue(cell.value, metric),
+              valueColor: cell.value == null ? '#54697a' : '#eef4f9',
+              bg: r.isBaseline ? 'rgba(116,200,168,0.045)' : (better > 0 ? 'rgba(116,200,168,0.05)' : better < 0 ? 'rgba(239,122,90,0.05)' : 'transparent'),
+              ring: cell.isBest ? 'inset 0 0 0 2px #74c8a8' : 'none',
+              arrow: r.isBaseline || ratio == null ? '' : (better > 0 ? '▲' : better < 0 ? '▼' : '='),
+              ratioText: r.isBaseline ? 'baseline' : (ratio == null ? '' : ratio.toFixed(2) + '×'),
+              chipColor: r.isBaseline ? '#74c8a8' : col,
+              onEnter: (e) => this.showTip(e, {
+                title: r.algo + ' · ' + tc,
+                sub: metric + ' · ' + region,
+                note: mspec.description || (b.testCases[tc] && b.testCases[tc].description) || '',
+                rows: [
+                  { k: st.stat + ' (shown)', v: cell.value == null ? '—' : lib.formatValue(cell.value, metric), color: '#f2f7fb' },
+                  { k: 'parameters', v: grp.label || 'none swept', color: '#a8e2f6' },
+                  { k: 'baseline', v: r.isBaseline ? 'this row' : (grp.baselineLabel || '—'), color: '#8fd6ba' },
+                  { k: 'baseline value', v: cell.base == null ? '—' : lib.formatValue(cell.base, metric), color: '#cfe0ec' },
+                  { k: 'vs baseline', v: ratio == null ? '—' : (ratio.toFixed(3) + '× · ' + (cell.deltaPct >= 0 ? '+' : '') + cell.deltaPct.toFixed(1) + '%'), color: col },
+                  { k: 'rank', v: cell.isBest ? 'best in this group' : '—', color: cell.isBest ? '#74c8a8' : '#7d94a6' },
+                ].concat(this.sampleRows(cell.sample)),
+                hist: this.histBars(cell.sample),
+              }),
+            };
+          }),
+        };
+      }),
+      }));
+    } else if (st.view === 'compare') {
+      out.tableNote = 'No report published for this benchmark yet.';
+      out.statOpts = lib.STAT_KEYS.map((s) => ({ value: s.key, label: s.label }));
+      out.metricOpts = b.metricOrder.map((m) => ({ value: m, label: m }));
+      out.regionOpts = [{ value: 'all_regions', label: 'all_regions' }];
+      out.baselineOpts = [{ value: '', label: '—' }];
+      out.dirOpts = [];
+      out.onMetric = () => {}; out.onStat = (e) => this.setState({ stat: e.target.value });
+      out.onRegion = () => {}; out.onBaseline = () => {}; out.onRun = () => {};
+    }
+
+    /* ---- test cases ---- */
+    if (st.view === 'cases') {
+      out.casesList = b.caseOrder.map((tc) => {
+        const info = b.testCases[tc] || {};
+        const data = info.data || {};
+        return {
+          name: tc,
+          description: info.description || 'No description declared for this test case.',
+          iterLabel: (b.iterations[tc] != null ? b.iterations[tc] : '?') + ' iterations',
+          concLabel: 'concurrency ' + (info.concurrency != null ? info.concurrency : 'auto'),
+          fields: Object.keys(data).map((k) => ({ k, v: String(data[k]) })),
+        };
+      });
+    }
+
+    /* ---- algorithms ---- */
+    if (st.view === 'algos') {
+      const measured = new Set(run ? run.rows.map((r) => r.algo) : []);
+      out.algosList = b.algoOrder.map((name) => {
+        const schema = b.algorithms[name] || {};
+        const over = (b.matrixOver && b.matrixOver[name]) || {};
+        const has = measured.has(name);
+        return {
+          name,
+          state: has ? 'measured' : 'declared',
+          stateColor: has ? '#0a2a1f' : '#8ba3b6',
+          stateBg: has ? '#74c8a8' : 'rgba(255,255,255,0.07)',
+          params: Object.keys(schema).length
+            ? Object.keys(schema).map((p) => {
+                const s = schema[p] || {};
+                const swept = over[p];
+                return {
+                  name: p === '_' ? '(no parameters)' : p,
+                  type: s.type || '—',
+                  values: swept ? 'sweep: ' + swept.join(', ') : (s.enum ? s.enum.join(' | ') : (s.default !== undefined ? 'default ' + s.default : '')),
+                  description: s.description || '',
+                };
+              })
+            : [{ name: '(no schema)', type: '', values: '', description: 'This algorithm appears in a report but not in any loaded configuration.' }],
+        };
+      });
+    }
+
+    /* ---- metrics ---- */
+    if (st.view === 'metrics') {
+      out.metricsList = b.metricOrder.map((name) => {
+        const spec = b.metrics[name] || {};
+        const d = lib.metricDirection(name);
+        return {
+          name, kind: spec.type || 'builtin',
+          kindColor: spec.type === 'evaluation' ? '#c9a8ff' : spec.type === 'counter' ? '#ffc9a8' : spec.type === 'region' ? '#8fd6ba' : '#7fd3ee',
+          dirLabel: d < 0 ? '↓ lower' : d > 0 ? '↑ higher' : '– neutral',
+          onOpen: (e) => { e.preventDefault(); this.setState({ view: 'compare', metric: name, dir: null }); },
+        };
+      });
+    }
+
+    return out;
+  }
+}
+
+</script>
+</body>
+</html>

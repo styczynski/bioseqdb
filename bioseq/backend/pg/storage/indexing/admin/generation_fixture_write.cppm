@@ -3,6 +3,9 @@
  * @brief PostgreSQL grouped-SoA generation fixture publication support.
  */
 module;
+#include <new>
+#include <bioseq/pg_compat.h>
+
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -13,35 +16,18 @@ module;
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
 #include <libassert/assert.hpp>
 extern "C" {
 #include "storage/buffile.h"
 }
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <limits>
-#include <map>
-#include <new>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
-#include <vector>
 export module bioseq.postgres.storage.indexing.admin:generation_fixture_write;
-import bioseq.common.logging;
+import std;
+import :generation_api;
+import :grouped_soa;
+import :hash_major;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
@@ -52,67 +38,31 @@ import bioseq.storage.scanner;                 // sequence access requirements
 import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
 import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
 #ifdef BIOSEQ_TEST_INDEXES
 import bioseq.postgres.storage.indexing.sorted_runs;
 #endif
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 import bioseq.postgres.table.io;
 import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata; // column_table_row_count
+import bioseq.postgres.storage.metadata;
+import bioseq.postgres.storage.indexing.admin.policy_catalog;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
-import :rebuild;
-import :inspection_policy;
 
 export namespace bioseq::storage::indexing {
 
-/// Result type of the test path that instantiates the grouped-SoA coordinator
-/// against a real PostgreSQL-backed lazy sequence. The head and manifest are
-/// independently reopened after publication. The route receipt is the
-/// producer-originated execution result returned by the coordinator itself.
-struct ready_minimizer_generation_coordinator_fixture_result {
-    std::string table_name;
-    std::string selected_backend_name;
-    std::int16_t column_attno = 0;
-    std::uint64_t sequence_rowno = 0;
-    sequence_locator locator{};
-    std::uint8_t alphabet_code = 0;
-    std::uint8_t storage_unit_byte_width = 0;
-    std::optional<ready_minimizer_generation_publication> publication;
-    minimizer_generation_head head{};
-    minimizer_generation_manifest manifest{};
-    bool head_manifest_verified = false;
-
-    /// Return the sealed publication retained by a completed fixture.
-    [[nodiscard]] const ready_minimizer_generation_publication&
-    sealed_publication() const noexcept {
-        DEBUG_ASSERT(publication.has_value(),
-                     "READY fixture publication must be sealed before return");
-        return *publication;
-    }
-};
+const ready_minimizer_generation_publication&
+ready_minimizer_generation_coordinator_fixture_result::sealed_publication() const noexcept {
+    DEBUG_ASSERT(publication.has_value(),
+                 "READY fixture publication must be sealed before return");
+    return *publication;
+}
 
 /**
  * @brief Parse one exact fixture backend name without fallback.
@@ -330,7 +280,7 @@ inline void disarm_ready_minimizer_fixture_failures() noexcept {
  *
  * This route does not update metadata_age_log; unavailable SIMD/GPU backends fail closed.
  */
-[[nodiscard]] inline ready_minimizer_generation_coordinator_fixture_result
+[[nodiscard]] ready_minimizer_generation_coordinator_fixture_result
 build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
                                                           std::string_view index_name,
                                                           std::uint64_t sequence_rowno,
@@ -714,43 +664,6 @@ build_ready_minimizer_generation_coordinator_fixture_impl(Oid rel_oid,
     return result;
 }
 
-/// Live PostgreSQL fixture result for the grouped-SoA storage contract. This
-/// is used only by the integration SQL path. Other readers never
-/// call it, and only the current grouped-SoA layout is accepted.
-struct minimizer_generation_integration_fixture_result {
-    std::string table_name;
-    bioseq::indexing::minimizer_generation_layout layout =
-        bioseq::indexing::minimizer_generation_layout::invalid;
-    std::uint64_t generation_id = 0;
-    std::uint64_t source_identity = 0;
-    std::uint64_t source_content_checksum = 0;
-    std::uint64_t storage_contract_checksum = 0;
-    std::uint64_t source_num_fragments = 0;
-    std::uint64_t source_total_bp = 0;
-    std::uint64_t source_padding_letters = 0;
-    std::uint64_t writer_rows = 0;
-    std::uint64_t writer_batches = 0;
-    std::uint64_t published_head_bytes = 0;
-    std::uint64_t control_count = 0;
-    std::uint64_t position_count = 0;
-    std::uint64_t directory_entries = 0;
-    std::uint64_t position_segment_count = 0;
-    std::uint64_t control_encoded_bytes = 0;
-    std::uint64_t position_encoded_bytes = 0;
-    std::uint64_t control_chunks = 0;
-    std::uint64_t position_chunks = 0;
-    std::uint64_t validated_control_bytes = 0;
-    std::uint64_t validated_position_bytes = 0;
-    std::uint64_t validated_control_checksum = 0;
-    std::uint64_t validated_position_checksum = 0;
-    std::uint64_t lookup_count = 0;
-    std::uint64_t lookup_bp = 0;
-    bool lookup_reverse = false;
-    bool positions_complete = false;
-    minimizer_generation_read_stats read_stats{};
-    minimizer_generation_read_stats selective_probe_stats{};
-};
-
 /// Deterministic replayable producer used by the live PG fixture. Its declared
 /// scheme is the caller-requested backend identity. The Vulkan-labelled
 /// storage fixture emits up to 32768 events with small valid
@@ -815,7 +728,7 @@ static_assert(bioseq::indexing::grouped_soa_event_producer<minimizer_generation_
 /// goes through the row sink. The write path opens no read
 /// session so a later SQL statement/backend can validate an independently
 /// reopened reader without inheriting session-owned state.
-[[nodiscard]] inline minimizer_generation_integration_fixture_result
+[[nodiscard]] minimizer_generation_integration_fixture_result
 build_minimizer_generation_integration_fixture_impl(
     Oid rel_oid,
     std::string_view index_name,

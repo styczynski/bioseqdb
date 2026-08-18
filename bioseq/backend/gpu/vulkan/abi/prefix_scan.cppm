@@ -4,9 +4,9 @@
  */
 module;
 
-#include <cstdint>
-
 export module bioseq.gpu.vulkan.abi:prefix_scan;
+
+import std;
 
 export namespace bioseq::gpu::vulkan {
 

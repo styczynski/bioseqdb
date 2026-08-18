@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 export module bioseq.postgres.storage.indexing.chunked_storage:generation_session_validation;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -118,6 +94,7 @@ import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
 import :fragment_image;
+import :generation_writer_rows;
 export import :generation_session_contract;
 export import :generation_session_lifecycle;
 export import :generation_session_metadata;
@@ -372,26 +349,13 @@ rewrite_source_checksum_pg(Oid table_oid, std::uint64_t query_key, std::uint64_t
     bioseq::postgres::support::invoke_pg_as_cpp([] { CommandCounterIncrement(); });
 }
 
-/// Setup-only identity carried across the mandatory E2E restart. The timed
-/// backend must obtain its own identity from statement authorization instead of
-/// invoking this pre-restart inspection seam.
-struct ready_minimizer_generation_identity {
-    std::uint64_t generation_id = 0;
-    std::uint64_t source_identity = 0;
-    std::uint64_t source_content_checksum = 0;
-    std::uint64_t storage_contract_checksum = 0;
-
-    [[nodiscard]] bool operator==(const ready_minimizer_generation_identity&) const = default;
-};
-
 /// Read-only, PostgreSQL-owned pre-restart audit for one exact relation row,
 /// column and logical minimizer index. It validates the source relfilenode and
 /// attribute, the exact eight-column sidecar/PK, the address-bound row CRCs,
 /// fixed head/manifest wire, every directory chunk, and all cross-object
 /// metadata equations under one registered MVCC snapshot. It intentionally
 /// does not activate ordinal 2 or expose a standalone SQL symbol.
-[[nodiscard]] inline ready_minimizer_generation_identity
-inspect_ready_minimizer_generation_identity_pg(
+[[nodiscard]] ready_minimizer_generation_identity inspect_ready_minimizer_generation_identity_pg(
     const minimizer_generation_administration_identity& identity,
     std::uint64_t sequence_rowno,
     Snapshot executor_snapshot,

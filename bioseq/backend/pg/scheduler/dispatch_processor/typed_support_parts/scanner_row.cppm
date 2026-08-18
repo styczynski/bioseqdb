@@ -4,98 +4,109 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:scanner_row;
+#include "utils/errcodes.h"
+}
 
-import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.scanner_row;
+
+import std;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.transient_storage;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_targets;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters;
 import bioseq.highway.dispatch_contract;
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
+import bioseq.common.logging;
+import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.lazy_binding_contract;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
 /**
- * Aligns one typed scanner batch row through PostgreSQL lazy query and target
- * views.
+ * Aligns one typed scanner batch row through PostgreSQL lazy query and target views.
  *
- * Routes by locator, target recipe, or inline header through persisted-index,
- * prepared-target, recompute, opportunistic RAM-index, resident-segment, or
- * direct minimap ports according to the scanner context index policy.
- * Sketches or reuses query minimizers per row, or shares cached batch sketches
- * when per-row query mode is off.
- * Sets consumed_shared_cached_query_stats when batch-shared sketch execution
- * stats are applied on this row.
+ * Selects a target access path from locator-backed lazy binding, an optional
+ * transformed target recipe, or an inline @p target_hdr header. Index routes
+ * include native persisted readers on a CPU prepared target, assembled fragment
+ * or minimizer-sequence indexes from stored chunks, opportunistic RAM-first
+ * builds, transient minimizer-sequence streaming, resident segment workers, and
+ * raw or segmented minimap ports. Route choice follows @p scanner_pg_ctx read,
+ * recompute, async-persist, and @c index_read_requirement gates.
  *
- * Returns alignment matches and minimizer-route execution stats for the row.
+ * Query minimizers are sketched per row or taken from @p cached_query_minimizers
+ * when @p per_row_query_mode is false. Persisted-index branches pin sketch and
+ * stored-index geometry to k=15 w=10 even when @p params use size-heuristic k/w.
+ *
+ * @tparam p_sequence Compact sequence type used for PostgreSQL lazy target binding.
+ * @tparam p_scanner_context Scanner batch context owning per-row locators, prepared
+ *     targets, index policy flags, and payload allocation observers.
+ * @tparam p_fragment_storage_factory Callable that opens the concrete fragment storage handle.
+ *
+ * @param query_view Lazy query sequence for this row. Payload allocations are
+ *     recorded through the query observer on @p scanner_pg_ctx.
+ * @param target_recipe_view Optional transformed target view. Mutually exclusive with
+ *     locator storage and @p target_hdr. Raises on corruption when combined.
+ * @param target_hdr Inline PostgreSQL seq header when the target is not locator-backed.
+ *     Unused when @p target_recipe_view or a locator is present.
+ * @param row_index Batch row index into @p scanner_pg_ctx per-row arrays.
+ * @param target_bp_size Target length in base pairs for segmentation thresholds and
+ *     CPU prepared-target identity checks.
+ * @param min_bp Minimum base-pair hint used to tighten persisted-index chain thresholds.
+ * @param dispatch_params Index-route parameters. May differ from @p params for alignment
+ *     scoring while persisted reads stay at k=15 w=10.
+ * @param params Alignment and minimizer parameters for minimap ports and recompute paths.
+ * @param per_row_query_mode When true, sketch query minimizers into row-local storage.
+ *     When false, share @p cached_query_minimizers across rows in the batch.
+ * @param cached_query_minimizers Batch-shared query sketch cache. Populated on the first
+ *     persisted-index consumer when @p per_row_query_mode is false.
+ * @param cached_query_minimizer_stats Execution stats paired with @p cached_query_minimizers.
+ * @param[out] consumed_shared_cached_query_stats Set true when this row applies batch-shared
+ *     sketch execution stats to the returned collection so the caller counts them once.
+ * @param alphabet_code Column alphabet code for locator-backed target binding.
+ * @param storage_unit_byte_width Packed storage byte width for letters-per-unit geometry.
+ * @param scanner_pg_ctx Scanner context that must outlive the call. Updated with
+ *     @c target_index_sources, persisted generation ids, and source identities on index routes.
+ * @param pool Global parallelism pool consulted for resident segment worker eligibility.
+ * @param active_read_session Optional PostgreSQL read session passed into locator target
+ *     materialization.
+ * @param open_fragment_storage_fn Statically bound fragment storage opener.
+ *
+ * @return Match results and route execution stats for the row. Query sketch host time is
+ *     attached when a fresh sketch ran on this row.
+ *
+ * @note Raises PostgreSQL errors on policy violations, prepared-target identity mismatch,
+ *     missing or duplicated persisted readers, absent query stats after sketch consumption,
+ *     duplicate query stats on the collection, Vulkan on CPU-prepared paths, query length
+ *     above the 28-bit minimizer position domain, invalid packed geometry, and index
+ *     admission failure.
  */
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
-template <class p_sequence>
+template <class p_sequence,
+          class p_scanner_context,
+          class p_fragment_storage_factory>
 [[nodiscard]] match_result_collection process_scanner_pg_row_typed(
     bioseq::storage::lazy_sequence_view<
         typename compact_sequence_range<p_sequence>::traits::alphabet_type> query_view,
@@ -113,9 +124,10 @@ template <class p_sequence>
     bool& consumed_shared_cached_query_stats,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    batch_processor::scanner_pg_context* scanner_pg_ctx,
+    p_scanner_context* scanner_pg_ctx,
     bioseq::parallelism::global_pool& pool,
-    pg_sequence_read_session* active_read_session) {
+    pg_sequence_read_session* active_read_session,
+    p_fragment_storage_factory& open_fragment_storage_fn) {
     match_result_collection collection;
     // Recompute-owned and per-row sketches are independent operations. A
     // broadcast persisted-query sketch is shared across rows: every consuming
@@ -143,7 +155,11 @@ template <class p_sequence>
         ::bioseq::pipeline_stats::target_index_source::recomputed;
     std::optional<std::vector<minimap_sketch_data>> row_query_minimizers;
     std::optional<pipe::minimizer_range_execution_stats> row_query_minimizer_stats;
-    const batch_processor::cpu_prepared_query_sketch* retained_prepared_query_sketch = nullptr;
+    /** Element type of retained query sketches stored on a CPU prepared-target group. */
+    using cpu_prepared_query_sketch =
+        std::remove_cvref_t<decltype(scanner_pg_ctx->cpu_prepared_target->groups.front()
+                                         .retained_query_sketches.front())>;
+    const cpu_prepared_query_sketch* retained_prepared_query_sketch = nullptr;
     const sequence_size_t query_bp_size = query_view.bp_size();
     const auto unobserved_query_view = query_view;
     const auto lazy_query_view = unobserved_query_view.with_payload_allocation_observer(
@@ -235,13 +251,14 @@ template <class p_sequence>
              &collection,
              &row_consumed_persisted_query_sketch,
              &retained_prepared_query_sketch,
+             &open_fragment_storage_fn,
              &query_sketch_host_wall_ns](auto ft_pg_view, pg_sequence_read_session*) {
                 ft_pg_view = ft_pg_view.with_payload_allocation_observer(
                     std::addressof(scanner_pg_ctx->mmsearch_target_payload_observer));
                 // Assemble from the stored
                 // per-fragment minimizer index if present
-                // (deserialise + globalise, no re-collection);
-                // otherwise fall back to recompute.
+                // (deserialise + globalise, no re-collection).
+                // Otherwise fall back to recompute.
                 bool assembled = false;
                 /*
                  * Persisted-payload reads and opportunistic recompute persistence are
@@ -249,7 +266,7 @@ template <class p_sequence>
                  * clears read_index_active, but index.recompute_async_persistence.enabled must
                  * still be able to build and enqueue the default minimizer-fragment index from the
                  * source sequence. Keep the minimizer-fragment RAM-first path reachable when both
-                 * async write gates are captured for this scan; every prepared,
+                 * async write gates are captured for this scan. Every prepared,
                  * sidecar, and assembled-cache read below remains guarded by
                  * read_index_active.
                  */
@@ -275,7 +292,19 @@ template <class p_sequence>
                      (scanner_pg_ctx->read_index_active && stored_minimizer_scheme_compatible) ||
                      opportunistic_minimizer_fragment_recompute_requested) &&
                     OidIsValid(scanner_pg_ctx->user_relid)) {
-                    using index_storage_type = bioseq::storage::indexing::fragment_index_storage;
+                    /** Opened fragment-storage handle for one locator-backed persisted index. */
+                    using index_storage_type = std::remove_cvref_t<decltype(
+                        open_fragment_storage_fn(scanner_pg_ctx->user_relid,
+                                                 scanner_pg_ctx->db_oid,
+                                                 scanner_pg_ctx->tablespace_oid,
+                                                 scanner_pg_ctx->main_relfilenode,
+                                                 scanner_pg_ctx->mmsearch_seq_attno,
+                                                 minimizers_per_fragment_index_name,
+                                                 *loc_opt,
+                                                 static_cast<std::uint64_t>(
+                                                     scanner_pg_ctx->target_rownos[row_index]),
+                                                 scanner_pg_ctx->caches,
+                                                 scanner_pg_ctx->parent_mctx))>;
                     const bool want_seq_recompute =
                         scanner_pg_ctx->active_index == minimizers_per_sequence_index_name;
                     const bool want_seq = want_seq_recompute;
@@ -320,11 +349,10 @@ template <class p_sequence>
                             }
                             const std::uint64_t query_sketch_started_ns = dispatch_host_now_ns();
                             if (selected_vulkan_execution(idx_params)) {
-                                bioseq::gpu::vulkan::vulkan_runtime_error err{
+                                raise_vulkan_pg_error(
+                                    "persisted query minimizer sketch",
                                     "persisted Vulkan query sketch cannot use the CPU "
-                                    "prepared-index path"};
-                                raise_vulkan_pg_error("persisted query minimizer sketch",
-                                                      err.what());
+                                    "prepared-index path");
                             }
                             sketch_collector query_collector;
                             const minimizer_sketch_backend sketch_backend =
@@ -443,10 +471,10 @@ template <class p_sequence>
                                 receipt.failures == 0u && !receipt.saturated;
                         }
                         if (prepared_group == nullptr ||
-                            !batch_processor::exactly_one_native_persisted_reader(
-                                has_fragment_reader,
-                                has_grouped_soa_reader,
-                                has_hash_major_reader) ||
+                            static_cast<unsigned>(has_fragment_reader) +
+                                    static_cast<unsigned>(has_grouped_soa_reader) +
+                                    static_cast<unsigned>(has_hash_major_reader) !=
+                                1u ||
                             has_fragment_reader != has_fragment_mapping_guard ||
                             (has_fragment_reader &&
                              !prepared_group->persisted_fragment_reader->ready()) ||
@@ -819,7 +847,7 @@ template <class p_sequence>
                     // active index not materialised for THIS row recomputes.
                     if (scanner_pg_ctx->read_index_active && !persisted_required && !assembled) {
                         if (want_seq) {
-                            auto seq_store = bioseq::storage::indexing::open_fragment_storage(
+                            auto seq_store = open_fragment_storage_fn(
                                 scanner_pg_ctx->user_relid,
                                 scanner_pg_ctx->db_oid,
                                 scanner_pg_ctx->tablespace_oid,
@@ -1039,7 +1067,7 @@ template <class p_sequence>
                                     }
                                 });
                         } else {
-                            auto frag_store = bioseq::storage::indexing::open_fragment_storage(
+                            auto frag_store = open_fragment_storage_fn(
                                 scanner_pg_ctx->user_relid,
                                 scanner_pg_ctx->db_oid,
                                 scanner_pg_ctx->tablespace_oid,

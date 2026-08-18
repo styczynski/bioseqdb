@@ -70,7 +70,6 @@ import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
 import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.instrumentation.summary_writer;
 import bioseq.common.seqan_adapter;
 import bioseq.postgres.table.batch_sort_scan;

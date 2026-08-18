@@ -142,7 +142,7 @@ begin_sequence_payload_read(Relation shard,
 /// @return Flat sequence storage allocated in `out_mctx`.
 /// @throws PostgreSQL ERROR if geometry is corrupt, a fragment is absent, or
 /// the materialized varlena would exceed PostgreSQL allocation limits.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 bioseq::pg_types::seq*
@@ -445,7 +445,7 @@ sequence_storage_manager<
 /// @param out_mctx Memory context owning each returned sequence.
 /// @param cache Caller-owned relation and reader cache.
 /// @throws PostgreSQL ERROR if scratch space is short or any request fails.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 void
@@ -504,7 +504,7 @@ sequence_storage_manager<
 ///
 /// Relcache references are closed while both `AccessShareLock` locks remain
 /// owned by the current transaction.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 void
@@ -552,7 +552,7 @@ sequence_storage_manager<
 /// accepted while PostgreSQL removes the extension.
 /// @throws PostgreSQL ERROR for catalog validation or SPI failures reported by
 /// PostgreSQL.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 void

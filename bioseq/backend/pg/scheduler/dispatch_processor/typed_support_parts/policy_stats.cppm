@@ -4,72 +4,37 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:policy_stats;
+#include "utils/guc.h"
+#include "utils/palloc.h"
+#include "utils/rel.h"
+}
 
-import bioseq.postgres.scheduler.dispatch_processor;
-import bioseq.highway.dispatch_contract;
-import bioseq.common.logging;
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+
+export import bioseq.postgres.scheduler.dispatch_processor.operational_stats;
+import std;
+import bioseq.postgres.scheduler.dispatch_processor.effective_minimap_parameters;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
+import bioseq.postgres.storage.indexing.minimizer_persistence_policy;
 import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
 import bioseq.pipeline.pipe;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
 import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
@@ -165,8 +130,14 @@ pg_gpu_index_identity(std::uint64_t rowno,
     return bioseq::indexing::gpu_index_cache_identity{.assembly_identity = identity_hash};
 }
 
+/**
+ * @brief Derives a GPU cache identity from an assembled-index key.
+ * @param[in] key Relation, scheme and query identity fields for one assembled index.
+ * @return Stable nonzero cache identity for the key.
+ */
+template <class p_assembled_index_key>
 [[nodiscard]] inline bioseq::indexing::gpu_index_cache_identity
-pg_gpu_index_identity(const bioseq::storage::indexing::assembled_index_key& key) noexcept {
+pg_gpu_index_identity(const p_assembled_index_key& key) noexcept {
     std::uint64_t identity_hash =
         bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.db_oid));
     identity_hash ^= bioseq::indexing::splitmix64(static_cast<std::uint64_t>(key.user_relid) +
@@ -215,7 +186,7 @@ deferred_kind_for_index(std::string_view index_name) noexcept {
 }
 
 [[nodiscard]] std::optional<deferred_minimizer_persist_choice>
-choose_deferred_minimizer_persist_index(const batch_processor::scanner_pg_context& ctx) {
+choose_deferred_minimizer_persist_index(const auto& ctx) {
     if (!OidIsValid(ctx.user_relid) || ctx.mmsearch_seq_attno <= 0) {
         return std::nullopt;
     }
@@ -249,7 +220,7 @@ choose_deferred_minimizer_persist_index(const batch_processor::scanner_pg_contex
  */
 [[nodiscard]] inline minimap2_parameters apply_size_heuristic(const minimap2_parameters& base,
                                                               size_t min_bp) {
-    return batch_processor::effective_params_for_pair(base, min_bp);
+    return effective_minimap_parameters_for_pair(base, min_bp);
 }
 
 [[nodiscard]] inline bool selected_vulkan_execution(const minimap2_parameters& params) noexcept {
@@ -361,14 +332,6 @@ observed_simd_alignment_algorithm_identity(
     return block_present ? identity_type::block_aligner : identity_type::none;
 }
 
-inline void add_operational_counter(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
-                                    std::uint64_t& destination,
-                                    const std::uint64_t increment = 1) noexcept {
-    stats.operational.are_stats_saturated =
-        ::bioseq::pipeline_stats::merge_counter(destination, increment) ||
-        stats.operational.are_stats_saturated;
-}
-
 inline void add_stage_host_time(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                                 const ::bioseq::pipeline_stats::pipeline_stage stage,
                                 const std::uint64_t elapsed_ns) noexcept {
@@ -413,12 +376,13 @@ record_block_aligner_execution_stats(::bioseq::pipeline_stats::pipeline_executio
         stats.operational.are_stats_saturated;
 }
 
+template <class p_scanner_pg_context>
 inline void
 record_unattested_job(::bioseq::pipeline_stats::pipeline_execution_stats& stats,
                       const minimap2_parameters& params,
                       const ::bioseq::pipeline_stats::target_index_source requested_source,
                       const ::bioseq::pipeline_stats::target_index_source actual_source,
-                      const batch_processor::scanner_pg_context* scanner_pg_ctx,
+                      const p_scanner_pg_context* scanner_pg_ctx,
                       const std::size_t row_index,
                       const bool per_row_query_mode,
                       const std::uint64_t broadcast_query_ordinal,
@@ -939,7 +903,7 @@ inline void record_target_row(::bioseq::pipeline_stats::pipeline_execution_stats
 }
 
 [[nodiscard]] inline ::bioseq::pipeline_stats::target_index_source
-requested_target_index_source(const batch_processor::scanner_pg_context* scanner_pg_ctx) noexcept {
+requested_target_index_source(const auto* scanner_pg_ctx) noexcept {
     if (scanner_pg_ctx == nullptr) {
         return ::bioseq::pipeline_stats::target_index_source::recomputed;
     }

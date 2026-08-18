@@ -49,9 +49,13 @@ inline void index_corruption_panic(std::string_view msg) {
 /// Caller-owned per-row/per-query assembly scratch. Reused across
 /// segments within one query, destroyed with its IndexReadContext.
 struct minimizer_assembly_scratch {
+    /// Globalized `(hash, encoded_position)` pairs for one assembly result.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+    /// Deduplicated query kmer hashes used to filter persisted buckets.
     std::vector<std::uint64_t> query_kmers;
+    /// Reusable position buffer passed to `wire_for_each_bucket`.
     std::vector<std::uint64_t> bucket_positions;
+    /// Storage sub keys selected for query-touched bucket loads.
     std::vector<bioseq::indexing::index_sub_key_t> wanted_sub_keys;
     /// Clear state retained only for the current target segment.
     void clear_segment() noexcept {
@@ -69,6 +73,7 @@ struct minimizer_assembly_scratch {
 // ---- shared serialized-index walkers -------------------------------------
 
 /// Walk one persisted wire blob and emit each key/position pair.
+/// Aborts via `index_corruption_panic` when the header, layout, or bucket ranges are invalid.
 /// @tparam p_function Callable accepting `(hash, encoded_position)`.
 template <class p_function>
 void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& emit) {
@@ -106,7 +111,9 @@ void wire_for_each_entry(const char* blob, std::size_t blob_bytes, p_function&& 
 }
 
 /// Walk one persisted wire blob and emit each complete hash bucket.
-/// The callback receives a pointer into `pos_scratch` that remains valid until the next bucket.
+/// Aborts via `index_corruption_panic` when the header, layout, or bucket ranges are invalid.
+/// The callback receives a pointer into `pos_scratch`, which is resized per bucket and remains
+/// valid only until the next bucket.
 /// @tparam p_function Callable accepting `(hash, position_count, positions)`.
 template <class p_function>
 void wire_for_each_bucket(const char* blob,
@@ -146,7 +153,13 @@ void wire_for_each_bucket(const char* blob,
 }
 
 /// Return the number of whole fragments fitting one GPU window.
-/// The bound covers the run buffer, dispatch geometry, and position field.
+/// The bound is the minimum of fragment count, run-buffer memory, encoded position field,
+/// and dispatch geometry limits.
+///
+/// @param nfrag Total physical fragment count for the target.
+/// @param frag_bp Bytes in one fragment core.
+/// @param halo_bp Collection halo on each side of a batch core.
+/// @param run_buffer_bytes GPU run-buffer capacity for one submission.
 [[nodiscard]] inline std::size_t
 gpu_minimizer_fragments_per_batch(std::size_t nfrag,
                                   std::size_t frag_bp,
@@ -174,6 +187,9 @@ gpu_minimizer_fragments_per_batch(std::size_t nfrag,
 
 /// Serialize sorted `(hash, encoded_position)` pairs into one fragment blob.
 /// This function performs no minimizer collection or sorting.
+///
+/// @param target_len Fragment core length stored in the blob header.
+/// @param out_blob Resized to hold the complete wire encoding.
 inline void serialize_sorted_pairs_to_fragment_blob(
     std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted_pairs,
     sequence_size_t target_len,
@@ -238,7 +254,9 @@ class minimizer_fragment_generation_execution_receipt {
     std::uint64_t target_length = 0;
     std::uint16_t window_size = 0;
     std::uint16_t kmer_size = 0;
+    /// Total producer scan attempts, including geometry retries.
     std::uint64_t producer_scan_count = 0;
+    /// Extra scans recorded when `persisted_span` changes between replays.
     std::uint64_t geometry_retry_count = 0;
     minimizer_generation_layout generation_layout = minimizer_generation_layout::invalid;
     std::uint64_t short_core_runs = 0;
@@ -253,7 +271,9 @@ class minimizer_fragment_generation_execution_receipt {
     packed_bounded_nthash_index_execution_stats packed_bounded_stats{};
     bool packed_bounded_stats_present = false;
     bioseq::gpu::vulkan::vulkan_segment_pair_execution_stats vulkan_stats{};
+    /// Set when route identity fields were populated from a bound producer.
     bool backend_bound = false;
+    /// Set when a route counter overflowed and the receipt must be rejected.
     bool saturated = false;
 
     /// Return the successful replay count required by the selected layout.
@@ -526,7 +546,9 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
         packed_bounded_stats_present_ = true;
     }
 
-    /// Collect, globalize, sort, and deduplicate one disjoint fragment core with its halo.
+    /// Collect minimizers for one half-open core `[core_lo, core_hi)` with the standard halo.
+    /// Events are sorted and deduplicated before return.
+    /// Returns `storage_contract_mismatch` when the selected backend or SIMD collection fails.
     [[nodiscard]] std::expected<std::vector<canonical_minimizer_event>,
                                 minimizer_generation_encoding_error>
     collect_core_run(std::uint64_t core_lo, std::uint64_t core_hi) {
@@ -664,6 +686,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
           window_size_(window_size), kmer_size_(kmer_size) {}
 
     /// Bind the required replay count from the persisted generation layout before scanning.
+    /// Sets `saturated` when the layout is unsupported, a scan already ran, or the layout changes
+    /// after binding.
     void bind_generation_layout(minimizer_generation_layout layout) noexcept {
         const std::uint64_t required =
             layout == minimizer_generation_layout::grouped_soa_segment_local ? 3u
@@ -691,7 +715,8 @@ template <sequence_alphabet p_alphabet> class minimizer_fragment_generation_repl
     /// Replay canonical events in hash-major order for one persisted segment geometry.
     ///
     /// Each call rescans the borrowed source. A changed `persisted_span` is recorded as a
-    /// geometry retry, and receiver rejection stops the scan immediately.
+    /// geometry retry. The receiver is invoked once per event in sorted order. Returning an
+    /// error stops the scan and propagates that error.
     [[nodiscard]] std::expected<void, minimizer_generation_encoding_error>
     scan_sorted_events(std::uint64_t persisted_span, canonical_minimizer_event_receiver receiver) {
         constexpr std::uint64_t fragment_bp = 32'768u;
@@ -1350,6 +1375,11 @@ template <class p_storage> struct minimizers_per_fragment_index {
     ///
     /// Fragment-local positions are globalized, clipped to `[clip_lo_bp, clip_hi_bp)`, and
     /// rebuilt into one target-wide hash map using caller-owned reusable scratch.
+    ///
+    /// @param frag_lo First fragment index in `[frag_lo, frag_hi)`.
+    /// @param frag_hi One-past-last fragment index to load.
+    /// @param clip_lo_bp Inclusive global clip start for retained positions.
+    /// @param clip_hi_bp Exclusive global clip end for retained positions.
     static minimizer_hashmap_fragment_index assemble_segment(p_storage& storage,
                                                              std::size_t frag_lo,
                                                              std::size_t frag_hi,
@@ -1405,6 +1435,12 @@ template <class p_storage> struct minimizers_per_fragment_index {
     /// Query-filtered segment assembly for GPU seed lookup. Only query kmers
     /// can be probed by the seed stage, so persisted minimizer-fragment does not need to
     /// materialise unrelated buckets before uploading the segment index.
+    ///
+    /// @param query_minimizers Query sketches whose kmer hashes select persisted buckets.
+    /// @param frag_lo First fragment index in `[frag_lo, frag_hi)`.
+    /// @param frag_hi One-past-last fragment index to load.
+    /// @param clip_lo_bp Inclusive global clip start for retained positions.
+    /// @param clip_hi_bp Exclusive global clip end for retained positions.
     static minimizer_hashmap_fragment_index
     assemble_segment_for_query(p_storage& storage,
                                std::span<const minimap_sketch_data> query_minimizers,

@@ -2,21 +2,13 @@
  * @file minimizer_sequence_index/bucket_codec.cppm
  * @brief Direct minimizer bucket wire records and serialization.
  */
-module;
+export module bioseq.indexing.minimizer_sequence.bucket_codec;
 
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <limits>
-#include <span>
-#include <vector>
-
-export module bioseq.indexing.minimizer_sequence:bucket_codec;
-
+import std;
 import bioseq.common.checked_arithmetic;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.storage;
-import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
@@ -238,13 +230,14 @@ static_assert(sizeof(direct_minimizer_bucket_directory) == 40 &&
               "directory wire header layout pinned");
 static_assert(sizeof(bioseq::storage::sequence_size_t) == 8,
               "directory wire fields assume 8-byte sequence_size_t");
-static_assert(offsetof(direct_minimizer_bucket_directory, flags) == 8 &&
-                  offsetof(direct_minimizer_bucket_directory, reserved) == 12 &&
-                  offsetof(direct_minimizer_bucket_directory, num_buckets) == 16 &&
-                  offsetof(direct_minimizer_bucket_directory, total_distinct_kmers) == 24 &&
-                  offsetof(direct_minimizer_bucket_directory, total_positions) == 32,
+static_assert(__builtin_offsetof(direct_minimizer_bucket_directory, flags) == 8 &&
+                  __builtin_offsetof(direct_minimizer_bucket_directory, reserved) == 12 &&
+                  __builtin_offsetof(direct_minimizer_bucket_directory, num_buckets) == 16 &&
+                  __builtin_offsetof(direct_minimizer_bucket_directory,
+                                     total_distinct_kmers) == 24 &&
+                  __builtin_offsetof(direct_minimizer_bucket_directory, total_positions) == 32,
               "directory header field offsets pinned");
-static_assert(offsetof(direct_minimizer_bucket_directory_entry, sub_key) == 16,
+static_assert(__builtin_offsetof(direct_minimizer_bucket_directory_entry, sub_key) == 16,
               "dir entry field offsets pinned");
 
 /**

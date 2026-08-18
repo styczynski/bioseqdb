@@ -1,0 +1,260 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 720" width="1080" height="720" font-family="sans-serif">
+<defs>
+<radialGradient id="grey" cx="0.5" cy="0.42" r="0.85"><stop offset="0" stop-color="#585858"></stop><stop offset="1" stop-color="#848484"></stop></radialGradient>
+<marker id="arrW" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#ffffff"></path></marker>
+<marker id="arrO" markerWidth="10" markerHeight="10" refX="6.5" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#f26522"></path></marker>
+<filter id="sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.6" flood-color="#00243a" flood-opacity="0.45"></feDropShadow></filter>
+</defs>
+<line x1="24" y1="251" x2="1056" y2="251" stroke="#ffffff" stroke-width="2.4" stroke-dasharray="1.5 8" stroke-linecap="round" opacity="0.85"></line>
+<line x1="24" y1="464" x2="1056" y2="464" stroke="#ffffff" stroke-width="2.4" stroke-dasharray="1.5 8" stroke-linecap="round" opacity="0.85"></line>
+<circle cx="40" cy="60" r="17" fill="url(#grey)" stroke="#ffffff" stroke-width="1.5" filter="url(#sh)"></circle>
+<text x="40" y="66" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="19" font-weight="800" fill="#ffffff" text-anchor="middle">1</text>
+<text x="185.0" y="38" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="18" font-weight="700" fill="#ffffff" text-anchor="middle">k-mers (k = 7):</text>
+<path d="M 100,52 Q 100,47.5 110,47.5 L 175.0,47.5 Q 185.0,47.5 185.0,43.0 Q 185.0,47.5 195.0,47.5 L 260.0,47.5 Q 270,47.5 270,52" fill="none" stroke="#ffffff" stroke-width="2"></path>
+<path d="M 84,76 Q 78.0,76 78.0,86 L 78.0,130.0 Q 78.0,140.0 72.0,140.0 Q 78.0,140.0 78.0,150.0 L 78.0,194.0 Q 78.0,204 84,204" fill="none" stroke="#ffffff" stroke-width="2"></path>
+<text x="30" y="140" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle" transform="rotate(-90 30 140)">Window: 4 k-mers</text>
+<rect x="100" y="78.0" width="170" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="185.0" y="97.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="154" lengthAdjust="spacing">GCTATTA</text>
+<line x1="272.0" y1="92.0" x2="328.0" y2="92.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="332" y="78.0" width="96" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="380.0" y="97.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="430.0" y1="92.0" x2="488.0" y2="92.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="490" y="78.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="529.0" y="97.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xA1</text>
+<line x1="568" y1="92" x2="610" y2="92" stroke="#ffffff" stroke-width="2.2"></line>
+<rect x="100" y="110.0" width="170" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="185.0" y="129.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="154" lengthAdjust="spacing">CTATTAC</text>
+<line x1="272.0" y1="124.0" x2="328.0" y2="124.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="332" y="110.0" width="96" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="380.0" y="129.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="430.0" y1="124.0" x2="488.0" y2="124.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="490" y="110.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="529.0" y="129.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0x02</text>
+<line x1="568" y1="124" x2="610" y2="124" stroke="#ffffff" stroke-width="2.2"></line>
+<rect x="100" y="142.0" width="170" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="185.0" y="161.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="154" lengthAdjust="spacing">TATTACC</text>
+<line x1="272.0" y1="156.0" x2="328.0" y2="156.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="332" y="142.0" width="96" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="380.0" y="161.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="430.0" y1="156.0" x2="488.0" y2="156.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="490" y="142.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="529.0" y="161.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xFC</text>
+<line x1="568" y1="156" x2="610" y2="156" stroke="#ffffff" stroke-width="2.2"></line>
+<rect x="100" y="174.0" width="170" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="185.0" y="193.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="154" lengthAdjust="spacing">ATTACCT</text>
+<line x1="272.0" y1="188.0" x2="328.0" y2="188.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="332" y="174.0" width="96" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="380.0" y="193.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="430.0" y1="188.0" x2="488.0" y2="188.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="490" y="174.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="529.0" y="193.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0x45</text>
+<line x1="568" y1="188" x2="610" y2="188" stroke="#ffffff" stroke-width="2.2"></line>
+<line x1="610" y1="92" x2="610" y2="188" stroke="#ffffff" stroke-width="2.2"></line>
+<line x1="610.0" y1="140.0" x2="652.0" y2="140.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="654" y="98.0" width="112" height="84" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="710.0" y="135.4" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">Find</text>
+<text x="710.0" y="156.5" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">Min</text>
+<path d="M766,140 L812,140 L812,113 L866,113" fill="none" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></path>
+<rect x="870" y="100" width="80" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="910.0" y="119.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0x02</text>
+<line x1="910" y1="128" x2="910" y2="150" stroke="#ffffff" stroke-width="1.9" stroke-dasharray="5 4"></line>
+<rect x="830" y="150" width="160" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="910.0" y="169.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="144" lengthAdjust="spacing">CTATTAC</text>
+<path d="M 832,182 Q 832,186.5 842,186.5 L 900.0,186.5 Q 910.0,186.5 910.0,191.0 Q 910.0,186.5 920.0,186.5 L 978.0,186.5 Q 988,186.5 988,182" fill="none" stroke="#cc3b03" stroke-width="2.4"></path>
+<text x="910" y="205" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#cc3b03" text-anchor="middle">Minimizer</text>
+<text x="910" y="222" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#cc3b03" text-anchor="middle">k-mer (Seed)</text>
+<circle cx="40" cy="342" r="17" fill="url(#grey)" stroke="#ffffff" stroke-width="1.5" filter="url(#sh)"></circle>
+<text x="40" y="348" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="19" font-weight="800" fill="#ffffff" text-anchor="middle">2</text>
+<rect x="442" y="276" width="168" height="132" rx="12" fill="none" stroke="#cc3b03" stroke-width="2.5" stroke-dasharray="8 5"></rect>
+<text x="526.0" y="430" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">Spaced Seeds</text>
+<rect x="100" y="286.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="175.0" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="134" lengthAdjust="spacing">GCTATTA</text>
+<line x1="252.0" y1="300.0" x2="286.0" y2="300.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="288" y="286.0" width="112" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="344.0" y="305.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Pattern</text>
+<line x1="402.0" y1="300.0" x2="446.0" y2="300.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="286.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="467.6" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="486.7" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="505.9" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="525.0" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="544.1" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="563.3" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="582.4" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<line x1="602.0" y1="300.0" x2="646.0" y2="300.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="648" y="286.0" width="86" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="691.0" y="305.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="736.0" y1="300.0" x2="780.0" y2="300.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="782" y="286.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="821.0" y="305.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xA1</text>
+<rect x="100" y="328.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="175.0" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="134" lengthAdjust="spacing">GATACTA</text>
+<line x1="252.0" y1="342.0" x2="286.0" y2="342.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="288" y="328.0" width="112" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="344.0" y="347.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Pattern</text>
+<line x1="402.0" y1="342.0" x2="446.0" y2="342.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="328.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="467.6" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="486.7" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="505.9" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="525.0" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="544.1" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="563.3" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="582.4" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<line x1="602.0" y1="342.0" x2="646.0" y2="342.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="648" y="328.0" width="86" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="691.0" y="347.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="736.0" y1="342.0" x2="780.0" y2="342.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="782" y="328.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="821.0" y="347.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xA1</text>
+<rect x="100" y="370.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="175.0" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="134" lengthAdjust="spacing">GACACTA</text>
+<line x1="252.0" y1="384.0" x2="286.0" y2="384.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="288" y="370.0" width="112" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="344.0" y="389.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Pattern</text>
+<line x1="402.0" y1="384.0" x2="446.0" y2="384.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="370.0" width="150" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="467.6" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="486.7" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="505.9" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="525.0" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="544.1" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">X</text>
+<text x="563.3" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="582.4" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<line x1="602.0" y1="384.0" x2="646.0" y2="384.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="648" y="370.0" width="86" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="691.0" y="389.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="736.0" y1="384.0" x2="780.0" y2="384.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="782" y="370.0" width="78" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="821.0" y="389.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xFC</text>
+<path d="M 872,284 Q 878.0,284 878.0,294 L 878.0,332.0 Q 878.0,342.0 884.0,342.0 Q 878.0,342.0 878.0,352.0 L 878.0,390.0 Q 878.0,400 872,400" fill="none" stroke="#ffffff" stroke-width="2"></path>
+<text x="958" y="294" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<text x="958" y="316" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">Values</text>
+<text x="958" y="338" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">of the</text>
+<text x="958" y="360" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#ffffff" text-anchor="middle">Seeds</text>
+<circle cx="40" cy="556" r="17" fill="url(#grey)" stroke="#ffffff" stroke-width="1.5" filter="url(#sh)"></circle>
+<text x="40" y="562" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="19" font-weight="800" fill="#ffffff" text-anchor="middle">3</text>
+<rect x="582" y="488" width="182" height="136" rx="12" fill="none" stroke="#cc3b03" stroke-width="2.5" stroke-dasharray="8 5"></rect>
+<text x="673.0" y="646" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="17" font-weight="700" fill="#cc3b03" text-anchor="middle">Strobemers (Seeds)</text>
+<rect x="92" y="498.0" width="320" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="106.6" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="119.8" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="133.0" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="146.3" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="159.5" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="172.7" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="185.9" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="199.1" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="212.3" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="225.6" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="238.8" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="252.0" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="265.2" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="278.4" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="291.7" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="304.9" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="318.1" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="331.3" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="344.5" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="357.7" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="371.0" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="384.2" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="397.4" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<rect x="98.5" y="501.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="217.5" y="501.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="336.4" y="501.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<line x1="414.0" y1="512.0" x2="448.0" y2="512.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="498.0" width="82" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="491.0" y="517.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Link</text>
+<line x1="534.0" y1="512.0" x2="568.0" y2="512.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="570" y="498.0" width="176" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="658.0" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="160" lengthAdjust="spacing">GCTATTAATGGA</text>
+<line x1="748.0" y1="512.0" x2="792.0" y2="512.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="794" y="498.0" width="84" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="836.0" y="517.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="880.0" y1="512.0" x2="922.0" y2="512.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="924" y="498.0" width="80" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="964.0" y="517.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xA1</text>
+<rect x="92" y="542.0" width="320" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="106.6" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="119.8" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="133.0" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="146.3" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="159.5" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="172.7" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="185.9" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="199.1" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="212.3" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="225.6" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="238.8" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="252.0" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="265.2" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="278.4" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="291.7" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="304.9" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="318.1" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="331.3" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="344.5" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="357.7" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="371.0" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="384.2" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="397.4" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<rect x="98.5" y="545.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="217.5" y="545.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="336.4" y="545.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<line x1="414.0" y1="556.0" x2="448.0" y2="556.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="542.0" width="82" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="491.0" y="561.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Link</text>
+<line x1="534.0" y1="556.0" x2="568.0" y2="556.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="570" y="542.0" width="176" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="658.0" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="160" lengthAdjust="spacing">GCTATTAATGGA</text>
+<line x1="748.0" y1="556.0" x2="792.0" y2="556.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="794" y="542.0" width="84" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="836.0" y="561.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="880.0" y1="556.0" x2="922.0" y2="556.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="924" y="542.0" width="80" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="964.0" y="561.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xA1</text>
+<rect x="92" y="586.0" width="320" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="106.6" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="119.8" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="133.0" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="146.3" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="159.5" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="172.7" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="185.9" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="199.1" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="212.3" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<text x="225.6" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="238.8" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="252.0" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="265.2" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="278.4" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="291.7" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="304.9" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="318.1" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="331.3" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="344.5" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">T</text>
+<text x="357.7" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="371.0" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">G</text>
+<text x="384.2" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">A</text>
+<text x="397.4" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="15.5" font-weight="700" fill="#141414" text-anchor="middle">C</text>
+<rect x="124.9" y="589.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="230.7" y="589.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<rect x="336.4" y="589.0" width="55.9" height="22" rx="3" fill="none" stroke="#008bb9" stroke-width="2.3"></rect>
+<line x1="414.0" y1="600.0" x2="448.0" y2="600.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="450" y="586.0" width="82" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="491.0" y="605.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Link</text>
+<line x1="534.0" y1="600.0" x2="568.0" y2="600.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="570" y="586.0" width="176" height="28" rx="6" fill="#ffffff" stroke="#f26522" stroke-width="2.5" filter="url(#sh)"></rect>
+<text x="658.0" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="17" font-weight="700" fill="#141414" text-anchor="middle" textLength="160" lengthAdjust="spacing">CCTCTAAATGGA</text>
+<line x1="748.0" y1="600.0" x2="792.0" y2="600.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="794" y="586.0" width="84" height="28" rx="7" fill="url(#grey)" stroke="#2f2f2f" stroke-width="1" filter="url(#sh)"></rect>
+<text x="836.0" y="605.6" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Hash</text>
+<line x1="880.0" y1="600.0" x2="922.0" y2="600.0" stroke="#ffffff" stroke-width="2.2" marker-end="url(#arrW)"></line>
+<rect x="924" y="586.0" width="80" height="28" rx="4" fill="#ffffff" stroke="#008bb9" stroke-width="2.4" filter="url(#sh)"></rect>
+<text x="964.0" y="605.5" font-family="&#39;DejaVu Sans Mono&#39;,&#39;Menlo&#39;,&#39;Courier New&#39;,monospace" font-size="16" font-weight="700" fill="#141414" text-anchor="middle">0xFC</text>
+<text x="258" y="662" font-family="&#39;DejaVu Sans&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="16" font-weight="700" fill="#ffffff" text-anchor="middle">Selected k-mers (e.g., minimizers)</text>
+<line x1="258" y1="648" x2="152.9" y2="616" stroke="#f26522" stroke-width="2.4" marker-end="url(#arrO)"></line>
+<line x1="258" y1="648" x2="258.6" y2="616" stroke="#f26522" stroke-width="2.4" marker-end="url(#arrO)"></line>
+<line x1="258" y1="648" x2="364.3" y2="616" stroke="#f26522" stroke-width="2.4" marker-end="url(#arrO)"></line>
+</svg>

@@ -5,7 +5,7 @@
 export module bioseq.storage.lazy_sequence:adapters;
 
 import std;
-import :view_contract;
+import bioseq.storage.lazy_sequence_view;
 import :owners;
 import bioseq.common.seqan_adapter;
 import bioseq.common.checked_arithmetic;

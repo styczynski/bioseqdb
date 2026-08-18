@@ -70,7 +70,7 @@ import bioseq.postgres.storage.manager; // alloc_locator_stub_in, alloc_seq_cach
 //   k_sequence_fragment_storage_units, sequence_stream_writer,
 //   flush_seq_cache_write_states, sequence_locator
 import bioseq.postgres.table.io; // write_column_row, get_column_write_per_tuple_context
-import bioseq.postgres.storage.indexing.admin; // build_policy_update_on_insert_indexes
+import bioseq.postgres.storage.io.index_maintenance;
 import bioseq.io.options;                      // sequence_file_format, reader_options
 import bioseq.io.file_kind;                    // detect_sequence_file_kind, sequence_file_kind
 import bioseq.io.reader;                       // stream_sequences_file, packed_sequence_chunk,
@@ -121,7 +121,7 @@ void build_indexes_if_enabled(Oid main_relid) {
     // the SELECT pushed is still on the stack.
     DEBUG_ASSERT(ActiveSnapshotSet(),
                  "bioseq.load: index build needs the portal's active snapshot");
-    bioseq::storage::indexing::build_policy_update_on_insert_indexes(main_relid);
+    bioseq::postgres::storage::io::maintain_insert_policy_indexes(main_relid);
 }
 
 /** @brief Clears sequence caches invalidated by post-load storage allocation. */

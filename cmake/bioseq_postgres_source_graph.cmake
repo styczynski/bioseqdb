@@ -171,6 +171,7 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/sequence_source_contract.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/sql_frontdoor.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/source_provider_promotion_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_buffer/api_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/runtime.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/highway_binding.cppm"
@@ -180,6 +181,9 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/persist_worker.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/shader_runtime.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/direct_minimizer_materialization.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/io/index_maintenance_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/index_build_runtime_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/rebuild/generation_route_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/external/standard_library_link_support.cppm")
 list(APPEND BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   ${BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS}
