@@ -1,59 +1,61 @@
 % Alignment foundations, scalable search, and the limits that motivate BioSeqDB.
 
-\section{Alignment objectives and boundary conditions}
+\section{Alignment foundation and specification of a problem}
 \label{sec:alignment-model}
-\label{subsec:alignment-modes}
 
-Sequence search and sequence alignment answer different questions. Search
-identifies locations that may contain a useful correspondence. Alignment then
-describes one correspondence at symbol resolution. This distinction matters at
-genome scale. Exact dynamic programming can optimize a stated pairwise
-problem, but applying it to every reference interval would be too costly.
-Practical search methods first reduce the candidate set, then align only the
-retained regions.
+Alignment can be done in different ways, where the core algorithms stays the same, but some of the conbditions change.
+It's important to understand what are the capabilities of standard dynamic programming algorithms and how they can be used to solve different problems.
 
-Let \(X=x_1\ldots x_n\) and \(Y=y_1\ldots y_m\) be the sequence portions
-consumed by one traceback. Under a global objective they are the complete
-inputs. Other boundary modes may select substrings or leave terminal flanks
-unaligned. An alignment is a sequence of columns
+Formally: Let \(X=x_1\ldots x_n\) and \(Y=y_1\ldots y_m\) be the sequences we align. 
+An alignment is a sequence of columns
 \[
   A=((a_1,b_1),\ldots,(a_L,b_L)),
   \qquad
   (a_r,b_r)\in(\Sigma\cup\{-\})^2\setminus\{(-,-)\},
 \]
-whose first and second rows recover \(X\) and \(Y\) after gaps are removed. A
-column with two symbols is a match or substitution. A symbol opposite a gap is
-an insertion or deletion relative to the other sequence. The alignment is an
-optimized correspondence under a scoring model. Its score alone does not
-establish evolutionary homology.
+where first and second elements reciver contents of \(X\) and \(Y\) after gaps are removed:
+\begin{enumerate}
+\item An element of shape \(a_r, -\) signifies an insertion in \(X\)
+\item An element of shape \(-, b_r\) signifies a deletion in \(Y\)
+\item An element of shape \(m_r, m_r\) signifies a match
+\item An element of shape \(a_r, b_r\) where \(a_r \neq b_r\) signifies a substitution
+\end{enumerate}
 
+This alignment is an optimized sequence correspondence under a scoring model.
 For substitution score \(s(a,b)\) and gap cost \(g(\ell)\), the score is
 \[
   S(A)=\sum_{\text{symbol pairs }r}s(a_r,b_r)
        -\sum_{\text{gap runs }u}g(|u|).
 \]
-This chapter uses the affine convention
+The scoring model may be formulated in different ways, but one of the simplest and mostcommon conventions is to use an affine gap cost model:
 \begin{equation}
   g(\ell)=q+\ell e,
   \qquad \ell\geq 1,
   \label{eq:affine-gap-convention}
 \end{equation}
-where \(q\) is the opening cost and \(e\) is the extension cost. A gap of length
-one therefore costs \(q+e\). Sources that write \(q+(\ell-1)e\) use a different
+where \(q\) is the opening cost and \(e\) is the extension cost.
+
+A gap of size one costs then \(q+e\). Some scientific papers mentioning \(q+(\ell-1)e\) use a different
 parameter convention. Affine scoring charges one opening cost per gap run and
 can be evaluated with a fixed number of states per matrix cell
 \cite{gotoh_1982_affine}.
 
-The scoring recurrence does not fully define the problem. Initialization,
-restart rules, and permitted traceback endpoints determine which sequence
-ends must be accounted for. Global alignment consumes both complete sequences
-\cite{needleman_wunsch_1970}. Local alignment may restart at zero and selects
-the best pair of substrings \cite{smith_waterman_1981}. Semi-global and overlap
-objectives consume selected ends while allowing specified flanks to remain
-unaligned. Extension begins from a fixed anchor and chooses an endpoint under
-a stopping rule. Clipping records a terminal segment as unaligned rather than
-charging it as an ordinary gap. Local-extension fixes the start but permits an
-interior endpoint. Figure~\ref{fig:alignment-boundary-modes} shows schematic
+This scoring model isn't sufficient to define entire problem:
+\begin{enumerate}
+\item Global alignment consumes both complete sequences
+\cite{needleman_wunsch_1970}
+\item Local alignment may restart at zero and selects
+the best pair of substrings \cite{smith_waterman_1981}
+\item Semi-global and overlap
+goals consume selected ends while allowing specified prefix/postfix to remain
+unaligned
+\item Extension begins from a fixed anchor and chooses an endpoint under
+a stopping rule
+\item Clipping will just finish on the rightmost gap and keep postfix unaligned
+\item Local-extension fixes the start but permits an interior endpoint
+\end{enumerate}
+
+Figure~\ref{fig:alignment-boundary-modes} shows schematic
 examples of these modes.
 
 \definecolor{alignmentamber}{HTML}{EFB84C}
@@ -214,26 +216,22 @@ examples of these modes.
     \draw[penalty edge] (10.60,-0.20) -- (11.02,-0.20);
     \node[anchor=west] at (11.12,-0.20) {penalized border};
   \end{tikzpicture}
-  \caption{Eight alignment boundary modes. Amber paths show possible
-    tracebacks rather than scores computed for one sequence pair. Black dots
-    mark fixed endpoints, amber dots mark selected free endpoints, and bold
-    border segments mark penalized or anchored boundaries. In each lower
-    schematic, the solid arrow is the reference and the cream dashed track is
-    the query. These panels summarize boundary patterns and do not replace a
-    library's precise initialization and endpoint rules.}
+  \caption{Eight alignment boundary modes. Yellow lines depcict possible
+    tracebacks. Black dots
+    mark fixed endpoints (for example for global alignment we always align entire sequence so endpoints are 0 and len(Y)-1), yellow dots mark selected free endpoints, and bold
+    border segments mark penalized or anchored boundaries (usually the border is the length of sequence, but under certain conditions we might have limits on the alignment length and coordinates). In each lower
+    schematic, the solid arrow is the reference and the yellow dashed track is
+    the query. These panels showcase how different libraries/algorithms handle different goals across number of scientific resarch}
   \label{fig:alignment-boundary-modes}
 \end{figure}
 
-The mode name is not sufficient when results are compared across libraries.
-The axis assignment and boundary initialization must be stated. The permitted
-traceback start and endpoint must also be given. Local alignment further needs
-the zero-restart rule, while extension may use an early stopping criterion.
+Various practical implementations also use special stopping criteria, which usualy can be upper bound on the $S(A)$ score.
 
-\section{Exact dynamic programming}
+\section{Dynamic programming definition}
 \label{sec:exact-dp}
 
 Let \(H_{i,j}\) be the best score after consuming \(i\) symbols of \(X\) and
-\(j\) symbols of \(Y\). With a linear gap cost \(d\), a global recurrence is
+\(j\) symbols of \(Y\). For a simpler linear gap cost model \(d\), we can define the algorithm's state matrix as:
 \begin{equation}
   H_{i,j}=\max\bigl\{
     H_{i-1,j-1}+s(x_i,y_j),
@@ -242,11 +240,10 @@ Let \(H_{i,j}\) be the best score after consuming \(i\) symbols of \(X\) and
   \bigr\}.
   \label{eq:linear-gap-dp}
 \end{equation}
-Its boundary row and column accumulate gap costs. A local recurrence adds zero
-as a candidate. Free-end objectives change the boundary values and the cells
-from which traceback may begin.
+This is the intuitive definition based on 3 possible options (replacement or two variants of gap).
+Free-end alignment (like local) change the score values for the cells from which traceback may begin.
 
-Affine scoring requires a main state and one state for each gap orientation.
+For affine scoring model we need to hold main state and one state for each gap orientation.
 Let \(I_{i,j}\) and \(D_{i,j}\) end in gaps in \(X\) and \(Y\), respectively,
 and let \(M_{i,j}\) end in a symbol pair. Under
 Equation~\ref{eq:affine-gap-convention}, one formulation is
@@ -260,8 +257,8 @@ Equation~\ref{eq:affine-gap-convention}, one formulation is
 \label{eq:affine-dp}
 \end{equation}
 Using \(H\) to open a gap permits a transition from any previous state. Local
-alignment also includes zero in the final maximum. Sentinel values exclude
-states that cannot occur at a selected boundary.
+alignment also includes zero in the final maximum.
+%TODO: This listing is floating so not positioned where it should be
 
 \begin{algorithm}[tb]
   \caption{Affine-gap alignment with an explicit boundary contract}
@@ -286,391 +283,288 @@ states that cannot occur at a selected boundary.
   \end{algorithmic}
 \end{algorithm}
 
-Traceback yields an edit path that can be encoded as a CIGAR string. This is
-the standard compact representation of gapped alignments
-\cite{sam_format_specification}.
-Unbanded matrix filling costs \(O(nm)\) time. A score needs only a small number
-of rows, while direct traceback normally retains predecessor information for
-the evaluated cells.
+The algorithm state matrix can be used to retrieve the edit path as CIGAR string. This is
+the standard compact representation of gapped alignments described in chapter 1\cite{sam_format_specification}
 
-A two-piece affine model uses
+Affine model is some scenarios might not be enough as it doesn't distinguish between short and long gaps. The two-piece affine model can support such feature without complicating the scoring function too much:
 \[
   g_2(\ell)=\min(q_1+\ell e_1,\ q_2+\ell e_2)
 \]
-and adds a second state for each gap orientation. This permits different cost
-slopes for short and long gaps. The minimap2-derived route can use this model,
-while an adaptive block route uses one affine component.
+This model permits different cost slopes for short and long gaps. In our software we use single affine model for the fastest alignment modes (adaptive block), while KSW2 variants support dual affine model.
 
-Large alignments require a smaller evaluated region. A band retains cells near
-an expected diagonal. Its cost is proportional to the band width and sequence
-length, but it changes the result if the best path leaves the band. X-drop
-stops an extension when its score falls sufficiently below the best score seen
-so far. Z-drop also considers displacement from the best diagonal, which makes
-it less likely that one long gap is treated as an ordinary score collapse.
-Adaptive block alignment follows a promising rectangular region rather than a
-fixed band. It can also miss the unconstrained optimum
-\cite{block_aligner_paper}.
+For large datasets evaluating entire large \(O(nm)\) matrix can make significant practical difference:
+\begin{itemize}
+    \item We can evaluate alignments only close to diagonal. Being close to diagonal means that there aren't many large gaps between matching fragments. Designing algorithms around diagonals can make us skip evaluation of many far cells that do not contribute to the result.
+    \item In case of features that do not require traceback (CIGAR construction requires traceback, but score or coordinates of best match do not) we can just store relevant slice in memory and avoid allocating large memory region.
+    \item We can introduce X-drop stop condition: stop when score falls below best score seen so far by more than X
+    \item We can introduce Z-drop stop condition: the same as X-drop, but if the distance from diagonal is too high then stop as well (this means that we stop when there are too many gaps cummulatively)
+\end{itemize}
 
-Vector execution changes how cells are evaluated, not the intended objective.
-Equivalent scalar and vector routes still need the same precision, boundary
-values, cell set, stopping rule, and tie policy. The Suzuki and Kasahara
-difference formulation stores bounded differences between neighboring scores,
-which supports narrow integer lanes and forms the basis of KSW2
-\cite{suzuki_kasahara_2018}. BioSeqDB uses portable SIMD for selected
-alignment routes and configurations.
+Smart evaluation startegy can combine all these approaches. KSW2 and Block aligner for example use all of them. Block aligner \cite{block_aligner_paper} evaluates only the most promising rectangular region in the matrix while KSW2 \cite{suzuki_kasahara_2018} focuses on diagonal-centered evaluation.
 
-\section{Search by seeding, chaining, and extension}
+\section{Seed and extend}
 \label{sec:seed-chain-extend}
 
 Applying local dynamic programming between a query of length \(m\) and a
-reference of length \(N\) costs \(O(Nm)\). Most reference positions cannot
-belong to a useful result. Long-read mappers therefore organize search into
+reference of length \(N\) costs \(O(Nm)\). Most reference positions don't contribute to the result. Long-read mappers therefore organize search into
 three stages \cite{minimap2_paper}.
 
+First step is to use divide and conquer approach and split sequence into representatives known as seeds:
+\begin{equation}
+\begin{aligned}
+  \text{Seed}(x_1, x_2, ..., x_n) = {(s_1, i_1, j_1), (s_2, i_2, j_2), ..., (s_k, i_k, j_k)} \\
+  \text{where} 1 \leq i_a, j_a \leq n \forall a \in {1, 2, ..., k}
+\end{aligned}
+\label{eq:seeding-def}
+\end{equation}
+
+Seed $(s_a, i_a, j_a)$ is some represenative of the sequence substring $x_a = x_{i_a}x_{i_a+1}...x_{j_a}$. This can be implemented in different ways, this definition is the most abtract one.
+If a seed occurs in both query and reference, then we can consulde that two represented substrings are very similar.
+Using some concrete seeding function we can obtain intersection for query and reference:
+\begin{equation}
+\begin{aligned}
+  S_{X \cap Y} = {(s, i_x, j_x, i_y, j_y) \text{where} (s, i_x, j_x) \in \text{Seed}(X) \text{and} (s, i_y, j_y) \in \text{Seed}(Y)}
+\end{aligned}
+\label{eq:seeding-def}
+\end{equation}
+
 \begin{enumerate}
-  \item \textbf{Seeding} selects short query substrings and finds compatible
-    reference occurrences.
-  \item \textbf{Chaining} selects ordered, approximately collinear hits and
-    turns them into candidate regions.
-  \item \textbf{Extension} performs base-level dynamic programming between and
-    around retained anchors, then returns coordinates, a score, and optional
-    traceback data.
+  \item \textbf{Seeding} Generate $Seed(X)$ and $Seed(Y)$ and obtain $S_{X \cap Y}$
+  \item \textbf{Chaining} As matching seeds will cover only parts of both sequences that match without errors, we still need to fill-in the gaps between them. We connect seeds from $S_{X \cap Y}$ into chains using similar dynamic programming approach as in usual aligner. This gives us some approximate alignments.
+  \item \textbf{Extension} Perform usual alignment algorithm on the approximate fragments to obtain final results.
 \end{enumerate}
 
-An exact \(k\)-mer seed is a length-\(k\) word shared by the query and target.
-Indexing every \(k\)-mer produces many redundant neighboring hits. A minimizer
-sketch selects a representative \(k\)-mer from each window of \(w\) consecutive
-\(k\)-mers, commonly the minimum under a hash order
-\cite{roberts_minimizers_2004}. Overlapping windows often retain the same
-representative, which is emitted once. Canonical nucleotide seeds use one key
-for a \(k\)-mer and its reverse complement while retaining orientation.
-Occurrence filtering removes or down-weights very frequent keys because they
-carry little location information.
+%TODO: Describe different flavours of seeding like minimizers, strobomers etc. I want here to have figure created from description "pic11 — Three seed constructions: minimizers, spaced seeds, strobemers" from DOCS/CURRENT/TECH_SPECS/0367_RECONSTRUCTION_REFERENCE_FOR_14_SEQUENCE_ALGORITHM_FIGURES_PIC1_PIC14.md docment
 
-A lookup produces anchors. Write anchor \(a_i\) as a reference coordinate
-\(r_i\), query coordinate \(q_i\), orientation \(o_i\), and span \(\ell_i\).
-For reverse-strand hits, transform \(q_i\) into the coordinate order of the
-oriented query. Denote the resulting coordinate by \(\tilde q_i\). Anchors from
-one ungapped correspondence then lie near a common diagonal
-\(r_i-\tilde q_i\). Insertions and deletions shift that diagonal. Chaining is
-therefore a sparse path problem in the oriented reference-query plane.
+\textbf{Minimizers} are one of many possible seeding model definitions. Given parameters $w$ and $k$, a window $W$ of length $l = w + k - 1$ contains
+$w$ consecutive $k$-mers. The minimizer of the window is the smallest $k$-mer (subsequence of length $k$) in the window.
+For random minimizers, $k$-mers are ordered by a pseudo-random order, usually given by
+comparing hashes of the $k$-mers. In case of ties, the leftmost smallest $k$-mer is chosen. \cite{roberts_minimizers_2004}
+Overlapping windows often retain the same representative, which is emitted once.
 
-After sorting anchors by the canonical coordinate order, a representative
-score is
-\begin{equation}
-  f(i)=\max\left\{
-    \ell_i,
-    \max_{j<i}\bigl(f(j)+\rho(a_j,a_i)-\gamma(a_j,a_i)\bigr)
-  \right\},
-  \label{eq:chaining-score}
-\end{equation}
-where \(\rho\) rewards newly covered matching span and \(\gamma\) penalizes
-large gaps and diagonal changes. A predecessor is admitted only when its
-orientation, coordinate order, distance, and bandwidth satisfy the chaining
-policy. Backtracking predecessor indices from high-scoring endpoints recovers
-chains.
+\textbf{Canonical minimizers:} DNA is double-stranded and majority of sequencing technologies
+do not distinguish these two strands. Genomic sequences thus need to satisy additional constraint: sequence and its reverse complement ($A \leftrightarrow T, C \leftrightarrow G$) should be handled in the same way by the software (they should be indistinguisable)
+In our case this means that for minimizer of a window $W$ at position $p$ we need to have minimizer $\overline{W^{c}}$ at position $w-1-p = |W| - k - p$. \cite{groot_koerkamp_simd_minimizers_2025}
+In most of the software due to simplicity truly cannonical minimizers aren't used. Instead we take minimum of hashes of $k$-mer and its reverse complement: $m^{\text{cannonical}} = \min(m, \overline{m^{c}})$
 
-Testing every predecessor costs \(O(A^2)\) for \(A\) anchors. Minimap2 limits
-the scan to recent admissible anchors and may stop after a configured number of
-unproductive candidates. These rules reduce work in practice, but the optimum
-is then defined over the examined predecessor set. Range-minimum-query methods
-accelerate a related long-gap formulation. SIMD and GPU methods instead
-evaluate groups of predecessor candidates together. These approaches may
-share a scoring function without sharing the same candidate policy.
-
-\begin{algorithm}[tb]
-  \caption{Conceptual seed, chain, and extend search}
-  \label{alg:seed-chain-extend}
-  \begin{algorithmic}[1]
-    \Require query \(Q\), compatible target index \(I\), and search policy \(P\)
-    \Ensure ranked alignments
-    \State sketch \(Q\) and retrieve compatible seed occurrences from \(I\)
-    \State form oriented anchors and suppress uninformative frequent keys
-    \State sort anchors in canonical coordinate order
-    \State \textbf{for each} anchor endpoint \(i\) \textbf{do}
-      \State score the predecessor candidates admitted by \(P\)
-      \State store the best score and predecessor for \(i\)
-    \State \textbf{end for}
-    \State backtrack high-scoring chains and derive candidate regions
-    \State \textbf{for each} retained region \textbf{do}
-      \State align inter-anchor gaps and extend the two outer regions
-      \State compose endpoints, score, and optional CIGAR data
-    \State \textbf{end for}
-    \State rank competing mappings and compute mapping quality
-  \end{algorithmic}
-\end{algorithm}
-
-The final alignment is assembled from related boundary problems. Inter-anchor
-segments usually require both anchor ends. Outer regions are extension
-problems and may terminate under X-drop or Z-drop. Mapping quality (MAPQ) then
-summarizes one mapping relative to alternatives and repetitive evidence. It is
-not the score of one dynamic-programming matrix.
-
-BioSeqDB retains the minimap2 stages but accepts alphabet-aware compact ranges,
-manages persistent target indexes, batches database rows, and returns typed
-alignment fields. Individual stages can select scalar, portable SIMD, or GPU
-execution when their configuration supports it. Backend selection does not
-change the meaning of an alignment column.
-
-\section{Profile database search}
-\label{sec:profile-database-search}
-
-Protein profile search uses a different scoring model but applies the same
-principle of progressive candidate reduction. In MMseqs2, two successive
-indexed hits for one target with equal diagonals activate ungapped scoring.
-Only a smaller candidate set reaches profile alignment
-\cite{mmseqs2_2017}. Figure~\ref{fig:profile-double-hit} shows this funnel and
-the loop order behind the diagonal check.
-
-\definecolor{profilequery}{HTML}{EE3B3B}
-\definecolor{profiletarget}{HTML}{2A2AE6}
-\definecolor{profileposition}{HTML}{F08A22}
-\definecolor{profilehit}{HTML}{C21FA0}
-\definecolor{profilematch}{HTML}{1EA01E}
-
-\begin{figure}[tbp]
+\begin{figure}[ht]
   \centering
   \begin{tikzpicture}[
-      x=1cm,
-      y=1cm,
+      scale=0.82,
+      transform shape,
       >=Latex,
-      font=\sffamily\footnotesize,
-      stage caption/.style={align=center,text width=3.2cm},
-      plot/.style={draw=black,fill=white,line width=0.55pt},
-      neutral arrow/.style={draw=gray!55,line width=1.7mm,
-                            -{Latex[length=3.5mm,width=4mm]}},
-      loop badge/.style={circle,minimum size=5.5mm,inner sep=0pt,
-                         text=white,font=\small\bfseries}
+      node distance=0.62cm,
+      stage/.style={draw, rounded corners=2pt, minimum height=1.05cm,
+                    minimum width=2.65cm, align=center, fill=gray!8},
+      datum/.style={draw, rounded corners=8pt, minimum height=0.72cm,
+                    minimum width=1.55cm, align=center, fill=blue!8},
+      note/.style={font=\footnotesize, align=center, text width=2.65cm}
     ]
+    \node[datum] (query) {query};
+    \node[stage, right=of query] (sketch) {sketch\\representative \(k\)-mers};
+    \node[stage, right=of sketch] (lookup) {index lookup\\seed occurrences};
+    \node[datum, right=of lookup] (anchors) {anchors\\\((r,q,o,\ell)\)};
+    \node[stage, below=1.62cm of anchors] (chain)
+      {chaining DP\\collinear subsets};
+    \node[datum, left=of chain] (regions) {regions};
+    \node[stage, left=of regions] (extend) {base-level DP\\traceback};
+    \node[stage, left=of extend] (post) {postprocess};
+    \node[datum, left=of post] (result) {score, coordinates\\CIGAR};
 
-    \node[font=\small\bfseries,anchor=west] at (0,13.55)
-      {(a) Candidate funnel};
+    \draw[->] (query) -- (sketch);
+    \draw[->] (sketch) -- (lookup);
+    \draw[->] (lookup) -- (anchors);
+    \draw[->] (anchors) -- (chain);
+    \draw[->] (chain) -- (regions);
+    \draw[->] (regions) -- (extend);
+    \draw[->] (extend) -- (post);
+    \draw[->] (post) -- (result);
 
-    % Fast k-mer match deck
-    \foreach \o in {0.30,0.15} {
-      \begin{scope}[shift={(\o,\o)}]
-        \draw[draw=gray!55,fill=white] (0.48,10.25) rectangle (3.08,12.72);
-      \end{scope}
-    }
-    \draw[plot] (0.48,10.25) rectangle (3.08,12.72);
-    \draw[gray!55] (0.82,10.55) -- (2.78,12.38);
-    \draw[gray!55] (0.82,10.72) -- (2.67,12.45);
-    \draw[fill=gray!30,rounded corners=0.6mm]
-      (1.02,10.86) rectangle (1.29,10.99);
-    \draw[fill=black,rounded corners=0.6mm]
-      (1.48,11.25) rectangle (1.79,11.39);
-    \draw[fill=black,rounded corners=0.6mm]
-      (2.04,11.77) rectangle (2.35,11.91);
-    \draw[fill=gray!30,rounded corners=0.6mm]
-      (2.52,11.52) rectangle (2.79,11.65);
-    \node[text=profiletarget,rotate=90,font=\bfseries] at (0.18,11.48)
-      {target profile};
-    \node[text=profilequery,font=\bfseries] at (1.78,10.02) {query};
-    \node[align=center,text width=2.9cm] at (1.78,13.02)
-      {many target profiles};
-    \node[stage caption] at (1.78,9.55) {Fast \(k\)-mer match};
-    \node[align=center] at (1.82,12.26) {two hits on\\one diagonal};
-    \draw[->] (1.62,11.98) -- (1.63,11.42);
-
-    \draw[neutral arrow] (3.55,11.48) -- (5.55,11.48);
-    \node[align=center,text width=2.1cm] at (4.55,12.16)
-      {double hit on\\the same diagonal};
-
-    % Ungapped alignment deck
-    \foreach \o in {0.24,0.12} {
-      \begin{scope}[shift={(\o,\o)}]
-        \draw[draw=gray!55,fill=white] (6.00,10.25) rectangle (8.60,12.72);
-      \end{scope}
-    }
-    \draw[plot] (6.00,10.25) rectangle (8.60,12.72);
-    \draw[black,line width=1.25pt] (6.38,10.65) -- (7.24,11.45);
-    \draw[black,line width=1.25pt] (7.38,11.58) -- (8.25,12.38);
-    \node[align=center,text width=2.9cm] at (7.30,13.02)
-      {fewer target profiles};
-    \node[text=profilequery,font=\bfseries] at (7.30,10.02) {query};
-    \node[stage caption] at (7.30,9.55)
-      {Ungapped alignment of target consensus};
-
-    \draw[neutral arrow] (9.05,11.48) -- (11.05,11.48);
-    \node[align=center,text width=2.0cm] at (10.05,12.16)
-      {transpose\\shortlist};
-
-    % Final profile alignment
-    \draw[plot] (11.48,10.25) rectangle (14.08,12.72);
-    \draw[black,line width=1.25pt] (11.85,10.65) -- (12.65,11.38)
-      -- (12.92,11.38) -- (13.72,12.15);
-    \node[align=center,text width=2.9cm] at (12.78,13.02)
-      {final candidates};
-    \node[text=profilequery,font=\bfseries] at (12.78,10.02) {query};
-    \node[stage caption] at (12.78,9.55)
-      {Target-profile alignment};
-
-    \draw[gray!55,dashed] (0,8.92) -- (15,8.92);
-    \node[font=\small\bfseries,anchor=west] at (0,8.55)
-      {(b) Nested-loop double-hit search};
-
-    \node[draw=profilequery,cylinder,shape border rotate=90,aspect=0.28,
-          minimum width=2.55cm,minimum height=1.05cm,align=center,
-          text=profilequery] (queries) at (1.48,6.82)
-      {query 1\\\(\vdots\)\\query \(x\)};
-    \node[loop badge,fill=profilequery] at (0.24,7.72) {1};
-    \node[anchor=west,text=profilequery,font=\bfseries] at (0.58,7.72)
-      {queries};
-    \node[draw=profileposition,dashed,rounded corners=2pt,
-          minimum width=2.9cm,minimum height=0.78cm,align=center,
-          text=profilequery] (qmer) at (1.48,4.92)
-      {\textcolor{profileposition}{position \(i=151\)}\\
-       \textcolor{profilequery}{\texttt{MHVWAVR}}};
-    \draw[->,draw=profilequery,line width=0.8pt] (queries) -- (qmer);
-    \node[loop badge,fill=profileposition] at (0.24,5.68) {2};
-    \node[anchor=west,text=profileposition,font=\bfseries] at (0.58,5.68)
-      {positions};
-
-    \draw[draw=profiletarget,rounded corners=2pt,line width=0.8pt]
-      (3.55,3.78) rectangle (9.15,7.06);
-    \node[text=profiletarget,font=\small\bfseries] at (6.35,6.55)
-      {Precomputed profile index};
-    \node[draw=profiletarget,cylinder,shape border rotate=90,aspect=0.28,
-          minimum width=2.55cm,minimum height=0.82cm,align=center,
-          text=profiletarget] (targets) at (6.35,7.65)
-      {target profiles};
-    \draw[->,draw=profiletarget,line width=0.8pt]
-      (targets.south) -- (6.35,7.06);
-    \draw[gray!50] (6.30,4.03) -- (6.30,6.20);
-    \node[align=center,text width=2.35cm] at (4.88,5.70)
-      {similar \(k\)-mers\\above threshold};
-    \node[draw=profileposition,rounded corners=1pt] at (4.88,4.65)
-      {\texttt{MHWVREA}};
-    \node[text=profilehit,font=\bfseries] at (7.46,5.70) {index hits};
-    \node[loop badge,fill=profilehit] at (8.67,5.70) {3};
-    \node[align=left] at (7.72,4.60)
-      {\((23,431)\)\\\textcolor{profilehit}{\((972,149)\)}\\
-       \((1522,217)\)};
-    \draw[->,draw=profileposition,line width=0.8pt]
-      (qmer.east) -- node[above] {lookup} (4.35,4.65);
-    \draw[plot] (10.15,3.78) rectangle (14.55,7.08);
-    \node[text=profilehit,rotate=90,font=\bfseries] at (9.87,5.43)
-      {target 972};
-    \node[text=profilequery,font=\bfseries] at (12.35,3.50) {query \(x\)};
-    \draw[gray!55] (10.55,4.18) -- (14.12,6.68);
-    \draw[gray!55] (10.55,4.38) -- (13.98,6.78);
-    \draw[dashed,draw=profileposition] (12.65,3.78) -- (12.65,7.08);
-    \draw[dashed,draw=profilematch] (10.15,5.28) -- (14.55,5.28);
-    \node[text=profileposition,anchor=south,fill=white,inner sep=1pt]
-      at (12.65,3.82) {\(i=151\), \texttt{MHWVRQA}};
-    \node[text=profilematch,anchor=east,fill=white,inner sep=1pt]
-      at (14.47,5.45) {\(j=149\), \texttt{MHWVREA}};
-    \node[fill=black,rounded corners=0.5mm,minimum width=3.2mm,
-          minimum height=1.2mm,inner sep=0pt] at (11.85,5.10) {};
-    \node[fill=black,rounded corners=0.5mm,minimum width=3.2mm,
-          minimum height=1.2mm,inner sep=0pt] at (12.72,5.72) {};
-    \node[fill=gray!30,draw=gray!60,rounded corners=0.5mm,
-          minimum width=3.2mm,minimum height=1.2mm,inner sep=0pt]
-      at (13.48,6.25) {};
-    \node[align=center,fill=white,inner sep=1pt] at (12.32,6.72)
-      {diagonal \(d=j-i=-2\)};
-    \draw[->,draw=profilehit,line width=0.85pt]
-      (8.38,4.70) -- (10.15,4.70);
-
-    \node[draw=profilehit,rounded corners=2pt,anchor=south west,
-          text width=13.65cm,align=left,inner sep=2.2mm]
-      at (0.48,0.30) {
-        \textcolor{profilequery}{for each query \(Q\)}\\
-        \quad\textcolor{profileposition}{for each position \(i\) in \(Q\)}\\
-        \qquad\textcolor{profilehit}{for each indexed hit \((t,j)\) of a
-          similar \(k\)-mer}\\
-        \qquad\quad \(d\gets j-i\)\\
-        \qquad\quad if \(\operatorname{lastDiagonal}[t]=d\), emit candidate
-          \((t,d)\)\\
-        \qquad\quad \(\operatorname{lastDiagonal}[t]\gets d\)
-      };
+    \node[note, below=0.36cm of sketch] {reduces sequence\\to a sparse sketch};
+    \node[note, below=0.36cm of chain]
+      {suppresses random and\\inconsistent hits};
+    \node[note, below=0.36cm of extend]
+      {recovers symbol-level\\edit path};
   \end{tikzpicture}
-  \caption{Profile-search candidate reduction based on the staged organization
-    of MMseqs2 \cite{mmseqs2_2017}. Panel (a) uses two successive \(k\)-mer
-    hits on one diagonal to select candidates for ungapped scoring before final
-    profile alignment. Panel (b) traverses queries, query positions, and index
-    postings. The coordinate example illustrates the previous-diagonal check.
-    Candidate reductions are qualitative.}
-  \label{fig:profile-double-hit}
+  \caption{The seed--chain--extend decomposition}
+  \label{fig:seed-chain-extend}
 \end{figure}
 
-For a hit at query position \(i\) and target position \(j\), the diagonal is
-\(d=j-i\). The index and previous-diagonal state avoid an exhaustive comparison
-of every profile symbol with every query symbol.
+In case of Minimap2 and BioseqDB $S_{X \cap Y}$ is represented as tuple \((r,q,o,\ell)\) which holds reference coordinate \(r\), query coordinate \(q\),
+orientation \(o\) and span \(\ell\) (length).
 
-\section{Linear and graph reference models}
-\label{sec:graph-approaches}
+After sorting anchors by
+ending reference coordinate, with implementation-specific tie keys, a
+chaining score can be written
+\begin{equation}
+ f(i)=\max\left(
+     w_i,\ 
+     \max_{j<i}\{f(j)+\alpha(j,i)-\beta(j,i)\}
+   \right),
+ \label{eq:minimap2-chain}
+\end{equation}
+where \(\alpha\) rewards newly covered matching bases and \(\beta\) penalizes
+large gaps and diagonal changes. A representative minimap2 reward is
+\[
+  \alpha(j,i)=
+  \min\bigl(
+    \min(y_i-y_j,\ x_i-x_j),\ w_i
+  \bigr).
+\]
 
-A linear reference provides one coordinate order for chaining. A variation
-graph can represent shared sequence through common nodes and branch where
-alternatives differ. A query alignment then chooses both a path through the
-graph and an edit path against that path \cite{garrison_variation_graph_2018}.
-A de Bruijn
-graph represents local \(k\)-mer adjacency, commonly with \((k-1)\)-mers as
-nodes and observed \(k\)-mers as edges \cite{pevzner_tang_waterman_2001}. It is
-useful for assembly, but a graph walk is not itself an alignment.
+Testing every \(j<i\) is \(O(A^2)\) for \(A\) anchors.
+Minimap2 scans a bounded recent window and stops after a configured number of
+unproductive indices, making the practical cost much smaller \cite{minimap2_paper}.
 
-Dynamic programming over an acyclic sequence graph can follow a topological
-node order \cite{lee_partial_order_2002}. Cycles, repeated nodes, and many
-equivalent paths require further constraints or search. Graph mappers still
-need candidate reduction because one seed may occur on many paths. A graph
-position identifies a node, offset, and orientation. Path identifiers and
-graph versions are also needed when results use persistent path coordinates.
+\begin{algorithm}[H]
+  \caption{Conceptual bounded predecessor chaining}
+  \label{alg:anchor-chaining}
+  \begin{enumerate}
+    \item \textbf{Input.} Anchors \(a_1,\ldots,a_A\) in canonical coordinate
+      order.
+    \item \textbf{Endpoint loop.} For each \(i=1,\ldots,A\), perform the
+      following steps:
+      \begin{enumerate}
+        \item Initialize \(f[i]\gets\operatorname{span}(a_i)\) and
+          \(p[i]\gets\bot\).
+        \item For each candidate \(j<i\) in the active distance and iteration
+          window, perform the following steps:
+          \begin{enumerate}
+            \item If \(a_j\) and \(a_i\) have valid order, strand, gap, and
+              bandwidth, compute
+              \[
+                v\gets f[j]+\operatorname{reward}(a_j,a_i)
+                  -\operatorname{gapPenalty}(a_j,a_i).
+              \]
+            \item If the candidate is valid and \(v>f[i]\), set
+              \(f[i]\gets v\) and \(p[i]\gets j\).
+            \item Optionally stop the predecessor loop after the configured
+              skip heuristic fires.
+          \end{enumerate}
+      \end{enumerate}
+    \item \textbf{Backtracking.} Backtrack from high-scoring endpoints through
+      \(p\).
+    \item \textbf{Result.} Return the chains that remain after filtering by
+      score, seed count, and overlap.
+  \end{enumerate}
+\end{algorithm}
 
-BioSeqDB presently chains anchors in a linear reference coordinate system. A
-graph-native route would require graph positions in the seed index and
-reachability-aware chaining. It would also require graph alignment or local
-subgraph extraction, plus stable path identifiers in SQL results. The graph
-model is therefore a change to the search object, not a substitute for scoring,
-seeding, or alignment.
+% \section{Linear and graph reference models}
+% \label{sec:graph-approaches}
+
+% A linear reference provides one coordinate order for chaining. A variation
+% graph can represent shared sequence through common nodes and branch where
+% alternatives differ. A query alignment then chooses both a path through the
+% graph and an edit path against that path \cite{garrison_variation_graph_2018}.
+% A de Bruijn
+% graph represents local \(k\)-mer adjacency, commonly with \((k-1)\)-mers as
+% nodes and observed \(k\)-mers as edges \cite{pevzner_tang_waterman_2001}. It is
+% useful for assembly, but a graph walk is not itself an alignment.
+
+% Dynamic programming over an acyclic sequence graph can follow a topological
+% node order \cite{lee_partial_order_2002}. Cycles, repeated nodes, and many
+% equivalent paths require further constraints or search. Graph mappers still
+% need candidate reduction because one seed may occur on many paths. A graph
+% position identifies a node, offset, and orientation. Path identifiers and
+% graph versions are also needed when results use persistent path coordinates.
+
+% BioSeqDB presently chains anchors in a linear reference coordinate system. A
+% graph-native route would require graph positions in the seed index and
+% reachability-aware chaining. It would also require graph alignment or local
+% subgraph extraction, plus stable path identifiers in SQL results. The graph
+% model is therefore a change to the search object, not a substitute for scoring,
+% seeding, or alignment.
 
 \section{Limitations of existing tools}
 \label{sec:limitations-existing-tools}
 
-BioSeqDB addresses database integration limits rather than mapper efficiency.
-Minimap2 already provides an optimized nucleotide mapper and reusable
-reference indexes \cite{minimap2_paper}. BLAST+ and MMseqs2 support large
-sequence-database searches \cite{blast_plus_2009,mmseqs2_2017}. The relevant
-limits are the trade-offs of sparse search and the boundary between standalone
-tools and relational execution.
+Most of the current most popular tools implement variations of the seed and extend approach described in the previous section. However the algorithm outlined here is heavily underspecified to be directly implemented as a computer program:
+\begin{itemize}
+  \item $S_{X \cap Y}$ can be implemented as interection of two hash maps where $Seed(X)$ is realized as map from seed to its start/end: $S \rightarrow \natural^2$ where seed itself is represented by it's hash $S = \mathbb{Z}$. This opens few important questions: what hashing strategy to choose? Which map implementation to choose?
+  \item As $Seed(X)$ can be computed before alignment starts we can store it in memory and persist it to disk to speed up processing in the future. Which binary format we want to choose?
+  \item Anchors as tuples will be implemented as some concrete binary structure and authors need to specify their representation (do we store them as AOS or SOA? What are widths of elements and their types?). Each decision will imapct performance as there can be millions of anchors per long sequence and additional bytes sum up to MBs of additional memory to be processed (and slowdowns).
+  \item Finally, what is the most effective way to parallelize this computation (the most straightforward approach is to split input sequences $X$ and $Y$ into chunks)
+\end{itemize}
 
-\subsection{Limits of sparse alignment search}
+Most of the current state of the art tools choose to:
+\begin{enumerate}
+  \item File-based operation
+  \item Suboptimal or non-extensible internal data structures
+  \item Optimise only selected parts of the algorithm like hash function properties or one specific stage.
+\end{enumerate}
+This leads to different consequences for the user.
 
-Minimizers reduce work by retaining only part of the available exact evidence.
-Sensitivity depends on \(k\), the window length, ambiguous symbols, the error
-pattern, and occurrence filtering. A short or damaged query may contain no
-useful seed. A repetitive seed may produce many locations and weak positional
-evidence. No later alignment kernel can recover a locus removed at this stage.
+\textbf{File-based operation:}
+Operating directly on the disk with simplistic wire format means that seed index is usually one giant binary blob not prepared for highly-concurrent access and interface doesn't offer modern tools like buffer pooling or lazy loading. The format of indexes are largely undocumented by authors. 
+Missing of lazy loading feature is the most hurting to the user.
+If index is large it will be loaded entirely into memory and can overwhelm SWAP space. This degrades performance by several orders of magnitude and can be avoided by splitting sequences into smaller chunks. User doesn't know what is the exact relationship between sequence length and required memory space, so 
+this process takes time and involves guessing. Additionally index implementation sometimes offer complex parameters to adjust its partitioning (like in case of MMseqs2), but entire responsibility is still shifted to the user and that leads to user frustration andrecurring OOM issues or severly degraded performance. \cite{mmseqs2_issue_338} \cite{mmseqs2_issue_517}
+Software not only treats indexes as files, but it operates on FASTA files directly. This means the user cannot easily sort/split/extract or filter records without using external tools.
 
-Chaining is exact only for its score and admitted predecessor set. Distance
-limits, bandwidth, occurrence thresholds, and early stopping can remove a
-useful chain. Final dynamic programming is likewise exact only over its
-evaluated cells and endpoints. A narrow band, an adaptive block, X-drop, or
-Z-drop may exclude the unconstrained optimum. Repeats can produce several
-similar mappings, so MAPQ depends on alternatives and repetitiveness rather
-than one alignment score. These are properties to report, not defects that
-database integration removes.
+\textbf{Suboptimal or non-extensible internal data structures:}
+Minimap2 uses 31 bits to encode anchor's position meaning that practically entire human genome (>3Gbps) cannot be aligned at once and require splitting via other tools before any operation is performed.
+LexiMap (not using seed and extend approach) limits maximum genome size to 268Mbp \cite{lexicmap_faqs}.
+Additionally software is implemented without proper abstractions - minimap2 code is non-easily extensible C code, while G3SA doesn't offer extension points for new types of indexes or sequences interfaces.
 
-Processor choice adds another trade-off. SIMD works best when lanes perform
-similar operations over regular memory. GPU execution adds submission,
-transfer, synchronization, and residency costs that need a sufficiently large
-batch. A faster kernel does not imply a faster query when candidate
-construction, data conversion, or result materialization dominates.
+\textbf{Selective optimisations:}
+Optimisations are usually fixed for one single platform (AVX512 or SSE) and either get severe performance penalties (scalar fallbacks) or user cannot use them at all. SIMD support is quite popular even though it supports one or two selected platforms, but GPU support exists usually only for NVIDIA graphics cards.
+This leads to a difficult situation for the user as they need to choose between several versions of the same tool (\cite{mm2_fast_paper}, \cite{mm2_gpu_paper}), while better, more modern software like G3SA exists purely on NVIDIA hardware \cite{g3sa_pape}
+Modern hardware like MacBook Pro M3 with arm64 architecture won't be able to utilise any integrated GPU acceleration. While minimap2 offers compatibility layer to port SSE code to NEON, it does not vectorize all operations and code ported from SSE doesn't account for lane widths and instruction level parallelism available in M2-M4 chips. \cite{simd_opt_website_jake}
 
-\subsection{Limits of a file-oriented execution boundary}
+I wanted to address these limitations by implementing BioseqDB, Postgres extension that will provide the following features:
+\begin{itemize}
+  \item Tight integration with Postgres meaning that user can operate on sequences (loaded FASTA files) directly using SQL rather than resorting to external toolkits.
+  \item Support for indexes and storage structures designed with parallelism and lazy-loading from the start, meaning that software can be run on very RAM-constrained device and still perform well. At the same time design will incorporate assumptiuon about arbitrary large sequences so the user will be able to operate on >3Gbps records without any additional steps.
+  \item Provide layer of abstractions written using latest C++26 standard, so the algorithms can be reused in separate software or extended to different types of new sequences and indexes.
+  \item Provide optimised kernels for SIMD and GPU architectures written using architecture-agnostic, but performant code.
+\end{itemize}
 
-A conventional workflow exports selected sequences, invokes a mapper, parses
-its output, and joins the records back to metadata. File formats remain useful
-for interchange and archiving, but as a mandatory query boundary they hide
-alignment work from the relational planner, repeat conversion, and leave index
-compatibility to orchestration code. PostgreSQL functions can express typed
-one-to-many computation, but a custom scan is needed to own batching, index
-reuse, rescans, and result projection \cite{postgresql17_custom_scan}.
+Tight integration with Postgres also means that as a side effect, we can utilise some benefits of persistent state: deferring expesive operations, keeping large indexing structures in memory in case use reruns query and more effective memory-disk caching schemes. 
 
-Representation and lifetime are part of this problem. Packed, out-of-line,
-fragmented, and lazy sequences have different access costs. PostgreSQL may need
-to detoast a variable-length value before access \cite{postgresql17_toast}.
-Eager conversion can process a complete sequence when search needs one region.
-A reusable index separately needs source and parameter identity, safe
-publication, invalidation, and bounded loading. These are database lifecycle
-requirements rather than changes to minimizer or alignment arithmetic.
+% BioSeqDB addresses database integration limits rather than mapper efficiency.
+% Minimap2 already provides an optimized nucleotide mapper and reusable
+% reference indexes \cite{minimap2_paper}. BLAST+ and MMseqs2 support large
+% sequence-database searches \cite{blast_plus_2009,mmseqs2_2017}. The relevant
+% limits are the trade-offs of sparse search and the boundary between standalone
+% tools and relational execution.
+
+% \subsection{Limits of sparse alignment search}
+
+% Minimizers reduce work by retaining only part of the available exact evidence.
+% Sensitivity depends on \(k\), the window length, ambiguous symbols, the error
+% pattern, and occurrence filtering. A short or damaged query may contain no
+% useful seed. A repetitive seed may produce many locations and weak positional
+% evidence. No later alignment kernel can recover a locus removed at this stage.
+
+% Chaining is exact only for its score and admitted predecessor set. Distance
+% limits, bandwidth, occurrence thresholds, and early stopping can remove a
+% useful chain. Final dynamic programming is likewise exact only over its
+% evaluated cells and endpoints. A narrow band, an adaptive block, X-drop, or
+% Z-drop may exclude the unconstrained optimum. Repeats can produce several
+% similar mappings, so MAPQ depends on alternatives and repetitiveness rather
+% than one alignment score. These are properties to report, not defects that
+% database integration removes.
+
+% Processor choice adds another trade-off. SIMD works best when lanes perform
+% similar operations over regular memory. GPU execution adds submission,
+% transfer, synchronization, and residency costs that need a sufficiently large
+% batch. A faster kernel does not imply a faster query when candidate
+% construction, data conversion, or result materialization dominates.
+
+% \subsection{Limits of a file-oriented execution boundary}
+
+% A conventional workflow exports selected sequences, invokes a mapper, parses
+% its output, and joins the records back to metadata. File formats remain useful
+% for interchange and archiving, but as a mandatory query boundary they hide
+% alignment work from the relational planner, repeat conversion, and leave index
+% compatibility to orchestration code. PostgreSQL functions can express typed
+% one-to-many computation, but a custom scan is needed to own batching, index
+% reuse, rescans, and result projection \cite{postgresql17_custom_scan}.
+
+% Representation and lifetime are part of this problem. Packed, out-of-line,
+% fragmented, and lazy sequences have different access costs. PostgreSQL may need
+% to detoast a variable-length value before access \cite{postgresql17_toast}.
+% Eager conversion can process a complete sequence when search needs one region.
+% A reusable index separately needs source and parameter identity, safe
+% publication, invalidation, and bounded loading. These are database lifecycle
+% requirements rather than changes to minimizer or alignment arithmetic.
