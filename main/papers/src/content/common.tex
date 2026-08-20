@@ -22,6 +22,10 @@
 \usepackage{tcolorbox}
 \usepackage{pdftexcmds}
 \usepackage{robust-externalize}
+\ExplSyntaxOn
+\ProvideExpandableDocumentCommand{\lenToCmNoUnit}{ O{cm} m }
+  { \dim_to_decimal_in_unit:nn { #2 } { 1 #1 } }
+\ExplSyntaxOff
 \usepackage{relsize}
 \usepackage{algorithm}
 \usepackage{verbatimbox}
@@ -31,7 +35,7 @@
 \PassOptionsToPackage{noend}{algpseudocode}
 \usepackage{algpseudocode}
 \else
-\PassOptionsToPackage{noEnd}{algpseudocodex}
+\PassOptionsToPackage{noEnd,indLines=false}{algpseudocodex}
 \usepackage{algpseudocodex}
 \fi
 \usepackage{float}

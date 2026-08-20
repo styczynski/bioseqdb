@@ -230,6 +230,7 @@ Various practical implementations also use special stopping criteria, which usua
 \section{Dynamic programming definition}
 \label{sec:exact-dp}
 
+%TODO: There are some random indentations, we should fix it everywhere in the document
 Let \(H_{i,j}\) be the best score after consuming \(i\) symbols of \(X\) and
 \(j\) symbols of \(Y\). For a simpler linear gap cost model \(d\), we can define the algorithm's state matrix as:
 \begin{equation}
@@ -310,6 +311,7 @@ reference of length \(N\) costs \(O(Nm)\). Most reference positions don't contri
 three stages \cite{minimap2_paper}.
 
 First step is to use divide and conquer approach and split sequence into representatives known as seeds:
+%TODO: This equalition is formatted in very ugly way, fix it
 \begin{equation}
 \begin{aligned}
   \text{Seed}(x_1, x_2, ..., x_n) = {(s_1, i_1, j_1), (s_2, i_2, j_2), ..., (s_k, i_k, j_k)} \\
@@ -328,6 +330,7 @@ Using some concrete seeding function we can obtain intersection for query and re
 \label{eq:seeding-def}
 \end{equation}
 
+%TODO: textbf doesn't work in most of the places, can we fix it?
 \begin{enumerate}
   \item \textbf{Seeding} Generate $Seed(X)$ and $Seed(Y)$ and obtain $S_{X \cap Y}$
   \item \textbf{Chaining} As matching seeds will cover only parts of both sequences that match without errors, we still need to fill-in the gaps between them. We connect seeds from $S_{X \cap Y}$ into chains using similar dynamic programming approach as in usual aligner. This gives us some approximate alignments.
