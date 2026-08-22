@@ -124,9 +124,11 @@ function(bioseq_assert_first_party_test_source_ownership)
       "The first-party Catch ownership table must name exactly 13 executables")
   endif()
 
-  # This glob is a fail-closed discovery guard only. Target source lists stay
-  # explicit, while a newly authored *_test.cpp fails configuration until it
-  # is assigned to one of the reviewed owners below.
+  # This inventory is independent of target source collection. Every authored
+  # *_test.cpp must match one reviewed path-to-target rule below and appear
+  # exactly once in that target's resolved SOURCES property. Explicit target
+  # lists and guarded CONFIGURE_DEPENDS target globs therefore receive the same
+  # one-owner check without a stale repository-wide cardinality constant.
   file(GLOB_RECURSE _bioseq_authored_test_sources
     CONFIGURE_DEPENDS LIST_DIRECTORIES FALSE
     "${CMAKE_SOURCE_DIR}/bench/*_test.cpp"
@@ -142,13 +144,35 @@ function(bioseq_assert_first_party_test_source_ownership)
   list(FILTER _bioseq_authored_test_sources EXCLUDE REGEX
     "/generated/external/api/")
   list(SORT _bioseq_authored_test_sources)
-  list(LENGTH
-    _bioseq_authored_test_sources _bioseq_authored_test_source_count)
-  if(NOT _bioseq_authored_test_source_count EQUAL 148)
+
+  # This conditional safety-harness self-test is compiled by the runtime
+  # profile executables, not by one of the 13 Catch executables. Keep the
+  # exclusion exact and fail closed if discovery no longer sees it once.
+  set(_bioseq_safety_runtime_harness_self_test_source
+    "${CMAKE_SOURCE_DIR}/bioseq/tests/integration/support/safety_runtime_harness_self_test.cpp")
+  cmake_path(NORMAL_PATH _bioseq_safety_runtime_harness_self_test_source)
+  if(NOT EXISTS "${_bioseq_safety_runtime_harness_self_test_source}")
     message(FATAL_ERROR
-      "First-party authored *_test.cpp inventory changed: expected 148, got "
-      "${_bioseq_authored_test_source_count}; update the explicit owner table")
+      "Reviewed non-Catch safety harness source is missing: "
+      "${_bioseq_safety_runtime_harness_self_test_source}")
   endif()
+  set(_bioseq_safety_runtime_harness_discovery_count 0)
+  foreach(_bioseq_authored_test_source IN LISTS
+      _bioseq_authored_test_sources)
+    if(_bioseq_authored_test_source STREQUAL
+        _bioseq_safety_runtime_harness_self_test_source)
+      math(EXPR _bioseq_safety_runtime_harness_discovery_count
+        "${_bioseq_safety_runtime_harness_discovery_count} + 1")
+    endif()
+  endforeach()
+  if(NOT _bioseq_safety_runtime_harness_discovery_count EQUAL 1)
+    message(FATAL_ERROR
+      "Reviewed non-Catch safety harness source must be discovered exactly "
+      "once; got ${_bioseq_safety_runtime_harness_discovery_count}: "
+      "${_bioseq_safety_runtime_harness_self_test_source}")
+  endif()
+  list(REMOVE_ITEM _bioseq_authored_test_sources
+    "${_bioseq_safety_runtime_harness_self_test_source}")
 
   set(_bioseq_unit_event_listener_source
     "${CMAKE_SOURCE_DIR}/bioseq/tests/support/test_event_listener.cpp")

@@ -1,9 +1,9 @@
 /**
- * @file chaining_simd.cppm
+ * @file simd.cppm
  * @brief Target-neutral contracts and facade for SIMD DP chaining.
  *
- * The complete Highway implementation is generated per target from
- * chaining_simd_kernel.cppm. This module intentionally contains no Highway
+ * The complete Highway implementation is generated per target from the
+ * chaining SIMD source modules. This module intentionally contains no Highway
  * headers, target namespaces, or runtime dispatch. Callers supply the function
  * selected once by the dispatch processor.
  */
@@ -96,6 +96,12 @@ struct simd_chaining_policy_stats {
     std::uint64_t policy_rejections = 0;
     bool saturated = false;
 
+    /**
+     * @brief Adds one counter and records unsigned overflow as saturation.
+     * @param destination Counter updated in place.
+     * @param increment Value to add.
+     * @param did_saturate Set when the addition overflows.
+     */
     static void add_counter(
             std::uint64_t& destination,
             std::uint64_t increment,
@@ -109,7 +115,8 @@ struct simd_chaining_policy_stats {
         destination += increment;
     }
 
-    /// Saturating aggregation used by call, batch, and result collectors.
+    /// @brief Saturating aggregation used by call, batch, and result collectors.
+    /// @param other Policy counters to add.
     void merge(const simd_chaining_policy_stats& other) noexcept {
         saturated = saturated || other.saturated;
         add_counter(
@@ -154,7 +161,10 @@ struct simd_chaining_policy_stats {
             saturated);
     }
 
-    /// Fail-closed consistency for the requested named policy.
+    /// @brief Checks fail-closed consistency for the requested named policy.
+    /// @param selected Policy whose counter relationships must hold.
+    /// @param require_accelerated_work Require observed bounded-policy vector work.
+    /// @return `true` when all policy-specific relationships hold.
     [[nodiscard]] constexpr bool is_internally_consistent(
         simd_chaining_policy selected,
         bool require_accelerated_work) const noexcept
@@ -203,10 +213,10 @@ struct simd_chaining_policy_stats {
 };
 
 /**
- * @brief Execution counters proving that SIMD scoring and backtracking ran.
+ * @brief Execution counters for SIMD scoring and backtracking work.
  *
- * Match, pipeline, and benchmark aggregation carries this object end to end;
- * forbidden scalar-route counters must remain zero for accepted execution.
+ * Match, pipeline, and benchmark aggregation carries this object end to end.
+ * Forbidden scalar-route counters must remain zero for accepted execution.
  */
 struct simd_chaining_execution_stats {
     std::uint64_t anchors_consumed = 0;
@@ -242,6 +252,12 @@ struct simd_chaining_execution_stats {
     simd_chaining_policy_stats policy{};
     bool saturated = false;
 
+    /**
+     * @brief Adds one counter and records unsigned overflow as saturation.
+     * @param destination Counter updated in place.
+     * @param increment Value to add.
+     * @param did_saturate Set when the addition overflows.
+     */
     static void add_counter(
             std::uint64_t& destination,
             std::uint64_t increment,
@@ -255,7 +271,8 @@ struct simd_chaining_execution_stats {
         destination += increment;
     }
 
-    /// Saturating merge used by call, batch, and result collectors.
+    /// @brief Saturating merge used by call, batch, and result collectors.
+    /// @param other Execution counters to add.
     void merge(const simd_chaining_execution_stats& other) noexcept {
         saturated = saturated || other.saturated;
         policy.merge(other.policy);
@@ -292,7 +309,10 @@ struct simd_chaining_execution_stats {
 #undef BIOSEQ_MERGE_SIMD_CHAIN_COUNTER
     }
 
-    /// Return whether counters describe an authentic execution of @p selected.
+    /// @brief Tests whether counters describe an authentic execution of @p selected.
+    /// @param selected Policy whose execution relationships must hold.
+    /// @param require_nonempty_vector_work Require observed scoring and backtracking vectors.
+    /// @return `true` when the counters authenticate the selected route.
     [[nodiscard]] constexpr bool is_internally_consistent(
             simd_chaining_policy selected,
             bool require_nonempty_vector_work = false) const noexcept {
@@ -318,7 +338,10 @@ struct simd_chaining_execution_stats {
     [[nodiscard]] constexpr bool operator==(
         const simd_chaining_execution_stats&) const noexcept = default;
 
-    /// Selected-policy stats plus the policy-specific forward invariants.
+    /// @brief Validates selected-policy counters and forward-pass invariants.
+    /// @param selected Policy whose relationships must hold.
+    /// @param require_accelerated_work Require policy-specific accelerated work.
+    /// @return `true` when policy and execution counters agree.
     [[nodiscard]] constexpr bool has_consistent_policy_stats(
         simd_chaining_policy selected,
         bool require_accelerated_work = false) const noexcept
@@ -336,6 +359,8 @@ struct simd_chaining_execution_stats {
         return false;
     }
 
+    /// @brief Checks exact-policy batch classification and replay relationships.
+    /// @return `true` when exact forward-pass counters are self-consistent.
     [[nodiscard]] constexpr bool has_consistent_exact_execution_stats()
             const noexcept {
         if (no_improvement_fast_batches
@@ -384,6 +409,13 @@ static_assert(std::is_pointer_v<chain_anchors_simd_kernel>);
  * chosen fixed-target function in a focused test).
  *
  * @throws simd_chaining_runtime_error when @p kernel is null.
+ * @param kernel Fixed-target function selected by process dispatch.
+ * @param anchors Canonically ordered anchors to chain.
+ * @param params Scoring, distance, and policy parameters.
+ * @param chains_out Arena-backed destination for chain descriptors.
+ * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+ * @param stats Optional execution counters updated by the selected kernel.
+ * @param aggregate_stats Whether the kernel should collect route summaries without hot-loop counters.
  */
 inline void chain_anchors_simd(
     chain_anchors_simd_kernel kernel,

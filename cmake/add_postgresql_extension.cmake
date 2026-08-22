@@ -439,13 +439,18 @@ function(bioseq_add_postgresql_extension_variant LIBRARY_NAME ENABLE_TEST_TARGET
        OR "${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
       find_package(Catch2 3 REQUIRED)
       target_link_libraries(${LIBRARY_NAME} PRIVATE Catch2::Catch2WithMain)
-      target_compile_definitions(${LIBRARY_NAME} PRIVATE CATCH_CONFIG_CONSOLE_WIDTH=1024 CATCH_CONFIG_DEFAULT_REPORTER=console CATCH_CONFIG_EXPERIMENTAL_REDIRECT=1)
+      # Catch's generated user config owns console width for every test TU.
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE
+        CATCH_CONFIG_DEFAULT_REPORTER=console
+        CATCH_CONFIG_EXPERIMENTAL_REDIRECT=1)
     endif()
 
     if(IS_TEST_EXEC)
       find_package(Catch2 3 REQUIRED)
       target_link_libraries(${LIBRARY_NAME} PRIVATE Catch2::Catch2)
-      target_compile_definitions(${LIBRARY_NAME} PRIVATE CATCH_CONFIG_CONSOLE_WIDTH=1024 CATCH_CONFIG_DEFAULT_REPORTER=console CATCH_CONFIG_EXPERIMENTAL_REDIRECT=1)
+      target_compile_definitions(${LIBRARY_NAME} PRIVATE
+        CATCH_CONFIG_DEFAULT_REPORTER=console
+        CATCH_CONFIG_EXPERIMENTAL_REDIRECT=1)
       target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
     endif()
 

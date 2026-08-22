@@ -127,17 +127,21 @@ option(BIOSEQ_CODEGEN_ENABLE_SQL "Build the PostgreSQL extension SQL component" 
 option(BIOSEQ_CODEGEN_ENABLE_HIGHWAY "Build the Highway target-module component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
   "Build the generic template-flatten namespace materializer" OFF)
+option(BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG
+  "Build the attribute-driven build-configuration component" OFF)
 
 if(NOT BIOSEQ_CODEGEN_ENABLE_EXTERNAL
    AND NOT BIOSEQ_CODEGEN_ENABLE_WEBSITE
    AND NOT BIOSEQ_CODEGEN_ENABLE_SQL
    AND NOT BIOSEQ_CODEGEN_ENABLE_HIGHWAY
-   AND NOT BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
+   AND NOT BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+   AND NOT BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG)
   message(FATAL_ERROR
     "bioseq_codegen requires at least one enabled component "
     "(BIOSEQ_CODEGEN_ENABLE_EXTERNAL / BIOSEQ_CODEGEN_ENABLE_WEBSITE / "
     "BIOSEQ_CODEGEN_ENABLE_SQL / BIOSEQ_CODEGEN_ENABLE_HIGHWAY / "
-    "BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)")
+    "BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION / "
+    "BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG)")
 endif()
 
 set(CMAKE_CXX_STANDARD 26)
@@ -175,10 +179,11 @@ set(_codegen_component_entries "")
 if(BIOSEQ_CODEGEN_ENABLE_SQL
     OR BIOSEQ_CODEGEN_ENABLE_WEBSITE
     OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY
-    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
-  # One Clang 22 AST/token/USR implementation serves SQL, website, and Highway
-  # collection. Clang/LLVM types remain confined to the named module
-  # implementation unit; importers see only the compiler-neutral model.
+    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+    OR BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG)
+  # One Clang 22 AST/token/USR implementation serves SQL, website, Highway and
+  # build-configuration collection. Clang/LLVM types remain confined to the
+  # named module implementation unit. Importers see only the neutral model.
   execute_process(COMMAND "${LLVM_CONFIG_BINARY}" --includedir
     OUTPUT_VARIABLE _bioseq_llvm_incdir OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY)
@@ -231,6 +236,20 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
       "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
     list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_LLVM_LIB}")
   endif()
+endif()
+
+if(BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG)
+  list(APPEND _codegen_module_files
+    "${_codegen_src}/build_config/model.cppm"
+    "${_codegen_src}/build_config/validator.cppm"
+    "${_codegen_src}/build_config/renderer.cppm"
+    "${_codegen_src}/build_config/tests/contract/index.cppm"
+    "${_codegen_src}/build_config/index.cppm")
+  string(APPEND _codegen_component_imports
+    "import bioseq.codegen.build_config;\n")
+  string(APPEND _codegen_component_entries
+    "        {\"build_config\", &bioseq::codegen::build_config::self_test, "
+    "&bioseq::codegen::build_config::run},\n")
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
@@ -504,7 +523,8 @@ endif()
 if(BIOSEQ_CODEGEN_ENABLE_SQL
     OR BIOSEQ_CODEGEN_ENABLE_WEBSITE
     OR BIOSEQ_CODEGEN_ENABLE_HIGHWAY
-    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION)
+    OR BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION
+    OR BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG)
   target_include_directories(bioseq_codegen SYSTEM PRIVATE
     "${_bioseq_llvm_incdir}")
   target_link_options(bioseq_codegen PRIVATE
@@ -518,6 +538,14 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL
     "BIOSEQ_LINKED_CLANG_CPP_SHA256=\"${_bioseq_clang_cpp_sha256}\""
     "BIOSEQ_LINKED_LLVM_LIBRARY=\"${BIOSEQ_CODEGEN_LLVM_LIB}\""
     "BIOSEQ_LINKED_LLVM_LIBRARY_SHA256=\"${_bioseq_llvm_library_sha256}\"")
+endif()
+
+if(BIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG
+    AND BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)
+  add_custom_command(TARGET bioseq_codegen POST_BUILD
+    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test build_config
+    COMMENT "Running build-configuration code-generator contracts"
+    VERBATIM)
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION

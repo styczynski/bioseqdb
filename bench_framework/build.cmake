@@ -7,12 +7,15 @@
 # Outputs: reusable `bioseq_bench_framework` module library and the
 # `bioseq_bench_framework_example` executable.
 
+include("${PROJECT_SOURCE_DIR}/cmake/bioseq_source_inventory.cmake")
+
 # Resolve every owned source-tree component from the repository-level CMake
 # source root. The including CMake file belongs to the bioseq component, while
 # this framework is its repository-level sibling.
 set(BIOSEQ_REPOSITORY_ROOT "${PROJECT_SOURCE_DIR}")
-set(BENCH_FRAMEWORK_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
-set(BENCH_PRODUCTION_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench")
+set(BIOSEQ_BENCHMARK_FRAMEWORK_DIR
+  "${BIOSEQ_REPOSITORY_ROOT}/bench_framework")
+set(BIOSEQ_BENCHMARK_SOURCE_DIR "${BIOSEQ_REPOSITORY_ROOT}/bench")
 set(BIOSEQ_DIR "${BIOSEQ_REPOSITORY_ROOT}/bioseq")
 
 # Fixed-threshold algorithm selection is consumed by both the production
@@ -28,8 +31,9 @@ set_target_properties(bioseq_bench_prefilter_algorithm_selection PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_sources(bioseq_bench_prefilter_algorithm_selection
   PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${BENCH_PRODUCTION_DIR}"
-    FILES "${BENCH_PRODUCTION_DIR}/prefilter_algorithm_selection.cppm")
+    BASE_DIRS "${BIOSEQ_BENCHMARK_SOURCE_DIR}"
+    FILES
+      "${BIOSEQ_BENCHMARK_SOURCE_DIR}/prefilter_algorithm_selection.cppm")
 
 # The framework has one reusable module owner. Executables link this target
 # instead of compiling the interface and its implementation unit repeatedly.
@@ -43,12 +47,12 @@ set_target_properties(bioseq_bench_framework PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 target_sources(bioseq_bench_framework
   PRIVATE
-    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+    "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/interactive.cppm"
   PUBLIC FILE_SET CXX_MODULES
-    BASE_DIRS "${BENCH_FRAMEWORK_DIR}"
-    FILES "${BENCH_FRAMEWORK_DIR}/index.cppm")
+    BASE_DIRS "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}"
+    FILES "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/index.cppm")
 set_source_files_properties(
-  "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+  "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/interactive.cppm"
   PROPERTIES
     CXX_SCAN_FOR_MODULES ON
     COMPILE_OPTIONS "-x;c++")
@@ -70,30 +74,37 @@ target_link_libraries(bioseq_bench_framework PUBLIC
   TBB::tbb)
 
 # The executable owns only the example driver's primary module.
-set(BENCH_FRAMEWORK_MODULE_FILES
-  "${BENCH_FRAMEWORK_DIR}/example/index.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_BENCHMARK_FRAMEWORK_EXAMPLE_MODULES
+  BASE_DIRECTORY "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/example"
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS "main.cppm"
+  EXPECTED_COUNT 1)
 
 # The example executable retains only its narrow global launcher.
 # source; the framework implementation unit belongs to the shared owner.
-set(BENCH_FRAMEWORK_EXAMPLE_SOURCES
-  "${BENCH_FRAMEWORK_DIR}/example/main.cppm")
+set(BIOSEQ_BENCHMARK_FRAMEWORK_EXAMPLE_LAUNCHER
+  "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/example/main.cppm")
 
 # Catch2 contract tests use an explicit semantic target name. The framework
 # links Catch2WithMain into that binary, so index_test.cpp must not define its
 # own main. Run with:
 #   ninja bioseq_benchmark_framework_contract_tests
 #   ./bioseq_benchmark_framework_contract_tests
-set(BENCH_FRAMEWORK_TEST_SOURCES
-  "${BENCH_FRAMEWORK_DIR}/tests/contract/index_test.cpp")
+bioseq_collect_authored_sources(
+  BIOSEQ_BENCHMARK_FRAMEWORK_CONTRACT_TEST_SOURCES
+  BASE_DIRECTORY "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}/tests/contract"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 1)
 
-set(BENCH_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS
+set(BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS
   "${BIOSEQ_DIR}"
   "${BIOSEQ_DIR}/backend/pg/include"
   "${BIOSEQ_REPOSITORY_ROOT}/vendor/safestringlib/include"
   "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmtlog"
   "${BIOSEQ_REPOSITORY_ROOT}/vendor/fmt"
   "${BIOSEQ_REPOSITORY_ROOT}/vendor/seqan3/include")
-set(BENCH_FRAMEWORK_EXECUTABLE_LINKS
+set(BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_LINKS
   safestring_static
   fmt
   reflectcpp::reflectcpp
@@ -125,19 +136,19 @@ bioseq_add_postgresql_extension(
   VERSION    ${INSTALL_VERSION}
   COMPONENT  ${PROJECT_NAME}
   INCLUDE_DIRS
-    ${BENCH_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS}
   LINKS
-    ${BENCH_FRAMEWORK_EXECUTABLE_LINKS}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_LINKS}
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
-    ${BENCH_FRAMEWORK_EXAMPLE_SOURCES}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXAMPLE_LAUNCHER}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${BIOSEQ_DIR}"
-    "${BENCH_FRAMEWORK_DIR}"
+    "${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}"
   CXX_MOD_FILES
-    ${BENCH_FRAMEWORK_MODULE_FILES}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXAMPLE_MODULES}
 )
 
 # The contract executable imports only reusable providers. It must not compile
@@ -152,13 +163,13 @@ bioseq_add_postgresql_extension_variant(
   VERSION    ${INSTALL_VERSION}
   COMPONENT  ${PROJECT_NAME}
   INCLUDE_DIRS
-    ${BENCH_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_INCLUDE_DIRS}
   LINKS
-    ${BENCH_FRAMEWORK_EXECUTABLE_LINKS}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_EXECUTABLE_LINKS}
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   TESTS
-    ${BENCH_FRAMEWORK_TEST_SOURCES}
+    ${BIOSEQ_BENCHMARK_FRAMEWORK_CONTRACT_TEST_SOURCES}
 )
 set_target_properties(bioseq_benchmark_framework_contract_tests PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
@@ -182,7 +193,7 @@ add_custom_target(
 target_compile_definitions(bioseq_bench_framework_example
   PRIVATE
     "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bench_framework_example\""
-    "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BENCH_FRAMEWORK_DIR}\""
+    "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}\""
 )
 
 # The same compile definitions also need to flow into the test
@@ -195,6 +206,6 @@ if(TARGET bioseq_benchmark_framework_contract_tests)
   target_compile_definitions(bioseq_benchmark_framework_contract_tests
     PRIVATE
       "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR=\"${BIOSEQ_REPOSITORY_ROOT}/reporting/bench_framework_example\""
-      "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BENCH_FRAMEWORK_DIR}\""
+      "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BIOSEQ_BENCHMARK_FRAMEWORK_DIR}\""
   )
 endif()

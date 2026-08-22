@@ -119,6 +119,8 @@ def test_environment_allowlist(bindir: Path, scratch: Path) -> None:
 def test_unique_allocation(bindir: Path, scratch: Path) -> None:
     first = UniquePrivateCluster(_inputs(bindir, scratch, "uniq_a"))
     second = UniquePrivateCluster(_inputs(bindir, scratch, "uniq_b"))
+    assert first.socket_dir == first.socket_dir.resolve(strict=True)
+    assert second.socket_dir == second.socket_dir.resolve(strict=True)
     assert first.socket_dir != second.socket_dir
     assert first.port != second.port
     assert first.run_dir != second.run_dir
@@ -401,6 +403,48 @@ def test_stale_live_pid_never_signals_unrelated_process(
         cluster.stop()
 
 
+def test_address_space_preexec_contract(
+    _bindir: Path,
+    _scratch: Path,
+) -> None:
+    assert private_postgres_module._address_space_preexec(None) is None
+
+    darwin_resource = mock.Mock()
+    darwin_resource.RLIMIT_AS = mock.sentinel.rlimit_as
+    with (
+        mock.patch.object(private_postgres_module.sys, "platform", "darwin"),
+        mock.patch.dict(sys.modules, {"resource": darwin_resource}),
+    ):
+        try:
+            private_postgres_module._address_space_preexec(64)
+        except ClusterCommandError as error:
+            diagnostic = str(error)
+            assert "unsupported" in diagnostic.lower()
+            assert "Darwin" in diagnostic
+            assert "RLIMIT_AS" in diagnostic
+        else:
+            raise AssertionError(
+                "finite Darwin address-space limit must be rejected"
+            )
+    darwin_resource.setrlimit.assert_not_called()
+
+    linux_resource = mock.Mock()
+    linux_resource.RLIMIT_AS = mock.sentinel.rlimit_as
+    limit_mib = 64
+    limit_bytes = limit_mib * 1024 * 1024
+    with (
+        mock.patch.object(private_postgres_module.sys, "platform", "linux"),
+        mock.patch.dict(sys.modules, {"resource": linux_resource}),
+    ):
+        hook = private_postgres_module._address_space_preexec(limit_mib)
+        assert hook is not None
+        hook()
+    linux_resource.setrlimit.assert_called_once_with(
+        linux_resource.RLIMIT_AS,
+        (limit_bytes, limit_bytes),
+    )
+
+
 TESTS = [
     test_basic_lifecycle_and_bootstrap,
     test_environment_allowlist,
@@ -412,6 +456,7 @@ TESTS = [
     test_unproven_shutdown_retains_owned_directories,
     test_status_probe_cross_checks_live_pid,
     test_stale_live_pid_never_signals_unrelated_process,
+    test_address_space_preexec_contract,
 ]
 
 

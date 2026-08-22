@@ -1,19 +1,16 @@
 /**
  * @file sneaky_snake_test.cpp
- * @brief Soundness and scalar/Highway parity tests for SneakySnake.
+ * @brief Verifies SneakySnake soundness and scalar, fixed-target, and Vulkan parity.
+ *
+ * The suite compares lower bounds with an independent exact-distance oracle, exercises submaze
+ * and active-lane boundaries, validates the generated Highway callable table, and checks Vulkan
+ * replay with fresh mapped rank bytes. Arbitrary byte alphabets and malformed slices retain their
+ * conservative contracts across every backend.
  */
 #include <hwy/highway.h>
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <span>
-#include <stdexcept>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.prefilter.types;
 import bioseq.prefilter.sneaky_snake;
 import bioseq.prefilter.sneaky_snake.vulkan;
@@ -28,6 +25,11 @@ using namespace bioseq::prefilter;
 
 namespace {
 
+/**
+ * @brief Resolves the generated fixed-target SneakySnake callable used by this test translation.
+ * @return The non-null callable installed in the fixed-target Highway test table.
+ * @throws std::logic_error If the generated table omitted the callable.
+ */
 [[nodiscard]] ::bioseq::simd_dispatch::sneaky_snake_simd_batch_kernel
 fixed_sneaky_snake_kernel()
 {
@@ -40,6 +42,12 @@ fixed_sneaky_snake_kernel()
     return kernel;
 }
 
+/**
+ * @brief Computes an independent full-matrix global Levenshtein distance.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @return Exact insertion, deletion, and substitution distance.
+ */
 [[nodiscard]] std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target)
@@ -66,6 +74,12 @@ fixed_sneaky_snake_kernel()
     return previous.back();
 }
 
+/**
+ * @brief Compares every field in the prefilter result ABI.
+ * @param[in] lhs First result.
+ * @param[in] rhs Second result.
+ * @return `true` only when all four result fields are equal.
+ */
 [[nodiscard]] bool same_result(
     const prefilter_result& lhs,
     const prefilter_result& rhs) noexcept
@@ -76,6 +90,11 @@ fixed_sneaky_snake_kernel()
         && lhs.diagnostics == rhs.diagnostics;
 }
 
+/**
+ * @brief Enumerates every binary rank string up to one inclusive length.
+ * @param[in] max_length Greatest generated string length.
+ * @return Strings ordered first by length and then by increasing source bits.
+ */
 [[nodiscard]] std::vector<std::vector<std::uint8_t>> binary_sequences(
     std::uint32_t max_length)
 {
@@ -94,8 +113,17 @@ fixed_sneaky_snake_kernel()
     return sequences;
 }
 
+/**
+ * @brief Owns deterministic linear-congruential state for reproducible rank fixtures.
+ *
+ * Instances are test-local, single-threaded, and have no external lifetime or ownership.
+ */
 class deterministic_ranks {
 public:
+    /**
+     * @brief Advances the fixture generator.
+     * @return The next deterministic 32-bit value.
+     */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ = state_ * 1664525u + 1013904223u;
@@ -106,14 +134,30 @@ private:
     std::uint32_t state_ = 0x5EED1234u;
 };
 
+/**
+ * @brief Owns flat rank buffers, jobs, and per-job rank vectors for backend comparisons.
+ *
+ * Job offsets address `query_ranks` and `target_ranks`. The `queries` and `targets` vectors retain
+ * the same logical slices independently for exact-distance checks.
+ */
 struct batch_fixture {
+    /** Flat query storage including poison ranks around logical slices. */
     std::vector<std::uint8_t> query_ranks;
+    /** Flat target storage including poison ranks around logical slices. */
     std::vector<std::uint8_t> target_ranks;
+    /** Ordered slices addressing the flat query and target storage. */
     std::vector<prefilter_job> jobs;
+    /** Logical query ranks retained independently for exact-distance checks. */
     std::vector<std::vector<std::uint8_t>> queries;
+    /** Logical target ranks retained independently for exact-distance checks. */
     std::vector<std::vector<std::uint8_t>> targets;
 };
 
+/**
+ * @brief Builds a deterministic mixed-geometry batch with guarded rank slices.
+ * @param[in] job_count Number of jobs and logical sequence pairs to generate.
+ * @return An owning fixture containing ordered jobs and their flat and logical rank storage.
+ */
 [[nodiscard]] batch_fixture random_batch(std::size_t job_count)
 {
     deterministic_ranks random;

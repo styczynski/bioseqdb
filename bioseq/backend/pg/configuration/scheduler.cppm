@@ -1,3 +1,7 @@
+/**
+ * @file scheduler.cppm
+ * @brief Declares PostgreSQL settings for scheduler execution.
+ */
 export module bioseq.postgres.configuration.scheduler;
 
 import bioseq.codegen.sql.annotation_model;

@@ -39,7 +39,7 @@ enum class sequence_iteration_part : std::uint8_t {
  * @tparam p_finish_type Callable invoked after the masked tail is consumed.
  * @tparam p_iterator_type Iterator into the packed range.
  * @tparam p_maximum_delay Maximum admitted delay in logical symbols.
- * @param sequence Packed sequence range; storage remains borrowed.
+ * @param sequence Packed sequence range. Storage remains borrowed.
  * @param begin First packed unit to inspect.
  * @param end One-past-last packed unit.
  * @param context_bps Logical-symbol context required by the caller.
@@ -67,17 +67,14 @@ inline void iterate_sequence_bp_simd_offsets(
 ) {
     using sequence_traits = compact_sequence_range<p_sequence_range>::traits;
 
-	// Function-entry log gated behind BIOSEQ_HOT_TRACE_LOGS — formatting
-	// the offsets vector + sequence pretty-print costs ~5-10 us per call,
-	// dominating the steady-state mm_sketch_simd time when this fired
-	// raw on every call.
-	const auto [context_units, context_padding] =
-		::bioseq::simd::iteration_geometry::int_div_ceil(
-			context_bps, sequence_traits::letters_per_unit);
-	(void)context_padding;
-	constexpr std::size_t delay_count = sizeof...(delays);
+    // Hot-path tracing remains compile-time gated because formatting offsets
+    // and sequence state dominates short minimizer traversals.
+    const auto [context_units, context_padding] = ::bioseq::simd::iteration_geometry::int_div_ceil(
+        context_bps, sequence_traits::letters_per_unit);
+    (void)context_padding;
+    constexpr std::size_t delay_count = sizeof...(delays);
 
-	const std::size_t sequence_length = sequence.size();
+    const std::size_t sequence_length = sequence.size();
 	if (sequence.bp_size() < context_bps) {
 		// Sequence shorter than required context
 		return;
@@ -90,10 +87,10 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	const hn::ScalableTag<typename sequence_traits::storage_unit> d;
 	using vector_type = hn::Vec<decltype(d)>;
-	using vec_mask_t = hn::Mask<decltype(d)>;
-	using matrix = square_lane_matrix<decltype(d)>;
+    using vector_mask = hn::Mask<decltype(d)>;
+    using matrix = square_lane_matrix<decltype(d)>;
 
-	const vector_type symbol_mask = hn::Set(d, sequence_traits::char_mask);
+    const vector_type symbol_mask = hn::Set(d, sequence_traits::char_mask);
 
     auto iter = begin;
 
@@ -124,25 +121,17 @@ inline void iterate_sequence_bp_simd_offsets(
 		hn::Lanes(d) * sequence_traits::letters_per_unit;
 	const std::size_t full_chunks_count_raw = bps_per_lane / bps_per_matrix;
 	const std::size_t bps_last_chunk_raw = bps_per_lane % bps_per_matrix;
-	// When the sequence length is an exact multiple of (Lanes * letters_per_unit) per
-	// lane we end up with bps_last_chunk == 0. That means:
-	//   (a) the partial-matrix loop never runs, so `finish` is never invoked, and
-	//   (b) any padding that lives in the tail of the last "full" chunk is processed
-	//       without the partial-matrix lane mask, so garbage bytes can poison the
-	//       minimizer search. Both cases showed up in dna5 × uint32_t and dna4 ×
-	//       uint64_t parameterizations of the kmer tests. Fix: whenever this happens
-	//       move the final full chunk into the partial-matrix path (reduce full
-	//       chunks by one, set bps_last_chunk to a full matrix worth). This keeps
-	//       the full-chunk fast path for everything in the middle but gives the tail
-	//       proper masking and a finish call.
-	size_t full_chunks_count = full_chunks_count_raw;
-	size_t bps_last_chunk = bps_last_chunk_raw;
-	if (bps_last_chunk == 0 && full_chunks_count > 0) {
-		--full_chunks_count;
+    // An exact matrix multiple moves its final chunk through the partial path.
+    // This guarantees tail masking and one finish callback without changing the
+    // full-matrix treatment of preceding chunks.
+    size_t full_chunks_count = full_chunks_count_raw;
+    size_t bps_last_chunk = bps_last_chunk_raw;
+    if (bps_last_chunk == 0 && full_chunks_count > 0) {
+        --full_chunks_count;
 		bps_last_chunk = hn::Lanes(d) * sequence_traits::letters_per_unit;
-	}
+    }
 
-	using buffer_type = bioseq::common::circular_append_buffer<
+    using buffer_type = bioseq::common::circular_append_buffer<
 		vector_type,
 		buffer_size_bound,
 		0,
@@ -163,25 +152,25 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	auto buffer_write_pos = buffer.get_begin_position();
 
-	const vec_mask_t full_mask = hn::FirstN(d, hn::Lanes(d));
-	const vec_mask_t none_mask = hn::MaskFalse(d);
-	//const vec_mask_t dummy_mask = hn::FirstN(d, hn::Lanes(d));
-	HWY_ALIGN std::array<vec_mask_t, delay_count> delays_masks{
-		((void)delays, none_mask)...};
+    const vector_mask full_mask = hn::FirstN(d, hn::Lanes(d));
+    const vector_mask none_mask = hn::MaskFalse(d);
+    HWY_ALIGN std::array<vector_mask, delay_count> delays_masks{((void)delays, none_mask)...};
 
-	const vec_mask_t left_mask = offsets[0] == offsets[hn::Lanes(d)-1] ? hn::MaskFalse(d) : hn::FirstN(d, hn::Lanes(d)-1);
-	typename std::conditional<delay_count == 0, std::monostate,
-		std::array<std::int32_t, delay_count>>::type delays_counters = {
-		-static_cast<std::int32_t>(delays)...};
-	vec_mask_t main_mask = full_mask;
-	std::int32_t main_counter = 0;
+    const vector_mask left_mask = offsets[0] == offsets[hn::Lanes(d) - 1]
+                                      ? hn::MaskFalse(d)
+                                      : hn::FirstN(d, hn::Lanes(d) - 1);
+    typename std::conditional<delay_count == 0,
+                              std::monostate,
+                              std::array<std::int32_t, delay_count>>::type delays_counters = {
+        -static_cast<std::int32_t>(delays)...};
+    vector_mask main_mask = full_mask;
+    std::int32_t main_counter = 0;
 
-	DEBUG_ASSERT(bps_last_chunk >= sequence.padding() || bps_last_chunk == 0,
-		"partial iteration must cover every padded symbol");
-	const std::int32_t main_counter_only_left =
-		static_cast<std::int32_t>(bps_last_chunk)
-		- static_cast<std::int32_t>(sequence.padding());
-	const std::int32_t main_counter_none =
+    DEBUG_ASSERT(bps_last_chunk >= sequence.padding() || bps_last_chunk == 0,
+                 "partial iteration must cover every padded symbol");
+    const std::int32_t main_counter_only_left =
+        static_cast<std::int32_t>(bps_last_chunk) - static_cast<std::int32_t>(sequence.padding());
+    const std::int32_t main_counter_none =
 		static_cast<std::int32_t>(bps_last_chunk);
 
 	std::size_t live_iterators_count = 1 + delay_count;
@@ -189,12 +178,28 @@ inline void iterate_sequence_bp_simd_offsets(
 	HWY_ALIGN std::array<vector_type, delay_count> all_bp_vecs{
 		((void)delays, hn::Undefined(d))...};
 
-	auto handle_row_bp = [&]<sequence_iteration_part p_mode>(vector_type p_row)
-			[[gnu::always_inline]] -> bool {
-		vector_type row = p_row;
-		for (std::size_t bp_index = 0;
-			 bp_index < sequence_traits::letters_per_unit; ++bp_index) {
-			vector_type base_bp_vec = hn::And(row, symbol_mask);
+	// Advances one transposed symbol row through delayed lane states and callbacks.
+	auto handle_row_bp = [&delays_state,
+                          &buffer,
+                          &delays_counters,
+                          &main_counter_only_left,
+                          &delays_masks,
+                          &full_mask,
+                          &all_bp_vecs,
+                          &symbol_mask,
+                          &handler,
+                          &offsets,
+                          &d,
+                          &main_mask,
+                          &main_counter_none,
+                          &none_mask,
+                          &live_iterators_count,
+                          &left_mask,
+                          &main_counter]<sequence_iteration_part p_mode>(vector_type p_row)
+                             [[gnu::always_inline]] -> bool {
+        vector_type row = p_row;
+        for (std::size_t bp_index = 0; bp_index < sequence_traits::letters_per_unit; ++bp_index) {
+            vector_type base_bp_vec = hn::And(row, symbol_mask);
 			row = hn::ShiftRightSame(row, sequence_traits::bits_per_char);
 			// Check delayed
 			if constexpr (delay_count > 0) {
@@ -256,15 +261,15 @@ inline void iterate_sequence_bp_simd_offsets(
 					main_mask = left_mask;
 				}
 			}
-		}
-		return false;
-	};
+        }
+        return false;
+    };
 
-	for(std::size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
-		matrix mat(buffer.get_pointer_at(buffer_write_pos));
+    for (std::size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
+        matrix mat(buffer.get_pointer_at(buffer_write_pos));
 
-		// We read only full matrices
-		DEBUG_ASSERT(buffer.get_contiguous_capacity() >= matrix_size,
+        // We read only full matrices
+        DEBUG_ASSERT(buffer.get_contiguous_capacity() >= matrix_size,
 			"bounded buffer lacks space for a full matrix load");
 		iter += mat.load_rows_at_offsets(
 			d, offsets, sequence.read_cptr(iter));
@@ -281,20 +286,19 @@ inline void iterate_sequence_bp_simd_offsets(
 			buffer.advance_position(buffer_write_pos);
 		}
 		// context change
-	}
+    }
 
-	DEBUG_ASSERT(
-		static_cast<std::size_t>(end - iter) * sequence_traits::letters_per_unit
-		- offsets[hn::Lanes(d)-1] * sequence_traits::letters_per_unit
-		== bps_last_chunk,
-		"Expect the last available part to load be exactly of size bps_last_chunk (ignoring padding)"
-	);
+    DEBUG_ASSERT(static_cast<std::size_t>(end - iter) * sequence_traits::letters_per_unit -
+                         offsets[hn::Lanes(d) - 1] * sequence_traits::letters_per_unit ==
+                     bps_last_chunk,
+                 "Expect the last available part to load be exactly of size bps_last_chunk "
+                 "(ignoring padding)");
 
-	DEBUG_ASSERT(buffer.get_contiguous_capacity()
-		>= bps_last_chunk / sequence_traits::letters_per_unit,
-		"partial matrix exceeds the bounded sequence buffer");
+    DEBUG_ASSERT(buffer.get_contiguous_capacity() >=
+                     bps_last_chunk / sequence_traits::letters_per_unit,
+                 "partial matrix exceeds the bounded sequence buffer");
 
-	matrix mat(buffer.get_pointer_at(buffer_write_pos));
+    matrix mat(buffer.get_pointer_at(buffer_write_pos));
 	mat.load_bounded_rows_at_offsets(
 		d, end - iter, offsets, sequence.read_cptr(iter)
 	);
@@ -337,15 +341,15 @@ inline void iterate_sequence_bp_simd_offsets(
  * The tail transitions from a full mask to the left mask before completion.
  *
  * @tparam p_stream_count Number of interleaved streams, in the range `[1, 4]`.
- * @tparam p_descriptor_tag Optional Highway descriptor override; `void` selects
+ * @tparam p_descriptor_tag Optional Highway descriptor override. `void` selects
  * the scalable descriptor for the view's storage unit.
- * @tparam p_delay_types Reserved delay argument types; the pack must be empty.
+ * @tparam p_delay_types Reserved delay argument types. The pack must be empty.
  * @tparam p_sequence_view Packed sequence view satisfying the bit-cast contract.
  * @tparam p_handler_type Callable receiving full/partial state, offsets,
  * descriptor, live mask, and the vector stream.
  * @tparam p_finish_type Callable receiving offsets, descriptor, and final mask.
  * @tparam p_iterator_type Iterator exposed by the sequence view.
- * @param sequence Borrowed sequence view; no sequence materialization occurs.
+ * @param sequence Borrowed sequence view. No sequence materialization occurs.
  * @param begin First packed view unit.
  * @param end One-past-last packed view unit.
  * @param context_bps Logical-symbol context required by the caller.
@@ -479,63 +483,63 @@ iterate_sequence_bp_simd(
 
 	for (std::size_t chunk_index = 0;
 		 chunk_index < full_chunks_count; ++chunk_index) {
-		for_each_stream<p_stream_count>(
-			[&](auto p_stream_index_constant) [[gnu::always_inline]] {
-			constexpr std::size_t stream =
-				decltype(p_stream_index_constant)::value;
-			matrix(raw_matrix_storage[stream].data())
-				.load_rows_at_offsets(descriptor, offsets_per_stream[stream],
-					sequence.read_cptr(iter));
-		});
-		p_sequence_view::advance_iter(iter, lanes_per_stream);
-		for_each_stream<p_stream_count>(
-			[&](auto p_stream_index_constant) [[gnu::always_inline]] {
-			constexpr std::size_t stream =
-				decltype(p_stream_index_constant)::value;
-			matrix(raw_matrix_storage[stream].data())
-				.transpose_in_place(descriptor);
-		});
+        // Loads one full packed matrix for each logical stream.
+        for_each_stream<p_stream_count>(
+            [&raw_matrix_storage, &descriptor, &offsets_per_stream, &sequence, &iter](
+                auto p_stream_index_constant) [[gnu::always_inline]] {
+                constexpr std::size_t stream = decltype(p_stream_index_constant)::value;
+                matrix(raw_matrix_storage[stream].data())
+                    .load_rows_at_offsets(
+                        descriptor, offsets_per_stream[stream], sequence.read_cptr(iter));
+            });
+        p_sequence_view::advance_iter(iter, lanes_per_stream);
+        // Transposes each stream matrix into biological row order.
+        for_each_stream<p_stream_count>([&raw_matrix_storage, &descriptor](
+                                            auto p_stream_index_constant) [[gnu::always_inline]] {
+            constexpr std::size_t stream = decltype(p_stream_index_constant)::value;
+            matrix(raw_matrix_storage[stream].data()).transpose_in_place(descriptor);
+        });
 
-		for (std::size_t row_index = 0;
-			 row_index < lanes_per_stream; ++row_index) {
-			stream_bundle row = make_vector_stream_from_rows<
-				resolved_descriptor,
-				typename sequence_traits::storage_unit,
-				p_stream_count>(raw_matrix_storage, row_index);
-			for (std::size_t symbol_index = 0;
-				 symbol_index < sequence_traits::letters_per_unit;
-				 ++symbol_index) {
-				const stream_bundle symbols = bit_and(row, symbol_mask);
+        for (std::size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+            stream_bundle row =
+                make_vector_stream_from_rows<resolved_descriptor,
+                                             typename sequence_traits::storage_unit,
+                                             p_stream_count>(raw_matrix_storage, row_index);
+            for (std::size_t symbol_index = 0; symbol_index < sequence_traits::letters_per_unit;
+                 ++symbol_index) {
+                const stream_bundle symbols = bit_and(row, symbol_mask);
 				row = shift_right<sequence_traits::bits_per_char>(row);
 				handler(std::bool_constant<true>{}, offsets, descriptor,
 					full_mask, symbols);
-			}
-		}
-	}
+            }
+        }
+    }
 
-	const std::size_t partial_units_remaining =
-		p_sequence_view::view_distance(iter, end);
-	for_each_stream<p_stream_count>(
-		[&](auto p_stream_index_constant) [[gnu::always_inline]] {
-		constexpr std::size_t stream =
-			decltype(p_stream_index_constant)::value;
-		matrix(raw_matrix_storage[stream].data())
-			.load_bounded_rows_at_offsets(
-				descriptor, partial_units_remaining,
-				offsets_per_stream[stream], sequence.read_cptr(iter));
-		matrix(raw_matrix_storage[stream].data())
-			.transpose_in_place(descriptor);
-	});
+    const std::size_t partial_units_remaining = p_sequence_view::view_distance(iter, end);
+    // Loads the final bounded matrix for each stream without reading past the range.
+    for_each_stream<p_stream_count>([&raw_matrix_storage,
+                                     &descriptor,
+                                     &partial_units_remaining,
+                                     &offsets_per_stream,
+                                     &sequence,
+                                     &iter](auto p_stream_index_constant) [[gnu::always_inline]] {
+        constexpr std::size_t stream = decltype(p_stream_index_constant)::value;
+        matrix(raw_matrix_storage[stream].data())
+            .load_bounded_rows_at_offsets(descriptor,
+                                          partial_units_remaining,
+                                          offsets_per_stream[stream],
+                                          sequence.read_cptr(iter));
+        matrix(raw_matrix_storage[stream].data()).transpose_in_place(descriptor);
+    });
 
-	if (main_counter_none == 0) {
-		return;
-	}
+    if (main_counter_none == 0) {
+        return;
+    }
 
-	DEBUG_ASSERT(main_counter_none >= 1,
-		"partial iteration must contain at least one symbol");
-	DEBUG_ASSERT(main_counter_only_left >= 1,
-		"left-mask transition must follow at least one symbol");
-	DEBUG_ASSERT(main_counter_none >= main_counter_only_left,
+    DEBUG_ASSERT(main_counter_none >= 1, "partial iteration must contain at least one symbol");
+    DEBUG_ASSERT(main_counter_only_left >= 1,
+                 "left-mask transition must follow at least one symbol");
+    DEBUG_ASSERT(main_counter_none >= main_counter_only_left,
 		"left-mask transition must precede the empty-mask transition");
 	DEBUG_ASSERT(static_cast<std::size_t>(main_counter_none) <= bps_per_lane,
 		"partial iteration count exceeds per-lane reach");

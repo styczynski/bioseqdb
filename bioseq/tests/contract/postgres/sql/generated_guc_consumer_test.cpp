@@ -1,3 +1,7 @@
+/**
+ * @file generated_guc_consumer_test.cpp
+ * @brief Verifies the public surface of generated enum-GUC storage.
+ */
 #include <concepts>
 #include <type_traits>
 

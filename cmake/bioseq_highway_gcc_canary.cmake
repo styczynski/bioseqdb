@@ -116,6 +116,494 @@ function(_bioseq_highway_gcc_canary_query_driver
   set(${output} "${_stdout}" PARENT_SCOPE)
 endfunction()
 
+function(_bioseq_highway_gcc_canary_require_identity_value label value)
+  if("${value}" STREQUAL "" OR "${value}" MATCHES "[;\t\r\n]")
+    message(FATAL_ERROR
+      "Highway GCC canary ${label} has an empty or unrepresentable identity: "
+      "${value}")
+  endif()
+endfunction()
+
+function(_bioseq_highway_gcc_canary_require_nonshared_writable_directory
+    path label)
+  if(NOT IS_ABSOLUTE "${path}" OR NOT IS_DIRECTORY "${path}")
+    message(FATAL_ERROR
+      "Highway GCC canary ${label} is not an existing absolute directory: "
+      "${path}")
+  endif()
+  execute_process(
+    COMMAND "/usr/bin/env" -i
+      "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+      "LC_ALL=C"
+      "LANG=C"
+      "/usr/bin/stat" -f "%Sp" "${path}"
+    RESULT_VARIABLE _stat_status
+    OUTPUT_VARIABLE _permissions
+    ERROR_VARIABLE _stat_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _stat_status EQUAL 0 OR NOT _permissions MATCHES "^d.........$")
+    message(FATAL_ERROR
+      "Highway GCC canary could not inspect ${label} permissions: "
+      "status=${_stat_status}, output=${_permissions}, stderr=${_stat_stderr}")
+  endif()
+  string(SUBSTRING "${_permissions}" 5 1 _group_write)
+  string(SUBSTRING "${_permissions}" 8 1 _world_write)
+  if(_group_write STREQUAL "w" OR _world_write STREQUAL "w")
+    message(FATAL_ERROR
+      "Highway GCC canary ${label} is group/world writable: "
+      "${path} (${_permissions})")
+  endif()
+endfunction()
+
+function(_bioseq_highway_gcc_canary_apple_sdk_closure)
+  cmake_parse_arguments(PARSE_ARGV 0 ARG
+    ""
+    "CXX;DEVELOPER_DIR;SDK_PATH;SDK_ROOT;OUTPUT_VERSION;OUTPUT_BUILD_VERSION;OUTPUT_DIGEST"
+    "")
+  foreach(_required IN ITEMS
+      CXX DEVELOPER_DIR SDK_PATH SDK_ROOT OUTPUT_VERSION
+      OUTPUT_BUILD_VERSION OUTPUT_DIGEST)
+    if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK closure requires ${_required}")
+    endif()
+  endforeach()
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK closure received unknown arguments: "
+      "${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  foreach(_identity IN ITEMS
+      ARG_CXX ARG_DEVELOPER_DIR ARG_SDK_PATH ARG_SDK_ROOT)
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "Apple SDK ${_identity}" "${${_identity}}")
+  endforeach()
+  if(NOT IS_ABSOLUTE "${ARG_CXX}"
+      OR NOT EXISTS "${ARG_CXX}"
+      OR IS_DIRECTORY "${ARG_CXX}")
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK probe requires an absolute compiler: "
+      "${ARG_CXX}")
+  endif()
+  if(NOT IS_ABSOLUTE "${ARG_DEVELOPER_DIR}"
+      OR NOT IS_DIRECTORY "${ARG_DEVELOPER_DIR}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Developer path is not an absolute directory: "
+      "${ARG_DEVELOPER_DIR}")
+  endif()
+  if(NOT IS_ABSOLUTE "${ARG_SDK_PATH}"
+      OR NOT IS_DIRECTORY "${ARG_SDK_PATH}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK path is not an absolute directory: "
+      "${ARG_SDK_PATH}")
+  endif()
+  if(NOT IS_ABSOLUTE "${ARG_SDK_ROOT}"
+      OR NOT IS_DIRECTORY "${ARG_SDK_ROOT}")
+    message(FATAL_ERROR
+      "Highway GCC canary sealed Apple SDK root is not an absolute directory: "
+      "${ARG_SDK_ROOT}")
+  endif()
+  file(REAL_PATH "${ARG_DEVELOPER_DIR}" _developer_real)
+  file(REAL_PATH "${ARG_SDK_PATH}" _sdk_real)
+  file(REAL_PATH "${ARG_SDK_ROOT}" _expected_sdk_real)
+  if(NOT _sdk_real STREQUAL _expected_sdk_real)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK spelling no longer resolves to its sealed "
+      "root: path=${ARG_SDK_PATH}, expected=${_expected_sdk_real}, "
+      "observed=${_sdk_real}")
+  endif()
+  set(_sdk_parent
+    "${_developer_real}/Platforms/MacOSX.platform/Developer/SDKs")
+  if(NOT IS_DIRECTORY "${_sdk_parent}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Developer directory owns no macOS SDK root: "
+      "${_sdk_parent}")
+  endif()
+  file(REAL_PATH "${_sdk_parent}" _sdk_parent_real)
+  string(FIND "${_sdk_real}/" "${_sdk_parent_real}/" _sdk_contained)
+  if(NOT _sdk_contained EQUAL 0)
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK escaped the selected Developer "
+      "directory: developer=${_developer_real}, sdk=${_sdk_real}")
+  endif()
+  # This is a deterministic qualification seal, not a hostile-local-writer
+  # security boundary.  It rejects shared writable SDK trees and checkpoints
+  # every compilation-relevant byte before/after each phase; a same-UID actor
+  # racing and restoring inputs is explicitly outside the builder threat model.
+  _bioseq_highway_gcc_canary_require_nonshared_writable_directory(
+    "${_developer_real}" "active Developer directory")
+  set(_sdk_ancestor "${_sdk_real}")
+  while(TRUE)
+    _bioseq_highway_gcc_canary_require_nonshared_writable_directory(
+      "${_sdk_ancestor}" "active Apple SDK ancestor")
+    if(_sdk_ancestor STREQUAL _developer_real)
+      break()
+    endif()
+    get_filename_component(_sdk_ancestor "${_sdk_ancestor}" DIRECTORY)
+    string(FIND "${_sdk_ancestor}/" "${_developer_real}/" _ancestor_contained)
+    if(NOT _ancestor_contained EQUAL 0
+        AND NOT _sdk_ancestor STREQUAL _developer_real)
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK ancestor escaped the selected "
+        "Developer directory")
+    endif()
+  endwhile()
+
+  set(_sdk_settings "${_sdk_real}/SDKSettings.plist")
+  set(_sdk_settings_json "${_sdk_real}/SDKSettings.json")
+  set(_system_version_plist
+    "${_sdk_real}/System/Library/CoreServices/SystemVersion.plist")
+  set(_libsystem_path "${_sdk_real}/usr/lib/libSystem.tbd")
+  set(_required_regular_files
+    "${_sdk_settings}" "${_sdk_settings_json}" "${_system_version_plist}")
+  foreach(_required_file IN LISTS _required_regular_files)
+    if(NOT EXISTS "${_required_file}" OR IS_DIRECTORY "${_required_file}")
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK closure is missing ${_required_file}")
+    endif()
+    if(IS_SYMLINK "${_required_file}")
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK metadata must be a regular in-tree "
+        "file: ${_required_file}")
+    endif()
+    file(REAL_PATH "${_required_file}" _required_file_real)
+    string(FIND "${_required_file_real}/" "${_sdk_real}/"
+      _required_file_contained)
+    if(NOT _required_file_contained EQUAL 0)
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK metadata escaped its sealed root: "
+        "${_required_file}")
+    endif()
+  endforeach()
+  foreach(_required_header IN ITEMS
+      _bounds.h stdio.h stdlib.h stddef.h stdint.h sys/types.h)
+    if(NOT EXISTS "${_sdk_real}/usr/include/${_required_header}"
+        OR IS_DIRECTORY "${_sdk_real}/usr/include/${_required_header}")
+      message(FATAL_ERROR
+        "Highway GCC canary active Apple SDK is missing required C header "
+        "usr/include/${_required_header}")
+    endif()
+  endforeach()
+  if(NOT EXISTS "${_libsystem_path}" OR IS_DIRECTORY "${_libsystem_path}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK is missing usr/lib/libSystem.tbd")
+  endif()
+
+  set(_plist_query_labels
+    sdk_version sdk_canonical_name system_version system_build_version)
+  set(_plist_query_files
+    "${_sdk_settings}" "${_sdk_settings}"
+    "${_system_version_plist}" "${_system_version_plist}")
+  set(_plist_query_keys
+    Version CanonicalName ProductVersion ProductBuildVersion)
+  foreach(_query_index RANGE 0 3)
+    list(GET _plist_query_labels ${_query_index} _query_label)
+    list(GET _plist_query_files ${_query_index} _query_file)
+    list(GET _plist_query_keys ${_query_index} _query_key)
+    execute_process(
+      COMMAND "/usr/bin/env" -i
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+        "LC_ALL=C"
+        "LANG=C"
+        "/usr/bin/plutil" -extract "${_query_key}" raw -o - "${_query_file}"
+      RESULT_VARIABLE _query_status
+      OUTPUT_VARIABLE _query_output
+      ERROR_VARIABLE _query_stderr
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _query_status EQUAL 0)
+      message(FATAL_ERROR
+        "Highway GCC canary could not query ${_query_label}: "
+        "status=${_query_status}, stderr=${_query_stderr}")
+    endif()
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "${_query_label}" "${_query_output}")
+    set("_${_query_label}" "${_query_output}")
+  endforeach()
+  if(NOT _sdk_version MATCHES "^[0-9]+(\\.[0-9]+)+$")
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK has invalid version "
+      "${_sdk_version}")
+  endif()
+  if(NOT _sdk_canonical_name STREQUAL "macosx${_sdk_version}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK canonical name/version disagree: "
+      "${_sdk_canonical_name} versus ${_sdk_version}")
+  endif()
+  if(NOT _system_version STREQUAL _sdk_version)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK and SystemVersion product versions "
+      "disagree: ${_sdk_version} versus ${_system_version}")
+  endif()
+
+  file(GLOB_RECURSE _sdk_headers FOLLOW_SYMLINKS LIST_DIRECTORIES FALSE
+    "${_sdk_real}/usr/include/*")
+  file(GLOB_RECURSE _sdk_header_entries LIST_DIRECTORIES TRUE
+    "${_sdk_real}/usr/include/*")
+  list(SORT _sdk_headers)
+  list(SORT _sdk_header_entries)
+  if(NOT _sdk_headers)
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK has no usr/include closure")
+  endif()
+  set(_header_material
+    "bioseq-highway-gcc-apple-sdk-c-headers\n"
+    "revision=1\n")
+  foreach(_header IN LISTS _sdk_headers)
+    cmake_path(RELATIVE_PATH _header
+      BASE_DIRECTORY "${_sdk_real}" OUTPUT_VARIABLE _header_relative)
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "Apple SDK header path" "${_header_relative}")
+    file(REAL_PATH "${_header}" _header_real)
+    string(FIND "${_header_real}/" "${_sdk_real}/" _header_contained)
+    if(NOT _header_contained EQUAL 0)
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK header escaped its sealed root: "
+        "${_header}")
+    endif()
+    cmake_path(RELATIVE_PATH _header_real
+      BASE_DIRECTORY "${_sdk_real}" OUTPUT_VARIABLE _header_real_relative)
+    set(_header_link "regular")
+    if(IS_SYMLINK "${_header}")
+      file(READ_SYMLINK "${_header}" _header_link)
+      _bioseq_highway_gcc_canary_require_identity_value(
+        "Apple SDK header symlink" "${_header_link}")
+    endif()
+    file(SHA256 "${_header_real}" _header_sha256)
+    string(APPEND _header_material
+      "${_header_relative}\t${_header_link}\t${_header_real_relative}\t"
+      "${_header_sha256}\n")
+  endforeach()
+  string(SHA256 _header_digest "${_header_material}")
+  set(_header_symlink_material
+    "bioseq-highway-gcc-apple-sdk-c-header-symlinks\n"
+    "revision=1\n")
+  foreach(_header_entry IN LISTS _sdk_header_entries)
+    if(NOT IS_SYMLINK "${_header_entry}")
+      continue()
+    endif()
+    cmake_path(RELATIVE_PATH _header_entry
+      BASE_DIRECTORY "${_sdk_real}" OUTPUT_VARIABLE _entry_relative)
+    file(READ_SYMLINK "${_header_entry}" _entry_link)
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "Apple SDK header symlink path" "${_entry_relative}")
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "Apple SDK header symlink target" "${_entry_link}")
+    file(REAL_PATH "${_header_entry}" _entry_real)
+    string(FIND "${_entry_real}/" "${_sdk_real}/" _entry_contained)
+    if(NOT _entry_contained EQUAL 0)
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK header symlink escaped its sealed root: "
+        "${_header_entry}")
+    endif()
+    cmake_path(RELATIVE_PATH _entry_real
+      BASE_DIRECTORY "${_sdk_real}" OUTPUT_VARIABLE _entry_real_relative)
+    string(APPEND _header_symlink_material
+      "${_entry_relative}\t${_entry_link}\t${_entry_real_relative}\n")
+  endforeach()
+  string(SHA256 _header_symlink_digest "${_header_symlink_material}")
+
+  file(REAL_PATH "${_libsystem_path}" _libsystem_real)
+  string(FIND "${_libsystem_real}/" "${_sdk_real}/" _libsystem_contained)
+  if(NOT _libsystem_contained EQUAL 0)
+    message(FATAL_ERROR
+      "Highway GCC canary libSystem.tbd escaped the active Apple SDK")
+  endif()
+  set(_libsystem_link "regular")
+  if(IS_SYMLINK "${_libsystem_path}")
+    file(READ_SYMLINK "${_libsystem_path}" _libsystem_link)
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "Apple SDK libSystem symlink" "${_libsystem_link}")
+  endif()
+  cmake_path(RELATIVE_PATH _libsystem_real
+    BASE_DIRECTORY "${_sdk_real}" OUTPUT_VARIABLE _libsystem_relative)
+  file(SHA256 "${_libsystem_real}" _libsystem_sha256)
+  file(SHA256 "${_sdk_settings}" _sdk_settings_sha256)
+  file(SHA256 "${_sdk_settings_json}" _sdk_settings_json_sha256)
+  file(SHA256 "${_system_version_plist}" _system_version_sha256)
+
+  execute_process(
+    COMMAND "/usr/bin/env" -i
+      "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+      "LC_ALL=C"
+      "LANG=C"
+      "DEVELOPER_DIR=${_developer_real}"
+      "SDKROOT=${_sdk_real}"
+      "${ARG_CXX}"
+      -std=gnu++26
+      -isysroot "${_sdk_real}"
+      -x c++
+      -include cstdio
+      -fsyntax-only /dev/null
+    RESULT_VARIABLE _probe_status
+    OUTPUT_VARIABLE _probe_stdout
+    ERROR_VARIABLE _probe_stderr)
+  if(NOT _probe_status EQUAL 0)
+    message(FATAL_ERROR
+      "Highway GCC canary authenticated compiler cannot use the active Apple "
+      "SDK for <cstdio>: status=${_probe_status}, stderr=${_probe_stderr}")
+  endif()
+
+  string(CONCAT _sdk_material
+    "bioseq-highway-gcc-apple-sdk\n"
+    "revision=1\n"
+    "developer=${_developer_real}\n"
+    "sdk-path=${ARG_SDK_PATH}\n"
+    "sdk-root=${_sdk_real}\n"
+    "version=${_sdk_version}\n"
+    "build=${_system_build_version}\n"
+    "canonical-name=${_sdk_canonical_name}\n"
+    "sdk-settings=${_sdk_settings_sha256}\n"
+    "sdk-settings-json=${_sdk_settings_json_sha256}\n"
+    "system-version=${_system_version_sha256}\n"
+    "c-headers=${_header_digest}\n"
+    "c-header-symlinks=${_header_symlink_digest}\n"
+    "libsystem-link=${_libsystem_link}\n"
+    "libsystem-target=${_libsystem_relative}\n"
+    "libsystem=${_libsystem_sha256}\n")
+  string(SHA256 _sdk_digest "${_sdk_material}")
+  set(${ARG_OUTPUT_VERSION} "${_sdk_version}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_BUILD_VERSION} "${_system_build_version}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_DIGEST} "${_sdk_digest}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_gcc_canary_select_apple_sdk)
+  cmake_parse_arguments(PARSE_ARGV 0 ARG
+    ""
+    "CXX;OUTPUT_DEVELOPER_DIR;OUTPUT_SDK_PATH;OUTPUT_SDK_ROOT;OUTPUT_VERSION;OUTPUT_BUILD_VERSION;OUTPUT_DIGEST"
+    "")
+  foreach(_required IN ITEMS
+      CXX OUTPUT_DEVELOPER_DIR OUTPUT_SDK_PATH OUTPUT_SDK_ROOT OUTPUT_VERSION
+      OUTPUT_BUILD_VERSION OUTPUT_DIGEST)
+    if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK selection requires ${_required}")
+    endif()
+  endforeach()
+  if(ARG_UNPARSED_ARGUMENTS)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK selection received unknown arguments: "
+      "${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+  # The host Clang build may intentionally use the standalone CLT SDK.  The
+  # isolated Homebrew-GCC proof instead binds only the active Xcode selected by
+  # xcode-select/xcrun; it never inherits CMAKE_OSX_SYSROOT, SDKROOT, or an
+  # arbitrary installed-Xcode path from the outer process.
+  foreach(_tool IN ITEMS env xcode-select xcrun plutil stat)
+    set(_tool_path "/usr/bin/${_tool}")
+    if(NOT EXISTS "${_tool_path}" OR IS_DIRECTORY "${_tool_path}")
+      message(FATAL_ERROR
+        "Highway GCC canary requires absolute Apple tool ${_tool_path}")
+    endif()
+  endforeach()
+  set(_clean_environment
+    "/usr/bin/env" -i
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+    "LC_ALL=C"
+    "LANG=C")
+  execute_process(
+    COMMAND ${_clean_environment} "/usr/bin/xcode-select" -p
+    RESULT_VARIABLE _developer_status
+    OUTPUT_VARIABLE _developer_path
+    ERROR_VARIABLE _developer_stderr
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  _bioseq_highway_gcc_canary_require_identity_value(
+    "xcode-select Developer path" "${_developer_path}")
+  if(NOT _developer_status EQUAL 0
+      OR NOT IS_ABSOLUTE "${_developer_path}"
+      OR NOT IS_DIRECTORY "${_developer_path}")
+    message(FATAL_ERROR
+      "Highway GCC canary could not resolve the active Developer directory: "
+      "status=${_developer_status}, stderr=${_developer_stderr}")
+  endif()
+  file(REAL_PATH "${_developer_path}" _developer_real)
+  set(_developer_environment
+    ${_clean_environment} "DEVELOPER_DIR=${_developer_real}")
+  set(_sdk_query_labels path version build_version)
+  set(_sdk_query_arguments
+    --show-sdk-path --show-sdk-version --show-sdk-build-version)
+  foreach(_query_index RANGE 0 2)
+    list(GET _sdk_query_labels ${_query_index} _query_label)
+    list(GET _sdk_query_arguments ${_query_index} _query_argument)
+    execute_process(
+      COMMAND ${_developer_environment}
+        "/usr/bin/xcrun" --sdk macosx "${_query_argument}"
+      RESULT_VARIABLE _query_status
+      OUTPUT_VARIABLE _query_output
+      ERROR_VARIABLE _query_stderr
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _query_status EQUAL 0)
+      message(FATAL_ERROR
+        "Highway GCC canary could not resolve active macOS SDK ${_query_label}: "
+        "status=${_query_status}, stderr=${_query_stderr}")
+    endif()
+    _bioseq_highway_gcc_canary_require_identity_value(
+      "xcrun macOS SDK ${_query_label}" "${_query_output}")
+    set("_sdk_${_query_label}" "${_query_output}")
+  endforeach()
+  if(NOT IS_ABSOLUTE "${_sdk_path}" OR NOT IS_DIRECTORY "${_sdk_path}")
+    message(FATAL_ERROR
+      "Highway GCC canary xcrun returned a non-directory SDK path: "
+      "${_sdk_path}")
+  endif()
+  file(REAL_PATH "${_sdk_path}" _sdk_real)
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${ARG_CXX}"
+    DEVELOPER_DIR "${_developer_real}"
+    SDK_PATH "${_sdk_path}"
+    SDK_ROOT "${_sdk_real}"
+    OUTPUT_VERSION _observed_version
+    OUTPUT_BUILD_VERSION _observed_build_version
+    OUTPUT_DIGEST _observed_digest)
+  if(NOT _sdk_version STREQUAL _observed_version
+      OR NOT _sdk_build_version STREQUAL _observed_build_version)
+    message(FATAL_ERROR
+      "Highway GCC canary xcrun and active SDK metadata disagree: "
+      "xcrun=${_sdk_version}/${_sdk_build_version}, "
+      "metadata=${_observed_version}/${_observed_build_version}")
+  endif()
+  set(${ARG_OUTPUT_DEVELOPER_DIR} "${_developer_real}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_SDK_PATH} "${_sdk_path}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_SDK_ROOT} "${_sdk_real}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_VERSION} "${_observed_version}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_BUILD_VERSION} "${_observed_build_version}" PARENT_SCOPE)
+  set(${ARG_OUTPUT_DIGEST} "${_observed_digest}" PARENT_SCOPE)
+endfunction()
+
+function(_bioseq_highway_gcc_canary_verify_apple_sdk)
+  cmake_parse_arguments(PARSE_ARGV 0 ARG
+    ""
+    "CXX;DEVELOPER_DIR;SDK_PATH;SDK_ROOT;VERSION;BUILD_VERSION;DIGEST"
+    "")
+  foreach(_required IN ITEMS
+      CXX DEVELOPER_DIR SDK_PATH SDK_ROOT VERSION BUILD_VERSION DIGEST)
+    if(NOT DEFINED ARG_${_required} OR "${ARG_${_required}}" STREQUAL "")
+      message(FATAL_ERROR
+        "Highway GCC canary Apple SDK verification requires ${_required}")
+    endif()
+  endforeach()
+  _bioseq_highway_gcc_canary_select_apple_sdk(
+    CXX "${ARG_CXX}"
+    OUTPUT_DEVELOPER_DIR _observed_developer
+    OUTPUT_SDK_PATH _observed_path
+    OUTPUT_SDK_ROOT _observed_root
+    OUTPUT_VERSION _observed_version
+    OUTPUT_BUILD_VERSION _observed_build
+    OUTPUT_DIGEST _observed_digest)
+  if(NOT "${_observed_developer}" STREQUAL "${ARG_DEVELOPER_DIR}"
+      OR NOT "${_observed_path}" STREQUAL "${ARG_SDK_PATH}"
+      OR NOT "${_observed_root}" STREQUAL "${ARG_SDK_ROOT}"
+      OR NOT "${_observed_version}" STREQUAL "${ARG_VERSION}"
+      OR NOT "${_observed_build}" STREQUAL "${ARG_BUILD_VERSION}"
+      OR NOT "${_observed_digest}" STREQUAL "${ARG_DIGEST}")
+    message(FATAL_ERROR
+      "Highway GCC canary active Apple SDK identity changed: expected="
+      "${ARG_DEVELOPER_DIR}|${ARG_SDK_PATH}|${ARG_SDK_ROOT}|${ARG_VERSION}|"
+      "${ARG_BUILD_VERSION}|${ARG_DIGEST}, observed=${_observed_developer}|"
+      "${_observed_path}|${_observed_root}|${_observed_version}|"
+      "${_observed_build}|${_observed_digest}")
+  endif()
+endfunction()
+
 function(_bioseq_highway_gcc_canary_macho_records
     output_dependencies output_rpaths image)
   if(NOT IS_ABSOLUTE "${image}"
@@ -688,6 +1176,14 @@ function(bioseq_add_highway_gcc_canary)
   _bioseq_highway_gcc_canary_driver_closure(
     _gcc_driver_closure_sha256 _gcc_libstdcxx _gcc_libgcc
     "${_gcc_root}" "${_gcc_cxx}")
+  _bioseq_highway_gcc_canary_select_apple_sdk(
+    CXX "${_gcc_cxx}"
+    OUTPUT_DEVELOPER_DIR _apple_developer_dir
+    OUTPUT_SDK_PATH _apple_sdk_path
+    OUTPUT_SDK_ROOT _apple_sdk_root
+    OUTPUT_VERSION _apple_sdk_version
+    OUTPUT_BUILD_VERSION _apple_sdk_build_version
+    OUTPUT_DIGEST _apple_sdk_digest)
 
   set(_nested_source
     "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/namespace_materialization/tests/integration/module_canary/gcc_canary")
@@ -708,6 +1204,8 @@ function(bioseq_add_highway_gcc_canary)
       "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
       "LC_ALL=C"
       "LANG=C"
+      "DEVELOPER_DIR=${_apple_developer_dir}"
+      "SDKROOT=${_apple_sdk_root}"
       "${CMAKE_COMMAND}"
       "-DBIOSEQ_GCC_CANARY_CMAKE=${CMAKE_COMMAND}"
       "-DBIOSEQ_GCC_CANARY_NINJA=${CMAKE_MAKE_PROGRAM}"
@@ -733,6 +1231,12 @@ function(bioseq_add_highway_gcc_canary)
       "-DBIOSEQ_GCC_CANARY_MODULES_SHA256=${_gcc_modules_sha256}"
       "-DBIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256=${_gcc_module_sources_sha256}"
       "-DBIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256=${_gcc_driver_closure_sha256}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR=${_apple_developer_dir}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_SDK_PATH=${_apple_sdk_path}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_SDK_ROOT=${_apple_sdk_root}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_SDK_VERSION=${_apple_sdk_version}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION=${_apple_sdk_build_version}"
+      "-DBIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST=${_apple_sdk_digest}"
       -P "${_runner}"
     COMMENT
       "Compiling and linking GCC Highway/module canaries with an empty environment"

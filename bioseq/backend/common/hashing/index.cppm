@@ -205,6 +205,7 @@ using sha256_digest = std::array<std::byte, 32>;
 class sha256_hasher {
 private:
     static constexpr std::size_t k_block_size = 64u;
+    using block_view = std::span<const std::byte, k_block_size>;
 
     std::array<std::uint32_t, 8> state_{
         0x6a09e667u,
@@ -240,9 +241,9 @@ private:
     /**
      * @brief Compresses one complete SHA-256 message block into the state.
      *
-     * @param[in] block Pointer to exactly @ref k_block_size readable bytes.
+     * @param[in] block Exactly @ref k_block_size readable bytes.
      */
-    void transform_block(const std::byte* block) noexcept {
+    void transform_block(block_view block) noexcept {
         std::array<std::uint32_t, 64> words{};
         for (std::size_t word_index = 0; word_index < 16u; ++word_index) {
             const std::size_t byte_offset = word_index * 4u;
@@ -332,7 +333,7 @@ private:
                 block_buffer_.begin() + static_cast<std::ptrdiff_t>(buffered_byte_count_),
                 block_buffer_.end(),
                 std::byte{0});
-            transform_block(block_buffer_.data());
+            transform_block(block_view{block_buffer_});
             buffered_byte_count_ = 0u;
         }
 
@@ -344,7 +345,7 @@ private:
             block_buffer_[63u - byte_index] = static_cast<std::byte>(
                 (bit_length >> (byte_index * 8u)) & 0xffu);
         }
-        transform_block(block_buffer_.data());
+        transform_block(block_view{block_buffer_});
 
         sha256_digest digest{};
         for (std::size_t word_index = 0; word_index < state_.size(); ++word_index) {
@@ -360,8 +361,8 @@ public:
     /**
      * @brief Appends a contiguous byte span to the running digest.
      *
-     * Complete 64-byte blocks are compressed directly from the caller's span;
-     * only the incomplete suffix is copied into object storage.
+     * Complete 64-byte blocks are compressed directly from the caller's span.
+     * Only the incomplete suffix is copied into object storage.
      *
      * @param[in] bytes Bytes appended without framing or length prefixes.
      */
@@ -383,13 +384,13 @@ public:
             bytes = bytes.subspan(copied_byte_count);
 
             if (buffered_byte_count_ == k_block_size) {
-                transform_block(block_buffer_.data());
+                transform_block(block_view{block_buffer_});
                 buffered_byte_count_ = 0u;
             }
         }
 
         while (bytes.size() >= k_block_size) {
-            transform_block(bytes.data());
+            transform_block(bytes.first<k_block_size>());
             bytes = bytes.subspan(k_block_size);
         }
 
@@ -435,7 +436,9 @@ public:
  * @return Lowercase hexadecimal representation.
  */
 [[nodiscard]] inline std::string to_hex(const sha256_digest& digest) {
-    static constexpr char k_hex_digits[] = "0123456789abcdef";
+    static constexpr std::array k_hex_digits{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
     std::string hexadecimal_digest;
     hexadecimal_digest.reserve(digest.size() * 2u);
     for (const std::byte value : digest) {
@@ -453,7 +456,7 @@ public:
  * @return Lowercase 64-character SHA-256 digest.
  */
 [[nodiscard]] inline std::string sha256_hex(std::string_view bytes) {
-    sha256_hasher hasher;
+    sha256_hasher hasher{};
     hasher.update(std::as_bytes(std::span{bytes.data(), bytes.size()}));
     return to_hex(hasher.finalize());
 }

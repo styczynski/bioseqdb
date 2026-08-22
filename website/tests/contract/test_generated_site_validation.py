@@ -53,6 +53,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 try:
     import html5lib
@@ -73,6 +74,22 @@ _INLINE_HANDLERS = (
     " onclick=", " onload=", " onerror=", " onmouseover=", " onfocus=",
     " onsubmit=", " onchange=")
 _H1 = re.compile(r"<h1[\s>]", re.IGNORECASE)
+_EXPECTED_TUTORIAL_IDS = {
+    "tutorial:quick_read_search_write",
+    "tutorial:sequence_column_type",
+    "tutorial:columnar_storage_and_vectorized_aggregates",
+    "tutorial:sequence_generation",
+    "tutorial:fasta_fastq_gzip_and_io",
+    "tutorial:index_lifecycle_and_metadata",
+    "tutorial:slice_concat_reverse",
+    "tutorial:similarity_search",
+    "tutorial:multiple_sequence_columns_and_joins",
+    "tutorial:remote_provider_to_search",
+    "tutorial:query_cache",
+    "tutorial:highway_runtime_dispatch",
+    "tutorial:reading_bioseq_explain",
+}
+_BENCHMARK_REMOTE_HOSTS = {"raw.githubusercontent.com"}
 
 # HTML namespace used by html5lib's etree treebuilder; the ``id`` attribute key
 # itself is not namespaced (verified empirically against html5lib 1.1).
@@ -98,6 +115,66 @@ _ABSOLUTE_PATH_TOKENS = ("/home/", "/root/", ".s.PGSQL", "dbname=", "postgresql:
 
 def _fail(path: Path, reason: str) -> str:
     return f"{path}: {reason}"
+
+
+def _benchmark_data_inventory_problems(
+    benchmark_manifest: Path,
+    local_targets: set[Path],
+    *,
+    has_local_source: bool,
+    remote_count: int,
+) -> list[str]:
+    """Validate every staged benchmark-data entry against the manifest mode."""
+
+    problems: list[str] = []
+    lexical_data_root = benchmark_manifest.parent / "benchmark-data"
+    display_root = benchmark_manifest.parent.resolve()
+    staged_files: set[Path] = set()
+    if lexical_data_root.is_symlink():
+        problems.append(_fail(
+            lexical_data_root,
+            "benchmark-data root must not be a symlink",
+        ))
+    elif lexical_data_root.exists() and not lexical_data_root.is_dir():
+        problems.append(_fail(
+            lexical_data_root,
+            "benchmark-data root must be a directory",
+        ))
+    elif lexical_data_root.is_dir():
+        for entry in sorted(lexical_data_root.rglob("*")):
+            if entry.is_symlink():
+                problems.append(_fail(
+                    entry, "benchmark-data must not contain a symlink"))
+            elif entry.is_dir():
+                continue
+            elif not entry.is_file():
+                problems.append(_fail(
+                    entry, "benchmark-data contains a special file"))
+            else:
+                staged_files.add(entry.resolve())
+    if has_local_source and local_targets != staged_files:
+        missing = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in staged_files - local_targets
+        )
+        extra = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in local_targets - staged_files
+        )
+        problems.append(_fail(
+            benchmark_manifest,
+            f"benchmark inventory mismatch missing={missing}, extra={extra}",
+        ))
+    elif not has_local_source and remote_count and staged_files:
+        unexpected = sorted(
+            path.relative_to(display_root).as_posix()
+            for path in staged_files
+        )
+        problems.append(_fail(
+            benchmark_manifest,
+            f"remote benchmark override retains local data: {unexpected}",
+        ))
+    return problems
 
 
 def _route_to_relpath(route: str, base_path: str) -> str | None:
@@ -275,6 +352,244 @@ def site_level_checks(site: Path, pages: dict[Path, str],
         except Exception as error:  # noqa: BLE001
             problems.append(_fail(path, f"is not valid XML: {error}"))
 
+    # The default benchmark manifest is a content-classified same-origin index.
+    # An explicit override may contain only immutable public raw HTTPS URLs.
+    benchmark_manifests = sorted(site.rglob("benchmarks-manifest.json"))
+    if len(benchmark_manifests) != 1:
+        problems.append(_fail(
+            site, f"expected one benchmark manifest, got {benchmark_manifests}"))
+    else:
+        benchmark_manifest = benchmark_manifests[0]
+        try:
+            benchmark_document = json.loads(
+                benchmark_manifest.read_text(encoding="utf-8"))
+        except Exception:  # already reported by the general JSON pass
+            benchmark_document = {}
+        if isinstance(benchmark_document, list):
+            sources = benchmark_document
+        elif isinstance(benchmark_document, dict):
+            sources = benchmark_document.get("sources", [])
+        else:
+            sources = []
+        if not isinstance(sources, list) or not sources:
+            problems.append(_fail(
+                benchmark_manifest, "has no non-empty sources array"))
+        else:
+            local_records: list[tuple[str, str, int]] = []
+            local_targets: set[Path] = set()
+            remote_count = 0
+            has_local_source = False
+            source_values: set[str] = set()
+            data_root = (benchmark_manifest.parent / "benchmark-data").resolve()
+            for source in sources:
+                if isinstance(source, str):
+                    value = source
+                elif isinstance(source, dict) and set(source).issubset(
+                        {"url", "path"}) and len(source) == 1:
+                    value = source.get("url", source.get("path", ""))
+                else:
+                    value = ""
+                if not isinstance(value, str) or not value:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is invalid: {source!r}",
+                    ))
+                    continue
+                if value in source_values:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is duplicated: {value!r}",
+                    ))
+                    continue
+                source_values.add(value)
+                try:
+                    parsed = urlsplit(value)
+                except ValueError as error:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source URL is invalid: {value!r}: {error}",
+                    ))
+                    continue
+                if parsed.scheme or parsed.netloc:
+                    remote_count += 1
+                    decoded_path = unquote(parsed.path)
+                    decoded_parts = tuple(
+                        part for part in decoded_path.split("/") if part)
+                    try:
+                        port = parsed.port
+                    except ValueError:
+                        port = -1
+                    immutable_revision = (
+                        len(decoded_parts) >= 4
+                        and re.fullmatch(
+                            r"[0-9a-f]{40}", decoded_parts[2]) is not None
+                    )
+                    if (
+                        parsed.scheme != "https"
+                        or parsed.hostname not in _BENCHMARK_REMOTE_HOSTS
+                        or port is not None
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or parsed.query
+                        or parsed.fragment
+                        or ".." in decoded_parts
+                        or "\\" in decoded_path
+                        or "%" in decoded_path
+                        or "/blob/" in parsed.path
+                        or not immutable_revision
+                    ):
+                        problems.append(_fail(
+                            benchmark_manifest,
+                            f"unsupported benchmark override URL {value!r}",
+                        ))
+                    continue
+                has_local_source = True
+                decoded_path = unquote(parsed.path)
+                relative_parts = Path(decoded_path).parts
+                if (
+                    decoded_path.startswith("/")
+                    or parsed.query
+                    or parsed.fragment
+                    or "\\" in decoded_path
+                    or "%" in decoded_path
+                    or ".." in relative_parts
+                ):
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is not a plain relative path: {value!r}",
+                    ))
+                    continue
+                if len(relative_parts) < 2 or relative_parts[0] != "benchmark-data":
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source is outside benchmark-data: {value!r}",
+                    ))
+                    continue
+                lexical_target = benchmark_manifest.parent / decoded_path
+                current = benchmark_manifest.parent
+                traverses_symlink = False
+                for part in relative_parts:
+                    current = current / part
+                    if current.is_symlink():
+                        traverses_symlink = True
+                        break
+                if traverses_symlink:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source traverses a symlink: {value!r}",
+                    ))
+                    continue
+                target = lexical_target.resolve()
+                try:
+                    target.relative_to(data_root)
+                except ValueError:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source escapes benchmark-data: {value!r}",
+                    ))
+                    continue
+                if target.suffix != ".json" or not target.is_file():
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark source does not resolve: {value!r}",
+                    ))
+                    continue
+                if target in local_targets:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        f"benchmark target is duplicated: {value!r}",
+                    ))
+                    continue
+                local_targets.add(target)
+
+                try:
+                    document = json.loads(target.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                report_claim = (
+                    isinstance(document, dict)
+                    and isinstance(document.get("benchmarks"), dict)
+                    and bool(document["benchmarks"])
+                    and isinstance(document.get("meta"), dict)
+                )
+                config_blocks = []
+                if isinstance(document, dict):
+                    config_blocks = [
+                        block for key, block in document.items()
+                        if key not in {"params", "test_cases", "regression_rules"}
+                        and isinstance(block, dict)
+                        and isinstance(block.get("matrix"), dict)
+                    ]
+                config_claim = (
+                    isinstance(document, dict)
+                    and isinstance(document.get("params"), dict)
+                    and bool(document["params"])
+                    and isinstance(document.get("test_cases"), dict)
+                    and bool(document["test_cases"])
+                    and isinstance(document.get("regression_rules"), list)
+                    and bool(config_blocks)
+                )
+                if report_claim == config_claim:
+                    problems.append(_fail(
+                        target,
+                        "is not exactly one supported benchmark report/configuration",
+                    ))
+                    continue
+                if config_claim:
+                    local_records.append((decoded_path, "configuration", 0))
+                    continue
+                meta = document["meta"]
+                report_shape_valid = (
+                    type(meta.get("timestamp")) is int
+                    and meta["timestamp"] >= 0
+                    and isinstance(meta.get("created"), str)
+                    and isinstance(meta.get("fast"), bool)
+                    and isinstance(meta.get("history_eligible"), bool)
+                    and all(
+                        isinstance(benchmark, dict)
+                        and isinstance(benchmark.get("execution_tuples"), list)
+                        and bool(benchmark["execution_tuples"])
+                        for benchmark in document["benchmarks"].values()
+                    )
+                )
+                if not report_shape_valid:
+                    problems.append(_fail(
+                        target, "does not expose validated framework report metadata"))
+                    continue
+                local_records.append(
+                    (decoded_path, "report", meta["timestamp"]))
+            if has_local_source and remote_count:
+                problems.append(_fail(
+                    benchmark_manifest,
+                    "must not mix same-origin data with remote overrides",
+                ))
+            problems.extend(_benchmark_data_inventory_problems(
+                benchmark_manifest,
+                local_targets,
+                has_local_source=has_local_source,
+                remote_count=remote_count,
+            ))
+            if has_local_source:
+                if not any(kind == "configuration"
+                           for _, kind, _ in local_records):
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        "same-origin benchmark inventory has no configuration",
+                    ))
+                expected_records = sorted(
+                    (record for record in local_records
+                     if record[1] == "configuration"),
+                    key=lambda record: record[0],
+                ) + sorted(
+                    (record for record in local_records if record[1] == "report"),
+                    key=lambda record: (-record[2], record[0]),
+                )
+                if local_records != expected_records:
+                    problems.append(_fail(
+                        benchmark_manifest,
+                        "benchmark sources are not in deterministic config/newest-report order",
+                    ))
+
     # (2) site-manifest set-equality + per-file SHA-256 verification (§16). The
     #     external layer re-derives the tree so a typed-model manifest cannot
     #     self-certify; symlinks and special files are rejected outright.
@@ -367,12 +682,6 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                     problems.append(_fail(path, f"link {url} anchor #{frag} not found in target"))
 
     # (5) Search records, entity references, and tooltip data URLs resolve (§12.4).
-    expected_tutorial_ids = {
-        "tutorial:sequence_column_type",
-        "tutorial:similarity_search",
-        "tutorial:query_cache",
-        "tutorial:highway_runtime_dispatch",
-    }
     for search_path in site.rglob("search-index.json"):
         records = json.loads(
             search_path.read_text(encoding="utf-8")
@@ -382,10 +691,10 @@ def site_level_checks(site: Path, pages: dict[Path, str],
             for record in records
             if record.get("group") == "Tutorials"
         }
-        if tutorial_ids != expected_tutorial_ids:
+        if tutorial_ids != _EXPECTED_TUTORIAL_IDS:
             problems.append(_fail(
                 search_path,
-                "tutorial search inventory is not the exact current four-page set",
+                "tutorial search inventory is not the exact current tutorial set",
             ))
         for record in records:
             route = record.get("route")
@@ -394,8 +703,60 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 problems.append(_fail(search_path,
                                       f"record {record.get('id')!r} route {route} does not resolve"))
         tutorial_root = search_path.parent / "tutorials"
+        for tutorial_page in tutorial_root.glob("*/index.html"):
+            tutorial_text = tutorial_page.read_text(encoding="utf-8")
+            for forbidden in (
+                "Test-build-only", "DSM Test Fixture",
+                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
+                "Bioseq Owned RestrictInfo Path Copies",
+                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+                "Bioseq Requirement Executable", "bioseq_internal.",
+                "inspect_ready_minimizer_generation",
+                "inspect_ready_hash_major_minimizer_generation",
+            ):
+                if forbidden in tutorial_text:
+                    problems.append(_fail(
+                        tutorial_page,
+                        f"public tutorial exposes non-user field {forbidden!r}",
+                    ))
+        columnar_page = (
+            tutorial_root / "columnar_storage_and_vectorized_aggregates" / "index.html"
+        )
+        index_page = tutorial_root / "index_lifecycle_and_metadata" / "index.html"
         cache_page = tutorial_root / "query_cache" / "index.html"
         highway_page = tutorial_root / "highway_runtime_dispatch" / "index.html"
+        explain_page = tutorial_root / "reading_bioseq_explain" / "index.html"
+        if not columnar_page.is_file():
+            problems.append(_fail(
+                columnar_page, "current columnar/vector aggregate tutorial is missing"))
+        else:
+            columnar_text = columnar_page.read_text(encoding="utf-8")
+            for token in (
+                "VectorAggNode", "BioseqScan", "bioseq.list_seq_storage_shards",
+                "alter_bioseq_table_set", "alter_bioseq_table_reset",
+                "bioseq.column_cache.capacity_mb", "bioseq.vacuum_seq_storage",
+                "columnar_vector_aggregate",
+            ):
+                if token not in columnar_text:
+                    problems.append(_fail(
+                        columnar_page,
+                        f"columnar tutorial contract token {token!r} is missing",
+                    ))
+        if not index_page.is_file():
+            problems.append(_fail(index_page, "current index lifecycle tutorial is missing"))
+        else:
+            index_text = index_page.read_text(encoding="utf-8")
+            for token in (
+                "minimizers_per_fragment", "minimizers_per_sequence",
+                "symbol_counts", "require_compatible_persisted",
+                "Bioseq Fetched From Meta", "Actual Target Index Source",
+                "index_lifecycle_metadata",
+            ):
+                if token not in index_text:
+                    problems.append(_fail(
+                        index_page,
+                        f"index lifecycle tutorial contract token {token!r} is missing",
+                    ))
         if not cache_page.is_file():
             problems.append(_fail(cache_page, "current cache tutorial is missing"))
         else:
@@ -421,6 +782,22 @@ def site_level_checks(site: Path, pages: dict[Path, str],
                 if label not in highway_text:
                     problems.append(_fail(
                         highway_page, f"Highway EXPLAIN label {label!r} is missing"))
+        if not explain_page.is_file():
+            problems.append(_fail(explain_page, "current EXPLAIN tutorial is missing"))
+        else:
+            explain_text = explain_page.read_text(encoding="utf-8")
+            for forbidden in (
+                "Test-build-only DSM diagnostics", "DSM Test Fixture",
+                "Fully Attested Alignment Jobs", "Bioseq Batch ABI Version",
+                "Bioseq Owned RestrictInfo Path Copies",
+                "Bioseq Match Placeholder Sites", "Bioseq CPU Prepared Target",
+                "Bioseq Requirement Executable",
+            ):
+                if forbidden in explain_text:
+                    problems.append(_fail(
+                        explain_page,
+                        f"public EXPLAIN tutorial exposes non-user field {forbidden!r}",
+                    ))
     for entities_path in site.rglob("entities.*.json"):
         for entity_id, entity in json.loads(
                 entities_path.read_text(encoding="utf-8")).get("entities", {}).items():

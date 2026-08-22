@@ -116,7 +116,7 @@ struct chunked_span_sequence_scanner final {
 
     /// Build a chunked scanner over the storage of an existing in-memory
     /// compact_sequence_range. The backing span is `range`'s packed storage
-    /// units; the caller owns those bytes for the scanner's lifetime. We
+    /// units. The caller owns those bytes for the scanner's lifetime. We
     /// derive the span from `read_cptr(cbegin())` + `size()` because the
     /// project's compact_sequence_range has no `raw_storage_span` accessor.
     template <class p_range>
@@ -210,8 +210,10 @@ concept concrete_lazy_sequence = requires {
     requires sequence_scanner<typename p_view::scanner_type>;
 };
 
+/** @brief Marks views that satisfy the logical lazy-sequence slice contract. */
 struct lazy_sequence_slice_tag {};
 
+/** @brief Contiguity guarantee required by a sequence consumer. */
 enum class sequence_access_requirement : std::uint8_t {
     sequential_symbols,
     bounded_random_window,

@@ -1,3 +1,7 @@
+/**
+ * @file pg_compat.h
+ * @brief Provides the C++ include and function boundary for PostgreSQL headers.
+ */
 #pragma once
 
 #define PG_VERSION_17 170000

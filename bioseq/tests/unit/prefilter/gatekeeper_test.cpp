@@ -1,25 +1,18 @@
 /**
  * @file gatekeeper_test.cpp
- * @brief Focused semantic tests for the clean-room scalar GateKeeper oracle.
+ * @brief Verifies scalar GateKeeper soundness, diagnostics, and compact adapters.
+ *
+ * Independent dynamic-programming and run-based mask oracles cover exhaustive binary inputs,
+ * arbitrary byte ranks, packed dna4/dna5/aa27 ranges, boundary lengths, conservative slice
+ * handling, and randomized batch fixtures.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <numeric>
-#include <span>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
-import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;
 import bioseq.sequences.edit_distance_threshold;
 import bioseq.prefilter.gatekeeper;
-import bioseq.prefilter.gatekeeper.vulkan;
 import bioseq.prefilter.types;
 
 using namespace seq::literals;
@@ -27,9 +20,15 @@ using namespace bioseq::prefilter;
 
 namespace {
 
+/** Logical mismatch vector used by the independent run-scanning oracle. */
 using bit_vector = std::vector<std::uint8_t>;
 
-/** Compute independent full-matrix global Levenshtein distance. */
+/**
+ * @brief Computes an independent full-matrix global Levenshtein distance.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @return Exact insertion, deletion, and substitution distance.
+ */
 [[nodiscard]] inline std::uint32_t exact_levenshtein(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target)
@@ -55,7 +54,11 @@ using bit_vector = std::vector<std::uint8_t>;
     return previous.back();
 }
 
-/** Enumerate every binary string of one fixed length. */
+/**
+ * @brief Enumerates every binary rank string of one fixed length.
+ * @param[in] length Number of ranks in every generated string.
+ * @return All `2^length` strings in increasing source-bit order.
+ */
 [[nodiscard]] inline std::vector<std::vector<std::uint8_t>>
 binary_sequences(std::uint32_t length)
 {
@@ -73,7 +76,11 @@ binary_sequences(std::uint32_t length)
     return sequences;
 }
 
-/** Amend bounded zero runs by scanning runs, independently of word shifts. */
+/**
+ * @brief Amends bounded zero runs by scanning them independently of bitset shifts.
+ * @param[in] mismatches Logical mismatch bits for one diagonal.
+ * @return A copy with bounded internal runs of at most two zero bits set.
+ */
 [[nodiscard]] inline bit_vector amend_run_oracle(
     const bit_vector& mismatches)
 {
@@ -102,7 +109,14 @@ binary_sequences(std::uint32_t length)
     return amended;
 }
 
-/** Build one shifted mismatch row with vacant positions represented by zero. */
+/**
+ * @brief Builds one shifted mismatch row with vacant positions represented by zero.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @param[in] distance Diagonal displacement in ranks.
+ * @param[in] shift_query_right Selects the query-right diagonal when `true`.
+ * @return Logical mismatch bits for the selected diagonal.
+ */
 [[nodiscard]] inline bit_vector shifted_mismatch_oracle(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -124,7 +138,11 @@ binary_sequences(std::uint32_t length)
     return mismatches;
 }
 
-/** Derive the specified nibble cost by comparisons rather than a table. */
+/**
+ * @brief Derives the GateKeeper nibble cost with comparisons rather than a table.
+ * @param[in] nibble Four-bit mismatch group.
+ * @return The specified zero-, one-, or two-edit group cost.
+ */
 [[nodiscard]] constexpr inline std::uint32_t nibble_cost_oracle(
     std::uint8_t nibble) noexcept
 {
@@ -142,9 +160,14 @@ binary_sequences(std::uint32_t length)
 }
 
 /**
- * Compute only the packed low diagnostic through a simple run-based mask
- * oracle. This intentionally does not share the implementation's bitset
- * amendment or multiword shifts.
+ * @brief Computes the packed low diagnostic through a run-based mask oracle.
+ * @param[in] query Query ranks in logical order.
+ * @param[in] target Target ranks in logical order.
+ * @param[in] max_edits Threshold used to cap the estimate.
+ * @return The expected GateKeeper diagnostic estimate, capped at `max_edits + 1`.
+ *
+ * This oracle intentionally shares neither the implementation's bitset amendment nor its
+ * multiword shifts.
  */
 [[nodiscard]] inline std::uint32_t diagnostic_estimate_oracle(
     std::span<const std::uint8_t> query,
@@ -202,7 +225,12 @@ binary_sequences(std::uint32_t length)
     return estimate;
 }
 
-/** Compare every result ABI field. */
+/**
+ * @brief Compares every field in the prefilter result ABI.
+ * @param[in] lhs First result.
+ * @param[in] rhs Second result.
+ * @return `true` only when all four result fields are equal.
+ */
 [[nodiscard]] constexpr inline bool same_result(
     const prefilter_result& lhs,
     const prefilter_result& rhs) noexcept
@@ -213,7 +241,11 @@ binary_sequences(std::uint32_t length)
         && lhs.diagnostics == rhs.diagnostics;
 }
 
-/** Check the diagnostic implications shared by all supported equal jobs. */
+/**
+ * @brief Checks diagnostic implications shared by all supported equal-length jobs.
+ * @param[in] result Evaluated GateKeeper result.
+ * @param[in] max_edits Threshold used for the evaluation.
+ */
 inline void check_supported_diagnostics(
     const prefilter_result& result,
     std::uint32_t max_edits)
@@ -235,13 +267,26 @@ inline void check_supported_diagnostics(
     }
 }
 
+/**
+ * @brief Owns deterministic xorshift state for reproducible rank fixtures.
+ *
+ * Instances are test-local, single-threaded, and have no external lifetime or ownership.
+ */
 class deterministic_gatekeeper_ranks {
 public:
+    /**
+     * @brief Initializes the deterministic state.
+     * @param[in] seed Non-random initial state used by the fixture.
+     */
     explicit constexpr deterministic_gatekeeper_ranks(
         std::uint32_t seed) noexcept
         : state_(seed)
     {}
 
+    /**
+     * @brief Advances the deterministic state.
+     * @return The next deterministic 32-bit value.
+     */
     [[nodiscard]] std::uint32_t next() noexcept
     {
         state_ ^= state_ << 13u;
@@ -250,6 +295,12 @@ public:
         return state_;
     }
 
+    /**
+     * @brief Draws one rank from a nonempty rank domain.
+     * @param[in] rank_count Exclusive upper bound for the returned rank.
+     * @return A rank in `[0, rank_count)`.
+     * @pre `rank_count` is nonzero.
+     */
     [[nodiscard]] std::uint8_t rank(std::uint32_t rank_count) noexcept
     {
         return static_cast<std::uint8_t>(next() % rank_count);
@@ -259,6 +310,14 @@ private:
     std::uint32_t state_;
 };
 
+/**
+ * @brief Generates a deterministic rank sequence.
+ * @param[in] length Number of ranks to generate.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in,out] ranks Deterministic state advanced by each generated rank.
+ * @return A sequence containing `length` generated ranks.
+ * @pre `rank_count` is nonzero.
+ */
 [[nodiscard]] std::vector<std::uint8_t> randomized_rank_sequence(
     std::size_t length,
     std::uint32_t rank_count,
@@ -271,6 +330,14 @@ private:
     return sequence;
 }
 
+/**
+ * @brief Applies distinct-rank substitutions at deterministic consecutive positions.
+ * @param[in,out] target Sequence to mutate.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in] substitution_count Maximum number of substitutions to apply.
+ * @param[in,out] ranks Deterministic state used for the start and replacement ranks.
+ * @pre `rank_count` is greater than one whenever `target` is nonempty.
+ */
 void apply_randomized_substitutions(
     std::vector<std::uint8_t>& target,
     std::uint32_t rank_count,
@@ -290,6 +357,16 @@ void apply_randomized_substitutions(
     }
 }
 
+/**
+ * @brief Builds one deterministic target variant for randomized soundness checks.
+ * @param[in] query Source query ranks.
+ * @param[in] rank_count Exclusive upper bound for every rank.
+ * @param[in] max_edits Threshold controlling substitution variants.
+ * @param[in] variant Selects identity, bounded substitutions, rotation, or random ranks.
+ * @param[in,out] ranks Deterministic state consumed by the selected variant.
+ * @return A target with the same length as `query`.
+ * @pre `rank_count` is greater than one.
+ */
 [[nodiscard]] std::vector<std::uint8_t> randomized_target_sequence(
     std::span<const std::uint8_t> query,
     std::uint32_t rank_count,
@@ -329,6 +406,13 @@ void apply_randomized_substitutions(
     return target;
 }
 
+/**
+ * @brief Converts numeric ranks into values of one SeqAn alphabet.
+ * @tparam p_alphabet Alphabet type accepting every supplied rank.
+ * @param[in] ranks Numeric ranks to convert in order.
+ * @return Alphabet values with the same ranks and order.
+ * @pre Every input rank belongs to `p_alphabet`.
+ */
 template <typename p_alphabet>
 [[nodiscard]] std::vector<p_alphabet> alphabet_sequence_from_ranks(
     std::span<const std::uint8_t> ranks)
@@ -344,6 +428,13 @@ template <typename p_alphabet>
     return sequence;
 }
 
+/**
+ * @brief Checks a randomized result against independent exact and mask oracles.
+ * @param[in] query Query ranks evaluated by GateKeeper.
+ * @param[in] target Target ranks evaluated by GateKeeper.
+ * @param[in] max_edits Threshold supplied to GateKeeper.
+ * @param[in] result Result whose bounds, acceptance, and diagnostics are checked.
+ */
 inline void check_randomized_gatekeeper_result(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -724,490 +815,6 @@ TEST_CASE(
         std::span<const std::uint8_t>{target_ranks}.subspan(1u, 32u),
         0u);
     REQUIRE(same_result(results[4], direct));
-}
-
-TEST_CASE(
-    "GateKeeper hardware Vulkan matches the scalar oracle and replays fresh ranks",
-    "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
-{
-    namespace gv = bioseq::gpu::vulkan;
-    if (!is_vulkan_gatekeeper_supported()) {
-        SKIP("hardware Vulkan device unavailable");
-    }
-
-    std::vector<std::uint8_t> query_ranks;
-    std::vector<std::uint8_t> target_ranks;
-    std::vector<prefilter_job> jobs;
-    const auto append_supported_job = [
-        &query_ranks,
-        &target_ranks,
-        &jobs](
-            std::uint32_t length,
-            std::uint32_t max_edits,
-            std::uint32_t variant) {
-        // Deliberately retain non-word-aligned poison bytes around every
-        // logical slice. The shader must address byte ranks from the job
-        // offsets rather than accidentally consuming neighbouring records.
-        query_ranks.insert(
-            query_ranks.end(), 1u + variant % 3u,
-            static_cast<std::uint8_t>(0xD0u + variant));
-        target_ranks.insert(
-            target_ranks.end(), 2u + variant % 2u,
-            static_cast<std::uint8_t>(0x70u + variant));
-        const std::uint32_t query_offset = static_cast<std::uint32_t>(
-            query_ranks.size());
-        const std::uint32_t target_offset = static_cast<std::uint32_t>(
-            target_ranks.size());
-
-        std::vector<std::uint8_t> query(length);
-        std::vector<std::uint8_t> target(length);
-        for (std::uint32_t position = 0u; position < length; ++position) {
-            query[position] = static_cast<std::uint8_t>(
-                (position * 73u + variant * 41u + length) & 0xffu);
-        }
-        target = query;
-        const std::uint32_t scenario = variant % 4u;
-        if (scenario == 1u) {
-            // A known within-threshold substitution case.
-            for (std::uint32_t edit = 0u; edit < max_edits; ++edit) {
-                const std::uint32_t position =
-                    (edit * 11u + 3u) % length;
-                target[position] = static_cast<std::uint8_t>(
-                    query[position] ^ 0xffu);
-            }
-        } else if (scenario == 2u) {
-            // Force a mask candidate and exact-guard-confirmed rejection.
-            for (std::uint32_t position = 0u; position < length; ++position) {
-                target[position] = static_cast<std::uint8_t>(
-                    query[position] ^ 0xffu);
-            }
-        } else if (scenario == 3u) {
-            // One insertion/deletion-shaped shift remains within E=2 and E=4.
-            target[0] = static_cast<std::uint8_t>(query[0] ^ 0x5au);
-            std::copy_n(query.begin(), length - 1u, target.begin() + 1u);
-        }
-
-        query_ranks.insert(
-            query_ranks.end(), query.begin(), query.end());
-        target_ranks.insert(
-            target_ranks.end(), target.begin(), target.end());
-        query_ranks.push_back(static_cast<std::uint8_t>(0xE0u + variant));
-        target_ranks.push_back(static_cast<std::uint8_t>(0x60u + variant));
-        jobs.push_back(prefilter_job{
-            .query_offset = query_offset,
-            .target_offset = target_offset,
-            .query_length = length,
-            .target_length = length,
-            .max_edits = max_edits,
-        });
-    };
-
-    for (const std::uint32_t length : {32u, 64u}) {
-        for (const std::uint32_t max_edits : {2u, 4u}) {
-            for (std::uint32_t variant = 0u; variant < 12u; ++variant) {
-                append_supported_job(length, max_edits, variant);
-            }
-        }
-    }
-
-    const prefilter_batch_input input{
-        .query_ranks = query_ranks,
-        .target_ranks = target_ranks,
-        .jobs = jobs,
-    };
-    const auto scalar = gatekeeper_scalar_batch(input);
-    auto& runtime = gv::runtime::instance();
-    const std::uint64_t dispatches_before =
-        runtime.gatekeeper_dispatch_count();
-    const auto gpu = run_gatekeeper_vulkan_batch(
-        query_ranks, target_ranks, jobs);
-
-    REQUIRE(gpu.size() == scalar.size());
-    for (std::size_t index = 0u; index < scalar.size(); ++index) {
-        CAPTURE(
-            index,
-            jobs[index].query_length,
-            jobs[index].max_edits,
-            scalar[index].lower_bound,
-            scalar[index].diagnostics,
-            gpu[index].lower_bound,
-            gpu[index].diagnostics);
-        CHECK(same_result(gpu[index], scalar[index]));
-        check_supported_diagnostics(gpu[index], jobs[index].max_edits);
-    }
-
-    // Keep the GateKeeper replay key (shape, mode, counts, and groups)
-    // identical, but replace every target slice with fresh mapped bytes.
-    // A recorded command must execute again and observe the new exact matches.
-    std::vector<std::uint8_t> replay_targets = target_ranks;
-    for (const prefilter_job& job : jobs) {
-        std::copy_n(
-            query_ranks.begin() + job.query_offset,
-            job.query_length,
-            replay_targets.begin() + job.target_offset);
-    }
-    const prefilter_batch_input replay_input{
-        .query_ranks = query_ranks,
-        .target_ranks = replay_targets,
-        .jobs = jobs,
-    };
-    const auto replay_scalar = gatekeeper_scalar_batch(replay_input);
-    const auto replayed = run_gatekeeper_vulkan_batch(
-        query_ranks, replay_targets, jobs);
-
-    REQUIRE(replayed.size() == replay_scalar.size());
-    bool observed_changed_result = false;
-    for (std::size_t index = 0u; index < replay_scalar.size(); ++index) {
-        CAPTURE(index, jobs[index].query_length, jobs[index].max_edits);
-        CHECK(same_result(replayed[index], replay_scalar[index]));
-        CHECK(is_prefilter_accepted(replayed[index]));
-        CHECK(replayed[index].lower_bound == 0u);
-        CHECK(gatekeeper_diagnostic_estimate(replayed[index]) == 0u);
-        observed_changed_result |=
-            !same_result(scalar[index], replay_scalar[index]);
-    }
-    CHECK(observed_changed_result);
-    CHECK(runtime.gatekeeper_dispatch_count() == dispatches_before + 2u);
-}
-
-TEST_CASE(
-    "GateKeeper hardware Vulkan fails open before poisoned invalid slice loads",
-    "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
-{
-    namespace gv = bioseq::gpu::vulkan;
-    if (!is_vulkan_gatekeeper_supported()) {
-        SKIP("hardware Vulkan device unavailable");
-    }
-
-    // Thirteen logical bytes allocate four packed words. Offsets ten through
-    // thirteen therefore name three poison bytes plus one allocation-padding
-    // byte, but are outside the logical span and must not be inspected.
-    std::vector<std::uint8_t> query_ranks(13u, 0xA5u);
-    std::vector<std::uint8_t> target_ranks(13u, 0x5Au);
-    for (std::size_t index = 0u; index < 9u; ++index) {
-        query_ranks[index] = static_cast<std::uint8_t>(index * 17u + 3u);
-        target_ranks[index] = query_ranks[index];
-    }
-    const std::array<prefilter_job, 6u> jobs{
-        prefilter_job{
-            .query_offset = 10u,
-            .target_offset = 9u,
-            .query_length = 4u,
-            .target_length = 4u,
-            .max_edits = 2u,
-        },
-        prefilter_job{
-            .query_offset = 9u,
-            .target_offset = 10u,
-            .query_length = 4u,
-            .target_length = 4u,
-            .max_edits = 4u,
-        },
-        prefilter_job{
-            .query_offset = (std::numeric_limits<std::uint32_t>::max)(),
-            .target_offset = 0u,
-            .query_length = 4u,
-            .target_length = 4u,
-            .max_edits = 2u,
-        },
-        prefilter_job{
-            .query_offset = 13u,
-            .target_offset = 0u,
-            .query_length = 1u,
-            .target_length = 1u,
-            .max_edits = 4u,
-        },
-        prefilter_job{
-            .query_offset = 10u,
-            .target_offset = 0u,
-            .query_length = 4u,
-            .target_length = 3u,
-            .max_edits = 9u,
-        },
-        prefilter_job{
-            .query_offset = 1u,
-            .target_offset = 1u,
-            .query_length = 8u,
-            .target_length = 8u,
-            .max_edits = 2u,
-        },
-    };
-    const prefilter_batch_input input{
-        .query_ranks = query_ranks,
-        .target_ranks = target_ranks,
-        .jobs = jobs,
-    };
-    for (std::size_t index = 0u; index < jobs.size() - 1u; ++index) {
-        REQUIRE_FALSE(prefilter_job_in_bounds(input, jobs[index]));
-    }
-    REQUIRE(prefilter_job_in_bounds(input, jobs.back()));
-    const auto scalar = gatekeeper_scalar_batch(input);
-    auto& runtime = gv::runtime::instance();
-    const std::uint64_t dispatches_before =
-        runtime.gatekeeper_dispatch_count();
-    const auto gpu = run_gatekeeper_vulkan_batch(
-        query_ranks, target_ranks, jobs);
-
-    REQUIRE(gpu.size() == jobs.size());
-    REQUIRE(scalar.size() == jobs.size());
-    for (std::size_t index = 0u; index < jobs.size(); ++index) {
-        CAPTURE(index, gpu[index].status, gpu[index].diagnostics);
-        CHECK(same_result(gpu[index], scalar[index]));
-    }
-    for (std::size_t index = 0u; index < jobs.size() - 1u; ++index) {
-        CHECK(gpu[index].status == static_cast<std::uint32_t>(
-            prefilter_status::unsupported_conservative));
-        CHECK(is_prefilter_accepted(gpu[index]));
-        CHECK(gpu[index].lower_bound == 0u);
-        CHECK(gpu[index].diagnostics == 0u);
-    }
-    CHECK(runtime.gatekeeper_dispatch_count() == dispatches_before + 1u);
-}
-
-TEST_CASE(
-    "GateKeeper Vulkan E2 E4 wavefront guard handles boundaries and replay",
-    "[component:bioseq][layer:unit][feature:prefilter][resource:gpu]")
-{
-    namespace gv = bioseq::gpu::vulkan;
-    if (!is_vulkan_gatekeeper_supported()) {
-        SKIP("hardware Vulkan device unavailable");
-    }
-
-    auto& runtime = gv::runtime::instance();
-    const std::uint64_t dispatches_before =
-        runtime.gatekeeper_dispatch_count();
-    std::uint64_t expected_dispatches = 0u;
-
-    for (const std::uint32_t length : {32u, 64u}) {
-        for (const std::uint32_t max_edits : {2u, 4u}) {
-            std::vector<std::uint8_t> query_ranks;
-            std::vector<std::uint8_t> target_ranks;
-            std::vector<prefilter_job> jobs;
-            std::vector<std::uint32_t> exact_distances;
-            std::vector<std::uint32_t> hamming_distances;
-            std::vector<bool> expected_guard_rejections;
-            const auto append_case = [
-                &query_ranks,
-                &target_ranks,
-                &jobs,
-                &exact_distances,
-                &hamming_distances,
-                &expected_guard_rejections,
-                max_edits](
-                    const std::vector<std::uint8_t>& query,
-                    const std::vector<std::uint8_t>& target,
-                    bool expect_guard_rejection) {
-                REQUIRE(query.size() == target.size());
-                while ((query_ranks.size() & 3u) != 0u) {
-                    query_ranks.push_back(static_cast<std::uint8_t>(
-                        0xD0u + jobs.size()));
-                }
-                while ((target_ranks.size() & 3u) != 0u) {
-                    target_ranks.push_back(static_cast<std::uint8_t>(
-                        0x70u + jobs.size()));
-                }
-                const std::uint32_t query_offset =
-                    static_cast<std::uint32_t>(query_ranks.size());
-                const std::uint32_t target_offset =
-                    static_cast<std::uint32_t>(target_ranks.size());
-                REQUIRE((query_offset & 3u) == 0u);
-                REQUIRE((target_offset & 3u) == 0u);
-
-                query_ranks.insert(
-                    query_ranks.end(), query.begin(), query.end());
-                target_ranks.insert(
-                    target_ranks.end(), target.begin(), target.end());
-                // Retain poison after each logical slice. The next job pads
-                // independently back to an aligned offset before packed loads.
-                query_ranks.push_back(static_cast<std::uint8_t>(
-                    0xE0u + jobs.size()));
-                target_ranks.push_back(static_cast<std::uint8_t>(
-                    0x60u + jobs.size()));
-                jobs.push_back(prefilter_job{
-                    .query_offset = query_offset,
-                    .target_offset = target_offset,
-                    .query_length = static_cast<std::uint32_t>(query.size()),
-                    .target_length = static_cast<std::uint32_t>(target.size()),
-                    .max_edits = max_edits,
-                });
-                exact_distances.push_back(exact_levenshtein(query, target));
-                hamming_distances.push_back(static_cast<std::uint32_t>(
-                    std::inner_product(
-                        query.begin(),
-                        query.end(),
-                        target.begin(),
-                        std::uint32_t{0u},
-                        std::plus<>{},
-                        std::not_equal_to<>{})));
-                expected_guard_rejections.push_back(expect_guard_rejection);
-            };
-
-            const std::uint32_t boundary = length / 2u;
-            // A terminal rotation of three-symbol runs has edit distance two
-            // but high Hamming distance. It exercises the fast production
-            // mask without allowing the Hamming shortcut to hide the path.
-            std::vector<std::uint8_t> repeated_query(length);
-            for (std::uint32_t position = 0u; position < length; ++position) {
-                repeated_query[position] = static_cast<std::uint8_t>(
-                    (position / 3u) % 11u);
-            }
-            std::vector<std::uint8_t> terminal_rotation(length);
-            terminal_rotation[0] = repeated_query.back();
-            std::copy_n(
-                repeated_query.begin(),
-                length - 1u,
-                terminal_rotation.begin() + 1u);
-            append_case(
-                repeated_query,
-                terminal_rotation,
-                false);
-
-            // Move one unique rank across the 32-bit mask boundary at L=64;
-            // L=32 uses the central nibble boundary and ends exactly at a
-            // packed-word boundary. The two-edit path crosses many bytes.
-            std::vector<std::uint8_t> boundary_query(length);
-            for (std::uint32_t position = 0u; position < length; ++position) {
-                boundary_query[position] = static_cast<std::uint8_t>(
-                    position * 73u + 19u);
-            }
-            std::vector<std::uint8_t> boundary_move = boundary_query;
-            const std::uint32_t move_from = boundary - 5u;
-            const std::uint32_t move_to = boundary + 5u;
-            const std::uint8_t moved = boundary_move[move_from];
-            boundary_move.erase(
-                boundary_move.begin()
-                + static_cast<std::ptrdiff_t>(move_from));
-            boundary_move.insert(
-                boundary_move.begin()
-                + static_cast<std::ptrdiff_t>(move_to),
-                moved);
-            append_case(
-                boundary_query,
-                boundary_move,
-                false);
-
-            // A two-symbol match run straddles the central boundary and is
-            // surrounded by mismatches. Amendment must cross the 32-bit word
-            // seam for L=64 before the exact wavefront confirms rejection.
-            std::vector<std::uint8_t> boundary_rejection(length);
-            for (std::uint32_t position = 0u; position < length; ++position) {
-                boundary_rejection[position] = static_cast<std::uint8_t>(
-                    boundary_query[position] ^ 0xffu);
-            }
-            boundary_rejection[boundary - 1u] =
-                boundary_query[boundary - 1u];
-            boundary_rejection[boundary] = boundary_query[boundary];
-            append_case(
-                boundary_query,
-                boundary_rejection,
-                true);
-
-            // The same bounded two-match run at the logical tail must not be
-            // treated as an internal run by amendment. The remaining high-
-            // error body still has to activate and fail the exact guard.
-            std::vector<std::uint8_t> terminal_rejection(length);
-            for (std::uint32_t position = 0u; position < length; ++position) {
-                terminal_rejection[position] = static_cast<std::uint8_t>(
-                    repeated_query[position] + 127u);
-            }
-            terminal_rejection[length - 2u] = repeated_query[length - 2u];
-            terminal_rejection[length - 1u] = repeated_query[length - 1u];
-            append_case(
-                repeated_query,
-                terminal_rejection,
-                true);
-
-            REQUIRE_FALSE(jobs.empty());
-            for (const prefilter_job& job : jobs) {
-                REQUIRE(job.query_length == length);
-                REQUIRE(job.target_length == length);
-                REQUIRE(job.max_edits == max_edits);
-                REQUIRE((job.query_offset & 3u) == 0u);
-                REQUIRE((job.target_offset & 3u) == 0u);
-            }
-            const prefilter_batch_input input{
-                .query_ranks = query_ranks,
-                .target_ranks = target_ranks,
-                .jobs = jobs,
-            };
-            const auto scalar = gatekeeper_scalar_batch(input);
-            REQUIRE(scalar.size() == jobs.size());
-            for (std::size_t index = 0u; index < scalar.size(); ++index) {
-                CAPTURE(
-                    index,
-                    length,
-                    max_edits,
-                    exact_distances[index],
-                    hamming_distances[index],
-                    scalar[index].lower_bound,
-                    scalar[index].diagnostics);
-                REQUIRE(hamming_distances[index] > max_edits);
-                if (expected_guard_rejections[index]) {
-                    REQUIRE(exact_distances[index] > max_edits);
-                    REQUIRE_FALSE(is_prefilter_accepted(scalar[index]));
-                    REQUIRE(is_gatekeeper_mask_rejection_candidate(scalar[index]));
-                    REQUIRE(is_gatekeeper_exact_guard_activated(scalar[index]));
-                    REQUIRE(is_gatekeeper_guard_confirmed_rejection(scalar[index]));
-                } else {
-                    REQUIRE(exact_distances[index] <= max_edits);
-                    REQUIRE(is_prefilter_accepted(scalar[index]));
-                }
-            }
-
-            const auto gpu = run_gatekeeper_vulkan_batch(
-                query_ranks, target_ranks, jobs);
-            ++expected_dispatches;
-            REQUIRE(gpu.size() == scalar.size());
-            for (std::size_t index = 0u; index < scalar.size(); ++index) {
-                CAPTURE(
-                    index,
-                    length,
-                    max_edits,
-                    scalar[index].diagnostics,
-                    gpu[index].diagnostics);
-                CHECK(same_result(gpu[index], scalar[index]));
-                check_supported_diagnostics(gpu[index], max_edits);
-            }
-
-            // Keep the specialized replay key identical while replacing all
-            // target slices with fresh exact-match bytes. This exercises
-            // command replay and mapped-buffer visibility for every L/E key.
-            std::vector<std::uint8_t> replay_targets = target_ranks;
-            for (const prefilter_job& job : jobs) {
-                std::copy_n(
-                    query_ranks.begin() + job.query_offset,
-                    job.query_length,
-                    replay_targets.begin() + job.target_offset);
-            }
-            const prefilter_batch_input replay_input{
-                .query_ranks = query_ranks,
-                .target_ranks = replay_targets,
-                .jobs = jobs,
-            };
-            const auto replay_scalar = gatekeeper_scalar_batch(replay_input);
-            const auto replayed = run_gatekeeper_vulkan_batch(
-                query_ranks, replay_targets, jobs);
-            ++expected_dispatches;
-
-            REQUIRE(replayed.size() == replay_scalar.size());
-            bool observed_changed_result = false;
-            for (std::size_t index = 0u;
-                 index < replay_scalar.size();
-                 ++index) {
-                CAPTURE(index, length, max_edits);
-                CHECK(same_result(replayed[index], replay_scalar[index]));
-                CHECK(is_prefilter_accepted(replayed[index]));
-                CHECK(replayed[index].lower_bound == 0u);
-                CHECK(gatekeeper_diagnostic_estimate(replayed[index]) == 0u);
-                observed_changed_result |=
-                    !same_result(scalar[index], replay_scalar[index]);
-            }
-            CHECK(observed_changed_result);
-        }
-    }
-    CHECK(expected_dispatches == 8u);
-    CHECK(runtime.gatekeeper_dispatch_count()
-          == dispatches_before + expected_dispatches);
 }
 
 TEST_CASE(

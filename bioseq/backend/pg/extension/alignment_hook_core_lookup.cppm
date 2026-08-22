@@ -15,9 +15,14 @@ extern "C" {
 module bioseq.postgres.extension:alignment_hook_core_lookup;
 
 import :alignment_hook_contract;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
+/**
+ * @brief Finds the frame registered for a query descriptor.
+ * @return The borrowed frame, or null when the descriptor is not registered.
+ */
 [[nodiscard]] alignment_executor_frame* find_alignment_frame(
 		QueryDesc* query_desc) noexcept
 {
@@ -29,6 +34,10 @@ namespace bioseq::pg::detail {
 	return nullptr;
 }
 
+/**
+ * @brief Finds the frame registered for executor state.
+ * @return The borrowed frame, or null when the executor state is not registered.
+ */
 [[nodiscard]] alignment_executor_frame* find_alignment_frame(
 		EState* estate) noexcept
 {
@@ -40,6 +49,10 @@ namespace bioseq::pg::detail {
 	return nullptr;
 }
 
+/**
+ * @brief Indexes a complete frame by query descriptor and executor state.
+ * @param[in] frame Frame that remains heap-owned by its cleanup token.
+ */
 void register_alignment_frame(alignment_executor_frame* frame)
 {
 	if (frame == nullptr || frame->query_desc == nullptr || frame->estate == nullptr) {

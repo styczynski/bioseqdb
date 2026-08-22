@@ -83,6 +83,7 @@ struct routine_result_contract {
     std::string cpp_type;
     std::string sql_type;
     std::string row_cpp_name;
+    std::string stable_identity_sql_type;
 };
 
 struct collected_result_field {
@@ -92,6 +93,7 @@ struct collected_result_field {
     bool nullable{};
     structural_analysis::documentation_record documentation;
     structural_analysis::source_range source_range;
+    std::string stable_identity_sql_type;
 };
 
 struct collected_result_row {
@@ -120,6 +122,7 @@ struct collected_entity {
     std::string schema;
     std::string cpp_signature;
     std::string cpp_return_type;
+    std::string resolved_sql_type;
     std::string initializer_expression;
     std::vector<option_value> options;
     std::vector<dependency_reference> dependencies;

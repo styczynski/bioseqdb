@@ -1,4 +1,7 @@
-/* scalar concat and O(1) logical transform SQL adapters. */
+/**
+ * @file concat_reverse.cppm
+ * @brief Concatenation and constant-time logical transform SQL adapters.
+ */
 module;
 
 #include <cstddef>
@@ -24,12 +27,24 @@ import bioseq.storage.lazy_sequence;
 
 namespace {
 
+/**
+ * @brief Builds an unbound sequence Datum from a text fragment.
+ * @param[in] value ASCII symbols copied into the current PostgreSQL memory context.
+ * @return Newly allocated unbound sequence Datum.
+ */
 [[nodiscard]] inline Datum text_sequence_literal(std::string_view value)
 {
     return make_unbound_sequence_from_ascii(
         value.data(), value.size());
 }
 
+/**
+ * @brief Concatenates a temporary text literal with an existing sequence.
+ * @param[in] value ASCII text converted to an unbound sequence leaf.
+ * @param[in] sequence Sequence Datum borrowed for the operation.
+ * @param[in] text_on_left Whether the text precedes the sequence.
+ * @return Persistent concatenation Datum allocated for the SQL result.
+ */
 [[nodiscard]] inline Datum concat_text_and_sequence(
     std::string_view value,
     Datum sequence,
@@ -47,6 +62,12 @@ namespace {
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Concatenates two sequence values without flattening their piece trees.
+ * @param[in] left Left sequence operand.
+ * @param[in] right Right sequence operand.
+ * @return Sequence containing both operands in order.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -71,6 +92,12 @@ Datum seq_concat(
     return concat_pg_sequences(left, right);
 }
 
+/**
+ * @brief Appends a text value to a sequence.
+ * @param[in] sequence Sequence prefix.
+ * @param[in] value ASCII suffix copied into an unbound literal leaf.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -92,6 +119,12 @@ Datum seq_concat_text(
     return concat_text_and_sequence(value, sequence, false);
 }
 
+/**
+ * @brief Prepends a text value to a sequence.
+ * @param[in] value ASCII prefix copied into an unbound literal leaf.
+ * @param[in] sequence Sequence suffix.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -113,6 +146,12 @@ Datum text_concat_seq(
     return concat_text_and_sequence(value, sequence, true);
 }
 
+/**
+ * @brief Appends a `varchar` value to a sequence.
+ * @param[in] sequence Sequence prefix.
+ * @param[in] value ASCII suffix copied into an unbound literal leaf.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -137,6 +176,12 @@ Datum seq_concat_varchar(
     return concat_text_and_sequence(value, sequence, false);
 }
 
+/**
+ * @brief Prepends a `varchar` value to a sequence.
+ * @param[in] value ASCII prefix copied into an unbound literal leaf.
+ * @param[in] sequence Sequence suffix.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -161,6 +206,11 @@ Datum varchar_concat_seq(
     return concat_text_and_sequence(value, sequence, true);
 }
 
+/**
+ * @brief Returns a logical reverse view of a sequence.
+ * @param[in] input Sequence Datum whose root transform is composed with reversal.
+ * @return Reversed sequence without eager payload materialization.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -179,6 +229,12 @@ Datum reverse(
         input, bioseq::storage::sequence_transform::reversed);
 }
 
+/**
+ * @brief Returns a logical reverse-complement view of a bound sequence.
+ * @param[in] input Sequence using an alphabet with a complete complement map.
+ * @return Reverse-complement sequence without eager payload materialization.
+ * @note Unbound or non-complementable alphabets report a PostgreSQL error.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -219,6 +275,12 @@ Datum reverse_complement(
         input, bioseq::storage::sequence_transform::reverse_complement);
 }
 
+/**
+ * @brief Implements PostgreSQL array-style concatenation for two sequences.
+ * @param[in] left Left sequence operand.
+ * @param[in] right Right sequence operand.
+ * @return Sequence containing both operands in order.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,

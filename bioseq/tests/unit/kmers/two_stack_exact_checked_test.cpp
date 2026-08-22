@@ -1,26 +1,13 @@
-// Checked representation coverage for the generated two_stack_nthash kernel.
-// Biological comparisons in this file retain raw chronological order,
-// strand, and duplicate multiplicity. Only the resident-vector-stream contract
-// explicitly normalizes its target-geometry-dependent overlap output.
+/**
+ * @file two_stack_exact_checked_test.cpp
+ * @brief Checked representation coverage for two-stack ntHash kernels.
+ *
+ * Biological comparisons retain chronological order, strand, and duplicates.
+ */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <compare>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;

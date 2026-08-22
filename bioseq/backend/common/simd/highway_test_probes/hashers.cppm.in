@@ -1,12 +1,16 @@
+/**
+ * @file
+ * @brief Generates fixed-target scalar/SIMD hasher parity probes.
+ */
+
 #ifndef BIOSEQ_TEST_INDEXES
 #error "fixed-target unit probes require BIOSEQ_TEST_INDEXES"
 #endif
 
-#include "common/simd/highway_test_probes/contract.h"
-
 module @BIOSEQ_HIGHWAY_PROBE_PRIMARY_MODULE@;
 
 import std;
+import bioseq.highway.test_probe_contract;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
 import bioseq.sequences.kmers.hashers.base;
@@ -21,7 +25,11 @@ namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-[[nodiscard]] std::vector<seq::dna4> short_dna4_sequence() {
+/**
+ * @brief Builds the deterministic DNA4 fixture shared by hasher checks.
+ * @return Logical DNA4 symbols for scalar and SIMD hashing.
+ */
+[[nodiscard]] auto short_dna4_sequence() -> std::vector<seq::dna4> {
     constexpr std::string_view k_bases =
         "ACTGTAGCTGATCGTAGCTAGTCACTGTAGCT"
         "GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA"
@@ -33,17 +41,24 @@ namespace hn = hwy::HWY_NAMESPACE;
         "CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG"
         "ATCGTAGCTAGTC";
     std::vector<seq::dna4> result(k_bases.size());
-    for (std::size_t index = 0u; index < k_bases.size(); ++index) {
+    for (std::size_t index = 0U; index < k_bases.size(); ++index) {
         result[index].assign_char(k_bases[index]);
     }
     return result;
 }
 
+/**
+ * @brief Compares scalar and target-local SIMD hash sets for one lane type.
+ * @tparam p_input Unsigned packed-lane type.
+ * @tparam p_scalar_hasher Scalar hasher family.
+ * @tparam p_simd_hasher Target-local SIMD hasher family.
+ * @return `true` when both implementations emit identical position/hash pairs.
+ */
 template<
     class p_input,
     template<class p_alphabet> class p_scalar_hasher,
     template<class p_alphabet> class p_simd_hasher>
-[[nodiscard]] bool hasher_set_parity() {
+[[nodiscard]] auto hasher_set_parity() -> bool {
     using alphabet_storage_type =
         sequence_custom_alphabet<seq::dna4, p_input>;
     using range_type = compact_sequence_range<alphabet_storage_type>;
@@ -51,7 +66,7 @@ template<
     using simd_tag_type = hn::ScalableTag<p_input>;
     constexpr std::size_t k_maximum_lanes =
         hn::MaxLanes(simd_tag_type{});
-    constexpr std::size_t k_kmer_length = 10u;
+    constexpr std::size_t k_kmer_length = 10U;
 
     auto source = short_dna4_sequence();
     range_type sequence{source};
@@ -66,7 +81,7 @@ template<
     scalar_results.reserve(sequence.bp_size());
     simd_results.reserve(sequence.bp_size());
 
-    std::size_t position = 0u;
+    std::size_t position = 0U;
     for (const auto rank : sequence.template iterable<logical_rank>()) {
         const auto [hash, strand] = scalar_hasher.next(
             static_cast<p_input>(rank), static_cast<p_input>(rank));
@@ -77,17 +92,17 @@ template<
         ++position;
     }
 
-    position = 0u;
+    position = 0U;
     iterate_sequence_bp_simd_offsets(
         sequence, sequence.begin(), sequence.end(), k_kmer_length,
-        [&]<bool p_is_full>(
+        [&simd_hasher, &position, &simd_results]<bool p_is_full>(
             std::bool_constant<p_is_full>,
             const auto& offsets,
             auto& callback_simd_tag,
             auto& mask,
             auto&& incoming,
             auto,
-            auto outgoing) {
+            auto outgoing) -> void {
             const auto hash = simd_hasher.next(
                 callback_simd_tag, incoming, outgoing);
             if (position >= k_kmer_length) {
@@ -98,7 +113,7 @@ template<
                     hn::VecFromMask(callback_simd_tag, mask),
                     callback_simd_tag, masks.data());
                 const std::size_t lanes = hn::Lanes(callback_simd_tag);
-                for (std::size_t lane = 0u; lane < lanes; ++lane) {
+                for (std::size_t lane = 0U; lane < lanes; ++lane) {
                     if (masks[lane] == p_input{}) continue;
                     simd_results.emplace_back(
                         offsets[lane] * traits_type::letters_per_unit
@@ -108,22 +123,32 @@ template<
             }
             ++position;
         },
-        [](const auto&, auto&, auto&) {}, 0u);
+        [](const auto&, auto&, auto&) -> void {}, 0U);
 
     return std::set(scalar_results.begin(), scalar_results.end())
         == std::set(simd_results.begin(), simd_results.end());
 }
 
+/**
+ * @brief Checks lexicographic hashing for one packed-lane type.
+ * @tparam p_input Unsigned packed-lane type.
+ * @return `true` when scalar and SIMD outputs match.
+ */
 template<class p_input>
-[[nodiscard]] bool lexic_parity() {
+[[nodiscard]] auto lexic_parity() -> bool {
     return hasher_set_parity<
         p_input,
         ::bioseq::simd::lexic_hasher,
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::lexic_hasher>();
 }
 
+/**
+ * @brief Checks minimap integer hashing for one packed-lane type.
+ * @tparam p_input Unsigned packed-lane type.
+ * @return `true` when scalar and SIMD outputs match.
+ */
 template<class p_input>
-[[nodiscard]] bool minimap_int_parity() {
+[[nodiscard]] auto minimap_int_parity() -> bool {
     return hasher_set_parity<
         p_input,
         ::bioseq::simd::minimap_int_hasher,
@@ -132,31 +157,34 @@ template<class p_input>
 
 }  // namespace bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail
 
-extern "C" bool bioseq_highway_run_hashers_probe(
-    bioseq_highway_hashers_probe_receipt* receipt) noexcept {
+/** @copydoc bioseq_highway_run_hashers_probe */
+extern "C" auto bioseq_highway_run_hashers_probe(
+    bioseq_highway_hashers_probe_receipt* receipt) noexcept -> bool {
     if (receipt == nullptr) return false;
     *receipt = {};
     receipt->target = static_cast<std::int64_t>(HWY_TARGET);
     namespace probe =
         bioseq::simd::@BIOSEQ_HIGHWAY_PROBE_TARGET_NAMESPACE@::probe_detail;
     try {
-        const auto record = [&](const std::uint64_t bit, const bool passed) {
+        const auto record = [&receipt](
+                                const std::uint64_t bit,
+                                const bool passed) -> void {
             ++receipt->cases_run;
             if (passed) {
                 receipt->passed_properties |= bit;
                 ++receipt->cases_passed;
             }
         };
-        record(1u << 0u, probe::lexic_parity<std::uint8_t>());
-        record(1u << 1u, probe::lexic_parity<std::uint16_t>());
-        record(1u << 2u, probe::lexic_parity<std::uint32_t>());
-        record(1u << 3u, probe::lexic_parity<std::uint64_t>());
-        record(1u << 4u, probe::minimap_int_parity<std::uint8_t>());
-        record(1u << 5u, probe::minimap_int_parity<std::uint16_t>());
-        record(1u << 6u, probe::minimap_int_parity<std::uint32_t>());
-        record(1u << 7u, probe::minimap_int_parity<std::uint64_t>());
-        return receipt->passed_properties == 0xffu
-            && receipt->cases_run == 8u
+        record(1U << 0U, probe::lexic_parity<std::uint8_t>());
+        record(1U << 1U, probe::lexic_parity<std::uint16_t>());
+        record(1U << 2U, probe::lexic_parity<std::uint32_t>());
+        record(1U << 3U, probe::lexic_parity<std::uint64_t>());
+        record(1U << 4U, probe::minimap_int_parity<std::uint8_t>());
+        record(1U << 5U, probe::minimap_int_parity<std::uint16_t>());
+        record(1U << 6U, probe::minimap_int_parity<std::uint32_t>());
+        record(1U << 7U, probe::minimap_int_parity<std::uint64_t>());
+        return receipt->passed_properties == 0xffU
+            && receipt->cases_run == 8U
             && receipt->cases_run == receipt->cases_passed;
     } catch (...) {
         return false;

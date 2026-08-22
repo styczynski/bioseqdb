@@ -6,6 +6,7 @@ if(DEFINED BUILD_TESTING)
   set(_bioseq_io_build_testing_was_defined TRUE)
   set(_bioseq_io_saved_build_testing "${BUILD_TESTING}")
 endif()
+# Fetch kseq++ without its test targets, then restore the caller's test setting.
 set(BUILD_TESTING OFF)
 FetchContent_Declare(kseq++ GIT_REPOSITORY https://github.com/cartoonist/kseqpp.git GIT_TAG v1.1.2)
 FetchContent_MakeAvailable(kseq++)

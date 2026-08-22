@@ -1,5 +1,6 @@
 module;
 
+#include <array>
 #include <span>
 #include <string_view>
 
@@ -21,10 +22,11 @@ struct component_entry {
 };
 
 /// @brief The components CMake compiled into this binary, in registration order.
-[[nodiscard]] inline std::span<const component_entry> registered_components() {
-    static const component_entry table[] = {
+[[nodiscard]] inline auto registered_components()
+    -> std::span<const component_entry> {
+    static constexpr auto table = std::to_array<component_entry>({
 @BIOSEQ_CODEGEN_COMPONENT_ENTRIES@
-    };
+    });
     return table;
 }
 

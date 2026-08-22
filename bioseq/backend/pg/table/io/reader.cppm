@@ -37,70 +37,94 @@ inline constexpr const char* k_unexpected_stripe_read_error_message =
 	"table {}, stripe with id={} is not flushed";
 
 
+/** @brief Return the number of chunk groups eliminated by active filters. */
 export int64_t
 read_chunk_groups_filtered(column_read_state *state);
+/** @brief Position a reader on the stripe containing a row number. */
 export bool
 set_stripe_read_state(column_read_state *read_state,
 						   stripe_metadata *start_stripe_metadata);
+/** @brief Materialize the next visible column-table row. */
 export bool
 read_next_column_row(column_read_state *read_state, Datum *column_values, bool *column_nulls,
 					uint64_t *row_number);
+/** @brief Create column-table read state for a relation and projection. */
 export column_read_state *
 begin_column_read(Relation relation, TupleDesc tuple_descriptor,
 				  List *projected_columns, List *filter_clauses,
 				  MemoryContext scan_context, Snapshot snapshot,
 				  bool random_access,
 				  parallel_column_scan_handle parallel_scan);
+/** @brief Materialize the next batch of visible rows into vector columns. */
 export bool
 read_next_column_vector(column_read_state *read_state,  Datum *column_values,
 					   bool *column_nulls, std::uint64_t *row_number, int *new_vector_size);
+/** @brief Restart a reader using updated scan qualifiers. */
 export void
 rescan_column_reader(column_read_state *read_state, List *scan_qual);
+/** @brief Release all resources owned by a column-table reader. */
 export void
 end_column_read(column_read_state *read_state);
+/** @brief Materialize a requested row or report its absence as a PostgreSQL error. */
 export void
 read_column_row_by_number_or_error(column_read_state *read_state,
 								  uint64_t row_number, Datum *column_values,
 								  bool *column_nulls);
+/** @brief Flush pending writer state before observing relation contents. */
 export void
 flush_pending_writes_for_read(column_read_state *read_state);
+/** @brief Materialize a requested row when it is visible to the reader. */
 export bool
 read_column_row_by_number(column_read_state *read_state,
 						   uint64_t row_number, Datum *column_values,
 						   bool *column_nulls);
+/** @brief Reset a reader's transient stripe and chunk-group state. */
 void
 reset_column_read(column_read_state *read_state);
 
 
 /* static function declarations */
+/** @brief Create the memory context that owns one loaded stripe. */
 static MemoryContext create_stripe_read_memory_context(void);
+/** @brief Report whether a row belongs to the currently loaded stripe. */
 static bool is_current_read_stripe(column_read_state *read_state,
 										uint64_t row_number);
+/** @brief Return the metadata record for the currently loaded stripe. */
 static stripe_metadata * get_current_read_stripe(column_read_state *read_state);
+/** @brief Materialize a row after locating its stripe. */
 static bool read_stripe_row_by_number(column_read_state *read_state,
 									 uint64_t row_number, Datum *column_values,
 									 bool *column_nulls);
+/** @brief Report whether a chunk-group index is currently loaded. */
 static bool is_current_chunk_group(stripe_read_state *stripe_state,
 										  int chunk_group_index);
+/** @brief Materialize a row by its offset inside the current chunk group. */
 static bool read_chunk_group_row_by_offset(chunk_group_read_state *chunk_group_state,
 										 stripe_metadata *stripe_metadata_value,
 										 uint64_t stripe_row_offset, Datum *column_values,
 										 bool *column_nulls);
+/** @brief Report whether a stripe is currently loaded for the reader. */
 static bool stripe_read_in_progress(column_read_state *read_state);
+/** @brief Report whether metadata contains another readable stripe. */
 static bool has_unread_stripe(column_read_state *read_state);
+/** @brief Load one stripe and initialize its row-materialization state. */
 static stripe_read_state * begin_stripe_read(stripe_metadata *stripe_metadata_value, Relation rel,
 										 TupleDesc tuple_desc, List *projected_columns,
 										 List *filter_clauses, List *filter_variables,
 										 MemoryContext stripe_read_context,
 										 Snapshot snapshot);
+/** @brief Advance the reader to its next stripe and reset per-stripe state. */
 static void advance_stripe_read(column_read_state *read_state);
+/** @brief Report whether a snapshot can observe unflushed stripes. */
 static bool snapshot_might_see_unflushed_stripes(Snapshot snapshot);
+/** @brief Materialize the next visible row from the active stripe. */
 static bool read_next_stripe_row(stripe_read_state *stripe_state, Datum *column_values,
 								  bool *column_nulls,
 								  uint64_t stripe_first_row_number,
 								  Snapshot snapshot, uint64_t stripe_id);
 
 /* Vectorization */
+/** @brief Materialize visible active-stripe rows into vector columns. */
 static bool read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
 								 bool *column_nulls, int *new_vector_size,
 								 uint64 stripe_id,
@@ -972,6 +996,7 @@ read_next_column_vector(column_read_state *read_state,  Datum *column_values,
 }
 
 
+/** @brief Materialize visible rows from one stripe into the caller's vector columns. */
 static bool
 read_next_stripe_vector(stripe_read_state *stripe_state, Datum *column_values,
 					 bool *column_nulls, int *new_vector_size,

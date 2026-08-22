@@ -28,6 +28,7 @@ enum class arena_kind : std::uint8_t {
     hash = 5,
 };
 
+/** @brief Number of values in arena_kind, including the none sentinel. */
 inline constexpr std::size_t arena_kind_count = 6;
 
 /** @brief Allocation metrics for one arena category. */
@@ -38,9 +39,7 @@ struct arena_counter {
     std::uint64_t largest_allocation_bytes = 0;
 };
 
-/// Per-pipeline profiler state. Owned on the stack by the dispatch fork
-/// in BatchProcessor::process_sequences when p_configuration_type::enable_profiling is
-/// true; not constructed at all when false.
+/** @brief Per-thread profiler state for one compile-time configuration. */
 template<profiling_configuration p_configuration_type>
 struct profiler_state {
     region_aggregate_table<p_configuration_type>          aggregates;
@@ -50,37 +49,38 @@ struct profiler_state {
     std::uint16_t stack_depth = 0;
     std::uint16_t stack_error_count = 0;
 
+    /** @brief Return the category receiving allocation events. */
     [[nodiscard, gnu::always_inline]]
     arena_kind active_arena_kind() const noexcept { return active_arena; }
 
+    /** @brief Select the category receiving allocation events. */
     [[gnu::always_inline]]
     void set_active_arena(arena_kind kind) noexcept { active_arena = kind; }
 
+    /** @brief Return counters for an arena category. */
     [[nodiscard, gnu::always_inline]]
     arena_counter& counter_for(arena_kind kind) noexcept {
         return arena_counters[static_cast<unsigned>(kind)];
     }
 };
 
-/// Typed thread-local pointer to the currently-installed profiler_state.
-/// One slot per distinct p_configuration_type type the program instantiates. When no
-/// profiler is installed for that p_configuration_type, the pointer is null.
+/** @brief Active profiler pointer for one instantiated configuration. */
 template<profiling_configuration p_configuration_type>
 inline thread_local profiler_state<p_configuration_type>* active_thread_profiler = nullptr;
 
-/// RAII installer. Construct on the stack alongside a stack-local
-/// profiler_state<p_configuration_type>; the constructor stores the address in
-/// active_thread_profiler<p_configuration_type>; the destructor restores the prior value.
+/** @brief Scoped installer that restores the prior thread-local profiler. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] installed_profiler_scope {
     profiler_state<p_configuration_type>* previous_profiler = nullptr;
 
+    /** @brief Install a profiler and retain the prior thread-local pointer. */
     [[gnu::always_inline]]
     explicit installed_profiler_scope(profiler_state<p_configuration_type>& profiler) noexcept {
         previous_profiler = active_thread_profiler<p_configuration_type>;
         active_thread_profiler<p_configuration_type> = &profiler;
     }
 
+    /** @brief Restore the prior thread-local profiler pointer. */
     [[gnu::always_inline]]
     ~installed_profiler_scope() noexcept {
         active_thread_profiler<p_configuration_type> = previous_profiler;

@@ -1,16 +1,16 @@
-// Integration contracts for length-bucketed sub-table sharding. Verifies that:
-//   * INSERT into a `USING bioseq` parent lands the SEQ payload in a
-//     length-bucketed sub-table whose bucket_idx matches the sequence
-//     length.
-//   * `bioseq.len` and `bioseq.unit_len` return BIGINT.
-//   * The cap=0 sentinel forces one shard per INSERT.
-//   * Multi-SEQ-column parents route by column_attno.
-//   * DROP TABLE cascades to every sub-table.
-//   * TEMP parents are rejected.
-//   * UNLOGGED parents inherit UNLOGGED sub-tables.
+/**
+ * @file Integration contracts for length-bucketed sub-table sharding.
+ *
+ *   * INSERT routes payloads by length bucket and column attribute number.
+ *   * `bioseq.len` and `bioseq.unit_len` return BIGINT.
+ *   * The cap=0 sentinel forces one shard per INSERT.
+ *   * DROP cascades, TEMP rejection, and UNLOGGED inheritance stay exact.
+ */
 
-#include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
@@ -59,11 +59,11 @@ TEST_CASE("bioseq.storage.sequence_shard.max_size_gib=0 forces one shard "
               "CREATE TABLE {} (id INT PRIMARY KEY, "
               "seq bioseq.seq('dna4', 32)) USING bioseq;",
               k_table);
-    for (int i = 0; i < 5; ++i) {
+    for (int row_number = 0; row_number < 5; ++row_number) {
         exec_sqlf(ctx,
                   "INSERT INTO {} VALUES ({}, "
                   "'ACGT'::bioseq.seq('dna4', 32));",
-                  k_table, i);
+                  k_table, row_number);
     }
     const long long rows = query_scalar_int(
         ctx,
@@ -158,11 +158,11 @@ TEST_CASE("DROP TABLE cascades to every sub-table",
               "CREATE TABLE {} (id INT PRIMARY KEY, "
               "seq bioseq.seq('dna4', 32)) USING bioseq;",
               k_table);
-    for (int i = 0; i < 5; ++i) {
+    for (int row_number = 0; row_number < 5; ++row_number) {
         exec_sqlf(ctx,
                   "INSERT INTO {} VALUES ({}, "
                   "'ACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
-                  k_table, i);
+                  k_table, row_number);
     }
     exec_sqlf(ctx, "DROP TABLE {};", k_table);
     REQUIRE(query_scalar_int(

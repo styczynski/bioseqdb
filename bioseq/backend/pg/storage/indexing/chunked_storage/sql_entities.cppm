@@ -1,3 +1,7 @@
+/**
+ * @file sql_entities.cppm
+ * @brief SQL entity declarations for chunked generation storage.
+ */
 module;
 
 #include <cstdint>
@@ -10,8 +14,7 @@ export namespace bioseq::storage::indexing::sql_entities {
 
 [[bioseq_sql::sequence({
     .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
-})]]
-[[bioseq_sql::revoke({
+})]] [[bioseq_sql::revoke({
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
 })]]

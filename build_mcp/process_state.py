@@ -87,55 +87,6 @@ BUILD_GUARD_WORKER_ARM_TIMEOUT_SEC = 15.0
 
 BUILD_GUARD_ENV_KEY = "BIOSEQ_BUILD_GUARD_TOKEN"
 
-SUBAGENT_STATE_FILE = Path("/tmp/bioseq_subagent_mcp_state.json")
-
-SUBAGENT_LOCK_FILE  = Path("/tmp/bioseq_subagent_mcp.lock")
-
-@contextlib.contextmanager
-def _subagent_global_lock():
-    SUBAGENT_LOCK_FILE.touch()
-    fd = os.open(str(SUBAGENT_LOCK_FILE), os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-def _load_subagent_state() -> dict:
-    if not SUBAGENT_STATE_FILE.exists():
-        return {}
-    try:
-        with SUBAGENT_STATE_FILE.open("r") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-def _save_subagent_state(state: dict) -> None:
-    durable_replace_bytes(
-        SUBAGENT_STATE_FILE,
-        (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-    )
-
-def _update_subagent_entry(**fields) -> None:
-    state = _load_subagent_state()
-    state.update(fields)
-    _save_subagent_state(state)
-
-def _refresh_subagent(state: dict) -> dict:
-    """Promote a 'running' entry whose worker pid is dead to 'aborted'."""
-    if state.get("status") == "running" and not _is_pid_alive(state.get("pid")):
-        state = dict(state)
-        state["status"] = "aborted"
-        state["step"] = "aborted"
-        if not state.get("completed_at"):
-            state["completed_at"] = time.time()
-        _save_subagent_state(state)
-    return state
-
 def _log(msg: str) -> None:
     """Server-side log line. Always stderr — stdout is JSON-RPC only."""
     print(f"[bioseq-build-mcp] {msg}", file=sys.stderr, flush=True)

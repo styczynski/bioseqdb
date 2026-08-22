@@ -1,3 +1,7 @@
+/**
+ * @file guc_storage.cppm
+ * @brief Bridges typed enum storage to PostgreSQL GUC registration.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -31,6 +35,7 @@ struct postgres_enum_registration {
     GucEnumAssignHook assign_hook = nullptr;
     GucShowHook show_hook = nullptr;
 
+    /** @brief Registers this enum setting against its integer wire cell. */
     void register_variable(int* wire) const {
         auto const* registration = this;
         auto define_variable = [registration, wire] {

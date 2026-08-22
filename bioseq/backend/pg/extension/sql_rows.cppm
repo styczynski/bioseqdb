@@ -1,3 +1,7 @@
+/**
+ * @file sql_rows.cppm
+ * @brief Declares typed SQL rows returned by extension diagnostics and fixtures.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -14,6 +18,7 @@ import bioseq.postgres.support.sql_boundary;
 
 export namespace bioseq::postgres::sql_rows {
 
+/** @brief Reports Vulkan runtime availability and device identity. */
 struct vulkan_runtime_status_row final {
     bool is_available;
     std::string device_name;
@@ -24,6 +29,7 @@ struct vulkan_runtime_status_row final {
     bool is_software_device;
 };
 
+/** @brief Reports one sequence relation metadata entry. */
 struct list_metadata_row final {
     [[bioseq_sql::column({
         .sql_type = bioseq::sql::pg::regclass,
@@ -41,6 +47,7 @@ struct list_metadata_row final {
     std::optional<bioseq::postgres::support::interval_value> time_since_update;
 };
 
+/** @brief Describes the resolved active read policy for one indexed column. */
 struct active_read_policy_debug_row final {
     std::int64_t resolver_configured_rows;
     std::int64_t resolver_authoritative_defaults;
@@ -53,6 +60,7 @@ struct active_read_policy_debug_row final {
     std::int64_t prohibited_file_writer_entries;
 };
 
+/** @brief Reports the last minimizer-sequence build in this backend. */
 struct last_minimizer_sequence_build_stats_row final {
     std::int64_t backend_pid;
     std::int64_t db_oid;
@@ -74,6 +82,7 @@ struct last_minimizer_sequence_build_stats_row final {
     std::int64_t position_spill_count;
 };
 
+/** @brief Reports scheduler-wide minimizer-sequence build counters. */
 struct scheduler_minimizer_sequence_build_stats_row final {
     std::int64_t backend_pid;
     std::int64_t db_oid;
@@ -101,6 +110,7 @@ struct scheduler_minimizer_sequence_build_stats_row final {
     std::int64_t shareable_lazy_workers;
 };
 
+/** @brief Reports worker-boundary success and failure counters. */
 struct async_minimizer_sequence_worker_boundary_stats_row final {
     std::int64_t relation_leaf_calls;
     std::int64_t spi_leaf_calls;
@@ -118,6 +128,7 @@ struct async_minimizer_sequence_worker_boundary_stats_row final {
     std::string last_failure_message;
 };
 
+/** @brief Reports queue, worker, and persistence scheduler counters. */
 struct scheduler_stats_row final {
     bool is_supervisor;
     std::int32_t config_generation;
@@ -137,6 +148,7 @@ struct scheduler_stats_row final {
     std::int64_t index_memory_reserved_bytes;
 };
 
+/** @brief Reports the cold-read absence state for one sequence index. */
 struct inspect_cold_no_index_absence_row final {
     std::int64_t target_rows;
     bool is_target_cardinality_metadata_only;
@@ -148,6 +160,7 @@ struct inspect_cold_no_index_absence_row final {
     std::int64_t generation_objects;
 };
 
+/** @brief Reports the ready minimizer generation selected for inspection. */
 struct inspect_ready_minimizer_generation_row final {
     std::int64_t generation_id;
     std::string source_identity;
@@ -174,6 +187,7 @@ struct inspect_ready_minimizer_generation_row final {
     std::int32_t position_segment_count;
 };
 
+/** @brief Reports one generated minimizer fixture and its identity. */
 struct build_minimizer_fixture_row final {
     std::string sidecar_table;
     std::int16_t layout;
@@ -197,6 +211,7 @@ struct build_minimizer_fixture_row final {
     std::int64_t position_chunks;
 };
 
+/** @brief Reports one minimizer fixture read and validation result. */
 struct read_minimizer_fixture_row final {
     std::string sidecar_table;
     std::int16_t layout;
@@ -239,6 +254,7 @@ struct read_minimizer_fixture_row final {
     bioseq::postgres::support::jsonb_value selective_cold_index_preparation;
 };
 
+/** @brief Reports one grouped-SoA generation scan performed by a test routine. */
 struct scan_grouped_soa_minimizer_generation_test_row final {
     std::string sidecar_table;
     std::string selected_backend;
@@ -258,6 +274,7 @@ struct scan_grouped_soa_minimizer_generation_test_row final {
     std::int64_t scan_calls;
 };
 
+/** @brief Reports storage state for one persisted index generation. */
 struct generation_storage_state_row final {
     std::optional<Oid> before_oid;
     std::optional<Oid> operation_oid;
@@ -268,6 +285,7 @@ struct generation_storage_state_row final {
     std::optional<bool> is_assembled_cache_hit;
 };
 
+/** @brief Reports a ready minimizer-fragment generation built by a fixture. */
 struct build_ready_minimizer_fragment_generation_row final {
     std::string sidecar_table;
     std::int16_t column_attno;
@@ -316,6 +334,7 @@ struct build_ready_minimizer_fragment_generation_row final {
     std::int64_t vulkan_downloaded_minimizers;
 };
 
+/** @brief Reports a ready minimizer-sequence generation built by a fixture. */
 struct build_ready_minimizer_sequence_generation_row final {
     std::string sidecar_table;
     std::int16_t column_attno;

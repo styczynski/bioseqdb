@@ -1,3 +1,7 @@
+/**
+ * @file standard_library_link_support.cppm
+ * @brief Forces emission of standard-library members required by GCC module objects.
+ */
 /*-------------------------------------------------------------------------
  *
  * external/standard_library_link_support.cppm
@@ -38,8 +42,11 @@ using shim_pair = std::pair<std::size_t, std::size_t>;
  * odr-use of each member function emits its external COMDAT weak definition,
  * which is what the module objects link against.
  */
+/** @brief ODR-uses `span::data` so the linker receives its weak definition. */
 [[gnu::used]] auto const bioseq_external_keep_span_data = &shim_span::data;
+/** @brief ODR-uses `span::size` so the linker receives its weak definition. */
 [[gnu::used]] auto const bioseq_external_keep_span_size = &shim_span::size;
+/** @brief ODR-uses pair move assignment so the linker receives its definition. */
 [[gnu::used]] shim_pair& (shim_pair::* const bioseq_external_keep_pair_move)(
     shim_pair&&) = &shim_pair::operator=;
 

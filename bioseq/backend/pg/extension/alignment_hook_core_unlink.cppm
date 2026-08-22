@@ -16,9 +16,14 @@ extern "C" {
 module bioseq.postgres.extension:alignment_hook_core_unlink;
 
 import :alignment_hook_contract;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
+/**
+ * @brief Removes a frame from every backend-local registry and lifecycle stack.
+ * @param[in] frame Frame to unlink, or null when registration never completed.
+ */
 void unlink_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {

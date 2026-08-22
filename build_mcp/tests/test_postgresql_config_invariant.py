@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -184,7 +185,12 @@ class PostgreSQLConfigPresetInvariantTest(unittest.TestCase):
             root = Path(temporary)
             build_dir = root / "build"
             build_dir.mkdir()
-            expected = {"artifact_kind": "expected"}
+            expected = {
+                "artifact_kind": build_presets._CMAKE_CONFIGURE_STAMP_KIND,
+                "schema_revision": 1,
+                "inputs": {},
+                "inputs_sha256": hashlib.sha256(b"{}").hexdigest(),
+            }
             stamp = build_dir / build_presets._CMAKE_CONFIGURE_STAMP_NAME
             stamp.write_text("{", encoding="utf-8")
             matches, reason = build_worker._cmake_configure_stamp_status(

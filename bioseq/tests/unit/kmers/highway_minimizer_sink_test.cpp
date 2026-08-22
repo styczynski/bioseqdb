@@ -1,19 +1,10 @@
-#include <tests/support/common.hpp>
+/**
+ * @file highway_minimizer_sink_test.cpp
+ * @brief Output-layout and collector checks for Highway minimizer sinks.
+ */
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <bit>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <exception>
-#include <limits>
-#include <memory>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <type_traits>
-#include <vector>
-
+import std;
 import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace {

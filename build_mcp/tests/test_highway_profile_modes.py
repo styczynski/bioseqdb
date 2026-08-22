@@ -79,7 +79,7 @@ class HighwayProfileModeContractTest(unittest.TestCase):
             definition["name"]
             for definition in protocol.TOOL_DEFINITIONS
         ]
-        self.assertEqual(len(names), 19)
+        self.assertEqual(len(names), 18)
         self.assertEqual(len(names), len(set(names)))
 
     def test_remote_run_schema_and_runtime_close_operation_shapes(self) -> None:
@@ -90,8 +90,6 @@ class HighwayProfileModeContractTest(unittest.TestCase):
         for tool_name in (
             "start_build",
             "inspect",
-            "subagent",
-            "subagent_status",
             "remote-status",
             "remote-debug",
             "remote-status-ps",
@@ -104,6 +102,10 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                 definitions[tool_name]["inputSchema"][
                     "additionalProperties"]
             )
+        subagent_schema = definitions["subagent"]["inputSchema"]
+        self.assertEqual(len(subagent_schema["oneOf"]), 8)
+        for shape in subagent_schema["oneOf"]:
+            self.assertFalse(shape["additionalProperties"])
         remote_schema = definitions["remote-run"]["inputSchema"]
         for shape in remote_schema["oneOf"]:
             self.assertFalse(shape["additionalProperties"])
@@ -117,6 +119,23 @@ class HighwayProfileModeContractTest(unittest.TestCase):
                     "function_name": "cross-shape argument",
                 },
             )
+
+    def test_subagent_public_dispatch_preserves_runtime_error_envelope(self) -> None:
+        expected = json.dumps({
+            "ok": False,
+            "command": "status",
+            "error_code": "INVALID_ARGUMENT",
+        })
+        arguments = {"command": "status", "agent_id": 1}
+        with mock.patch.object(
+            protocol, "tool_subagent", return_value=expected,
+        ) as dispatched:
+            response = protocol._handle_tools_call({
+                "name": "subagent",
+                "arguments": arguments,
+            })
+        dispatched.assert_called_once_with(arguments)
+        self.assertEqual(response["content"][0]["text"], expected)
 
     def test_removed_mode_keys_have_no_alias_or_entrypoint(self) -> None:
         local_schema = next(

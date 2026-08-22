@@ -534,9 +534,9 @@ inline void validate_artifact_path_aliases(
         std::string,
         std::less<>>
         identities;
-    const auto add =
-        [&](const std::filesystem::path& path,
-            std::string_view role) {
+    const auto add = [&identities](
+                         const std::filesystem::path& path,
+                         std::string_view role) -> void {
             if (path.empty()) return;
             const std::filesystem::path identity =
                 artifact_path_identity(path);
@@ -645,9 +645,9 @@ inline void validate_artifact_path_aliases(
             std::filesystem::path,
             std::string>>
             writable;
-        const auto writable_add =
-            [&](const std::filesystem::path& path,
-                std::string_view role) {
+        const auto writable_add = [&writable](
+                                      const std::filesystem::path& path,
+                                      std::string_view role) -> void {
                 if (!path.empty()) {
                     writable.emplace_back(
                         artifact_path_identity(path),
@@ -736,7 +736,7 @@ inline void run_artifact_path_alias_contract_self_test() {
         throw std::runtime_error(
             "cannot allocate SQL artifact-alias contract directory");
     }
-    const auto cleanup = [&] {
+    const auto cleanup = [&temporary_root]() -> void {
         std::error_code error;
         std::filesystem::remove_all(temporary_root, error);
     };
@@ -1119,7 +1119,7 @@ inline void publish_guc_package(
 
 [[nodiscard]] inline std::string json_string(std::string_view value) {
     std::string result{"\""};
-    constexpr char hex[] = "0123456789abcdef";
+    constexpr std::string_view hex = "0123456789abcdef";
     for (const unsigned char character : value) {
         switch (character) {
             case '"': result += "\\\""; break;

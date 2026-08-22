@@ -178,8 +178,8 @@ struct declaration_specifier_state {
 /// A callable definition inside a structurally marked namespace. All ranges
 /// are half-open byte ranges. `highway_attribute_insertion` is the
 /// declaration-prefix position for functions (after any outer template head)
-/// and the legal GNU-attribute slot after a lambda's parameter list, or after
-/// its complete template head/front attributes when parentheses are omitted.
+/// and the lambda front-attribute slot after its introducer or complete
+/// explicit template head, before authored front attributes and its declarator.
 struct callable_insertion_record {
     callable_kind kind{callable_kind::function};
     std::string qualified_name;

@@ -1,0 +1,172 @@
+/**
+ * @file admin/rebuild/generation_route_implementation.cppm
+ * @brief Implements locator-backed grouped-SoA and hash-major rebuild publication.
+ */
+module;
+
+#include <bioseq/pg_compat.h>
+
+#include <cstdint>
+
+module bioseq.postgres.storage.indexing.admin.rebuild.generation_route;
+
+import bioseq.postgres.storage.indexing.admin.rebuild.promoted_sequence;
+import bioseq.postgres.storage.indexing.admin:hash_major;
+import bioseq.postgres.storage.indexing.admin:grouped_soa;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
+import bioseq.common.logging;
+import bioseq.postgres.support;
+import bioseq.postgres.storage.manager;
+import bioseq.postgres.storage.scanner;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.storage.lazy_sequence;
+import bioseq.storage.scanner;
+import bioseq.sequences;
+import bioseq.indexing.hash_major_minimizer_index;
+import bioseq.indexing.type;
+import bioseq.sequences.kmers;
+import bioseq.postgres.storage.indexing.handles;
+
+namespace bioseq::storage::indexing::rebuild_detail {
+
+/**
+ * @brief Select and verify the exact persisted representation for one lazy source.
+ * @tparam p_sequence_range Concrete sequence representation selected from the datum.
+ * @param request Borrowed rebuild authority and source identity.
+ * @param storage Open fragment storage that owns publication cleanup.
+ * @param sequence Snapshot-bound lazy source view.
+ * @param source_binding Locator and source-snapshot binding for publication.
+ *
+ * Fragment-scoped indexes and unsupported hash-major profiles retain grouped-SoA.
+ * A hash-major publication is accepted only when every returned identity and count
+ * matches the requested source. Failures propagate through the existing publisher
+ * and PostgreSQL error boundaries.
+ */
+template <class p_sequence_range>
+inline void build_and_verify_hash_major_minimizer_generation(
+    const locator_generation_rebuild_request& request,
+    fragment_index_storage& storage,
+    bioseq::storage::lazy_sequence_view<
+        typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
+        sequence,
+    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding) {
+    using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
+    const sequence_locator& locator = source_binding.locator();
+    constexpr std::uint16_t k_window_size = 10u;
+    constexpr std::uint16_t k_kmer_size = 15u;
+    constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
+    if (request.index_name == k_minimizers_per_fragment_index_name) {
+        build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
+                                                             request.column_attno,
+                                                             request.index_name,
+                                                             request.sequence_rowno,
+                                                             storage,
+                                                             sequence,
+                                                             source_binding,
+                                                             request.backend,
+                                                             request.kernels);
+        return;
+    }
+    if constexpr (k_alphabet_code != 0u) {
+        build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
+                                                             request.column_attno,
+                                                             request.index_name,
+                                                             request.sequence_rowno,
+                                                             storage,
+                                                             sequence,
+                                                             source_binding,
+                                                             request.backend,
+                                                             request.kernels);
+        return;
+    } else {
+        const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
+            request.backend,
+            k_alphabet_code,
+            k_kmer_size,
+            k_window_size,
+            locator.logical_length);
+        if (!profile) {
+            build_and_verify_grouped_soa_minimizer_generation_pg(request.user_relation_oid,
+                                                                 request.column_attno,
+                                                                 request.index_name,
+                                                                 request.sequence_rowno,
+                                                                 storage,
+                                                                 sequence,
+                                                                 source_binding,
+                                                                 request.backend,
+                                                                 request.kernels);
+            return;
+        }
+        const ready_hash_major_minimizer_publication publication =
+            build_and_publish_hash_major_minimizer_generation_pg(request.user_relation_oid,
+                                                                 request.column_attno,
+                                                                 request.index_name,
+                                                                 request.sequence_rowno,
+                                                                 storage,
+                                                                 sequence,
+                                                                 source_binding,
+                                                                 request.backend,
+                                                                 request.kernels);
+        if (!publication.published || publication.generation_id == 0u ||
+            publication.query_key != request.sequence_rowno ||
+            publication.source_epoch != locator.source_epoch ||
+            publication.selected_backend != request.backend ||
+            publication.head.generation_id != publication.generation_id ||
+            publication.head.query_key != request.sequence_rowno ||
+            publication.head.source_epoch != locator.source_epoch ||
+            publication.manifest.generation_id != publication.generation_id ||
+            publication.manifest.source_epoch != locator.source_epoch ||
+            publication.manifest.target_length != locator.logical_length ||
+            publication.unique_hash_count != publication.manifest.unique_hash_count ||
+            publication.total_posting_count != publication.manifest.total_posting_count) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "normal hash-major minimizer rebuild publication validation was rejected",
+                fmt::format("index={} backend={}",
+                            request.index_name,
+                            bioseq::minimizers::minimizer_sketch_backend_name(request.backend)));
+        }
+    }
+}
+
+void build_and_verify_locator_minimizer_generation(
+    const locator_generation_rebuild_request& request) {
+    bioseq::pg_types::seq::dispatch_instance(
+        request.alphabet_code,
+        request.storage_width,
+        [&request]<class p_sequence_type>() {
+            using source_binding =
+                bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
+            const source_binding bound_source{
+                request.database_oid,
+                request.tablespace_oid,
+                request.main_relfilenode,
+                request.column_attno,
+                request.locator,
+                source_binding::expected_last_fragment_padding(request.locator),
+                request.snapshot,
+                request.caches,
+                request.row_context};
+            bioseq::postgres::support::invoke_pg_as_cpp([&request, bound_source] {
+                with_promoted_pg_sequence_view<typename source_binding::alphabet_type>(
+                    request.promoted_datum,
+                    request.row_context,
+                    [&request, bound_source](auto lazy_view) {
+                        auto storage = open_fragment_storage(request.user_relation_oid,
+                                                             request.database_oid,
+                                                             request.tablespace_oid,
+                                                             request.main_relfilenode,
+                                                             request.column_attno,
+                                                             request.index_name,
+                                                             request.locator,
+                                                             request.sequence_rowno,
+                                                             request.caches,
+                                                             request.work_context);
+                        build_and_verify_hash_major_minimizer_generation<p_sequence_type>(
+                            request, storage, lazy_view, bound_source);
+                    });
+            });
+        });
+}
+
+} // namespace bioseq::storage::indexing::rebuild_detail

@@ -93,9 +93,10 @@ if rg --quiet --ignore-case 'rustup|rustc --version|cargo --version|\.cargo/bin'
   fail "$BOOTSTRAP must not install, expose, or verify the retired Rust/Cargo toolchain"
 fi
 
-# Persistent builders may be reconciled and snapshotted while running, but no
-# package-build path may stop, terminate, reboot, or power off an EC2 instance.
-for lifecycle_file in "$CONTROLLER" "$BOOTSTRAP" "$USER_DATA"; do
+# Bootstrap paths never change instance lifecycle. Release cleanup may issue
+# only the controller's constant SSM poweroff command, which maps to the
+# instance's configured stop behavior and preserves its EBS cache.
+for lifecycle_file in "$BOOTSTRAP" "$USER_DATA"; do
   for forbidden_lifecycle in \
     stop-instances terminate-instances \
     'sudo shutdown' 'sudo poweroff' 'sudo halt' 'sudo reboot' \
@@ -107,6 +108,36 @@ for lifecycle_file in "$CONTROLLER" "$BOOTSTRAP" "$USER_DATA"; do
     fi
   done
 done
+for forbidden_lifecycle in \
+  stop-instances terminate-instances \
+  'sudo shutdown' 'sudo poweroff' 'sudo halt' 'sudo reboot' \
+  '/sbin/shutdown' '/sbin/poweroff' '/sbin/halt' '/sbin/reboot' \
+  'systemctl halt' 'systemctl reboot' 'tofu destroy'; do
+  if rg --fixed-strings --quiet -- "$forbidden_lifecycle" "$CONTROLLER"; then
+    fail "forbidden instance lifecycle operation found in $CONTROLLER: $forbidden_lifecycle"
+  fi
+done
+assert_literal "$CONTROLLER" '"AWS-RunShellScript"'
+assert_literal "$CONTROLLER" '"poweroff quiescence requires exactly one positive mutation deadline"'
+assert_literal "$CONTROLLER" '"test \"$(date +%s)\" -le \"$not_after\" || exit 76",'
+assert_literal "$CONTROLLER" '"/usr/bin/systemctl poweroff --no-block",'
+assert_literal "$CONTROLLER" 'committed_source_tree_sha256'
+assert_literal "$CONTROLLER" '.bioseq-source-tree-sha256'
+assert_literal "$CONTROLLER" 'record_builder_stop_ownership'
+assert_literal "$CONTROLLER" 'if payload["builders"][name]["stop_owned"]'
+assert_literal "$CONTROLLER" 'REMOTE_OPTIMIZATION_EVIDENCE_SCRIPT'
+assert_literal "$CONTROLLER" 'production compiler command must contain only -O3, exactly'
+assert_literal "$CONTROLLER" '-DNDEBUG, and exactly -fno-omit-frame-pointer;'
+assert_literal "$CONTROLLER" 'require_compiler_optimization_evidence'
+assert_literal "$CONTROLLER" '"optimization_flags": ["-O3"]'
+assert_literal "$CONTROLLER" '"forbidden_optimization_flags": []'
+assert_literal "$CONTROLLER" 'force_remote_package_reconfigure'
+assert_literal "$CONTROLLER" '*/build-repository-root/CMakeCache.txt'
+assert_literal "$CONTROLLER" '.pre-o3-${token}'
+assert_literal "$CONTROLLER" 'cmake/verify_o3_compile_database.py'
+assert_literal "$CONTROLLER" '"language_compile_commands"'
+assert_literal "$CONTROLLER" '"cmake_cache_paths"'
+assert_literal "$CONTROLLER" '"compile_databases"'
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.

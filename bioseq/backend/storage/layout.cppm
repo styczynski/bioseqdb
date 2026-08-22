@@ -28,6 +28,7 @@ inline constexpr std::uint8_t sequence_locator_payload_version = 3u;
 /** Width-byte marker indicating that a flat sequence value holds a locator. */
 inline constexpr std::uint8_t sequence_locator_stub_width_marker = 0x80u;
 
+/** @brief Return whether a stored width byte denotes a locator stub. */
 [[nodiscard]] constexpr bool is_sequence_locator_stub_width(
     std::uint8_t width) noexcept
 {
@@ -175,12 +176,14 @@ validate_sequence_locator(const sequence_locator& locator) noexcept
     return bioseq::common::ceil_div(storage_units, fragment_storage_units);
 }
 
+/** @brief Reason a fragment's framed byte count is invalid. */
 enum class fragment_frame_error : std::uint8_t {
     none = 0u,
     shorter_than_header,
     size_mismatch,
 };
 
+/** @brief Validate a fragment's complete framed byte count. */
 [[nodiscard]] constexpr fragment_frame_error validate_fragment_frame(
     std::uint64_t actual_bytes,
     std::uint64_t header_bytes,
@@ -195,6 +198,7 @@ enum class fragment_frame_error : std::uint8_t {
     return fragment_frame_error::none;
 }
 
+/** @brief Reason fragment metadata differs from its owning locator. */
 enum class fragment_metadata_error : std::uint8_t {
     none = 0u,
     type_mismatch,
@@ -202,6 +206,7 @@ enum class fragment_metadata_error : std::uint8_t {
     padding_mismatch,
 };
 
+/** @brief Compare fragment metadata with the expected persisted geometry. */
 [[nodiscard]] constexpr fragment_metadata_error validate_fragment_metadata(
     std::uint8_t actual_alphabet,
     std::uint8_t actual_width,

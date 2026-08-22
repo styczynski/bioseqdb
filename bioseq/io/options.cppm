@@ -1,5 +1,8 @@
+/**
+ * @file options.cppm
+ * @brief Reader and writer configuration with default policies.
+ */
 module;
-
 
 #include <cstddef>
 #include <cstdint>
@@ -9,8 +12,8 @@ export module bioseq.io.options;
 export namespace bioseq::io {
 
 /// Which file format `read_sequences_file` is being asked to parse. The
-/// user MUST commit to one format up front (template parameter); we do
-/// not auto-detect per record. See tech spec §3.3.
+/// callers select one format through the template parameter. The reader does
+/// not auto-detect per record.
 enum class sequence_file_format : std::uint8_t {
     fasta = 0,
     fastq = 1,
@@ -18,46 +21,32 @@ enum class sequence_file_format : std::uint8_t {
 
 /// I/O backend knobs (buffer sizes, mmap thresholds, gzip auto-detection).
 struct io_options {
-    // Larger initial buffer = fewer slab cycles + fewer kernel→user
-    // copies on the posix_read path. 1 MiB matches kseqpp's 128 KiB +
-    // headroom; on the 234-MiB human-genome cell this cuts refill
-    // cycles from ~3650 → 234. Past 1 MiB the marginal win drops
-    // (memcpy bandwidth dominates the syscall overhead) and very
-    // large slabs fight the page-cache prefetcher. Empirically 4 MiB
-    // regressed across all the synthetic cells (build_26) — the
-    // additional `make_room` memmove cost on each refill outweighed
-    // the syscall amortisation.
+    /// Initial byte capacity of each aligned refill slab.
     std::size_t initial_buffer_size = 1 * 1024 * 1024;
+    /// Maximum slab capacity available to an oversized record.
     std::size_t max_buffer_size = static_cast<std::size_t>(1) * 1024 * 1024 * 1024;
-    bool        prefer_mmap = true;
+    bool prefer_mmap = true;
     std::size_t max_mmap_bytes = static_cast<std::size_t>(1) << 35;
-    bool        mmap_zero_copy = true;
-    bool        stream_madvise = true;
-    bool        gzip_auto_detect = true;
+    bool mmap_zero_copy = true;
+    bool stream_madvise = true;
+    bool gzip_auto_detect = true;
 
-    // ---------------------------------------------------------------
-    // Parallel-gzip knobs (spec §2.2). The dispatcher activates the
-    // parallel decoder when (a) the file is gzipped (magic-byte sniff
-    // in `mmap_source::try_open`), (b) the file size meets
-    // `parallel_gzip_min_compressed_bytes`, and (c)
-    // `parallel_gzip_enabled` is true. Falls back to single-thread
-    // `gzip_source` otherwise.
-    // ---------------------------------------------------------------
-    bool        parallel_gzip_enabled              = true;
+    /// Enable parallel gzip above the configured compressed-size threshold.
+    bool parallel_gzip_enabled = true;
     std::size_t parallel_gzip_min_compressed_bytes = 16ULL * 1024 * 1024;
     /// 0 = use default_parallel_gzip_chunk_size = 4 MiB.
-    std::size_t parallel_gzip_chunk_bytes          = 0;
+    std::size_t parallel_gzip_chunk_bytes = 0;
     /// 0 = auto (`hardware_concurrency() - 2`, capped at 6).
-    std::size_t parallel_gzip_thread_count         = 0;
-    bool        parallel_gzip_verify_crc           = true;
+    std::size_t parallel_gzip_thread_count = 0;
+    bool parallel_gzip_verify_crc = true;
 };
 
 /// Concurrency knobs (thread counts, ring sizes, batch shape).
 struct concurrency_options {
     std::size_t worker_count = 0;
     /// Number of parsing threads for mmap parallel mode. 0 = auto
-    /// (use std::thread::hardware_concurrency capped to 8); 1 = force
-    /// sequential single-threaded mmap path; N > 1 = exactly N parser
+    /// (use std::thread::hardware_concurrency capped to 8). 1 forces the
+    /// sequential single-threaded mmap path. N > 1 selects exactly N parser
     /// shards. The parallel path activates only on the mmap zero-copy
     /// path with file_size >= mmap_parallel_min_bytes.
     std::size_t parser_count = 0;
@@ -65,26 +54,12 @@ struct concurrency_options {
     std::size_t ring_capacity = 32;
     std::size_t batch_target_record_count = 0;
     std::size_t batch_min_payload_bytes = 256 * 1024;
-    bool        compact_batch = true;
+    bool compact_batch = true;
     /// Minimum mmap'd file size that activates parallel sharded
-    /// parsing. Below this, the sequential mmap path runs.
-    /// Empirically: the synthetic LONG / VERY_LONG cells (≤ 16 MiB)
-    /// don't have enough records to balance shards. The 234 MiB
-    /// human-genome FASTA cell has 24 records — 8 shards = 3 records
-    /// per shard, each ~10 MiB — and the macOS `vm_map` lock
-    /// serialises the demand-zero of 8 × 30 MiB anonymous-mmap
-    /// regions per iteration, hurting throughput by ~50% vs
-    /// sequential. The 6 GiB SRR FASTQ cell has ~30 M short records
-    /// spread across 8 shards of 750 MiB each — the per-shard demand
-    /// -zero amortises across millions of records and parallel
-    /// parsing wins by ~5× over single-threaded. 1 GiB threshold
-    /// keeps the human cell sequential and the SRR cell parallel.
-    std::size_t mmap_parallel_min_bytes =
-        static_cast<std::size_t>(1024) * 1024 * 1024;
-    /// Hard cap on shard count even if hardware_concurrency is higher.
-    /// 8 perf cores on M1 Pro is the sweet spot; oversubscription past
-    /// 8 contends on the L1 ports the SIMD pack pipeline already
-    /// saturates.
+    /// parsing. Smaller files use the sequential mmap path to avoid
+    /// shard setup and per-shard storage overhead.
+    std::size_t mmap_parallel_min_bytes = static_cast<std::size_t>(1024) * 1024 * 1024;
+    /// Hard cap on shard count even when more hardware threads are available.
     std::size_t mmap_parallel_max_shards = 8;
 };
 
@@ -96,7 +71,7 @@ struct encoder_options {
 
 /// Diagnostics knobs (progress traces).
 struct diagnostics_options {
-    bool        trace_progress = false;
+    bool trace_progress = false;
     std::size_t trace_interval_bytes = 64ull * 1024 * 1024;
 };
 
@@ -104,9 +79,9 @@ struct diagnostics_options {
 /// so designated initialisation reads cleanly. Default constructor gives
 /// sensible defaults for every field.
 struct reader_options {
-    io_options          io{};
+    io_options io{};
     concurrency_options concurrency{};
-    encoder_options     encoder{};
+    encoder_options encoder{};
     diagnostics_options diagnostics{};
 };
 
@@ -116,24 +91,20 @@ inline constexpr reader_options default_reader_options{};
 /// (a) decode packed sequence words → ASCII, (b) inject newlines for
 /// FASTA wrap, (c) pwrite the per-thread output chunk to the file's
 /// disjoint range claimed via an atomic offset. The defaults are
-/// calibrated for the bench's largest cells (234 MiB human FASTA,
-/// 6 GiB SRR FASTQ).
+/// selected to bound syscall frequency and per-thread memory use.
 struct writer_options {
     /// Per-line width for FASTA bodies (letters before a `\n`). 0 = no
     /// wrapping (one giant line per record). Default 0 = no wrapping
-    /// for maximum throughput; the FASTA spec accepts arbitrary line
+    /// for maximum throughput. The FASTA specification accepts arbitrary line
     /// lengths and bioseq's reader handles single-line bodies fine.
     /// Set to 80 for kseq++-canonical output.
     std::size_t fasta_line_width = 0;
 
     /// Size (in bytes) of one producer-thread's output chunk. The
-    /// chunk fills with formatted bytes; once it crosses
+    /// chunk fills with formatted bytes. Once it crosses
     /// `flush_threshold_bytes` the thread reserves a disjoint file
     /// range via atomic-fetch-add and pwrites the chunk in one
-    /// syscall. 64 MiB strikes a balance between syscall amortisation
-    /// (only ~96 syscalls for the 6 GiB FASTQ cell) and per-thread
-    /// memory footprint (with 8 producer threads, peak working set
-    /// is 512 MiB).
+    /// syscall.
     std::size_t chunk_capacity_bytes = 64 * 1024 * 1024;
 
     /// Threshold at which a producer thread flushes its chunk. Below
@@ -145,7 +116,7 @@ struct writer_options {
     /// quality span length doesn't match the sequence's letter count.
     /// Default false: real-world FASTQ corpora (e.g. SRR datasets)
     /// occasionally contain records where the qual string is one byte
-    /// off from the sequence; the writer truncates qual to the
+    /// off from the sequence. The writer truncates quality to the
     /// sequence's letter count instead of aborting. Set true to
     /// enforce strict matching.
     bool strict_fastq_quality_length = false;
@@ -169,4 +140,4 @@ struct writer_options {
 
 inline constexpr writer_options default_writer_options{};
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

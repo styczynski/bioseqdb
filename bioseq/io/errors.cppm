@@ -1,9 +1,12 @@
+/**
+ * @file errors.cppm
+ * @brief Failure callback and formatted diagnostic helpers.
+ */
 module;
 
-
+#include <concepts>
 #include <string>
 #include <utility>
-#include <concepts>
 
 export module bioseq.io.errors;
 
@@ -11,15 +14,11 @@ import bioseq.common.logging;
 
 export namespace bioseq::io {
 
-/// Concept: a callable that accepts a diagnostic string by rvalue.
-/// Used for the `failure_fn` passed into `read_sequences_file`.
+/// Accepts ownership of one diagnostic string.
 template <typename p_failure_function>
 concept failure_callback = std::invocable<p_failure_function, std::string&&>;
 
-/// Build a diagnostic via a compile-checked fmt format string and
-/// dispatch to the user's failure callback. Wraps the boilerplate of
-/// `failure_fn(fmt::format(...))` while keeping the format string
-/// compile-time validated. Spec §3.5 / §15.1.
+/// Format and dispatch one diagnostic through the supplied callback.
 template <typename p_failure_function, typename... p_arguments>
 inline void emit_failure(p_failure_function& failure_fn,
                          fmt::format_string<p_arguments...> fmt_str,
@@ -27,4 +26,4 @@ inline void emit_failure(p_failure_function& failure_fn,
     failure_fn(fmt::format(fmt_str, std::forward<p_arguments>(args)...));
 }
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

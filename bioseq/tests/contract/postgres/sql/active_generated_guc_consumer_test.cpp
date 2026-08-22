@@ -1,3 +1,7 @@
+/**
+ * @file active_generated_guc_consumer_test.cpp
+ * @brief Checks the active generated GUC owner and registry profile.
+ */
 #include <concepts>
 
 #if defined(BIOSEQ_TEST_INDEXES)

@@ -1,12 +1,9 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file sql_catalog_entities.cppm
+ * @brief Provides stateless typed handles for PostgreSQL catalog entities.
  *
- * sql_catalog_entities.cppm
- *
- * Stateless typed handles for PostgreSQL relation-like catalog entities.
  * Generated owner facets instantiate these handles from collected SQL
- * declarations; ordinary consumers use only those generated variables.
- *
- *-------------------------------------------------------------------------
+ * declarations. Ordinary consumers use only those generated variables.
  */
 module;
 
@@ -54,6 +51,7 @@ inline void arm_lookup_barrier(std::int64_t key) noexcept {
     lookup_barrier_key = key;
 }
 
+/** @brief Disarms the backend-local lookup barrier without blocking. */
 inline void disarm_lookup_barrier() noexcept {
     lookup_barrier_key.reset();
 }
@@ -64,8 +62,9 @@ inline void disarm_lookup_barrier() noexcept {
  * the catalog object and observes this backend waiting through pg_locks.
  */
 inline void pass_lookup_barrier() {
-    if (!lookup_barrier_key.has_value())
+    if (!lookup_barrier_key.has_value()) {
         return;
+    }
     const std::int64_t key = *lookup_barrier_key;
     lookup_barrier_key.reset();
     bioseq::postgres::support::invoke_pg_as_cpp([key] {
@@ -98,15 +97,19 @@ template<std::size_t p_extent>
 struct fixed_catalog_name final {
     std::array<char, p_extent> bytes{};
 
+    /** @brief Copies a null-terminated catalog identifier at compile time. */
     consteval fixed_catalog_name(const char (&text)[p_extent]) {
-        for (std::size_t index = 0; index != p_extent; ++index)
+        for (std::size_t index = 0; index != p_extent; ++index) {
             bytes[index] = text[index];
+        }
     }
 
+    /** @return The identifier without its terminating null byte. */
     [[nodiscard]] constexpr std::string_view view() const noexcept {
         return {bytes.data(), p_extent - 1};
     }
 
+    /** @return Whether the structural value is a nonempty C string. */
     [[nodiscard]] consteval bool valid() const noexcept {
         return p_extent > 1 && bytes[p_extent - 1] == '\0';
     }
@@ -151,8 +154,9 @@ class relation_entity_handle final {
     [[nodiscard]] static Oid missing_oid(
             catalog_missing_policy policy,
             std::string_view message) {
-        if (policy == catalog_missing_policy::return_invalid)
+        if (policy == catalog_missing_policy::return_invalid) {
             return InvalidOid;
+        }
         raise_lookup_error(ERRCODE_UNDEFINED_OBJECT, message);
     }
 
@@ -182,8 +186,9 @@ class relation_entity_handle final {
                 });
         }
 
-        if (!OidIsValid(result))
+        if (!OidIsValid(result)) {
             return missing_oid(policy, "required schema is missing");
+        }
         return result;
     }
 
@@ -226,18 +231,22 @@ class relation_entity_handle final {
     }
 
 public:
+    /** @brief Constructs a stateless handle. All identity is template-owned. */
     constexpr relation_entity_handle() noexcept = default;
 
+    /** @return The unqualified catalog object name. */
     [[nodiscard]] static constexpr std::string_view
     leaf_name() noexcept {
         return p_leaf.view();
     }
 
+    /** @return Whether the schema is fixed or extension-relative. */
     [[nodiscard]] static constexpr sql_schema_binding
     schema_binding() noexcept {
         return p_binding;
     }
 
+    /** @return The stable schema key, using `$extension` when appropriate. */
     [[nodiscard]] static constexpr std::string_view
     stable_schema_name() noexcept {
         if constexpr (p_binding == sql_schema_binding::fixed)
@@ -245,6 +254,7 @@ public:
         return "$extension";
     }
 
+    /** @return The stable schema and leaf name used by generated metadata. */
     [[nodiscard]] static std::string stable_qualified_name() {
         std::string result{stable_schema_name()};
         result.push_back('.');
@@ -252,19 +262,23 @@ public:
         return result;
     }
 
+    /** @return The installed schema name, or no value under a permissive policy. */
     [[nodiscard]] static std::optional<std::string>
     installed_schema_name(catalog_missing_policy policy) {
         const Oid namespace_id = namespace_oid(policy);
-        if (!OidIsValid(namespace_id))
+        if (!OidIsValid(namespace_id)) {
             return std::nullopt;
+        }
         return copy_namespace_name(namespace_id, policy);
     }
 
+    /** @return The quoted installed name, or no value under a permissive policy. */
     [[nodiscard]] static std::optional<std::string>
     installed_qualified_name(catalog_missing_policy policy) {
         auto schema = installed_schema_name(policy);
-        if (!schema)
+        if (!schema) {
             return std::nullopt;
+        }
 
         const std::string leaf{leaf_name()};
         char* raw_name = bioseq::postgres::support::invoke_pg_as_cpp(
@@ -294,11 +308,13 @@ public:
         }
     }
 
+    /** @return The validated relation OID, or `InvalidOid` when permitted. */
     [[nodiscard]] static Oid resolve_oid(
             catalog_missing_policy policy) {
         const Oid namespace_id = namespace_oid(policy);
-        if (!OidIsValid(namespace_id))
+        if (!OidIsValid(namespace_id)) {
             return InvalidOid;
+        }
 
         const std::string leaf{leaf_name()};
         const Oid relation_id =
@@ -307,8 +323,9 @@ public:
                     return get_relname_relid(
                         leaf_name, namespace_id);
                 });
-        if (!OidIsValid(relation_id))
+        if (!OidIsValid(relation_id)) {
             return missing_oid(policy, "required relation is missing");
+        }
 
 #if defined(BIOSEQ_TEST_INDEXES)
         catalog_entity_test_support::pass_lookup_barrier();
@@ -319,8 +336,9 @@ public:
                 [relation_id, namespace_id] {
                     HeapTuple tuple = SearchSysCache1(
                         RELOID, ObjectIdGetDatum(relation_id));
-                    if (!HeapTupleIsValid(tuple))
+                    if (!HeapTupleIsValid(tuple)) {
                         return relation_lookup_state::disappeared;
+                    }
 
                     const Form_pg_class relation =
                         reinterpret_cast<Form_pg_class>(

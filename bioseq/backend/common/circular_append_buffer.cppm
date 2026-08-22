@@ -6,6 +6,7 @@ module;
 
 #include <boost/serialization/strong_typedef.hpp>
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <type_traits>
@@ -34,14 +35,14 @@ struct unavailable_circular_append_buffer_allocator {};
  * @brief Circular write buffer backed by inline or allocator-provided storage.
  *
  * The buffer owns its storage and is not synchronized. Dynamic-capacity
- * instances wrap at the constructor-supplied capacity; fixed-capacity
+ * instances wrap at the constructor-supplied capacity. Fixed-capacity
  * instances use the next power-of-two storage bound and a mask. Accessors do
  * not validate positions because this type serves latency-sensitive streaming
  * loops whose bounds are established by the owning algorithm.
  *
  * @tparam p_value_type Stored element type.
  * @tparam p_requested_capacity Compile-time upper bound for allocated slots.
- * @tparam p_alignment Alignment of the storage field; zero requests no additional alignment.
+ * @tparam p_alignment Alignment of the storage field. Zero requests no additional alignment.
  * @tparam p_is_fixed_capacity Whether wrapping uses the compile-time power-of-two capacity.
  * @tparam p_storage_type Inline storage when `void`, otherwise an indexable owning storage type.
  * @tparam p_allocator_template Allocator used only for non-void storage types.
@@ -75,10 +76,15 @@ public:
     static constexpr std::size_t k_size_mask = k_storage_size - 1u;
 
 private:
-    /// @brief Concrete inline-array or allocator-owned storage representation.
+    /**
+     * @brief Concrete inline-array or allocator-owned storage representation.
+     *
+     * `std::array` preserves contiguous inline storage without allocation while
+     * making the fixed extent part of the storage type.
+     */
     using storage_type = std::conditional_t<
         std::is_same_v<p_storage_type, void>,
-        p_value_type[k_storage_size],
+        std::array<p_value_type, k_storage_size>,
         p_storage_type>;
 
     alignas(p_alignment) storage_type buffer_;

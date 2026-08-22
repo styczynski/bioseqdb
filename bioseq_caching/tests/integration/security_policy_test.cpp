@@ -216,7 +216,7 @@ TEST_CASE("unknown finalized scans bypass and cache diagnostics redact",
             connection,
             "SELECT * FROM bioseq_cache.entries()",
             "42501", 10s);
-        CHECK(denied.sqlstate == "42501");
+        CHECK(denied.sql_state == "42501");
         bioseq::cache_test::execute(connection, "RESET ROLE");
 
     }

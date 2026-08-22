@@ -87,6 +87,7 @@ build_target_coordinates(const target_manifest& inventory) {
     return result;
 }
 
+/// Renders the global module fragment shared by fixed-target artifacts.
 [[nodiscard]] inline std::string fixed_target_fragment(
     const target_manifest& inventory,
     const target_spec& target) {
@@ -96,9 +97,21 @@ build_target_coordinates(const target_manifest& inventory) {
            << "#include <hwy/detect_targets.h>\n"
            << "#undef HWY_TARGET\n"
            << "#define HWY_TARGET " << target.token << "\n"
+           << "#include <array>\n"
            << "#include <cstdint>\n"
            << "#include <hwy/aligned_allocator.h>\n"
-           << "#include <hwy/highway.h>\n\n";
+           << "#include <hwy/highway.h>\n"
+           << "#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+           << "#if defined(HWY_TARGET_STR) && HWY_HAS_ATTRIBUTE(target)\n"
+           << "#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)\n"
+           << "#error \"compiler lacks the scoped target attribute required "
+              "for generated lambdas\"\n"
+           << "#endif\n"
+           << "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR "
+              "[[gnu::target(HWY_TARGET_STR)]]\n"
+           << "#else\n"
+           << "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+           << "#endif\n\n";
     return output.str();
 }
 
@@ -151,7 +164,7 @@ build_target_coordinates(const target_manifest& inventory) {
         if (callable.body_relative_offset >= source.body.size()) {
             throw std::runtime_error(
                 source.source.path.string()
-                + ": stale HWY_ATTR insertion geometry while rendering");
+                + ": stale target-attribute insertion geometry while rendering");
         }
         std::string attribute{"HWY_ATTR "};
         if (lambda) {
@@ -177,7 +190,7 @@ build_target_coordinates(const target_manifest& inventory) {
                     source.source.path.string()
                     + ": stale lambda declarator tokens while rendering");
             }
-            attribute = " HWY_ATTR";
+            attribute = " BIOSEQ_HIGHWAY_LAMBDA_ATTR";
             const unsigned char next = static_cast<unsigned char>(
                 source.body[callable.body_relative_offset]);
             if (!std::isspace(next)) attribute += ' ';
@@ -187,7 +200,10 @@ build_target_coordinates(const target_manifest& inventory) {
             .end_byte = callable.body_relative_offset,
             .replacement = std::move(attribute),
             .source_identity = callable.qualified_name,
-            .purpose = "insert HWY_ATTR on " + callable.qualified_name,
+            .purpose = lambda
+                ? "insert lambda target attribute on "
+                    + callable.qualified_name
+                : "insert HWY_ATTR on " + callable.qualified_name,
         });
     }
     return namespace_materialization::apply_exact_edits(
@@ -214,7 +230,7 @@ inline void replace_all(
     const std::string_view needle,
     const std::string_view replacement) {
     if (needle.empty()) return;
-    std::size_t position = 0u;
+    std::size_t position = 0U;
     while ((position = text.find(needle, position)) != std::string::npos) {
         text.replace(position, needle.size(), replacement);
         position += replacement.size();
@@ -256,6 +272,7 @@ inline void replace_all(
     return output.str();
 }
 
+/// Renders one fixed-target owner for a bounded minimizer representation.
 [[nodiscard]] inline std::string render_minimizer_representation_instantiation(
     const generation_plan& plan,
     const target_spec& target,
@@ -288,10 +305,10 @@ inline void replace_all(
             ? "::std::uint32_t"
             : "::std::uint64_t";
         output
-            << "[[nodiscard]] HWY_ATTR bool " << prefix << identity << "_"
+            << "[[nodiscard]] HWY_ATTR auto " << prefix << identity << "_"
             << storage << "(\n"
             << "    ::bioseq::minimizers::minimizer_kernel_invocation& invocation,\n"
-            << "    ::bioseq::minimizers::minimizer_kernel_result& result)\n"
+            << "    ::bioseq::minimizers::minimizer_kernel_result& result) -> bool\n"
             << "{\n    return ";
         if (instance.algorithm == "minimap2_reference") {
             output << "minimizer_kernel_detail::run_reference<\n"
@@ -326,7 +343,7 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
             + std::string{family});
     }
 
-    std::uint32_t code = 0u;
+    std::uint32_t code = 0U;
     for (const char character : family.substr(
              alignment_family_prefix.size())) {
         if (character < '0' || character > '9') {
@@ -334,9 +351,9 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
                 "typed alignment slot family has a non-numeric alphabet code: "
                 + std::string{family});
         }
-        code = code * 10u
+        code = code * 10U
              + static_cast<std::uint32_t>(character - '0');
-        if (code > 255u) {
+        if (code > 255U) {
             throw std::runtime_error(
                 "typed alignment slot family alphabet code exceeds uint8_t: "
                 + std::string{family});
@@ -361,10 +378,10 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
     const std::size_t close = slot.expression.rfind('>');
     if (marker == std::string::npos
         || open == std::string::npos
-        || close != slot.expression.size() - 1u
-        || open + 1u == close
-        || slot.expression.find('<', open + 1u) != std::string::npos
-        || slot.expression.find('>', open + 1u) != close) {
+        || close != slot.expression.size() - 1U
+        || open + 1U == close
+        || slot.expression.find('<', open + 1U) != std::string::npos
+        || slot.expression.find('>', open + 1U) != close) {
         throw std::runtime_error(
             "typed alignment slot '" + slot.family_field + "."
             + slot.slot_field
@@ -372,7 +389,7 @@ inline constexpr std::string_view alignment_family_prefix = "alignment_";
     }
 
     std::string alphabet =
-        slot.expression.substr(open + 1u, close - open - 1u);
+        slot.expression.substr(open + 1U, close - open - 1U);
     for (const char character : alphabet) {
         const bool identifier_character =
             (character >= 'a' && character <= 'z')
@@ -500,22 +517,22 @@ struct minimizer_case_binding final {
     const std::string_view field,
     const std::string_view family) {
     if (spelling.empty()
-        || (spelling.size() > 1u && spelling.front() == '0')) {
+        || (spelling.size() > 1U && spelling.front() == '0')) {
         throw std::runtime_error(
             "typed minimizer family '" + std::string{family}
             + "' has a non-canonical " + std::string{field});
     }
 
-    std::uint32_t result = 0u;
+    std::uint32_t result = 0U;
     for (const char character : spelling) {
         if (character < '0' || character > '9') {
             throw std::runtime_error(
                 "typed minimizer family '" + std::string{family}
                 + "' has a non-numeric " + std::string{field});
         }
-        result = result * 10u
+        result = result * 10U
                + static_cast<std::uint32_t>(character - '0');
-        if (result > 255u) {
+        if (result > 255U) {
             throw std::runtime_error(
                 "typed minimizer family '" + std::string{family} + "' "
                 + std::string{field} + " exceeds uint8_t");
@@ -536,9 +553,9 @@ minimizer_case_coordinates(const std::string_view family) {
         family.substr(minimizer_case_family_prefix.size());
     const std::size_t separator = suffix.find('_');
     if (separator == std::string_view::npos
-        || separator == 0u
-        || separator + 1u == suffix.size()
-        || suffix.find('_', separator + 1u) != std::string_view::npos) {
+        || separator == 0U
+        || separator + 1U == suffix.size()
+        || suffix.find('_', separator + 1U) != std::string_view::npos) {
         throw std::runtime_error(
             "typed minimizer slot family must be named "
             "minimizer_case_<alphabet-code>_<storage-bytes>: "
@@ -546,11 +563,11 @@ minimizer_case_coordinates(const std::string_view family) {
     }
 
     const std::uint8_t alphabet_code = parse_minimizer_case_number(
-        suffix.substr(0u, separator), "alphabet code", family);
+        suffix.substr(0U, separator), "alphabet code", family);
     const std::uint8_t storage_unit_bytes = parse_minimizer_case_number(
-        suffix.substr(separator + 1u), "storage byte width", family);
-    if (storage_unit_bytes == 0u || storage_unit_bytes > 8u
-        || (storage_unit_bytes & (storage_unit_bytes - 1u)) != 0u) {
+        suffix.substr(separator + 1U), "storage byte width", family);
+    if (storage_unit_bytes == 0U || storage_unit_bytes > 8U
+        || (storage_unit_bytes & (storage_unit_bytes - 1U)) != 0U) {
         throw std::runtime_error(
             "typed minimizer family '" + std::string{family}
             + "' storage byte width must be a power of two no greater "
@@ -562,12 +579,12 @@ minimizer_case_coordinates(const std::string_view family) {
 [[nodiscard]] inline bool qualified_type_name(
     const std::string_view spelling) noexcept {
     std::string_view remaining = spelling;
-    if (remaining.starts_with("::")) remaining.remove_prefix(2u);
+    if (remaining.starts_with("::")) remaining.remove_prefix(2U);
     if (remaining.empty()) return false;
 
     while (!remaining.empty()) {
         const std::size_t separator = remaining.find("::");
-        const std::string_view component = remaining.substr(0u, separator);
+        const std::string_view component = remaining.substr(0U, separator);
         if (component.empty()
             || !std::ranges::all_of(component, [](const char character) {
                    return (character >= 'a' && character <= 'z')
@@ -581,7 +598,7 @@ minimizer_case_coordinates(const std::string_view family) {
             return false;
         }
         if (separator == std::string_view::npos) return true;
-        remaining.remove_prefix(separator + 2u);
+        remaining.remove_prefix(separator + 2U);
     }
     return false;
 }
@@ -606,12 +623,12 @@ minimizer_case_types(const slot_spec& slot) {
     const std::size_t arguments_begin = marker + expected_suffix.size();
     const std::string_view arguments{
         slot.expression.data() + arguments_begin,
-        slot.expression.size() - arguments_begin - 1u};
+        slot.expression.size() - arguments_begin - 1U};
     const std::size_t comma = arguments.find(',');
     if (comma == std::string_view::npos
-        || comma == 0u
-        || comma + 1u == arguments.size()
-        || arguments.find(',', comma + 1u) != std::string_view::npos
+        || comma == 0U
+        || comma + 1U == arguments.size()
+        || arguments.find(',', comma + 1U) != std::string_view::npos
         || arguments.find_first_of("<>") != std::string_view::npos) {
         throw std::runtime_error(
             "typed minimizer slot '" + slot.family_field + "."
@@ -619,8 +636,8 @@ minimizer_case_types(const slot_spec& slot) {
             + "' must have exactly two simple type arguments");
     }
 
-    const std::string alphabet{arguments.substr(0u, comma)};
-    const std::string storage{arguments.substr(comma + 1u)};
+    const std::string alphabet{arguments.substr(0U, comma)};
+    const std::string storage{arguments.substr(comma + 1U)};
     if (!qualified_type_name(alphabet) || !qualified_type_name(storage)) {
         throw std::runtime_error(
             "typed minimizer slot '" + slot.family_field + "."
@@ -704,7 +721,7 @@ collect_minimizer_cases(
         const std::string expected_storage_type =
             "::std::uint"
             + std::to_string(
-                static_cast<unsigned int>(storage_unit_bytes) * 8u)
+                static_cast<unsigned int>(storage_unit_bytes) * 8U)
             + "_t";
         if (binding.storage_unit_type != expected_storage_type) {
             throw std::runtime_error(
@@ -747,8 +764,8 @@ collect_minimizer_cases(
             "typed minimizer cases may not coexist with a second root-table "
             "minimizer slot registry");
     }
-    if (result.size() != 8u || alphabet_types.size() != 2u
-        || storage_types.size() != 4u) {
+    if (result.size() != 8U || alphabet_types.size() != 2U
+        || storage_types.size() != 4U) {
         throw std::runtime_error(
             "typed minimizer registry must be the exact source-owned "
             "two-alphabet by four-storage-width matrix");
@@ -872,10 +889,11 @@ collect_alphabet_identities(
         throw std::runtime_error(
             "typed minimizer callable lost its address-of marker");
     }
-    expression.erase(0u, 1u);
+    expression.erase(0U, 1U);
     return expression;
 }
 
+/// Emits the alphabet/storage switch for one minimizer dispatch member.
 inline void render_minimizer_wrapper(
     std::ostringstream& output,
     const std::vector<minimizer_case_binding>& cases,
@@ -884,18 +902,17 @@ inline void render_minimizer_wrapper(
     if (cases.empty()) return;
 
     output
-        << "[[nodiscard]] HWY_ATTR "
-           "::bioseq::minimizers::minimizer_kernel_result "
+        << "[[nodiscard]] HWY_ATTR auto "
         << minimizer_wrapper_name(member.slot) << "(\n"
         << "    ::bioseq::minimizers::minimizer_kernel_invocation& "
-           "invocation) {\n"
+           "invocation) -> ::bioseq::minimizers::minimizer_kernel_result {\n"
         << "    switch (invocation.sequence.alphabet_code) {\n";
 
-    std::size_t begin = 0u;
+    std::size_t begin = 0U;
     while (begin < cases.size()) {
         const std::uint8_t alphabet_code = cases[begin].alphabet_code;
         output << "        case "
-               << static_cast<unsigned int>(alphabet_code) << "u:\n"
+               << static_cast<unsigned int>(alphabet_code) << "U:\n"
                << "            switch ("
                   "invocation.sequence.storage_unit_bytes) {\n";
         std::size_t end = begin;
@@ -905,7 +922,7 @@ inline void render_minimizer_wrapper(
             const slot_spec* slot = binding.members.find(member.slot)->second;
             output << "                case "
                    << static_cast<unsigned int>(binding.storage_unit_bytes)
-                   << "u:\n"
+                   << "U:\n"
                    << "                    return "
                    << minimizer_callable_expression(
                           *slot, coordinate.identity_namespace)
@@ -991,6 +1008,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return owners;
 }
 
+/// Renders the exported fixed-target declaration and private owner hooks.
 [[nodiscard]] inline std::string render_primary(
     const source_manifest& inventory,
     const namespace_materialization::materialization_coordinate& coordinate) {
@@ -1011,8 +1029,8 @@ collect_slot_owners(const source_manifest& inventory) {
     output << "\n"
            << "export namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << " {\n"
-           << "[[nodiscard]] const highway_target_binding* "
-              "bind_highway_target();\n"
+           << "[[nodiscard]] auto bind_highway_target() "
+              "-> const highway_target_binding*;\n"
            << "}  // namespace bioseq::simd_dispatch::"
            << coordinate.identity_namespace << "\n\n"
            << "namespace bioseq::simd_dispatch::"
@@ -1207,6 +1225,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
+/// Renders the fixed-target tables while preserving manifest iteration order.
 [[nodiscard]] inline std::string render_binder(
     const generation_plan& plan,
     const target_spec& target,
@@ -1243,9 +1262,9 @@ collect_slot_owners(const source_manifest& inventory) {
             static_cast<void>(member);
             family_owners.insert(slot->owner_key);
         }
-        output << "HWY_ATTR ::bioseq::simd::alignment_kernels<"
-               << family.alphabet_type << "> make_alignment_" << code
-               << "() noexcept {\n"
+        output << "HWY_ATTR auto make_alignment_" << code
+               << "() noexcept -> ::bioseq::simd::alignment_kernels<"
+               << family.alphabet_type << "> {\n"
                << "    ::bioseq::simd::alignment_kernels<"
                << family.alphabet_type << "> table{};\n";
         for (const std::string& owner : family_owners) {
@@ -1257,7 +1276,8 @@ collect_slot_owners(const source_manifest& inventory) {
                << "}\n\n";
     }
 
-    output << "HWY_ATTR highway_kernel_table make_highway_kernel_table() noexcept {\n"
+    output << "HWY_ATTR auto make_highway_kernel_table() noexcept "
+              "-> highway_kernel_table {\n"
            << "    highway_kernel_table table{};\n";
 
     std::set<std::string, std::less<>> available_kernel_ids;
@@ -1278,8 +1298,8 @@ collect_slot_owners(const source_manifest& inventory) {
 
     if (!alphabet_identities.empty()) {
         output
-            << "    static const ::bioseq::simd_dispatch::"
-               "highway_alphabet_identity_entry alphabet_identities[]{\n";
+            << "    static const auto alphabet_identities = ::std::to_array<"
+               "::bioseq::simd_dispatch::highway_alphabet_identity_entry>({\n";
         for (const alphabet_identity_binding& identity
              : alphabet_identities) {
             output
@@ -1288,9 +1308,9 @@ collect_slot_owners(const source_manifest& inventory) {
                    "highway_alphabet_identity_for<"
                 << identity.alphabet_type << ">(), .alphabet_code = "
                 << static_cast<unsigned int>(identity.alphabet_code)
-                << "u},\n";
+                << "U},\n";
         }
-        output << "    };\n"
+        output << "    });\n"
                << "    table.alphabet_identities = alphabet_identities;\n";
     }
 
@@ -1301,18 +1321,18 @@ collect_slot_owners(const source_manifest& inventory) {
                << " = make_alignment_" << code << "();\n";
     }
     if (!alignment_families.empty()) {
-        output << "    static const ::bioseq::simd::alignment_table_entry "
-                  "alignment_by_alphabet[]{\n";
+        output << "    static const auto alignment_by_alphabet = "
+                  "::std::to_array<::bioseq::simd::alignment_table_entry>({\n";
         for (const alignment_family_binding& family : alignment_families) {
             const auto code = static_cast<unsigned int>(family.alphabet_code);
             output << "        {.alphabet_code = " << code
-                   << "u, .typed_table_complete = "
+                   << "U, .typed_table_complete = "
                       "::bioseq::simd::is_alignment_kernel_table_complete("
                       "alignment_"
                    << code << "), .typed_table = &alignment_" << code
                    << "},\n";
         }
-        output << "    };\n"
+        output << "    });\n"
                << "    table.alignment_by_alphabet = "
                   "alignment_by_alphabet;\n";
     }
@@ -1331,7 +1351,8 @@ collect_slot_owners(const source_manifest& inventory) {
     }
     output << "    return table;\n"
            << "}\n\n"
-           << "HWY_ATTR const highway_target_binding* bind_highway_target() {\n"
+           << "HWY_ATTR auto bind_highway_target() "
+              "-> const highway_target_binding* {\n"
            << "    static const highway_kernel_table kernels = "
               "make_highway_kernel_table();\n"
            << "    if (!kernels.is_complete()) {\n"
@@ -1350,6 +1371,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
+/// Renders the sole dynamic-dispatch export and validated target selection.
 [[nodiscard]] inline std::string render_dispatch_registry_partition(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&
@@ -1366,8 +1388,9 @@ collect_slot_owners(const source_manifest& inventory) {
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
            << "HWY_EXPORT(bind_highway_target);\n\n"
-           << "const highway_target_binding& select_highway_target_once(\n"
-              "    const highway_dispatch_plan& plan) {\n"
+           << "auto select_highway_target_once(\n"
+              "    const highway_dispatch_plan& plan) "
+              "-> const highway_target_binding& {\n"
            << "    if (plan.planned_target == 0\n"
               "        || (plan.runnable_targets & plan.planned_target) == 0) {\n"
            << "        throw std::logic_error{\n"
@@ -1394,6 +1417,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
+/// Renders the cold exact-target inventory in authenticated target order.
 [[nodiscard]] inline std::string render_dispatch_inventory(
     const generation_plan& plan) {
     const std::uint64_t compiled_mask =
@@ -1408,12 +1432,14 @@ collect_slot_owners(const source_manifest& inventory) {
         output << "import " << generated_module_name(target) << ";\n";
     }
     output << "\nnamespace bioseq::simd_dispatch {\n\n"
-           << "highway_dispatch_plan registered_highway_dispatch_plan() noexcept {\n"
+           << "auto registered_highway_dispatch_plan() noexcept "
+              "-> highway_dispatch_plan {\n"
            << "    return make_highway_dispatch_plan(static_cast<std::int64_t>("
            << compiled_mask << "ULL));\n"
            << "}\n\n"
-           << "const highway_target_binding& registered_highway_target_binding(\n"
-              "    const std::int64_t exact_target) {\n"
+           << "auto registered_highway_target_binding(\n"
+              "    const std::int64_t exact_target) "
+              "-> const highway_target_binding& {\n"
            << "    const auto target = static_cast<std::uint64_t>(exact_target);\n"
            << "    const highway_dispatch_plan plan =\n"
               "        registered_highway_dispatch_plan();\n"
@@ -1448,6 +1474,7 @@ collect_slot_owners(const source_manifest& inventory) {
     return output.str();
 }
 
+/// Renders the fixed-target accessors used by deterministic tests.
 [[nodiscard]] inline std::string render_test_support(
     const generation_plan& plan,
     const std::vector<namespace_materialization::materialization_coordinate>&
@@ -1469,11 +1496,12 @@ collect_slot_owners(const source_manifest& inventory) {
            << "#include <stdexcept>\n\n"
            << "// Generated fixed-target test binding; do not edit.\n"
            << "export module bioseq.highway.test_support;\n\n"
+           << "export import bioseq.highway.test_probe_contract;\n"
            << "import " << plan.source_inventory.contract_module << ";\n"
            << "import " << coordinate.module_name << ";\n\n"
            << "export namespace bioseq::simd_dispatch {\n\n"
-           << "[[nodiscard]] const highway_target_binding& "
-              "highway_test_target_binding() {\n"
+           << "[[nodiscard]] auto highway_test_target_binding() "
+              "-> const highway_target_binding& {\n"
            << "    const highway_target_binding* binding = "
            << coordinate.identity_namespace << "::bind_highway_target();\n"
            << "    if (binding == nullptr || binding->kernels == nullptr) {\n"
@@ -1486,8 +1514,8 @@ collect_slot_owners(const source_manifest& inventory) {
            << "    }\n"
            << "    return *binding;\n"
            << "}\n\n"
-           << "[[nodiscard]] const highway_kernel_table& "
-              "highway_test_kernel_table() {\n"
+           << "[[nodiscard]] auto highway_test_kernel_table() "
+              "-> const highway_kernel_table& {\n"
            << "    return *highway_test_target_binding().kernels;\n"
            << "}\n\n"
            << "}  // namespace bioseq::simd_dispatch\n";
@@ -1547,7 +1575,8 @@ inline void validate_rendered_artifact(
     if (artifact.kind
         == artifact_kind::dispatch_inventory_implementation) {
         if (!artifact.content.contains(
-                "registered_highway_dispatch_plan() noexcept")
+                "registered_highway_dispatch_plan() noexcept -> "
+                "highway_dispatch_plan")
             || !artifact.content.contains(
                 "registered_highway_target_binding(")
             || artifact.content.contains("select_highway_target_once")
@@ -1596,6 +1625,8 @@ inline void validate_rendered_artifact(
     if (artifact.kind == artifact_kind::unit_probe_implementation
         && (!artifact.content.contains("#define HWY_TARGET ")
             || !artifact.content.contains("import :")
+            || !artifact.content.contains(
+                "import bioseq.highway.test_probe_contract;")
             || artifact.content.contains("export module")
             || artifact.content.contains("bind_highway_target"))) {
         throw std::runtime_error(
@@ -1624,7 +1655,7 @@ inline void validate_rendered_artifact(
         sources_by_key.emplace(source.source.key, &source.source);
     }
 
-    for (std::size_t target_index = 0u;
+    for (std::size_t target_index = 0U;
          target_index < plan.target_inventory.targets.size();
          ++target_index) {
         const target_spec& target =

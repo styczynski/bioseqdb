@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file tuple_ops.cppm
+ * @brief Tuple modification helpers for columnar metadata catalogs.
  *
- * tuple_ops.cppm
- *
- * Tuple modification helpers shared by storage_metadata catalog code.
+ * Shared by storage_metadata catalog code.
  * Keeping executor-state setup and tuple insert/delete plumbing in this leaf
  * partition keeps metadata-core focused on catalog semantics.
- *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -20,6 +18,12 @@ import bioseq.postgres.support;
 
 export namespace bioseq::storage::metadata::tuple_ops {
 
+/**
+ * @brief Holds borrowed relation state and executor resources for catalog mutations.
+ *
+ * The relation remains owned by the caller. `finish_relation_modification` releases the
+ * executor and index resources and invalidates the remaining pointers.
+ */
 struct relation_modification_state
 {
 	Relation relation;
@@ -28,6 +32,8 @@ struct relation_modification_state
 };
 
 /// @brief Creates executor state configured for catalog tuple modification.
+/// @param[in] relation Open relation borrowed for the executor's range table.
+/// @return Executor state that must be released after the mutation batch.
 EState *
 create_relation_executor_state(Relation relation)
 {
@@ -53,6 +59,8 @@ create_relation_executor_state(Relation relation)
 }
 
 /// @brief Opens indexes and allocates state for relation modification.
+/// @param[in] relation Open relation retained by the caller for the whole mutation batch.
+/// @return Transaction-context state closed by `finish_relation_modification`.
 relation_modification_state *
 begin_relation_modification(Relation relation)
 {
@@ -74,9 +82,12 @@ begin_relation_modification(Relation relation)
 	return state;
 }
 
-/*
- * insert_catalog_tuple inserts a tuple into a relation and makes
- * sure that inserted tuple obeys the constraints.
+/**
+ * @brief Inserts one catalog tuple while enforcing indexes, constraints, and triggers.
+ * @param[in] state Active modification state for the destination relation.
+ * @param[in] values Attribute values ordered by the destination tuple descriptor.
+ * @param[in] nulls Per-attribute null flags parallel to `values`.
+ * @note PostgreSQL reports constraint and trigger failures through its error boundary.
  */
 void
 insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nulls)
@@ -102,9 +113,10 @@ insert_catalog_tuple(relation_modification_state *state, Datum *values, bool *nu
 	ExecSimpleRelationInsert(state->result_rel_info, state->executor_state, slot);
 }
 
-/*
- * delete_catalog_tuple deletes a tuple from a relation and
- * enforces constraints by checking index constraints.
+/**
+ * @brief Deletes one catalog tuple and runs its row-delete triggers.
+ * @param[in] state Active modification state for the owning relation.
+ * @param[in] heap_tuple Borrowed tuple whose self pointer identifies the row to delete.
  */
 void
 delete_catalog_tuple(relation_modification_state *state, HeapTuple heap_tuple)
@@ -120,8 +132,9 @@ delete_catalog_tuple(relation_modification_state *state, HeapTuple heap_tuple)
 		executor_state, result_rel_info, tuple_id, nullptr, nullptr, true);
 }
 
-/*
- * finish_relation_modification cleans up resources after modifications are done.
+/**
+ * @brief Closes indexes, fires queued triggers, and releases executor resources.
+ * @param[in] state Completed modification state, invalid after this call.
  */
 void
 finish_relation_modification(relation_modification_state *state)

@@ -1,3 +1,7 @@
+/**
+ * @file sql_boundary_template_consumer_test.cpp
+ * @brief Verifies generated SQL-boundary templates from an ordinary importer.
+ */
 #include <bioseq/pg_compat.h>
 
 extern "C" {

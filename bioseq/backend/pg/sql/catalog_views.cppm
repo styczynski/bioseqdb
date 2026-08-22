@@ -1,3 +1,7 @@
+/**
+ * @file catalog_views.cppm
+ * @brief Declares public SQL catalog views for Bioseq storage metadata.
+ */
 export module bioseq.postgres.sql.catalog_views;
 
 import bioseq.codegen.sql.annotation_model;
@@ -5,6 +9,7 @@ import bioseq.codegen.sql.annotation_model;
 export namespace bioseq::sql_entities::catalog_views {
 
 /**
+ * @brief Summarizes physical sequence-shard storage relations.
  * @remark Missing shard relations appear as NULL while concurrent DDL is in
  * flight.
  */
@@ -87,6 +92,8 @@ WHERE o.regclass = c.oid
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
@@ -113,6 +120,8 @@ WHERE stripe.storage_id = storage.storage_id
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]
@@ -134,6 +143,8 @@ WHERE cg.storage_id = storage.storage_id
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .security_barrier = true,
 }),
+  bioseq_sql::depends(
+      bioseq::sql_entities::catalog_views::storage),
   bioseq_sql::grant({
     .privileges = bioseq::sql::privileges::select,
 })]]

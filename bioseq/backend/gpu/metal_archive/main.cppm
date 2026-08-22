@@ -14,6 +14,6 @@ import bioseq.gpu.metal_archive.builder;
  * @param[in] arguments Mutable null-terminated command-line argument array.
  * @return Archive-builder process status.
  */
-int main(const int argument_count, char** const arguments) {
+auto main(const int argument_count, char** const arguments) -> int {
     return bioseq::gpu::metal_archive::run_binary_archive_builder(argument_count, arguments);
 }

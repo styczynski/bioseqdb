@@ -7,9 +7,10 @@ module;
 #include <bioseq/pg_compat.h>
 
 extern "C" {
-#include "miscadmin.h"
 #include "storage/dsm.h"
 #include "storage/dsm_impl.h"
+
+#include "miscadmin.h"
 }
 
 #include <cstddef>
@@ -35,6 +36,12 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::postgres::scheduler {
 
+/**
+ * @brief Fixed wire header for a metadata-only minimizer build DSM.
+ *
+ * The asserted size and offsets are shared with the worker parser. Function pointers and
+ * process-local kernel tables never enter this representation.
+ */
 struct minimizer_sequence_build_dsm_header {
     std::uint32_t magic;
     std::uint32_t version;
@@ -55,51 +62,72 @@ static_assert(offsetof(minimizer_sequence_build_dsm_header, highway_executed_tar
 static_assert(offsetof(minimizer_sequence_build_dsm_header, locator) == 48);
 static_assert(std::is_trivially_copyable_v<minimizer_sequence_build_dsm_header>);
 
-[[nodiscard]] constexpr bool valid_minimizer_sketch_backend_wire_value(
-        std::int32_t backend_value) noexcept {
+/**
+ * @brief Checks whether a serialized minimizer backend is recognized.
+ * @param[in] backend_value Serialized backend selector.
+ * @return True for every supported wire value.
+ */
+[[nodiscard]] constexpr bool
+valid_minimizer_sketch_backend_wire_value(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     switch (static_cast<minimizer_sketch_backend>(backend_value)) {
-        case minimizer_sketch_backend::scalar:
-        case minimizer_sketch_backend::vulkan_segment:
-        case minimizer_sketch_backend::exact_simd:
-        case minimizer_sketch_backend::bounded_nthash_simd:
-            return true;
+    case minimizer_sketch_backend::scalar:
+    case minimizer_sketch_backend::vulkan_segment:
+    case minimizer_sketch_backend::exact_simd:
+    case minimizer_sketch_backend::bounded_nthash_simd:
+        return true;
     }
     return false;
 }
 
-[[nodiscard]] constexpr bool minimizer_backend_requires_highway_target(
-        std::int32_t backend_value) noexcept {
+/**
+ * @brief Reports whether a queued backend requires an exact Highway target bit.
+ * @param[in] backend_value Serialized backend selector.
+ * @return True for Highway SIMD backends.
+ */
+[[nodiscard]] constexpr bool
+minimizer_backend_requires_highway_target(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     const auto backend = static_cast<minimizer_sketch_backend>(backend_value);
-    return backend == minimizer_sketch_backend::exact_simd
-        || backend == minimizer_sketch_backend::bounded_nthash_simd;
+    return backend == minimizer_sketch_backend::exact_simd ||
+           backend == minimizer_sketch_backend::bounded_nthash_simd;
 }
 
-[[nodiscard]] constexpr bool minimizer_backend_allowed_in_async_minimizer_sequence(
-        std::int32_t backend_value) noexcept {
+/**
+ * @brief Checks whether the identity-only async payload can reproduce a backend.
+ * @param[in] backend_value Serialized backend selector.
+ * @return True when the worker can rebuild without additional scheme identity.
+ */
+[[nodiscard]] constexpr bool
+minimizer_backend_allowed_in_async_minimizer_sequence(std::int32_t backend_value) noexcept {
     using bioseq::minimizers::minimizer_sketch_backend;
     const auto backend = static_cast<minimizer_sketch_backend>(backend_value);
-    return backend == minimizer_sketch_backend::scalar
-        || backend == minimizer_sketch_backend::vulkan_segment
-        || backend == minimizer_sketch_backend::exact_simd;
+    return backend == minimizer_sketch_backend::scalar ||
+           backend == minimizer_sketch_backend::vulkan_segment ||
+           backend == minimizer_sketch_backend::exact_simd;
 }
 
+/** @brief Tracks whether this backend installed its transaction callback. */
 inline bool g_persist_xact_callback_registered = false;
 
 #ifdef BIOSEQ_TEST_INDEXES
+/** @brief Stores the backend-local one-shot staging failure selector. */
 inline thread_local async_minimizer_sequence_stage_pg_failure
-    g_async_minimizer_sequence_stage_pg_failure =
-        async_minimizer_sequence_stage_pg_failure::none;
-inline thread_local std::uint64_t
-    g_async_minimizer_sequence_stage_injected_failures = 0;
+    g_async_minimizer_sequence_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
+/** @brief Counts process-local staging failures raised by test injection. */
+inline thread_local std::uint64_t g_async_minimizer_sequence_stage_injected_failures = 0;
 #endif
 
+/**
+ * @brief Arms one backend-local staging failure selector.
+ * @param[in] point PostgreSQL leaf that should fail once.
+ * @return True when test instrumentation accepted the selector.
+ */
 [[nodiscard]] bool arm_async_minimizer_sequence_stage_pg_failure(
-        async_minimizer_sequence_stage_pg_failure point) noexcept {
+    async_minimizer_sequence_stage_pg_failure point) noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    if (point == async_minimizer_sequence_stage_pg_failure::none
-        || point > async_minimizer_sequence_stage_pg_failure::dsm_detach) {
+    if (point == async_minimizer_sequence_stage_pg_failure::none ||
+        point > async_minimizer_sequence_stage_pg_failure::dsm_detach) {
         return false;
     }
     g_async_minimizer_sequence_stage_pg_failure = point;
@@ -110,13 +138,17 @@ inline thread_local std::uint64_t
 #endif
 }
 
+/** @brief Clears the backend-local staging failure selector. */
 void disarm_async_minimizer_sequence_stage_pg_failure() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-    g_async_minimizer_sequence_stage_pg_failure =
-        async_minimizer_sequence_stage_pg_failure::none;
+    g_async_minimizer_sequence_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
 #endif
 }
 
+/**
+ * @brief Reads the backend-local staging failure selector.
+ * @return The armed leaf or `none` when instrumentation is unavailable.
+ */
 [[nodiscard]] async_minimizer_sequence_stage_pg_failure
 async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -126,8 +158,11 @@ async_minimizer_sequence_stage_pg_failure_armed() noexcept {
 #endif
 }
 
-[[nodiscard]] std::uint64_t
-async_minimizer_sequence_stage_injected_failure_count() noexcept {
+/**
+ * @brief Reads the count of injected backend-local staging failures.
+ * @return The process-local injected failure count.
+ */
+[[nodiscard]] std::uint64_t async_minimizer_sequence_stage_injected_failure_count() noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
     return g_async_minimizer_sequence_stage_injected_failures;
 #else
@@ -135,44 +170,55 @@ async_minimizer_sequence_stage_injected_failure_count() noexcept {
 #endif
 }
 
+/**
+ * @brief Consumes an armed staging selector and raises PostgreSQL ERROR.
+ * @param[in] point Leaf about to execute.
+ */
 void inject_async_minimizer_sequence_stage_pg_failure_leaf(
-        async_minimizer_sequence_stage_pg_failure point) {
+    async_minimizer_sequence_stage_pg_failure point) {
 #ifdef BIOSEQ_TEST_INDEXES
     if (g_async_minimizer_sequence_stage_pg_failure != point) {
         return;
     }
-    g_async_minimizer_sequence_stage_pg_failure =
-        async_minimizer_sequence_stage_pg_failure::none;
+    g_async_minimizer_sequence_stage_pg_failure = async_minimizer_sequence_stage_pg_failure::none;
     ++g_async_minimizer_sequence_stage_injected_failures;
     ereport(ERROR,
-        (errcode(ERRCODE_INTERNAL_ERROR),
-         errmsg("injected asynchronous minimizer-sequence staging PostgreSQL leaf failure"),
-         errdetail("failure_point=%u", static_cast<unsigned>(point))));
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected asynchronous minimizer-sequence staging PostgreSQL leaf failure"),
+             errdetail("failure_point=%u", static_cast<unsigned>(point))));
 #else
     (void)point;
 #endif
 }
 
+/**
+ * @brief Executes one staging primitive inside a PostgreSQL error bridge.
+ * @tparam p_function Callable returning the leaf result.
+ * @param[in] point Failure selector associated with the primitive.
+ * @param[in,out] function Callable invoked once after failure injection.
+ * @return The callable result.
+ */
 template <class p_function>
-auto invoke_async_minimizer_sequence_stage_pg_leaf(
-        async_minimizer_sequence_stage_pg_failure point,
-        p_function&& function)
+auto invoke_async_minimizer_sequence_stage_pg_leaf(async_minimizer_sequence_stage_pg_failure point,
+                                                   p_function&& function)
     -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
     return bioseq::postgres::support::invoke_pg_as_cpp(
-        [point, &function]() ->
-            std::invoke_result_t<std::remove_reference_t<p_function>&> {
+        [point, &function]() -> std::invoke_result_t<std::remove_reference_t<p_function>&> {
             inject_async_minimizer_sequence_stage_pg_failure_leaf(point);
             return std::invoke(function);
         });
 }
 
+/**
+ * @brief Releases a pinned DSM while preserving the initiating cleanup outcome.
+ * @param[in] handle DSM handle, or `DSM_HANDLE_INVALID` when already released.
+ */
 void release_pinned_dsm(dsm_handle handle) noexcept {
     if (handle == DSM_HANDLE_INVALID) {
         return;
     }
     try {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [handle] { dsm_unpin_segment(handle); });
+        bioseq::postgres::support::invoke_pg_as_cpp([handle] { dsm_unpin_segment(handle); });
     } catch (...) {
         // Transaction/worker cleanup must not longjmp across pending_persist_job
         // owners. Supported PostgreSQL releases do not ERROR here; preserve
@@ -180,6 +226,12 @@ void release_pinned_dsm(dsm_handle handle) noexcept {
     }
 }
 
+/**
+ * @brief Validates and decodes metadata from a mapped DSM.
+ * @param[in] base Start of the mapped bytes.
+ * @param[in] mapped Accessible byte count.
+ * @return Decoded metadata, or absence for any invalid identity or bound.
+ */
 [[nodiscard]] std::optional<minimizer_sequence_build_metadata>
 parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
     if (mapped < sizeof(minimizer_sequence_build_dsm_header)) {
@@ -187,20 +239,15 @@ parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
     }
     minimizer_sequence_build_dsm_header header{};
     std::memcpy(&header, base, sizeof(header));
-    if (header.magic != k_minimizer_sequence_build_dsm_magic
-        || header.version != k_minimizer_sequence_build_wire_revision
-        || header.index_name_len == 0
-        || !bioseq::indexing::pair_run_sort_implementation_ordinal_valid(
-            header.pair_sort_impl)
-        || !valid_minimizer_sketch_backend_wire_value(
-            header.index_sketch_backend)
-        || !minimizer_backend_allowed_in_async_minimizer_sequence(
-            header.index_sketch_backend)
-        || (minimizer_backend_requires_highway_target(
-                header.index_sketch_backend)
-            && header.highway_executed_target == 0)
-        || header.locator.payload_version != bioseq::storage::sequence_locator_payload_version
-        || header.locator.source_epoch == 0) {
+    if (header.magic != k_minimizer_sequence_build_dsm_magic ||
+        header.version != k_minimizer_sequence_build_wire_revision || header.index_name_len == 0 ||
+        !bioseq::indexing::pair_run_sort_implementation_ordinal_valid(header.pair_sort_impl) ||
+        !valid_minimizer_sketch_backend_wire_value(header.index_sketch_backend) ||
+        !minimizer_backend_allowed_in_async_minimizer_sequence(header.index_sketch_backend) ||
+        (minimizer_backend_requires_highway_target(header.index_sketch_backend) &&
+         header.highway_executed_target == 0) ||
+        header.locator.payload_version != bioseq::storage::sequence_locator_payload_version ||
+        header.locator.source_epoch == 0) {
         return std::nullopt;
     }
     const std::uint64_t name_offset = sizeof(minimizer_sequence_build_dsm_header);
@@ -223,6 +270,7 @@ parse_minimizer_sequence_build_metadata(const char* base, Size mapped) {
     return meta;
 }
 
+/** @brief Installs the transaction callback once after its PostgreSQL leaf succeeds. */
 void ensure_persist_xact_callback_registered() {
     if (g_persist_xact_callback_registered) {
         return;
@@ -236,98 +284,107 @@ void ensure_persist_xact_callback_registered() {
     g_persist_xact_callback_registered = true;
 }
 
+/**
+ * @brief Reports whether shared persistence slots are attached.
+ * @return True when this backend can publish into supervisor shared memory.
+ */
 [[nodiscard]] bool async_persist_queue_available() noexcept {
     return g_shared != nullptr;
 }
 
-[[nodiscard]] bool stage_async_minimizer_sequence_build(
-        const persist_target& target,
-        const bioseq::storage::sequence_locator& locator,
-        std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width,
-        std::uint16_t last_fragment_padding,
-        std::int32_t pair_sort_impl,
-        std::int32_t pipeline_mode,
-        std::int32_t max_concurrency,
-        std::int32_t index_memory_cap_mb,
-        std::int32_t index_sketch_backend,
-        std::int64_t highway_executed_target) {
-    if (!bioseq::indexing::pair_run_sort_implementation_ordinal_valid(
-            pair_sort_impl)) {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [pair_sort_impl] {
-                ereport(ERROR,
+/**
+ * @brief Serializes one validated build identity into a pinned metadata DSM.
+ * @param[in] target Relation, index, and sequence identity.
+ * @param[in] locator Durable source location consumed by the worker.
+ * @param[in] alphabet_code Serialized alphabet selector.
+ * @param[in] storage_unit_byte_width Packed storage width in bytes.
+ * @param[in] last_fragment_padding Padding symbols in the final fragment.
+ * @param[in] pair_sort_impl Serialized pair sorter selector.
+ * @param[in] pipeline_mode Serialized worker concurrency mode.
+ * @param[in] max_concurrency Worker concurrency limit.
+ * @param[in] index_memory_cap_mb Worker index-memory cap in MiB.
+ * @param[in] index_sketch_backend Serialized minimizer backend selector.
+ * @param[in] highway_executed_target Exact target bit selected before staging.
+ * @return True when transaction-local pending work accepted the pinned DSM.
+ */
+[[nodiscard]] bool
+stage_async_minimizer_sequence_build(const persist_target& target,
+                                     const bioseq::storage::sequence_locator& locator,
+                                     std::uint8_t alphabet_code,
+                                     std::uint8_t storage_unit_byte_width,
+                                     std::uint16_t last_fragment_padding,
+                                     std::int32_t pair_sort_impl,
+                                     std::int32_t pipeline_mode,
+                                     std::int32_t max_concurrency,
+                                     std::int32_t index_memory_cap_mb,
+                                     std::int32_t index_sketch_backend,
+                                     std::int64_t highway_executed_target) {
+    if (!bioseq::indexing::pair_run_sort_implementation_ordinal_valid(pair_sort_impl)) {
+        bioseq::postgres::support::invoke_pg_as_cpp([pair_sort_impl] {
+            ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("asynchronous minimizer-sequence build has an invalid pair sorter"),
                      errdetail("sorter=%d", pair_sort_impl)));
-            });
+        });
         pg_unreachable();
     }
     if (!valid_minimizer_sketch_backend_wire_value(index_sketch_backend)) {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [index_sketch_backend] {
-                ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                     errmsg("asynchronous minimizer-sequence build has an invalid minimizer backend"),
-                     errdetail("backend=%d", index_sketch_backend)));
-            });
+        bioseq::postgres::support::invoke_pg_as_cpp([index_sketch_backend] {
+            ereport(
+                ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("asynchronous minimizer-sequence build has an invalid minimizer backend"),
+                 errdetail("backend=%d", index_sketch_backend)));
+        });
         pg_unreachable();
     }
-    if (!minimizer_backend_allowed_in_async_minimizer_sequence(
-            index_sketch_backend)) {
+    if (!minimizer_backend_allowed_in_async_minimizer_sequence(index_sketch_backend)) {
         return false;
     }
-    if (minimizer_backend_requires_highway_target(index_sketch_backend)
-        && highway_executed_target == 0) {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [index_sketch_backend, highway_executed_target] {
-                ereport(ERROR,
+    if (minimizer_backend_requires_highway_target(index_sketch_backend) &&
+        highway_executed_target == 0) {
+        bioseq::postgres::support::invoke_pg_as_cpp([index_sketch_backend,
+                                                     highway_executed_target] {
+            ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                      errmsg("asynchronous minimizer-sequence build has no selected Highway target"),
-                     errdetail("backend=%d target=%lld; the queued worker cannot redispatch or change algorithms",
-                        index_sketch_backend,
-                        static_cast<long long>(highway_executed_target))));
-            });
+                     errdetail("backend=%d target=%lld; the queued worker cannot redispatch or "
+                               "change algorithms",
+                               index_sketch_backend,
+                               static_cast<long long>(highway_executed_target))));
+        });
         pg_unreachable();
     }
-    (void)rebind_minimizer_kernels_for_backend(
-        index_sketch_backend, highway_executed_target);
+    (void)rebind_minimizer_kernels_for_backend(index_sketch_backend, highway_executed_target);
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
-    if (!bioseq::settings::index::async_persistence::enabled
-        || !OidIsValid(target.db_oid)
-        || !OidIsValid(target.user_relid)
-        || !OidIsValid(target.main_relfilenode)
-        || target.column_attno <= 0
-        || target.index_name.empty()
-        || locator.payload_version != bioseq::storage::sequence_locator_payload_version
-        || locator.source_epoch == 0
-        || locator.fragment_count == 0
-        || locator.logical_length == 0
-        || target.bucket_idx != locator.bucket_index
-        || target.shard_idx != locator.shard_index) {
+    if (!bioseq::settings::index::async_persistence::enabled || !OidIsValid(target.db_oid) ||
+        !OidIsValid(target.user_relid) || !OidIsValid(target.main_relfilenode) ||
+        target.column_attno <= 0 || target.index_name.empty() ||
+        locator.payload_version != bioseq::storage::sequence_locator_payload_version ||
+        locator.source_epoch == 0 || locator.fragment_count == 0 || locator.logical_length == 0 ||
+        target.bucket_idx != locator.bucket_index || target.shard_idx != locator.shard_index) {
         return false;
     }
     if (!async_persist_queue_available()) {
-        bioseq_log<logging_level::debug>("[bioseq] index: async minimizer-sequence build skipped row={} index={} target_bp={} fragments={} because shared supervisor queue is unavailable",
-                static_cast<unsigned long long>(target.sequence_rowno),
-                target.index_name,
-                static_cast<unsigned long long>(locator.logical_length),
-                static_cast<unsigned long long>(locator.fragment_count));
+        bioseq_log<logging_level::debug>(
+            "[bioseq] index: async minimizer-sequence build skipped row={} index={} target_bp={} "
+            "fragments={} because shared supervisor queue is unavailable",
+            static_cast<unsigned long long>(target.sequence_rowno),
+            target.index_name,
+            static_cast<unsigned long long>(locator.logical_length),
+            static_cast<unsigned long long>(locator.fragment_count));
         return false;
     }
-    if (target.index_name.size()
-            > (std::numeric_limits<std::uint32_t>::max)()
-        || target.index_name.size()
-            > (std::numeric_limits<std::uint64_t>::max)()
-                - sizeof(minimizer_sequence_build_dsm_header)) {
+    if (target.index_name.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+        target.index_name.size() > (std::numeric_limits<std::uint64_t>::max)() -
+                                       sizeof(minimizer_sequence_build_dsm_header)) {
         return false;
     }
-    const std::uint64_t bytes_total = sizeof(minimizer_sequence_build_dsm_header)
-        + static_cast<std::uint64_t>(target.index_name.size());
-    if (bytes_total == 0u
-        || bytes_total
-            > static_cast<std::uint64_t>((std::numeric_limits<Size>::max)())) {
+    const std::uint64_t bytes_total = sizeof(minimizer_sequence_build_dsm_header) +
+                                      static_cast<std::uint64_t>(target.index_name.size());
+    if (bytes_total == 0u ||
+        bytes_total > static_cast<std::uint64_t>((std::numeric_limits<Size>::max)())) {
         return false;
     }
     ensure_persist_xact_callback_registered();
@@ -341,17 +398,14 @@ void ensure_persist_xact_callback_registered() {
         if (dsm.attached != nullptr) {
             dsm_segment* attached = std::exchange(dsm.attached, nullptr);
             try {
-                bioseq::postgres::support::invoke_pg_as_cpp(
-                    [attached] { dsm_detach(attached); });
+                bioseq::postgres::support::invoke_pg_as_cpp([attached] { dsm_detach(attached); });
             } catch (...) {
                 // The mapping remains ResourceOwner-owned. Preserve the
                 // staging error; transaction abort performs final cleanup.
             }
         }
-        if (dsm.unpin_cleanup_required
-            && dsm.handle != DSM_HANDLE_INVALID) {
-            const dsm_handle handle = std::exchange(
-                dsm.handle, DSM_HANDLE_INVALID);
+        if (dsm.unpin_cleanup_required && dsm.handle != DSM_HANDLE_INVALID) {
+            const dsm_handle handle = std::exchange(dsm.handle, DSM_HANDLE_INVALID);
             dsm.unpin_cleanup_required = false;
             try {
                 bioseq::postgres::support::invoke_pg_as_cpp(
@@ -366,11 +420,8 @@ void ensure_persist_xact_callback_registered() {
 
     try {
         dsm.attached = invoke_async_minimizer_sequence_stage_pg_leaf(
-            async_minimizer_sequence_stage_pg_failure::dsm_create,
-            [bytes_total] {
-                return dsm_create(
-                    static_cast<Size>(bytes_total),
-                    DSM_CREATE_NULL_IF_MAXSEGMENTS);
+            async_minimizer_sequence_stage_pg_failure::dsm_create, [bytes_total] {
+                return dsm_create(static_cast<Size>(bytes_total), DSM_CREATE_NULL_IF_MAXSEGMENTS);
             });
         if (dsm.attached == nullptr) {
             return false;
@@ -379,13 +430,11 @@ void ensure_persist_xact_callback_registered() {
         // This DSM is metadata-only: locator/source identity, selected build
         // policy, and the already-selected Highway target bit. Function/table
         // pointers remain process-local and never cross this boundary.
-        char* base = static_cast<char*>(
-            dsm_segment_address(dsm.attached));
+        char* base = static_cast<char*>(dsm_segment_address(dsm.attached));
         const minimizer_sequence_build_dsm_header header{
             .magic = k_minimizer_sequence_build_dsm_magic,
             .version = k_minimizer_sequence_build_wire_revision,
-            .index_name_len = static_cast<std::uint32_t>(
-                target.index_name.size()),
+            .index_name_len = static_cast<std::uint32_t>(target.index_name.size()),
             .alphabet_code = alphabet_code,
             .storage_unit_byte_width = storage_unit_byte_width,
             .last_fragment_padding = last_fragment_padding,
@@ -398,10 +447,7 @@ void ensure_persist_xact_callback_registered() {
             .locator = locator,
         };
         std::memcpy(base, &header, sizeof(header));
-        std::memcpy(
-            base + sizeof(header),
-            target.index_name.data(),
-            target.index_name.size());
+        std::memcpy(base + sizeof(header), target.index_name.data(), target.index_name.size());
 
         dsm.handle = dsm_segment_handle(dsm.attached);
         // Arm cleanup before entering the leaf. This covers both the injected
@@ -417,10 +463,7 @@ void ensure_persist_xact_callback_registered() {
             [&dsm] { dsm_detach(dsm.attached); });
         dsm.attached = nullptr;
 
-        enqueue_pending_minimizer_sequence_build(
-            target,
-            dsm.handle,
-            bytes_total);
+        enqueue_pending_minimizer_sequence_build(target, dsm.handle, bytes_total);
         // The pending transaction list now owns the pin. Disarm cleanup only
         // after vector insertion (and every possible allocation) succeeded.
         dsm.handle = DSM_HANDLE_INVALID;
@@ -431,16 +474,19 @@ void ensure_persist_xact_callback_registered() {
     }
     const std::uint64_t queued_ns =
         static_cast<std::uint64_t>(bioseq::instrumentation::clock::now_ns());
-    bioseq_log<logging_level::debug>("[bioseq] index: staged async minimizer-sequence build job row={} index={} target_bp={} fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} total_stage_ns={}",
-            static_cast<unsigned long long>(target.sequence_rowno),
-            target.index_name,
-            static_cast<unsigned long long>(locator.logical_length),
-            static_cast<unsigned long long>(locator.fragment_count),
-            pipeline_mode,
-            max_concurrency,
-            index_memory_cap_mb,
-            static_cast<unsigned long long>(bytes_total),
-            static_cast<unsigned long long>(queued_ns - stage_start_ns));
+    bioseq_log<logging_level::debug>(
+        "[bioseq] index: staged async minimizer-sequence build job row={} index={} target_bp={} "
+        "fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} "
+        "total_stage_ns={}",
+        static_cast<unsigned long long>(target.sequence_rowno),
+        target.index_name,
+        static_cast<unsigned long long>(locator.logical_length),
+        static_cast<unsigned long long>(locator.fragment_count),
+        pipeline_mode,
+        max_concurrency,
+        index_memory_cap_mb,
+        static_cast<unsigned long long>(bytes_total),
+        static_cast<unsigned long long>(queued_ns - stage_start_ns));
     return true;
 }
 

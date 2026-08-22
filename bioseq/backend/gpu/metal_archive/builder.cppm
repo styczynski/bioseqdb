@@ -19,7 +19,11 @@ import bioseq.gpu.metal_archive;
 namespace bioseq::gpu::metal_archive {
 namespace {
 
-/** Write exact protocol bytes, retrying interrupted system calls. */
+/**
+ * @brief Writes exact protocol bytes while retrying interrupted system calls.
+ * @param[in] descriptor Open output file descriptor.
+ * @param[in] bytes Protocol bytes to write.
+ */
 void write_process_output(
         const int descriptor,
         const std::string_view bytes) noexcept {
@@ -41,11 +45,11 @@ void write_process_output(
 } // namespace
 
 /**
- * Run the archive-builder command protocol for a process entry point.
+ * @brief Runs the archive-builder command protocol for a process entry point.
  *
- * @param argument_count Number of command-line arguments, including the
+ * @param[in] argument_count Number of command-line arguments, including the
  * executable name.
- * @param arguments Mutable null-terminated command-line argument array.
+ * @param[in] arguments Mutable null-terminated command-line argument array.
  * @return `0` after the exact success sentinel, `1` after qualification
  * failure, or `2` for invalid arguments.
  */

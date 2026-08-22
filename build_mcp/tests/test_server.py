@@ -2,13 +2,16 @@
 
 from pathlib import Path
 import hashlib
+import io
 import json
 import os
 import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -21,6 +24,8 @@ sys.path.insert(0, str(BUILD_MCP_DIR))
 
 import build_presets
 import build_worker
+import cache_modes
+import doxygen_toolchain
 import integrity
 import process_state
 import protocol
@@ -129,7 +134,11 @@ class DocumentActivityContractTests(unittest.TestCase):
             ), mock.patch.object(manager, "_cli", side_effect=cli):
                 manager._ensure_collections()
 
-        self.assertEqual(collections[qmd_manager.COL_CURRENT]["path"], current)
+        canonical_current = current.resolve()
+        self.assertEqual(
+            collections[qmd_manager.COL_CURRENT]["path"],
+            canonical_current,
+        )
         self.assertEqual(
             collections[qmd_manager.COL_CURRENT]["pattern"],
             qmd_manager.COLLECTION_MASK,
@@ -137,7 +146,7 @@ class DocumentActivityContractTests(unittest.TestCase):
         remove_command = (
             "collection", "remove", qmd_manager.COL_CURRENT)
         add_command = (
-            "collection", "add", str(current), "--name",
+            "collection", "add", str(canonical_current), "--name",
             qmd_manager.COL_CURRENT, "--mask", qmd_manager.COLLECTION_MASK,
         )
         self.assertIn(remove_command, commands)
@@ -246,7 +255,7 @@ class DocumentActivityContractTests(unittest.TestCase):
                     "pid": 99999999,
                     "initialized": True,
                     "update_queued": 0,
-                    "update_running": 0,
+                    "update_running": 1,
                     "embed_queued": 0,
                     "embed_running": 0,
                 },
@@ -527,6 +536,7 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
             build_presets.MODES["website"].required_cache_variables,
             {
                 "BIOSEQ_BUILD_WEBSITE": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
             },
@@ -586,21 +596,41 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                     _clang_rt_cmake_cache_repairs=mock.DEFAULT,
                     _cmake_preset_cache_contract=mock.DEFAULT,
                     _cmake_preset_cache_repairs=mock.DEFAULT,
+                    _postgresql_discovery_cache_reset_args=mock.DEFAULT,
                     _cmake_configure_stamp_document=mock.DEFAULT,
+                    ensure_exact_doxygen=mock.DEFAULT,
             ) as patched:
                 patched["_refuse_root_build_identity"].return_value = None
                 patched["_load_state"].return_value = state
                 patched["preset_for"].return_value = preset
                 patched["build_dir_for"].return_value = build_dir
-                patched["_build_worker_descendant_environment"].return_value = {}
+                patched[
+                    "_build_worker_descendant_environment"
+                ].return_value = {"PATH": os.environ.get("PATH", "")}
                 patched["_configured_local_build_rt_priority"].return_value = None
                 patched["_local_clang_rt_is_enabled"].return_value = False
                 patched["_stream_subprocess"].side_effect = run
                 patched["_clang_rt_cmake_cache_repairs"].return_value = ([], [])
                 patched["_cmake_preset_cache_contract"].return_value = {}
                 patched["_cmake_preset_cache_repairs"].return_value = {}
+                patched[
+                    "_postgresql_discovery_cache_reset_args"
+                ].return_value = ()
                 patched["_cmake_configure_stamp_document"].return_value = (
                     configure_stamp)
+                patched["ensure_exact_doxygen"].return_value = (
+                    doxygen_toolchain.ProvisionedDoxygen(
+                        executable=Path(
+                            "/managed/doxygen/1.9.8/bin/doxygen"),
+                        version="1.9.8",
+                        version_output="1.9.8",
+                        platform_name="linux",
+                        architecture="x86_64",
+                        archive_sha256="1" * 64,
+                        executable_sha256="2" * 64,
+                        cache_hit=True,
+                    )
+                )
 
                 result = build_worker._run_build_worker(mode, build_only=True)
 
@@ -610,14 +640,18 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
     def test_website_to_external_transition_is_atomic(self):
         commands = self._run_optional_transition(
             "external-api",
-            "shared-opt",
+            build_presets.EXTERNAL_API_BUILD_PRESET,
             {
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
                 "BIOSEQ_BUILD_WEBSITE": "ON",
+                "BIOSEQ_BUILD_CACHE": "ON",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
             },
         )
-        self.assertEqual(commands[0][:3], ["cmake", "--preset", "shared-opt"])
+        self.assertEqual(
+            commands[0][:3],
+            ["cmake", "--preset", build_presets.EXTERNAL_API_BUILD_PRESET],
+        )
         self.assertEqual(
             set(commands[0][3:]),
             {
@@ -631,20 +665,26 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
     def test_external_to_website_transition_is_atomic(self):
         commands = self._run_optional_transition(
             "website",
-            "shared-opt",
+            build_presets.WEBSITE_BUILD_PRESET,
             {
                 "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
                 "BIOSEQ_BUILD_WEBSITE": "OFF",
+                "BIOSEQ_BUILD_CACHE": "OFF",
                 "BIOSEQ_WEBSITE_BROWSER_TESTS": "OFF",
             },
         )
-        self.assertEqual(commands[0][:3], ["cmake", "--preset", "shared-opt"])
+        self.assertEqual(
+            commands[0][:3],
+            ["cmake", "--preset", build_presets.WEBSITE_BUILD_PRESET],
+        )
         self.assertEqual(
             set(commands[0][3:]),
             {
                 "-DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF",
                 "-DBIOSEQ_BUILD_WEBSITE=ON",
+                "-DBIOSEQ_BUILD_CACHE=ON",
                 "-DBIOSEQ_WEBSITE_BROWSER_TESTS=ON",
+                "-DDOXYGEN_EXECUTABLE=/managed/doxygen/1.9.8/bin/doxygen",
             },
         )
         self.assertEqual(commands[1][:2], ["cmake", "--build"])
@@ -698,16 +738,16 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
                 },
             }
 
-            def fallback_build_dir(mode, debug):
+            def fallback_build_dirs(mode, debug):
                 self.assertEqual((mode, debug), ("external-api", True))
-                return shared_debug_tree
+                return (shared_debug_tree,)
 
             with mock.patch.object(
                     build_worker, "_refresh",
                     side_effect=lambda current, candidate:
                     current.get(candidate)), mock.patch.object(
-                        build_worker, "build_dir_for",
-                        side_effect=fallback_build_dir):
+                        build_worker, "build_dirs_for",
+                        side_effect=fallback_build_dirs):
                 conflict_mode, conflict_entry = build_worker._running_in_same_group(
                     state, "website", True, shared_debug_tree)
 
@@ -821,6 +861,561 @@ class UnitIntegrationCacheIsolationTests(unittest.TestCase):
             index for index, command in enumerate(commands)
             if command[:2] == ["cmake", "--build"])
         self.assertLess(0, first_build)
+
+
+class DoxygenToolchainProvisioningTests(unittest.TestCase):
+    """Exact website Doxygen provisioning is locked, isolated, and atomic."""
+
+    _EXECUTABLE_MEMBER = "doxygen-1.9.8/bin/doxygen"
+    _EXECUTABLE_BYTES = b"#!/bin/sh\nprintf '1.9.8\\n'\n"
+
+    def _tar_archive(
+            self,
+            *,
+            executable_bytes: bytes | None = None,
+            extra_members: list[tarfile.TarInfo] | None = None) -> bytes:
+        executable_payload = (
+            self._EXECUTABLE_BYTES
+            if executable_bytes is None
+            else executable_bytes
+        )
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            executable = tarfile.TarInfo(self._EXECUTABLE_MEMBER)
+            executable.mode = 0o755
+            executable.size = len(executable_payload)
+            archive.addfile(executable, io.BytesIO(executable_payload))
+            for member in extra_members or []:
+                archive.addfile(member)
+        return output.getvalue()
+
+    def _write_lock(
+            self,
+            root: Path,
+            archive: bytes,
+            *,
+            executable_bytes: bytes | None = None) -> Path:
+        executable_payload = (
+            self._EXECUTABLE_BYTES
+            if executable_bytes is None
+            else executable_bytes
+        )
+        payload = json.loads(
+            doxygen_toolchain.DOXYGEN_TOOLCHAIN_LOCK.read_text(
+                encoding="utf-8"))
+        linux = payload["platforms"]["linux-x86_64"]
+        linux.update({
+            "archive_sha256": hashlib.sha256(archive).hexdigest(),
+            "archive_size_bytes": len(archive),
+            "archive_url": (
+                "https://github.com/doxygen/doxygen/releases/download/"
+                "Release_1_9_8/test-doxygen.tar.gz"
+            ),
+            "executable_member": self._EXECUTABLE_MEMBER,
+            "executable_sha256": hashlib.sha256(
+                executable_payload).hexdigest(),
+            "executable_size_bytes": len(executable_payload),
+            "version_output": "1.9.8",
+        })
+        lock_path = root / "doxygen.lock.json"
+        lock_path.write_text(json.dumps(payload), encoding="utf-8")
+        return lock_path
+
+    def _ensure_linux(
+            self,
+            cache_root: Path,
+            lock_path: Path) -> doxygen_toolchain.ProvisionedDoxygen:
+        return doxygen_toolchain.ensure_exact_doxygen(
+            cache_root,
+            platform_name="linux",
+            machine_name="x86_64",
+            lock_path=lock_path,
+        )
+
+    def test_production_lock_selects_darwin_and_linux_by_architecture(self):
+        darwin_arm = doxygen_toolchain._select_asset(
+            platform_name="Darwin",
+            machine_name="arm64",
+        )
+        darwin_x64 = doxygen_toolchain._select_asset(
+            platform_name="darwin",
+            machine_name="AMD64",
+        )
+        linux_x64 = doxygen_toolchain._select_asset(
+            platform_name="linux-gnu",
+            machine_name="x86_64",
+        )
+
+        self.assertEqual(darwin_arm[2].host_key, "darwin-arm64")
+        self.assertEqual(darwin_x64[2].host_key, "darwin-x86_64")
+        self.assertEqual(linux_x64[2].host_key, "linux-x86_64")
+        with self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "no locked Doxygen 1.9.8 artifact"):
+            doxygen_toolchain._select_asset(
+                platform_name="linux",
+                machine_name="arm64",
+            )
+
+    def test_cold_cache_provisions_then_reuses_without_network(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            cache_root = root / "cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ) as download:
+                first = self._ensure_linux(cache_root, lock_path)
+            self.assertFalse(first.cache_hit)
+            self.assertEqual(
+                first.executable.read_bytes(),
+                self._EXECUTABLE_BYTES,
+            )
+            self.assertEqual(first.version_output, "1.9.8")
+            download.assert_called_once()
+
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("network must not be used"),
+            ) as download:
+                second = self._ensure_linux(cache_root, lock_path)
+            self.assertTrue(second.cache_hit)
+            self.assertEqual(second.executable, first.executable)
+            download.assert_not_called()
+
+    def test_concurrent_callers_serialize_and_download_once(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            cache_root = root / "cache"
+            download_started = threading.Event()
+            release_download = threading.Event()
+            second_lock_attempted = threading.Event()
+            counter_lock = threading.Lock()
+            download_count = 0
+            exclusive_lock_attempts = 0
+            results: list[doxygen_toolchain.ProvisionedDoxygen] = []
+            errors: list[Exception] = []
+            real_flock = doxygen_toolchain.fcntl.flock
+
+            def tracked_flock(descriptor: int, operation: int):
+                nonlocal exclusive_lock_attempts
+                if operation == doxygen_toolchain.fcntl.LOCK_EX:
+                    with counter_lock:
+                        exclusive_lock_attempts += 1
+                        if exclusive_lock_attempts == 2:
+                            second_lock_attempted.set()
+                return real_flock(descriptor, operation)
+
+            def download(*_args, **_kwargs):
+                nonlocal download_count
+                with counter_lock:
+                    download_count += 1
+                download_started.set()
+                if not release_download.wait(timeout=5.0):
+                    raise OSError("timed out waiting to release test download")
+                return io.BytesIO(archive)
+
+            def provision() -> None:
+                try:
+                    results.append(self._ensure_linux(cache_root, lock_path))
+                except Exception as exc:
+                    errors.append(exc)
+
+            first = threading.Thread(target=provision, daemon=True)
+            second = threading.Thread(target=provision, daemon=True)
+            download_was_started = False
+            second_reached_lock = False
+            download_count_while_locked = -1
+            second_was_blocked = False
+            with mock.patch.object(
+                doxygen_toolchain.fcntl,
+                "flock",
+                side_effect=tracked_flock,
+            ), mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=download,
+            ):
+                first.start()
+                try:
+                    download_was_started = download_started.wait(timeout=5.0)
+                    if download_was_started:
+                        second.start()
+                        second_reached_lock = second_lock_attempted.wait(
+                            timeout=5.0)
+                        with counter_lock:
+                            download_count_while_locked = download_count
+                        second_was_blocked = second.is_alive()
+                finally:
+                    release_download.set()
+                    first.join(timeout=5.0)
+                    if second.ident is not None:
+                        second.join(timeout=5.0)
+
+            self.assertTrue(download_was_started)
+            self.assertTrue(second_reached_lock)
+            self.assertEqual(download_count_while_locked, 1)
+            self.assertTrue(second_was_blocked)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(exclusive_lock_attempts, 2)
+            self.assertEqual(download_count, 1)
+            self.assertEqual(
+                sorted(result.cache_hit for result in results),
+                [False, True],
+            )
+
+    def test_corrupt_executable_repairs_from_authenticated_archive(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            cache_root = root / "cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ):
+                first = self._ensure_linux(cache_root, lock_path)
+            first.executable.write_bytes(b"corrupt")
+            first.executable.chmod(0o755)
+
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=AssertionError("verified archive must be reused"),
+            ) as download:
+                repaired = self._ensure_linux(cache_root, lock_path)
+
+            self.assertFalse(repaired.cache_hit)
+            self.assertEqual(
+                repaired.executable.read_bytes(), self._EXECUTABLE_BYTES)
+            download.assert_not_called()
+
+    def test_wrong_archive_hash_is_never_published(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            payload["platforms"]["linux-x86_64"]["archive_sha256"] = "0" * 64
+            lock_path.write_text(json.dumps(payload), encoding="utf-8")
+            cache_root = root / "cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ), self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "archive SHA-256 differs",
+            ):
+                self._ensure_linux(cache_root, lock_path)
+
+            archives = cache_root / "archives"
+            self.assertEqual(list(archives.iterdir()), [])
+
+    def test_wrong_archive_size_is_never_published(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            payload["platforms"]["linux-x86_64"][
+                "archive_size_bytes"] += 1
+            lock_path.write_text(json.dumps(payload), encoding="utf-8")
+            cache_root = root / "cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ), self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "archive byte count differs",
+            ):
+                self._ensure_linux(cache_root, lock_path)
+
+            self.assertEqual(list((cache_root / "archives").iterdir()), [])
+
+    def test_interrupted_publication_leaves_no_partial_cache_entry(self):
+        archive = self._tar_archive()
+
+        class InterruptedResponse:
+            headers = None
+
+            def __init__(self):
+                self._first_read = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size: int) -> bytes:
+                if self._first_read:
+                    self._first_read = False
+                    return archive[:16]
+                raise OSError("injected interrupted archive download")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            cache_root = root / "archive-cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                return_value=InterruptedResponse(),
+            ), self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "cannot download locked Doxygen archive",
+            ):
+                self._ensure_linux(cache_root, lock_path)
+
+            archive_directory = cache_root / "archives"
+            self.assertEqual(list(archive_directory.iterdir()), [])
+
+        def interrupt_executable(
+                _source,
+                destination_descriptor: int,
+                _asset) -> None:
+            os.write(destination_descriptor, b"partial executable")
+            raise OSError("injected interrupted executable publication")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(root, archive)
+            cache_root = root / "executable-cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ), mock.patch.object(
+                doxygen_toolchain,
+                "_copy_verified_executable",
+                side_effect=interrupt_executable,
+            ), self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "cannot extract locked Doxygen tar archive",
+            ):
+                self._ensure_linux(cache_root, lock_path)
+
+            executable_directory = (
+                cache_root / "1.9.8/linux-x86_64/bin"
+            )
+            self.assertFalse((executable_directory / "doxygen").exists())
+            self.assertEqual(list(executable_directory.iterdir()), [])
+
+    def test_tar_member_size_and_sha_mismatches_are_not_published(self):
+        wrong_size = self._EXECUTABLE_BYTES[:-1]
+        wrong_sha = bytes([
+            self._EXECUTABLE_BYTES[0] ^ 1,
+        ]) + self._EXECUTABLE_BYTES[1:]
+        for executable_bytes, diagnostic in (
+            (wrong_size, "tar member size differs"),
+            (wrong_sha, "executable SHA-256 differs"),
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                archive = self._tar_archive(
+                    executable_bytes=executable_bytes)
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    lock_path = self._write_lock(root, archive)
+                    cache_root = root / "cache"
+                    with mock.patch.object(
+                        doxygen_toolchain.urllib.request,
+                        "urlopen",
+                        side_effect=(
+                            lambda *_args, **_kwargs: io.BytesIO(archive)),
+                    ), self.assertRaisesRegex(
+                        doxygen_toolchain.DoxygenProvisioningError,
+                        diagnostic,
+                    ):
+                        self._ensure_linux(cache_root, lock_path)
+
+                    executable = (
+                        cache_root / "1.9.8/linux-x86_64/bin/doxygen"
+                    )
+                    self.assertFalse(executable.exists())
+
+    def test_wrong_runtime_version_is_rejected_and_not_retained(self):
+        wrong_executable = b"#!/bin/sh\nprintf '1.9.9\\n'\n"
+        archive = self._tar_archive(executable_bytes=wrong_executable)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = self._write_lock(
+                root,
+                archive,
+                executable_bytes=wrong_executable,
+            )
+            cache_root = root / "cache"
+            with mock.patch.object(
+                doxygen_toolchain.urllib.request,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(archive),
+            ), self.assertRaisesRegex(
+                doxygen_toolchain.DoxygenProvisioningError,
+                "version identity differs",
+            ):
+                self._ensure_linux(cache_root, lock_path)
+
+            executable = (
+                cache_root
+                / "1.9.8"
+                / "linux-x86_64"
+                / "bin"
+                / "doxygen"
+            )
+            self.assertFalse(executable.exists())
+
+    def test_tar_traversal_and_symlink_members_are_rejected(self):
+        traversal = tarfile.TarInfo("../escape")
+        traversal.size = 0
+        symlink = tarfile.TarInfo("doxygen-1.9.8/bin/alias")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = self._EXECUTABLE_MEMBER
+
+        for unsafe, diagnostic in (
+            (traversal, "unsafe member"),
+            (symlink, "link, device, or unsupported member"),
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                archive = self._tar_archive(extra_members=[unsafe])
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    lock_path = self._write_lock(root, archive)
+                    with mock.patch.object(
+                        doxygen_toolchain.urllib.request,
+                        "urlopen",
+                        side_effect=(
+                            lambda *_args, **_kwargs: io.BytesIO(archive)),
+                    ), self.assertRaisesRegex(
+                        doxygen_toolchain.DoxygenProvisioningError,
+                        diagnostic,
+                    ):
+                        self._ensure_linux(root / "cache", lock_path)
+                    self.assertFalse((root / "escape").exists())
+
+    def test_symlink_lock_and_cache_root_are_rejected(self):
+        archive = self._tar_archive()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_lock = self._write_lock(root, archive)
+            lock_alias = root / "lock-alias.json"
+            lock_alias.symlink_to(real_lock)
+            with self.assertRaisesRegex(
+                    doxygen_toolchain.DoxygenProvisioningError,
+                    "non-symlink file"):
+                doxygen_toolchain.load_doxygen_toolchain_lock(lock_alias)
+
+            real_cache = root / "real-cache"
+            real_cache.mkdir()
+            cache_alias = root / "cache-alias"
+            cache_alias.symlink_to(real_cache, target_is_directory=True)
+            with self.assertRaisesRegex(
+                    doxygen_toolchain.DoxygenProvisioningError,
+                    "not a symlink"):
+                self._ensure_linux(cache_alias, real_lock)
+
+    def test_rosetta_failure_is_actionable_on_apple_silicon(self):
+        asset = doxygen_toolchain.load_doxygen_toolchain_lock()[
+            "darwin-arm64"]
+        failed = subprocess.CompletedProcess(
+            ["/usr/bin/arch"], 1, stdout=b"", stderr=b"missing")
+        with mock.patch.object(
+            doxygen_toolchain.subprocess,
+            "run",
+            return_value=failed,
+        ), self.assertRaisesRegex(
+            doxygen_toolchain.DoxygenProvisioningError,
+            "softwareupdate --install-rosetta --agree-to-license",
+        ):
+            doxygen_toolchain._require_rosetta_if_needed(
+                "darwin", "arm64", asset)
+
+    def test_only_website_mode_prepares_doxygen(self):
+        provisioned = doxygen_toolchain.ProvisionedDoxygen(
+            executable=Path("/cache/doxygen/1.9.8/bin/doxygen"),
+            version="1.9.8",
+            version_output="1.9.8",
+            platform_name="linux",
+            architecture="x86_64",
+            archive_sha256="1" * 64,
+            executable_sha256="2" * 64,
+            cache_hit=True,
+        )
+        environment = {"PATH": "/usr/bin:/bin"}
+        log = io.StringIO()
+        with mock.patch.object(
+            build_worker,
+            "ensure_exact_doxygen",
+            return_value=provisioned,
+        ) as ensure:
+            cache, identity = build_worker._prepare_mode_toolchain(
+                "website",
+                environment=environment,
+                log_handle=log,
+            )
+            ordinary_cache, ordinary_identity = (
+                build_worker._prepare_mode_toolchain(
+                    "unit-integration",
+                    environment=environment,
+                    log_handle=log,
+                )
+            )
+
+        ensure.assert_called_once_with()
+        self.assertEqual(
+            cache,
+            {"DOXYGEN_EXECUTABLE": str(provisioned.executable)},
+        )
+        self.assertEqual(identity["doxygen"], provisioned.configure_identity())
+        self.assertEqual(ordinary_cache, {})
+        self.assertEqual(ordinary_identity, {})
+        self.assertEqual(
+            environment["PATH"].split(os.pathsep)[0],
+            str(provisioned.executable.parent),
+        )
+
+    def test_exact_cmake_policy_and_bootstrap_prewarm_are_static_contracts(self):
+        website_cmake = (REPOSITORY_ROOT / "website/CMakeLists.txt").read_text(
+            encoding="utf-8")
+        bootstrap_script = (
+            REPOSITORY_ROOT / "infra/testing_infra/scripts/bootstrap.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            website_cmake.count(
+                "find_package(Doxygen 1.9.8 EXACT REQUIRED)"),
+            1,
+        )
+        self.assertNotIn("file(DOWNLOAD", website_cmake)
+        self.assertIn("build_mcp/doxygen_toolchain.py", bootstrap_script)
+        self.assertIn(
+            '[ "$DOXYGEN_VERSION_OUTPUT" = "1.9.8" ]',
+            bootstrap_script,
+        )
+        syntax = subprocess.run(
+            ["bash", "-n", str(
+                REPOSITORY_ROOT
+                / "infra/testing_infra/scripts/bootstrap.sh")],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=10.0,
+        )
+        self.assertEqual(
+            syntax.returncode,
+            0,
+            syntax.stderr.decode("utf-8", errors="replace"),
+        )
 
 
 class RemoteRunWebsiteRejectionTests(unittest.TestCase):
@@ -977,12 +1572,14 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         registries = (
             ({"benchmark": {"status": "completed"}}, True),
             ({}, False),
-            ({}, False),
         )
         with mock.patch.object(
             build_worker, "_read_activity_registry", side_effect=registries,
         ), mock.patch.object(
             build_worker, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            build_worker, "subagent_activity_snapshot",
+            return_value={"queued": 0, "running": 0, "state": "idle"},
         ), mock.patch.object(
             build_worker.shutil, "disk_usage",
             return_value=SimpleNamespace(free=12345),
@@ -1019,9 +1616,12 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
         with mock.patch.object(
             build_worker,
             "_read_activity_registry",
-            side_effect=((None, True), ({}, False), ({}, False)),
+            side_effect=((None, True), ({}, False)),
         ), mock.patch.object(
             build_worker, "_document_activity", return_value=document,
+        ), mock.patch.object(
+            build_worker, "subagent_activity_snapshot",
+            return_value={"queued": 0, "running": 0, "state": "absent"},
         ), mock.patch.object(
             build_worker.shutil, "disk_usage",
             return_value=SimpleNamespace(free=1),
@@ -1428,9 +2028,32 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             runner.write_bytes(b"cache integration runner\n")
             manifest = bin_dir / "cache_native_artifacts.json"
             manifest.write_text('{"schema_revision":2}\n', encoding="utf-8")
+            stage_root = build_dir / "staged/postgres"
+            stage_bin = stage_root / "bin"
+            stage_bin.mkdir(parents=True)
+            stage_manifest = stage_root / "manifest.json"
+            stage_manifest.write_text("{}\n", encoding="utf-8")
             referenced = build_dir / "staged/cache--1.0.sql"
-            referenced.parent.mkdir()
             referenced.write_text("SELECT 1;\n", encoding="utf-8")
+            cache_control = build_dir / "staged/bioseq_cache.control"
+            cache_control.write_text("default_version='1.0'\n", encoding="utf-8")
+            cache_dso_input = build_dir / "staged/bioseq_cache.dylib"
+            cache_dso_input.write_bytes(b"cache test support dso\n")
+            artifacts = {
+                key: "" for key in cache_modes._CACHE_NATIVE_ARTIFACT_KEYS
+            }
+            artifacts.update({
+                "cache_test_support_postgres_bin_dir": str(stage_bin),
+                "cache_test_support_postgres_stage_root": str(stage_root),
+                "cache_test_support_postgres_stage_manifest":
+                    str(stage_manifest),
+                "cache_test_control": str(cache_control),
+                "cache_test_install_sql": str(referenced),
+                "cache_test_dso": str(cache_dso_input),
+                # This configured profile is not consumed by cache-integration.
+                "cache_production_postgres_stage_root":
+                    str(build_dir / "unused/missing-production-stage"),
+            })
             suffix = build_worker._native_shared_library_suffix(
                 build_worker.host_platform.system())
             (build_dir / "CMakeCache.txt").write_text(
@@ -1446,13 +2069,20 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             with mock.patch.object(
                 build_worker,
                 "_cache_native_artifacts",
-                return_value={"cache_install_sql": str(referenced)},
+                return_value=artifacts,
             ):
                 before = build_worker._receipt_authorized_artifact_evidence(
                     "cache-integration", build_dir, debug=False)
                 referenced.write_text("SELECT 2;\n", encoding="utf-8")
                 after = build_worker._receipt_authorized_artifact_evidence(
                     "cache-integration", build_dir, debug=False)
+                referenced.unlink()
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "cache native artifact manifest references a file "
+                        "outside the receipted build tree"):
+                    build_worker._receipt_authorized_artifact_evidence(
+                        "cache-integration", build_dir, debug=False)
 
         before_by_path = {
             item["relative_path"]: item for item in before}
@@ -1816,15 +2446,27 @@ class BuildReceiptWorkflowTests(unittest.TestCase):
             build_dir = Path(temporary).resolve()
             suffix = build_worker._native_shared_library_suffix(
                 build_worker.host_platform.system())
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_BUILD_TYPE:STRING=Release\n",
+                encoding="utf-8",
+            )
             core = build_dir / "bioseq" / f"bioseq{suffix}"
             core.parent.mkdir()
             core.write_bytes(b"website-owned core dso\n")
+            cache = (
+                build_dir
+                / "bioseq_caching/artifacts/cache_production/Release"
+                / f"bioseq_cache{suffix}"
+            )
+            cache.parent.mkdir(parents=True)
+            cache.write_bytes(b"website-owned cache dso\n")
 
             evidence = build_worker._receipt_authorized_artifact_evidence(
                 "website", build_dir, debug=False)
 
         relative_paths = {item["relative_path"] for item in evidence}
         self.assertIn(str(core.relative_to(build_dir)), relative_paths)
+        self.assertIn(str(cache.relative_to(build_dir)), relative_paths)
 
     def test_runtime_artifact_must_be_executable(self):
         with tempfile.TemporaryDirectory() as temporary:

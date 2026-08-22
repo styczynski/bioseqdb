@@ -29,7 +29,7 @@ file(READ "${_canary_module}" _canary_module_source)
 file(READ "${_runner}" _runner_source)
 foreach(_runner_identity_contract IN ITEMS
     "bioseq-highway-gcc-canary"
-    "revision=1")
+    "revision=2")
   string(FIND "${_runner_source}" "${_runner_identity_contract}"
     _runner_identity_offset)
   if(_runner_identity_offset EQUAL -1)
@@ -72,6 +72,29 @@ foreach(_driver_closure_contract IN ITEMS
     message(FATAL_ERROR
       "Highway GCC canary lost driver closure evidence "
       "${_driver_closure_contract}")
+  endif()
+endforeach()
+foreach(_apple_sdk_contract IN ITEMS
+    "_bioseq_highway_gcc_canary_select_apple_sdk"
+    "_bioseq_highway_gcc_canary_verify_apple_sdk"
+    "bioseq-highway-gcc-apple-sdk-c-headers"
+    "bioseq-highway-gcc-apple-sdk"
+    "/usr/bin/xcode-select"
+    "/usr/bin/xcrun"
+    "--show-sdk-path"
+    "--show-sdk-version"
+    "--show-sdk-build-version"
+    "SDKSettings.plist"
+    "SystemVersion.plist"
+    "_bounds.h"
+    "usr/lib/libSystem.tbd"
+    "-include cstdio")
+  string(FIND "${_canary_module_source}" "${_apple_sdk_contract}"
+    _apple_sdk_offset)
+  if(_apple_sdk_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary lost sealed Apple SDK contract "
+      "${_apple_sdk_contract}")
   endif()
 endforeach()
 foreach(_macho_closure_contract IN ITEMS
@@ -125,6 +148,20 @@ function(_expect_script_failure name source expected)
     message(FATAL_ERROR
       "${name} did not fail with '${expected}':\n${_combined}")
   endif()
+endfunction()
+
+function(_require_ordered_text name source)
+  set(_remaining "${source}")
+  foreach(_needle IN LISTS ARGN)
+    string(FIND "${_remaining}" "${_needle}" _needle_offset)
+    if(_needle_offset EQUAL -1)
+      message(FATAL_ERROR
+        "${name} lost ordered contract text '${_needle}'")
+    endif()
+    string(LENGTH "${_needle}" _needle_length)
+    math(EXPR _remaining_offset "${_needle_offset} + ${_needle_length}")
+    string(SUBSTRING "${_remaining}" ${_remaining_offset} -1 _remaining)
+  endforeach()
 endfunction()
 
 set(CANARY_MODULE "${_canary_module}")
@@ -236,6 +273,495 @@ string(CONFIGURE "${_missing_pair}" _missing_pair @ONLY)
 _expect_script_failure(
   missing_gcc_pair "${_missing_pair}" "paired gcc-16/g\\+\\+-16")
 
+function(_create_fake_apple_sdk developer output_path output_root)
+  set(_sdk_parent
+    "${developer}/Platforms/MacOSX.platform/Developer/SDKs")
+  set(_sdk_root "${_sdk_parent}/MacOSX26.2.sdk")
+  set(_sdk_path "${_sdk_parent}/MacOSX.sdk")
+  file(MAKE_DIRECTORY
+    "${_sdk_root}/usr/include/detail"
+    "${_sdk_root}/usr/include/sys"
+    "${_sdk_root}/usr/lib"
+    "${_sdk_root}/System/Library/CoreServices"
+    "${_sdk_root}/System/Library/Frameworks/Fake.framework/Headers")
+
+  set(_sdk_settings [=[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Version</key>
+  <string>26.2</string>
+  <key>CanonicalName</key>
+  <string>macosx26.2</string>
+</dict>
+</plist>
+]=])
+  set(_system_version [=[<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>ProductVersion</key>
+  <string>26.2</string>
+  <key>ProductBuildVersion</key>
+  <string>TEST26A1</string>
+</dict>
+</plist>
+]=])
+  file(WRITE "${_sdk_root}/SDKSettings.plist" "${_sdk_settings}")
+  file(WRITE "${_sdk_root}/SDKSettings.json"
+    "{\n  \"Version\": \"26.2\",\n  \"CanonicalName\": \"macosx26.2\"\n}\n")
+  file(WRITE
+    "${_sdk_root}/System/Library/CoreServices/SystemVersion.plist"
+    "${_system_version}")
+  foreach(_header IN ITEMS
+      _bounds.h stdio.h stdlib.h stddef.h stdint.h sys/types.h)
+    file(WRITE "${_sdk_root}/usr/include/${_header}"
+      "/* sealed fake Apple SDK ${_header} */\n")
+  endforeach()
+  file(WRITE "${_sdk_root}/usr/include/detail/non_sentinel.h"
+    "#define BIOSEQ_FAKE_APPLE_SDK_SENTINEL 1\n")
+  file(WRITE
+    "${_sdk_root}/System/Library/Frameworks/Fake.framework/Headers/aliased.h"
+    "#define BIOSEQ_FAKE_APPLE_SDK_ALIASED_HEADER 1\n")
+  file(CREATE_LINK
+    "${_sdk_root}/System/Library/Frameworks/Fake.framework/Headers"
+    "${_sdk_root}/usr/include/fake_framework" SYMBOLIC
+    RESULT _framework_header_link_status)
+  if(NOT _framework_header_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create fake Apple SDK framework-header link: "
+      "${_framework_header_link_status}")
+  endif()
+  file(WRITE "${_sdk_root}/usr/lib/libSystem.B.tbd"
+    "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\n...\n")
+  file(CREATE_LINK
+    "${_sdk_root}/usr/lib/libSystem.B.tbd"
+    "${_sdk_root}/usr/lib/libSystem.tbd" SYMBOLIC
+    RESULT _libsystem_link_status)
+  if(NOT _libsystem_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create fake Apple SDK libSystem link: "
+      "${_libsystem_link_status}")
+  endif()
+  file(CREATE_LINK "${_sdk_root}" "${_sdk_path}" SYMBOLIC
+    RESULT _sdk_link_status)
+  if(NOT _sdk_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create fake active Apple SDK link: ${_sdk_link_status}")
+  endif()
+  set(${output_path} "${_sdk_path}" PARENT_SCOPE)
+  set(${output_root} "${_sdk_root}" PARENT_SCOPE)
+endfunction()
+
+function(_write_fake_apple_sdk_compiler
+    compiler developer sdk_root receipt)
+  set(EXPECTED_DEVELOPER "${developer}")
+  set(EXPECTED_SDK_ROOT "${sdk_root}")
+  set(PROBE_RECEIPT "${receipt}")
+  set(_probe_template [=[#!/bin/sh
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 91
+}
+[ "$#" -eq 9 ] || fail "unexpected argc=$#"
+[ "$1" = "-std=gnu++26" ] || fail "unexpected argv[1]=$1"
+[ "$2" = "-isysroot" ] || fail "unexpected argv[2]=$2"
+[ "$3" = "@EXPECTED_SDK_ROOT@" ] || fail "unexpected argv[3]=$3"
+[ "$4" = "-x" ] || fail "unexpected argv[4]=$4"
+[ "$5" = "c++" ] || fail "unexpected argv[5]=$5"
+[ "$6" = "-include" ] || fail "unexpected argv[6]=$6"
+[ "$7" = "cstdio" ] || fail "unexpected argv[7]=$7"
+[ "$8" = "-fsyntax-only" ] || fail "unexpected argv[8]=$8"
+[ "$9" = "/dev/null" ] || fail "unexpected argv[9]=$9"
+[ "${PATH-}" = "/usr/bin:/bin:/usr/sbin:/sbin" ] || fail "unexpected PATH"
+[ "${LC_ALL-}" = "C" ] || fail "unexpected LC_ALL"
+[ "${LANG-}" = "C" ] || fail "unexpected LANG"
+[ "${DEVELOPER_DIR-}" = "@EXPECTED_DEVELOPER@" ] || fail "unexpected DEVELOPER_DIR"
+[ "${SDKROOT-}" = "@EXPECTED_SDK_ROOT@" ] || fail "unexpected SDKROOT"
+if [ -n "${CPATH-}" ] || [ -n "${C_INCLUDE_PATH-}" ] || \
+   [ -n "${CPLUS_INCLUDE_PATH-}" ] || [ -n "${OBJC_INCLUDE_PATH-}" ] || \
+   [ -n "${GCC_EXEC_PREFIX-}" ] || [ -n "${COMPILER_PATH-}" ] || \
+   [ -n "${LIBRARY_PATH-}" ] || [ -n "${DYLD_INSERT_LIBRARIES-}" ] || \
+   [ -n "${DYLD_LIBRARY_PATH-}" ] || [ -n "${DYLD_FRAMEWORK_PATH-}" ]; then
+  fail "forbidden ambient compiler environment survived"
+fi
+printf '%s\n' probe-ok > "@PROBE_RECEIPT@"
+]=])
+  string(CONFIGURE "${_probe_template}" _probe_source @ONLY)
+  file(WRITE "${compiler}" "${_probe_source}")
+  file(CHMOD "${compiler}"
+    PERMISSIONS
+      OWNER_READ OWNER_WRITE OWNER_EXECUTE
+      GROUP_READ GROUP_EXECUTE
+      WORLD_READ WORLD_EXECUTE)
+endfunction()
+
+function(_expect_fake_sdk_closure_failure name sdk_path sdk_root expected)
+  set(CASE_CANARY_MODULE "${_canary_module}")
+  set(CASE_COMPILER "${_fake_sdk_compiler}")
+  set(CASE_DEVELOPER "${_fake_developer}")
+  set(CASE_SDK_PATH "${sdk_path}")
+  set(CASE_SDK_ROOT "${sdk_root}")
+  set(_case_source [=[
+include("@CASE_CANARY_MODULE@")
+_bioseq_highway_gcc_canary_apple_sdk_closure(
+  CXX "@CASE_COMPILER@"
+  DEVELOPER_DIR "@CASE_DEVELOPER@"
+  SDK_PATH "@CASE_SDK_PATH@"
+  SDK_ROOT "@CASE_SDK_ROOT@"
+  OUTPUT_VERSION observed_version
+  OUTPUT_BUILD_VERSION observed_build
+  OUTPUT_DIGEST observed_digest)
+]=])
+  string(CONFIGURE "${_case_source}" _configured_case @ONLY)
+  _expect_script_failure("${name}" "${_configured_case}" "${expected}")
+endfunction()
+
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+  include("${_canary_module}")
+  set(_fake_developer "${TEST_ROOT}/Fake Developer With Spaces")
+  _create_fake_apple_sdk(
+    "${_fake_developer}" _fake_sdk_path _fake_sdk_root)
+  file(REAL_PATH "${_fake_developer}" _fake_developer_real)
+  file(REAL_PATH "${_fake_sdk_root}" _fake_sdk_root_real)
+  set(_fake_developer "${_fake_developer_real}")
+  set(_fake_sdk_root "${_fake_sdk_root_real}")
+  set(_fake_sdk_compiler
+    "${TEST_ROOT}/Fake Compiler With Spaces/g++-16")
+  get_filename_component(_fake_sdk_compiler_dir
+    "${_fake_sdk_compiler}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_fake_sdk_compiler_dir}")
+  set(_fake_probe_receipt "${TEST_ROOT}/fake-sdk-probe.receipt")
+  _write_fake_apple_sdk_compiler(
+    "${_fake_sdk_compiler}" "${_fake_developer}" "${_fake_sdk_root}"
+    "${_fake_probe_receipt}")
+
+  set(_poisoned_sdk_environment
+    DEVELOPER_DIR SDKROOT CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH
+    OBJC_INCLUDE_PATH GCC_EXEC_PREFIX COMPILER_PATH LIBRARY_PATH
+    DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH)
+  foreach(_poisoned_name IN LISTS _poisoned_sdk_environment)
+    set(ENV{${_poisoned_name}} "/poisoned/${_poisoned_name}")
+  endforeach()
+
+  file(REMOVE "${_fake_probe_receipt}")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _fake_sdk_version
+    OUTPUT_BUILD_VERSION _fake_sdk_build
+    OUTPUT_DIGEST _fake_sdk_digest)
+  string(LENGTH "${_fake_sdk_digest}" _fake_sdk_digest_length)
+  if(NOT _fake_sdk_version STREQUAL "26.2"
+      OR NOT _fake_sdk_build STREQUAL "TEST26A1"
+      OR NOT _fake_sdk_digest_length EQUAL 64
+      OR NOT _fake_sdk_digest MATCHES "^[0-9a-f]+$")
+    message(FATAL_ERROR
+      "fake Apple SDK closure returned an incomplete identity: "
+      "${_fake_sdk_version}/${_fake_sdk_build}/${_fake_sdk_digest}")
+  endif()
+  if(NOT EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR
+      "fake Apple SDK closure did not run the exact compiler probe")
+  endif()
+  file(READ "${_fake_probe_receipt}" _fake_probe_result)
+  if(NOT _fake_probe_result STREQUAL "probe-ok\n")
+    message(FATAL_ERROR
+      "fake Apple SDK compiler probe returned an unexpected receipt")
+  endif()
+
+  file(REMOVE "${_fake_probe_receipt}")
+  _expect_fake_sdk_closure_failure(
+    missing_apple_sdk
+    "${TEST_ROOT}/missing Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    "${TEST_ROOT}/missing Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk"
+    "active Apple SDK path")
+  if(EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR "missing Apple SDK unexpectedly reached the compiler")
+  endif()
+
+  set(_bounds_header "${_fake_sdk_root}/usr/include/_bounds.h")
+  file(READ "${_bounds_header}" _bounds_contents)
+  file(REMOVE "${_bounds_header}" "${_fake_probe_receipt}")
+  _expect_fake_sdk_closure_failure(
+    missing_apple_sdk_bounds_header
+    "${_fake_sdk_path}" "${_fake_sdk_root}" "_bounds\\.h")
+  if(EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR
+      "missing _bounds.h unexpectedly reached the compiler probe")
+  endif()
+  file(WRITE "${_bounds_header}" "${_bounds_contents}")
+
+  set(_sdk_settings "${_fake_sdk_root}/SDKSettings.plist")
+  file(READ "${_sdk_settings}" _sdk_settings_contents)
+  set(_escaped_sdk_settings "${TEST_ROOT}/escaped-SDKSettings.plist")
+  file(WRITE "${_escaped_sdk_settings}" "${_sdk_settings_contents}")
+  file(REMOVE "${_sdk_settings}" "${_fake_probe_receipt}")
+  file(CREATE_LINK "${_escaped_sdk_settings}" "${_sdk_settings}" SYMBOLIC
+    RESULT _escaped_sdk_settings_link_status)
+  if(NOT _escaped_sdk_settings_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create escaping fake SDK metadata link: "
+      "${_escaped_sdk_settings_link_status}")
+  endif()
+  _expect_fake_sdk_closure_failure(
+    escaped_apple_sdk_metadata
+    "${_fake_sdk_path}" "${_fake_sdk_root}"
+    "metadata must be")
+  if(EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR
+      "escaping SDK metadata unexpectedly reached the compiler probe")
+  endif()
+  file(REMOVE "${_sdk_settings}")
+  file(WRITE "${_sdk_settings}" "${_sdk_settings_contents}")
+
+  set(_extra_header
+    "${_fake_sdk_root}/usr/include/detail/non_sentinel.h")
+  file(READ "${_extra_header}" _extra_header_contents)
+  set(_escaped_header "${TEST_ROOT}/escaped-apple-sdk-header.h")
+  file(WRITE "${_escaped_header}" "/* outside the fake SDK */\n")
+  file(REMOVE "${_extra_header}" "${_fake_probe_receipt}")
+  file(CREATE_LINK "${_escaped_header}" "${_extra_header}" SYMBOLIC
+    RESULT _escaped_header_link_status)
+  if(NOT _escaped_header_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create escaping fake SDK header link: "
+      "${_escaped_header_link_status}")
+  endif()
+  _expect_fake_sdk_closure_failure(
+    escaped_apple_sdk_header
+    "${_fake_sdk_path}" "${_fake_sdk_root}"
+    "header escaped")
+  if(EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR
+      "escaping SDK header unexpectedly reached the compiler probe")
+  endif()
+  file(REMOVE "${_extra_header}")
+  file(WRITE "${_extra_header}" "${_extra_header_contents}")
+
+  set(_wrong_sdk_root
+    "${_fake_developer}/Platforms/MacOSX.platform/Developer/SDKs/Wrong.sdk")
+  file(MAKE_DIRECTORY "${_wrong_sdk_root}")
+  _expect_fake_sdk_closure_failure(
+    mismatched_apple_sdk_root
+    "${_fake_sdk_path}" "${_wrong_sdk_root}"
+    "spelling no longer")
+
+  file(APPEND "${_extra_header}" "/* mutated */\n")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _mutated_header_version
+    OUTPUT_BUILD_VERSION _mutated_header_build
+    OUTPUT_DIGEST _mutated_header_digest)
+  if(_mutated_header_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "non-sentinel Apple SDK header mutation did not change the digest")
+  endif()
+  file(WRITE "${_extra_header}" "${_extra_header_contents}")
+
+  set(_aliased_header
+    "${_fake_sdk_root}/System/Library/Frameworks/Fake.framework/Headers/aliased.h")
+  file(READ "${_aliased_header}" _aliased_header_contents)
+  file(APPEND "${_aliased_header}" "/* mutated through directory alias */\n")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _mutated_alias_version
+    OUTPUT_BUILD_VERSION _mutated_alias_build
+    OUTPUT_DIGEST _mutated_alias_digest)
+  if(_mutated_alias_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "symlinked Apple SDK header-directory mutation escaped the closure")
+  endif()
+  file(WRITE "${_aliased_header}" "${_aliased_header_contents}")
+
+  set(_second_aliased_header
+    "${_fake_sdk_root}/System/Library/Frameworks/Fake2.framework/Headers/aliased.h")
+  get_filename_component(_second_aliased_header_dir
+    "${_second_aliased_header}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_second_aliased_header_dir}")
+  file(WRITE "${_second_aliased_header}" "${_aliased_header_contents}")
+  get_filename_component(_original_aliased_header_dir
+    "${_aliased_header}" DIRECTORY)
+  file(REAL_PATH "${_original_aliased_header_dir}" _original_alias_target)
+  file(REAL_PATH "${_second_aliased_header_dir}" _second_alias_target)
+  file(GLOB _original_alias_files RELATIVE "${_original_alias_target}"
+    "${_original_alias_target}/*")
+  file(GLOB _second_alias_files RELATIVE "${_second_alias_target}"
+    "${_second_alias_target}/*")
+  list(SORT _original_alias_files)
+  list(SORT _second_alias_files)
+  if(NOT _original_alias_files STREQUAL _second_alias_files)
+    message(FATAL_ERROR
+      "fake Apple SDK directory-link retarget fixtures differ in topology")
+  endif()
+  foreach(_alias_file IN LISTS _original_alias_files)
+    file(SHA256 "${_original_alias_target}/${_alias_file}" _original_alias_sha)
+    file(SHA256 "${_second_alias_target}/${_alias_file}" _second_alias_sha)
+    if(NOT _original_alias_sha STREQUAL _second_alias_sha)
+      message(FATAL_ERROR
+        "fake Apple SDK directory-link retarget fixtures differ in bytes")
+    endif()
+  endforeach()
+  set(_header_directory_link
+    "${_fake_sdk_root}/usr/include/fake_framework")
+  file(REMOVE "${_header_directory_link}")
+  file(CREATE_LINK "${_second_aliased_header_dir}"
+    "${_header_directory_link}" SYMBOLIC
+    RESULT _retargeted_header_directory_status)
+  if(NOT _retargeted_header_directory_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not retarget fake Apple SDK header directory link: "
+      "${_retargeted_header_directory_status}")
+  endif()
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _retargeted_alias_version
+    OUTPUT_BUILD_VERSION _retargeted_alias_build
+    OUTPUT_DIGEST _retargeted_alias_digest)
+  if(_retargeted_alias_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "Apple SDK header-directory symlink retargeting was not sealed")
+  endif()
+  file(REMOVE "${_header_directory_link}")
+  file(CREATE_LINK "${_original_aliased_header_dir}"
+    "${_header_directory_link}" SYMBOLIC
+    RESULT _restored_header_directory_status)
+  if(NOT _restored_header_directory_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not restore fake Apple SDK header directory link: "
+      "${_restored_header_directory_status}")
+  endif()
+
+  string(REPLACE "</dict>"
+    "  <key>Mutation</key>\n  <string>detected</string>\n</dict>"
+    _mutated_sdk_settings "${_sdk_settings_contents}")
+  file(WRITE "${_sdk_settings}" "${_mutated_sdk_settings}")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _mutated_settings_version
+    OUTPUT_BUILD_VERSION _mutated_settings_build
+    OUTPUT_DIGEST _mutated_settings_digest)
+  if(_mutated_settings_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "Apple SDK settings mutation did not change the digest")
+  endif()
+  file(WRITE "${_sdk_settings}" "${_sdk_settings_contents}")
+
+  set(_system_version_plist
+    "${_fake_sdk_root}/System/Library/CoreServices/SystemVersion.plist")
+  file(READ "${_system_version_plist}" _system_version_contents)
+  string(REPLACE "TEST26A1" "TEST26A2"
+    _mutated_system_version "${_system_version_contents}")
+  file(WRITE "${_system_version_plist}" "${_mutated_system_version}")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _mutated_system_version_value
+    OUTPUT_BUILD_VERSION _mutated_system_build
+    OUTPUT_DIGEST _mutated_system_digest)
+  if(NOT _mutated_system_build STREQUAL "TEST26A2"
+      OR _mutated_system_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "Apple SDK build identity mutation was not sealed")
+  endif()
+  file(WRITE "${_system_version_plist}" "${_system_version_contents}")
+
+  set(_libsystem_target "${_fake_sdk_root}/usr/lib/libSystem.B.tbd")
+  file(READ "${_libsystem_target}" _libsystem_contents)
+  file(APPEND "${_libsystem_target}" "# mutated\n")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_fake_sdk_compiler}"
+    DEVELOPER_DIR "${_fake_developer}"
+    SDK_PATH "${_fake_sdk_path}"
+    SDK_ROOT "${_fake_sdk_root}"
+    OUTPUT_VERSION _mutated_libsystem_version
+    OUTPUT_BUILD_VERSION _mutated_libsystem_build
+    OUTPUT_DIGEST _mutated_libsystem_digest)
+  if(_mutated_libsystem_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "Apple SDK libSystem mutation did not change the digest")
+  endif()
+  file(WRITE "${_libsystem_target}" "${_libsystem_contents}")
+
+  set(_libsystem_link "${_fake_sdk_root}/usr/lib/libSystem.tbd")
+  set(_escaped_libsystem "${TEST_ROOT}/escaped-libSystem.tbd")
+  file(WRITE "${_escaped_libsystem}" "--- !tapi-tbd\n...\n")
+  file(REMOVE "${_libsystem_link}" "${_fake_probe_receipt}")
+  file(CREATE_LINK "${_escaped_libsystem}" "${_libsystem_link}" SYMBOLIC
+    RESULT _escaped_libsystem_link_status)
+  if(NOT _escaped_libsystem_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not create escaping fake libSystem link: "
+      "${_escaped_libsystem_link_status}")
+  endif()
+  _expect_fake_sdk_closure_failure(
+    escaped_apple_sdk_libsystem
+    "${_fake_sdk_path}" "${_fake_sdk_root}"
+    "libSystem\\.tbd escaped the active Apple SDK")
+  if(EXISTS "${_fake_probe_receipt}")
+    message(FATAL_ERROR
+      "escaping libSystem unexpectedly reached the compiler probe")
+  endif()
+  file(REMOVE "${_libsystem_link}")
+  file(CREATE_LINK "${_libsystem_target}" "${_libsystem_link}" SYMBOLIC
+    RESULT _restored_libsystem_link_status)
+  if(NOT _restored_libsystem_link_status STREQUAL "0")
+    message(FATAL_ERROR
+      "could not restore fake SDK libSystem link: "
+      "${_restored_libsystem_link_status}")
+  endif()
+
+  set(_relocated_developer
+    "${TEST_ROOT}/Relocated Fake Developer With Spaces")
+  _create_fake_apple_sdk(
+    "${_relocated_developer}" _relocated_sdk_path _relocated_sdk_root)
+  file(REAL_PATH "${_relocated_developer}" _relocated_developer_real)
+  file(REAL_PATH "${_relocated_sdk_root}" _relocated_sdk_root_real)
+  set(_relocated_developer "${_relocated_developer_real}")
+  set(_relocated_sdk_root "${_relocated_sdk_root_real}")
+  set(_relocated_compiler
+    "${TEST_ROOT}/Relocated Fake Compiler With Spaces/g++-16")
+  get_filename_component(_relocated_compiler_dir
+    "${_relocated_compiler}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_relocated_compiler_dir}")
+  set(_relocated_receipt "${TEST_ROOT}/relocated-sdk-probe.receipt")
+  _write_fake_apple_sdk_compiler(
+    "${_relocated_compiler}" "${_relocated_developer}"
+    "${_relocated_sdk_root}" "${_relocated_receipt}")
+  _bioseq_highway_gcc_canary_apple_sdk_closure(
+    CXX "${_relocated_compiler}"
+    DEVELOPER_DIR "${_relocated_developer}"
+    SDK_PATH "${_relocated_sdk_path}"
+    SDK_ROOT "${_relocated_sdk_root}"
+    OUTPUT_VERSION _relocated_sdk_version
+    OUTPUT_BUILD_VERSION _relocated_sdk_build
+    OUTPUT_DIGEST _relocated_sdk_digest)
+  if(_relocated_sdk_digest STREQUAL _fake_sdk_digest)
+    message(FATAL_ERROR
+      "relocated byte-identical Apple SDK retained the old path identity")
+  endif()
+
+  foreach(_poisoned_name IN LISTS _poisoned_sdk_environment)
+    unset(ENV{${_poisoned_name}})
+  endforeach()
+endif()
+
 file(READ "${SOURCE_ROOT}/CMakeLists.txt" _root_cmake)
 string(FIND "${_root_cmake}" "option(BIOSEQ_HIGHWAY_GCC_CANARY" _option_offset)
 if(_option_offset EQUAL -1)
@@ -246,6 +772,71 @@ string(FIND "${_root_cmake}"
 if(_option_off_offset EQUAL -1)
   message(FATAL_ERROR "Highway GCC canary must remain OFF by default")
 endif()
+foreach(_selection_contract IN ITEMS
+    [=[OR NOT IS_ABSOLUTE "${_developer_path}"]=]
+    [=[COMMAND ${_clean_environment} "/usr/bin/xcode-select" -p]=]
+    [=[${_clean_environment} "DEVELOPER_DIR=${_developer_real}"]=]
+    [=["/usr/bin/xcrun" --sdk macosx "${_query_argument}"]=]
+    [=[--show-sdk-path --show-sdk-version --show-sdk-build-version]=]
+    [=[file(GLOB_RECURSE _sdk_headers FOLLOW_SYMLINKS]=]
+    [=[file(GLOB_RECURSE _sdk_header_entries LIST_DIRECTORIES TRUE]=]
+    [=[bioseq-highway-gcc-apple-sdk-c-header-symlinks]=]
+    [=[c-header-symlinks=${_header_symlink_digest}]=]
+    [=["/usr/bin/plutil" -extract "${_query_key}" raw -o -]=]
+    [=["DEVELOPER_DIR=${_developer_real}"]=]
+    [=["SDKROOT=${_sdk_real}"]=]
+    [=[-std=gnu++26]=]
+    [=[-isysroot "${_sdk_real}"]=]
+    [=[-x c++]=]
+    [=[-include cstdio]=]
+    [=[-fsyntax-only /dev/null]=])
+  string(FIND "${_canary_module_source}" "${_selection_contract}"
+    _selection_contract_offset)
+  if(_selection_contract_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK selection lost exact contract text: "
+      "${_selection_contract}")
+  endif()
+endforeach()
+foreach(_forbidden_selection_text IN ITEMS
+    [=[$ENV{DEVELOPER_DIR}]=]
+    [=[$ENV{SDKROOT}]=]
+    [=[find_program(]=]
+    [=[/Applications/Xcode]=]
+    [=[/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk]=])
+  string(FIND "${_canary_module_source}" "${_forbidden_selection_text}"
+    _forbidden_selection_offset)
+  if(NOT _forbidden_selection_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary Apple SDK selection retained ambient/discovery "
+      "text: ${_forbidden_selection_text}")
+  endif()
+endforeach()
+_require_ordered_text(
+  "Highway GCC canary host-before-SDK selection"
+  "${_canary_module_source}"
+  [=[_bioseq_highway_gcc_canary_validate_host(]=]
+  [=[bioseq_select_gcc16_toolchain(]=]
+  [=[_bioseq_highway_gcc_canary_select_apple_sdk(]=]
+  [=[add_custom_target(]=])
+
+foreach(_outer_sdk_argument IN ITEMS
+    [=["DEVELOPER_DIR=${_apple_developer_dir}"]=]
+    [=["SDKROOT=${_apple_sdk_root}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR=${_apple_developer_dir}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_SDK_PATH=${_apple_sdk_path}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_SDK_ROOT=${_apple_sdk_root}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_SDK_VERSION=${_apple_sdk_version}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION=${_apple_sdk_build_version}"]=]
+    [=["-DBIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST=${_apple_sdk_digest}"]=])
+  string(FIND "${_canary_module_source}" "${_outer_sdk_argument}"
+    _outer_sdk_argument_offset)
+  if(_outer_sdk_argument_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary outer target lost sealed Apple SDK argument: "
+      "${_outer_sdk_argument}")
+  endif()
+endforeach()
 
 file(READ "${_nested_project}" _nested)
 foreach(_required_text IN ITEMS
@@ -345,6 +936,59 @@ if(_native_consumer_dependency_offset EQUAL -1)
     "normal build-only consumers lost the Clang imported-binder dependency")
 endif()
 
+foreach(_nested_sdk_contract IN ITEMS
+    "BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_PATH"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST"
+    [=[set(CMAKE_OSX_SYSROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"]=]
+    [=[_CMAKE_OSX_SYSROOT_PATH]=]
+    [=[CMAKE_CXX_SYSROOT_FLAG STREQUAL "-isysroot"]=]
+    [=[CMAKE_SYSROOT CMAKE_SYSROOT_COMPILE CMAKE_SYSROOT_LINK]=]
+    [=[forbids compiler launchers and ambient flags]=])
+  string(FIND "${_nested}" "${_nested_sdk_contract}"
+    _nested_sdk_contract_offset)
+  if(_nested_sdk_contract_offset EQUAL -1)
+    message(FATAL_ERROR
+      "nested GCC canary lost sealed Apple SDK contract: "
+      "${_nested_sdk_contract}")
+  endif()
+endforeach()
+_require_ordered_text(
+  "nested GCC pre-project Apple SDK verification"
+  "${_nested}"
+  [=[set(CMAKE_CXX_COMPILER]=]
+  [=[set(CMAKE_OSX_SYSROOT]=]
+  [=[include("${BIOSEQ_GCC_CANARY_CANARY_HELPER}")]=]
+  [=[_bioseq_highway_gcc_canary_verify_apple_sdk(]=]
+  [=[project(bioseq_highway_gcc_module_canary LANGUAGES CXX)]=])
+string(FIND "${_nested}"
+  [=[project(bioseq_highway_gcc_module_canary LANGUAGES CXX)]=]
+  _nested_project_offset)
+string(FIND "${_nested}" [=[_CMAKE_OSX_SYSROOT_PATH]=]
+  _nested_resolved_sdk_offset)
+string(FIND "${_nested}" [=[CMAKE_CXX_SYSROOT_FLAG STREQUAL "-isysroot"]=]
+  _nested_sysroot_flag_offset)
+if(_nested_project_offset EQUAL -1
+    OR _nested_resolved_sdk_offset LESS _nested_project_offset
+    OR _nested_sysroot_flag_offset LESS _nested_project_offset)
+  message(FATAL_ERROR
+    "nested GCC canary must audit CMake's resolved SDK and -isysroot flag "
+    "after project() enables C++")
+endif()
+string(REGEX MATCHALL
+  "_bioseq_highway_gcc_canary_verify_apple_sdk\\("
+  _nested_sdk_verification_matches "${_nested}")
+list(LENGTH _nested_sdk_verification_matches
+  _nested_sdk_verification_count)
+if(NOT _nested_sdk_verification_count EQUAL 2)
+  message(FATAL_ERROR
+    "nested GCC canary must verify the Apple SDK exactly before and after "
+    "project(); found ${_nested_sdk_verification_count}")
+endif()
+
 set(_canary_source_root
   "${SOURCE_ROOT}/codegen/namespace_materialization/tests/integration/module_canary/highway_canary")
 file(READ "${_canary_source_root}/registry.cppm.in" _registry_source)
@@ -402,6 +1046,9 @@ file(READ "${_canary_source_root}/target_attribute_shapes.cppm.in"
   _attribute_source)
 foreach(_attribute_contract IN ITEMS
     "sizeof(HWY_TARGET_STR) > 1"
+    "#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR"
+    [=[#if defined(HWY_TARGET_STR) && HWY_HAS_ATTRIBUTE(target)]=]
+    [=[#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)]=]
     "hn::AESRound"
     "hn::SumOfMulQuadAccumulate"
     "attribute_target_only_bf16_dot_product"
@@ -411,9 +1058,14 @@ foreach(_attribute_contract IN ITEMS
     "member() const"
     "member_template"
     "highway_attribute_coverage"
-    ") HWY_ATTR constexpr"
-    "[] HWY_ATTR"
-    "[]<class p_value>(const p_value value) HWY_ATTR")
+    [=[#define BIOSEQ_HIGHWAY_LAMBDA_ATTR [[gnu::target(HWY_TARGET_STR)]]]=]
+    [=[#define BIOSEQ_HIGHWAY_LAMBDA_ATTR
+#endif]=]
+    "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR ("
+    "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR {"
+    "[]<class p_value> BIOSEQ_HIGHWAY_LAMBDA_ATTR ("
+    "requires (sizeof(p_value) > 0) BIOSEQ_HIGHWAY_LAMBDA_ATTR ("
+    "const auto value) noexcept(noexcept(value + decltype(value){9}))")
   string(FIND "${_attribute_source}" "${_attribute_contract}"
     _attribute_offset)
   if(_attribute_offset EQUAL -1)
@@ -491,6 +1143,7 @@ endif()
 file(READ "${_runner}" _runner_source)
 foreach(_sealed_argument IN ITEMS
     "-G Ninja"
+    "-DCMAKE_OSX_SYSROOT:PATH="
     "-DCMAKE_TOOLCHAIN_FILE:FILEPATH="
     "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING="
     "-DCMAKE_CXX_FLAGS:STRING="
@@ -501,6 +1154,15 @@ foreach(_sealed_argument IN ITEMS
     "/usr/bin/env"
     "-i"
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+    [=[DEVELOPER_DIR=${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}]=]
+    [=[SDKROOT=${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}]=]
+    "BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_PATH"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION"
+    "BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST"
+    "_bioseq_highway_gcc_canary_verify_apple_sdk"
     "--verbose"
     "bioseq_gcc_canary_closure"
     "_bioseq_highway_gcc_canary_collect_macho_closure"
@@ -510,6 +1172,66 @@ foreach(_sealed_argument IN ITEMS
   if(_sealed_offset EQUAL -1)
     message(FATAL_ERROR
       "Highway GCC canary runner lost sealed argument: ${_sealed_argument}")
+  endif()
+endforeach()
+string(REGEX MATCHALL
+  "_bioseq_highway_gcc_canary_verify_apple_sdk\\("
+  _runner_sdk_verification_matches "${_runner_source}")
+list(LENGTH _runner_sdk_verification_matches
+  _runner_sdk_verification_count)
+if(NOT _runner_sdk_verification_count EQUAL 4)
+  message(FATAL_ERROR
+    "Highway GCC canary runner must verify the Apple SDK exactly before "
+    "tree recreation, after configure, immediately before build, and after "
+    "build; found "
+    "${_runner_sdk_verification_count}")
+endif()
+_require_ordered_text(
+  "Highway GCC canary runner Apple SDK lifecycle"
+  "${_runner_source}"
+  [=[_bioseq_highway_gcc_canary_verify_apple_sdk(]=]
+  [=[file(REMOVE_RECURSE "${_nested_build_normal}")]=]
+  [=["-DCMAKE_OSX_SYSROOT:PATH=${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"]=]
+  [=[_bioseq_highway_gcc_canary_verify_apple_sdk(]=]
+  [=[-t commands bioseq_gcc_canary_closure]=]
+  [=[_bioseq_highway_gcc_canary_verify_apple_sdk(]=]
+  [=[--target bioseq_gcc_canary_closure]=]
+  [=[_bioseq_highway_gcc_canary_verify_apple_sdk(]=])
+foreach(_runner_identity_sdk_field IN ITEMS
+    [=["${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}\n"]=]
+    [=["${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}\n"]=]
+    [=["${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}\n"]=]
+    [=["${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}\n"]=]
+    [=["${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}\n"]=]
+    [=["${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}\n"]=])
+  string(FIND "${_runner_source}" "${_runner_identity_sdk_field}"
+    _runner_identity_sdk_offset)
+  if(_runner_identity_sdk_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary runner identity omitted Apple SDK field: "
+      "${_runner_identity_sdk_field}")
+  endif()
+endforeach()
+foreach(_exact_sysroot_audit_contract IN ITEMS
+    [=[separate_arguments(_command_tokens UNIX_COMMAND]=]
+    [=[set(_gcc_token_count 0)]=]
+    [=[if("${_command_token}" STREQUAL "${BIOSEQ_GCC_CANARY_CXX}")]=]
+    [=[if(NOT _gcc_token_count EQUAL 1)]=]
+    [=[references the authenticated compiler]=]
+    "_sysroot_flag_count"
+    [=[if(_command_token STREQUAL "-isysroot")]=]
+    [=[math(EXPR _sysroot_value_index]=]
+    [=[list(GET _command_tokens ${_sysroot_value_index} _sysroot_value)]=]
+    [=["${_sysroot_value}" STREQUAL]=]
+    [=[elseif(_command_token MATCHES "^-isysroot.+"]=]
+    [=[OR _command_token MATCHES "^--sysroot($|=)"]=]
+    "sealed Apple sysroot")
+  string(FIND "${_runner_source}" "${_exact_sysroot_audit_contract}"
+    _exact_sysroot_audit_offset)
+  if(_exact_sysroot_audit_offset EQUAL -1)
+    message(FATAL_ERROR
+      "Highway GCC canary runner lost exact sysroot command audit text: "
+      "${_exact_sysroot_audit_contract}")
   endif()
 endforeach()
 foreach(_forbidden_runner_text IN ITEMS

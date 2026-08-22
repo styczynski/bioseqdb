@@ -1,24 +1,13 @@
-// Exact chronological continuation coverage through the generated kernel's
-// neutral fragment-source representation. No comparison in this file sorts or uniques:
-// hash, position, strand, order, and duplicate multiplicity are all observable.
+/**
+ * @file two_stack_exact_continuation_test.cpp
+ * @brief Chronological continuation checks for fragmented two-stack input.
+ *
+ * Hash, position, strand, order, and duplicate multiplicity remain observable.
+ */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <ranges>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.highway.dispatch_contract;
 import bioseq.highway.test_support;
@@ -577,7 +566,7 @@ TEST_CASE("two_stack continuation — every short length and final flush",
     }
 }
 
-TEST_CASE("two_stack continuation — even-p_kmer_size palindromes consume sentinel slots",
+TEST_CASE("two_stack continuation — even k-mer palindromes consume sentinel slots",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     constexpr std::size_t w = 3u;
     constexpr std::size_t k = 4u;
@@ -628,7 +617,7 @@ TEST_CASE("two_stack continuation — expiry rescans use rightmost minima",
     REQUIRE(result.stats.expiry_rescan_transitions > 0u);
 }
 
-TEST_CASE("two_stack continuation — p_window_size and p_kmer_size supported boundaries",
+TEST_CASE("two_stack continuation — window and k-mer supported boundaries",
           "[component:bioseq][layer:unit][feature:minimizer][resource:highway]") {
     SECTION("W1 K1") {
         constexpr std::size_t w = 1u;
@@ -641,7 +630,7 @@ TEST_CASE("two_stack continuation — p_window_size and p_kmer_size supported bo
         require_success(result, scalar_oracle(data, w, k));
     }
 
-    SECTION("maximum supported p_window_size and p_kmer_size") {
+    SECTION("maximum supported window and k-mer sizes") {
         constexpr std::size_t w = k_max_two_stack_window;
         constexpr std::size_t k = k_max_exact_two_stack_kmer;
         const auto data = fixture(k + w + 41u);

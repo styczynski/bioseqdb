@@ -412,7 +412,7 @@ registered_guc_module_graph_unit(
     const collected_entity& entity) {
     const option_value* option = find_option(entity, "flags");
     if (!option) return {};
-    static constexpr std::string_view names[] = {
+    static constexpr auto names = std::to_array<std::string_view>({
         "no_show_all",
         "not_in_sample",
         "unit_kb",
@@ -421,7 +421,7 @@ registered_guc_module_graph_unit(
         "unit_ms",
         "unit_s",
         "unit_min",
-    };
+    });
     std::vector<std::string> result;
     for (const std::string_view name : names) {
         if (option->expression.contains(name)
@@ -436,15 +436,15 @@ registered_guc_module_graph_unit(
     const collected_entity& entity) {
     const option_value* option = find_option(entity, "flags");
     if (!option) return std::nullopt;
-    static constexpr std::pair<std::string_view, std::string_view>
-        units[] = {
+    static constexpr auto units = std::to_array<
+        std::pair<std::string_view, std::string_view>>({
             {"unit_kb", "kb"},
             {"unit_mb", "mb"},
             {"unit_blocks", "blocks"},
             {"unit_ms", "ms"},
             {"unit_s", "s"},
             {"unit_min", "min"},
-        };
+        });
     for (const auto& [token, spelling] : units) {
         if (option->expression.contains(token)) {
             return std::string{spelling};
@@ -710,13 +710,19 @@ struct parsed_enum {
 
     const structural_analysis::translation_unit* unit = nullptr;
     const structural_analysis::declaration_record* declaration = nullptr;
-    const auto consider_units =
-        [&](const auto& units) {
+    const auto consider_units = [
+                                    &declaration,
+                                    &entity,
+                                    &qualified_name,
+                                    &unit](
+                                    const auto& units) -> void {
             for (const structural_analysis::translation_unit& candidate :
                  units) {
                 const auto match = std::ranges::find_if(
                     candidate.declarations,
-                    [&](const structural_analysis::declaration_record& item) {
+                    [&qualified_name](
+                        const structural_analysis::declaration_record& item)
+                        -> bool {
                         return item.kind
                                 == structural_analysis::declaration_kind::
                                     enumeration
@@ -961,12 +967,12 @@ inline void validate_documentation(const collected_entity& entity) {
     const std::string documentation = lower_ascii(
         entity.documentation.brief + " "
         + entity.documentation.details);
-    static constexpr std::string_view forbidden[] = {
+    static constexpr auto forbidden = std::to_array<std::string_view>({
         "doc0",
         "prototype",
         " phase ",
         " stage ",
-    };
+    });
     for (const std::string_view token : forbidden) {
         if (documentation.contains(token)) {
             throw std::runtime_error(
@@ -1214,8 +1220,9 @@ struct resolved_enum_default {
         std::vector<
             const structural_analysis::declaration_record*>
             constants;
-        const auto collect_constants =
-            [&](const structural_analysis::translation_unit& unit) {
+        const auto collect_constants = [&authored, &constants, &leaf](
+                                           const structural_analysis::translation_unit& unit)
+            -> void {
                 for (const structural_analysis::declaration_record& candidate :
                      unit.declarations) {
                     if (candidate.kind
@@ -1284,9 +1291,19 @@ struct resolved_enum_default {
             const std::string resolved_name =
                 qualified_identifier_leaf(
                     constant->initializer_text);
-            if (parsed.values.contains(resolved_name)) {
-                resolved_values.emplace(resolved_name);
+            if (!parsed.values.contains(resolved_name)) continue;
+            if (!program.compiler_profile.empty()
+                && std::ranges::none_of(
+                    values,
+                    [&resolved_name](
+                        const collected_guc_enum_value& value) {
+                        return value.name == resolved_name
+                            && value.compiled && !value.hidden
+                            && !value.alias_of;
+                    })) {
+                continue;
             }
+            resolved_values.emplace(resolved_name);
         }
         if (resolved_values.size() == 1) {
             value_name = *resolved_values.begin();
@@ -1606,6 +1623,46 @@ source_only_integer_initializer(
     if (expression == "INT_MIN") {
         return std::to_string(std::numeric_limits<int>::min());
     }
+    const auto numeric_limits_int_value = [](std::string_view value)
+        -> std::optional<int> {
+        std::size_t cursor = 0;
+        const auto skip_space = [&value, &cursor] {
+            while (cursor < value.size()
+                   && (value[cursor] == ' ' || value[cursor] == '\t'
+                       || value[cursor] == '\n'
+                       || value[cursor] == '\r')) {
+                ++cursor;
+            }
+        };
+        const auto consume = [&value, &cursor, &skip_space](
+                                 std::string_view token) -> bool {
+            skip_space();
+            if (!value.substr(cursor).starts_with(token)) return false;
+            cursor += token.size();
+            return true;
+        };
+
+        const bool shielded = consume("(");
+        if (!consume("std") || !consume("::")
+            || !consume("numeric_limits") || !consume("<")
+            || !consume("int") || !consume(">")
+            || !consume("::")) {
+            return std::nullopt;
+        }
+        const bool maximum = consume("max");
+        if (!maximum && !consume("min")) return std::nullopt;
+        if (shielded && !consume(")")) return std::nullopt;
+        if (!consume("(") || !consume(")")) return std::nullopt;
+        skip_space();
+        if (cursor != value.size()) return std::nullopt;
+        return maximum
+            ? std::numeric_limits<int>::max()
+            : std::numeric_limits<int>::min();
+    };
+    if (const std::optional<int> value =
+            numeric_limits_int_value(expression)) {
+        return std::to_string(*value);
+    }
     if (bare_numeric_identifier(expression)) {
         const auto unit = std::ranges::find(
             program.translation_units,
@@ -1615,40 +1672,58 @@ source_only_integer_initializer(
             throw std::runtime_error(
                 "cannot resolve generated integer GUC owner source");
         }
-        const auto declaration = std::ranges::find_if(
-            unit->declarations,
-            [expression](
-                const structural_analysis::declaration_record& candidate) {
-                return candidate.kind
-                        == structural_analysis::declaration_kind::variable
-                    && candidate.name == expression
-                    && !candidate.initializer_text.empty();
-            });
-        if (declaration == unit->declarations.end()) {
-            if (program.compiler_profile.empty()) {
-                if (const std::optional<std::string> initializer =
-                        source_only_integer_initializer(
-                            *unit, expression)) {
-                    return resolve_integer_expression(
-                        program,
-                        owner,
-                        *initializer,
-                        depth + 1);
-                }
+        const structural_analysis::declaration_record* declaration =
+            nullptr;
+        for (const structural_analysis::declaration_record& candidate :
+             unit->declarations) {
+            if (candidate.kind
+                    != structural_analysis::declaration_kind::variable
+                || candidate.name != expression
+                || canonical_feature_predicate(
+                       candidate.active_condition)
+                    != "true") {
+                continue;
             }
-            throw std::runtime_error(
-                "cannot resolve generated integer GUC identifier '"
-                + std::string{expression} + "' in "
-                + owner.source_path.string());
+            if (declaration != nullptr
+                || candidate.initializer_text.empty()
+                || !candidate.specifiers.is_constexpr) {
+                throw std::runtime_error(
+                    "cannot resolve generated integer GUC identifier '"
+                    + std::string{expression} + "' in "
+                    + owner.source_path.string());
+            }
+            declaration = &candidate;
         }
-        return resolve_integer_expression(
-            program,
-            owner,
-            declaration->initializer_text,
-            depth + 1);
+        if (declaration != nullptr) {
+            return resolve_integer_expression(
+                program,
+                owner,
+                declaration->initializer_text,
+                depth + 1);
+        }
+        if (const std::optional<std::string> initializer =
+                source_only_integer_initializer(*unit, expression)) {
+            return resolve_integer_expression(
+                program,
+                owner,
+                *initializer,
+                depth + 1);
+        }
+        throw std::runtime_error(
+            "cannot resolve generated integer GUC identifier '"
+            + std::string{expression} + "' in "
+            + owner.source_path.string());
     }
-    return std::to_string(
-        integer_expression_parser{expression}.parse());
+    const std::int64_t value =
+        integer_expression_parser{expression}.parse();
+    if (value < std::numeric_limits<int>::min()
+        || value > std::numeric_limits<int>::max()) {
+        throw std::runtime_error(
+            "cannot resolve generated integer GUC expression '"
+            + std::string{expression}
+            + "': value is outside PostgreSQL GUC int range");
+    }
+    return std::to_string(value);
 }
 
 [[nodiscard]] inline std::string resolve_real_expression(

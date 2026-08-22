@@ -1,15 +1,22 @@
-/// @brief Read-only PostgreSQL table access method for external relations.
+/// @file
+/// @brief Defines the read-only table access method for external relations.
 module;
 #include <bioseq/pg_compat.h>
 
-#include <climits>
 #include <cstddef>
+#include <cstring>
+#include <limits>
+#include <optional>
 
 extern "C" {
 #include "access/reloptions.h"
+#include "commands/defrem.h"
 }
 
 export module bioseq.postgres.external.relation;
+
+import bioseq.postgres.storage.metadata.sql_rows;
+import bioseq.postgres.storage.metadata.sql_row_codecs;
 
 #if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
 import bioseq.codegen.sql.annotation_model;
@@ -21,6 +28,10 @@ extern "C" {
     .schema = bioseq::sql::fixed_schema<"bioseq">,
 })]]
 [[bioseq_sql::access_method]]
+[[bioseq_sql::am_catalog_dependencies({
+    .roots = bioseq::sql::entities<
+        bioseq::storage::metadata::catalog_rows::external_relation_options>(),
+})]]
 [[bioseq_sql::revoke({
     .privileges = bioseq::sql::privileges::all,
     .from = bioseq::sql::public_role,
@@ -69,8 +80,34 @@ struct relation_options
 	int chunk_bases;
 };
 
+/** Parsed custom options removed from an external CREATE TABLE statement. */
+struct create_relation_options
+{
+	bool applies;
+	relation_entity entity;
+	const char *alphabet;
+	int storage_width;
+	int chunk_bases;
+};
+
 /** @brief Parses a `WITH (...)` datum into PostgreSQL-owned relation options. */
 [[nodiscard]] bytea *parse_relation_options(Datum options, bool validate);
+
+/** Tests whether a CREATE TABLE explicitly selects bioseq_external. */
+[[nodiscard]] bool is_external_create_statement(
+	const CreateStmt *statement) noexcept;
+
+/** Removes and validates this AM's four private CREATE TABLE options. */
+[[nodiscard]] create_relation_options consume_create_relation_options(
+	CreateStmt *statement);
+
+/** Inserts or replaces the typed option row for a successfully created table. */
+void persist_create_relation_options(
+	Oid relation_oid, const create_relation_options& options);
+
+/** Deletes a typed external-option row, optionally tolerating absence. */
+[[nodiscard]] bool delete_relation_options(
+	Oid relation_oid, bool missing_ok);
 
 /** @brief Returns the required logical entity or raises a PostgreSQL error. */
 [[nodiscard]] relation_entity entity_from_options(Relation relation);
@@ -125,6 +162,7 @@ const relopt_parse_elt relation_option_fields[] = {
  * values. Alphabet interpretation belongs to sequence materialization, so the
  * relation boundary accepts the stored spelling without changing it.
  */
+/** @brief Accepts the stored alphabet spelling for later sequence validation. */
 void
 accept_alphabet_option(const char *value)
 {
@@ -142,14 +180,306 @@ parse_relation_options(Datum options, bool validate)
 						 lengthof(relation_option_fields)));
 }
 
+namespace {
+
+using external_relation_options_codec =
+	bioseq::postgres::storage::metadata::sql_row_codecs::
+		external_relation_options_codec;
+using external_relation_options_row =
+	external_relation_options_codec::row_type;
+
+/** @return True when a CREATE TABLE option belongs to this access method. */
+[[nodiscard]] bool
+is_private_relation_option(const DefElem *option) noexcept
+{
+	if (option == nullptr || option->defnamespace != nullptr
+		|| option->defname == nullptr)
+	{
+		return false;
+	}
+	return std::strcmp(option->defname, "entity") == 0
+		|| std::strcmp(option->defname, "alphabet") == 0
+		|| std::strcmp(option->defname, "storage_width") == 0
+		|| std::strcmp(option->defname, "chunk_bases") == 0;
+}
+
+/** @return The typed relation-options catalog OID or `InvalidOid` when allowed. */
+[[nodiscard]] Oid
+relation_options_catalog_oid(bool missing_ok)
+{
+	const Oid namespace_oid = get_namespace_oid("bioseq_internal", true);
+	if (OidIsValid(namespace_oid))
+	{
+		const Oid relation_oid = get_relname_relid(
+			"external_relation_options", namespace_oid);
+		if (OidIsValid(relation_oid))
+		{
+			return relation_oid;
+		}
+	}
+	if (missing_ok)
+	{
+		return InvalidOid;
+	}
+	ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_TABLE),
+			 errmsg("bioseq_internal.external_relation_options is missing")));
+	pg_unreachable();
+}
+
+/** @return True when a PostgreSQL text datum equals the expected C string. */
+[[nodiscard]] bool
+text_equals(const text *value, const char *expected) noexcept
+{
+	const Size expected_size = std::strlen(expected);
+	const Size actual_size = static_cast<Size>(VARSIZE_ANY_EXHDR(value));
+	return actual_size == expected_size
+		&& std::memcmp(VARDATA_ANY(value), expected, actual_size) == 0;
+}
+
+/** @return The parsed entity or `unspecified` for an unknown spelling. */
+[[nodiscard]] relation_entity
+entity_from_text(const text *value) noexcept
+{
+	constexpr relation_entity candidates[] = {
+		relation_entity::taxonomy,
+		relation_entity::catalog,
+		relation_entity::record_gene,
+		relation_entity::record_location,
+		relation_entity::sequence,
+		relation_entity::sequence_chunk,
+	};
+	for (const relation_entity candidate : candidates)
+	{
+		if (text_equals(value, to_string(candidate)))
+		{
+			return candidate;
+		}
+	}
+	return relation_entity::unspecified;
+}
+
+} // namespace
+
+bool
+is_external_create_statement(const CreateStmt *statement) noexcept
+{
+	return statement != nullptr && statement->accessMethod != nullptr
+		&& std::strcmp(statement->accessMethod, "bioseq_external") == 0;
+}
+
+create_relation_options
+consume_create_relation_options(CreateStmt *statement)
+{
+	create_relation_options result{
+		.applies = is_external_create_statement(statement),
+		.entity = relation_entity::unspecified,
+		.alphabet = nullptr,
+		.storage_width = 0,
+		.chunk_bases = 0,
+	};
+	if (!result.applies)
+	{
+		return result;
+	}
+	if (relation_option_kind == static_cast<relopt_kind>(0))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("bioseq_external relation options are not initialized")));
+	}
+
+	List *private_options = NIL;
+	List *postgres_options = NIL;
+	ListCell *cell = nullptr;
+	foreach(cell, statement->options)
+	{
+		auto *option = reinterpret_cast<DefElem *>(lfirst(cell));
+		if (is_private_relation_option(option))
+		{
+			private_options = lappend(private_options, option);
+		}
+		else
+		{
+			postgres_options = lappend(postgres_options, option);
+		}
+	}
+
+	if (private_options == NIL)
+	{
+		list_free(postgres_options);
+		return result;
+	}
+
+	List *original_options = statement->options;
+	statement->options = postgres_options;
+	list_free(original_options);
+
+	char *valid_namespaces[] = { nullptr };
+	const Datum serialized = transformRelOptions(
+		(Datum) 0, private_options, nullptr, valid_namespaces,
+		/* acceptOidsOff = */ false, /* isReset = */ false);
+	list_free(private_options);
+
+	auto *parsed = reinterpret_cast<relation_options *>(
+		parse_relation_options(serialized, true));
+	if (parsed == nullptr
+		|| VARSIZE_ANY(parsed) < static_cast<int>(sizeof(relation_options)))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid bioseq_external relation options")));
+	}
+
+	result.entity = static_cast<relation_entity>(parsed->entity);
+	result.alphabet = GET_STRING_RELOPTION(parsed, alphabet);
+	result.storage_width = parsed->storage_width;
+	result.chunk_bases = parsed->chunk_bases;
+	return result;
+}
+
+void
+persist_create_relation_options(
+	Oid relation_oid, const create_relation_options& options)
+{
+	if (!options.applies)
+	{
+		return;
+	}
+
+	Relation target = table_open(relation_oid, AccessShareLock);
+	const bool external_relation = uses_table_access_method(target);
+	table_close(target, AccessShareLock);
+	if (!external_relation)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("created relation does not use the bioseq_external access method")));
+	}
+
+	std::optional<text *> stored_entity;
+	if (options.entity != relation_entity::unspecified)
+	{
+		stored_entity = cstring_to_text(to_string(options.entity));
+	}
+	std::optional<text *> stored_alphabet;
+	if (options.alphabet != nullptr)
+	{
+		stored_alphabet = cstring_to_text(options.alphabet);
+	}
+
+	const Oid catalog_oid = relation_options_catalog_oid(false);
+	Relation catalog = table_open(catalog_oid, RowExclusiveLock);
+	TupleDesc descriptor = RelationGetDescr(catalog);
+	external_relation_options_codec::validate_descriptor(descriptor);
+
+	auto encoded = external_relation_options_codec::encode(
+		external_relation_options_row{
+			.regclass = relation_oid,
+			.entity = stored_entity,
+			.alphabet = stored_alphabet,
+			.storage_width = options.storage_width,
+			.chunk_bases = options.chunk_bases,
+		},
+		CurrentMemoryContext);
+	HeapTuple replacement = encoded.form_tuple(descriptor);
+
+	ScanKeyData key = external_relation_options_codec::scan_key<
+		&external_relation_options_row::regclass>(relation_oid);
+	SysScanDesc scan = systable_beginscan(
+		catalog, InvalidOid, false, SnapshotSelf, 1, &key);
+	HeapTuple existing = systable_getnext(scan);
+	if (HeapTupleIsValid(existing))
+	{
+		CatalogTupleUpdate(catalog, &existing->t_self, replacement);
+	}
+	else
+	{
+		CatalogTupleInsert(catalog, replacement);
+	}
+	systable_endscan(scan);
+	heap_freetuple(replacement);
+	table_close(catalog, RowExclusiveLock);
+	CommandCounterIncrement();
+}
+
+bool
+delete_relation_options(Oid relation_oid, bool missing_ok)
+{
+	const Oid catalog_oid = relation_options_catalog_oid(true);
+	if (!OidIsValid(catalog_oid))
+	{
+		return false;
+	}
+
+	Relation catalog = table_open(catalog_oid, RowExclusiveLock);
+	external_relation_options_codec::validate_descriptor(
+		RelationGetDescr(catalog));
+	ScanKeyData key = external_relation_options_codec::scan_key<
+		&external_relation_options_row::regclass>(relation_oid);
+	SysScanDesc scan = systable_beginscan(
+		catalog, InvalidOid, false, SnapshotSelf, 1, &key);
+	HeapTuple existing = systable_getnext(scan);
+	const bool removed = HeapTupleIsValid(existing);
+	if (removed)
+	{
+		CatalogTupleDelete(catalog, &existing->t_self);
+	}
+	systable_endscan(scan);
+	table_close(catalog, RowExclusiveLock);
+	if (removed)
+	{
+		CommandCounterIncrement();
+	}
+	else if (!missing_ok)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("bioseq_external relation option metadata is missing for relation %u",
+						relation_oid)));
+	}
+	return removed;
+}
+
 relation_entity
 entity_from_options(Relation relation)
 {
-	relation_options *options =
-		reinterpret_cast<relation_options *>(relation->rd_options);
+	if (relation == nullptr || !uses_table_access_method(relation))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("relation does not use the bioseq_external access method")));
+	}
 
-	if (options == nullptr ||
-		options->entity == static_cast<int>(relation_entity::unspecified))
+	const Oid catalog_oid = relation_options_catalog_oid(false);
+	relation_entity entity = relation_entity::unspecified;
+	bool row_found = false;
+	bool entity_present = false;
+	Relation catalog = table_open(catalog_oid, AccessShareLock);
+	TupleDesc descriptor = RelationGetDescr(catalog);
+	external_relation_options_codec::validate_descriptor(descriptor);
+	ScanKeyData key = external_relation_options_codec::scan_key<
+		&external_relation_options_row::regclass>(
+			RelationGetRelid(relation));
+	SysScanDesc scan = systable_beginscan(
+		catalog, InvalidOid, false, SnapshotSelf, 1, &key);
+	HeapTuple tuple = systable_getnext(scan);
+	if (HeapTupleIsValid(tuple))
+	{
+		row_found = true;
+		external_relation_options_row stored =
+			external_relation_options_codec::deform(
+				tuple, descriptor, CurrentMemoryContext);
+		if (stored.entity.has_value())
+		{
+			entity_present = true;
+			entity = entity_from_text(*stored.entity);
+		}
+	}
+	systable_endscan(scan);
+	table_close(catalog, AccessShareLock);
+
+	if (!row_found || !entity_present)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -159,7 +489,24 @@ entity_from_options(Relation relation)
 						 "record_location, sequence, and sequence_chunk.")));
 	}
 
-	return static_cast<relation_entity>(options->entity);
+	switch (entity)
+	{
+		case relation_entity::taxonomy:
+		case relation_entity::catalog:
+		case relation_entity::record_gene:
+		case relation_entity::record_location:
+		case relation_entity::sequence:
+		case relation_entity::sequence_chunk:
+			return entity;
+		case relation_entity::unspecified:
+			break;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("invalid \"entity\" option for bioseq_external relation \"%s\"",
+					RelationGetRelationName(relation))));
+	pg_unreachable();
 }
 
 /* ======================================================================== */
@@ -168,7 +515,7 @@ entity_from_options(Relation relation)
 
 namespace {
 
-/* A physical scan callback fired: the CustomScan must own external reads. */
+/** @brief Rejects a physical table scan that bypassed the required CustomScan. */
 [[noreturn]] void
 raise_custom_scan_required()
 {
@@ -182,7 +529,7 @@ raise_custom_scan_required()
 	pg_unreachable();
 }
 
-/* Any write path fired against an inherently read-only external relation. */
+/** @brief Rejects writes against an external read-only relation. */
 [[noreturn]] void
 raise_read_only()
 {
@@ -192,7 +539,7 @@ raise_read_only()
 	pg_unreachable();
 }
 
-/* An unsupported physical capability (index/parallel/sample/rewrite) fired. */
+/** @brief Rejects a physical capability not supported by external relations. */
 [[noreturn]] void
 raise_unsupported_operation(const char *feature)
 {
@@ -213,6 +560,7 @@ namespace {
 
 /* --- slot ops: virtual slots, as the CustomScan produces --------------- */
 
+/** @return Virtual slot operations used by provider-produced rows. */
 const TupleTableSlotOps *
 slot_callbacks(Relation relation)
 {
@@ -221,6 +569,7 @@ slot_callbacks(Relation relation)
 
 /* --- sequential scan: owned by the CustomScan -------------------------- */
 
+/** @brief Rejects physical scan creation in favor of the CustomScan route. */
 TableScanDesc
 begin_physical_scan(Relation relation, Snapshot snapshot,
 						   int nkeys, ScanKey key,
@@ -230,6 +579,7 @@ begin_physical_scan(Relation relation, Snapshot snapshot,
 	raise_custom_scan_required();
 }
 
+/** @brief Accepts cleanup after a physical scan creation failure. */
 void
 end_physical_scan(TableScanDesc scan)
 {
@@ -237,6 +587,7 @@ end_physical_scan(TableScanDesc scan)
 	 * nothing to tear down. Safe to call regardless. */
 }
 
+/** @brief Rejects rescan through the physical table callback. */
 void
 rescan_physical_scan(TableScanDesc scan, ScanKey key, bool set_params,
 					   bool allow_strat, bool allow_sync, bool allow_pagemode)
@@ -244,6 +595,7 @@ rescan_physical_scan(TableScanDesc scan, ScanKey key, bool set_params,
 	raise_custom_scan_required();
 }
 
+/** @brief Rejects tuple retrieval through the physical table callback. */
 bool
 next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 							TupleTableSlot *slot)
@@ -253,18 +605,21 @@ next_physical_tuple(TableScanDesc scan, ScanDirection direction,
 
 /* --- parallel scan: external paths are always non-parallel ------------- */
 
+/** @brief Rejects parallel-scan size estimation for external relations. */
 Size
 estimate_parallel_scan(Relation rel)
 {
 	raise_unsupported_operation("parallel scan");
 }
 
+/** @brief Rejects parallel-scan initialization for external relations. */
 Size
 initialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
 	raise_unsupported_operation("parallel scan");
 }
 
+/** @brief Rejects parallel-scan reinitialization for external relations. */
 void
 reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 {
@@ -273,24 +628,28 @@ reinitialize_parallel_scan(Relation rel, ParallelTableScanDesc pscan)
 
 /* --- index fetch: external relations reject index DDL ------------------ */
 
+/** @brief Rejects index fetch creation for external relations. */
 IndexFetchTableData *
 begin_index_fetch(Relation rel)
 {
 	raise_unsupported_operation("index scan");
 }
 
+/** @brief Accepts cleanup after index fetch creation was rejected. */
 void
 reset_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
+/** @brief Accepts final cleanup after index fetch creation was rejected. */
 void
 end_index_fetch(IndexFetchTableData *scan)
 {
 	/* no-op: index_fetch_begin never returns a handle */
 }
 
+/** @brief Rejects tuple retrieval through a local index. */
 bool
 fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot,
@@ -301,6 +660,7 @@ fetch_index_tuple(IndexFetchTableData *scan, ItemPointer tid,
 
 /* --- tuple fetch / tid / snapshot -------------------------------------- */
 
+/** @brief Rejects physical tuple-version retrieval. */
 bool
 fetch_row_version(Relation relation, ItemPointer tid,
 								  Snapshot snapshot, TupleTableSlot *slot)
@@ -308,6 +668,7 @@ fetch_row_version(Relation relation, ItemPointer tid,
 	raise_custom_scan_required();
 }
 
+/** @return False because external relations expose no physical tuple IDs. */
 bool
 tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 {
@@ -316,12 +677,14 @@ tuple_identifier_is_valid(TableScanDesc scan, ItemPointer tid)
 	return false;
 }
 
+/** @brief Rejects physical tuple-version chain traversal. */
 void
 get_latest_tuple_identifier(TableScanDesc scan, ItemPointer tid)
 {
 	raise_unsupported_operation("tuple version chains");
 }
 
+/** @return False because external relations store no local tuple versions. */
 bool
 tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 										 Snapshot snapshot)
@@ -330,6 +693,7 @@ tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 	return false;
 }
 
+/** @return `InvalidTransactionId` after clearing the empty delete batch. */
 TransactionId
 delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 {
@@ -340,6 +704,7 @@ delete_index_tuples(Relation rel, TM_IndexDeleteOp *delstate)
 
 /* --- all DML is rejected (read-only) ----------------------------------- */
 
+/** @brief Rejects insertion into a read-only external relation. */
 void
 insert_tuple(Relation relation, TupleTableSlot *slot,
 							 CommandId cid, int options, BulkInsertState bistate)
@@ -347,6 +712,7 @@ insert_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects speculative insertion into a read-only external relation. */
 void
 insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										 CommandId cid, int options,
@@ -355,6 +721,7 @@ insert_speculative_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects speculative-insert completion for an external relation. */
 void
 complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 										   uint32 specToken, bool succeeded)
@@ -362,6 +729,7 @@ complete_speculative_tuple(Relation relation, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects batch insertion into a read-only external relation. */
 void
 insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 							 CommandId cid, int options, BulkInsertState bistate)
@@ -369,6 +737,7 @@ insert_multiple_tuples(Relation relation, TupleTableSlot **slots, int ntuples,
 	raise_read_only();
 }
 
+/** @brief Rejects tuple deletion from a read-only external relation. */
 TM_Result
 delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 							 Snapshot snapshot, Snapshot crosscheck, bool wait,
@@ -377,6 +746,7 @@ delete_tuple(Relation relation, ItemPointer tid, CommandId cid,
 	raise_read_only();
 }
 
+/** @brief Rejects tuple updates on a read-only external relation. */
 TM_Result
 update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 							 CommandId cid, Snapshot snapshot, Snapshot crosscheck,
@@ -386,6 +756,7 @@ update_tuple(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 	raise_read_only();
 }
 
+/** @brief Rejects physical tuple locks on an external relation. */
 TM_Result
 lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 						   TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
@@ -395,6 +766,7 @@ lock_tuple(Relation relation, ItemPointer tid, Snapshot snapshot,
 	raise_read_only();
 }
 
+/** @brief Rejects bulk-insert finalization for an external relation. */
 void
 finish_bulk_insert(Relation relation, int options)
 {
@@ -403,6 +775,7 @@ finish_bulk_insert(Relation relation, int options)
 
 /* --- storage lifecycle: validate, but create no physical storage ------- */
 
+/** @brief Initializes storage horizons without creating relation files. */
 void
 set_new_file_locator(Relation rel,
 											 const RelFileLocator *newrlocator,
@@ -417,11 +790,12 @@ set_new_file_locator(Relation rel,
 				 errmsg("bioseq_external relations cannot be TEMPORARY")));
 	}
 
-	/* Validate an attached option payload without creating physical storage. */
-	if (rel->rd_options != nullptr)
-	{
-		(void) entity_from_options(rel);
-	}
+	/*
+	 * The ProcessUtility owner validates and removes private options before
+	 * core reaches this callback, then persists them after CREATE succeeds.
+	 * A new relation is not catalog-visible here, so the required entity check
+	 * remains deferred until entity_from_options() performs runtime routing.
+	 */
 
 	/*
 	 * External relations are non-materialised: no heap/init fork is created.
@@ -432,18 +806,21 @@ set_new_file_locator(Relation rel,
 	*minmulti = InvalidMultiXactId;
 }
 
+/** @brief Rejects nontransactional truncation of an external relation. */
 void
 truncate_nontransactional(Relation rel)
 {
 	raise_unsupported_operation("TRUNCATE");
 }
 
+/** @brief Rejects physical data copying for an external relation. */
 void
 copy_relation_data(Relation rel, const RelFileLocator *newrlocator)
 {
 	raise_unsupported_operation("storage rewrite");
 }
 
+/** @brief Rejects physical relation rewrites for an external relation. */
 void
 copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 										  Relation OldIndex, bool use_sort,
@@ -457,6 +834,7 @@ copy_relation_for_cluster(Relation OldTable, Relation NewTable,
 	raise_unsupported_operation("CLUSTER / VACUUM FULL");
 }
 
+/** @brief Accepts vacuum without local storage work. */
 void
 vacuum_relation(Relation rel, VacuumParams *params,
 								BufferAccessStrategy bstrategy)
@@ -467,6 +845,7 @@ vacuum_relation(Relation rel, VacuumParams *params,
 
 /* --- analyze: no local rows, no remote I/O ----------------------------- */
 
+/** @return False because external relations expose no local blocks to analyze. */
 bool
 next_analyze_block(TableScanDesc scan, ReadStream *stream)
 {
@@ -474,6 +853,7 @@ next_analyze_block(TableScanDesc scan, ReadStream *stream)
 	return false;
 }
 
+/** @return False without contacting a provider or yielding a sample tuple. */
 bool
 next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
 										double *liverows, double *deadrows,
@@ -485,6 +865,7 @@ next_analyze_tuple(TableScanDesc scan, TransactionId OldestXmin,
 
 /* --- index build/validate: external relations reject index DDL --------- */
 
+/** @brief Rejects local index construction for external relations. */
 double
 build_index_range_scan(Relation table_rel, Relation index_rel,
 									   IndexInfo *index_info, bool allow_sync,
@@ -497,6 +878,7 @@ build_index_range_scan(Relation table_rel, Relation index_rel,
 	raise_unsupported_operation("index build");
 }
 
+/** @brief Rejects local index validation for external relations. */
 void
 validate_index_scan(Relation table_rel, Relation index_rel,
 									IndexInfo *index_info, Snapshot snapshot,
@@ -507,6 +889,7 @@ validate_index_scan(Relation table_rel, Relation index_rel,
 
 /* --- size / toast / estimate: zero physical footprint ------------------ */
 
+/** @return Zero because external relations own no PostgreSQL forks. */
 uint64
 relation_size(Relation rel, ForkNumber forkNumber)
 {
@@ -514,6 +897,7 @@ relation_size(Relation rel, ForkNumber forkNumber)
 	return 0;
 }
 
+/** @return False because no local tuples require TOAST storage. */
 bool
 relation_needs_toast_table(Relation rel)
 {
@@ -522,15 +906,16 @@ relation_needs_toast_table(Relation rel)
 }
 
 /* Provider-free estimate: fixed cardinality and local type widths only. */
-constexpr double default_estimated_rows = 1000.0;
+constexpr double k_default_estimated_rows = 1000.0;
 
+/** @brief Publishes provider-free relation size estimates to the planner. */
 void
 estimate_relation_size(Relation rel, int32 *attr_widths,
 								  BlockNumber *pages, double *tuples,
 								  double *allvisfrac)
 {
 	*pages = 0;
-	*tuples = default_estimated_rows;
+	*tuples = k_default_estimated_rows;
 	*allvisfrac = 0.0;
 
 	/* Local (statistics/type) column widths only — no remote I/O. */
@@ -539,12 +924,14 @@ estimate_relation_size(Relation rel, int32 *attr_widths,
 
 /* --- sample scan: rejected (also blocked at plan time) ----------------- */
 
+/** @brief Rejects block sampling for external relations. */
 bool
 next_sample_block(TableScanDesc scan, SampleScanState *scanstate)
 {
 	raise_unsupported_operation("TABLESAMPLE");
 }
 
+/** @brief Rejects tuple sampling for external relations. */
 bool
 next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 									   TupleTableSlot *slot)
@@ -552,7 +939,7 @@ next_sample_tuple(TableScanDesc scan, SampleScanState *scanstate,
 	raise_unsupported_operation("TABLESAMPLE");
 }
 
-/* Stable PostgreSQL callback table. Null bitmap callbacks prevent bitmap paths. */
+/** @brief Stable callback table with bitmap paths disabled. */
 const TableAmRoutine table_access_methods = {
 	.type = T_TableAmRoutine,
 
@@ -648,6 +1035,7 @@ to_string(relation_entity entity) noexcept
 	return "unspecified";
 }
 
+/** @brief Registers relation options once for the backend process. */
 void
 initialize_relation_options()
 {
@@ -678,7 +1066,7 @@ initialize_relation_options()
 
 	add_int_reloption(relation_option_kind, "chunk_bases",
 					  "Chunk length in bases for sequence_chunk entities.",
-					  0, 0, INT_MAX, AccessExclusiveLock);
+					  0, 0, std::numeric_limits<int>::max(), AccessExclusiveLock);
 }
 
 } // namespace bioseq::postgres::external

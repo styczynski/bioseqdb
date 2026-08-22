@@ -471,8 +471,10 @@ attributes_named(
     const std::vector<materialization_coordinate>& coordinates) {
     std::ostringstream output;
     output << "bioseq-template-flatten-topology\n"
-              "revision=1\n";
+              "revision=2\n";
     output << "output-module\t" << output_module << '\n';
+    output << "emission-policy\t" << spell_emission_policy(region.policy)
+           << '\n';
     for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
         const axis_group& group = groups[group_index];
         output << "group\t" << group_index << '\t'
@@ -504,6 +506,20 @@ attributes_named(
 }
 
 }  // namespace detail
+
+/// Parses the exact closed emission-policy vocabulary.
+[[nodiscard]] inline emission_policy parse_emission_policy(
+    std::string_view spelling) {
+    if (spelling == "selector_api") {
+        return emission_policy::selector_api;
+    }
+    if (spelling == "implementation_owners") {
+        return emission_policy::implementation_owners;
+    }
+    throw std::runtime_error(
+        "emission policy must be exactly 'selector_api' or "
+        "'implementation_owners'");
+}
 
 [[nodiscard]] inline std::vector<std::string> parse_closed_string_arguments(
     std::string_view argument_text) {
@@ -753,6 +769,10 @@ void validate_coordinate_axis_domain(
     materialization_region region,
     const std::size_t maximum_coordinates = 4096u) {
     topology_plan plan{.region = std::move(region)};
+    if (spell_emission_policy(plan.region.policy).empty()) {
+        throw std::runtime_error(
+            "configured template_flatten emission policy is invalid");
+    }
     if (!detail::module_name(plan.region.configured_output_module_name)
         || plan.region.configured_output_module_name.contains(':')) {
         throw std::runtime_error(
@@ -798,8 +818,12 @@ void validate_coordinate_axis_domain(
                 .case_ordinal = replacement.ordinal,
             });
         }
-        coordinate.identity_namespace = detail::identity_namespace(
-            plan.region.boundary.qualified_name, coordinate.assignments);
+        coordinate.identity_namespace =
+            plan.region.policy == emission_policy::selector_api
+            ? detail::identity_namespace(
+                  plan.region.boundary.qualified_name,
+                  coordinate.assignments)
+            : plan.region.boundary.qualified_name;
         validate_coordinate_axis_domain(coordinate);
         plan.coordinates.push_back(std::move(coordinate));
     }
@@ -855,17 +879,18 @@ inline constexpr std::array<std::string_view, 6u>
         std::ranges::find(
         coordinate.assignments, std::string_view{"width"},
         &axis_case_assignment::group);
-    if (alphabet == coordinate.assignments.end()
-        || width == coordinate.assignments.end()) {
-        return true;
-    }
     if (profile == "dna4_uint64") {
-        return alphabet->case_label == "dna4" && width->case_label == "w8";
+        return (alphabet == coordinate.assignments.end()
+                || alphabet->case_label == "dna4")
+            && (width == coordinate.assignments.end()
+                || width->case_label == "w8");
     }
     if (profile == "all_alphabets_uint64") {
-        return (alphabet->case_label == "dna4"
+        return (alphabet == coordinate.assignments.end()
+                || alphabet->case_label == "dna4"
                 || alphabet->case_label == "dna5")
-            && width->case_label == "w8";
+            && (width == coordinate.assignments.end()
+                || width->case_label == "w8");
     }
     return true;
 }
@@ -933,6 +958,56 @@ inline void validate_enabled_ordinals(
 
 /// Verifies unique generated entry ownership for every identity.
 inline void validate_entry_ownership(const topology_plan& topology) {
+    if (topology.region.policy == emission_policy::implementation_owners) {
+        for (const owned_declaration& declaration
+             : topology.region.controlled_declarations) {
+            if (declaration.generated_api_entry) {
+                throw std::runtime_error(
+                    "implementation_owners policy forbids generated API entries");
+            }
+        }
+        for (const std::uint32_t representative
+             : topology.identity_representative_ordinals) {
+            const materialization_coordinate& identity =
+                topology.coordinates.at(representative);
+            for (const owned_declaration& declaration
+                 : topology.region.controlled_declarations) {
+                if (!declaration.declaration.specifiers.is_definition
+                    || declaration.declaration.linkage
+                        == structural_analysis::entity_linkage::internal) {
+                    continue;
+                }
+                std::vector<std::uint32_t> owners;
+                for (const materialization_coordinate& coordinate
+                     : topology.coordinates) {
+                    if (detail::identity_key(coordinate)
+                            == detail::identity_key(identity)
+                        && coordinate_matches(
+                            coordinate, declaration.clauses)) {
+                        owners.push_back(coordinate.ordinal);
+                    }
+                }
+                if (owners.size() != 1u) {
+                    std::ostringstream message;
+                    message << "non-TU-local controlled definition '"
+                            << declaration.declaration.qualified_name
+                            << "' must have exactly one implementation owner for identity coordinate "
+                            << identity.ordinal << "; owners=";
+                    if (owners.empty()) {
+                        message << "none";
+                    } else {
+                        for (std::size_t index = 0; index < owners.size(); ++index) {
+                            if (index != 0u) message << ',';
+                            message << owners[index];
+                        }
+                    }
+                    throw std::runtime_error(message.str());
+                }
+            }
+        }
+        return;
+    }
+
     std::set<std::string, std::less<>> roles;
     for (const owned_declaration& declaration
          : topology.region.controlled_declarations) {
@@ -1069,10 +1144,176 @@ inline void validate_entry_ownership(const topology_plan& topology) {
     }
 }
 
+/// Verifies owner-mode body-free redeclarations against the imported primary.
+inline void validate_implementation_owner_declaration_probes(
+    const topology_plan& topology,
+    const std::vector<structural_analysis::translation_unit>& probes) {
+    if (probes.size() != topology.identity_representative_ordinals.size()) {
+        throw std::runtime_error(
+            "declaration-probe action count disagrees with identity topology");
+    }
+
+    std::map<std::string, const owned_declaration*, std::less<>> declarations;
+    std::set<std::string, std::less<>> expected_occurrences;
+    for (const owned_declaration& owned
+         : topology.region.controlled_declarations) {
+        const structural_analysis::declaration_record& declaration =
+            owned.declaration;
+        if (!declaration.specifiers.is_definition
+            || declaration.linkage
+                == structural_analysis::entity_linkage::internal) {
+            continue;
+        }
+        if (declaration.linkage
+                == structural_analysis::entity_linkage::none
+            || declaration.attachment
+                != structural_analysis::module_attachment::named_module) {
+            throw std::runtime_error(
+                "implementation-owner declarations require module-safe non-internal linkage and named-module attachment");
+        }
+        if (declaration.source_identity.empty()
+            || !declarations.emplace(
+                    declaration.source_identity, &owned).second) {
+            throw std::runtime_error(
+                "implementation-owner declarations require unique source provenance IDs");
+        }
+        for (const materialization_coordinate& coordinate
+             : topology.coordinates) {
+            if (coordinate_matches(coordinate, owned.clauses)) {
+                expected_occurrences.insert(
+                    declaration.source_identity + "\n"
+                    + std::to_string(coordinate.ordinal));
+            }
+        }
+    }
+
+    std::set<std::string, std::less<>> actual_occurrences;
+    std::set<std::string, std::less<>> probed_identity_keys;
+    for (const structural_analysis::translation_unit& probe : probes) {
+        if (probe.mode
+            != structural_analysis::collection_mode::declaration_probe) {
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": body-free validation did not use declaration_probe mode");
+        }
+        if (probe.source_module.provided_module
+                != topology.region.configured_output_module_name
+            || probe.source_module.is_interface
+            || probe.source_module.is_partition) {
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": implementation-owner declaration probe must be a body-free implementation unit of its configured output primary");
+        }
+
+        std::optional<std::string> probe_identity_key;
+        for (const structural_analysis::declaration_record& declaration
+             : probe.declarations) {
+            if (declaration.source_identity.empty()) continue;
+            const std::map<
+                std::string,
+                const owned_declaration*,
+                std::less<>>::const_iterator expected =
+                declarations.find(declaration.source_identity);
+            if (expected == declarations.end()) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": declaration probe carries unauthenticated implementation-owner provenance '"
+                    + declaration.source_identity + "'");
+            }
+
+            std::uint32_t coordinate_ordinal{};
+            const std::from_chars_result parsed_coordinate = std::from_chars(
+                declaration.source_coordinate.data(),
+                declaration.source_coordinate.data()
+                    + declaration.source_coordinate.size(),
+                coordinate_ordinal);
+            if (declaration.source_coordinate.empty()
+                || parsed_coordinate.ec != std::errc{}
+                || parsed_coordinate.ptr
+                    != declaration.source_coordinate.data()
+                        + declaration.source_coordinate.size()
+                || coordinate_ordinal >= topology.coordinates.size()
+                || declaration.source_coordinate
+                    != std::to_string(coordinate_ordinal)) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": declaration probe has invalid coordinate provenance for '"
+                    + declaration.source_identity + "'");
+            }
+            const materialization_coordinate& coordinate =
+                topology.coordinates[coordinate_ordinal];
+            const std::string coordinate_identity =
+                detail::identity_key(coordinate);
+            if (probe_identity_key.has_value()
+                && *probe_identity_key != coordinate_identity) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": one declaration probe spans multiple identity coordinates");
+            }
+            probe_identity_key = coordinate_identity;
+
+            const std::string occurrence = declaration.source_identity + "\n"
+                + declaration.source_coordinate;
+            if (!expected_occurrences.contains(occurrence)
+                || !actual_occurrences.insert(occurrence).second) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": declaration probe duplicates or misassigns implementation-owner provenance '"
+                    + declaration.source_identity + "' at coordinate "
+                    + declaration.source_coordinate);
+            }
+
+            const structural_analysis::declaration_record& authored =
+                expected->second->declaration;
+            if (declaration.kind != authored.kind
+                || declaration.name != authored.name
+                || declaration.qualified_name != authored.qualified_name) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": implementation-owner declaration probe changed the authored declaration identity for provenance '"
+                    + declaration.source_identity + "'");
+            }
+            if (declaration.stable_usr.empty()
+                || declaration.attachment
+                    != structural_analysis::module_attachment::named_module
+                || declaration.linkage
+                    == structural_analysis::entity_linkage::internal
+                || declaration.linkage
+                    == structural_analysis::entity_linkage::none
+                || declaration.specifiers.is_definition
+                || declaration.payload_kind
+                    != structural_analysis::declaration_payload_kind::none
+                || detail::nonempty_range(
+                    declaration.body_or_initializer_range)) {
+                throw std::runtime_error(
+                    probe.source_path.string()
+                    + ": implementation-owner probe failed body-free module-safe redeclaration semantics for '"
+                    + authored.qualified_name + "'");
+            }
+        }
+        if (!probe_identity_key.has_value()
+            || !probed_identity_keys.insert(*probe_identity_key).second) {
+            throw std::runtime_error(
+                probe.source_path.string()
+                + ": declaration probe has no unique identity-coordinate ownership");
+        }
+    }
+    if (actual_occurrences != expected_occurrences
+        || probed_identity_keys.size()
+            != topology.identity_representative_ordinals.size()) {
+        throw std::runtime_error(
+            "implementation-owner declaration probes do not cover the exact owned declaration topology");
+    }
+}
+
 /// Verifies that body-free probes cover the logical topology exactly once.
 inline void validate_declaration_probes(
     const topology_plan& topology,
     const std::vector<structural_analysis::translation_unit>& probes) {
+    if (topology.region.policy == emission_policy::implementation_owners) {
+        validate_implementation_owner_declaration_probes(topology, probes);
+        return;
+    }
     if (probes.size() != topology.identity_representative_ordinals.size()) {
         throw std::runtime_error(
             "declaration-probe action count disagrees with identity topology");
@@ -1278,6 +1519,10 @@ inline void validate_materialization_region(
     const materialization_region& region,
     std::string_view source_text) {
     const std::filesystem::path& path = region.source_module.source_path;
+    if (spell_emission_policy(region.policy).empty()) {
+        throw std::runtime_error(
+            path.string() + ": materialization emission policy is invalid");
+    }
     if (!region.source_module.is_interface || region.source_module.is_partition
         || !detail::module_name(region.source_module.provided_module)
         || region.source_module.provided_module
@@ -1423,6 +1668,13 @@ inline void validate_materialization_region(
     for (const owned_declaration& owned : region.controlled_declarations) {
         const structural_analysis::declaration_record& declaration =
             owned.declaration;
+        if (region.policy == emission_policy::implementation_owners
+            && owned.generated_api_entry) {
+            detail::reject(
+                path,
+                detail::declaration_range(declaration),
+                "implementation_owners policy forbids template_flatten_entry declarations");
+        }
         if (!declaration.specifiers.direct_namespace_member
             || !detail::contains(
                 region.boundary.body_range,
@@ -1431,6 +1683,14 @@ inline void validate_materialization_region(
                 path,
                 detail::declaration_range(declaration),
                 "template_flatten_when may only select a direct namespace child");
+        }
+        if (region.policy == emission_policy::implementation_owners
+            && declaration.enclosing_qualified_name
+                != region.boundary.qualified_name) {
+            detail::reject(
+                path,
+                detail::declaration_range(declaration),
+                "implementation-owner declarations must be direct children of the named materialization boundary");
         }
         if (detail::declaration_range(declaration).begin.byte_offset
             < final_binding_end) {
@@ -1469,7 +1729,8 @@ inline void validate_materialization_region(
             && declaration.specifiers.is_definition
             && declaration.linkage
                 != structural_analysis::entity_linkage::internal
-            && !inside_support
+            && (region.policy == emission_policy::implementation_owners
+                || !inside_support)
             && (declaration.specifiers.is_overloaded
                 || declaration.qualified_name.empty()
                 || !controlled_noninternal_names.insert(
@@ -1478,6 +1739,19 @@ inline void validate_materialization_region(
                 path,
                 detail::declaration_range(declaration),
                 "non-TU-local controlled definitions must have unique non-overloaded names; move overloads to an authored module");
+        }
+        if (region.policy == emission_policy::implementation_owners
+            && declaration.specifiers.is_definition
+            && declaration.linkage
+                != structural_analysis::entity_linkage::internal
+            && (declaration.linkage
+                    == structural_analysis::entity_linkage::none
+                || declaration.attachment
+                    != structural_analysis::module_attachment::named_module)) {
+            detail::reject(
+                path,
+                detail::declaration_range(declaration),
+                "implementation-owner definitions require module-safe non-internal linkage and named-module attachment");
         }
         if (!owned.generated_api_entry) continue;
         const structural_analysis::declaration_specifier_state& facts =
@@ -1611,6 +1885,7 @@ inline void validate_scheduler_highway_prepared_closure(
 [[nodiscard]] inline materialization_region extract_materialization_region(
     const structural_analysis::translation_unit& unit,
     std::string configured_output_module_name,
+    const emission_policy policy,
     std::string_view source_text) {
     if (unit.mode != structural_analysis::collection_mode::token_slice) {
         throw std::runtime_error(
@@ -1623,6 +1898,7 @@ inline void validate_scheduler_highway_prepared_closure(
         .source_module = unit.source_module,
         .configured_output_module_name =
             std::move(configured_output_module_name),
+        .policy = policy,
     };
     std::set<std::string, std::less<>> boundary_names;
     for (const structural_analysis::declaration_record& declaration

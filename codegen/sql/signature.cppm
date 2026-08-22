@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <stdexcept>
@@ -309,7 +310,7 @@ top_level_word_begins(std::string_view value) {
     if (words.size() == 1) return true;
 
     const std::string base = base_type_words(normalized);
-    static constexpr std::string_view multiword_types[] = {
+    static constexpr auto multiword_types = std::to_array<std::string_view>({
         "bit varying",
         "character varying",
         "double precision",
@@ -317,7 +318,7 @@ top_level_word_begins(std::string_view value) {
         "time without time zone",
         "timestamp with time zone",
         "timestamp without time zone",
-    };
+    });
     return std::ranges::contains(multiword_types, base);
 }
 

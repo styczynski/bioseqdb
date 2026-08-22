@@ -88,14 +88,14 @@ inline void require_rejected(
                     .slug = "emu128",
                     .token = "HWY_EMU128",
                     .target_namespace = "N_EMU128",
-                    .bit = 1u,
+                    .bit = 1U,
                 },
                 target_spec{
                     .platform = "x86",
                     .slug = "sse2",
                     .token = "HWY_SSE2",
                     .target_namespace = "N_SSE2",
-                    .bit = 2u,
+                    .bit = 2U,
                 },
             },
         },
@@ -125,14 +125,14 @@ inline void require_rejected(
                 .source = source,
                 .enclosing_namespace = "bioseq::fixture",
                 .body = "int kernel() { return 7; }\n",
-                .body_first_line = 5u,
+                .body_first_line = 5U,
                 .source_sha256 =
                     "11111111111111111111111111111111"
                     "11111111111111111111111111111111",
                 .neutral_imports = {"bioseq.fixture.neutral"},
                 .callables = {
                     callable_insertion{
-                        .body_relative_offset = 0u,
+                        .body_relative_offset = 0U,
                         .qualified_name = "bioseq::fixture::target::kernel",
                         .kind = "function",
                     },
@@ -168,7 +168,7 @@ inline void append_fixture_source(
         .source = std::move(source),
         .enclosing_namespace = "bioseq::simd",
         .body = {},
-        .body_first_line = 1u,
+        .body_first_line = 1U,
         .source_sha256 =
             "22222222222222222222222222222222"
             "22222222222222222222222222222222",
@@ -190,7 +190,7 @@ namespace [[bioseq::similar]] decoy {}
         structural_analysis::scan_translation_unit(
             "fixture_highway_marker.cppm", source);
     require(
-        unit.marked_namespaces.size() == 1u,
+        unit.marked_namespaces.size() == 1U,
         "only the exact bioseq::simd namespace marker is accepted");
     const structural_analysis::marked_namespace_record& marker =
         unit.marked_namespaces.front();
@@ -227,7 +227,7 @@ inline void verify_debug_assert_partition_preamble() {
     release_plan.extracted_sources.front().body =
         "int kernel() { DEBUG_ASSERT(true, \"fixture\"); return 7; }\n";
     const generation_result with_assert = render_generation(release_plan);
-    std::size_t asserted_partitions = 0u;
+    std::size_t asserted_partitions = 0U;
     for (const generated_artifact& artifact : with_assert.artifacts) {
         if (artifact.kind != artifact_kind::partition) continue;
         if (artifact.source_key != "prefilter") {
@@ -296,7 +296,7 @@ inline void verify_template_flatten_separation() {
             "a registered Highway source rejects policy attribute "
             + std::string{attribute};
         require_rejected(
-            [&] {
+            [&marked_source]() -> void {
                 validate_highway_source_policy(
                     structural_analysis::scan_token_slice(
                         "fixture_highway_source.cppm", marked_source));
@@ -311,7 +311,7 @@ inline void verify_template_flatten_separation() {
     };
     for (const std::string& provider : forbidden_providers) {
         require_rejected(
-            [&] {
+            [&inventory, &provider, &source]() -> void {
                 validate_highway_direct_import(
                     inventory, source, provider);
             },
@@ -328,7 +328,7 @@ inline void verify_template_flatten_separation() {
             },
         };
         require_rejected(
-            [&] {
+            [&inventory, &prepared]() -> void {
                 validate_highway_prepared_closure(inventory, prepared);
             },
             "an exact forbidden provider is rejected from the transitive "
@@ -355,7 +355,7 @@ inline void verify_slot_callable_ownership() {
     plan.source_inventory.slots.front().expression =
         "&::bioseq::fixture::{target_namespace}::kernel<std::int32_t>";
     plan.extracted_sources.front().callables.push_back(callable_insertion{
-        .body_relative_offset = 4u,
+        .body_relative_offset = 4U,
         .qualified_name = "bioseq::fixture::target::kernel",
         .kind = "function",
     });
@@ -366,7 +366,7 @@ inline void verify_slot_callable_ownership() {
     typo.source_inventory.slots.front().expression =
         "&::bioseq::fixture::{target_namespace}::kernle";
     require_rejected(
-        [&] {
+        [&typo]() -> void {
             validate_slot_callable_ownership(
                 typo.source_inventory, typo.extracted_sources);
         },
@@ -383,13 +383,13 @@ inline void verify_slot_callable_ownership() {
         .source = unrelated,
         .enclosing_namespace = "bioseq::fixture",
         .body = "int other_kernel() { return 9; }\n",
-        .body_first_line = 5u,
+        .body_first_line = 5U,
         .source_sha256 =
             "22222222222222222222222222222222"
             "22222222222222222222222222222222",
         .callables = {
             callable_insertion{
-                .body_relative_offset = 0u,
+                .body_relative_offset = 0U,
                 .qualified_name =
                     "bioseq::fixture::target::other_kernel",
                 .kind = "function",
@@ -399,7 +399,7 @@ inline void verify_slot_callable_ownership() {
     wrong_owner.extracted_sources.push_back(std::move(unrelated_extracted));
     wrong_owner.source_inventory.slots.front().owner_key = "unrelated";
     require_rejected(
-        [&] {
+        [&wrong_owner]() -> void {
             validate_slot_callable_ownership(
                 wrong_owner.source_inventory,
                 wrong_owner.extracted_sources);
@@ -426,10 +426,10 @@ inline void verify_complete_table_target_policy() {
             .slug = "excluded_" + std::to_string(index),
             .token = std::string{excluded_targets[index]},
             .target_namespace = "N_EXCLUDED_" + std::to_string(index),
-            .bit = 4u + index,
+            .bit = 4U + index,
         });
         require_rejected(
-            [&] {
+            [&excluded]() -> void {
                 validate_complete_table_target_policy(
                     excluded.target_inventory);
             },
@@ -441,7 +441,7 @@ inline void verify_complete_table_target_policy() {
         no_emu128.target_inventory.targets.begin());
     no_emu128.target_inventory.static_target_token = "HWY_SSE2";
     require_rejected(
-        [&] {
+        [&no_emu128]() -> void {
             validate_complete_table_target_policy(
                 no_emu128.target_inventory);
         },
@@ -451,7 +451,7 @@ inline void verify_complete_table_target_policy() {
 inline void verify_target_compile_policy() {
     target_manifest valid = two_target_plan().target_inventory;
     valid.policy_definitions = {
-        {"BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY", std::string(64u, 'a')},
+        {"BIOSEQ_HIGHWAY_PROBE_COMPILATION_IDENTITY", std::string(64U, 'a')},
         {"HWY_COMPILE_ALL_ATTAINABLE", "1"},
         {"HWY_DISABLED_TARGETS", "(HWY_SCALAR|HWY_ALL_SVE|HWY_RVV)"},
         {"HWY_STATIC_DEFINE", "1"},
@@ -464,7 +464,9 @@ inline void verify_target_compile_policy() {
     target_manifest unauthenticated_extra = valid;
     unauthenticated_extra.policy_definitions[3].second = "0";
     require_rejected(
-        [&] { validate_target_compile_policy(unauthenticated_extra); },
+        [&unauthenticated_extra]() -> void {
+            validate_target_compile_policy(unauthenticated_extra);
+        },
         "every effective Highway/toolchain definition remains authenticated");
 
     constexpr std::array required_names{
@@ -488,7 +490,7 @@ inline void verify_target_compile_policy() {
             missing.policy_definitions.begin() + required_index);
         seal_policy_digest(missing);
         require_rejected(
-            [&] { validate_target_compile_policy(missing); },
+            [&missing]() -> void { validate_target_compile_policy(missing); },
             "the all-target compile policy rejects a missing required name");
 
         target_manifest wrong_value = valid;
@@ -500,7 +502,9 @@ inline void verify_target_compile_policy() {
         wrong->second = "0";
         seal_policy_digest(wrong_value);
         require_rejected(
-            [&] { validate_target_compile_policy(wrong_value); },
+            [&wrong_value]() -> void {
+                validate_target_compile_policy(wrong_value);
+            },
             "the all-target compile policy rejects a wrong required value");
 
         target_manifest conflicting_duplicate = valid;
@@ -508,7 +512,9 @@ inline void verify_target_compile_policy() {
             required_name, "0");
         seal_policy_digest(conflicting_duplicate);
         require_rejected(
-            [&] { validate_target_compile_policy(conflicting_duplicate); },
+            [&conflicting_duplicate]() -> void {
+                validate_target_compile_policy(conflicting_duplicate);
+            },
             "the all-target compile policy rejects conflicting duplicates");
     }
 
@@ -517,14 +523,18 @@ inline void verify_target_compile_policy() {
         missing_identity.policy_definitions.begin());
     seal_policy_digest(missing_identity);
     require_rejected(
-        [&] { validate_target_compile_policy(missing_identity); },
+        [&missing_identity]() -> void {
+            validate_target_compile_policy(missing_identity);
+        },
         "the authenticated compile policy requires probe identity provenance");
 
     target_manifest malformed_identity = valid;
-    malformed_identity.policy_definitions.front().second = std::string(64u, 'A');
+    malformed_identity.policy_definitions.front().second = std::string(64U, 'A');
     seal_policy_digest(malformed_identity);
     require_rejected(
-        [&] { validate_target_compile_policy(malformed_identity); },
+        [&malformed_identity]() -> void {
+            validate_target_compile_policy(malformed_identity);
+        },
         "probe identity provenance remains an exact lowercase SHA-256");
 }
 
@@ -546,27 +556,27 @@ inline void verify_external_domain_topology_contract() {
              "0",
              "typed_scheduler",
              manifest.generic_string(),
-             std::string(64u, 'a'),
-             std::string(64u, 'b')},
+             std::string(64U, 'a'),
+             std::string(64U, 'b')},
             "targets.tsv",
-            0u);
+            0U);
     require(
         manifest_record.name == "typed_scheduler"
             && manifest_record.path == manifest
-            && manifest_record.topology_digest == std::string(64u, 'a')
-            && manifest_record.content_sha256 == std::string(64u, 'b'),
+            && manifest_record.topology_digest == std::string(64U, 'a')
+            && manifest_record.content_sha256 == std::string(64U, 'b'),
         "target/source manifests preserve sealed ordered topology authority");
     require_rejected(
-        [&] {
+        [&manifest]() -> void {
             (void)detail::parse_domain_topology_record(
                 {"domain-topology",
                  "1",
                  "typed_scheduler",
                  manifest.generic_string(),
-                 std::string(64u, 'a'),
-                 std::string(64u, 'b')},
+                 std::string(64U, 'a'),
+                 std::string(64U, 'b')},
                 "sources.tsv",
-                0u);
+                0U);
         },
         "target/source manifests reject non-contiguous topology ordinals");
 
@@ -589,7 +599,9 @@ inline void verify_external_domain_topology_contract() {
          .path = manifest.parent_path() / "other.configure.json"},
     };
     require_rejected(
-        [&] { (void)load_domain_topology_manifests(duplicate_names); },
+        [&duplicate_names]() -> void {
+            (void)load_domain_topology_manifests(duplicate_names);
+        },
         "domain topology aliases must have unique names before file access");
 
     generation_plan plan = two_target_plan();
@@ -621,7 +633,7 @@ inline void verify_external_domain_topology_contract() {
         plan.domain_topologies, observed, "contract fixture");
     std::ranges::reverse(observed);
     require_rejected(
-        [&] {
+        [&observed, &plan]() -> void {
             validate_domain_topology_authority(
                 plan.domain_topologies, observed, "contract fixture");
         },
@@ -629,7 +641,7 @@ inline void verify_external_domain_topology_contract() {
     observed = plan.domain_topologies;
     observed.front().content_sha256.front() = 'e';
     require_rejected(
-        [&] {
+        [&observed, &plan]() -> void {
             validate_domain_topology_authority(
                 plan.domain_topologies, observed, "contract fixture");
         },
@@ -681,9 +693,9 @@ inline void verify_shared_target_coordinates() {
     const auto coordinates = detail::build_target_coordinates(
         plan.target_inventory);
     require(
-        coordinates.size() == 2u
-            && coordinates[0].ordinal == 0u
-            && coordinates[0].assignments.size() == 1u
+        coordinates.size() == 2U
+            && coordinates[0].ordinal == 0U
+            && coordinates[0].assignments.size() == 1U
             && coordinates[0].assignments[0].role
                 == namespace_materialization::axis_role::external
             && coordinates[0].assignments[0].group == "highway_target"
@@ -693,8 +705,8 @@ inline void verify_shared_target_coordinates() {
                 == "bioseq.highway.generated.x86.emu128"
             && coordinates[0].relative_path
                 == std::filesystem::path{"x86/emu128/index.cppm"}
-            && coordinates[1].ordinal == 1u
-            && coordinates[1].assignments.size() == 1u
+            && coordinates[1].ordinal == 1U
+            && coordinates[1].assignments.size() == 1U
             && coordinates[1].assignments[0].case_label == "HWY_SSE2"
             && coordinates[1].identity_namespace == "N_SSE2"
             && coordinates[1].module_name
@@ -707,7 +719,7 @@ inline void verify_shared_target_coordinates() {
 inline void verify_generated_closure() {
     const generation_result generated = render_generation(two_target_plan());
     require(
-        generated.artifacts.size() == 11u,
+        generated.artifacts.size() == 11U,
         "two targets and one source produce two primaries, binders, "
         "partitions, owner instantiations, one private registry, one cold "
         "inventory, and fixed-target test support");
@@ -756,7 +768,7 @@ inline void verify_generated_closure() {
                                artifact.content,
                                "void populate_prefilter("
                                "::bioseq::simd_dispatch::highway_kernel_table& "
-                               "table) noexcept;") == 1u
+                               "table) noexcept;") == 1U
                         && !artifact.content.contains("#include <hwy/")
                         && !artifact.content.contains("import :")
                         && !artifact.content.contains("HWY_TARGET"),
@@ -787,11 +799,25 @@ inline void verify_generated_closure() {
                     artifact.content.contains("#define HWY_TARGET ")
                         && artifact.content.contains(
                             "#include <hwy/aligned_allocator.h>")
+                        && artifact.content.contains(
+                            "#undef BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+                        && artifact.content.contains(
+                            "#if defined(HWY_TARGET_STR) && "
+                            "HWY_HAS_ATTRIBUTE(target)")
+                        && artifact.content.contains(
+                            "#if !HWY_HAS_CPP_ATTRIBUTE(gnu::target)")
+                        && artifact.content.contains(
+                            "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR "
+                            "[[gnu::target(HWY_TARGET_STR)]]")
+                        && artifact.content.contains(
+                            "#define BIOSEQ_HIGHWAY_LAMBDA_ATTR\n"
+                            "#endif")
                         && artifact.content.contains("HWY_ATTR int kernel()")
                         && artifact.content.contains(
                             "import bioseq.fixture.neutral;"),
                     "each target/source partition fixes its target, provides "
-                    "the Highway allocation surface, and rewrites the callable");
+                    "the Highway allocation and lambda-attribute surfaces, "
+                    "and rewrites the callable");
                 break;
             case artifact_kind::kernel_instantiation:
                 ++owner_unit_count;
@@ -829,9 +855,9 @@ inline void verify_generated_closure() {
             case artifact_kind::dispatch_registry_partition:
                 ++registry_count;
                 require(
-                    occurrences(artifact.content, "HWY_EXPORT(") == 1u
+                    occurrences(artifact.content, "HWY_EXPORT(") == 1U
                         && occurrences(
-                            artifact.content, "HWY_DYNAMIC_DISPATCH(") == 1u
+                            artifact.content, "HWY_DYNAMIC_DISPATCH(") == 1U
                         && artifact.module_name
                             == "bioseq.scheduler.dispatch_processor:highway_registry"
                         && artifact.content.contains(
@@ -851,7 +877,8 @@ inline void verify_generated_closure() {
                         && artifact.content.contains(
                             "module bioseq.highway.dispatch_contract;")
                         && artifact.content.contains(
-                            "registered_highway_dispatch_plan() noexcept")
+                            "registered_highway_dispatch_plan() noexcept -> "
+                            "highway_dispatch_plan")
                         && artifact.content.contains(
                             "registered_highway_target_binding(")
                         && artifact.content.contains(
@@ -879,6 +906,8 @@ inline void verify_generated_closure() {
                     artifact.module_name == "bioseq.highway.test_support"
                         && artifact.target_token == "HWY_EMU128"
                         && artifact.content.contains(
+                            "export import bioseq.highway.test_probe_contract;")
+                        && artifact.content.contains(
                             "N_EMU128::bind_highway_target()")
                         && artifact.content.contains(
                             "highway_test_kernel_table()")
@@ -897,13 +926,13 @@ inline void verify_generated_closure() {
     }
 
     require(
-        primary_count == 2u && binder_count == 2u
-            && partition_count == 2u && owner_unit_count == 2u
-            && registry_count == 1u
-            && inventory_count == 1u && test_support_count == 1u,
+        primary_count == 2U && binder_count == 2U
+            && partition_count == 2U && owner_unit_count == 2U
+            && registry_count == 1U
+            && inventory_count == 1U && test_support_count == 1U,
         "the generated artifact-kind closure is exact");
     require(
-        export_count == 1u && dispatch_count == 1u,
+        export_count == 1U && dispatch_count == 1U,
         "the complete generated graph contains exactly one export and dynamic dispatch");
     require(
         target_source_closure
@@ -938,6 +967,13 @@ inline void verify_generated_closure() {
 }
 
 inline void verify_lambda_attribute_order() {
+    require(
+        detail::valid_lambda_front_attribute_follower("FIXTURE_PARAMS")
+            && detail::valid_lambda_front_attribute_follower("(")
+            && detail::valid_lambda_front_attribute_follower("constexpr")
+            && !detail::valid_lambda_front_attribute_follower(";"),
+        "lambda front-attribute validation accepts proven declarators and "
+        "macroized followers without accepting punctuation");
     extracted_source source{
         .source = source_spec{
             .key = "lambda_fixture",
@@ -945,25 +981,54 @@ inline void verify_lambda_attribute_order() {
         },
         .enclosing_namespace = "bioseq::fixture",
         .body =
-            "auto value = [](int x) constexpr [[gnu::always_inline]] "
+            "auto value = [] [[nodiscard]] (int x) constexpr noexcept(true) "
+            "[[gnu::always_inline]] "
             "-> int { return x; };\n",
     };
     source.callables.push_back(callable_insertion{
-        .body_relative_offset = source.body.find(')') + 1u,
+        .body_relative_offset = source.body.find(']') + 1U,
         .qualified_name = "bioseq::fixture::target::<lambda>",
         .kind = "lambda",
-        .lambda_preceding_token = ")",
-        .lambda_following_token = "constexpr",
-        .lambda_following_relative_offset = source.body.find("constexpr"),
+        .lambda_preceding_token = "]",
+        .lambda_following_token = "[",
+        .lambda_following_relative_offset = source.body.find("[["),
     });
     const std::string rendered = detail::body_with_highway_attributes(source);
     require(
         rendered.contains(
-            "[](int x) HWY_ATTR constexpr [[gnu::always_inline]] -> int")
-            && !rendered.contains("]] HWY_ATTR")
-            && !rendered.contains("-> int HWY_ATTR"),
-        "lambda HWY_ATTR precedes specifiers, standard attributes, and "
-        "trailing return types");
+            "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR [[nodiscard]] (int x) "
+            "constexpr noexcept(true) [[gnu::always_inline]] -> int")
+            && !rendered.contains(") BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+            && !rendered.contains("noexcept(true) BIOSEQ_HIGHWAY_LAMBDA_ATTR")
+            && !rendered.contains("]] BIOSEQ_HIGHWAY_LAMBDA_ATTR"),
+        "lambda target attribute occupies the front attribute slot before "
+        "authored attributes and the lambda declarator");
+
+    extracted_source macroized_source{
+        .source = source_spec{
+            .key = "macroized_lambda_fixture",
+            .path = "macroized_lambda_fixture.cppm",
+        },
+        .enclosing_namespace = "bioseq::fixture",
+        .body =
+            "auto value = [] FIXTURE_PARAMS(int x) { return x; };\n",
+    };
+    macroized_source.callables.push_back(callable_insertion{
+        .body_relative_offset = macroized_source.body.find(']') + 1U,
+        .qualified_name = "bioseq::fixture::target::<macroized-lambda>",
+        .kind = "lambda",
+        .lambda_preceding_token = "]",
+        .lambda_following_token = "FIXTURE_PARAMS",
+        .lambda_following_relative_offset =
+            macroized_source.body.find("FIXTURE_PARAMS"),
+    });
+    const std::string macroized_rendered =
+        detail::body_with_highway_attributes(macroized_source);
+    require(
+        macroized_rendered.contains(
+            "[] BIOSEQ_HIGHWAY_LAMBDA_ATTR FIXTURE_PARAMS(int x)"),
+        "macroized lambda parameters retain the writable front-attribute "
+        "boundary during rendering");
 }
 
 inline void verify_type_only_target_source() {
@@ -982,14 +1047,14 @@ inline void verify_type_only_target_source() {
         .body =
             "template<class p_value> struct foundation { "
             "using type = p_value; };\n",
-        .body_first_line = 5u,
+        .body_first_line = 5U,
         .source_sha256 =
             "33333333333333333333333333333333"
             "33333333333333333333333333333333",
     });
 
     const generation_result generated = render_generation(plan);
-    std::size_t type_only_partitions = 0u;
+    std::size_t type_only_partitions = 0U;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind != artifact_kind::partition
             || artifact.source_key != foundation.key) {
@@ -1035,8 +1100,8 @@ inline void verify_shared_publication_envelope() {
                 }),
         "Highway maps its complete production closure into the shared publisher");
     require(
-        generated.publication_topology_digest.size() == 64u
-            && manifest.manifest_identity.size() == 64u
+        generated.publication_topology_digest.size() == 64U
+            && manifest.manifest_identity.size() == 64U
             && manifest.json.contains(
                 "\"publication_schema_revision\": 1")
             && manifest.json.contains("\"policy\": \"highway\"")
@@ -1052,7 +1117,7 @@ inline void verify_shared_publication_envelope() {
             && manifest.json.contains(manifest.manifest_identity),
         "Highway evidence is embedded in the policy-neutral self-sealed envelope");
 
-    const std::string prior_identity(64u, 'a');
+    const std::string prior_identity(64U, 'a');
     const namespace_materialization::rendered_publication_manifest chained =
         render_highway_publication_manifest(
             output_root, prior_identity, plan, generated, publication);
@@ -1065,7 +1130,7 @@ inline void verify_shared_publication_envelope() {
     generation_result stale = generated;
     stale.policy_evidence_json += " ";
     require_rejected(
-        [&] {
+        [&output_root, &plan, &publication, &stale]() -> void {
             (void)render_highway_publication_manifest(
                 output_root, {}, plan, stale, publication);
         },
@@ -1077,7 +1142,7 @@ inline void verify_shared_publication_envelope() {
     tampered.front().content_sha256 =
         bioseq::common::sha256_hex(tampered.front().content);
     require_rejected(
-        [&] {
+        [&generated, &output_root, &plan, &tampered]() -> void {
             (void)render_highway_publication_manifest(
                 output_root, {}, plan, generated, tampered);
         },
@@ -1089,7 +1154,10 @@ inline void verify_shared_publication_envelope() {
         jointly_tampered_publication =
             make_publication_artifacts(jointly_tampered);
     require_rejected(
-        [&] {
+        [&jointly_tampered,
+         &jointly_tampered_publication,
+         &output_root,
+         &plan]() -> void {
             (void)render_highway_publication_manifest(
                 output_root,
                 {},
@@ -1114,9 +1182,9 @@ inline void verify_typed_alignment_binder() {
         const std::string_view alphabet) {
         const std::string family =
             "alignment_" + std::to_string(code);
-        const auto append = [&](
+        const auto append = [alphabet, &family, &plan](
             const std::string_view owner,
-            const std::string_view member) {
+            const std::string_view member) -> void {
             plan.source_inventory.slots.push_back(slot_spec{
                 .owner_key = std::string{owner},
                 .family_field = family,
@@ -1133,13 +1201,13 @@ inline void verify_typed_alignment_binder() {
         append("block_aligner", "try_block_certified_gap");
         append("block_aligner", "align_block");
     };
-    append_alphabet(0u, "::seq::dna4");
-    append_alphabet(1u, "::seq::dna5");
+    append_alphabet(0U, "::seq::dna4");
+    append_alphabet(1U, "::seq::dna5");
 
     const generation_result generated = render_generation(plan);
-    std::size_t checked_primaries = 0u;
-    std::size_t checked_binders = 0u;
-    std::size_t checked_alignment_owner_units = 0u;
+    std::size_t checked_primaries = 0U;
+    std::size_t checked_binders = 0U;
+    std::size_t checked_alignment_owner_units = 0U;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind == artifact_kind::primary) {
             ++checked_primaries;
@@ -1152,20 +1220,20 @@ inline void verify_typed_alignment_binder() {
                     + "_alignment_" + std::to_string(alphabet_code)
                     + "(::bioseq::simd::alignment_kernels<"
                     + std::string{alphabet} + ">& table) noexcept;";
-                return occurrences(artifact.content, expected) == 1u;
+                return occurrences(artifact.content, expected) == 1U;
             };
             require(
-                occurrences(artifact.content, "void populate_") == 6u
-                    && has_declaration("ksw2", 0u, "::seq::dna4")
-                    && has_declaration("ksw2", 1u, "::seq::dna5")
+                occurrences(artifact.content, "void populate_") == 6U
+                    && has_declaration("ksw2", 0U, "::seq::dna4")
+                    && has_declaration("ksw2", 1U, "::seq::dna5")
                     && has_declaration(
-                        "ksw2_batched", 0u, "::seq::dna4")
+                        "ksw2_batched", 0U, "::seq::dna4")
                     && has_declaration(
-                        "ksw2_batched", 1u, "::seq::dna5")
+                        "ksw2_batched", 1U, "::seq::dna5")
                     && has_declaration(
-                        "block_aligner", 0u, "::seq::dna4")
+                        "block_aligner", 0U, "::seq::dna4")
                     && has_declaration(
-                        "block_aligner", 1u, "::seq::dna5"),
+                        "block_aligner", 1U, "::seq::dna5"),
                 "each primary declares the exact typed alignment populators");
             continue;
         }
@@ -1182,20 +1250,20 @@ inline void verify_typed_alignment_binder() {
                 artifact.target_token == "HWY_EMU128"
                 ? "N_EMU128"
                 : "N_SSE2";
-            const auto has_assignment = [&](
+            const auto has_assignment = [&artifact, &target_namespace](
                 const std::string_view member,
-                const std::string_view alphabet) {
+                const std::string_view alphabet) -> bool {
                 const std::string expected =
                     "    table." + std::string{member}
                     + " = &::bioseq::simd::" + target_namespace + "::"
                     + std::string{member} + "<" + std::string{alphabet}
                     + ">;";
-                return occurrences(artifact.content, expected) == 1u;
+                return occurrences(artifact.content, expected) == 1U;
             };
             bool has_exact_owner_assignments = false;
             if (artifact.source_key == "ksw2") {
                 has_exact_owner_assignments =
-                    occurrences(artifact.content, "    table.") == 4u
+                    occurrences(artifact.content, "    table.") == 4U
                     && has_assignment(
                         "align_ksw2_dual_affine", "::seq::dna4")
                     && has_assignment(
@@ -1206,12 +1274,12 @@ inline void verify_typed_alignment_binder() {
                         "align_ksw2_single_affine", "::seq::dna5");
             } else if (artifact.source_key == "ksw2_batched") {
                 has_exact_owner_assignments =
-                    occurrences(artifact.content, "    table.") == 2u
+                    occurrences(artifact.content, "    table.") == 2U
                     && has_assignment("align_ksw2_batched", "::seq::dna4")
                     && has_assignment("align_ksw2_batched", "::seq::dna5");
             } else {
                 has_exact_owner_assignments =
-                    occurrences(artifact.content, "    table.") == 6u
+                    occurrences(artifact.content, "    table.") == 6U
                     && has_assignment("align_block", "::seq::dna4")
                     && has_assignment(
                         "prepare_block_global_gap_certificate",
@@ -1229,7 +1297,7 @@ inline void verify_typed_alignment_binder() {
                 occurrences(
                     artifact.content,
                     "HWY_ATTR void populate_" + artifact.source_key
-                        + "_alignment_") == 2u
+                        + "_alignment_") == 2U
                     && has_exact_owner_assignments,
                 "each alignment owner unit assigns exactly its typed slots");
             continue;
@@ -1243,25 +1311,27 @@ inline void verify_typed_alignment_binder() {
                 && artifact.content.contains(
                     "alignment_kernels<::seq::dna5> alignment_1")
                 && artifact.content.contains(
-                    ".alphabet_code = 0u, .typed_table_complete = "
+                    ".alphabet_code = 0U, .typed_table_complete = "
                     "::bioseq::simd::is_alignment_kernel_table_complete("
                     "alignment_0), .typed_table = &alignment_0")
                 && artifact.content.contains(
-                    ".alphabet_code = 1u, .typed_table_complete = "
+                    ".alphabet_code = 1U, .typed_table_complete = "
                     "::bioseq::simd::is_alignment_kernel_table_complete("
                     "alignment_1), .typed_table = &alignment_1")
                 && occurrences(
                        artifact.content,
                        "::bioseq::simd::is_alignment_kernel_table_complete(")
-                    == 2u
+                    == 2U
                 && artifact.content.contains(
-                    "highway_alphabet_identity_entry alphabet_identities[]")
+                    "static const auto alphabet_identities = ::std::to_array<"
+                    "::bioseq::simd_dispatch::"
+                    "highway_alphabet_identity_entry>({")
                 && occurrences(
                        artifact.content,
-                       "highway_alphabet_identity_for<::seq::dna4>()") == 1u
+                       "highway_alphabet_identity_for<::seq::dna4>()") == 1U
                 && occurrences(
                        artifact.content,
-                       "highway_alphabet_identity_for<::seq::dna5>()") == 1u
+                       "highway_alphabet_identity_for<::seq::dna5>()") == 1U
                 && artifact.content.contains(
                     "table.alphabet_identities = alphabet_identities")
                 && artifact.content.contains(
@@ -1282,35 +1352,37 @@ inline void verify_typed_alignment_binder() {
             "instantiating their templates or inventing root-table fields");
     }
     require(
-        checked_primaries == 2u,
+        checked_primaries == 2U,
         "both fixed targets declare typed alignment populators");
-    require(checked_binders == 2u, "both fixed targets receive typed alignment tables");
+    require(checked_binders == 2U, "both fixed targets receive typed alignment tables");
     require(
-        checked_alignment_owner_units == 6u,
+        checked_alignment_owner_units == 6U,
         "each fixed target compiles three alignment owner units");
 
     generation_plan incomplete = plan;
     incomplete.source_inventory.slots.pop_back();
     require_rejected(
-        [&] { (void)render_generation(incomplete); },
+        [&incomplete]() -> void { (void)render_generation(incomplete); },
         "a typed alignment family missing any function slot is rejected");
 
     generation_plan mixed = plan;
     mixed.source_inventory.slots.front().expression =
         "&::bioseq::simd::{target_namespace}::align_ksw2_single_affine<::seq::dna5>";
     require_rejected(
-        [&] { (void)render_generation(mixed); },
+        [&mixed]() -> void { (void)render_generation(mixed); },
         "a typed alignment family mixing alphabet arguments is rejected");
 
     generation_plan duplicate_type = plan;
     for (slot_spec& slot : duplicate_type.source_inventory.slots) {
         if (slot.family_field == "alignment_1") {
             const std::size_t dna5 = slot.expression.find("::seq::dna5");
-            slot.expression.replace(dna5, 11u, "::seq::dna4");
+            slot.expression.replace(dna5, 11U, "::seq::dna4");
         }
     }
     require_rejected(
-        [&] { (void)render_generation(duplicate_type); },
+        [&duplicate_type]() -> void {
+            (void)render_generation(duplicate_type);
+        },
         "two alignment codes may not erase the same concrete alphabet type");
 }
 
@@ -1334,9 +1406,13 @@ inline void verify_typed_minimizer_binder() {
         const std::string family =
             "minimizer_case_" + std::to_string(alphabet_code) + "_"
             + std::to_string(storage_unit_bytes);
-        const auto append = [&](
+        const auto append = [
+                                alphabet,
+                                &family,
+                                &plan,
+                                storage_unit](
             const std::string_view owner,
-            const std::string_view member) {
+            const std::string_view member) -> void {
             plan.source_inventory.slots.push_back(slot_spec{
                 .owner_key = std::string{owner},
                 .family_field = family,
@@ -1357,32 +1433,32 @@ inline void verify_typed_minimizer_binder() {
     // source-owned alphabet code and storage byte width.
     for (const auto& [bytes, storage] : std::array{
              std::pair<std::uint8_t, std::string_view>{
-                 8u, "::std::uint64_t"},
+                 8U, "::std::uint64_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 4u, "::std::uint32_t"},
+                 4U, "::std::uint32_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 2u, "::std::uint16_t"},
+                 2U, "::std::uint16_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 1u, "::std::uint8_t"},
+                 1U, "::std::uint8_t"},
          }) {
-        append_case(1u, "::seq::dna5", bytes, storage);
+        append_case(1U, "::seq::dna5", bytes, storage);
     }
     for (const auto& [bytes, storage] : std::array{
              std::pair<std::uint8_t, std::string_view>{
-                 8u, "::std::uint64_t"},
+                 8U, "::std::uint64_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 4u, "::std::uint32_t"},
+                 4U, "::std::uint32_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 2u, "::std::uint16_t"},
+                 2U, "::std::uint16_t"},
              std::pair<std::uint8_t, std::string_view>{
-                 1u, "::std::uint8_t"},
+                 1U, "::std::uint8_t"},
          }) {
-        append_case(0u, "::seq::dna4", bytes, storage);
+        append_case(0U, "::seq::dna4", bytes, storage);
     }
 
     const generation_result generated = render_generation(plan);
-    std::size_t checked_binders = 0u;
-    std::size_t checked_minimizer_owner_units = 0u;
+    std::size_t checked_binders = 0U;
+    std::size_t checked_minimizer_owner_units = 0U;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind == artifact_kind::kernel_instantiation
             && artifact.source_key.starts_with("minimizer_")) {
@@ -1390,17 +1466,17 @@ inline void verify_typed_minimizer_binder() {
             require(
                 occurrences(
                     artifact.content,
-                    "switch (invocation.sequence.alphabet_code)") == 1u
+                    "switch (invocation.sequence.alphabet_code)") == 1U
                     && occurrences(
                            artifact.content,
                            "switch (invocation.sequence.storage_unit_bytes)")
-                        == 2u
+                        == 2U
                     && occurrences(
                            artifact.content,
                            "minimizer_kernel_status::invalid_configuration")
-                        == 1u
+                        == 1U
                     && occurrences(
-                           artifact.content, "    table.minimizers.") == 1u,
+                           artifact.content, "    table.minimizers.") == 1U,
                 "each minimizer owner unit contains one typed wrapper and "
                 "one wrapper-to-slot assignment");
 
@@ -1413,7 +1489,7 @@ inline void verify_typed_minimizer_binder() {
                             "&minimizer_dispatch_minimap2_reference;")
                         && occurrences(
                                artifact.content,
-                               "minimap2_reference_case<") == 8u,
+                               "minimap2_reference_case<") == 8U,
                     "the minimap2-reference owner instantiates its complete case matrix");
                 const std::size_t dna4_u8 = artifact.content.find(
                     "minimap2_reference_case<::seq::dna4,::std::uint8_t>");
@@ -1436,7 +1512,7 @@ inline void verify_typed_minimizer_binder() {
                             "&minimizer_dispatch_two_stack_nthash;")
                         && occurrences(
                                artifact.content,
-                               "two_stack_nthash_case<") == 8u,
+                               "two_stack_nthash_case<") == 8U,
                     "the two-stack owner instantiates its complete case matrix");
             } else if (artifact.source_key == "minimizer_bounded_nthash") {
                 require(
@@ -1447,7 +1523,7 @@ inline void verify_typed_minimizer_binder() {
                             "&minimizer_dispatch_bounded_nthash;")
                         && occurrences(
                                artifact.content,
-                               "bounded_nthash_case<") == 8u,
+                               "bounded_nthash_case<") == 8U,
                     "the bounded-ntHash owner instantiates its complete case matrix");
             }
             continue;
@@ -1475,31 +1551,33 @@ inline void verify_typed_minimizer_binder() {
                     "minimizer_bounded_nthash)")
                 && occurrences(
                        artifact.content,
-                       "switch (invocation.sequence.alphabet_code)") == 0u
+                       "switch (invocation.sequence.alphabet_code)") == 0U
                 && occurrences(
                        artifact.content,
                        "switch (invocation.sequence.storage_unit_bytes)")
-                    == 0u
+                    == 0U
                 && occurrences(
                        artifact.content,
-                       "minimap2_reference_case<") == 0u
+                       "minimap2_reference_case<") == 0U
                 && occurrences(
                        artifact.content,
-                       "two_stack_nthash_case<") == 0u
+                       "two_stack_nthash_case<") == 0U
                 && occurrences(
                        artifact.content,
-                       "bounded_nthash_case<") == 0u
+                       "bounded_nthash_case<") == 0U
                 && occurrences(
                        artifact.content,
-                       "minimizer_kernel_status::invalid_configuration") == 0u
+                       "minimizer_kernel_status::invalid_configuration") == 0U
                 && artifact.content.contains(
-                    "highway_alphabet_identity_entry alphabet_identities[]")
+                    "static const auto alphabet_identities = ::std::to_array<"
+                    "::bioseq::simd_dispatch::"
+                    "highway_alphabet_identity_entry>({")
                 && occurrences(
                        artifact.content,
-                       "highway_alphabet_identity_for<::seq::dna4>()") == 1u
+                       "highway_alphabet_identity_for<::seq::dna4>()") == 1U
                 && occurrences(
                        artifact.content,
-                       "highway_alphabet_identity_for<::seq::dna5>()") == 1u
+                       "highway_alphabet_identity_for<::seq::dna5>()") == 1U
                 && artifact.content.contains(
                     "table.alphabet_identities = alphabet_identities")
                 && !artifact.content.contains("import :")
@@ -1508,10 +1586,10 @@ inline void verify_typed_minimizer_binder() {
             "instantiating the typed case matrix");
     }
     require(
-        checked_binders == 2u,
+        checked_binders == 2U,
         "both fixed targets receive typed minimizer wrappers");
     require(
-        checked_minimizer_owner_units == 6u,
+        checked_minimizer_owner_units == 6U,
         "each fixed target compiles three minimizer owner units");
 
     generation_plan incomplete = plan;
@@ -1519,20 +1597,24 @@ inline void verify_typed_minimizer_binder() {
         incomplete.source_inventory.slots.begin(),
         incomplete.source_inventory.slots.begin() + 3);
     require_rejected(
-        [&] { (void)render_generation(incomplete); },
+        [&incomplete]() -> void { (void)render_generation(incomplete); },
         "a typed minimizer registry missing one Cartesian case is rejected");
 
     generation_plan missing_member = plan;
     missing_member.source_inventory.slots.pop_back();
     require_rejected(
-        [&] { (void)render_generation(missing_member); },
+        [&missing_member]() -> void {
+            (void)render_generation(missing_member);
+        },
         "a typed minimizer family missing an algorithm member is rejected");
 
     generation_plan duplicate_member = plan;
     duplicate_member.source_inventory.slots.push_back(
         duplicate_member.source_inventory.slots.front());
     require_rejected(
-        [&] { (void)render_generation(duplicate_member); },
+        [&duplicate_member]() -> void {
+            (void)render_generation(duplicate_member);
+        },
         "a duplicate typed minimizer algorithm member is rejected");
 
     generation_plan second_registry = plan;
@@ -1544,7 +1626,9 @@ inline void verify_typed_minimizer_binder() {
             "&::bioseq::simd::{target_namespace}::minimap2_reference",
     });
     require_rejected(
-        [&] { (void)render_generation(second_registry); },
+        [&second_registry]() -> void {
+            (void)render_generation(second_registry);
+        },
         "typed minimizer cases reject a second hand-owned root-slot registry");
 
     generation_plan mixed = plan;
@@ -1552,7 +1636,7 @@ inline void verify_typed_minimizer_binder() {
         "&::bioseq::simd::{target_namespace}::minimap2_reference_case<"
         "::seq::dna4,::std::uint64_t>";
     require_rejected(
-        [&] { (void)render_generation(mixed); },
+        [&mixed]() -> void { (void)render_generation(mixed); },
         "a typed minimizer family mixing template arguments is rejected");
 
     generation_plan mismatched_width = plan;
@@ -1562,7 +1646,9 @@ inline void verify_typed_minimizer_binder() {
         }
     }
     require_rejected(
-        [&] { (void)render_generation(mismatched_width); },
+        [&mismatched_width]() -> void {
+            (void)render_generation(mismatched_width);
+        },
         "a typed minimizer case with an invalid topology byte width is "
         "rejected");
 
@@ -1571,7 +1657,7 @@ inline void verify_typed_minimizer_binder() {
         "&::bioseq::simd::{target_namespace}::bounded_nthash_case<"
         "::seq::dna5,::std::uint64_t>";
     require_rejected(
-        [&] { (void)render_generation(wrong_leaf); },
+        [&wrong_leaf]() -> void { (void)render_generation(wrong_leaf); },
         "a typed minimizer member naming the wrong case leaf is rejected");
 
     const auto append_alignment = [](
@@ -1607,7 +1693,7 @@ inline void verify_typed_minimizer_binder() {
     const auto topology_identities = detail::collect_alphabet_identities(
         {}, detail::collect_minimizer_cases(topology_families));
     require(
-        topology_identities.size() > 1u,
+        topology_identities.size() > 1U,
         "combined-consumer fixture exposes multiple topology alphabets");
 
     generation_plan combined = plan;
@@ -1617,17 +1703,17 @@ inline void verify_typed_minimizer_binder() {
             combined, identity.alphabet_code, identity.alphabet_type);
     }
     const generation_result combined_generated = render_generation(combined);
-    std::size_t combined_binders = 0u;
+    std::size_t combined_binders = 0U;
     for (const generated_artifact& artifact : combined_generated.artifacts) {
         if (artifact.kind != artifact_kind::binder) continue;
         ++combined_binders;
         require(
             occurrences(
                 artifact.content,
-                "highway_alphabet_identity_for<::seq::dna4>()") == 1u
+                "highway_alphabet_identity_for<::seq::dna4>()") == 1U
                 && occurrences(
                        artifact.content,
-                       "highway_alphabet_identity_for<::seq::dna5>()") == 1u,
+                       "highway_alphabet_identity_for<::seq::dna5>()") == 1U,
             "alignment and minimizer families share one alphabet identity "
             "axis in each binder");
         for (const detail::alphabet_identity_binding& identity
@@ -1637,7 +1723,7 @@ inline void verify_typed_minimizer_binder() {
                     "highway_alphabet_identity_for<"
                     + identity.alphabet_type
                     + ">(), .alphabet_code = "
-                    + std::to_string(identity.alphabet_code) + "u"),
+                    + std::to_string(identity.alphabet_code) + "U"),
                 "the reconciled identity axis preserves each generated "
                 "topology code/type pair");
         }
@@ -1647,18 +1733,20 @@ inline void verify_typed_minimizer_binder() {
         "each fixed target receives the reconciled identity axis");
 
     generation_plan mismatched_consumers = plan;
-    for (std::size_t index = 0u; index < topology_identities.size(); ++index) {
+    for (std::size_t index = 0U; index < topology_identities.size(); ++index) {
         const detail::alphabet_identity_binding& code_owner =
             topology_identities[index];
         const detail::alphabet_identity_binding& wrong_type =
-            topology_identities[(index + 1u) % topology_identities.size()];
+            topology_identities[(index + 1U) % topology_identities.size()];
         append_alignment(
             mismatched_consumers,
             code_owner.alphabet_code,
             wrong_type.alphabet_type);
     }
     require_rejected(
-        [&] { (void)render_generation(mismatched_consumers); },
+        [&mismatched_consumers]() -> void {
+            (void)render_generation(mismatched_consumers);
+        },
         "alignment and minimizer consumers must agree on topology code/type "
         "identity");
 }
@@ -1685,9 +1773,9 @@ inline void verify_bounded_minimizer_representation_owners() {
     };
 
     const generation_result generated = render_generation(plan);
-    std::size_t owner_units = 0u;
-    std::size_t minimap2_reference_wrappers = 0u;
-    std::size_t bounded_nthash_wrappers = 0u;
+    std::size_t owner_units = 0U;
+    std::size_t minimap2_reference_wrappers = 0U;
+    std::size_t bounded_nthash_wrappers = 0U;
     for (const generated_artifact& artifact : generated.artifacts) {
         if (artifact.kind != artifact_kind::minimizer_representation_instantiation) {
             continue;
@@ -1702,16 +1790,16 @@ inline void verify_bounded_minimizer_representation_owners() {
                 && artifact.content.contains("import std;")
                 && artifact.content.contains(
                     "import bioseq.sequences.kmers.highway_minimizer_contract;")
-                && occurrences(artifact.content, "HWY_ATTR bool") == 2u
+                && occurrences(artifact.content, ") -> bool") == 2U
                 && !artifact.content.contains("std::uint16_t")
                 && !artifact.content.contains("std::array"),
             "each representation owner is an ordinary two-width typed seam, "
             "not widened neutral storage");
     }
     require(
-        owner_units == 14u
-            && minimap2_reference_wrappers == 16u
-            && bounded_nthash_wrappers == 12u,
+        owner_units == 14U
+            && minimap2_reference_wrappers == 16U
+            && bounded_nthash_wrappers == 12U,
         "the two-target low profile renders exactly 7 owners / 14 typed "
         "instantiations per target");
 }

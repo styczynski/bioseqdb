@@ -2,21 +2,12 @@
  * @file sequence_generator_test.cpp
  * @brief Generic sequence generator checks.
  */
-#include <tests/support/common.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
 
-#include <array>
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <iostream>
-#include <limits>
-#include <set>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.gpu.vulkan.runtime;
@@ -135,27 +126,27 @@ void check_generator(std::string_view label, std::string_view valid_chars) {
 
 }  // namespace
 
-TEST_CASE("generator: dna4/uint32",
+TEST_CASE("sequence generation produces dna4 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna4, std::uint32_t>("dna4/u32", "ACGT");
 }
 
-TEST_CASE("generator: dna4/uint64",
+TEST_CASE("sequence generation produces dna4 uint64 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna4, std::uint64_t>("dna4/u64", "ACGT");
 }
 
-TEST_CASE("generator: dna5/uint32",
+TEST_CASE("sequence generation produces dna5 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna5, std::uint32_t>("dna5/u32", "ACGTN");
 }
 
-TEST_CASE("generator: dna5/uint64",
+TEST_CASE("sequence generation produces dna5 uint64 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     check_generator<seq::dna5, std::uint64_t>("dna5/u64", "ACGTN");
 }
 
-TEST_CASE("generator: aa27/uint32 genericity",
+TEST_CASE("sequence generation supports aa27 uint32 pairs",
           "[component:bioseq][layer:unit][feature:sequence]") {
     gen::generator_params gp{};
     gp.reference_length = 2000;
@@ -169,11 +160,11 @@ TEST_CASE("generator: aa27/uint32 genericity",
     ASSERT(!pairs.front().query.to_string().empty(), "aa27 query empty");
 }
 
-TEST_CASE("generator: custom alphabet with uint16 rank extraction",
+TEST_CASE("sequence generation extracts uint16 ranks for custom alphabets",
           "[component:bioseq][layer:unit][feature:sequence]") {
-    using custom_t = sequence_custom_alphabet<rank_300_alphabet, std::uint16_t>;
-    using seq_t = compact_sequence_range<custom_t>;
-    static_assert(sizeof(typename seq_t::traits::letter_unit) > sizeof(std::uint8_t));
+    using custom_type = sequence_custom_alphabet<rank_300_alphabet, std::uint16_t>;
+    using sequence_type = compact_sequence_range<custom_type>;
+    static_assert(sizeof(typename sequence_type::traits::letter_unit) > sizeof(std::uint8_t));
 
     gen::generator_params gp{};
     gp.reference_length = 1000;
@@ -186,17 +177,17 @@ TEST_CASE("generator: custom alphabet with uint16 rank extraction",
     gp.reverse_complement_rate = 0.0;
     gp.seed = 5150;
 
-    gen::sequence_generator<custom_t> generator(gp);
+    gen::sequence_generator<custom_type> generator(gp);
     const auto reference = generator.generate_reference();
     const auto pairs = generator.generate_fragment_pairs(reference, 0, gp.fragment_count);
     ASSERT(pairs.size() == gp.fragment_count, "custom alphabet under-produced");
 
-    auto decode = [](const seq_t& seq) {
-        std::vector<typename seq_t::traits::letter_unit> ranks;
+    auto decode = [](const sequence_type& seq) {
+        std::vector<typename sequence_type::traits::letter_unit> ranks;
         ranks.reserve(seq.bp_size());
         for (const auto unit : seq.packed_units) {
-            ranks.push_back(static_cast<typename seq_t::traits::letter_unit>(
-                unit & seq_t::traits::char_mask));
+            ranks.push_back(static_cast<typename sequence_type::traits::letter_unit>(
+                unit & sequence_type::traits::char_mask));
             if (ranks.size() == seq.bp_size()) {
                 break;
             }
@@ -224,7 +215,7 @@ static_assert(gen::is_valid_alphabet_probability<gen::alphabet_probability<seq::
 static_assert(gen::is_valid_alphabet_probability<gen::alphabet_probability<seq::aa27>>);
 static_assert(gen::packed_sequence_config<sequence_custom_alphabet<seq::dna4, std::uint64_t>>);
 
-TEST_CASE("generator: GPU and CPU paths produce identical bytes",
+TEST_CASE("GPU and CPU sequence generation produce identical bytes",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     gen::generator_params gp{};
     gp.reference_length = 1'000'003;
@@ -246,7 +237,7 @@ TEST_CASE("generator: GPU and CPU paths produce identical bytes",
            "GPU/CPU bytes diverge");
 }
 
-TEST_CASE("generator shader compiles for 32/64-bit packed units",
+TEST_CASE("sequence generator shaders compile for 32-bit and 64-bit packed units",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     for (const std::uint32_t word_bits : {32u, 64u}) {
         gv::shader_compile_request request{
@@ -264,7 +255,7 @@ TEST_CASE("generator shader compiles for 32/64-bit packed units",
     }
 }
 
-TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime",
+TEST_CASE("sequence generation dispatches generate_units through the Vulkan runtime",
           "[component:bioseq][layer:unit][feature:sequence][resource:gpu]") {
     auto& runtime = gv::runtime::instance();
     if (!gv::hardware_device_available(runtime)) {
@@ -310,7 +301,7 @@ TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime"
     ASSERT(any_nonzero, "generate_units smoke kernel produced an all-zero block");
 }
 
-TEST_CASE("generator: dna5 symbol frequencies",
+TEST_CASE("sequence generation preserves dna5 symbol frequencies",
           "[component:bioseq][layer:unit][feature:sequence]") {
     gen::generator_params gp{};
     gp.reference_length = 4'000'000;
@@ -360,14 +351,10 @@ template <typename p_sequence>
     std::size_t start,
     std::size_t end,
     bool reverse = false) {
-    using rank_t = typename p_sequence::traits::letter_unit;
-    std::vector<rank_t> ranks(end - start);
+    using rank_type = typename p_sequence::traits::letter_unit;
+    std::vector<rank_type> ranks(end - start);
     gen::extract_window_ranks(
-        seq,
-        start,
-        end,
-        reverse,
-        std::span<rank_t>{ranks.data(), ranks.size()});
+        seq, start, end, reverse, std::span<rank_type>{ranks.data(), ranks.size()});
     return ranks;
 }
 
@@ -381,7 +368,7 @@ template <typename p_traits, typename p_sequence>
     const gen::generator_params& gp,
     std::size_t count,
     std::uint64_t& total_positions) {
-    using rank_t = typename p_traits::letter_unit;
+    using rank_type = typename p_traits::letter_unit;
     static constexpr auto insertion_cdf =
         gen::make_integer_cdf(gen::alphabet_probability<seq::dna5>::probability());
     gen::indel_event_counts total{};
@@ -394,22 +381,24 @@ template <typename p_traits, typename p_sequence>
             state, static_cast<std::uint64_t>(gp.reference_length - length + 1)));
         const bool is_reverse = gen::next_unit_double(state) < gp.reverse_complement_rate;
 
-        std::vector<rank_t> fragment(length);
-        gen::extract_window_ranks(
-            reference, start, start + length, is_reverse,
-            std::span<rank_t>{fragment.data(), fragment.size()});
+        std::vector<rank_type> fragment(length);
+        gen::extract_window_ranks(reference,
+                                  start,
+                                  start + length,
+                                  is_reverse,
+                                  std::span<rank_type>{fragment.data(), fragment.size()});
         gen::apply_substitutions<p_traits>(
-            std::span<rank_t>{fragment.data(), fragment.size()}, gp.substitution_rate, state);
+            std::span<rank_type>{fragment.data(), fragment.size()}, gp.substitution_rate, state);
 
-        std::vector<rank_t> out;
+        std::vector<rank_type> out;
         gen::indel_event_counts local{};
         gen::apply_indels<p_traits>(
-            std::span<const rank_t>{fragment.data(), fragment.size()},
+            std::span<const rank_type>{fragment.data(), fragment.size()},
             gp,
             std::span<const std::uint32_t>{insertion_cdf.data(), insertion_cdf.size()},
             state,
-        out,
-        &local);
+            out,
+            &local);
         total.visited_positions += local.visited_positions;
         total.insertions += local.insertions;
         total.deletions += local.deletions;
@@ -422,18 +411,18 @@ template <typename p_traits, typename p_sequence>
 
 }  // namespace
 
-TEST_CASE("generator: large-scale statistical and coordinate validation",
+TEST_CASE("sequence generation preserves large-scale statistical and coordinate contracts",
           "[component:bioseq][layer:unit][feature:sequence][resource:large_memory]") {
-    using generator_t = gen::alphabet_sequence_generator<seq::dna5, std::uint64_t>;
-    using seq_t = typename generator_t::seq_t;
-    using traits = typename seq_t::traits;
+    using generator_type = gen::alphabet_sequence_generator<seq::dna5, std::uint64_t>;
+    using sequence_type = typename generator_type::sequence_type;
+    using traits = typename sequence_type::traits;
 
     gen::generator_params gp{};
     gp.reference_length = 2'000'000'000ull;
     gp.fragment_count = 0;
     gp.seed = 0xB10Cull;
 
-    generator_t generator(gp);
+    generator_type generator(gp);
     auto reference = generator.generate_reference();
 
     auto lazy = bioseq::storage::make_resident_lazy_sequence(*reference);
@@ -469,7 +458,13 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
     for_each_rank_prefix(
         *reference,
         gp.reference_length,
-        [&](traits::letter_unit rank, std::size_t pos) {
+        [&current_run,
+         &previous_rank,
+         &have_previous,
+         &longest_run,
+         &dinuc,
+         &previous_window_rank,
+         &have_previous_window_rank](traits::letter_unit rank, std::size_t pos) {
             if (!have_previous || rank != previous_rank) {
                 current_run = 1;
                 previous_rank = rank;
@@ -517,8 +512,9 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
 
     gen::generator_params interval_params = gp;
     interval_params.fragment_count = 1000;
-    auto interval_pairs = generator_t(interval_params).generate_fragment_pairs(
-        reference, 0, interval_params.fragment_count);
+    auto interval_pairs =
+        generator_type(interval_params)
+            .generate_fragment_pairs(reference, 0, interval_params.fragment_count);
     ASSERT(interval_pairs.size() == interval_params.fragment_count,
            fmt::format("expected {} pairs, got {}",
                        interval_params.fragment_count, interval_pairs.size()));
@@ -538,8 +534,8 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
     exact_params.insertion_rate = 0.0;
     exact_params.deletion_rate = 0.0;
     exact_params.reverse_complement_rate = 0.0;
-    auto exact_pairs = generator_t(exact_params).generate_fragment_pairs(
-        reference, 0, exact_params.fragment_count);
+    auto exact_pairs = generator_type(exact_params)
+                           .generate_fragment_pairs(reference, 0, exact_params.fragment_count);
     for (const auto& pair : exact_pairs) {
         const auto expected = ranks_for_window(
             *reference, pair.truth_target_start, pair.truth_target_end);
@@ -551,8 +547,9 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
     gen::generator_params substitution_params = exact_params;
     substitution_params.fragment_count = 2000;
     substitution_params.substitution_rate = 0.01;
-    auto substitution_pairs = generator_t(substitution_params).generate_fragment_pairs(
-        reference, 0, substitution_params.fragment_count);
+    auto substitution_pairs =
+        generator_type(substitution_params)
+            .generate_fragment_pairs(reference, 0, substitution_params.fragment_count);
     std::uint64_t total_bases = 0;
     std::uint64_t mismatches = 0;
     for (const auto& pair : substitution_pairs) {
@@ -605,8 +602,8 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
     gen::generator_params strand_params = exact_params;
     strand_params.fragment_count = 4000;
     strand_params.reverse_complement_rate = 0.5;
-    auto strand_pairs = generator_t(strand_params).generate_fragment_pairs(
-        reference, 0, strand_params.fragment_count);
+    auto strand_pairs = generator_type(strand_params)
+                            .generate_fragment_pairs(reference, 0, strand_params.fragment_count);
     std::size_t reverse_count = 0;
     std::size_t checked_forward = 0;
     std::size_t checked_reverse = 0;
@@ -639,7 +636,7 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
         "strand balance", fmt::format("reverse_fraction={:.6f}", reverse_fraction));
 
     {
-        auto repeated_reference = generator_t(gp).generate_reference();
+        auto repeated_reference = generator_type(gp).generate_reference();
         ASSERT(reference->packed_units == repeated_reference->packed_units
                    && reference->padding() == repeated_reference->padding(),
                "same-seed references differ");
@@ -648,18 +645,18 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
         gen::generator_params gpu_params = gp;
         gpu_params.use_vulkan = true;
         if (!hardware_vulkan_ready()) {
-            REQUIRE_THROWS_AS(
-                generator_t(gpu_params).generate_sequences(1), gv::vulkan_runtime_error);
+            REQUIRE_THROWS_AS(generator_type(gpu_params).generate_sequences(1),
+                              gv::vulkan_runtime_error);
             report_validation(
                 "GPU selection",
                 "generation rejected without a hardware Vulkan device");
         } else {
             const auto before = gv::runtime::instance().generate_units_dispatch_count();
-            auto gpu_or_cpu = generator_t(gpu_params).generate_sequences(1).front();
+            auto gpu_or_cpu = generator_type(gpu_params).generate_sequences(1).front();
             const auto after = gv::runtime::instance().generate_units_dispatch_count();
             ASSERT(after > before,
                    "hardware Vulkan device did not dispatch sequence generation");
-            auto cpu = generator_t(gpu_params).debug_generate_sequences_cpu_only(1).front();
+            auto cpu = generator_type(gpu_params).debug_generate_sequences_cpu_only(1).front();
             ASSERT(gpu_or_cpu.packed_units == cpu.packed_units && gpu_or_cpu.padding() == cpu.padding(),
                    "GPU and CPU references differ");
             report_validation(
@@ -679,13 +676,13 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
     wide_coordinate_params.deletion_rate = 0.0;
     wide_coordinate_params.reverse_complement_rate = 0.0;
     wide_coordinate_params.seed = 0xB10Cull;
-    using wide_coordinate_generator_t =
+    using wide_coordinate_generator_type =
         gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;
     auto wide_reference =
-        wide_coordinate_generator_t(wide_coordinate_params).generate_reference();
+        wide_coordinate_generator_type(wide_coordinate_params).generate_reference();
     auto wide_coordinate_pairs =
-        wide_coordinate_generator_t(wide_coordinate_params).generate_fragment_pairs(
-            wide_reference, 0, wide_coordinate_params.fragment_count);
+        wide_coordinate_generator_type(wide_coordinate_params)
+            .generate_fragment_pairs(wide_reference, 0, wide_coordinate_params.fragment_count);
     bool saw_high_start = false;
     for (const auto& pair : wide_coordinate_pairs) {
         ASSERT(pair.truth_target_start < pair.truth_target_end &&
@@ -700,11 +697,11 @@ TEST_CASE("generator: large-scale statistical and coordinate validation",
                     wide_coordinate_pairs.size(), saw_high_start));
 }
 
-// Compare GPU and CPU generation after checking byte parity and real GPU dispatch.
-TEST_CASE("generator: GPU and CPU generation throughput",
+// GPU and CPU paths must produce identical packed bytes before throughput is measured.
+TEST_CASE("GPU and CPU sequence generation reports throughput",
           "[component:bioseq][layer:unit][feature:sequence]"
           "[resource:gpu][resource:large_memory]") {
-    using gen_t = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;
+    using generator_type = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;
     auto& runtime = gv::runtime::instance();
     const bool usable = hardware_vulkan_ready();
     std::cout << fmt::format(
@@ -723,7 +720,7 @@ TEST_CASE("generator: GPU and CPU generation throughput",
         warm.fragment_count = 0;
         warm.seed = 1;
         warm.use_vulkan = true;
-        const auto warm_seq = gen_t(warm).generate_sequences(1);
+        const auto warm_seq = generator_type(warm).generate_sequences(1);
         ASSERT(!warm_seq.empty(), "gpubench warm-up produced no sequence");
     }
 
@@ -738,10 +735,10 @@ TEST_CASE("generator: GPU and CPU generation throughput",
 
         // Require a real dispatch and identical packed bytes before timing.
         const auto before = runtime.generate_units_dispatch_count();
-        const auto gpu_seq = gen_t(gp).generate_sequences(1);
+        const auto gpu_seq = generator_type(gp).generate_sequences(1);
         const auto after = runtime.generate_units_dispatch_count();
         {
-            const auto cpu_seq = gen_t(gp).debug_generate_sequences_cpu_only(1);
+            const auto cpu_seq = generator_type(gp).debug_generate_sequences_cpu_only(1);
             ASSERT(gpu_seq.front().packed_units == cpu_seq.front().packed_units &&
                        gpu_seq.front().padding() == cpu_seq.front().padding(),
                    fmt::format("gpubench GPU != CPU bytes at n={}", n));
@@ -751,7 +748,7 @@ TEST_CASE("generator: GPU and CPU generation throughput",
         double gpu_ms = std::numeric_limits<double>::max();
         for (int iteration = 0; iteration < iterations; ++iteration) {
             const auto t0 = std::chrono::steady_clock::now();
-            const auto seq = gen_t(gp).generate_sequences(1);
+            const auto seq = generator_type(gp).generate_sequences(1);
             const auto t1 = std::chrono::steady_clock::now();
             gpu_ms = std::min(gpu_ms, std::chrono::duration<double, std::milli>(t1 - t0).count());
             ASSERT(!seq.empty(), "gpubench gpu path empty");
@@ -759,7 +756,7 @@ TEST_CASE("generator: GPU and CPU generation throughput",
         double cpu_ms = std::numeric_limits<double>::max();
         for (int iteration = 0; iteration < iterations; ++iteration) {
             const auto t0 = std::chrono::steady_clock::now();
-            const auto seq = gen_t(gp).debug_generate_sequences_cpu_only(1);
+            const auto seq = generator_type(gp).debug_generate_sequences_cpu_only(1);
             const auto t1 = std::chrono::steady_clock::now();
             cpu_ms = std::min(cpu_ms, std::chrono::duration<double, std::milli>(t1 - t0).count());
             ASSERT(!seq.empty(), "gpubench cpu path empty");

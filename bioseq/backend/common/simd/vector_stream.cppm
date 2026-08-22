@@ -139,7 +139,7 @@ public:
      * @param[in] slot_index Stream slot in `[0, k_stream_count)`.
      * @return Mutable target vector reference.
      */
-    [[nodiscard]] constexpr vector_type& operator[](std::size_t slot_index) noexcept {
+    [[nodiscard]] constexpr auto operator[](std::size_t slot_index) noexcept -> vector_type& {
         return vectors_[slot_index];
     }
 
@@ -148,19 +148,19 @@ public:
      * @param[in] slot_index Stream slot in `[0, k_stream_count)`.
      * @return Const target vector reference.
      */
-    [[nodiscard]] constexpr const vector_type& operator[](
-        std::size_t slot_index) const noexcept {
+    [[nodiscard]] constexpr auto operator[](std::size_t slot_index) const noexcept
+        -> const vector_type& {
         return vectors_[slot_index];
     }
 
     /** @brief Returns the mutable inline vector representation. */
-    [[nodiscard]] constexpr std::array<vector_type, p_stream_count>& data() noexcept {
+    [[nodiscard]] constexpr auto data() noexcept -> std::array<vector_type, p_stream_count>& {
         return vectors_;
     }
 
     /** @brief Returns the const inline vector representation. */
-    [[nodiscard]] constexpr const std::array<vector_type, p_stream_count>&
-    data() const noexcept {
+    [[nodiscard]] constexpr auto data() const noexcept
+        -> const std::array<vector_type, p_stream_count>& {
         return vectors_;
     }
 
@@ -171,11 +171,10 @@ public:
      * @return Directly initialized vector bundle.
      */
     template <class... p_vector_types>
-    requires (
-        sizeof...(p_vector_types) == p_stream_count
-        && (std::is_convertible_v<p_vector_types, vector_type> && ...))
-    [[nodiscard]] static HWY_INLINE constexpr vector_stream pack(
-        p_vector_types... vectors) noexcept {
+        requires(sizeof...(p_vector_types) == p_stream_count &&
+                 (std::is_convertible_v<p_vector_types, vector_type> && ...))
+    [[nodiscard]] static HWY_INLINE constexpr auto pack(p_vector_types... vectors) noexcept
+        -> vector_stream {
         return vector_stream{std::array<vector_type, p_stream_count>{
             static_cast<vector_type>(vectors)...}};
     }
@@ -186,8 +185,8 @@ public:
      * @param[in] value Scalar value broadcast to every lane.
      * @return Uniform vector bundle.
      */
-    [[nodiscard]] static HWY_INLINE vector_stream
-    splat(tag_type simd_tag, storage_type value) noexcept {
+    [[nodiscard]] static HWY_INLINE auto splat(tag_type simd_tag, storage_type value) noexcept
+        -> vector_stream {
         return splat_impl(
             hn::Set(simd_tag, value), std::make_index_sequence<p_stream_count>{});
     }
@@ -197,7 +196,7 @@ public:
      * @param[in] simd_tag Highway lane descriptor.
      * @return Zero-filled vector bundle.
      */
-    [[nodiscard]] static HWY_INLINE vector_stream splat_zero(tag_type simd_tag) noexcept {
+    [[nodiscard]] static HWY_INLINE auto splat_zero(tag_type simd_tag) noexcept -> vector_stream {
         return splat(simd_tag, storage_type{0});
     }
 
@@ -208,12 +207,13 @@ private:
      * @param[in] vector Target vector replicated by the expansion.
      * @return Uniform vector bundle.
      */
-    template <std::size_t... p_slot_indices>
-    [[nodiscard]] static HWY_INLINE vector_stream splat_impl(
-        vector_type vector,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return pack(((void)p_slot_indices, vector)...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard]] static HWY_INLINE auto splat_impl(vector_type vector,
+                                                  std::index_sequence<p_slot_indices...>) noexcept
+      -> vector_stream {
+      return pack(((void)p_slot_indices, vector)...);
+  }
+
 public:
     /** @brief Adds corresponding vectors in two bundles. */
     [[nodiscard]] friend HWY_INLINE auto operator+(
@@ -276,101 +276,77 @@ public:
     }
 
 private:
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE vector_stream add_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return pack(hn::Add(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto
+  add_slots(vector_stream left,
+            vector_stream right,
+            std::index_sequence<p_slot_indices...>) noexcept -> vector_stream {
+      return pack(hn::Add(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE vector_stream subtract_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return pack(hn::Sub(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto
+  subtract_slots(vector_stream left,
+                 vector_stream right,
+                 std::index_sequence<p_slot_indices...>) noexcept -> vector_stream {
+      return pack(hn::Sub(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE vector_stream multiply_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return pack(hn::Mul(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto
+  multiply_slots(vector_stream left,
+                 vector_stream right,
+                 std::index_sequence<p_slot_indices...>) noexcept -> vector_stream {
+      return pack(hn::Mul(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_equal_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Eq(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_equal_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Eq(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_not_equal_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Ne(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_not_equal_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Ne(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_less_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Lt(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_less_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Lt(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_greater_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Gt(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_greater_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Gt(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_less_equal_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Le(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_less_equal_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Le(left[p_slot_indices], right[p_slot_indices])...);
+  }
 
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<
-        tag_type,
-        p_stream_count>
-    compare_greater_equal_slots(
-        vector_stream left,
-        vector_stream right,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return mask_stream<tag_type, p_stream_count>::pack(
-            hn::Ge(left[p_slot_indices], right[p_slot_indices])...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto compare_greater_equal_slots(
+      vector_stream left, vector_stream right, std::index_sequence<p_slot_indices...>) noexcept
+      -> mask_stream<tag_type, p_stream_count> {
+      return mask_stream<tag_type, p_stream_count>::pack(
+          hn::Ge(left[p_slot_indices], right[p_slot_indices])...);
+  }
 };
 
 /**
@@ -405,23 +381,23 @@ public:
     /** @brief Default-constructs every target mask slot. */
     HWY_INLINE constexpr mask_stream() noexcept = default;
 
-    [[nodiscard]] constexpr mask_type& operator[](std::size_t slot_index) noexcept {
+    [[nodiscard]] constexpr auto operator[](std::size_t slot_index) noexcept -> mask_type& {
         return masks_[slot_index];
     }
 
-    [[nodiscard]] constexpr const mask_type& operator[](
-        std::size_t slot_index) const noexcept {
+    [[nodiscard]] constexpr auto operator[](std::size_t slot_index) const noexcept
+        -> const mask_type& {
         return masks_[slot_index];
     }
 
     /** @brief Returns the mutable inline mask representation. */
-    [[nodiscard]] constexpr std::array<mask_type, p_stream_count>& data() noexcept {
+    [[nodiscard]] constexpr auto data() noexcept -> std::array<mask_type, p_stream_count>& {
         return masks_;
     }
 
     /** @brief Returns the const inline mask representation. */
-    [[nodiscard]] constexpr const std::array<mask_type, p_stream_count>&
-    data() const noexcept {
+    [[nodiscard]] constexpr auto data() const noexcept
+        -> const std::array<mask_type, p_stream_count>& {
         return masks_;
     }
 
@@ -432,11 +408,10 @@ public:
      * @return Directly initialized mask bundle.
      */
     template <class... p_mask_types>
-    requires (
-        sizeof...(p_mask_types) == p_stream_count
-        && (std::is_convertible_v<p_mask_types, mask_type> && ...))
-    [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(
-        p_mask_types... masks) noexcept {
+        requires(sizeof...(p_mask_types) == p_stream_count &&
+                 (std::is_convertible_v<p_mask_types, mask_type> && ...))
+    [[nodiscard]] static HWY_INLINE constexpr auto pack(p_mask_types... masks) noexcept
+        -> mask_stream {
         return mask_stream{std::array<mask_type, p_stream_count>{
             static_cast<mask_type>(masks)...}};
     }
@@ -446,19 +421,17 @@ public:
      * @param[in] simd_tag Highway lane descriptor.
      * @return Uniform false-mask bundle.
      */
-    [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_type simd_tag) noexcept {
+    [[nodiscard]] static HWY_INLINE auto splat_false(tag_type simd_tag) noexcept -> mask_stream {
         return splat_false_impl(
             hn::MaskFalse(simd_tag), std::make_index_sequence<p_stream_count>{});
     }
 
 private:
-    template <std::size_t... p_slot_indices>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream
-    splat_false_impl(
-        mask_type mask,
-        std::index_sequence<p_slot_indices...>) noexcept {
-        return pack(((void)p_slot_indices, mask)...);
-    }
+  template <std::size_t... p_slot_indices>
+  [[nodiscard, gnu::always_inline]] static HWY_INLINE auto
+  splat_false_impl(mask_type mask, std::index_sequence<p_slot_indices...>) noexcept -> mask_stream {
+      return pack(((void)p_slot_indices, mask)...);
+  }
 };
 
 namespace vector_stream_detail {
@@ -472,8 +445,8 @@ namespace vector_stream_detail {
  * @return Selected slot reference for streams, otherwise the original lvalue reference.
  */
 template <std::size_t p_slot_index, class p_argument_type>
-[[gnu::always_inline]] HWY_INLINE constexpr decltype(auto)
-project_stream_slot(p_argument_type& argument) {
+[[gnu::always_inline]] HWY_INLINE constexpr auto project_stream_slot(p_argument_type& argument)
+    -> decltype(auto) {
     if constexpr (k_is_any_stream<p_argument_type>) {
         return argument[p_slot_index];
     } else {
@@ -608,56 +581,49 @@ auto evaluate_lifted_slot(
 
 /** @brief Applies a void lifted operation for one stream slot. */
 template <std::size_t p_slot_index, class p_operation_type, class... p_argument_types>
-[[gnu::always_inline]] HWY_INLINE void apply_lifted_slot(
-    p_operation_type& operation,
-    p_argument_types&&... arguments) {
+[[gnu::always_inline]] HWY_INLINE auto apply_lifted_slot(p_operation_type& operation,
+                                                         p_argument_types&&... arguments) -> void {
     operation(project_stream_slot<p_slot_index>(arguments)...);
 }
 
 /** @brief Packs per-slot vector results from a lifted operation. */
-template <
-    class p_simd_tag,
-    class p_storage_type,
-    std::size_t p_stream_count,
-    std::size_t... p_slot_indices,
-    class p_operation_type,
-    class... p_argument_types>
-[[nodiscard, gnu::always_inline]] HWY_INLINE
-vector_stream<p_simd_tag, p_storage_type, p_stream_count> pack_lifted_vectors(
-    std::index_sequence<p_slot_indices...>,
-    p_operation_type& operation,
-    p_argument_types&&... arguments) {
+template <class p_simd_tag,
+          class p_storage_type,
+          std::size_t p_stream_count,
+          std::size_t... p_slot_indices,
+          class p_operation_type,
+          class... p_argument_types>
+[[nodiscard, gnu::always_inline]] HWY_INLINE auto
+pack_lifted_vectors(std::index_sequence<p_slot_indices...>,
+                    p_operation_type& operation,
+                    p_argument_types&&... arguments)
+    -> vector_stream<p_simd_tag, p_storage_type, p_stream_count> {
     return vector_stream<p_simd_tag, p_storage_type, p_stream_count>::pack(
         evaluate_lifted_slot<p_slot_indices>(
             operation, std::forward<p_argument_types>(arguments)...)...);
 }
 
 /** @brief Packs per-slot mask results from a lifted operation. */
-template <
-    class p_simd_tag,
-    std::size_t p_stream_count,
-    std::size_t... p_slot_indices,
-    class p_operation_type,
-    class... p_argument_types>
-[[nodiscard, gnu::always_inline]] HWY_INLINE
-mask_stream<p_simd_tag, p_stream_count> pack_lifted_masks(
-    std::index_sequence<p_slot_indices...>,
-    p_operation_type& operation,
-    p_argument_types&&... arguments) {
+template <class p_simd_tag,
+          std::size_t p_stream_count,
+          std::size_t... p_slot_indices,
+          class p_operation_type,
+          class... p_argument_types>
+[[nodiscard, gnu::always_inline]] HWY_INLINE auto
+pack_lifted_masks(std::index_sequence<p_slot_indices...>,
+                  p_operation_type& operation,
+                  p_argument_types&&... arguments) -> mask_stream<p_simd_tag, p_stream_count> {
     return mask_stream<p_simd_tag, p_stream_count>::pack(
         evaluate_lifted_slot<p_slot_indices>(
             operation, std::forward<p_argument_types>(arguments)...)...);
 }
 
 /** @brief Applies a void lifted operation to every stream slot. */
-template <
-    std::size_t... p_slot_indices,
-    class p_operation_type,
-    class... p_argument_types>
-[[gnu::always_inline]] HWY_INLINE void apply_lifted_operation(
-    std::index_sequence<p_slot_indices...>,
-    p_operation_type& operation,
-    p_argument_types&&... arguments) {
+template <std::size_t... p_slot_indices, class p_operation_type, class... p_argument_types>
+[[gnu::always_inline]] HWY_INLINE auto
+apply_lifted_operation(std::index_sequence<p_slot_indices...>,
+                       p_operation_type& operation,
+                       p_argument_types&&... arguments) -> void {
     (apply_lifted_slot<p_slot_indices>(
          operation, std::forward<p_argument_types>(arguments)...),
      ...);
@@ -1020,13 +986,12 @@ requires k_is_mask_stream<p_input_type>
 
 /** @brief Stores each vector slot to its corresponding aligned base pointer. */
 template <class p_simd_tag, class p_input_type, class p_storage_type>
-requires k_is_vector_stream<p_input_type>
-HWY_INLINE void store_stream(
+    requires k_is_vector_stream<p_input_type>
+HWY_INLINE auto store_stream(
     const p_input_type& input,
     p_simd_tag simd_tag,
-    std::array<
-        p_storage_type*,
-        std::remove_cvref_t<p_input_type>::k_stream_count> base_pointers) {
+    std::array<p_storage_type*, std::remove_cvref_t<p_input_type>::k_stream_count> base_pointers)
+    -> void {
     using input_type = std::remove_cvref_t<p_input_type>;
     static_assert(
         std::is_same_v<typename input_type::tag_type, p_simd_tag>,
@@ -1040,13 +1005,12 @@ HWY_INLINE void store_stream(
 
 /** @brief Stores each vector slot to its corresponding unaligned base pointer. */
 template <class p_simd_tag, class p_input_type, class p_storage_type>
-requires k_is_vector_stream<p_input_type>
-HWY_INLINE void store_unaligned_stream(
+    requires k_is_vector_stream<p_input_type>
+HWY_INLINE auto store_unaligned_stream(
     const p_input_type& input,
     p_simd_tag simd_tag,
-    std::array<
-        p_storage_type*,
-        std::remove_cvref_t<p_input_type>::k_stream_count> base_pointers) {
+    std::array<p_storage_type*, std::remove_cvref_t<p_input_type>::k_stream_count> base_pointers)
+    -> void {
     using input_type = std::remove_cvref_t<p_input_type>;
     static_assert(
         std::is_same_v<typename input_type::tag_type, p_simd_tag>,
@@ -1060,7 +1024,7 @@ HWY_INLINE void store_unaligned_stream(
 
 /**
  * @brief Reduces each mask slot independently with Highway `AllFalse`.
- * @return One boolean per stream slot; cross-stream reduction remains caller-owned.
+ * @return One boolean per stream slot. Cross-stream reduction remains caller-owned.
  */
 template <class p_simd_tag, class p_input_type>
 requires k_is_mask_stream<p_input_type>
@@ -1083,8 +1047,8 @@ requires k_is_mask_stream<p_input_type>
 
 /** @brief Invokes a callable once for every compile-time stream slot. */
 template <std::size_t p_stream_count, class p_function_type>
-[[gnu::always_inline]] HWY_INLINE constexpr void for_each_stream(
-    p_function_type&& function) {
+[[gnu::always_inline]] HWY_INLINE constexpr auto for_each_stream(p_function_type&& function)
+    -> void {
     for_each_index<p_stream_count>(std::forward<p_function_type>(function));
 }
 

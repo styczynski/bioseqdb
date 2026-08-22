@@ -1,3 +1,7 @@
+/**
+ * @file
+ * @brief Composite row models emitted for table-planning diagnostics and probes.
+ */
 module;
 
 #include <cstdint>
@@ -18,8 +22,8 @@ export namespace bioseq::table::composite_rows {
  * @ingroup bioseq_sql_public_api
  */
 struct [[bioseq_sql::type({
-            .schema = bioseq::sql::extension_schema,
-        })]] bioseq_aligner_options {
+    .schema = bioseq::sql::extension_schema,
+})]] bioseq_aligner_options {
     std::optional<std::int32_t> kmer_size;
     std::optional<std::int32_t> window_size;
     std::optional<std::int32_t> max_gap;
@@ -60,7 +64,7 @@ struct [[bioseq_sql::type({
 
 static_assert(std::is_aggregate_v<bioseq_aligner_options>);
 
-}  // namespace bioseq::table::composite_rows
+} // namespace bioseq::table::composite_rows
 
 export namespace bioseq::table {
 
@@ -72,6 +76,7 @@ struct teardown_diagnostics_row {
 
 static_assert(std::is_aggregate_v<teardown_diagnostics_row>);
 
+/** Planner-probe results for SliceProject-safe batch-join projections. */
 struct batch_join_projection_guard_probe_row {
     bool accepts_exact_helper;
     bool rejects_unrelated_phv;
@@ -84,9 +89,9 @@ struct batch_join_projection_guard_probe_row {
     bool rejects_nulling_var;
 };
 
-static_assert(
-    std::is_aggregate_v<batch_join_projection_guard_probe_row>);
+static_assert(std::is_aggregate_v<batch_join_projection_guard_probe_row>);
 
+/** Planner-probe results for wrapper propagation around one owned match helper. */
 struct match_helper_wrapper_propagation_probe_row {
     bool exact_owner_found;
     bool clone_applied;
@@ -109,10 +114,9 @@ struct match_helper_wrapper_propagation_probe_row {
     bool group_result_qual_rejected;
 };
 
-static_assert(
-    std::is_aggregate_v<
-        match_helper_wrapper_propagation_probe_row>);
+static_assert(std::is_aggregate_v<match_helper_wrapper_propagation_probe_row>);
 
+/** Executor-probe results for translated target and slot attribute identities. */
 struct base_match_executor_translation_probe_row {
     bool target_offset_accepted;
     bool target_attno_disagreement_rejected;
@@ -127,18 +131,15 @@ struct base_match_executor_translation_probe_row {
     bool special_out_of_range_rejected;
 };
 
-static_assert(
-    std::is_aggregate_v<
-        base_match_executor_translation_probe_row>);
+static_assert(std::is_aggregate_v<base_match_executor_translation_probe_row>);
 
+/** Scope-entry and scope-exit counters for match-owner finalization. */
 struct match_owner_finalization_scope_diagnostics_row {
     std::int64_t scopes_entered;
     std::int64_t scopes_exited;
     std::int64_t scopes_active;
 };
 
-static_assert(
-    std::is_aggregate_v<
-        match_owner_finalization_scope_diagnostics_row>);
+static_assert(std::is_aggregate_v<match_owner_finalization_scope_diagnostics_row>);
 
-}  // namespace bioseq::table
+} // namespace bioseq::table

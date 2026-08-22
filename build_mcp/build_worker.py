@@ -37,6 +37,9 @@ from build_presets import (
     CATCH_FILTER_MODES,
     CMAKE_PRESETS_FILE,
     DEFAULT_BUILD_DIR,
+    LINT_FOCUSED_MODE,
+    LINT_FULL_MODE,
+    LINT_MODES,
     MODES,
     PACKAGE_LINUX_MODE,
     POSTGRES_ERROR_SAFETY_MODE,
@@ -60,6 +63,7 @@ from build_presets import (
     _unit_test_filter_to_cli_args,
     build_dir_for,
     build_dirs_for,
+    lint_filter_to_paths,
     post_build_targets_for,
     preset_for,
     supports_bench_cli_options,
@@ -79,6 +83,7 @@ from cache_modes import (
     _validate_failed_cache_terminal_report,
     _verified_native_command_execution,
 )
+from doxygen_toolchain import ensure_exact_doxygen
 from integrity import (
     canonical_json_sha256,
     sha256_file,
@@ -87,7 +92,7 @@ from postgres_runtime import (
     _cmake_install_cmd,
     _postgresql_discovery_cache_reset_args,
     _postgresql_e2e_restart_shell_command,
-    _prepare_aws_postgresql_test_database,
+    _prepare_postgresql_test_database,
     _restart_postgresql,
 )
 from postgres_safety import (
@@ -98,7 +103,6 @@ from process_state import (
     LOG_DIR,
     REMOTE_STATE_FILE,
     STATE_FILE,
-    SUBAGENT_STATE_FILE,
     _ProcessIdentity,
     _await_guarded_worker_arm,
     _build_worker_descendant_environment,
@@ -107,26 +111,22 @@ from process_state import (
     _global_lock,
     _guarded_process_snapshot,
     _load_state,
-    _load_subagent_state,
     _log,
     _read_activity_registry,
     _refresh,
-    _refresh_subagent,
     _require_trusted_root_owned_path,
     _same_process,
     _save_state,
-    _save_subagent_state,
     _store_build_receipt,
     _stream_subprocess,
-    _subagent_global_lock,
     _tail_path,
     _terminate_unarmed_popen_group,
     _transient_activity,
     _trusted_root_owned_executable,
     _update_entry,
-    _update_subagent_entry,
     _valid_detached_worker_identity,
 )
+from subagent import subagent_activity_snapshot
 from publication import durable_replace_bytes, fsync_directory
 
 import bootstrap
@@ -186,6 +186,12 @@ LOCAL_LLVM22_CLANG = Path("/usr/lib/llvm-22/bin/clang")
 
 LOCAL_LLVM22_CLANGXX = Path("/usr/lib/llvm-22/bin/clang++")
 
+HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "LANG": "C",
+}
+
 LOCAL_CLANG_RT_CMAKE_KEYS = (
     "CMAKE_C_COMPILER_LAUNCHER",
     "CMAKE_CXX_COMPILER_LAUNCHER",
@@ -237,8 +243,10 @@ def _ensure_build_worker_timesharing_policy() -> None:
 def _safe_parallel_jobs() -> int:
     """Cap build parallelism by BOTH core count and RAM.
 
-    The heavy C++26 template TUs (pipeline/pipe.cppm, scheduler/dispatch_buffer.cppm,
-    storage/sequence_storage_manager.cppm, minimap_port.cppm, ksw2_batched.cppm)
+    The heavy C++26 template TUs (pipeline/pipe.cppm,
+    pg/scheduler/dispatch_buffer/index.cppm,
+    pg/storage/manager/sequence_storage.cppm, pipeline/minimap_port.cppm,
+    alignment_hwy/ksw2_batched.cppm)
     each peak around ~3-4 GB RSS at -O3 + thin-LTO. The previous hardcoded
     -j 32 launched dozens of them at once; on a 16 GB box that swap-thrashed
     to a near-total stall (a cold postgresql_bioseq build completed only 2
@@ -384,6 +392,7 @@ def _cmake_configure_stamp_document(
         managed_arguments: List[str],
         environment: Mapping[str, str],
         cmake_executable_identity: Mapping[str, object],
+        managed_toolchain_identity: Mapping[str, object] | None = None,
         presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
     """Seal every MCP-owned input which can select a CMake configuration."""
     preset_graph = _cmake_preset_payload_graph(
@@ -472,6 +481,9 @@ def _cmake_configure_stamp_document(
             for name in managed_environment_names
         },
     }
+    if managed_toolchain_identity:
+        inputs["managed_toolchain_identity"] = dict(
+            managed_toolchain_identity)
     canonical_inputs = json.dumps(
         inputs,
         ensure_ascii=True,
@@ -637,6 +649,48 @@ def _ensure_local_toolchain_environment(
             env["VCPKG_ROOT"] = str(candidate)
             return
 
+
+def _prepare_mode_toolchain(
+        mode: str,
+        *,
+        environment: dict[str, str],
+        log_handle) -> tuple[dict[str, str], dict[str, object]]:
+    """Provision and expose exact tools owned by one managed build mode.
+
+    Website provisioning runs before any CMake configure command. Other modes
+    remain independent of Doxygen and therefore return empty contracts.
+    """
+    if mode != "website":
+        return {}, {}
+
+    provisioned = ensure_exact_doxygen()
+    executable = str(provisioned.executable)
+    executable_directory = str(provisioned.executable.parent)
+    existing_path = environment.get("PATH", "")
+    path_entries = [
+        entry
+        for entry in existing_path.split(os.pathsep)
+        if entry and entry != executable_directory
+    ]
+    environment["PATH"] = os.pathsep.join(
+        [executable_directory, *path_entries])
+    identity = provisioned.configure_identity()
+    log_handle.write(
+        "# exact website Doxygen provisioned: "
+        f"path={executable} version={provisioned.version_output!r} "
+        f"platform={provisioned.platform_name} "
+        f"architecture={provisioned.architecture} "
+        f"archive_sha256={provisioned.archive_sha256} "
+        f"executable_sha256={provisioned.executable_sha256} "
+        f"cache_hit={provisioned.cache_hit}.\n"
+    )
+    log_handle.flush()
+    return (
+        {"DOXYGEN_EXECUTABLE": executable},
+        {"doxygen": identity},
+    )
+
+
 def _clear_cmake_configure_cache(build_dir: Path, log_handle, reason: str) -> None:
     _invalidate_cmake_configure_stamp(build_dir)
     log_handle.write(f"# CMake cache repair: clearing configure cache ({reason}).\n")
@@ -743,62 +797,6 @@ def _ensure_cmake_preset_tree_fresh(
         raise RuntimeError(
             f"preset {preset!r} did not produce {build_ninja}")
     return True
-
-_SUBAGENT_PROMPT_TEMPLATE = (
-    "# Context\n"
-    "You are subagent spawned from main AI agent. Your task will be stated in prompt "
-    "(from parent AI agent) below.\n\n"
-    "CRITICAL RULES — you must follow these unconditionally:\n"
-    "- This is a NON-INTERACTIVE session. You must NEVER ask questions or request clarification.\n"
-    "- You must complete ALL work described in the prompt in a single run. No deferring, no "
-    "'I will do this later', no partial work. Leaving any part of the task unfinished is a "
-    "CRITICAL FAILURE.\n"
-    "- If anything is ambiguous, make a reasonable decision and proceed. Document your decision "
-    "in task_status.\n\n"
-    "Always follow this workflow no matter what the prompt underneath says:\n"
-    "1. Read DOCS/CURRENT/GUIDELINES/0321_BIOSEQ_CODE_AND_WORKFLOW_GUIDELINES.md in full\n"
-    "2. Read prompt content and do ALL tasks specified there in full. Before finishing, spawn a "
-    "subagent that will review your response (this is to ensure the parent AI agent gets the "
-    "highest quality answer possible). Iterate this review subagent until saturation (no further "
-    "feedback). The review subagent must also follow the non-interactive, no-deferral rules.\n"
-    "3. Return response to the parent AI agent in the JSON format. The response format should "
-    "follow this pattern:\n"
-    "{\n"
-    '    "task_status": "Detailed information about completion of this task",\n'
-    '    "bugs": "Any bugs you found that needs to be flagged",\n'
-    '    "risks": "Any risks you found that needs to be flagged",\n'
-    '    "changed_files": [],\n'
-    '    "review_tldr": [],\n'
-    '    "output": []\n'
-    "}\n"
-    "The `output` array must contain one string entry per requested output (see below), "
-    "in the same order they were listed. Each entry is a free-form string — prose, code, "
-    "bullet points, whatever best answers that specific request.\n"
-    "{requested_outputs_section}\n"
-    "# Prompt\n"
-    "PROMPT FROM PARENT AI AGENT PASTED AS-IS BELOW:\n"
-    "{parent_prompt}"
-)
-
-def _build_requested_outputs_section(requested_outputs: list[str]) -> str:
-    """Render the requested_outputs list into the prompt section that tells the
-    subagent exactly what to put in each slot of the `output` array."""
-    if not requested_outputs:
-        return (
-            "No specific outputs were requested by the parent agent. "
-            "Leave the `output` array empty ([]).\n\n"
-        )
-    lines = [
-        "\n# Requested Outputs\n"
-        "The parent agent wants the following items in the `output` array, "
-        "one element per item, in this exact order:\n"
-    ]
-    for i, item in enumerate(requested_outputs, 1):
-        lines.append(f"{i}. {item}")
-    lines.append("\n")
-    return "\n".join(lines)
-
-SUBAGENT_HARD_TIMEOUT_SEC = 90 * 60.0
 
 @dataclass(frozen=True)
 class InspectTargetDefinition:
@@ -924,6 +922,450 @@ def _cmake_build_argv(
         "cmake", "--build", str(build_dir), "--target", *target_group,
         "--parallel", str(CMAKE_PARALLEL_JOBS),
     ]
+
+
+def _clang_tidy_scope(mode: str) -> str:
+    """Return the script scope owned by one closed lint build mode."""
+
+    if mode == LINT_FOCUSED_MODE:
+        return "focused"
+    if mode == LINT_FULL_MODE:
+        return "full"
+    raise ValueError(f"mode {mode!r} does not own clang-tidy analysis")
+
+
+def _clang_tidy_report_path(build_dir: Path, mode: str) -> Path:
+    """Return the build-tree report path for a lint mode."""
+
+    return build_dir / "bioseq-clang-tidy" / f"{_clang_tidy_scope(mode)}.json"
+
+
+def _clang_tidy_command(
+        build_dir: Path, mode: str, lint_paths: list[str]) -> list[str]:
+    """Construct the non-mutating clang-tidy runner command."""
+
+    command = [
+        sys.executable,
+        str(REPOSITORY_ROOT / "build_mcp" / "clang_tidy.py"),
+        "--source-root", str(REPOSITORY_ROOT),
+        "--build-dir", str(build_dir),
+        "--scope", _clang_tidy_scope(mode),
+        "--report", str(_clang_tidy_report_path(build_dir, mode)),
+    ]
+    for lint_path in lint_paths:
+        command.extend(("--path", lint_path))
+    return command
+
+
+def _clang_tidy_report_summary(
+    report_path: Path,
+    *,
+    expected_scope: str | None = None,
+) -> dict[str, object]:
+    """Validate a lint report and return its bounded status summary."""
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"clang-tidy did not create its report: {report_path}"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"clang-tidy report is invalid JSON: {error}") from error
+    if not isinstance(report, dict) or report.get("schema_version") != 2:
+        raise RuntimeError("clang-tidy report has an unsupported schema")
+    required_integer_fields = (
+        "available_count",
+        "available_path_count",
+        "available_authored_count",
+        "available_authored_path_count",
+        "available_generated_count",
+        "available_generated_path_count",
+        "selected_count",
+        "selected_path_count",
+        "authored_count",
+        "authored_path_count",
+        "generated_count",
+        "generated_path_count",
+        "optimization_verified_count",
+        "source_suppression_count",
+        "diagnostic_count",
+        "failure_count",
+    )
+    for field_name in required_integer_fields:
+        value = report.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RuntimeError(
+                f"clang-tidy report field {field_name!r} must be a nonnegative integer")
+    compile_databases = report.get("compile_databases")
+    if not isinstance(compile_databases, list) or not compile_databases:
+        raise RuntimeError(
+            "clang-tidy report must identify at least one compile database")
+    compile_database_paths: list[str] = []
+    for evidence in compile_databases:
+        if not isinstance(evidence, dict):
+            raise RuntimeError("clang-tidy compile database evidence is invalid")
+        path = evidence.get("path")
+        digest = evidence.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or ".." in Path(path).parts
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise RuntimeError("clang-tidy compile database evidence is invalid")
+        compile_database_paths.append(path)
+    if len(set(compile_database_paths)) != len(compile_database_paths):
+        raise RuntimeError("clang-tidy compile database evidence has duplicate paths")
+    contributions = report.get("compile_database_contributions")
+    if (
+        not isinstance(contributions, dict)
+        or set(contributions) != set(compile_database_paths)
+    ):
+        raise RuntimeError("clang-tidy compile database contributions are invalid")
+    for path, count in contributions.items():
+        if not isinstance(path, str) or type(count) is not int or count < 0:
+            raise RuntimeError("clang-tidy compile database contributions are invalid")
+    if sum(contributions.values()) != report["available_count"]:
+        raise RuntimeError(
+            "clang-tidy compile database contributions do not cover availability")
+    report_scope = report.get("scope")
+    if report_scope not in {"focused", "full"}:
+        raise RuntimeError("clang-tidy report has an invalid scope")
+    if expected_scope is not None and report_scope != expected_scope:
+        raise RuntimeError(
+            "clang-tidy report scope does not match the scheduled mode: "
+            f"expected={expected_scope} observed={report_scope}"
+        )
+    if (
+        report["available_authored_count"] + report["available_generated_count"]
+        != report["available_count"]
+    ):
+        raise RuntimeError("clang-tidy report available unit counts are inconsistent")
+    if (
+        report["available_authored_path_count"]
+        + report["available_generated_path_count"]
+        != report["available_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report available path counts are inconsistent")
+    if (
+        report["available_count"] == 0
+        or report["available_path_count"] == 0
+        or report["available_path_count"] > report["available_count"]
+        or report["available_authored_path_count"]
+        > report["available_authored_count"]
+        or report["available_generated_path_count"]
+        > report["available_generated_count"]
+    ):
+        raise RuntimeError("clang-tidy report available coverage is empty or invalid")
+    if (
+        report["authored_count"] + report["generated_count"]
+        != report["selected_count"]
+    ):
+        raise RuntimeError("clang-tidy report unit counts are inconsistent")
+    if (
+        report["authored_path_count"] + report["generated_path_count"]
+        != report["selected_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected path counts are inconsistent")
+    if (
+        report["selected_count"] == 0
+        or report["selected_path_count"] == 0
+        or report["selected_path_count"] > report["selected_count"]
+        or report["authored_path_count"] > report["authored_count"]
+        or report["generated_path_count"] > report["generated_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected coverage is empty or invalid")
+    if (
+        report["selected_count"] > report["available_count"]
+        or report["selected_path_count"] > report["available_path_count"]
+        or report["authored_count"] > report["available_authored_count"]
+        or report["generated_count"] > report["available_generated_count"]
+        or report["authored_path_count"] > report["available_authored_path_count"]
+        or report["generated_path_count"] > report["available_generated_path_count"]
+    ):
+        raise RuntimeError("clang-tidy report selected coverage exceeds availability")
+    if report["optimization_verified_count"] != report["available_count"]:
+        raise RuntimeError(
+            "clang-tidy report does not verify every available compile profile")
+    optimization_policy = report.get("optimization_policy")
+    if optimization_policy != {
+        "optimization_flags": ["-O3"],
+        "ndebug_required": True,
+    }:
+        raise RuntimeError("clang-tidy report has an invalid optimization policy")
+    if report["failure_count"] > report["selected_count"]:
+        raise RuntimeError("clang-tidy report failure count exceeds selected units")
+    results = report.get("results")
+    if not isinstance(results, list) or len(results) != report["selected_count"]:
+        raise RuntimeError("clang-tidy report result count is inconsistent")
+    result_identities: set[tuple[str, int]] = set()
+    result_paths: dict[bool, set[str]] = {False: set(), True: set()}
+    result_counts: dict[bool, int] = {False: 0, True: 0}
+    result_failures = 0
+    result_diagnostics = 0
+    result_suppressions: set[tuple[str, str]] = set()
+    result_database_counts = {path: 0 for path in compile_database_paths}
+    for result in results:
+        if not isinstance(result, dict):
+            raise RuntimeError("clang-tidy report result record is invalid")
+        path = result.get("path")
+        variant = result.get("variant")
+        generated = result.get("generated")
+        exit_code = result.get("exit_code")
+        diagnostic_count = result.get("diagnostic_count")
+        diagnostics = result.get("diagnostics")
+        source_suppressions = result.get("source_suppressions")
+        compile_database = result.get("compile_database")
+        response_files = result.get("response_files")
+        suppression_profiles = result.get("suppression_profiles")
+        disabled_checks = result.get("disabled_checks")
+        ninja_owners = result.get("ninja_owner_candidates")
+        heuristic_owners = result.get("heuristic_owner_candidates")
+        owner_query_status = result.get("owner_query_status")
+        working_directory = result.get("working_directory")
+        compiler = result.get("compiler")
+        duration_seconds = result.get("duration_seconds")
+        generator_hint = result.get("generator_hint")
+        invocation = result.get("invocation")
+        output = result.get("output")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or ".." in Path(path).parts
+            or type(variant) is not int
+            or variant < 0
+            or type(generated) is not bool
+            or type(exit_code) is not int
+            or type(diagnostic_count) is not int
+            or diagnostic_count < 0
+            or not isinstance(diagnostics, list)
+            or len(diagnostics) != diagnostic_count
+            or any(not isinstance(diagnostic, dict) for diagnostic in diagnostics)
+            or not isinstance(source_suppressions, list)
+            or not isinstance(compile_database, str)
+            or compile_database not in contributions
+            or not isinstance(response_files, list)
+            or not isinstance(suppression_profiles, list)
+            or any(
+                not isinstance(profile, str)
+                or profile not in {
+                    "named_module",
+                    "postgres_abi",
+                    "generated_highway",
+                    "zero_cost_hot_path",
+                }
+                for profile in suppression_profiles
+            )
+            or len(set(suppression_profiles)) != len(suppression_profiles)
+            or not isinstance(disabled_checks, list)
+            or any(
+                not isinstance(check, str) or not check or "*" in check
+                for check in disabled_checks
+            )
+            or len(set(disabled_checks)) != len(disabled_checks)
+            or not isinstance(ninja_owners, list)
+            or any(not isinstance(owner, str) or not owner for owner in ninja_owners)
+            or len(set(ninja_owners)) != len(ninja_owners)
+            or not isinstance(heuristic_owners, list)
+            or any(
+                not isinstance(owner, str) or not owner or owner == "CMakeLists.txt"
+                for owner in heuristic_owners
+            )
+            or len(set(heuristic_owners)) != len(heuristic_owners)
+            or (
+                owner_query_status is not None
+                and (
+                    not isinstance(owner_query_status, str)
+                    or re.fullmatch(
+                        r"ninja-(?:authored-inputs|no-authored-inputs|timeout|"
+                        r"exit--?\d+|error-[A-Za-z_][A-Za-z0-9_]*)",
+                        owner_query_status,
+                    ) is None
+                )
+            )
+            or not isinstance(working_directory, str)
+            or not Path(working_directory).is_absolute()
+            or not isinstance(compiler, str)
+            or not Path(compiler).is_absolute()
+            or (
+                not isinstance(duration_seconds, (int, float))
+                or isinstance(duration_seconds, bool)
+                or not math.isfinite(duration_seconds)
+                or duration_seconds < 0
+            )
+            or (generator_hint is not None and not isinstance(generator_hint, str))
+            or not isinstance(invocation, list)
+            or not invocation
+            or any(not isinstance(argument, str) for argument in invocation)
+            or not isinstance(output, str)
+        ):
+            raise RuntimeError("clang-tidy report result record is invalid")
+        if (
+            (not generated and (ninja_owners or heuristic_owners or owner_query_status))
+            or (
+                generated
+                and (exit_code != 0 or diagnostic_count != 0)
+                and not owner_query_status
+            )
+        ):
+            raise RuntimeError("clang-tidy generated-owner result record is invalid")
+        for response_file in response_files:
+            response_path = (
+                response_file.get("path")
+                if isinstance(response_file, dict)
+                else None
+            )
+            if (
+                not isinstance(response_file, dict)
+                or not isinstance(response_path, str)
+                or not response_path
+                or response_path.startswith("/")
+                or "\\" in response_path
+                or ".." in Path(response_path).parts
+                or not isinstance(response_file.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", response_file["sha256"]) is None
+            ):
+                raise RuntimeError("clang-tidy response-file evidence is invalid")
+        if len({item["path"] for item in response_files}) != len(response_files):
+            raise RuntimeError("clang-tidy response-file evidence has duplicate paths")
+        for diagnostic in diagnostics:
+            if (
+                not isinstance(diagnostic.get("path"), str)
+                or not diagnostic["path"]
+                or type(diagnostic.get("line")) is not int
+                or diagnostic["line"] <= 0
+                or type(diagnostic.get("column")) is not int
+                or diagnostic["column"] <= 0
+                or diagnostic.get("severity") not in {"warning", "error"}
+                or not isinstance(diagnostic.get("message"), str)
+                or not diagnostic["message"]
+                or (
+                    diagnostic.get("check") is not None
+                    and (
+                        not isinstance(diagnostic.get("check"), str)
+                        or not diagnostic["check"]
+                    )
+                )
+            ):
+                raise RuntimeError("clang-tidy diagnostic record is invalid")
+        identity = (path, variant)
+        if identity in result_identities:
+            raise RuntimeError("clang-tidy report has duplicate result identities")
+        result_identities.add(identity)
+        result_counts[generated] += 1
+        result_paths[generated].add(path)
+        result_failures += exit_code != 0
+        result_diagnostics += diagnostic_count
+        result_database_counts[compile_database] += 1
+        suppression_identities: set[str] = set()
+        for suppression in source_suppressions:
+            if not isinstance(suppression, dict):
+                raise RuntimeError("clang-tidy source suppression record is invalid")
+            line = suppression.get("line")
+            kind = suppression.get("kind")
+            checks = suppression.get("checks")
+            reason = suppression.get("reason")
+            if (
+                type(line) is not int
+                or line <= 0
+                or kind not in {
+                    "NOLINT",
+                    "NOLINTNEXTLINE",
+                    "NOLINTBEGIN",
+                    "NOLINTEND",
+                }
+                or not isinstance(checks, list)
+                or not checks
+                or any(
+                    not isinstance(check, str)
+                    or re.fullmatch(r"[a-z0-9_.-]+", check) is None
+                    for check in checks
+                )
+                or len(set(checks)) != len(checks)
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                raise RuntimeError("clang-tidy source suppression record is invalid")
+            suppression_identity = json.dumps(
+                suppression,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if suppression_identity in suppression_identities:
+                raise RuntimeError(
+                    "clang-tidy source suppression record is duplicated"
+                )
+            suppression_identities.add(suppression_identity)
+            result_suppressions.add((path, suppression_identity))
+    if any(
+        result_database_counts[path] > contributions[path]
+        for path in compile_database_paths
+    ):
+        raise RuntimeError(
+            "clang-tidy result database provenance exceeds availability"
+        )
+    if (
+        bool(result_paths[False] & result_paths[True])
+        or result_counts[False] != report["authored_count"]
+        or result_counts[True] != report["generated_count"]
+        or len(result_paths[False]) != report["authored_path_count"]
+        or len(result_paths[True]) != report["generated_path_count"]
+        or result_failures != report["failure_count"]
+        or result_diagnostics != report["diagnostic_count"]
+        or len(result_suppressions) != report["source_suppression_count"]
+    ):
+        raise RuntimeError("clang-tidy report result aggregates are inconsistent")
+    if report_scope == "full":
+        if (
+            report["selected_count"] != report["available_count"]
+            or report["selected_path_count"] != report["available_path_count"]
+        ):
+            raise RuntimeError(
+                "full clang-tidy report does not cover every available unit")
+        if (
+            report["available_authored_count"] == 0
+            or report["available_generated_count"] == 0
+        ):
+            raise RuntimeError(
+                "full clang-tidy report requires authored and generated coverage")
+        if len(compile_databases) < 2:
+            raise RuntimeError(
+                "full clang-tidy report requires primary and generator databases")
+        generator_database_paths = {
+            path
+            for path in compile_database_paths
+            if re.fullmatch(
+                r"codegen/generator-build(?:-[a-z0-9][a-z0-9-]*)?/"
+                r"compile_commands\.json",
+                path,
+            ) is not None
+        }
+        if result_database_counts != contributions:
+            raise RuntimeError(
+                "full clang-tidy result database provenance is inconsistent"
+            )
+        if (
+            contributions.get("compile_commands.json", 0) == 0
+            or not any(contributions[path] > 0 for path in generator_database_paths)
+        ):
+            raise RuntimeError(
+                "full clang-tidy report lacks primary or generator database "
+                "contribution"
+            )
+    return {
+        "scope": report_scope,
+        **{field_name: report[field_name] for field_name in required_integer_fields},
+        "compile_database_count": len(compile_databases),
+        "compile_database_contributions": contributions,
+        "optimization_policy": optimization_policy,
+        "policy_sha256": report.get("policy_sha256"),
+        "toolchain": report.get("toolchain"),
+    }
 
 _BUILD_SOURCE_FINGERPRINT_PATHS = tuple(
     path
@@ -1495,19 +1937,24 @@ def _receipt_authorized_artifact_evidence(
     # generated manifest.  Receipt-pinned execution must authenticate that
     # indirection and every referenced build-tree file, not merely the runner
     # executable that consumes it.
-    requires_cache_artifact_manifest = any(
-        argument.startswith("{")
-        and argument.endswith("}")
-        and argument != "{report}"
+    cache_artifact_keys = sorted({
+        argument[1:-1]
         for command in MODES[mode].commands
         for argument in command[1:]
-    )
-    if requires_cache_artifact_manifest:
+        if argument.startswith("{")
+        and argument.endswith("}")
+        and argument != "{report}"
+    })
+    if cache_artifact_keys:
         cache_artifact_manifest = bin_dir / "cache_native_artifacts.json"
         select_regular(cache_artifact_manifest, required=True)
-        for key, value in _cache_native_artifacts(bin_dir).items():
+        cache_artifacts = _cache_native_artifacts(bin_dir)
+        for key in cache_artifact_keys:
+            value = cache_artifacts[key]
             if not value:
-                continue
+                raise RuntimeError(
+                    "cache native artifact manifest has no path for selected "
+                    f"mode placeholder: {key}")
             referenced = Path(value)
             directory_key = key.endswith(
                 ("_postgres_bin_dir", "_postgres_stage_root"))
@@ -2390,7 +2837,12 @@ _RUN_ONLY_RECEIPT_MODES = {
 def _build_receipt_required(mode: str, build_only: bool) -> bool:
     # The specialized two-tree PostgreSQL error-safety worker owns separate
     # qualification receipts and bypasses the ordinary single-tree sealer.
-    return build_only and mode != POSTGRES_ERROR_SAFETY_MODE
+    # Lint modes produce analysis reports rather than reusable runtime trees.
+    return (
+        build_only
+        and mode != POSTGRES_ERROR_SAFETY_MODE
+        and mode not in LINT_MODES
+    )
 
 def _run_only_from_build_receipt(
         *,
@@ -2459,8 +2911,8 @@ def _run_only_from_build_receipt(
                 f"{rc}")
         _restart_postgresql(
             active_build_dir, active_preset, log_handle, deadline)
-        _prepare_aws_postgresql_test_database(
-            active_preset, log_handle, deadline)
+        _prepare_postgresql_test_database(
+            active_build_dir, active_preset, log_handle, deadline, env=env)
 
     _update_entry(mode, step="running from build receipt")
     run_env = env
@@ -2541,7 +2993,8 @@ def _postgres_safety_services() -> dict[str, object]:
 
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
-                      test_flags=None, bench_e2e_config=None,
+                      test_flags=None, lint_paths=None,
+                      bench_e2e_config=None,
                       run_only: bool = False,
                       reuse_build_receipt: str | None = None,
                       build_timeout_sec: int | None = None,
@@ -2563,6 +3016,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
     validated Catch2 argument list appended identically to every executable in
     a Catch correctness mode for a focused test run.
 
+    `lint_paths` contains exact normalized compile units and is accepted only
+    by the focused lint mode.
+
     `bench_e2e_config` is an absolute, server-validated path inside this
     repository and is exposed to the benchmark-e2e executable.
     """
@@ -2577,6 +3033,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         return 1
     bench_flags = bench_flags or []
     test_flags = test_flags or []
+    lint_paths = lint_paths or []
     if build_timeout_sec is not None and (
         not isinstance(build_timeout_sec, int)
         or isinstance(build_timeout_sec, bool)
@@ -2613,6 +3070,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         "run_only": run_only,
         "build_timeout_sec": build_timeout_sec,
         "reuse_build_receipt": reuse_build_receipt,
+        "lint_paths": lint_paths,
     }
     for field_name, observed_value in reserved_arguments.items():
         if field_name in entry and entry.get(field_name) != observed_value:
@@ -2622,9 +3080,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 f"worker={observed_value!r}")
             return 1
     mode_details = MODES[mode]
+    if mode == LINT_FOCUSED_MODE:
+        normalized_lint_paths, lint_error = lint_filter_to_paths(
+            {"paths": lint_paths}
+        )
+        if lint_error is not None or normalized_lint_paths != lint_paths:
+            _log(
+                f"{mode} worker received invalid lint paths: "
+                f"{lint_error or 'paths are not normalized and unique'}"
+            )
+            return 1
+    elif mode == LINT_FULL_MODE:
+        if lint_paths:
+            _log(f"{mode} worker does not accept focused lint paths")
+            return 1
+    elif lint_paths:
+        _log(f"{mode} worker does not accept lint paths")
+        return 1
     if mode_details.requires_build_only and (
         not build_only
         or run_only
+        or (mode in LINT_MODES and build_timeout_sec is not None)
         or debug
         or bench_flags
         or test_flags
@@ -2632,14 +3108,14 @@ def _run_build_worker(mode: str, build_only: bool = False,
     ):
         _log(
             f"{mode} worker requires build_only=true and rejects every "
-            "runtime-selection input")
+            "unsupported runtime-selection input")
         return 1
     if mode == PACKAGE_LINUX_MODE:
         if (
             build_only or run_only or fresh or build_timeout_sec is not None
             or reuse_build_receipt is not None
             or debug or bench_flags or test_flags
-            or bench_e2e_config
+            or lint_paths or bench_e2e_config
         ):
             _log("package-linux worker received forbidden variable inputs")
             return 1
@@ -2712,6 +3188,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# build_hard_timeout_at={build_hard_deadline}\n"
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
+        f"# lint_paths={json.dumps(lint_paths, ensure_ascii=True)}\n"
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
         f"# hard_timeout_min={mode_timeout_sec / 60.0}\n"
@@ -2784,6 +3261,22 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # VCPKG_ROOT from an existing configured tree for a fresh sibling
         # test/debug tree.
         _ensure_local_toolchain_environment(env, active_build_dir)
+        if mode == "website":
+            _update_entry(
+                mode,
+                step="provisioning exact Doxygen 1.9.8",
+                build_only=build_only,
+                debug=debug,
+                preset=active_preset,
+                build_dir=str(active_build_dir),
+            )
+        managed_cache_variables, managed_toolchain_identity = (
+            _prepare_mode_toolchain(
+                mode,
+                environment=env,
+                log_handle=log_handle,
+            )
+        )
         if _is_aws_clang_preset(active_preset):
             env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
         elif _is_aws_gcc_preset(active_preset):
@@ -2820,7 +3313,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # RERUN_CMAKE dependency graph, so relying on build.ninja alone can
         # silently retain stale include/toolchain cache values. Conversely,
         # configuring every run regenerates all module dyndep/modmap edges.
-        required_cache = mode_details.required_cache_variables or {}
+        required_cache = dict(mode_details.required_cache_variables or {})
+        overlapping_cache_variables = (
+            set(required_cache) & set(managed_cache_variables)
+        )
+        if overlapping_cache_variables:
+            raise RuntimeError(
+                "managed mode toolchain cache variables overlap the static "
+                "mode contract: "
+                f"{sorted(overlapping_cache_variables)}"
+            )
+        required_cache.update(managed_cache_variables)
         preset_cache_contract = _cmake_preset_cache_contract(
             active_preset,
             ("PostgreSQL_CONFIG",),
@@ -2848,6 +3351,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             managed_arguments=initial_clang_rt_args,
             environment=env,
             cmake_executable_identity=cmake_identity,
+            managed_toolchain_identity=managed_toolchain_identity,
         )
         build_ninja = active_build_dir / "build.ninja"
         build_phase_started_at = time.time()
@@ -3187,12 +3691,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
             "# verified BIOSEQ_TEST_INDEXES="
             f"{verified_test_indexes} preset={active_preset}.\n")
         log_handle.flush()
+        final_managed_toolchain_identity = managed_toolchain_identity
+        if mode == "website":
+            (
+                final_managed_cache_variables,
+                final_managed_toolchain_identity,
+            ) = _prepare_mode_toolchain(
+                mode,
+                environment=env,
+                log_handle=log_handle,
+            )
+            if final_managed_cache_variables != managed_cache_variables:
+                raise RuntimeError(
+                    "website Doxygen cache selection changed during configure"
+                )
         final_configure_stamp = _cmake_configure_stamp_document(
             active_preset,
             mode_cache_variables=configure_cache_contract,
             managed_arguments=initial_clang_rt_args,
             environment=env,
             cmake_executable_identity=_cmake_executable_identity(env),
+            managed_toolchain_identity=final_managed_toolchain_identity,
         )
         configure_seal = _finalize_cmake_configure_stamp(
             active_build_dir,
@@ -3293,6 +3812,50 @@ def _run_build_worker(mode: str, build_only: bool = False,
             except OSError:
                 pass
 
+        lint_report_files: list[Path] = []
+        lint_summary: dict[str, object] | None = None
+        if mode in LINT_MODES:
+            lint_report_path = _clang_tidy_report_path(active_build_dir, mode)
+            lint_report_path.unlink(missing_ok=True)
+            _update_entry(
+                mode,
+                step=f"running clang-tidy ({_clang_tidy_scope(mode)})",
+                lint_paths=list(lint_paths),
+            )
+            lint_command = _clang_tidy_command(
+                active_build_dir,
+                mode,
+                list(lint_paths),
+            )
+            rc = _stream_subprocess(
+                lint_command,
+                log_handle,
+                build_soft_deadline,
+                cwd=REPOSITORY_ROOT,
+                env=env,
+                hard_kill_deadline=build_hard_deadline,
+                state_mode=mode,
+                phase=f"clang-tidy:{_clang_tidy_scope(mode)}",
+                require_verified_termination=guarded_build,
+                deadline_clock=build_deadline_clock,
+            )
+            if lint_report_path.is_file():
+                lint_report_files = [lint_report_path]
+                lint_summary = _clang_tidy_report_summary(
+                    lint_report_path,
+                    expected_scope=_clang_tidy_scope(mode),
+                )
+                _update_entry(
+                    mode,
+                    report_files=[str(lint_report_path)],
+                    clang_tidy=lint_summary,
+                )
+            if rc != 0:
+                raise RuntimeError(
+                    f"clang-tidy {_clang_tidy_scope(mode)} analysis exited "
+                    f"with code {rc}; report={lint_report_path}"
+                )
+
         if build_only:
             receipt_entry = dict(_load_state().get(mode) or entry)
             receipt = (
@@ -3312,9 +3875,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 step="completed",
                 completed_at=completed_at,
                 exit_code=0,
-                report_files=[],
+                report_files=[str(path) for path in lint_report_files],
                 build_only=True,
                 debug=debug,
+                clang_tidy=lint_summary,
                 build_receipt_id=(
                     receipt["build_receipt_id"] if receipt else None),
                 configuration=(receipt["configuration"] if receipt else None),
@@ -3342,8 +3906,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
                         f"exited with code {rc}")
                 _restart_postgresql(active_build_dir, active_preset,
                                     log_handle, deadline)
-                _prepare_aws_postgresql_test_database(
-                    active_preset, log_handle, deadline)
+                _prepare_postgresql_test_database(
+                    active_build_dir, active_preset, log_handle, deadline,
+                    env=env)
 
             for post_target in post_build_targets_for(mode, build_only):
                 _update_entry(
@@ -3376,7 +3941,13 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"{env['BIOSEQ_E2E_PG_RESTART_CMD']}\n")
                 log_handle.flush()
             run_env = env
-            if mode == "benchmark-e2e" and bench_e2e_config is not None:
+            if mode == "highway-gcc-canary":
+                run_env = HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT.copy()
+                log_handle.write(
+                    "# highway-gcc-canary runtime environment="
+                    "PATH,LC_ALL,LANG\n")
+                log_handle.flush()
+            elif mode == "benchmark-e2e" and bench_e2e_config is not None:
                 run_env = env.copy()
                 run_env["BIOSEQ_E2E_CONFIG_OVERRIDE"] = bench_e2e_config
                 log_handle.write(
@@ -3850,19 +4421,30 @@ def tool_start_build(mode: str, build_only: bool = False,
                 "build_timeout_sec requires fresh=true so detached-process "
                 "ownership is isolated to one MCP build directory")
     mode_details = MODES[mode]
+    focused_lint_filter = (
+        mode == LINT_FOCUSED_MODE
+        and filter_supplied
+        and bench_filter is not None
+    )
     if mode_details.requires_build_only and (
         not build_only
         or run_only
         or reuse_build_receipt is not None
+        or (mode in LINT_MODES and build_timeout_sec is not None)
         or debug_supplied or debug
-        or filter_supplied or bench_filter is not None
+        or (
+            (filter_supplied or bench_filter is not None)
+            and not focused_lint_filter
+        )
         or debug_report_supplied or debug_report
         or bench_e2e_config is not None
     ):
         return (
             f"{mode} is a fixed local compile gate: it requires "
-            "build_only=true and accepts no debug, filter, debug_report, "
-            "bench_e2e_config inputs.")
+            "build_only=true and accepts no unsupported debug, filter, "
+            "debug_report, build_timeout_sec, or bench_e2e_config inputs.")
+    if mode == LINT_FOCUSED_MODE and not focused_lint_filter:
+        return "lint-focused requires a nonempty filter.paths selection"
     if mode == PACKAGE_LINUX_MODE and (
         build_only
         or run_only or fresh or build_timeout_sec is not None
@@ -3957,7 +4539,17 @@ def tool_start_build(mode: str, build_only: bool = False,
     # expressions and forwarded identically to every executable in the mode.
     bench_flags: list[str] = []
     test_flags: list[str] = []
-    if mode in CATCH_FILTER_MODES:
+    lint_paths: list[str] = []
+    if mode in LINT_MODES:
+        if debug_report_supplied or debug_report:
+            return "lint modes do not accept debug_report"
+        if mode == LINT_FOCUSED_MODE:
+            lint_paths, lint_error = lint_filter_to_paths(bench_filter)
+            if lint_error is not None:
+                return f"Invalid focused lint filter: {lint_error}"
+        elif filter_supplied or bench_filter is not None:
+            return "lint-full does not accept filter; it always lints the full owned database"
+    elif mode in CATCH_FILTER_MODES:
         if debug_report_supplied or debug_report:
             return ("`debug_report` is bench-only and is not accepted for "
                     f"Catch correctness mode {mode!r}.")
@@ -4088,9 +4680,14 @@ def tool_start_build(mode: str, build_only: bool = False,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
             "bench_e2e_config": worker_e2e_config,
+            "lint_paths": list(lint_paths),
             "rt_priority": configured_rt_priority,
             "effective_run_args":
-                test_flags if mode in CATCH_FILTER_MODES else bench_flags,
+                (
+                    lint_paths
+                    if mode in LINT_MODES
+                    else (test_flags if mode in CATCH_FILTER_MODES else bench_flags)
+                ),
         }
         _save_state(state)
 
@@ -4115,6 +4712,7 @@ def tool_start_build(mode: str, build_only: bool = False,
                      "--reuse-build-receipt", reuse_build_receipt or "",
                      "--bench-flags", json.dumps(bench_flags),
                      "--test-flags", json.dumps(test_flags),
+                     "--lint-paths", json.dumps(lint_paths),
                      "--benchmark-e2e-config", worker_e2e_config or ""],
                     stdin=subprocess.DEVNULL,
                     stdout=bootstrap_log,
@@ -4172,6 +4770,7 @@ def tool_start_build(mode: str, build_only: bool = False,
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"rt_priority={configured_rt_priority} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
+             f"lint_paths={lint_paths} "
              f"bench_e2e_config={resolved_e2e_config} "
              f"log={log_path}")
 
@@ -4193,6 +4792,8 @@ def tool_start_build(mode: str, build_only: bool = False,
             + (f" with bench flags {' '.join(bench_flags)}" if bench_flags else "")
             + (f" with focused Catch2 args {shlex.join(test_flags)}"
                if test_flags else "")
+            + (f" with focused lint paths {shlex.join(lint_paths)}"
+               if lint_paths else "")
             + (f" with E2E config {resolved_e2e_config}"
                if resolved_e2e_config else "")
             + f". Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
@@ -4216,6 +4817,11 @@ def _run_build_inline(mode: str, build_only: bool = False,
     bench_flags = list(bench_flags or [])
     test_flags = list(test_flags or [])
     mode_details = MODES[mode]
+    if mode == LINT_FOCUSED_MODE:
+        _log(
+            "--run-build-sync: lint-focused requires public MCP filter.paths "
+            "and is not an inline remote mode")
+        return 2
     if mode_details.requires_build_only and (
         not build_only or debug or bench_flags or test_flags
         or bench_e2e_config
@@ -4312,10 +4918,13 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "uses_private_cluster": mode_details.uses_private_cluster,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
+            "lint_paths": [],
             "bench_e2e_config": resolved_e2e_config,
             "rt_priority": configured_rt_priority,
             "effective_run_args": (
-                test_flags if mode in CATCH_FILTER_MODES else bench_flags
+                []
+                if mode in LINT_MODES
+                else (test_flags if mode in CATCH_FILTER_MODES else bench_flags)
             ),
         }
         _save_state(state)
@@ -4332,6 +4941,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
         debug=debug,
         bench_flags=bench_flags,
         test_flags=test_flags,
+        lint_paths=[],
         bench_e2e_config=resolved_e2e_config,
     )
 
@@ -4554,13 +5164,7 @@ def _local_activity() -> dict:
              if key not in known_keys]
         )
 
-    subagent_state, subagent_present = _read_activity_registry(
-        SUBAGENT_STATE_FILE)
-    subagent_activity = _transient_activity(
-        [subagent_state] if subagent_state else (
-            [None] if subagent_state is None else []),
-        registry_present=subagent_present,
-    )
+    subagent_activity = subagent_activity_snapshot()
     remote_state, remote_present = _read_activity_registry(REMOTE_STATE_FILE)
     remote_activity = _transient_activity(
         [remote_state] if remote_state else (
@@ -4681,6 +5285,12 @@ def tool_status(mode: str | None = None) -> str:
         if isinstance(artifact_counts, dict)
         else ""
     )
+    clang_tidy_summary = entry.get("clang_tidy")
+    clang_tidy_suffix = (
+        ". Clang-tidy: " + json.dumps(clang_tidy_summary, sort_keys=True)
+        if isinstance(clang_tidy_summary, dict)
+        else ""
+    )
     guard_suffix = ""
     if entry.get("build_timeout_sec") is not None:
         guard_suffix = (
@@ -4713,7 +5323,8 @@ def tool_status(mode: str | None = None) -> str:
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
-                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}")
+                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}")
 
     completed_at = entry.get("completed_at") or time.time()
     duration_min = (completed_at - entry["started_at"]) / 60.0
@@ -4737,6 +5348,7 @@ def tool_status(mode: str | None = None) -> str:
         msg += receipt_suffix
         msg += guard_suffix
         msg += artifact_suffix
+        msg += clang_tidy_suffix
         return msg
 
     if status == "killed_timeout":
@@ -4744,7 +5356,8 @@ def tool_status(mode: str | None = None) -> str:
                 f"{focus_suffix} "
                 f"Logs for inspection are available here: "
                 f"{log_path}{report_suffix}{qualification_suffix}"
-                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}. "
+                f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}. "
                 "Termination evidence: "
                 f"{json.dumps(entry.get('termination_evidence'), sort_keys=True)}")
 
@@ -4761,6 +5374,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"Log: {log_path}{report_suffix}{qualification_suffix}."
                 f"{private_note}{bootstrap_suffix}{guard_suffix}"
                 f"{artifact_suffix}"
+                f"{clang_tidy_suffix}"
                 f"{termination_suffix}")
 
     if status == "aborted":
@@ -4769,6 +5383,7 @@ def tool_status(mode: str | None = None) -> str:
                 f"{focus_suffix} "
                 f"Log: {log_path}{report_suffix}{qualification_suffix}"
                 f"{bootstrap_suffix}{guard_suffix}{artifact_suffix}"
+                f"{clang_tidy_suffix}"
                 f"{termination_suffix}")
 
     return (f"{mode_details.label} status: {status}."
@@ -5484,223 +6099,3 @@ def tool_papers_inspect(arguments: dict) -> dict:
         "content": content,
         "isError": bool(render_errors),
     }
-
-def _run_subagent_worker() -> int:
-    """Detached worker entry point — invoked via --run-subagent.
-
-    Reads the full prompt and config from SUBAGENT_STATE_FILE (written by
-    tool_subagent before spawning this process), runs codex exec, streams
-    its JSONL output to the log file, and captures the final message via
-    --output-last-message.  Updates state on every significant transition so
-    subagent_status always reflects reality.
-    """
-    state = _load_subagent_state()
-    if not state:
-        _log("subagent worker: no state entry, exiting")
-        return 1
-
-    started_at = float(state["started_at"])
-    log_path    = Path(state["log_file"])
-    result_path = Path(state["result_file"])
-    timeout_sec = float(state.get("timeout_sec", 3600))
-    deadline    = started_at + min(timeout_sec, SUBAGENT_HARD_TIMEOUT_SEC)
-
-    prompt            = state.get("prompt", "")
-    requested_outputs = state.get("requested_outputs") or []
-
-    outputs_section = _build_requested_outputs_section(requested_outputs)
-    full_prompt = (
-        _SUBAGENT_PROMPT_TEMPLATE
-        .replace("{requested_outputs_section}", outputs_section)
-        .replace("{parent_prompt}", prompt)
-    )
-
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_handle = log_path.open("w", buffering=1)
-    log_handle.write(
-        f"# bioseq subagent worker — pid={os.getpid()} "
-        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
-        f"# repository_root={REPOSITORY_ROOT}\n"
-        f"# timeout_sec={timeout_sec} (hard ceiling {SUBAGENT_HARD_TIMEOUT_SEC/60:.0f} min)\n"
-        f"# result_file={result_path}\n"
-    )
-    log_handle.flush()
-
-    env = os.environ.copy()
-
-    try:
-        _update_subagent_entry(step="running")
-
-        cmd = [
-            "codex", "exec",
-            "--json",
-            "--output-last-message", str(result_path),
-            "-C", str(REPOSITORY_ROOT),
-            full_prompt,
-        ]
-        rc = _stream_subprocess(cmd, log_handle, deadline,
-                                cwd=REPOSITORY_ROOT, env=env)
-
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="completed" if rc == 0 else "failed",
-            step="completed"  if rc == 0 else "failed",
-            completed_at=completed_at,
-            exit_code=rc,
-            notes=None if rc == 0 else f"codex exited with code {rc}",
-        )
-        log_handle.write(
-            f"\n# worker exiting (rc={rc}) at "
-            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
-        )
-        return 0 if rc == 0 else 1
-
-    except TimeoutError as e:
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="killed_timeout",
-            step="killed_timeout",
-            completed_at=completed_at,
-            exit_code=None,
-            notes=str(e),
-        )
-        log_handle.write(f"\n# killed by hard timeout: {e}\n")
-        return 124
-
-    except Exception as e:
-        completed_at = time.time()
-        _update_subagent_entry(
-            status="failed",
-            step="failed",
-            completed_at=completed_at,
-            exit_code=None,
-            notes=str(e),
-        )
-        log_handle.write(f"\n# worker failed: {e}\n")
-        return 1
-
-    finally:
-        log_handle.close()
-
-def tool_subagent(prompt: str, timeout_sec: int = 3600,
-                  requested_outputs: Optional[List[str]] = None) -> str:
-    """Schedule a Codex cross-model subagent (non-blocking).
-
-    Spawns a detached worker process (identical pattern to start_build) and
-    returns immediately.  Use subagent_status to poll for completion and read
-    the result.  At most one subagent runs at a time; a second call while one
-    is running returns the current status instead of starting a duplicate.
-    """
-
-    # DO NOT EDIT THIS!
-    return "Error: subagent is disabled for now. Use native subagents!"
-
-    if not prompt or not prompt.strip():
-        return "Error: prompt must be a non-empty string."
-
-    with _subagent_global_lock():
-        state = _refresh_subagent(_load_subagent_state())
-        if state.get("status") == "running":
-            elapsed_min = (time.time() - float(state["started_at"])) / 60.0
-            return (
-                f"A subagent is already running (pid={state.get('pid')}, "
-                f"elapsed={elapsed_min:.1f} min). "
-                f"Use subagent_status to check progress. "
-                f"Log: {state.get('log_file')}"
-            )
-
-        started_at = time.time()
-        timestamp  = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
-        log_path    = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.log"
-        result_path = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.result.json"
-
-        server_path = Path(__file__).with_name("server.py").resolve()
-        proc = subprocess.Popen(
-            [sys.executable, str(server_path), "--run-subagent"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
-
-        _save_subagent_state({
-            "status":            "running",
-            "step":              "spawning",
-            "started_at":        started_at,
-            "completed_at":      None,
-            "pid":               proc.pid,
-            "log_file":          str(log_path),
-            "result_file":       str(result_path),
-            "exit_code":         None,
-            "notes":             None,
-            "timeout_sec":       timeout_sec,
-            "prompt":            prompt,
-            "requested_outputs": requested_outputs or [],
-            "prompt_preview":    prompt[:200],
-        })
-        _log(f"started subagent worker pid={proc.pid} log={log_path}")
-
-    return (
-        f"Subagent scheduled (pid={proc.pid}). "
-        f"Use subagent_status to check progress and retrieve the result. "
-        f"Log: {log_path}. Result will be written to: {result_path}"
-    )
-
-def tool_subagent_status() -> str:
-    """Return the current status of the most recently scheduled subagent."""
-    state = _load_subagent_state()
-    if not state:
-        return "No subagent has been scheduled yet. Use the subagent tool to spawn one."
-
-    state = _refresh_subagent(state)
-    status   = state.get("status", "unknown")
-    log_path = state.get("log_file", "(no log)")
-    result_path = state.get("result_file", "(no result file)")
-    preview  = state.get("prompt_preview", "")
-
-    if status == "running":
-        elapsed_min = (time.time() - float(state["started_at"])) / 60.0
-        eta_min     = max(0.0, float(state.get("timeout_sec", 3600)) / 60.0 - elapsed_min)
-        step        = state.get("step", "running")
-        return (
-            f"Subagent is running (pid={state.get('pid')}, "
-            f"elapsed={elapsed_min:.1f} min, ETA ≤{eta_min:.0f} min). "
-            f"Step: {step}. Prompt preview: {preview!r}. "
-            f"Log: {log_path}"
-        )
-
-    started_at   = float(state.get("started_at", time.time()))
-    completed_at = float(state.get("completed_at") or time.time())
-    duration_min = (completed_at - started_at) / 60.0
-
-    if status == "completed":
-        msg = (
-            f"Subagent completed in {duration_min:.1f} min. "
-            f"Result: {result_path}. Log: {log_path}"
-        )
-        try:
-            result_text = Path(result_path).read_text(encoding="utf-8", errors="replace")
-            if len(result_text) <= 8000:
-                msg += f"\n\nResult content:\n{result_text}"
-            else:
-                msg += (f"\n\nResult file is large ({len(result_text)} chars); "
-                        f"read {result_path} directly.")
-        except OSError:
-            msg += "\n\n(result file not found or unreadable)"
-        return msg
-
-    if status == "killed_timeout":
-        return (
-            f"Subagent was killed by the hard timeout after {duration_min:.1f} min. "
-            f"Log: {log_path}"
-        )
-
-    if status in ("failed", "aborted"):
-        notes = state.get("notes") or "(no notes)"
-        return (
-            f"Subagent {status} after {duration_min:.1f} min: {notes}. "
-            f"Log: {log_path}"
-        )
-
-    return f"Subagent status: {status}. Log: {log_path}"

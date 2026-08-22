@@ -1,3 +1,8 @@
+/**
+ * @file external/tests/io/lazy_adapter_no_pg_test.cpp
+ * @brief PostgreSQL-free lazy sequence-adapter contract tests.
+ */
+
 #ifndef NO_POSTGRES
 #error "external rank-pack adapter requires NO_POSTGRES"
 #endif

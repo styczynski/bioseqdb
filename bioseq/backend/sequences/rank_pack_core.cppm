@@ -20,6 +20,7 @@ module;
 
 export module bioseq.sequences.rank_pack_core;
 
+/** @brief Shared LSB-first rank-packing primitives for storage policies. */
 export namespace bioseq::sequences::rank_pack_detail {
 
 /** @brief Unsigned integral counter accepted by the packing primitives. */
@@ -170,8 +171,8 @@ requires (std::unsigned_integral<p_storage_unit>
  * @tparam p_bits_per_character Logical rank width.
  * @tparam p_letters_per_unit Logical ranks stored in one destination word.
  * @tparam p_write_unit_type Callable accepting the final destination word.
- * @param partial_word In-progress destination word; cleared after a flush.
- * @param partial_letters Occupied rank slots; cleared after a flush.
+ * @param partial_word In-progress destination word, cleared after a flush.
+ * @param partial_letters Occupied rank slots, cleared after a flush.
  * @param write_unit Storage-policy callback for the final word.
  * @return Capacity status and the number of padding rank slots.
  */

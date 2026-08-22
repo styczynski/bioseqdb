@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ page.title }}</title>
+<meta name="description" content="{{ page.description }}">
+<link rel="canonical" href="{{ page.canonical }}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self' https://raw.githubusercontent.com https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="{{ page.title }}">
+<meta property="og:description" content="{{ page.description }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ page.canonical }}">
+<meta property="og:image" content="{{ site.social_image_url }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ page.title }}">
+<meta name="twitter:description" content="{{ page.description }}">
+<meta name="twitter:image" content="{{ site.social_image_url }}">
+<link rel="icon" href="{{ site.favicon_url }}">
+<link rel="stylesheet" href="{{ site.css_url }}">
+<link rel="stylesheet" href="{{ site.assets_base_url }}css/benchmarks-design.css">
+</head>
+<body id="page-top" class="benchmarks-design-page">
+<a class="benchmark-skip-link" href="#benchmark-main">Skip to benchmark results</a>
+<div id="benchmarks-app"
+     data-loader-url="{{ site.assets_base_url }}js/bench-loader.js"
+     data-manifest-url="{{ site.assets_base_url }}benchmarks-manifest.json"></div>
+<template id="benchmarks-app-template">
+<div data-screen-label="BioseqDB benchmarks" class="bd-s0001">
+
+  <header id="bhead" class="bd-s0002">
+    <div class="bd-s0003">
+      <a href="{{ site.base_path }}" class="bd-s0004">
+        <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="30" height="30" alt="BioseqDB logo" class="bd-s0005">
+        <span class="bd-s0006">Bioseq<span class="bd-s0007">DB</span></span>
+        <span data-hidesm class="bd-s0008">BENCH</span>
+      </a>
+      <nav data-hidesm class="bd-s0009">
+        <a href="{{ site.base_path }}{{ site.version }}/" class="bd-s0010 bd-h001">Docs</a>
+        <a href="{{ site.base_path }}" class="bd-s0010 bd-h001">Product</a>
+        <a href="{{ site.base_path }}benchmarks/" class="bd-s0011">Benchmarks</a>
+      </nav>
+      <div class="bd-s0012"></div>
+      <div data-hidesm class="bd-s0013">
+        <span class="bd-s0014" data-bench-style="background:[[ statusDot ]]"></span>[[ statusText ]]
+      </div>
+      <button data-bench-click="onReload" class="bd-s0015 bd-h002">Reload</button>
+    </div>
+  </header>
+
+  <div data-bgrid class="bd-s0016">
+
+    <aside data-bnav class="bd-s0017">
+
+      <div class="bd-s0018">
+        <button data-bench-click="onToggleSources" class="bd-s0019">
+          <span class="bd-s0020" data-bench-style="transform:[[ srcCaret ]]"></span>CI artifacts
+          <span class="bd-s0021">[[ sourceSummary ]]</span>
+        </button>
+
+          <div data-bench-if="showSources" class="bd-s0022">
+
+              <div data-bench-mouseenter="s.onEnter" data-bench-mouseleave="onTipOut" data-bench-for="sources" data-bench-as="s" class="bd-s0023">
+                <span class="bd-s0024" data-bench-style="background:[[ s.dot ]]"></span>
+                <span class="bd-s0025">[[ s.name ]]</span>
+                <span class="bd-s0026">[[ s.kind ]]</span>
+              </div>
+
+            <div class="bd-s0027">Discovered from the manifest — new reports appear here with no site change.</div>
+          </div>
+
+      </div>
+
+      <div class="bd-s0028">Benchmarks</div>
+
+
+        <div data-bench-for="navGroups" data-bench-as="g" class="bd-s0029">
+          <button data-bench-click="g.onToggle" class="bd-s0030 bd-h003" data-bench-style="background:[[ g.headBg ]];color:[[ g.headColor ]]">
+            <span class="bd-s0031" data-bench-style="transform:[[ g.caret ]]"></span>
+            <span class="bd-s0032">[[ g.label ]]</span>
+            <span class="bd-s0033" data-bench-style="color:[[ g.badgeColor ]];background:[[ g.badgeBg ]]">[[ g.badge ]]</span>
+          </button>
+
+            <div data-bench-if="g.open" class="bd-s0034">
+
+                <a data-bench-click="it.onClick" href="#benchmark-main" data-bench-for="g.items" data-bench-as="it" class="bd-s0035 bd-h004" data-bench-style="color:[[ it.color ]];background:[[ it.bg ]];border-left:2px solid [[ it.bar ]]">
+                  <span class="bd-s0036">[[ it.label ]]</span>
+                  <span class="bd-s0037">[[ it.count ]]</span>
+                </a>
+
+            </div>
+
+        </div>
+
+    </aside>
+
+    <main id="benchmark-main" class="bd-s0038">
+
+
+        <div data-bench-if="loading" class="bd-s0039">
+          <span class="bd-s0040"></span>Fetching benchmark artifacts…
+        </div>
+
+
+
+        <div data-bench-if="ready" class="bd-s0041">
+
+          <div class="bd-s0042">
+            <span>Benchmarks</span><span class="bd-s0043">/</span><span class="bd-s0044">[[ benchKey ]]</span><span class="bd-s0043">/</span><span class="bd-s0045">[[ viewLabel ]]</span>
+          </div>
+          <h1 class="bd-s0046">[[ benchTitle ]]</h1>
+
+          <div class="bd-s0047">
+
+              <span data-bench-mouseenter="c.onEnter" data-bench-mouseleave="onTipOut" data-bench-for="benchChips" data-bench-as="c" class="bd-s0048" data-bench-style="color:[[ c.color ]];background:[[ c.bg ]];border:1px solid [[ c.border ]]">[[ c.text ]]</span>
+
+          </div>
+
+          <p class="bd-s0049">[[ benchDescription ]]</p>
+
+
+            <div data-bench-if="isCompare">
+              <div data-ctrls class="bd-s0050">
+                <label class="bd-s0005">
+                  <span class="bd-s0051">Metric</span>
+                  <select value="[[ metric ]]" data-bench-change="onMetric" class="bd-s0052">
+                    <option value="[[ o.value ]]" data-bench-for="metricOpts" data-bench-as="o">[[ o.label ]]</option>
+                  </select>
+                </label>
+                <label class="bd-s0005">
+                  <span class="bd-s0051">Statistic</span>
+                  <select value="[[ stat ]]" data-bench-change="onStat" class="bd-s0053">
+                    <option value="[[ o.value ]]" data-bench-for="statOpts" data-bench-as="o">[[ o.label ]]</option>
+                  </select>
+                </label>
+                <label class="bd-s0005">
+                  <span class="bd-s0051">Region</span>
+                  <select value="[[ region ]]" data-bench-change="onRegion" class="bd-s0052">
+                    <option value="[[ o.value ]]" data-bench-for="regionOpts" data-bench-as="o">[[ o.label ]]</option>
+                  </select>
+                </label>
+                <label class="bd-s0005">
+                  <span class="bd-s0051">Baseline row</span>
+                  <select value="[[ baseline ]]" data-bench-change="onBaseline" class="bd-s0052">
+                    <option value="[[ o.value ]]" data-bench-for="baselineOpts" data-bench-as="o">[[ o.label ]]</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="bd-s0054">
+                <div class="bd-s0055">
+
+                    <button data-bench-click="d.onClick" data-bench-for="dirOpts" data-bench-as="d" class="bd-s0056" data-bench-style="background:[[ d.bg ]];color:[[ d.color ]]">[[ d.label ]]</button>
+
+                </div>
+
+                  <select value="[[ runIdx ]]" data-bench-change="onRun" data-bench-if="multiRun" class="bd-s0057">
+                    <option value="[[ o.value ]]" data-bench-for="runOpts" data-bench-as="o">[[ o.label ]]</option>
+                  </select>
+
+                <span class="bd-s0058">[[ tableNote ]]</span>
+              </div>
+
+              <div class="bd-s0059">
+                <table class="bd-s0060">
+                  <thead>
+                    <tr>
+                      <th class="bd-s0061">Execution tuple</th>
+
+                        <th data-bench-mouseenter="c.onEnter" data-bench-mouseleave="onTipOut" data-bench-for="cols" data-bench-as="c" class="bd-s0062">[[ c.name ]]<span class="bd-s0063">[[ c.sub ]]</span></th>
+
+                    </tr>
+                  </thead>
+
+                    <tbody data-bench-for="groups" data-bench-as="grp">
+
+                        <tr data-bench-if="grp.showHeader">
+                          <td colspan="[[ grp.span ]]" class="bd-s0064">
+                            <span class="bd-s0065">parameters</span>
+                            <span class="bd-s0066">[[ grp.label ]]</span>
+                          </td>
+                        </tr>
+
+
+                        <tr data-bench-for="grp.rows" data-bench-as="r">
+                          <td data-bench-mouseenter="r.onEnter" data-bench-mouseleave="onTipOut" class="bd-s0067" data-bench-style="background:[[ r.rowBg ]]">
+                            <div class="bd-s0068">
+                              <span class="bd-s0069" data-bench-style="color:[[ r.nameColor ]]">[[ r.algo ]]</span>
+                              <span data-bench-if="r.isBaseline" class="bd-s0070">BASE</span>
+                            </div>
+
+                              <div data-bench-if="r.hasDetail" class="bd-s0071">[[ r.detail ]]</div>
+
+                          </td>
+
+                            <td data-bench-mouseenter="cell.onEnter" data-bench-mouseleave="onTipOut" data-bench-for="r.cells" data-bench-as="cell" class="bd-s0072" data-bench-style="background:[[ cell.bg ]];box-shadow:[[ cell.ring ]]">
+                              <div class="bd-s0073" data-bench-style="color:[[ cell.valueColor ]]">[[ cell.text ]]</div>
+                              <div class="bd-s0074" data-bench-style="color:[[ cell.chipColor ]]">
+                                <span class="bd-s0075">[[ cell.arrow ]]</span>[[ cell.ratioText ]]
+                              </div>
+                            </td>
+
+                        </tr>
+
+                    </tbody>
+
+                </table>
+              </div>
+
+              <div class="bd-s0076">
+                <span class="bd-s0077"><span class="bd-s0078">▲</span>faster / better than baseline</span>
+                <span class="bd-s0077"><span class="bd-s0079">▼</span>slower / worse than baseline</span>
+                <span class="bd-s0077"><span class="bd-s0080"></span>best algorithm for that test case &amp; parameters</span>
+                <span>hover any cell for the full distribution</span>
+              </div>
+            </div>
+
+
+
+            <div data-bench-if="isCases" class="bd-s0081">
+
+                <div data-bench-for="casesList" data-bench-as="tc" class="bd-s0082">
+                  <div class="bd-s0083">
+                    <span class="bd-s0084">[[ tc.name ]]</span>
+                    <span class="bd-s0085">[[ tc.iterLabel ]]</span>
+                    <span class="bd-s0085">[[ tc.concLabel ]]</span>
+                  </div>
+                  <p class="bd-s0086">[[ tc.description ]]</p>
+                  <div class="bd-s0087">
+
+                      <span data-bench-for="tc.fields" data-bench-as="f" class="bd-s0088"><span class="bd-s0089">[[ f.k ]]</span> [[ f.v ]]</span>
+
+                  </div>
+                </div>
+
+            </div>
+
+
+
+            <div data-bench-if="isAlgos" class="bd-s0081">
+
+                <div data-bench-for="algosList" data-bench-as="a" class="bd-s0082">
+                  <div class="bd-s0083">
+                    <span class="bd-s0090">[[ a.name ]]</span>
+                    <span class="bd-s0091" data-bench-style="color:[[ a.stateColor ]];background:[[ a.stateBg ]]">[[ a.state ]]</span>
+                  </div>
+                  <div class="bd-s0092">
+
+                      <div data-bench-for="a.params" data-bench-as="p" class="bd-s0093">
+                        <span class="bd-s0094">[[ p.name ]]</span>
+                        <span class="bd-s0095">[[ p.type ]]</span>
+                        <span class="bd-s0096">[[ p.values ]]</span>
+                        <span class="bd-s0097">[[ p.description ]]</span>
+                      </div>
+
+                  </div>
+                </div>
+
+            </div>
+
+
+
+            <div data-bench-if="isMetrics" class="bd-s0098">
+              <table class="bd-s0099">
+                <thead>
+                  <tr>
+                    <th class="bd-s0100">Metric</th>
+                    <th class="bd-s0100">Kind</th>
+                    <th class="bd-s0100">Better</th>
+                    <th class="bd-s0101">Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+
+                    <tr data-bench-for="metricsList" data-bench-as="m">
+                      <td class="bd-s0102">[[ m.name ]]</td>
+                      <td class="bd-s0103" data-bench-style="color:[[ m.kindColor ]]">[[ m.kind ]]</td>
+                      <td class="bd-s0104">[[ m.dirLabel ]]</td>
+                      <td class="bd-s0105"><a data-bench-click="m.onOpen" href="#benchmark-main" class="bd-s0106">compare →</a></td>
+                    </tr>
+
+                </tbody>
+              </table>
+            </div>
+
+
+        </div>
+
+
+
+        <div data-bench-if="empty" class="bd-s0107">
+          <div class="bd-s0108">No benchmark data reachable</div>
+          <p class="bd-s0109">The CI manifest returned nothing usable. It should list <span class="bd-s0110">bench_configuration.json</span> and <span class="bd-s0110">report_&lt;N&gt;.json</span> URLs — a plain JSON array of paths is enough.</p>
+        </div>
+
+
+    </main>
+  </div>
+
+  <footer class="bd-s0111">
+    <div aria-hidden="true" class="bd-s0112">BioseqDB</div>
+    <div class="bd-s0113">
+      <div data-footcols class="bd-s0114">
+        <div>
+          <div class="bd-s0115">
+            <img src="{{ site.assets_base_url }}bioseq-mark.svg" width="32" height="32" alt="BioseqDB logo" class="bd-s0005">
+            <span class="bd-s0116">Bioseq<span class="bd-s0117">DB</span></span>
+            <span class="bd-s0118">BENCH</span>
+          </div>
+          <p class="bd-s0119">Every number on this page is read straight from the bench_framework artifacts published by CI — nothing is transcribed by hand.</p>
+        </div>
+        <div>
+          <div class="bd-s0120">Documentation</div>
+          <div class="bd-s0121">
+            <a href="{{ nav.documentation }}" class="bd-s0122 bd-h005">Installation</a>
+            <a href="{{ nav.tutorials }}" class="bd-s0122 bd-h005">Quick start</a>
+            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">SQL reference</a>
+            <a href="{{ nav.reference }}" class="bd-s0122 bd-h005">C++ core types</a>
+          </div>
+        </div>
+        <div>
+          <div class="bd-s0120">Explore</div>
+          <div class="bd-s0121">
+            <a href="{{ site.base_path }}" class="bd-s0122 bd-h005">Product home</a>
+            <a href="{{ site.base_path }}#workflow" class="bd-s0122 bd-h005">Workflow</a>
+            <a href="{{ site.base_path }}#examples" class="bd-s0122 bd-h005">Examples</a>
+            <a href="{{ site.base_path }}#scale" class="bd-s0122 bd-h005">Scale</a>
+          </div>
+        </div>
+        <div>
+          <div class="bd-s0120">Project</div>
+          <div class="bd-s0121">
+            <a href="{{ site.base_path }}{{ site.version }}/" class="bd-s0122 bd-h005">Documentation</a>
+            <a href="{{ site.repository_url }}" rel="noreferrer" class="bd-s0123">GitHub</a>
+            <span class="bd-s0124">{{ site.status_label }} &middot; {{ site.version }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="bd-s0125">
+      <div class="bd-s0126"></div>
+      <div class="bd-s0127">
+        <span class="bd-s0128">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>
+        <nav class="bd-s0129">
+          <a href="{{ site.repository_url }}/blob/main/LICENSE" rel="noreferrer" class="bd-s0130 bd-h006">License (MIT)</a>
+          <a href="{{ site.versions_page_url }}" class="bd-s0130 bd-h006">Versions</a>
+          <a data-bench-click="onTop" href="#page-top" class="bd-s0130 bd-h006">Back to top ↑</a>
+        </nav>
+      </div>
+    </div>
+  </footer>
+
+  <div class="bd-s0131" data-bench-style="left:[[ tipX ]]px;top:[[ tipY ]]px;opacity:[[ tipOpacity ]]">
+
+      <div data-bench-if="hasTip">
+        <div class="bd-s0132">[[ tipTitle ]]</div>
+        <div class="bd-s0133">[[ tipSub ]]</div>
+
+          <p data-bench-if="tipHasNote" class="bd-s0134">[[ tipNote ]]</p>
+
+        <div class="bd-s0135">
+
+            <div data-bench-for="tipRows" data-bench-as="row" class="bd-s0136">
+              <span class="bd-s0137">[[ row.k ]]</span>
+              <span class="bd-s0138" data-bench-style="color:[[ row.color ]]">[[ row.v ]]</span>
+            </div>
+
+        </div>
+
+          <div data-bench-if="tipHasHist" class="bd-s0139">
+
+              <span data-bench-for="tipHist" data-bench-as="b" class="bd-s0140" data-bench-style="background:[[ b.color ]];height:[[ b.h ]]%"></span>
+
+          </div>
+
+      </div>
+
+  </div>
+
+</div>
+</template>
+{% if page.jsonld %}<script type="application/ld+json">{{ page.jsonld }}</script>{% endif %}
+<script type="module" src="{{ site.assets_base_url }}js/benchmarks-design.mjs"></script>
+</body>
+</html>

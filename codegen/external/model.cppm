@@ -27,16 +27,16 @@ namespace bioseq::codegen::external {
 
 /// @brief Supported locations for parameters in generated HTTP requests.
 enum class parameter_location : std::uint8_t {
-    path, ///< Substitution within the origin-form path template.
-    query, ///< Percent-encoded query-string parameter.
+    path,   ///< Substitution within the origin-form path template.
+    query,  ///< Percent-encoded query-string parameter.
     header, ///< HTTP request-header field.
 };
 
 /// @brief Supported scalar value categories in an OpenAPI parameter schema.
 enum class parameter_kind : std::uint8_t {
-    string, ///< Text value.
+    string,  ///< Text value.
     integer, ///< Signed integral value.
-    number, ///< Floating-point value.
+    number,  ///< Floating-point value.
     boolean, ///< Boolean value.
 };
 
@@ -73,7 +73,7 @@ struct openapi_operation {
 /// @brief Invocation shape exercised by a generated integration case.
 enum class integration_mode : std::uint8_t {
     single, ///< Invoke the client's single-request API.
-    batch, ///< Invoke the client's batch API.
+    batch,  ///< Invoke the client's batch API.
 };
 
 /// @brief Owning scalar value parsed from an integration-case declaration.
@@ -143,6 +143,22 @@ struct openapi_document {
     std::vector<integration_case> integration_cases;
 };
 
+/// @brief One authored module source available to annotation resolution.
+struct descriptor_source {
+    /// @brief Absolute source path used for file diagnostics.
+    fs::path path;
+    /// @brief Stable generic path relative to the descriptor scan root.
+    fs::path relative_path;
+    /// @brief Exact authored source bytes.
+    std::string text;
+    /// @brief Authored file size in bytes.
+    std::uintmax_t file_size_bytes{};
+    /// @brief Authored filesystem write-time ticks.
+    std::int64_t last_write_ticks{};
+    /// @brief FNV-1a hash of the exact authored bytes.
+    std::uint64_t content_hash{};
+};
+
 /// @brief One registered source annotation resolved by cppast.
 struct annotation_request {
     /// @brief Original annotated module path.
@@ -157,6 +173,8 @@ struct annotation_request {
     std::string argument_expression;
     /// @brief Decoded embedded specification.
     std::string specification;
+    /// @brief Ordered imported fragment sources that form the specification closure.
+    std::vector<fs::path> specification_dependencies;
 };
 
 /// @brief Complete semantic input for rendering one external API client.
@@ -212,11 +230,11 @@ struct generation_options {
 
 /// @brief Current incremental metadata for one scanned module source.
 struct source_snapshot {
-    /// @brief Source size in bytes.
+    /// @brief Source size, or the aggregate annotated specification-closure size.
     std::uintmax_t file_size_bytes{};
-    /// @brief Filesystem write-time ticks.
+    /// @brief Source write time, or the greatest closure write-time tick count.
     std::int64_t last_write_ticks{};
-    /// @brief FNV-1a hash of the exact source bytes.
+    /// @brief FNV-1a hash of the source or exact specification closure.
     std::uint64_t content_hash{};
     /// @brief Whether the source contains a registered annotation.
     bool has_annotation{};

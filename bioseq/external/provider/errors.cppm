@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/errors.cppm
+ * @brief Bounded error categories and diagnostics for provider operations.
+ */
 module;
 
 #include <chrono>
@@ -14,6 +18,7 @@ import bioseq.external.provider.base;
 // imports only `base` (never sink refs) so the dependency chain stays acyclic.
 export namespace bioseq::external::provider {
 
+/// Stable categories for provider and transport failures.
 enum class external_error_kind : std::uint8_t {
   invalid_query,
   unsupported_capability,
@@ -30,6 +35,7 @@ enum class external_error_kind : std::uint8_t {
   provider_contract
 };
 
+/// Owning bounded diagnostic returned across provider boundaries.
 struct external_error {
   external_error_kind kind{};
   std::optional<provider_id> known_provider;
@@ -46,9 +52,7 @@ struct external_error {
   bool is_retryable{};
 };
 
-// Checked factory. All construction goes through here so the compile-time caps
-// and the smaller runtime error-body admission cap are both enforced; message
-// text is truncated rather than rejected so an error is never lost.
+/// Create a bounded error and infer whether its category is retryable.
 [[nodiscard]] inline external_error
 make_external_error(external_error_kind kind, std::string_view message,
                     std::optional<provider_id> known_provider = std::nullopt) {
@@ -63,6 +67,7 @@ make_external_error(external_error_kind kind, std::string_view message,
   return error;
 }
 
+/// Create a bounded error with provider and operation context.
 [[nodiscard]] inline external_error
 make_external_error(external_error_kind kind, provider_id provider,
                     std::string_view operation, std::string_view message) {
@@ -75,6 +80,7 @@ make_external_error(external_error_kind kind, provider_id provider,
   return error;
 }
 
+/// Return the stable text representation of an error category.
 [[nodiscard]] constexpr std::string_view
 to_string(external_error_kind kind) noexcept {
   switch (kind) {

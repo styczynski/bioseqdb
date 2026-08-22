@@ -25,7 +25,7 @@ export namespace bioseq::common {
  * @brief Stores a bounded set of movable values in generation-tracked slots.
  *
  * The cache owns all values inline and performs no dynamic allocation. Calls
- * are not synchronized; one thread must own an instance. A slot reference is
+ * are not synchronized. One thread must own an instance. A slot reference is
  * valid only while `is_valid_at()` accepts its index/generation pair.
  *
  * @tparam p_value_type Movable value stored in each slot.
@@ -80,6 +80,7 @@ public:
      * @param[in] key Key to locate.
      * @param[in] key_extractor Projection invoked only for occupied slots.
      * @return Slot index and generation on a hit, or `std::nullopt` on a miss.
+     * @warning `key_extractor` must not throw because lookup is `noexcept`.
      */
     template <class p_key_type, class p_key_extractor>
     [[nodiscard]] [[gnu::always_inline]]
@@ -107,6 +108,7 @@ public:
      * @param[in] value Value moved into the selected slot.
      * @param[in] on_evict Callback used only when insertion must replace a value.
      * @return Selected slot index and its new generation.
+     * @warning `on_evict` must not throw because insertion is `noexcept`.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] std::pair<slot_index_type, generation_type>
@@ -137,6 +139,7 @@ public:
      * @brief Evicts the oldest occupied slot when one exists.
      * @tparam p_eviction_callback Callable accepting a mutable stored value.
      * @param[in] on_evict Callback invoked before the selected slot is cleared.
+     * @warning `on_evict` must not throw and may not retain its value reference.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] void evict_oldest(p_eviction_callback&& on_evict) noexcept {
@@ -159,8 +162,9 @@ public:
      * @brief Evicts a specified occupied slot.
      *
      * @tparam p_eviction_callback Callable accepting a mutable stored value.
-     * @param[in] slot_index Slot to clear; out-of-range and empty slots are ignored.
+     * @param[in] slot_index Slot to clear. Out-of-range and empty slots are ignored.
      * @param[in] on_evict Callback invoked before an occupied slot is cleared.
+     * @warning `on_evict` must not throw and may not retain its value reference.
      */
     template <class p_eviction_callback>
     [[gnu::always_inline]] void evict_at(

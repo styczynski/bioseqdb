@@ -1,22 +1,12 @@
-// Exhaustive rank-packing checks for the PostgreSQL-independent core and adapters.
+/**
+ * @file
+ * @brief Verifies rank packing across alphabets, widths, sinks, and adapters.
+ */
 
-#include <tests/support/common.hpp>
-#include <bioseq/pg_build_profile.h>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <cstring>
-#include <limits>
-#include <memory>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.common.seqan_adapter;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
@@ -27,41 +17,53 @@ import bioseq.storage.lazy_sequence;
 
 namespace {
 
-template <class p_alphabet>
-struct alphabet_stdc_entry;
+/** @brief Maps an alphabet to the matching packed-sequence metadata entry. */
+template <class p_alphabet> struct alphabet_stdc_entry;
 
-template <>
-struct alphabet_stdc_entry<seq::dna4> {
+/** @brief Supplies packed-sequence metadata for DNA4. */
+template <> struct alphabet_stdc_entry<seq::dna4> {
     using type = alphabet_entry<seq::dna4, "dna4">;
 };
 
-template <>
-struct alphabet_stdc_entry<seq::dna5> {
+/** @brief Supplies packed-sequence metadata for DNA5. */
+template <> struct alphabet_stdc_entry<seq::dna5> {
     using type = alphabet_entry<seq::dna5, "dna5">;
 };
 
-template <>
-struct alphabet_stdc_entry<seq::aa20> {
+/** @brief Supplies packed-sequence metadata for the 20-symbol amino-acid alphabet. */
+template <> struct alphabet_stdc_entry<seq::aa20> {
     using type = alphabet_entry<seq::aa20, "aa20">;
 };
 
-template <>
-struct alphabet_stdc_entry<seq::aa27> {
+/** @brief Supplies packed-sequence metadata for the 27-symbol amino-acid alphabet. */
+template <> struct alphabet_stdc_entry<seq::aa27> {
     using type = alphabet_entry<seq::aa27, "aa27">;
 };
 
+/**
+ * @brief Packed varlena type restricted to one alphabet and storage width.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_unit Packed storage unit.
+ */
 template <class p_alphabet, class p_unit>
-using profile_stdc = compact_sequence_stdc<
-    supported_alphabets<typename alphabet_stdc_entry<p_alphabet>::type>,
-    std::uint32_t,
-    std::int32_t,
-    supported_storage_unit_byte_widths<sizeof(p_unit)>>;
+using profile_stdc =
+    compact_sequence_stdc<supported_alphabets<typename alphabet_stdc_entry<p_alphabet>::type>,
+                          std::uint32_t,
+                          std::int32_t,
+                          supported_storage_unit_byte_widths<sizeof(p_unit)>>;
 
-template <class p_stdc>
-struct stdc_test_arena {
+/**
+ * @brief Owns zeroed varlena buffers allocated by one packed profile.
+ * @tparam p_stdc Packed varlena type returned by the allocator.
+ */
+template <class p_stdc> struct stdc_test_arena {
     std::vector<std::unique_ptr<std::byte[]>> blocks;
 
-    auto allocator() {
+    /**
+     * @brief Creates an allocator that appends owned zeroed blocks.
+     * @return Callable compatible with packed-sequence factory allocation.
+     */
+    [[nodiscard]] auto allocator() {
         return [this](std::size_t byte_count) -> p_stdc* {
             auto block = std::make_unique<std::byte[]>(byte_count);
             std::memset(block.get(), 0, byte_count);
@@ -72,38 +74,47 @@ struct stdc_test_arena {
     }
 };
 
+/**
+ * @brief Requires byte-for-byte equality between packed unit spans.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] actual Units produced by the implementation.
+ * @param[in] expected Independent oracle units.
+ */
 template <class p_unit>
-void require_unit_bytes_equal(
-        std::span<const p_unit> actual,
-        std::span<const p_unit> expected) {
+void require_unit_bytes_equal(std::span<const p_unit> actual, std::span<const p_unit> expected) {
     REQUIRE(actual.size() == expected.size());
     if (!actual.empty()) {
-        REQUIRE(std::memcmp(actual.data(), expected.data(),
-                            actual.size_bytes()) == 0);
+        REQUIRE(std::memcmp(actual.data(), expected.data(), actual.size_bytes()) == 0);
     }
 }
 
+/**
+ * @brief Packs ranks with an independent least-significant-symbol-first oracle.
+ * @tparam p_alphabet Alphabet defining bits per symbol.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] ranks Valid alphabet ranks.
+ * @return Oracle packed units.
+ */
 template <class p_alphabet, class p_unit>
-[[nodiscard]] std::vector<p_unit> manual_pack(
-        std::span<const std::uint8_t> ranks) {
-    constexpr std::size_t bits =
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
-    constexpr std::size_t letters_per_unit =
-        std::numeric_limits<p_unit>::digits / bits;
-    std::vector<p_unit> result(
-        (ranks.size() + letters_per_unit - 1u) / letters_per_unit,
-        p_unit{});
+[[nodiscard]] std::vector<p_unit> manual_pack(std::span<const std::uint8_t> ranks) {
+    constexpr std::size_t bits = seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
+    constexpr std::size_t letters_per_unit = std::numeric_limits<p_unit>::digits / bits;
+    std::vector<p_unit> result((ranks.size() + letters_per_unit - 1u) / letters_per_unit, p_unit{});
     for (std::size_t index = 0u; index < ranks.size(); ++index) {
         result[index / letters_per_unit] |= static_cast<p_unit>(
-            static_cast<p_unit>(ranks[index])
-            << (bits * (index % letters_per_unit)));
+            static_cast<p_unit>(ranks[index]) << (bits * (index % letters_per_unit)));
     }
     return result;
 }
 
+/**
+ * @brief Converts ranks into alphabet symbols.
+ * @tparam p_alphabet Destination alphabet.
+ * @param[in] ranks Valid alphabet ranks.
+ * @return Symbols in input order.
+ */
 template <class p_alphabet>
-[[nodiscard]] std::vector<p_alphabet> letters_from_ranks(
-        std::span<const std::uint8_t> ranks) {
+[[nodiscard]] std::vector<p_alphabet> letters_from_ranks(std::span<const std::uint8_t> ranks) {
     std::vector<p_alphabet> letters(ranks.size());
     for (std::size_t index = 0u; index < ranks.size(); ++index) {
         letters[index].assign_rank(ranks[index]);
@@ -111,9 +122,14 @@ template <class p_alphabet>
     return letters;
 }
 
+/**
+ * @brief Converts ranks into their alphabet text representation.
+ * @tparam p_alphabet Destination alphabet.
+ * @param[in] ranks Valid alphabet ranks.
+ * @return Text in input order.
+ */
 template <class p_alphabet>
-[[nodiscard]] std::string text_from_ranks(
-        std::span<const std::uint8_t> ranks) {
+[[nodiscard]] std::string text_from_ranks(std::span<const std::uint8_t> ranks) {
     const auto letters = letters_from_ranks<p_alphabet>(ranks);
     std::string text;
     text.reserve(letters.size());
@@ -123,19 +139,27 @@ template <class p_alphabet>
     return text;
 }
 
+/**
+ * @brief Checks varlena receive, send, and type-dispatch behavior.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] ranks Source ranks.
+ * @param[in] expected Expected packed units.
+ * @param[in] padding Expected trailing padding in symbols.
+ * @param[in] expected_text Expected decoded text.
+ */
 template <class p_alphabet, class p_unit>
-void require_stdc_io_oracle(
-        std::span<const std::uint8_t> ranks,
-        std::span<const p_unit> expected,
-        std::uint16_t padding,
-        std::string_view expected_text) {
+void require_stdc_io_oracle(std::span<const std::uint8_t> ranks,
+                            std::span<const p_unit> expected,
+                            std::uint16_t padding,
+                            std::string_view expected_text) {
     using stdc_type = profile_stdc<p_alphabet, p_unit>;
+    /// Read cursor over the independent packed-unit oracle.
     struct cursor {
         std::span<const p_unit> units;
         std::size_t index{};
     } source{expected};
-    auto read_unit = []<class, class p_output>(
-                         cursor& input, std::uint8_t byte_width) -> p_output {
+    auto read_unit = []<class, class p_output>(cursor& input, std::uint8_t byte_width) -> p_output {
         REQUIRE(byte_width == sizeof(p_unit));
         REQUIRE(input.index < input.units.size());
         return static_cast<p_output>(input.units[input.index++]);
@@ -156,20 +180,18 @@ void require_stdc_io_oracle(
     REQUIRE(value->padding_letters == padding);
     REQUIRE(value->storage_unit_byte_width == sizeof(p_unit));
     if (!expected.empty()) {
-        REQUIRE(std::memcmp(value->data, expected.data(),
-                            expected.size_bytes()) == 0);
+        REQUIRE(std::memcmp(value->data, expected.data(), expected.size_bytes()) == 0);
     }
 
     std::vector<std::uint64_t> sent;
-    value->send_to(
-        sent,
-        []<class p_input>(std::vector<std::uint64_t>& output,
-                          std::uint64_t unit,
-                          std::uint8_t byte_width) {
-            static_assert(std::is_same_v<p_input, std::uint64_t>);
-            REQUIRE(byte_width == sizeof(p_unit));
-            output.push_back(unit);
-        });
+    value->send_to(sent,
+                   []<class p_input>(std::vector<std::uint64_t>& output,
+                                     std::uint64_t unit,
+                                     std::uint8_t byte_width) {
+                       static_assert(std::is_same_v<p_input, std::uint64_t>);
+                       REQUIRE(byte_width == sizeof(p_unit));
+                       output.push_back(unit);
+                   });
     REQUIRE(sent.size() == expected.size());
     for (std::size_t index = 0u; index < sent.size(); ++index) {
         REQUIRE(sent[index] == static_cast<std::uint64_t>(expected[index]));
@@ -177,30 +199,35 @@ void require_stdc_io_oracle(
 
     std::string converted_text;
     const std::size_t rank_count = ranks.size();
-    value->convert_to(
-        [&converted_text, rank_count, padding]<class p_instance>(
-                const compact_sequence_range<p_instance>& range) {
-            converted_text = range.to_string();
-            REQUIRE(range.bp_size() == rank_count);
-            REQUIRE(range.padding() == padding);
-        });
+    value->convert_to([&converted_text, rank_count, padding]<class p_instance>(
+                          const compact_sequence_range<p_instance>& range) {
+        converted_text = range.to_string();
+        REQUIRE(range.bp_size() == rank_count);
+        REQUIRE(range.padding() == padding);
+    });
     REQUIRE(converted_text == expected_text);
 }
 
+/**
+ * @brief Checks admitted materialization and permit lifetime for one profile.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] ranks Source ranks.
+ * @param[in] expected Expected packed units.
+ * @param[in] padding Expected trailing padding in symbols.
+ */
 template <class p_alphabet, class p_unit>
-void require_admitted_oracle(
-        std::span<const std::uint8_t> ranks,
-        std::span<const p_unit> expected,
-        std::uint16_t padding) {
-    using instance = sequence_custom_alphabet<
-        p_alphabet,
-        p_unit,
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>)>;
+void require_admitted_oracle(std::span<const std::uint8_t> ranks,
+                             std::span<const p_unit> expected,
+                             std::uint16_t padding) {
+    using instance =
+        sequence_custom_alphabet<p_alphabet,
+                                 p_unit,
+                                 seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>)>;
 
     std::vector<std::uint8_t> guarded_ranks;
     guarded_ranks.reserve(ranks.size() + 2u);
-    guarded_ranks.push_back(static_cast<std::uint8_t>(
-        seqan3::alphabet_size<p_alphabet> - 1u));
+    guarded_ranks.push_back(static_cast<std::uint8_t>(seqan3::alphabet_size<p_alphabet> - 1u));
     guarded_ranks.insert(guarded_ranks.end(), ranks.begin(), ranks.end());
     guarded_ranks.push_back(0u);
     auto guarded_letters = letters_from_ranks<p_alphabet>(guarded_ranks);
@@ -208,55 +235,49 @@ void require_admitted_oracle(
     const auto source = bioseq::storage::make_lazy_sequence_view(guarded_range);
 
     const auto admission_bytes =
-        bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(
-            ranks.size(), sizeof(p_unit));
-    auto& admission =
-        bioseq::parallelism::memory_admission_controller::instance();
+        bioseq::storage::packed_sequence_admission_bytes<p_alphabet>(ranks.size(), sizeof(p_unit));
+    auto& admission = bioseq::parallelism::memory_admission_controller::instance();
     const std::uint64_t baseline = admission.reserved_bytes();
     auto permit = admission.try_reserve(admission_bytes);
     REQUIRE(permit.has_value());
     {
         auto owner = bioseq::storage::materialize_packed_sequence(
-            source,
-            1u,
-            1u + ranks.size(),
-            sizeof(p_unit),
-            std::move(*permit));
+            source, 1u, 1u + ranks.size(), sizeof(p_unit), std::move(*permit));
         const auto& descriptor = owner.descriptor();
         REQUIRE(admission.reserved_bytes() == baseline + admission_bytes);
         REQUIRE(descriptor.logical_length == ranks.size());
         REQUIRE(descriptor.unit_count == expected.size());
         REQUIRE(descriptor.storage_unit_width == sizeof(p_unit));
-        REQUIRE(descriptor.bits_per_symbol
-                == seqan3::detail::ceil_log2(
-                    seqan3::alphabet_size<p_alphabet>));
+        REQUIRE(descriptor.bits_per_symbol ==
+                seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>));
         REQUIRE(descriptor.leading_symbol_offset == 0u);
         REQUIRE(descriptor.trailing_padding == padding);
-        REQUIRE(descriptor.bit_order
-                == bioseq::storage::lazy_sequence_view<p_alphabet>::
-                    packed_symbol_order::least_significant_symbol_first);
+        REQUIRE(descriptor.bit_order ==
+                bioseq::storage::lazy_sequence_view<
+                    p_alphabet>::packed_symbol_order::least_significant_symbol_first);
         if (!expected.empty()) {
             REQUIRE(descriptor.units != nullptr);
-            REQUIRE(std::memcmp(descriptor.units, expected.data(),
-                                expected.size_bytes()) == 0);
+            REQUIRE(std::memcmp(descriptor.units, expected.data(), expected.size_bytes()) == 0);
         }
 
         std::vector<std::uint8_t> observed(ranks.size());
-        owner.view().template copy_ranks<false, false>(
-            observed, 0u, observed.size());
-        REQUIRE(observed
-                == std::vector<std::uint8_t>(ranks.begin(), ranks.end()));
+        owner.view().template copy_ranks<false, false>(observed, 0u, observed.size());
+        REQUIRE(observed == std::vector<std::uint8_t>(ranks.begin(), ranks.end()));
     }
     REQUIRE(admission.reserved_bytes() == baseline);
 }
 
+/**
+ * @brief Checks invalid-rank handling and fixed-capacity boundaries.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] profile Diagnostic profile name.
+ */
 template <class p_alphabet, class p_unit>
 void require_invalid_and_capacity_matrix(std::string_view profile) {
-    constexpr std::size_t bits =
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
+    constexpr std::size_t bits = seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
     constexpr std::size_t alphabet_size = seqan3::alphabet_size<p_alphabet>;
-    constexpr std::size_t letters_per_unit =
-        std::numeric_limits<p_unit>::digits / bits;
+    constexpr std::size_t letters_per_unit = std::numeric_limits<p_unit>::digits / bits;
     using instance = sequence_custom_alphabet<p_alphabet, p_unit, bits>;
     using grow_sink = bioseq::sequences::growing_rank_pack_unit_sink<p_unit>;
     using fixed_sink = bioseq::sequences::fixed_rank_pack_unit_sink<p_unit>;
@@ -281,20 +302,16 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
         bioseq::sequences::pack_capacity_policy::fixed_span,
         fixed_sink>;
 
-    const std::array<std::uint8_t, 2u> valid{
-        0u, static_cast<std::uint8_t>(alphabet_size - 1u)};
+    const std::array<std::uint8_t, 2u> valid{0u, static_cast<std::uint8_t>(alphabet_size - 1u)};
     const auto expected_drop = manual_pack<p_alphabet, p_unit>(valid);
     const std::uint16_t expected_drop_padding =
         valid.size() % letters_per_unit == 0u
-        ? 0u
-        : static_cast<std::uint16_t>(
-            letters_per_unit - valid.size() % letters_per_unit);
+            ? 0u
+            : static_cast<std::uint16_t>(letters_per_unit - valid.size() % letters_per_unit);
 
-    for (const std::uint8_t invalid_rank : {
-            static_cast<std::uint8_t>(alphabet_size),
-            std::uint8_t{0xffu}}) {
-        const std::array<std::uint8_t, 3u> invalid{
-            valid.front(), invalid_rank, valid.back()};
+    for (const std::uint8_t invalid_rank :
+         {static_cast<std::uint8_t>(alphabet_size), std::uint8_t{0xffu}}) {
+        const std::array<std::uint8_t, 3u> invalid{valid.front(), invalid_rank, valid.back()};
         for (std::size_t split = 0u; split <= invalid.size(); ++split) {
             CAPTURE(profile, invalid_rank, split);
             const auto input = std::span<const std::uint8_t>{invalid};
@@ -304,35 +321,29 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
             static_cast<void>(rejected.append_ranks(input.first(split)));
             static_cast<void>(rejected.append_ranks(input.subspan(split)));
             const auto rejected_result = rejected.finish();
-            REQUIRE(rejected_result.status
-                    == bioseq::sequences::rank_pack_status::invalid_rank);
+            REQUIRE(rejected_result.status == bioseq::sequences::rank_pack_status::invalid_rank);
             REQUIRE(rejected_result.emitted_symbols == 1u);
 
             std::vector<p_unit> dropped_units;
             drop_grow dropped{grow_sink{dropped_units}};
-            REQUIRE(dropped.append_ranks(input.first(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            REQUIRE(dropped.append_ranks(input.subspan(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            const auto dropped_result = dropped.finish(
-                valid.size(), expected_drop.size());
-            REQUIRE(dropped_result.status
-                    == bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(dropped.append_ranks(input.first(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(dropped.append_ranks(input.subspan(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            const auto dropped_result = dropped.finish(valid.size(), expected_drop.size());
+            REQUIRE(dropped_result.status == bioseq::sequences::rank_pack_status::ok);
             REQUIRE(dropped_result.padding_letters == expected_drop_padding);
             require_unit_bytes_equal<p_unit>(dropped_units, expected_drop);
 
             std::vector<p_unit> fixed_drop_units(expected_drop.size());
             drop_fixed fixed_drop{fixed_sink{fixed_drop_units}};
-            REQUIRE(fixed_drop.append_ranks(input.first(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            REQUIRE(fixed_drop.append_ranks(input.subspan(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            const auto fixed_drop_result = fixed_drop.finish(
-                valid.size(), expected_drop.size());
-            REQUIRE(fixed_drop_result.status
-                    == bioseq::sequences::rank_pack_status::ok);
-            REQUIRE(fixed_drop_result.padding_letters
-                    == expected_drop_padding);
+            REQUIRE(fixed_drop.append_ranks(input.first(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(fixed_drop.append_ranks(input.subspan(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            const auto fixed_drop_result = fixed_drop.finish(valid.size(), expected_drop.size());
+            REQUIRE(fixed_drop_result.status == bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(fixed_drop_result.padding_letters == expected_drop_padding);
             require_unit_bytes_equal<p_unit>(fixed_drop_units, expected_drop);
         }
     }
@@ -341,8 +352,7 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
     for (std::size_t index = 0u; index < capacity_ranks.size(); ++index) {
         capacity_ranks[index] = static_cast<std::uint8_t>(index % alphabet_size);
     }
-    const auto capacity_expected =
-        manual_pack<p_alphabet, p_unit>(capacity_ranks);
+    const auto capacity_expected = manual_pack<p_alphabet, p_unit>(capacity_ranks);
     REQUIRE(capacity_expected.size() == 2u);
     for (std::size_t split = 0u; split <= capacity_ranks.size(); ++split) {
         CAPTURE(profile, split);
@@ -350,14 +360,11 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
 
         std::vector<p_unit> exact_units(capacity_expected.size());
         reject_fixed exact{fixed_sink{exact_units}};
-        REQUIRE(exact.append_ranks(input.first(split))
-                == bioseq::sequences::rank_pack_status::ok);
-        REQUIRE(exact.append_ranks(input.subspan(split))
-                == bioseq::sequences::rank_pack_status::ok);
-        const auto exact_result = exact.finish(
-            capacity_ranks.size(), capacity_expected.size());
-        REQUIRE(exact_result.status
-                == bioseq::sequences::rank_pack_status::ok);
+        REQUIRE(exact.append_ranks(input.first(split)) == bioseq::sequences::rank_pack_status::ok);
+        REQUIRE(exact.append_ranks(input.subspan(split)) ==
+                bioseq::sequences::rank_pack_status::ok);
+        const auto exact_result = exact.finish(capacity_ranks.size(), capacity_expected.size());
+        REQUIRE(exact_result.status == bioseq::sequences::rank_pack_status::ok);
         require_unit_bytes_equal<p_unit>(exact_units, capacity_expected);
 
         std::vector<p_unit> short_units(capacity_expected.size() - 1u);
@@ -365,19 +372,22 @@ void require_invalid_and_capacity_matrix(std::string_view profile) {
         static_cast<void>(short_writer.append_ranks(input.first(split)));
         static_cast<void>(short_writer.append_ranks(input.subspan(split)));
         const auto short_result = short_writer.finish();
-        REQUIRE(short_result.status
-                == bioseq::sequences::rank_pack_status::capacity_overflow);
+        REQUIRE(short_result.status == bioseq::sequences::rank_pack_status::capacity_overflow);
         REQUIRE(short_result.written_units == short_units.size());
     }
 }
 
+/**
+ * @brief Exercises every short boundary and split point for one rank-pack profile.
+ * @tparam p_alphabet Sequence alphabet.
+ * @tparam p_unit Packed storage unit.
+ * @param[in] profile Diagnostic profile name.
+ */
 template <class p_alphabet, class p_unit>
 void require_exhaustive_profile(std::string_view profile) {
-    constexpr std::size_t bits =
-        seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
+    constexpr std::size_t bits = seqan3::detail::ceil_log2(seqan3::alphabet_size<p_alphabet>);
     constexpr std::size_t alphabet_size = seqan3::alphabet_size<p_alphabet>;
-    constexpr std::size_t letters_per_unit =
-        std::numeric_limits<p_unit>::digits / bits;
+    constexpr std::size_t letters_per_unit = std::numeric_limits<p_unit>::digits / bits;
     using instance = sequence_custom_alphabet<p_alphabet, p_unit, bits>;
     using grow_sink = bioseq::sequences::growing_rank_pack_unit_sink<p_unit>;
     using fixed_sink = bioseq::sequences::fixed_rank_pack_unit_sink<p_unit>;
@@ -395,17 +405,15 @@ void require_exhaustive_profile(std::string_view profile) {
     for (std::size_t length = 0u; length <= letters_per_unit + 1u; ++length) {
         std::vector<std::uint8_t> ranks(length);
         for (std::size_t index = 0u; index < length; ++index) {
-            ranks[index] = static_cast<std::uint8_t>(
-                (index * 7u + index / 3u) % alphabet_size);
+            ranks[index] = static_cast<std::uint8_t>((index * 7u + index / 3u) % alphabet_size);
         }
         const auto expected = manual_pack<p_alphabet, p_unit>(ranks);
         auto letters = letters_from_ranks<p_alphabet>(ranks);
         const auto expected_text = text_from_ranks<p_alphabet>(ranks);
         const std::uint16_t expected_padding =
             length == 0u || length % letters_per_unit == 0u
-            ? 0u
-            : static_cast<std::uint16_t>(
-                letters_per_unit - length % letters_per_unit);
+                ? 0u
+                : static_cast<std::uint16_t>(letters_per_unit - length % letters_per_unit);
 
         compact_sequence_range<instance> directly_packed{letters};
         CAPTURE(profile, length);
@@ -414,12 +422,10 @@ void require_exhaustive_profile(std::string_view profile) {
         REQUIRE(directly_packed.bp_size() == length);
         REQUIRE(directly_packed.to_string() == expected_text);
 
-        const auto scalar =
-            bioseq::simd::active_target::encode_sequence_scalar<instance>(
-                expected_text.data(), expected_text.size());
-        const auto simd =
-            bioseq::simd::active_target::encode_sequence_simd<instance>(
-                expected_text.data(), expected_text.size());
+        const auto scalar = bioseq::simd::active_target::encode_sequence_scalar<instance>(
+            expected_text.data(), expected_text.size());
+        const auto simd = bioseq::simd::active_target::encode_sequence_simd<instance>(
+            expected_text.data(), expected_text.size());
         require_unit_bytes_equal<p_unit>(scalar.packed_units, expected);
         require_unit_bytes_equal<p_unit>(simd.packed_units, expected);
         REQUIRE(scalar.padding() == expected_padding);
@@ -427,8 +433,7 @@ void require_exhaustive_profile(std::string_view profile) {
 
         require_stdc_io_oracle<p_alphabet, p_unit>(
             ranks, expected, expected_padding, expected_text);
-        require_admitted_oracle<p_alphabet, p_unit>(
-            ranks, expected, expected_padding);
+        require_admitted_oracle<p_alphabet, p_unit>(ranks, expected, expected_padding);
 
         for (std::size_t split = 0u; split <= length; ++split) {
             CAPTURE(profile, length, split);
@@ -436,61 +441,52 @@ void require_exhaustive_profile(std::string_view profile) {
 
             std::vector<p_unit> grown;
             grow_writer growing{grow_sink{grown}};
-            REQUIRE(growing.append_ranks(input.first(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            REQUIRE(growing.append_ranks(input.subspan(split))
-                    == bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(growing.append_ranks(input.first(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(growing.append_ranks(input.subspan(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
             const auto grow_result = growing.finish(length, expected.size());
-            REQUIRE(grow_result.status
-                    == bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(grow_result.status == bioseq::sequences::rank_pack_status::ok);
             REQUIRE(grow_result.written_units == expected.size());
             REQUIRE(grow_result.padding_letters == expected_padding);
             require_unit_bytes_equal<p_unit>(grown, expected);
 
             std::vector<p_unit> fixed(expected.size());
             fixed_writer fixed_output{fixed_sink{fixed}};
-            REQUIRE(fixed_output.append_ranks(input.first(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            REQUIRE(fixed_output.append_ranks(input.subspan(split))
-                    == bioseq::sequences::rank_pack_status::ok);
-            const auto fixed_result = fixed_output.finish(
-                length, expected.size());
-            REQUIRE(fixed_result.status
-                    == bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(fixed_output.append_ranks(input.first(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            REQUIRE(fixed_output.append_ranks(input.subspan(split)) ==
+                    bioseq::sequences::rank_pack_status::ok);
+            const auto fixed_result = fixed_output.finish(length, expected.size());
+            REQUIRE(fixed_result.status == bioseq::sequences::rank_pack_status::ok);
             REQUIRE(fixed_result.written_units == expected.size());
             REQUIRE(fixed_result.padding_letters == expected_padding);
             require_unit_bytes_equal<p_unit>(fixed, expected);
 
             std::vector<p_unit> streamed;
-            bioseq::simd::active_target::encode_state<
-                p_unit, bits, letters_per_unit> stream_state{};
+            bioseq::simd::active_target::encode_state<p_unit, bits, letters_per_unit>
+                stream_state{};
             stream_state.output_storage = &streamed;
             stream_state.reset();
             bioseq::simd::active_target::encode_body_chunk<
                 p_alphabet,
-                bioseq::simd::active_target::unknown_byte_policy::
-                    map_to_default,
+                bioseq::simd::active_target::unknown_byte_policy::map_to_default,
                 p_unit,
                 bits,
                 letters_per_unit>(
-                    stream_state,
-                    reinterpret_cast<const std::uint8_t*>(
-                        expected_text.data()),
-                    split);
+                stream_state, reinterpret_cast<const std::uint8_t*>(expected_text.data()), split);
             bioseq::simd::active_target::encode_body_chunk<
                 p_alphabet,
-                bioseq::simd::active_target::unknown_byte_policy::
-                    map_to_default,
+                bioseq::simd::active_target::unknown_byte_policy::map_to_default,
                 p_unit,
                 bits,
                 letters_per_unit>(
-                    stream_state,
-                    reinterpret_cast<const std::uint8_t*>(
-                        expected_text.data() + split),
-                    expected_text.size() - split);
+                stream_state,
+                reinterpret_cast<const std::uint8_t*>(expected_text.data() + split),
+                expected_text.size() - split);
             const auto [stream_units, stream_padding] =
-                bioseq::simd::active_target::finalize_encode_state<
-                    p_unit, bits, letters_per_unit>(stream_state);
+                bioseq::simd::active_target::finalize_encode_state<p_unit, bits, letters_per_unit>(
+                    stream_state);
             REQUIRE(stream_units == expected.size());
             REQUIRE(stream_padding == expected_padding);
             require_unit_bytes_equal<p_unit>(streamed, expected);
@@ -500,10 +496,10 @@ void require_exhaustive_profile(std::string_view profile) {
     require_invalid_and_capacity_matrix<p_alphabet, p_unit>(profile);
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("PostgreSQL-independent rank packing covers all configured profiles",
-          "[component:bioseq][layer:unit][feature:sequence]") {
+TEST_CASE("rank packing covers all configured profiles independently of PostgreSQL",
+          "[component:bioseq][layer:unit][feature:sequence][resource:highway]") {
     // The dna4/uint64 profile always covers the primary SIMD width. Expanded
     // build profiles instantiate every supported alphabet and storage width.
     require_exhaustive_profile<seq::dna4, std::uint64_t>("dna4/u64");

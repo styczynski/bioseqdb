@@ -1,12 +1,10 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file types.cppm
+ * @brief Shared columnar metadata data types and ABI guards.
  *
- * types.cppm
- *
- * Shared storage-metadata data model and ABI guards. Table I/O, transaction
- * state, and catalog operations depend on this leaf partition without pulling
+ * Table I/O, transaction state, and catalog operations depend on this leaf
+ * partition without pulling
  * in catalog implementation details.
- *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -62,8 +60,8 @@ export struct chunk_skip_node
 
 /** @brief Chunk metadata used to skip irrelevant row groups.
  *
- * Contains a column chunk
- * skip node for each chunk of each column. chunk_skip_nodes[column][chunk]
+ * Contains a column chunk skip node for each chunk of each column.
+ * chunk_skip_nodes[column][chunk]
  * is the entry for the specified column chunk.
  */
 export struct stripe_skip_list
@@ -85,8 +83,8 @@ export struct cached_string_info
 
 /** @brief Decompressed values and presence bits for a row chunk.
  *
- * values_by_column stores
- * the values of data, and present_values stores whether a value is present.
+ * values_by_column stores the values, and present_values records whether a
+ * value is present.
  * value_buffer is used to store (uncompressed) serialized values referenced by
  * Datum's in values_by_column. It is only used for by-reference Datum's. There is a
  * one-to-one correspondence between values_by_column and present_values.
@@ -176,6 +174,7 @@ export struct parallel_column_scan_state
 	std::uint64_t slot_stride;
 	char snapshot_data[FLEXIBLE_ARRAY_MEMBER];
 };
+/// @brief Pointer handle to shared parallel-scan state with trailing snapshot storage.
 export using parallel_column_scan_handle = parallel_column_scan_state*;
 
 /// @brief Aggregate cache counters reported by column scans.
@@ -323,6 +322,7 @@ export struct column_write_state
 // ABI mirrors pin size and representative offsets. The parallel state has a
 // flexible array, so its fixed-header offset is checked instead of sizeof.
 namespace {
+/// @brief Mirrors the cross-module `column_read_state` ABI for layout assertions.
 struct column_read_state_layout
 {
 	TupleDesc tuple_descriptor;
@@ -345,6 +345,7 @@ static_assert(std::is_standard_layout_v<column_read_state> &&
 			  offsetof(column_read_state, parallel_scan) == offsetof(column_read_state_layout, parallel_scan),
 			  "column_read_state layout drift (reinterpret_cast'd across modules)");
 
+/// @brief Mirrors the cross-module `column_write_state` ABI for layout assertions.
 struct column_write_state_layout
 {
 	TupleDesc tuple_descriptor;
@@ -367,6 +368,7 @@ static_assert(std::is_standard_layout_v<column_write_state> &&
 			  offsetof(column_write_state, seq_caches) == offsetof(column_write_state_layout, seq_caches),
 			  "column_write_state layout drift (reinterpret_cast'd across modules)");
 
+/// @brief Mirrors the fixed header of shared parallel-scan state.
 struct parallel_column_scan_state_layout
 {
 	pg_atomic_uint64 next_stripe_id;

@@ -2,14 +2,8 @@
  * @file instrumentation/clock.cppm
  * @brief Portable wall-clock and cycle clock.
  *
- * Two functions: now_ns() returns a monotonic nanosecond timestamp,
- * now_cycles() returns a cycle counter (or 0 when unavailable).
- *
- * Implementations:
- *   - macOS arm64: mach_absolute_time + cached timebase ratio.
- *     mach_absolute_time on Apple Silicon is the cntvct_el0 read.
- *   - Linux: clock_gettime(CLOCK_MONOTONIC_RAW) (vDSO-accelerated).
- *   - Cycle counter: rdtscp on x86, mrs cntvct_el0 on arm64.
+ * `now_ns()` returns monotonic nanoseconds. `now_cycles()` returns the native
+ * cycle counter, or zero when the architecture has no supported counter.
  */
 module;
 
@@ -17,24 +11,32 @@ module;
 #include <cstdint>
 
 #if defined(__APPLE__)
-#  include <mach/mach_time.h>
+#include <mach/mach_time.h>
 #elif defined(__linux__)
-#  include <time.h>
+#include <time.h>
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
-#  include <x86intrin.h>
+#include <x86intrin.h>
 #endif
 
 export module bioseq.instrumentation.clock;
 
 export namespace bioseq::instrumentation::clock {
 
-/// Monotonic nanosecond timestamp. Cheap on every supported platform.
+/**
+ * @brief Read the platform's monotonic clock in nanoseconds.
+ *
+ * Apple uses `mach_absolute_time`, Linux uses `CLOCK_MONOTONIC_RAW`, and
+ * other platforms use `std::chrono::steady_clock`. The returned value is an
+ * absolute timestamp suitable only for same-clock differences.
+ *
+ * @return Monotonic time in nanoseconds.
+ */
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_ns() noexcept {
 #if defined(__APPLE__)
-    static const auto timebase = []() {
+    static const auto timebase = []() noexcept {
         mach_timebase_info_data_t result{};
         mach_timebase_info(&result);
         return result;
@@ -43,22 +45,31 @@ inline std::uint64_t now_ns() noexcept {
 #elif defined(__linux__)
     struct timespec timestamp{};
     clock_gettime(CLOCK_MONOTONIC_RAW, &timestamp);
-    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1'000'000'000ull
-         + static_cast<std::uint64_t>(timestamp.tv_nsec);
+    return static_cast<std::uint64_t>(timestamp.tv_sec) * 1'000'000'000ull +
+           static_cast<std::uint64_t>(timestamp.tv_nsec);
 #else
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now().time_since_epoch())
+                                          .count());
 #endif
 }
 
-/// Cycle counter. Returns 0 if not available.
+/**
+ * @brief Read the architecture's unscaled cycle or virtual-counter ticks.
+ *
+ * The value is not converted to nanoseconds: x86 reads RDTSCP and AArch64
+ * reads CNTVCT_EL0. Callers may subtract readings under the platform's
+ * monotonic-counter assumptions, but must not mix them with `now_ns()`.
+ *
+ * @return Raw counter ticks, or zero when the architecture has no backend.
+ */
 [[nodiscard, gnu::always_inline]]
 inline std::uint64_t now_cycles() noexcept {
 #if defined(__x86_64__) || defined(_M_X64)
-    unsigned processor_id;
+    unsigned processor_id{};
     return __rdtscp(&processor_id);
 #elif defined(__aarch64__)
-    std::uint64_t cycle_count;
+    std::uint64_t cycle_count{};
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cycle_count));
     return cycle_count;
 #else
@@ -66,4 +77,4 @@ inline std::uint64_t now_cycles() noexcept {
 #endif
 }
 
-}  // namespace bioseq::instrumentation::clock
+} // namespace bioseq::instrumentation::clock

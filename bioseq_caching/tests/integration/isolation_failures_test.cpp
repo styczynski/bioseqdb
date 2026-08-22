@@ -196,8 +196,8 @@ TEST_CASE("producer cancellation wakes waiter and permits a fresh claim",
                     "SELECT count(*), sum(id) "
                     "FROM cache_producer_cancel_rows WHERE id <= 10"));
             } catch (const bioseq::libpq::command_error& error) {
-                producer_sqlstate = std::string(error.sqlstate());
-                if (error.sqlstate() == "57014") {
+                producer_sqlstate = std::string(error.sql_state());
+                if (error.sql_state() == "57014") {
                     return;
                 }
                 throw;
@@ -303,8 +303,8 @@ TEST_CASE("producer SQL error propagates through waiter retry",
                     "SELECT sum(100 / (id - 25)) "
                     "FROM cache_sql_error_rows"));
             } catch (const bioseq::libpq::command_error& error) {
-                observed_sqlstate = std::string(error.sqlstate());
-                if (error.sqlstate() == "22012") {
+                observed_sqlstate = std::string(error.sql_state());
+                if (error.sql_state() == "22012") {
                     return;
                 }
                 throw;
@@ -442,9 +442,9 @@ TEST_CASE("timed out waiter drains while producer completes",
                     "SELECT count(*), sum(id) "
                     "FROM cache_wait_timeout_rows WHERE id <= 10"));
             } catch (const bioseq::libpq::command_error& error) {
-                waiter_sqlstate = std::string(error.sqlstate());
+                waiter_sqlstate = std::string(error.sql_state());
                 waiter_error = error.what();
-                if (error.sqlstate() == "57014") {
+                if (error.sql_state() == "57014") {
                     return;
                 }
                 throw;

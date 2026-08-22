@@ -1,17 +1,13 @@
 /**
  * @file parallel_gzip_source.cppm
- * @brief `io_source`-conforming adapter on top of `parallel_gzip_decoder`.
+ * @brief Byte source backed by the parallel gzip decoder.
  *
- * PIMPL via `std::unique_ptr<impl>`. The implementation holds the mmap source
- * (which keeps the
- * fd alive for the duration of the parse), the decoder, and the
- * trailing error message. Constructed via
- * `try_open_from_mmap(mmap_source, options)` so the dispatcher can
- * hand off the already-opened mmap source.
+ * The owned implementation keeps the mapping alive for every compressed view
+ * held by the decoder.
  */
 module;
 
-
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -30,25 +26,41 @@ import bioseq.parallelism.pool;
 
 export namespace bioseq::io {
 
+/// Adapts a memory-mapped gzip stream to the I/O source protocol.
+///
+/// The source owns the mapping and decoder together so the compressed span
+/// remains valid until destruction.
 class parallel_gzip_source {
-public:
+  public:
+    /// Construct an empty source that reports an error if read.
     parallel_gzip_source() = default;
+
+    /// Sources exclusively own their mapping and decoder.
     parallel_gzip_source(const parallel_gzip_source&) = delete;
+
+    /// Sources cannot share or replace active decoder state.
     parallel_gzip_source& operator=(const parallel_gzip_source&) = delete;
+
+    /// Transfer the mapping and decoder into a new source.
     parallel_gzip_source(parallel_gzip_source&&) noexcept = default;
+
+    /// Replace this source with transferred mapping and decoder state.
     parallel_gzip_source& operator=(parallel_gzip_source&&) noexcept = default;
+
+    /// Release the decoder before its backing mapping.
     ~parallel_gzip_source() = default;
 
-    /// Open from an already-opened mmap source. The `options` carry
-    /// chunk size / worker count knobs from `io_options`.
+    /// Open from an already-opened memory mapping.
+    ///
+    /// @param[in] mmap_in Mapping transferred into the returned source
+    /// @param[in] options Chunk size, worker count, and checksum policy
+    /// @return Ready source or a construction diagnostic
     [[nodiscard]] static std::expected<parallel_gzip_source, std::string>
-    try_open_from_mmap(mmap_source mmap_in,
-                       const reader_options& options) noexcept {
+    try_open_from_mmap(mmap_source mmap_in, const reader_options& options) noexcept {
         // Take a direct view of the mmap for the decoder. The mmap
         // outlives the decoder — both live in the impl.
         auto direct = mmap_in.direct_view();
-        std::span<const std::uint8_t> compressed_view{
-            direct.first, direct.second};
+        std::span<const std::uint8_t> compressed_view{direct.first, direct.second};
 
         parallel_gzip_source source;
         source._impl = std::make_unique<impl>();
@@ -58,24 +70,24 @@ public:
         // Compute chunk target / worker count from options.
         std::size_t chunk_bytes = options.io.parallel_gzip_chunk_bytes;
         if (chunk_bytes == 0) {
-            chunk_bytes = 4 * 1024 * 1024;  // default_parallel_gzip_chunk_size
+            chunk_bytes = 4 * 1024 * 1024; // default_parallel_gzip_chunk_size
         }
         std::size_t worker_count = options.io.parallel_gzip_thread_count;
         if (worker_count == 0) {
-            const unsigned hardware =
-                bioseq::parallelism::default_concurrency_limit();
+            const unsigned hardware = bioseq::parallelism::default_concurrency_limit();
             worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 8) : 1;
         }
 
-        source._impl->decoder = std::make_unique<
-            compression::parallel_gzip_decoder>(
-            compressed_view,
-            worker_count,
-            chunk_bytes,
-            options.io.parallel_gzip_verify_crc);
+        source._impl->decoder = std::make_unique<compression::parallel_gzip_decoder>(
+            compressed_view, worker_count, chunk_bytes, options.io.parallel_gzip_verify_crc);
         return source;
     }
 
+    /// Copy up to `cap` decompressed bytes into caller-owned storage.
+    ///
+    /// @param[out] dst Destination containing at least `cap` writable bytes
+    /// @param[in] cap Maximum byte count to copy
+    /// @return Read count together with EOF and error state
     [[nodiscard]] source_read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         if (_impl == nullptr) {
             _last_error_message = "parallel_gzip_source: not initialised";
@@ -88,27 +100,32 @@ public:
         return outcome;
     }
 
+    /// Return the terminal source diagnostic, or an empty string on success.
     [[nodiscard]] std::string last_error_message() const {
         return _last_error_message;
     }
 
-    [[nodiscard]] std::optional<std::span<const std::uint8_t>>
-    next_decoded_chunk_view() noexcept {
-        if (_impl == nullptr) return std::nullopt;
+    /// Forward the decoder's optional borrowed-chunk interface.
+    [[nodiscard]] std::optional<std::span<const std::uint8_t>> next_decoded_chunk_view() noexcept {
+        if (_impl == nullptr)
+            return std::nullopt;
         return _impl->decoder->next_decoded_chunk_view();
     }
+    /// Release a borrowed chunk when the decoder exposes one.
     void release_chunk() noexcept {
-        if (_impl != nullptr) _impl->decoder->release_chunk();
+        if (_impl != nullptr)
+            _impl->decoder->release_chunk();
     }
 
-private:
+  private:
+    /// Couples the mapping lifetime to every decoder view derived from it.
     struct impl {
-        mmap_source                                       mapped_source;
-        std::span<const std::uint8_t>                     compressed_view;
+        mmap_source mapped_source;
+        std::span<const std::uint8_t> compressed_view;
         std::unique_ptr<compression::parallel_gzip_decoder> decoder;
     };
     std::unique_ptr<impl> _impl;
-    std::string           _last_error_message;
+    std::string _last_error_message;
 };
 
-}  // namespace bioseq::io
+} // namespace bioseq::io

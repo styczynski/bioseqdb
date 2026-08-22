@@ -1,19 +1,11 @@
-// Deterministic randomized lazy expression-tree properties.
+/** @file Deterministic randomized properties for lazy sequence expressions. */
 
-#include <tests/support/postgres.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
 #include <libpq-fe.h>
-#include <limits>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
@@ -57,6 +49,7 @@ private:
     std::uint64_t state_;
 };
 
+/** Operations represented by the independently evaluated expression tree. */
 enum class expression_kind : std::uint8_t {
     source_a,
     source_b,
@@ -69,17 +62,20 @@ enum class expression_kind : std::uint8_t {
     reverse_complement,
 };
 
+/** SQL slice-bound forms emitted by the property generator. */
 enum class bound_kind : std::uint8_t {
     omitted,
     value,
     null_value,
 };
 
+/** One generated slice bound and its optional numeric value. */
 struct slice_bound {
     bound_kind kind = bound_kind::omitted;
     std::int64_t value = 0;
 };
 
+/** Arena node carrying both SQL structure and its eager expected value. */
 struct expression_node {
     expression_kind kind = expression_kind::literal;
     std::uint32_t left = k_no_child;
@@ -91,6 +87,7 @@ struct expression_node {
     std::size_t node_count = 1u;
 };
 
+/** Generated expression arena with its root and operation coverage mask. */
 struct expression_tree {
     std::vector<expression_node> nodes;
     std::uint32_t root = k_no_child;
@@ -435,6 +432,7 @@ private:
     }
 }
 
+/** Edge-heavy element and slice coordinates for one expression result. */
 struct coordinate_probes {
     std::array<std::int64_t, 6u> elements;
     std::array<std::pair<slice_bound, slice_bound>, 6u> slices;
@@ -497,6 +495,7 @@ struct coordinate_probes {
     return std::string(1u, (*value)[*normalized]);
 }
 
+/** Rendered property query paired with its independently computed row. */
 struct property_query {
     std::string sql;
     std::vector<std::optional<std::string>> expected_row;
@@ -562,6 +561,7 @@ struct property_query {
     return query;
 }
 
+/** SQL execution outcome used to report and minimize property failures. */
 struct sql_observation {
     bool succeeded = false;
     std::string sqlstate;
@@ -637,6 +637,7 @@ struct sql_observation {
     return std::nullopt;
 }
 
+/** Smallest generated subtree that still reproduces a property mismatch. */
 struct minimized_failure {
     std::uint32_t node_index;
     property_query query;

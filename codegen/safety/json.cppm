@@ -387,7 +387,7 @@ class parser {
 };
 
 [[nodiscard]] inline std::string escape(std::string_view input) {
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr std::string_view digits = "0123456789abcdef";
     std::string result;
     result.reserve(input.size() + 8);
     for (const unsigned char value : input) {

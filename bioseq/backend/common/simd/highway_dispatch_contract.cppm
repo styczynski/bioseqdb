@@ -121,9 +121,7 @@ inline std::byte type_identity_anchor{};
  * @return Address-stable neutral identity for `p_alphabet`.
  */
 template <class p_alphabet>
-[[nodiscard]] constexpr highway_alphabet_identity
-highway_alphabet_identity_for() noexcept
-{
+[[nodiscard]] constexpr auto highway_alphabet_identity_for() noexcept -> highway_alphabet_identity {
     return &highway_alphabet_identity_detail::type_identity_anchor<
         p_alphabet>;
 }
@@ -146,9 +144,8 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
  * @return Byte-stable source-record key, or `unknown` for the sentinel and
  * unsupported values.
  */
-[[nodiscard]] constexpr std::string_view highway_kernel_name(
-    const highway_kernel kernel) noexcept
-{
+[[nodiscard]] constexpr auto highway_kernel_name(const highway_kernel kernel) noexcept
+    -> std::string_view {
     switch (kernel) {
         case highway_kernel::minimizer_minimap2_reference:
             return "minimizer::minimap2_reference";
@@ -178,10 +175,9 @@ static_assert(std::is_trivially_copyable_v<highway_alphabet_identity_entry>);
  * @return One-bit mask for a runnable kernel, or an empty mask for the
  * sentinel and unsupported values.
  */
-[[nodiscard]] constexpr highway_kernel_mask highway_kernel_mask_for(
-    const highway_kernel kernel) noexcept
-{
-    highway_kernel_mask result;
+[[nodiscard]] constexpr auto highway_kernel_mask_for(const highway_kernel kernel) noexcept
+    -> highway_kernel_mask {
+    highway_kernel_mask result{};
     const auto index = static_cast<std::size_t>(kernel);
     if (index < result.size()) {
         result.set(index);
@@ -218,9 +214,7 @@ struct highway_kernel_table final {
      * @param kernel Kernel family to inspect.
      * @return `true` when the corresponding availability bit is set.
      */
-    [[nodiscard]] bool has_kernel(
-        const highway_kernel kernel) const noexcept
-    {
+    [[nodiscard]] auto has_kernel(const highway_kernel kernel) const noexcept -> bool {
         const auto index = static_cast<std::size_t>(kernel);
         return index < available_kernels.size() && available_kernels[index];
     }
@@ -230,9 +224,7 @@ struct highway_kernel_table final {
      * @param required Kernel-family mask required by the caller.
      * @return `true` when all requested bits are available.
      */
-    [[nodiscard]] bool has_all_kernels(
-        const highway_kernel_mask& required) const noexcept
-    {
+    [[nodiscard]] auto has_all_kernels(const highway_kernel_mask& required) const noexcept -> bool {
         return (available_kernels & required) == required;
     }
 
@@ -242,9 +234,8 @@ struct highway_kernel_table final {
      * @return The unique matching entry, or `nullptr` when no unique match
      * exists.
      */
-    [[nodiscard]] const highway_alphabet_identity_entry*
-    resolve_alphabet_identity(const std::uint8_t alphabet_code) const noexcept
-    {
+    [[nodiscard]] auto resolve_alphabet_identity(const std::uint8_t alphabet_code) const noexcept
+        -> const highway_alphabet_identity_entry* {
         const highway_alphabet_identity_entry* resolved = nullptr;
         for (const highway_alphabet_identity_entry& entry
              : alphabet_identities) {
@@ -262,9 +253,8 @@ struct highway_kernel_table final {
      * exists.
      */
     template <class p_alphabet>
-    [[nodiscard]] const highway_alphabet_identity_entry*
-    resolve_alphabet_identity() const noexcept
-    {
+    [[nodiscard]] auto resolve_alphabet_identity() const noexcept
+        -> const highway_alphabet_identity_entry* {
         const auto expected = highway_alphabet_identity_for<p_alphabet>();
         const highway_alphabet_identity_entry* resolved = nullptr;
         for (const highway_alphabet_identity_entry& entry
@@ -281,7 +271,7 @@ struct highway_kernel_table final {
      * @return `true` only when every family is bound and the alphabet and
      * alignment records form a unique, strictly ordered one-to-one mapping.
      */
-    [[nodiscard]] bool is_complete() const noexcept {
+    [[nodiscard]] auto is_complete() const noexcept -> bool {
         if (!available_kernels.all()
             || minimizers.minimap2_reference == nullptr
             || minimizers.two_stack_nthash == nullptr
@@ -335,15 +325,14 @@ static_assert(std::is_trivially_copyable_v<highway_target_binding>);
  * @return Plan intersecting the compiled mask with the current CPU and OS
  * capabilities and selecting the highest-priority runnable target.
  */
-[[nodiscard]] highway_dispatch_plan make_highway_dispatch_plan(
-    std::int64_t compiled_targets) noexcept;
+[[nodiscard]] auto make_highway_dispatch_plan(std::int64_t compiled_targets) noexcept
+    -> highway_dispatch_plan;
 
 /**
  * @brief Return metadata for the registered fixed-target inventory.
  * @return Dispatch plan for the process registry.
  */
-[[nodiscard]] highway_dispatch_plan
-registered_highway_dispatch_plan() noexcept;
+[[nodiscard]] auto registered_highway_dispatch_plan() noexcept -> highway_dispatch_plan;
 
 /**
  * @brief Resolve an already-selected target bit in the current process.
@@ -353,15 +342,14 @@ registered_highway_dispatch_plan() noexcept;
  * @param exact_target Exact single-bit Highway target identity.
  * @return Registered binding for `exact_target`.
  */
-[[nodiscard]] const highway_target_binding&
-registered_highway_target_binding(std::int64_t exact_target);
+[[nodiscard]] auto registered_highway_target_binding(std::int64_t exact_target)
+    -> const highway_target_binding&;
 
 /**
  * @brief Format target bits in Highway priority order.
  * @param mask Target mask to enumerate.
  * @return TargetName strings ordered from highest to lowest priority.
  */
-[[nodiscard]] std::vector<std::string_view> highway_target_names(
-    std::int64_t mask);
+[[nodiscard]] auto highway_target_names(std::int64_t mask) -> std::vector<std::string_view>;
 
 } // namespace bioseq::simd_dispatch

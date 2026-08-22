@@ -23,7 +23,7 @@ std::uint64_t allocated_bytes = 0;
 List* chunk_groups_in_use = NIL;
 column_cache_statistics cache_statistics{};
 
-/** Intrusive cache entry; `list_node` must remain the first member. */
+/** Intrusive cache entry. `list_node` must remain the first member. */
 struct column_cache_entry {
     dlist_node list_node{};
     std::uint64_t relation_id = 0;
@@ -42,11 +42,13 @@ struct active_chunk_group {
     std::uint64_t chunk_id = 0;
 };
 
+/** @brief Convert the configured cache capacity from MiB to bytes. */
 [[nodiscard]] std::uint64_t cache_capacity_bytes() noexcept {
     return static_cast<std::uint64_t>(
         bioseq::settings::column_cache::capacity_mb) * 1024u * 1024u;
 }
 
+/** @brief Report whether a scan currently protects an entry's chunk group. */
 [[nodiscard]] bool entry_is_in_use(const column_cache_entry& entry) {
     for (const auto* active : bioseq::postgres::support::postgres_list<active_chunk_group>(chunk_groups_in_use)) {
         if (active->relation_id == entry.relation_id
@@ -58,6 +60,7 @@ struct active_chunk_group {
     return false;
 }
 
+/** @brief Release the cache-owned buffer referenced by an entry. */
 void release_entry_storage(column_cache_entry& entry) noexcept {
     auto* buffer = static_cast<StringInfo>(entry.storage);
     if (buffer->data != nullptr) {
@@ -128,6 +131,7 @@ void evict_column_cache_bytes(std::uint64_t bytes_to_release) {
     }
 }
 
+/** @brief Count entries currently linked into the cache list. */
 [[nodiscard]] std::uint64_t count_column_cache_entries() noexcept {
     if (cache_entries == nullptr) {
         return 0;
@@ -202,7 +206,7 @@ export void mark_chunk_group_in_use(
 
 /**
  * @brief Add or replace a decompressed chunk buffer.
- * @param storage Owned `StringInfo`; ownership transfers to the cache.
+ * @param storage Owned `StringInfo`. Ownership transfers to the cache.
  */
 export void add_column_cache_entry(
         std::uint64_t relation_id,

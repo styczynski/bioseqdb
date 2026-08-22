@@ -1,30 +1,18 @@
-// Tests for same-alphabet typmod coalescing and cross-alphabet rejection.
-//
-// A query such as
-//   mmsearch(seq_dna4_32, 'CTAG...'::bioseq.seq('dna4', 64))
-// (column is dna4/32, literal is dna4/64) has these contracts:
-//   - Same alphabet, different width  → coalesce (re-encode literal
-//                                       at column's width); same
-//                                       results, sidecar usable.
-//   - Different bound alphabet        → SQLSTATE 42804 before recoding.
-//
-// Results are independent of the literal's storage width. Same-alphabet paths
-// produce results identical to
-// the query expressed at the column's typmod; alphabet is semantic and never
-// implicitly promoted by mmsearch.
-//
-// EXPLAIN-output assertions are kept secondary to result-set
-// assertions: the EXPLAIN line "(coalesce to seq('dna4', 32))"
-// is the user-visible signal while the row set is the primary contract.
+/**
+ * @file Tests for same-alphabet typmod coalescing and cross-alphabet rejection.
+ *
+ * Same-alphabet width mismatches re-encode at the column width without
+ * changing results or sidecar eligibility. Cross-alphabet bindings fail with
+ * SQLSTATE 42804 before recoding. Result rows remain the primary contract.
+ * EXPLAIN assertions provide a secondary user-visible signal.
+ */
 
-#include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <set>
-#include <string>
-#include <string_view>
+#include <catch2/catch_template_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
@@ -74,7 +62,7 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
     seed_hoe_fixture(ctx, k_coalesce_table);
 
     // p_width-matched (32, identical to column).
-    const auto rows_match = query_rows(
+    const auto matched_width_rows = query_rows(
         ctx,
         fmt::format(
             "SELECT pk, bioseq.cigar(pk), bioseq.target_start(pk), bioseq.target_end(pk) "
@@ -85,7 +73,7 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
             k_coalesce_table));
 
     // p_width-mismatched (64, requires coalesce).
-    const auto rows_coalesce = query_rows(
+    const auto coalesced_width_rows = query_rows(
         ctx,
         fmt::format(
             "SELECT pk, bioseq.cigar(pk), bioseq.target_start(pk), bioseq.target_end(pk) "
@@ -95,11 +83,11 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
             " ORDER BY pk;",
             k_coalesce_table));
 
-    REQUIRE_FALSE(rows_match.empty());
-    REQUIRE_FALSE(rows_coalesce.empty());
+    REQUIRE_FALSE(matched_width_rows.empty());
+    REQUIRE_FALSE(coalesced_width_rows.empty());
     // The user's headline expectation: "The query should return the
     // same results". Strict equality.
-    REQUIRE(rows_match == rows_coalesce);
+    REQUIRE(matched_width_rows == coalesced_width_rows);
 }
 
 TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "

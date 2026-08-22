@@ -1,13 +1,19 @@
 find_package(Threads REQUIRED)
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_BENCHMARK_MODULES
+  BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS
+    "combined/main.cppm"
+    "standalone/main.cppm"
+  EXPECTED_COUNT 3)
 add_library(bioseq_cache_benchmark_support STATIC)
 target_sources(bioseq_cache_benchmark_support
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
-    FILES
-      "${CMAKE_CURRENT_SOURCE_DIR}/cache_benchmark.cppm"
-      "${CMAKE_CURRENT_SOURCE_DIR}/standalone/index.cppm"
-      "${CMAKE_CURRENT_SOURCE_DIR}/combined/index.cppm")
+    FILES ${BIOSEQ_CACHE_BENCHMARK_MODULES})
 set_target_properties(bioseq_cache_benchmark_support PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
@@ -56,9 +62,15 @@ add_dependencies(
   bioseq_cache_production_postgres_stage)
 
 find_package(Catch2 3 REQUIRED)
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES
+  BASE_DIRECTORY
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tests/contract/benchmark"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 1)
 add_executable(
   bioseq_cache_benchmark_report_contract_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/../tests/contract/benchmark/cache_benchmark_report_test.cpp")
+  ${BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES})
 set_target_properties(
   bioseq_cache_benchmark_report_contract_tests
   PROPERTIES

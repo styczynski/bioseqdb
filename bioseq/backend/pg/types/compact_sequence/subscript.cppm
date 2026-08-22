@@ -1,4 +1,7 @@
-/* PostgreSQL 17 custom subscript handler for zero-based half-open seq access. */
+/**
+ * @file subscript.cppm
+ * @brief PostgreSQL subscript handling for zero-based half-open sequence access.
+ */
 module;
 
 #include <cstdint>
@@ -30,6 +33,12 @@ import :letter;
 import bioseq.postgres.support;
 import bioseq.storage.coordinates;
 
+/**
+ * @brief Reads the logical base-pair length from an inline or tree sequence Datum.
+ * @param[in] input Non-null sequence Datum valid for the current PostgreSQL call.
+ * @return Logical length in base pairs.
+ * @note Locator Datums require scan ownership and therefore report a PostgreSQL error here.
+ */
 export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
 {
     const auto descriptor = classify_and_describe_sequence_header(input);
@@ -42,6 +51,12 @@ export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
     return descriptor.bp_length;
 }
 
+/**
+ * @brief Reads one normalized base rank from a sequence Datum.
+ * @param[in] input Non-null sequence Datum valid for the current PostgreSQL call.
+ * @param[in] normalized_index Zero-based index known to be within the logical length.
+ * @return Alphabet code and rank for the selected base.
+ */
 export [[nodiscard]] inline pg_sequence_rank_value sequence_letter_at(
     Datum input,
     std::uint64_t normalized_index)
@@ -51,6 +66,7 @@ export [[nodiscard]] inline pg_sequence_rank_value sequence_letter_at(
 
 namespace {
 
+/** @brief Carries normalized scalar or slice bounds between executor callbacks. */
 struct seq_subscript_workspace {
     bool is_slice;
     bool lower_provided;
@@ -59,6 +75,12 @@ struct seq_subscript_workspace {
     std::int64_t upper;
 };
 
+/**
+ * @brief Coerces one optional subscript expression to PostgreSQL `bigint`.
+ * @param[in] pstate Parser state used for transformation and error positioning.
+ * @param[in] raw Raw bound expression, or `nullptr` for an omitted slice bound.
+ * @return Parser-owned coerced expression, or `nullptr` for an omitted bound.
+ */
 [[nodiscard]] Expr* coerce_seq_subscript(ParseState* pstate, Node* raw)
 {
     if (raw == nullptr) {
@@ -78,6 +100,14 @@ struct seq_subscript_workspace {
     return reinterpret_cast<Expr*>(coerced);
 }
 
+/**
+ * @brief Validates a one-dimensional read subscript and installs coerced bounds.
+ * @param[in,out] sbsref Parse node populated with result and bound expressions.
+ * @param[in] indirection Single PostgreSQL index or slice descriptor.
+ * @param[in] pstate Parser state used to transform bound expressions.
+ * @param[in] is_slice Whether the expression requests a half-open slice.
+ * @param[in] is_assignment Whether the parser requested unsupported assignment semantics.
+ */
 void seq_subscript_transform(
     SubscriptingRef* sbsref,
     List* indirection,
@@ -118,6 +148,11 @@ void seq_subscript_transform(
     }
 }
 
+/**
+ * @brief Copies evaluated bounds into workspace and propagates SQL null bounds.
+ * @param[in,out] op Executor step containing evaluated bound values and result null state.
+ * @return `true` when fetch evaluation should continue.
+ */
 bool seq_check_subscripts(
     ExprState*,
     ExprEvalStep* op,
@@ -146,6 +181,10 @@ bool seq_check_subscripts(
     return true;
 }
 
+/**
+ * @brief Produces a nullable letter or a non-null half-open sequence slice.
+ * @param[in,out] op Executor step whose input Datum and result slot are reused in place.
+ */
 inline void seq_fetch_subscript_impl(ExprState*, ExprEvalStep* op, ExprContext*)
 {
     auto* state = op->d.sbsref.state;
@@ -184,13 +223,16 @@ inline void seq_fetch_subscript_impl(ExprState*, ExprEvalStep* op, ExprContext*)
     *op->resnull = false;
 }
 
-/* PostgreSQL invokes sbs_fetch directly from executor expression evaluation,
- * after the fmgr subscript handler has returned its SubscriptRoutines.  Keep
- * that actual callback as a no-escape C++ boundary: source reads deliberately
- * surface PostgreSQL ERROR as postgres_error only long enough to unwind
- * their read-session owners.  At this seam the exact ErrorData is transferred
- * back to PostgreSQL after the exception object and every fetch-local C++
- * owner have been destroyed. */
+/**
+ * @brief Executes subscript fetches without allowing C++ exceptions to cross PostgreSQL.
+ *
+ * Source reads may surface PostgreSQL errors long enough to unwind read-session owners.
+ * This callback transfers the exact error back only after fetch-local C++ objects die.
+ *
+ * @param[in] expression Executor expression state forwarded to the implementation.
+ * @param[in,out] op Executor step containing the input and output slots.
+ * @param[in] context Executor context forwarded to the implementation.
+ */
 inline void seq_fetch_subscript(ExprState* expression,
                                 ExprEvalStep* op,
                                 ExprContext* context)
@@ -227,6 +269,12 @@ inline void seq_fetch_subscript(ExprState* expression,
     pg_unreachable();
 }
 
+/**
+ * @brief Allocates expression-lifetime workspace and installs read-only callbacks.
+ * @param[in] sbsref Planned subscript expression.
+ * @param[in,out] sbsrefstate Executor state that owns the allocated workspace.
+ * @param[out] methods Callback table consumed by PostgreSQL expression evaluation.
+ */
 void seq_subscript_exec_setup(
     SubscriptingRef const* sbsref,
     SubscriptingRefState* sbsrefstate,
@@ -251,6 +299,11 @@ void seq_subscript_exec_setup(
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Returns the process-lifetime callback table for `bioseq.seq` subscripting.
+ * @param[in] input PostgreSQL internal handler argument, unused by this type.
+ * @return Static read-only subscript routine table exposed as PostgreSQL `internal`.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,

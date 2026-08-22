@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/concepts.cppm
+ * @brief Compile-time contracts for external sequence providers.
+ */
 module;
 
 #include <concepts>
@@ -28,6 +32,7 @@ import bioseq.parallelism.pool;
 // cycle is impossible. No virtual methods, no inheritance.
 export namespace bioseq::external::provider {
 
+/// Session contract for cancellable provider message production.
 template <class p_session_type>
 concept external_api_session_compatible =
     requires(p_session_type &session, provider_message_sink_ref messages,
@@ -38,6 +43,7 @@ concept external_api_session_compatible =
       { session.request_stop() } noexcept -> std::same_as<void>;
     };
 
+/// Provider contract for capability discovery, planning, and session creation.
 template <class p_provider_type>
 concept external_api_provider_compatible = requires(
     const normalized_external_query &query,

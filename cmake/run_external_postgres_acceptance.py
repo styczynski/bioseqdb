@@ -107,16 +107,79 @@ RUNTIME_CLOSURE_SCHEMA_REVISION = 1
 INSTALL_SCHEMA = "external_acceptance_install"
 DENIED_ROLE = "external_acceptance_denied"
 LIFECYCLE_TABLE = f"{INSTALL_SCHEMA}.external_lifecycle_probe"
+INVALID_ENTITY_TABLE = (
+    f"{INSTALL_SCHEMA}.external_invalid_entity_probe"
+)
+MISSING_ENTITY_TABLE = (
+    f"{INSTALL_SCHEMA}.external_missing_entity_probe"
+)
+INVALID_ENTITY_SQLSTATE = "22023"
+MISSING_ENTITY_SQLSTATE = "22023"
+MISSING_ENTITY_MESSAGE = (
+    'bioseq_external relation "external_missing_entity_probe" is missing '
+    'the required "entity" option'
+)
+EXTERNAL_OPTIONS_TABLE = "bioseq_internal.external_relation_options"
+EXTERNAL_OPTIONS_TABLE_IDENTITY = f"sql:table:{EXTERNAL_OPTIONS_TABLE}"
+EXTERNAL_OPTIONS_CPP_NAME = (
+    "bioseq::storage::metadata::catalog_rows::external_relation_options"
+)
+EXTERNAL_OPTIONS_SOURCE_MODULE = (
+    "bioseq.postgres.storage.metadata.sql_rows"
+)
+EXTERNAL_OPTIONS_SOURCE_PATH = (
+    "bioseq/backend/pg/column/metadata/sql_rows.cppm"
+)
+EXTERNAL_OPTIONS_ROW_CODEC_MODULE = (
+    "bioseq.postgres.storage.metadata.sql_row_codecs"
+)
+EXTERNAL_OPTIONS_ROW_CODEC_FIELDS = (
+    (0, "regclass", "regclass", "Oid", False, "row_codec.oid.required"),
+    (
+        1, "entity", "text", "std::optional<text*>", True,
+        "row_codec.text_pointer.nullable",
+    ),
+    (
+        2, "alphabet", "text", "std::optional<text*>", True,
+        "row_codec.text_pointer.nullable",
+    ),
+    (
+        3, "storage_width", "integer", "std::int32_t", False,
+        "row_codec.std::int32_t.required",
+    ),
+    (
+        4, "chunk_bases", "integer", "std::int32_t", False,
+        "row_codec.std::int32_t.required",
+    ),
+)
+EXPECTED_RELATION_ENTITIES = {
+    "catalog": "catalog",
+    "record_genes": "record_gene",
+    "record_locations": "record_location",
+    "sequence_chunks": "sequence_chunk",
+    "sequences": "sequence",
+    "taxonomy": "taxonomy",
+}
 EXTERNAL_SOURCE_PATHS = frozenset({
     "bioseq/backend/pg/external/relation.cppm",
     "bioseq/backend/pg/external/sql_catalog.cppm",
 })
+EXTERNAL_AUTHORITY_SOURCE_PATHS = frozenset({
+    *EXTERNAL_SOURCE_PATHS,
+    EXTERNAL_OPTIONS_SOURCE_PATH,
+})
+EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY = (
+    "sql:catalog_dependencies:$extension."
+    "bioseq::postgres::external::sql_routines.bioseq_external_handler"
+)
+EXTERNAL_ACCESS_METHOD_IDENTITY = (
+    "sql:access_method:$extension."
+    "bioseq::postgres::external::sql_routines.bioseq_external"
+)
 EXPECTED_EXTERNAL_TOP_LEVEL_IDENTITIES = frozenset({
     "sql:function:bioseq.bioseq_external_handler(internal)",
-    (
-        "sql:access_method:$extension."
-        "bioseq::postgres::external::sql_routines.bioseq_external"
-    ),
+    EXTERNAL_ACCESS_METHOD_IDENTITY,
+    EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY,
     "sql:schema:bioseq_external",
     *(
         f"sql:table:bioseq_external.{table}"
@@ -311,15 +374,15 @@ BASE_INPUT_FILE_KEYS = frozenset({
 })
 EXPECTED_INPUT_FILE_KEYS = frozenset({
     *BASE_INPUT_FILE_KEYS,
-    *(f"external_source:{path}" for path in EXTERNAL_SOURCE_PATHS),
+    *(f"external_source:{path}" for path in EXTERNAL_AUTHORITY_SOURCE_PATHS),
 })
 READ_ONLY_INSERT_SQL = {
     "catalog": """
 INSERT INTO bioseq_external.catalog
-  (provider, domain, original_identifier, accession, retrievable,
-   provenance, retrieved_at)
+  (provider, domain, entity_kind, original_identifier, accession,
+   retrievable, provenance, retrieved_at)
 VALUES
-  ('acceptance', 'sequence', 'probe', 'probe', true,
+  ('acceptance', 'sequence', 'nucleotide', 'probe', 'probe', true,
    '{}'::pg_catalog.jsonb, pg_catalog.now());
 """,
     "record_genes": """
@@ -626,6 +689,23 @@ def _expected_catalog_rows() -> list[dict[str, object]]:
     return rows
 
 
+def _expected_external_option_rows() -> list[dict[str, object]]:
+    if set(EXPECTED_RELATION_ENTITIES) != set(EXPECTED_TABLES):
+        raise ExternalAcceptanceError(
+            "external entity routing does not close over the six public tables"
+        )
+    return [
+        {
+            "relation": f"bioseq_external.{table}",
+            "entity": EXPECTED_RELATION_ENTITIES[table],
+            "alphabet": None,
+            "storage_width": 0,
+            "chunk_bases": 0,
+        }
+        for table in sorted(EXPECTED_RELATION_ENTITIES)
+    ]
+
+
 EXPECTED_CATALOG_SHA256 = _sha256_bytes(
     _canonical_json(_expected_catalog_rows())
 )
@@ -661,6 +741,234 @@ def _canonical_repository_source(
             f"{label} differs from its canonical repository path"
         )
     return source
+
+
+def _compact_cpp_type(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(value.split())
+
+
+def _validate_external_options_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    entities: Sequence[Mapping[str, Any]],
+    repository_root: Path,
+) -> dict[str, object]:
+    options_entities = [
+        entity
+        for entity in entities
+        if (
+            entity.get("source_path") == EXTERNAL_OPTIONS_SOURCE_PATH
+            and (
+                entity.get("stable_identity")
+                == EXTERNAL_OPTIONS_TABLE_IDENTITY
+                or entity.get("cpp_declaration")
+                == EXTERNAL_OPTIONS_CPP_NAME
+                or str(entity.get("cpp_declaration", "")).startswith(
+                    EXTERNAL_OPTIONS_CPP_NAME + "::"
+                )
+            )
+        )
+    ]
+    kind_counts = {
+        kind: sum(entity.get("kind") == kind for entity in options_entities)
+        for kind in ("table", "column", "primary_key", "check", "config_dump")
+    }
+    if kind_counts != {
+        "table": 1,
+        "column": 5,
+        "primary_key": 1,
+        "check": 3,
+        "config_dump": 1,
+    } or len(options_entities) != 11:
+        raise ExternalAcceptanceError(
+            "generated manifest does not contain the exact private external "
+            "option table/column/PK/check/config-dump closure"
+        )
+    source_hashes = {
+        entity.get("source_sha256") for entity in options_entities
+    }
+    if (
+        any(
+            entity.get("source_module") != EXTERNAL_OPTIONS_SOURCE_MODULE
+            for entity in options_entities
+        )
+        or len(source_hashes) != 1
+        or re.fullmatch(r"[0-9a-f]{64}", str(next(iter(source_hashes))))
+        is None
+    ):
+        raise ExternalAcceptanceError(
+            "private external option catalog source provenance is malformed"
+        )
+    source = _canonical_repository_source(
+        repository_root,
+        EXTERNAL_OPTIONS_SOURCE_PATH,
+        "external option catalog authority",
+    )
+    if _sha256(source) != next(iter(source_hashes)):
+        raise ExternalAcceptanceError(
+            "private external option catalog source hash is stale"
+        )
+    by_kind = {
+        kind: [
+            entity
+            for entity in options_entities
+            if entity.get("kind") == kind
+        ]
+        for kind in kind_counts
+    }
+    table = by_kind["table"][0]
+    if (
+        table.get("stable_identity") != EXTERNAL_OPTIONS_TABLE_IDENTITY
+        or table.get("installed_identity") != EXTERNAL_OPTIONS_TABLE_IDENTITY
+        or table.get("schema") != "bioseq_internal"
+        or table.get("schema_mode") != "fixed"
+        or table.get("name") != "external_relation_options"
+        or table.get("cpp_declaration") != EXTERNAL_OPTIONS_CPP_NAME
+    ):
+        raise ExternalAcceptanceError(
+            "private external option table identity/schema is not exact"
+        )
+    columns = {
+        str(entity.get("stable_identity"))
+        for entity in by_kind["column"]
+    }
+    constraints = {
+        str(entity.get("stable_identity"))
+        for entity in by_kind["check"]
+    }
+    if (
+        set(table.get("columns", [])) != columns
+        or set(table.get("constraints", [])) != constraints
+        or len(table.get("columns", [])) != 5
+        or len(table.get("constraints", [])) != 3
+    ):
+        raise ExternalAcceptanceError(
+            "private external option table child closure is incomplete"
+        )
+    for companion in by_kind["column"]:
+        if set(companion.get("dependencies", [])) != {
+            "sql:schema:bioseq_internal",
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        }:
+            raise ExternalAcceptanceError(
+                "private external option column lost its exact schema/table "
+                "dependencies"
+            )
+    for companion in (
+        *by_kind["primary_key"],
+        *by_kind["check"],
+        *by_kind["config_dump"],
+    ):
+        if set(companion.get("dependencies", [])) != {
+            EXTERNAL_OPTIONS_TABLE_IDENTITY
+        }:
+            raise ExternalAcceptanceError(
+                "private external option companion lost its exact table "
+                "dependency"
+            )
+    generated_cpp = table.get("generated_cpp")
+    if (
+        not isinstance(generated_cpp, dict)
+        or generated_cpp.get("facet") != "row_codec"
+        or generated_cpp.get("owner_key") != "storage_metadata"
+        or generated_cpp.get("source_module")
+        != EXTERNAL_OPTIONS_SOURCE_MODULE
+        or generated_cpp.get("module_name")
+        != EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        or generated_cpp.get("row_cpp_name") != EXTERNAL_OPTIONS_CPP_NAME
+        or generated_cpp.get("profile_invariant") is not True
+    ):
+        raise ExternalAcceptanceError(
+            "private external option table lost its generated typed row codec"
+        )
+    modules = manifest.get("row_codec_modules")
+    if not isinstance(modules, list):
+        raise ExternalAcceptanceError(
+            "generated manifest has no row-codec module inventory"
+        )
+    matching_modules = [
+        module
+        for module in modules
+        if (
+            isinstance(module, dict)
+            and module.get("module_name") == EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        )
+    ]
+    if len(matching_modules) != 1:
+        raise ExternalAcceptanceError(
+            "storage-metadata row-codec module identity is not unique"
+        )
+    module = matching_modules[0]
+    row_names = module.get("row_cpp_names")
+    row_identities = module.get("row_entity_identities")
+    if (
+        module.get("owner_key") != "storage_metadata"
+        or module.get("source_module") != EXTERNAL_OPTIONS_SOURCE_MODULE
+        or module.get("profile_invariant") is not True
+        or not isinstance(row_names, list)
+        or not isinstance(row_identities, list)
+        or len(row_names) != len(row_identities)
+        or [
+            identity
+            for name, identity in zip(row_names, row_identities, strict=True)
+            if name == EXTERNAL_OPTIONS_CPP_NAME
+        ] != [EXTERNAL_OPTIONS_TABLE_IDENTITY]
+    ):
+        raise ExternalAcceptanceError(
+            "storage-metadata codec module does not bind the external option "
+            "row exactly"
+        )
+    contracts = manifest.get("row_codec_contracts")
+    if not isinstance(contracts, list):
+        raise ExternalAcceptanceError(
+            "generated manifest has no row-codec contract inventory"
+        )
+    matching_contracts = [
+        contract
+        for contract in contracts
+        if (
+            isinstance(contract, dict)
+            and contract.get("row_identity")
+            == EXTERNAL_OPTIONS_TABLE_IDENTITY
+        )
+    ]
+    if len(matching_contracts) != 1:
+        raise ExternalAcceptanceError(
+            "private external option row-codec contract is not unique"
+        )
+    contract = matching_contracts[0]
+    fields = contract.get("fields")
+    if (
+        contract.get("row_cpp_name") != EXTERNAL_OPTIONS_CPP_NAME
+        or contract.get("module_name") != EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        or not isinstance(fields, list)
+    ):
+        raise ExternalAcceptanceError(
+            "private external option row-codec identity is stale"
+        )
+    actual_fields = tuple(
+        (
+            field.get("ordinal"),
+            field.get("sql_name"),
+            field.get("sql_type"),
+            _compact_cpp_type(field.get("cpp_type")),
+            field.get("nullable"),
+            field.get("converter_key"),
+        )
+        for field in fields
+        if isinstance(field, dict)
+    )
+    if (
+        len(actual_fields) != len(fields)
+        or actual_fields != EXTERNAL_OPTIONS_ROW_CODEC_FIELDS
+    ):
+        raise ExternalAcceptanceError(
+            "private external option row-codec fields differ in exact "
+            "name/order/type/nullability/converter"
+        )
+    return _file_record(source, repository_root=repository_root)
 
 
 def _validate_generated_manifest(
@@ -718,6 +1026,11 @@ def _validate_generated_manifest(
         raise ExternalAcceptanceError(
             "generated manifest repeats a stable identity"
         )
+    metadata_source_record = _validate_external_options_manifest(
+        manifest,
+        entities=entities,
+        repository_root=repository_root,
+    )
     external_top_level = {
         str(entity["stable_identity"])
         for entity in external
@@ -743,6 +1056,42 @@ def _validate_generated_manifest(
             "an authority outside the reviewed external sources owns an "
             "external SQL identity"
         )
+
+    by_identity = {
+        str(entity["stable_identity"]): entity for entity in entities
+    }
+    catalog_dependencies = by_identity.get(
+        EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY
+    )
+    if (
+        not isinstance(catalog_dependencies, dict)
+        or catalog_dependencies.get("kind") != "catalog_dependencies"
+        or set(catalog_dependencies.get("dependencies", [])) != {
+            "sql:function:bioseq.bioseq_external_handler(internal)",
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        }
+    ):
+        raise ExternalAcceptanceError(
+            "AM catalog dependency does not root exactly the handler and "
+            "typed external option catalog"
+        )
+    for table_name in EXPECTED_TABLES:
+        table_identity = f"sql:table:bioseq_external.{table_name}"
+        expected_dependencies = {
+            "sql:schema:bioseq_external",
+            EXTERNAL_ACCESS_METHOD_IDENTITY,
+            EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        }
+        if table_name in {"sequences", "sequence_chunks"}:
+            expected_dependencies.add("sql:type:bioseq.seq")
+        table = by_identity.get(table_identity)
+        if (
+            not isinstance(table, dict)
+            or set(table.get("dependencies", [])) != expected_dependencies
+        ):
+            raise ExternalAcceptanceError(
+                f"external table dependencies are not exact: {table_identity}"
+            )
 
     source_provenance: dict[str, dict[str, object]] = {}
     for entity in external:
@@ -786,6 +1135,12 @@ def _validate_generated_manifest(
         raise ExternalAcceptanceError(
             "external source provenance does not close over both authorities"
         )
+    source_provenance[EXTERNAL_OPTIONS_SOURCE_PATH] = metadata_source_record
+    if set(source_provenance) != EXTERNAL_AUTHORITY_SOURCE_PATHS:
+        raise ExternalAcceptanceError(
+            "external source provenance does not close over the public and "
+            "typed metadata authorities"
+        )
 
     statements = manifest.get("statements")
     if not isinstance(statements, list):
@@ -809,6 +1164,27 @@ def _validate_generated_manifest(
             "external statement inventory does not exactly cover the "
             "reviewed external owner set"
         )
+    statement_positions = {
+        str(statement.get("owner_identity")): index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, dict)
+    }
+    metadata_position = statement_positions.get(
+        EXTERNAL_OPTIONS_TABLE_IDENTITY
+    )
+    for table_name in EXPECTED_TABLES:
+        table_position = statement_positions.get(
+            f"sql:table:bioseq_external.{table_name}"
+        )
+        if (
+            not isinstance(metadata_position, int)
+            or not isinstance(table_position, int)
+            or metadata_position >= table_position
+        ):
+            raise ExternalAcceptanceError(
+                "typed external option metadata was rendered after public "
+                f"table {table_name}"
+            )
     if manifest.get("handwritten_fmgr_export_external_symbols") != [
         "bioseq_external_handler"
     ] or manifest.get("handwritten_fmgr_export_external_symbol_count") != 1:
@@ -830,6 +1206,13 @@ def _validate_generated_manifest(
         "manifest_statement_count": len(statements),
         "external_top_level_identity_count": len(external_top_level),
         "external_column_identity_count": external_column_count,
+        "external_options_table_identity": EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        "external_options_row_codec_module": (
+            EXTERNAL_OPTIONS_ROW_CODEC_MODULE
+        ),
+        "external_options_field_count": len(
+            EXTERNAL_OPTIONS_ROW_CODEC_FIELDS
+        ),
         "external_statement_owners": sorted(external_statement_owners),
         "external_source_provenance": source_provenance,
     }
@@ -851,7 +1234,7 @@ def _postgresql_provenance(
         output = _run_checked(
             [str(pg_config), flag],
             timeout=timeout,
-        ).decode("utf-8", errors="strict").strip()
+        ).decode("utf-8", errors="strict").rstrip()
         if not output:
             raise ExternalAcceptanceError(
                 f"pg_config {flag} returned no value"
@@ -1703,6 +2086,50 @@ def _validate_table_catalog(
     }
 
 
+def _validate_external_option_catalog(
+    rows: Sequence[Mapping[str, str]],
+) -> dict[str, object]:
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        if set(row) != {
+            "relation",
+            "entity",
+            "alphabet_is_null",
+            "storage_width",
+            "chunk_bases",
+        }:
+            raise ExternalAcceptanceError(
+                "live external option catalog row fields are not exact"
+            )
+        try:
+            alphabet_is_null = _boolean(
+                row["alphabet_is_null"],
+                "external option alphabet nullability",
+            )
+            normalized.append({
+                "relation": row["relation"],
+                "entity": row["entity"],
+                "alphabet": None if alphabet_is_null else "<present>",
+                "storage_width": int(row["storage_width"]),
+                "chunk_bases": int(row["chunk_bases"]),
+            })
+        except (KeyError, TypeError, ValueError) as error:
+            raise ExternalAcceptanceError(
+                f"malformed live external option row: {dict(row)}"
+            ) from error
+    expected = _expected_external_option_rows()
+    if normalized != expected:
+        raise ExternalAcceptanceError(
+            "generated external route-to-entity catalog rows or typed defaults "
+            "differ from the exact six-table contract"
+        )
+    return {
+        "catalog_table": EXTERNAL_OPTIONS_TABLE,
+        "row_count": len(expected),
+        "rows": normalized,
+    }
+
+
 def _validate_extension(row: Mapping[str, str]) -> dict[str, object]:
     expected = {
         "extension_name": "bioseq",
@@ -1754,6 +2181,19 @@ def _extract_sqlstate(value: bytes, marker: str) -> str:
     text = value.decode("utf-8", errors="strict")
     matches = re.findall(
         rf"(?m)^{re.escape(marker)}=([0-9A-Z]{{5}})$",
+        text,
+    )
+    if len(matches) != 1:
+        raise ExternalAcceptanceError(
+            f"expected exactly one {marker} marker, got {matches!r}"
+        )
+    return matches[0]
+
+
+def _extract_error_message(value: bytes, marker: str) -> str:
+    text = value.decode("utf-8", errors="strict")
+    matches = re.findall(
+        rf"(?m)^{re.escape(marker)}=(.+)$",
         text,
     )
     if len(matches) != 1:
@@ -1877,7 +2317,7 @@ def _repository_root_from_inputs(
     paths: Mapping[str, Path],
 ) -> Path:
     roots: set[Path] = set()
-    for source_path in sorted(EXTERNAL_SOURCE_PATHS):
+    for source_path in sorted(EXTERNAL_AUTHORITY_SOURCE_PATHS):
         key = f"external_source:{source_path}"
         record = files[key]
         if record.get("repository_path") != source_path:
@@ -2025,7 +2465,7 @@ def _validate_receipt_package(
             "receipt generated-package projection is not exact"
         )
     source_provenance = value["external_source_provenance"]
-    for source_path in sorted(EXTERNAL_SOURCE_PATHS):
+    for source_path in sorted(EXTERNAL_AUTHORITY_SOURCE_PATHS):
         if source_provenance[source_path] != input_files[
             f"external_source:{source_path}"
         ]:
@@ -2117,6 +2557,7 @@ def _validate_receipt_checks(
             "handler",
             "access_method",
             "tables",
+            "relation_options",
             "acl",
             "read_only",
             "empty_relation",
@@ -2212,6 +2653,11 @@ def _validate_receipt_checks(
             "ordered_catalog_sha256": EXPECTED_CATALOG_SHA256,
             "all_relation_sizes_zero": True,
         },
+        "relation_options": {
+            "catalog_table": EXTERNAL_OPTIONS_TABLE,
+            "row_count": len(EXPECTED_RELATION_ENTITIES),
+            "rows": _expected_external_option_rows(),
+        },
         "acl": {
             "schema_usage": False,
             "handler_execute": False,
@@ -2226,8 +2672,24 @@ def _validate_receipt_checks(
         },
         "create_drop_using_am": {
             "created_with_access_method": "bioseq_external",
+            "stored_entity": "taxonomy",
+            "stored_alphabet": None,
+            "stored_storage_width": 0,
+            "stored_chunk_bases": 0,
             "relation_size": 0,
             "dropped": True,
+            "stale_catalog_row_count": 0,
+            "invalid_entity_sqlstate": INVALID_ENTITY_SQLSTATE,
+            "invalid_relation_absent": True,
+            "invalid_catalog_row_count": len(EXPECTED_RELATION_ENTITIES),
+            "missing_entity_sqlstate": MISSING_ENTITY_SQLSTATE,
+            "missing_entity_message": MISSING_ENTITY_MESSAGE,
+            "missing_stored_entity": None,
+            "missing_stored_alphabet": None,
+            "missing_stored_storage_width": 0,
+            "missing_stored_chunk_bases": 0,
+            "missing_relation_dropped": True,
+            "missing_stale_catalog_row_count": 0,
         },
         "drop_extension": {
             "extension_count": 0,
@@ -2325,6 +2787,27 @@ def _validate_evidence_inventory_schema(
                 f"queries/read_only_insert_{table}.sql",
                 f"results/read_only_insert_{table}.stdout",
                 f"results/read_only_insert_{table}.stderr",
+            )
+        ),
+        *(
+            f"{directory}/{label}.{suffix}"
+            for label in (
+                "relation_options_catalog",
+                "create_using_am",
+                "created_using_am_catalog",
+                "drop_using_am",
+                "dropped_using_am_catalog",
+                "invalid_entity_option",
+                "invalid_entity_cleanup_catalog",
+                "create_missing_entity",
+                "missing_entity_catalog",
+                "missing_entity_option",
+                "missing_entity_cleanup_catalog",
+            )
+            for directory, suffix in (
+                ("queries", "sql"),
+                ("results", "stdout"),
+                ("results", "stderr"),
             )
         ),
     }
@@ -3048,6 +3531,32 @@ COPY (
         "external table catalog",
     ))
 
+    relation_options = _validate_external_option_catalog(_csv_records(
+        _run_psql(
+            label="relation_options_catalog",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql="""
+COPY (
+  SELECT
+    pg_catalog.format('%I.%I', n.nspname, c.relname) AS relation,
+    o.entity,
+    o.alphabet IS NULL AS alphabet_is_null,
+    o.storage_width,
+    o.chunk_bases
+  FROM bioseq_internal.external_relation_options AS o
+  JOIN pg_catalog.pg_class AS c ON c.oid = o.regclass
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'bioseq_external'
+  ORDER BY c.relname
+) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+""",
+        ),
+        "external relation option catalog",
+    ))
+
     acl = _validate_acl(_one_csv_record(
         _run_psql(
             label="acl_summary",
@@ -3179,6 +3688,7 @@ COPY (
         retained_root=retained_root,
         timeout=timeout,
         sql=f"""
+LOAD '$libdir/bioseq';
 CREATE TABLE {LIFECYCLE_TABLE}
   (provider pg_catalog.text NOT NULL)
 USING bioseq_external
@@ -3195,11 +3705,18 @@ WITH (entity = 'taxonomy');
             sql=f"""
 COPY (
   SELECT
+    c.oid::pg_catalog.text AS relation_oid,
     am.amname AS access_method,
-    pg_catalog.pg_relation_size(c.oid) AS relation_size
+    pg_catalog.pg_relation_size(c.oid) AS relation_size,
+    o.entity AS stored_entity,
+    o.alphabet IS NULL AS stored_alphabet_is_null,
+    o.storage_width AS stored_storage_width,
+    o.chunk_bases AS stored_chunk_bases
   FROM pg_catalog.pg_class AS c
   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
   JOIN pg_catalog.pg_am AS am ON am.oid = c.relam
+  JOIN bioseq_internal.external_relation_options AS o
+    ON o.regclass = c.oid
   WHERE n.nspname = '{INSTALL_SCHEMA}'
     AND c.relname = 'external_lifecycle_probe'
 ) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
@@ -3207,12 +3724,33 @@ COPY (
         ),
         "created USING AM relation",
     )
+    lifecycle_oid = _integer(
+        lifecycle_row["relation_oid"], "lifecycle relation OID"
+    )
     lifecycle = {
         "created_with_access_method": lifecycle_row["access_method"],
+        "stored_entity": lifecycle_row["stored_entity"],
+        "stored_alphabet": (
+            None
+            if _boolean(
+                lifecycle_row["stored_alphabet_is_null"],
+                "lifecycle stored alphabet nullability",
+            )
+            else "<present>"
+        ),
+        "stored_storage_width": _integer(
+            lifecycle_row["stored_storage_width"],
+            "lifecycle stored storage width",
+        ),
+        "stored_chunk_bases": _integer(
+            lifecycle_row["stored_chunk_bases"],
+            "lifecycle stored chunk bases",
+        ),
         "relation_size": _integer(
             lifecycle_row["relation_size"], "lifecycle relation size"
         ),
         "dropped": False,
+        "stale_catalog_row_count": -1,
     }
     _run_psql(
         label="drop_using_am",
@@ -3220,7 +3758,7 @@ COPY (
         bindir=bindir,
         retained_root=retained_root,
         timeout=timeout,
-        sql=f"DROP TABLE {LIFECYCLE_TABLE};\n",
+        sql=f"LOAD '$libdir/bioseq';\nDROP TABLE {LIFECYCLE_TABLE};\n",
     )
     dropped_row = _one_csv_record(
         _run_psql(
@@ -3231,7 +3769,12 @@ COPY (
             timeout=timeout,
             sql=f"""
 COPY (
-  SELECT pg_catalog.to_regclass('{LIFECYCLE_TABLE}') IS NULL AS dropped
+  SELECT
+    pg_catalog.to_regclass('{LIFECYCLE_TABLE}') IS NULL AS dropped,
+    (SELECT count(*)
+       FROM bioseq_internal.external_relation_options AS o
+      WHERE o.regclass = {lifecycle_oid}::pg_catalog.oid)
+      AS stale_catalog_row_count
 ) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
 """,
         ),
@@ -3240,14 +3783,239 @@ COPY (
     lifecycle["dropped"] = _boolean(
         dropped_row["dropped"], "lifecycle dropped"
     )
+    lifecycle["stale_catalog_row_count"] = _integer(
+        dropped_row["stale_catalog_row_count"],
+        "lifecycle stale catalog row count",
+    )
     if lifecycle != {
         "created_with_access_method": "bioseq_external",
+        "stored_entity": "taxonomy",
+        "stored_alphabet": None,
+        "stored_storage_width": 0,
+        "stored_chunk_bases": 0,
         "relation_size": 0,
         "dropped": True,
+        "stale_catalog_row_count": 0,
     }:
         raise ExternalAcceptanceError(
             f"create/drop USING AM contract differs: {lifecycle}"
         )
+
+    invalid_marker = "__BIOSEQ_INVALID_ENTITY_SQLSTATE__"
+    invalid_entity_sqlstate = _extract_sqlstate(
+        _run_psql(
+            label="invalid_entity_option",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql=f"""
+LOAD '$libdir/bioseq';
+\\set ON_ERROR_STOP off
+CREATE TABLE {INVALID_ENTITY_TABLE}
+  (provider pg_catalog.text NOT NULL)
+USING bioseq_external
+WITH (entity = 'unsupported');
+\\echo {invalid_marker}=:SQLSTATE
+\\set ON_ERROR_STOP on
+""",
+        ),
+        invalid_marker,
+    )
+    if invalid_entity_sqlstate != INVALID_ENTITY_SQLSTATE:
+        raise ExternalAcceptanceError(
+            "invalid external entity option returned SQLSTATE "
+            f"{invalid_entity_sqlstate}, expected {INVALID_ENTITY_SQLSTATE}"
+        )
+    invalid_cleanup = _one_csv_record(
+        _run_psql(
+            label="invalid_entity_cleanup_catalog",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql=f"""
+COPY (
+  SELECT
+    pg_catalog.to_regclass('{INVALID_ENTITY_TABLE}') IS NULL
+      AS relation_absent,
+    (SELECT count(*) FROM bioseq_internal.external_relation_options)
+      AS catalog_row_count
+) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+""",
+        ),
+        "invalid external entity cleanup",
+    )
+    invalid_relation_absent = _boolean(
+        invalid_cleanup["relation_absent"],
+        "invalid external entity relation absence",
+    )
+    invalid_catalog_row_count = _integer(
+        invalid_cleanup["catalog_row_count"],
+        "invalid external entity catalog row count",
+    )
+    if (
+        not invalid_relation_absent
+        or invalid_catalog_row_count != len(EXPECTED_RELATION_ENTITIES)
+    ):
+        raise ExternalAcceptanceError(
+            "invalid external entity CREATE mutated relation/catalog state"
+        )
+
+    _run_psql(
+        label="create_missing_entity",
+        cluster=cluster,
+        bindir=bindir,
+        retained_root=retained_root,
+        timeout=timeout,
+        sql=f"""
+LOAD '$libdir/bioseq';
+CREATE TABLE {MISSING_ENTITY_TABLE}
+  (provider pg_catalog.text NOT NULL)
+USING bioseq_external;
+""",
+    )
+    missing_catalog_row = _one_csv_record(
+        _run_psql(
+            label="missing_entity_catalog",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql=f"""
+COPY (
+  SELECT
+    c.oid::pg_catalog.text AS relation_oid,
+    o.entity IS NULL AS entity_is_null,
+    o.alphabet IS NULL AS alphabet_is_null,
+    o.storage_width,
+    o.chunk_bases
+  FROM pg_catalog.pg_class AS c
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+  JOIN bioseq_internal.external_relation_options AS o
+    ON o.regclass = c.oid
+  WHERE n.nspname = '{INSTALL_SCHEMA}'
+    AND c.relname = 'external_missing_entity_probe'
+) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+""",
+        ),
+        "missing external entity typed catalog row",
+    )
+    missing_oid = _integer(
+        missing_catalog_row["relation_oid"],
+        "missing external entity relation OID",
+    )
+    missing_stored_entity = (
+        None
+        if _boolean(
+            missing_catalog_row["entity_is_null"],
+            "missing external entity nullability",
+        )
+        else "<present>"
+    )
+    missing_stored_alphabet = (
+        None
+        if _boolean(
+            missing_catalog_row["alphabet_is_null"],
+            "missing external alphabet nullability",
+        )
+        else "<present>"
+    )
+    missing_stored_storage_width = _integer(
+        missing_catalog_row["storage_width"],
+        "missing external entity storage width",
+    )
+    missing_stored_chunk_bases = _integer(
+        missing_catalog_row["chunk_bases"],
+        "missing external entity chunk bases",
+    )
+
+    missing_state_marker = "__BIOSEQ_MISSING_ENTITY_SQLSTATE__"
+    missing_message_marker = "__BIOSEQ_MISSING_ENTITY_MESSAGE__"
+    missing_entity_output = _run_psql(
+        label="missing_entity_option",
+        cluster=cluster,
+        bindir=bindir,
+        retained_root=retained_root,
+        timeout=timeout,
+        sql=f"""
+\\set ON_ERROR_STOP off
+SELECT count(*) FROM {MISSING_ENTITY_TABLE};
+\\echo {missing_state_marker}=:SQLSTATE
+\\echo {missing_message_marker}=:LAST_ERROR_MESSAGE
+\\set ON_ERROR_STOP on
+DROP TABLE {MISSING_ENTITY_TABLE};
+""",
+    )
+    missing_entity_sqlstate = _extract_sqlstate(
+        missing_entity_output, missing_state_marker
+    )
+    missing_entity_message = _extract_error_message(
+        missing_entity_output, missing_message_marker
+    )
+    if (
+        missing_entity_sqlstate != MISSING_ENTITY_SQLSTATE
+        or missing_entity_message != MISSING_ENTITY_MESSAGE
+    ):
+        raise ExternalAcceptanceError(
+            "missing external entity option did not fail closed: "
+            f"SQLSTATE={missing_entity_sqlstate!r}, "
+            f"message={missing_entity_message!r}"
+        )
+    missing_cleanup = _one_csv_record(
+        _run_psql(
+            label="missing_entity_cleanup_catalog",
+            cluster=cluster,
+            bindir=bindir,
+            retained_root=retained_root,
+            timeout=timeout,
+            sql=f"""
+COPY (
+  SELECT
+    pg_catalog.to_regclass('{MISSING_ENTITY_TABLE}') IS NULL
+      AS relation_dropped,
+    (SELECT count(*)
+       FROM bioseq_internal.external_relation_options AS o
+      WHERE o.regclass = {missing_oid}::pg_catalog.oid)
+      AS stale_catalog_row_count
+) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8');
+""",
+        ),
+        "missing external entity cleanup",
+    )
+    missing_relation_dropped = _boolean(
+        missing_cleanup["relation_dropped"],
+        "missing external entity relation drop",
+    )
+    missing_stale_catalog_row_count = _integer(
+        missing_cleanup["stale_catalog_row_count"],
+        "missing external entity stale catalog row count",
+    )
+    if (
+        missing_stored_entity is not None
+        or missing_stored_alphabet is not None
+        or missing_stored_storage_width != 0
+        or missing_stored_chunk_bases != 0
+        or not missing_relation_dropped
+        or missing_stale_catalog_row_count != 0
+    ):
+        raise ExternalAcceptanceError(
+            "missing external entity typed defaults or DROP cleanup differ"
+        )
+
+    lifecycle.update({
+        "invalid_entity_sqlstate": invalid_entity_sqlstate,
+        "invalid_relation_absent": invalid_relation_absent,
+        "invalid_catalog_row_count": invalid_catalog_row_count,
+        "missing_entity_sqlstate": missing_entity_sqlstate,
+        "missing_entity_message": missing_entity_message,
+        "missing_stored_entity": missing_stored_entity,
+        "missing_stored_alphabet": missing_stored_alphabet,
+        "missing_stored_storage_width": missing_stored_storage_width,
+        "missing_stored_chunk_bases": missing_stored_chunk_bases,
+        "missing_relation_dropped": missing_relation_dropped,
+        "missing_stale_catalog_row_count": missing_stale_catalog_row_count,
+    })
 
     _run_psql(
         label="drop_extension",
@@ -3322,6 +4090,7 @@ DROP ROLE {DENIED_ROLE};
         "handler": handler,
         "access_method": access_method,
         "tables": tables,
+        "relation_options": relation_options,
         "acl": acl,
         "read_only": {
             "operation": "insert",
@@ -3401,7 +4170,7 @@ def _run_live(args: argparse.Namespace) -> Path:
         paths["pg_config"], timeout=timeout
     )
     source_paths = sorted({
-        *EXTERNAL_SOURCE_PATHS,
+        *EXTERNAL_AUTHORITY_SOURCE_PATHS,
         *(
             str(record["repository_path"])
             for record in package["external_source_provenance"].values()
@@ -3655,11 +4424,65 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             root / "results" / f"read_only_insert_{table}.stderr",
             b"",
         )
+    _write_bytes(
+        root / "queries" / "invalid_entity_option.sql",
+        b"-- synthetic invalid entity probe\n",
+    )
+    _write_bytes(
+        root / "results" / "invalid_entity_option.stdout",
+        (
+            "__BIOSEQ_INVALID_ENTITY_SQLSTATE__="
+            f"{INVALID_ENTITY_SQLSTATE}\n"
+        ).encode("ascii"),
+    )
+    _write_bytes(
+        root / "results" / "invalid_entity_option.stderr",
+        b"",
+    )
+    _write_bytes(
+        root / "queries" / "missing_entity_option.sql",
+        b"-- synthetic missing entity probe\n",
+    )
+    _write_bytes(
+        root / "results" / "missing_entity_option.stdout",
+        (
+            "__BIOSEQ_MISSING_ENTITY_SQLSTATE__="
+            f"{MISSING_ENTITY_SQLSTATE}\n"
+            "__BIOSEQ_MISSING_ENTITY_MESSAGE__="
+            f"{MISSING_ENTITY_MESSAGE}\n"
+        ).encode("utf-8"),
+    )
+    _write_bytes(
+        root / "results" / "missing_entity_option.stderr",
+        b"",
+    )
+    for label in (
+        "relation_options_catalog",
+        "create_using_am",
+        "created_using_am_catalog",
+        "drop_using_am",
+        "dropped_using_am_catalog",
+        "invalid_entity_cleanup_catalog",
+        "create_missing_entity",
+        "missing_entity_catalog",
+        "missing_entity_cleanup_catalog",
+    ):
+        _write_bytes(
+            root / "queries" / f"{label}.sql",
+            f"-- synthetic {label} probe\n".encode("ascii"),
+        )
+        _write_bytes(
+            root / "results" / f"{label}.stdout",
+            f"synthetic {label} receipt\n".encode("ascii"),
+        )
+        _write_bytes(root / "results" / f"{label}.stderr", b"")
 
     inputs_root = root / "inputs"
     repository_root = inputs_root / "repository"
     source_paths: dict[str, Path] = {}
-    for index, source_path in enumerate(sorted(EXTERNAL_SOURCE_PATHS), 1):
+    for index, source_path in enumerate(
+        sorted(EXTERNAL_AUTHORITY_SOURCE_PATHS), 1
+    ):
         source = repository_root / source_path
         _write_bytes(
             source,
@@ -3708,12 +4531,31 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             )
             else "bioseq/backend/pg/external/sql_catalog.cppm"
         )
+        dependencies: list[str] = []
+        kind = "surface"
+        if identity == EXTERNAL_CATALOG_DEPENDENCIES_IDENTITY:
+            kind = "catalog_dependencies"
+            dependencies = [
+                "sql:function:bioseq.bioseq_external_handler(internal)",
+                EXTERNAL_OPTIONS_TABLE_IDENTITY,
+            ]
+        elif identity.startswith("sql:table:bioseq_external."):
+            kind = "table"
+            table_name = identity.rsplit(".", 1)[-1]
+            dependencies = [
+                "sql:schema:bioseq_external",
+                EXTERNAL_ACCESS_METHOD_IDENTITY,
+                EXTERNAL_OPTIONS_TABLE_IDENTITY,
+            ]
+            if table_name in {"sequences", "sequence_chunks"}:
+                dependencies.append("sql:type:bioseq.seq")
         top_level_entities.append({
             "stable_identity": identity,
-            "kind": "surface",
+            "kind": kind,
             "source_path": source_path,
             "source_sha256": _sha256(source_paths[source_path]),
             "active_condition": "defined(BIOSEQ_EXTERNAL_PG)",
+            "dependencies": sorted(dependencies),
         })
     catalog_source_path = (
         "bioseq/backend/pg/external/sql_catalog.cppm"
@@ -3728,7 +4570,87 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         }
         for index in range(1, EXPECTED_COLUMN_COUNT + 1)
     ]
+    metadata_hash = _sha256(
+        source_paths[EXTERNAL_OPTIONS_SOURCE_PATH]
+    )
+    metadata_column_names = (
+        "regclass",
+        "entity",
+        "alphabet",
+        "storage_width",
+        "chunk_bases",
+    )
+    metadata_column_ids = [
+        f"sql:column:bioseq_internal.synthetic_external_options.{name}"
+        for name in metadata_column_names
+    ]
+    metadata_constraint_ids = [
+        "sql:primary_key:bioseq_internal.synthetic_external_options.pk",
+        "sql:check:bioseq_internal.synthetic_external_options.entity",
+        "sql:check:bioseq_internal.synthetic_external_options.storage_width",
+        "sql:check:bioseq_internal.synthetic_external_options.chunk_bases",
+    ]
+    metadata_config_dump_id = (
+        "sql:config_dump:bioseq_internal.synthetic_external_options.dump"
+    )
+    metadata_table = {
+        "stable_identity": EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        "installed_identity": EXTERNAL_OPTIONS_TABLE_IDENTITY,
+        "kind": "table",
+        "schema": "bioseq_internal",
+        "schema_mode": "fixed",
+        "name": "external_relation_options",
+        "cpp_declaration": EXTERNAL_OPTIONS_CPP_NAME,
+        "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
+        "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
+        "source_sha256": metadata_hash,
+        "columns": metadata_column_ids,
+        "constraints": metadata_constraint_ids[1:],
+        "generated_cpp": {
+            "facet": "row_codec",
+            "owner_key": "storage_metadata",
+            "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
+            "module_name": EXTERNAL_OPTIONS_ROW_CODEC_MODULE,
+            "row_cpp_name": EXTERNAL_OPTIONS_CPP_NAME,
+            "profile_invariant": True,
+        },
+    }
+    metadata_companions: list[dict[str, object]] = []
+    for name, identity in zip(
+        metadata_column_names, metadata_column_ids, strict=True
+    ):
+        metadata_companions.append({
+            "stable_identity": identity,
+            "kind": "column",
+            "cpp_declaration": f"{EXTERNAL_OPTIONS_CPP_NAME}::{name}",
+            "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
+            "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
+            "source_sha256": metadata_hash,
+            "dependencies": [
+                "sql:schema:bioseq_internal",
+                EXTERNAL_OPTIONS_TABLE_IDENTITY,
+            ],
+        })
+    for identity, kind in (
+        (metadata_constraint_ids[0], "primary_key"),
+        *((identity, "check") for identity in metadata_constraint_ids[1:]),
+        (metadata_config_dump_id, "config_dump"),
+    ):
+        metadata_companions.append({
+            "stable_identity": identity,
+            "kind": kind,
+            "cpp_declaration": EXTERNAL_OPTIONS_CPP_NAME,
+            "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
+            "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
+            "source_sha256": metadata_hash,
+            "dependencies": [EXTERNAL_OPTIONS_TABLE_IDENTITY],
+        })
     statements: list[dict[str, str]] = []
+    statements.append({
+        "statement_id": "S000",
+        "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
+        "owner_identity": EXTERNAL_OPTIONS_TABLE_IDENTITY,
+    })
     for index, owner_identity in enumerate(sorted_top_level, 1):
         source_path = (
             "bioseq/backend/pg/external/relation.cppm"
@@ -3743,7 +4665,36 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             "source_path": source_path,
             "owner_identity": owner_identity,
         })
-    entities = [*top_level_entities, *column_entities]
+    statements.append({
+        "statement_id": f"S{len(statements):03d}",
+        "source_path": EXTERNAL_OPTIONS_SOURCE_PATH,
+        "owner_identity": metadata_config_dump_id,
+    })
+    entities = [
+        *top_level_entities,
+        *column_entities,
+        metadata_table,
+        *metadata_companions,
+    ]
+    row_codec_fields = [
+        {
+            "ordinal": ordinal,
+            "cpp_name": sql_name,
+            "sql_name": sql_name,
+            "cpp_type": cpp_type,
+            "sql_type": sql_type,
+            "nullable": nullable,
+            "converter_key": converter_key,
+        }
+        for (
+            ordinal,
+            sql_name,
+            sql_type,
+            cpp_type,
+            nullable,
+            converter_key,
+        ) in EXTERNAL_OPTIONS_ROW_CODEC_FIELDS
+    ]
     manifest = {
         "schema_revision": 1,
         "authority_mode": "annotated_cpp",
@@ -3752,6 +4703,20 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
         "entity_count": len(entities),
         "entities": entities,
         "statements": statements,
+        "row_codec_modules": [{
+            "owner_key": "storage_metadata",
+            "source_module": EXTERNAL_OPTIONS_SOURCE_MODULE,
+            "module_name": EXTERNAL_OPTIONS_ROW_CODEC_MODULE,
+            "profile_invariant": True,
+            "row_cpp_names": [EXTERNAL_OPTIONS_CPP_NAME],
+            "row_entity_identities": [EXTERNAL_OPTIONS_TABLE_IDENTITY],
+        }],
+        "row_codec_contracts": [{
+            "row_identity": EXTERNAL_OPTIONS_TABLE_IDENTITY,
+            "row_cpp_name": EXTERNAL_OPTIONS_CPP_NAME,
+            "module_name": EXTERNAL_OPTIONS_ROW_CODEC_MODULE,
+            "fields": row_codec_fields,
+        }],
         "handwritten_fmgr_export_external_symbol_count": 1,
         "handwritten_fmgr_export_external_symbols": ["bioseq_external_handler"],
     }
@@ -4051,6 +5016,11 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
                 "ordered_catalog_sha256": EXPECTED_CATALOG_SHA256,
                 "all_relation_sizes_zero": True,
             },
+            "relation_options": {
+                "catalog_table": EXTERNAL_OPTIONS_TABLE,
+                "row_count": len(EXPECTED_RELATION_ENTITIES),
+                "rows": _expected_external_option_rows(),
+            },
             "acl": {
                 "schema_usage": False,
                 "handler_execute": False,
@@ -4065,8 +5035,26 @@ def _synthetic_receipt(root: Path) -> dict[str, Any]:
             },
             "create_drop_using_am": {
                 "created_with_access_method": "bioseq_external",
+                "stored_entity": "taxonomy",
+                "stored_alphabet": None,
+                "stored_storage_width": 0,
+                "stored_chunk_bases": 0,
                 "relation_size": 0,
                 "dropped": True,
+                "stale_catalog_row_count": 0,
+                "invalid_entity_sqlstate": INVALID_ENTITY_SQLSTATE,
+                "invalid_relation_absent": True,
+                "invalid_catalog_row_count": len(
+                    EXPECTED_RELATION_ENTITIES
+                ),
+                "missing_entity_sqlstate": MISSING_ENTITY_SQLSTATE,
+                "missing_entity_message": MISSING_ENTITY_MESSAGE,
+                "missing_stored_entity": None,
+                "missing_stored_alphabet": None,
+                "missing_stored_storage_width": 0,
+                "missing_stored_chunk_bases": 0,
+                "missing_relation_dropped": True,
+                "missing_stale_catalog_row_count": 0,
             },
             "drop_extension": {
                 "extension_count": 0,
@@ -4327,9 +5315,17 @@ def run_self_tests() -> None:
             "generated package statement count": (
                 "generated_package", "manifest_statement_count", 0,
             ),
+            "generated package typed codec": (
+                "generated_package", "external_options_row_codec_module",
+                "bioseq.postgres.invalid.sql_row_codecs",
+            ),
             "generated package source join": (
                 "generated_package", "external_source_provenance",
                 sorted(EXTERNAL_SOURCE_PATHS)[0], "sha256", "3" * 64,
+            ),
+            "generated package metadata source join": (
+                "generated_package", "external_source_provenance",
+                EXTERNAL_OPTIONS_SOURCE_PATH, "sha256", "4" * 64,
             ),
             "PostgreSQL input projection join": (
                 "postgresql", "pg_config", "configure", "--mutated",
@@ -4414,6 +5410,13 @@ def run_self_tests() -> None:
             "table catalog digest": (
                 "checks", "tables", "ordered_catalog_sha256", "a" * 64,
             ),
+            "typed route entity": (
+                "checks", "relation_options", "rows", 0, "entity", "mutated",
+            ),
+            "typed route width": (
+                "checks", "relation_options", "rows", 0,
+                "storage_width", 1,
+            ),
             "ACL SQLSTATE": (
                 "checks", "acl", "denied_sqlstate", "00000",
             ),
@@ -4429,11 +5432,38 @@ def run_self_tests() -> None:
             "lifecycle drop": (
                 "checks", "create_drop_using_am", "dropped", False,
             ),
+            "lifecycle typed width": (
+                "checks", "create_drop_using_am", "stored_storage_width", 1,
+            ),
+            "lifecycle stale catalog row": (
+                "checks", "create_drop_using_am",
+                "stale_catalog_row_count", 1,
+            ),
+            "invalid entity SQLSTATE": (
+                "checks", "create_drop_using_am",
+                "invalid_entity_sqlstate", "00000",
+            ),
+            "missing entity message": (
+                "checks", "create_drop_using_am",
+                "missing_entity_message", "mutated",
+            ),
+            "missing entity typed row": (
+                "checks", "create_drop_using_am",
+                "missing_stored_entity", "taxonomy",
+            ),
+            "missing entity stale catalog row": (
+                "checks", "create_drop_using_am",
+                "missing_stale_catalog_row_count", 1,
+            ),
             "cleanup residue": (
                 "checks", "drop_extension", "access_method_count", 1,
             ),
             "evidence record hash": (
                 "evidence_files", "queries/probe.sql", "sha256", "b" * 64,
+            ),
+            "typed catalog transcript hash": (
+                "evidence_files", "queries/relation_options_catalog.sql",
+                "sha256", "c" * 64,
             ),
         }
         for label, (*keys, replacement) in path_mutations.items():

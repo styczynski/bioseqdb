@@ -27,6 +27,7 @@ module;
 #include <clang/Lex/Lexer.h>
 #include <clang/Lex/PPCallbacks.h>
 #include <clang/Lex/Preprocessor.h>
+#include <clang/Options/OptionUtils.h>
 #include <clang/Tooling/ArgumentsAdjusters.h>
 #include <clang/Tooling/CompilationDatabase.h>
 #include <clang/Tooling/DependencyScanningTool.h>
@@ -204,8 +205,8 @@ private:
 [[nodiscard]] inline std::optional<std::size_t> raw_string_end(
     std::string_view source,
     std::size_t offset) {
-    static constexpr std::string_view prefixes[] = {
-        "R\"", "u8R\"", "uR\"", "UR\"", "LR\""};
+    static constexpr auto prefixes = std::to_array<std::string_view>({
+        "R\"", "u8R\"", "uR\"", "UR\"", "LR\""});
     std::size_t quote = std::string_view::npos;
     for (const std::string_view prefix : prefixes) {
         if (source.substr(offset).starts_with(prefix)) {
@@ -336,9 +337,9 @@ lex_source(std::string_view source) {
             continue;
         }
         const std::size_t begin = index;
-        static constexpr std::string_view multi[] = {
+        static constexpr auto multi = std::to_array<std::string_view>({
             "::", "->", "&&", "||", "==", "!=", "<=>", "<=", ">=",
-            "...", "<<", ">>", "++", "--"};
+            "...", "<<", ">>", "++", "--"});
         bool matched = false;
         for (const std::string_view punctuation : multi) {
             if (source.substr(index).starts_with(punctuation)) {
@@ -937,7 +938,9 @@ inline void adjust_angle_depth(
         if (token == "(") {
             if (!first_parenthesis && !saw_initializer_equals
                 && parentheses == 0 && brackets == 0 && braces == 0
-                && angles == 0) {
+                && angles == 0
+                && (terminator == declaration_begin
+                    || tokens[terminator - 1].spelling != "decltype")) {
                 first_parenthesis = terminator;
             }
             ++parentheses;
@@ -2497,7 +2500,7 @@ collect_preprocessor_directives(
         std::remove_if(
             result.imported_modules.begin(),
             result.imported_modules.end(),
-            [&](const std::string& imported) {
+            [&seen_imports](const std::string& imported) -> bool {
                 return !seen_imports.insert(imported).second;
             }),
         result.imported_modules.end());
@@ -2758,6 +2761,35 @@ struct sliced_declaration_bounds {
     bool multiple_declarators{};
 };
 
+/// Tracks only the top-level requires grammar following a function parameter
+/// list. A requires-expression body is introduced by a second top-level
+/// `requires`; nested requires tokens never advance this state.
+struct trailing_requires_state {
+    enum class stage {
+        before_clause,
+        constraint_expression,
+        requires_expression,
+    };
+
+    stage current{stage::before_clause};
+
+    /// Consumes one top-level suffix token and reports whether its opening
+    /// brace belongs to a requires-expression rather than the function body.
+    [[nodiscard]] constexpr bool consume(
+        std::string_view spelling) noexcept {
+        if (spelling == "requires") {
+            current = current == stage::before_clause
+                ? stage::constraint_expression
+                : stage::requires_expression;
+            return false;
+        }
+        if (current != stage::requires_expression) return false;
+        if (spelling == "(") return false;
+        current = stage::constraint_expression;
+        return spelling == "{";
+    }
+};
+
 [[nodiscard]] inline std::vector<std::size_t> attribute_end_by_begin(
     std::size_t token_count,
     const std::vector<attribute_block>& blocks) {
@@ -2800,7 +2832,7 @@ slice_direct_declaration_bounds(
     bool declaration_scope = false;
     bool constructor_initializer = false;
     bool constructor_component_complete = false;
-    bool skipped_requires_body = false;
+    trailing_requires_state trailing_requires;
     for (std::size_t cursor = begin; cursor < limit; ++cursor) {
         if (attribute_ends[cursor] > cursor) {
             cursor = attribute_ends[cursor] - 1;
@@ -2817,10 +2849,13 @@ slice_direct_declaration_bounds(
             && brackets == 0;
         const bool type_top_level = delimiter_top_level
             && angles == 0;
+        const bool after_function_parameters =
+            result.parameter_close
+            && cursor > *result.parameter_close;
+        const bool requires_expression_body = type_top_level
+            && after_function_parameters
+            && trailing_requires.consume(spelling);
         if (type_top_level && spelling == "=") {
-            const bool after_function_parameters =
-                result.parameter_close
-                && cursor > *result.parameter_close;
             const bool special_function_definition =
                 after_function_parameters
                 && cursor + 1 < limit
@@ -2877,41 +2912,11 @@ slice_direct_declaration_bounds(
                 && cursor > begin
                 && tokens[cursor - 1].spelling != ")"
                 && tokens[cursor - 1].spelling != "}";
-            bool requires_expression_body = false;
-            if (declaration_scope && !skipped_requires_body
-                && result.parameter_close
-                && cursor > *result.parameter_close) {
-                const auto requires_token = std::ranges::find_if(
-                    tokens.begin()
-                        + static_cast<std::ptrdiff_t>(
-                            *result.parameter_close + 1),
-                    tokens.begin()
-                        + static_cast<std::ptrdiff_t>(cursor),
-                    [](const lexical_token& token) {
-                        return token.spelling == "requires";
-                    });
-                if (requires_token
-                    != tokens.begin()
-                        + static_cast<std::ptrdiff_t>(cursor)) {
-                    const std::string_view previous =
-                        tokens[cursor - 1].spelling;
-                    requires_expression_body = previous == "requires"
-                        || (previous == ")"
-                            && std::ranges::count_if(
-                                requires_token,
-                                tokens.begin()
-                                    + static_cast<std::ptrdiff_t>(cursor),
-                                [](const lexical_token& token) {
-                                    return token.spelling == "requires";
-                                }) >= 2);
-                }
-            }
             if (constructor_braced_initializer
                 || requires_expression_body) {
                 cursor = *close;
                 constructor_component_complete =
                     constructor_braced_initializer;
-                skipped_requires_body = requires_expression_body;
                 continue;
             }
             if (declaration_scope && !saw_initializer) {
@@ -2933,7 +2938,9 @@ slice_direct_declaration_bounds(
 
         if (spelling == "(") {
             if (type_top_level && !saw_initializer
-                && !result.first_parenthesis) {
+                && !result.first_parenthesis
+                && (cursor == begin
+                    || tokens[cursor - 1].spelling != "decltype")) {
                 result.first_parenthesis = cursor;
             }
             ++parentheses;
@@ -3065,6 +3072,312 @@ previous_identifier_token(
         tokens[name_token].range.begin.byte_offset;
     return std::string{trim_view(
         source.substr(byte_begin, byte_end - byte_begin))};
+}
+
+enum class trailing_return_scan_state {
+    absent,
+    valid,
+    malformed,
+};
+
+struct trailing_return_scan {
+    trailing_return_scan_state state{trailing_return_scan_state::absent};
+    std::size_t type_begin{};
+    std::size_t type_end{};
+};
+
+[[nodiscard]] constexpr trailing_return_scan
+malformed_trailing_return() noexcept {
+    return {
+        .state = trailing_return_scan_state::malformed,
+    };
+}
+
+struct return_arrow_scan {
+    std::optional<std::size_t> arrow;
+    bool balanced{true};
+};
+
+/// Finds only a delimiter-level arrow after a function parameter list. A
+/// top-level requires-clause ends the declarator prefix being searched.
+[[nodiscard]] inline return_arrow_scan find_return_arrow(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    int parentheses = 0;
+    int brackets = 0;
+    int braces = 0;
+    for (std::size_t cursor = parameter_close + 1;
+         cursor < declarator_end;
+         ++cursor) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > declarator_end) {
+                return {.balanced = false};
+            }
+            cursor = attribute_ends[cursor] - 1;
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        const bool top_level = parentheses == 0 && brackets == 0
+            && braces == 0;
+        if (top_level
+            && (spelling == "requires" || spelling == "="
+                || spelling == "try")) {
+            break;
+        }
+        if (top_level && spelling == "->") {
+            return {.arrow = cursor};
+        }
+        if (spelling == "(") {
+            ++parentheses;
+        } else if (spelling == ")") {
+            --parentheses;
+        } else if (spelling == "[") {
+            ++brackets;
+        } else if (spelling == "]") {
+            --brackets;
+        } else if (spelling == "{") {
+            ++braces;
+        } else if (spelling == "}") {
+            --braces;
+        }
+        if (parentheses < 0 || brackets < 0 || braces < 0) {
+            return {.balanced = false};
+        }
+    }
+    return {
+        .balanced = parentheses == 0 && brackets == 0 && braces == 0,
+    };
+}
+
+/// Accepts the closed qualifier grammar between parameters and `->`.
+[[nodiscard]] inline bool valid_trailing_return_prefix(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t arrow) {
+    enum class prefix_stage {
+        cv_qualifiers,
+        ref_qualifier,
+        exception_specification,
+    };
+    prefix_stage stage = prefix_stage::cv_qualifiers;
+    bool saw_const = false;
+    bool saw_volatile = false;
+    bool saw_ref_qualifier = false;
+    bool saw_exception_specification = false;
+    for (std::size_t cursor = parameter_close + 1;
+         cursor < arrow;) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > arrow) return false;
+            cursor = attribute_ends[cursor];
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        if (spelling == "const" || spelling == "volatile") {
+            bool& seen = spelling == "const" ? saw_const : saw_volatile;
+            if (stage != prefix_stage::cv_qualifiers || seen) return false;
+            seen = true;
+            ++cursor;
+            continue;
+        }
+        if (spelling == "&" || spelling == "&&") {
+            if (stage == prefix_stage::exception_specification
+                || saw_ref_qualifier) {
+                return false;
+            }
+            saw_ref_qualifier = true;
+            stage = prefix_stage::ref_qualifier;
+            ++cursor;
+            continue;
+        }
+        if (spelling != "noexcept"
+            || saw_exception_specification) {
+            return false;
+        }
+        saw_exception_specification = true;
+        stage = prefix_stage::exception_specification;
+        ++cursor;
+        if (cursor < arrow && tokens[cursor].spelling == "(") {
+            const std::optional<std::size_t> close = matching_token(
+                tokens, cursor, "(", ")");
+            if (!close || *close == cursor + 1 || *close >= arrow) {
+                return false;
+            }
+            cursor = *close + 1;
+        }
+    }
+    return true;
+}
+
+/// Updates the balanced type-id delimiter stack. Greater-than operators
+/// nested in expressions remain ordinary tokens unless they close `<`.
+[[nodiscard]] inline bool consume_trailing_type_delimiter(
+    std::string_view spelling,
+    std::vector<char>& delimiters) {
+    if (spelling == "(" || spelling == "[" || spelling == "{"
+        || spelling == "<") {
+        delimiters.push_back(spelling.front());
+        return true;
+    }
+    const auto close = [&delimiters](char expected) {
+        if (delimiters.empty() || delimiters.back() != expected) {
+            return false;
+        }
+        delimiters.pop_back();
+        return true;
+    };
+    if (spelling == ")") return close('(');
+    if (spelling == "]") return close('[');
+    if (spelling == "}") return close('{');
+    if (spelling == ">") {
+        if (!delimiters.empty() && delimiters.back() == '<') {
+            return close('<');
+        }
+        return !delimiters.empty();
+    }
+    if (spelling == ">>") {
+        if (delimiters.size() >= 2
+            && delimiters.back() == '<'
+            && delimiters[delimiters.size() - 2] == '<') {
+            delimiters.pop_back();
+            delimiters.pop_back();
+            return true;
+        }
+        return !delimiters.empty();
+    }
+    return true;
+}
+
+/// Parses the balanced type-id following a proven trailing-return arrow.
+[[nodiscard]] inline trailing_return_scan scan_trailing_type_id(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t arrow,
+    std::size_t declarator_end) {
+    const std::size_t type_begin = arrow + 1;
+    std::size_t type_end = declarator_end;
+    std::vector<char> delimiters;
+    std::optional<std::string_view> first_token;
+    std::optional<std::string_view> last_token;
+    for (std::size_t cursor = type_begin; cursor < declarator_end;) {
+        if (attribute_ends[cursor] > cursor) {
+            if (attribute_ends[cursor] > declarator_end) {
+                return malformed_trailing_return();
+            }
+            cursor = attribute_ends[cursor];
+            continue;
+        }
+        const std::string_view spelling = tokens[cursor].spelling;
+        const bool top_level = delimiters.empty();
+        const bool terminal_specifier = spelling == "="
+            || spelling == "try"
+            || ((spelling == "override" || spelling == "final")
+                && first_token.has_value());
+        if (top_level && (spelling == "requires" || terminal_specifier)) {
+            type_end = cursor;
+            break;
+        }
+        if (top_level
+            && (spelling == "->" || spelling == ","
+                || spelling == ";")) {
+            return malformed_trailing_return();
+        }
+        if (!first_token) first_token = spelling;
+        last_token = spelling;
+        if (!consume_trailing_type_delimiter(spelling, delimiters)) {
+            return malformed_trailing_return();
+        }
+        ++cursor;
+    }
+
+    const auto begins_type = [](std::string_view spelling) noexcept {
+        return !spelling.empty()
+            && (identifier_begin(spelling.front()) || spelling == "::");
+    };
+    const auto ends_type = [](std::string_view spelling) noexcept {
+        return !spelling.empty()
+            && (identifier_begin(spelling.front()) || spelling == ">"
+                || spelling == ">>" || spelling == ")"
+                || spelling == "]" || spelling == "*"
+                || spelling == "&" || spelling == "&&"
+                || spelling == "...");
+    };
+    if (type_begin >= type_end || !delimiters.empty()
+        || !first_token || !last_token
+        || !begins_type(*first_token) || !ends_type(*last_token)) {
+        return malformed_trailing_return();
+    }
+    return {
+        .state = trailing_return_scan_state::valid,
+        .type_begin = type_begin,
+        .type_end = type_end,
+    };
+}
+
+/// Finds a function's trailing return type without entering its body. The
+/// prefix grammar is deliberately closed to cv/ref qualifiers, attributes,
+/// and noexcept; nested arrows are ignored inside balanced token groups.
+[[nodiscard]] inline trailing_return_scan scan_trailing_return_type(
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    if (parameter_close >= declarator_end
+        || declarator_end > tokens.size()) {
+        return malformed_trailing_return();
+    }
+    const return_arrow_scan arrow = find_return_arrow(
+        tokens, attribute_ends, parameter_close, declarator_end);
+    if (!arrow.balanced) return malformed_trailing_return();
+    if (!arrow.arrow) return {};
+    if (!valid_trailing_return_prefix(
+            tokens, attribute_ends, parameter_close, *arrow.arrow)) {
+        return malformed_trailing_return();
+    }
+    return scan_trailing_type_id(
+        tokens, attribute_ends, *arrow.arrow, declarator_end);
+}
+
+/// Returns the source-spelled return type for a function declarator. A
+/// malformed trailing return suppresses the leading placeholder so callers
+/// cannot accidentally treat an invalid declaration as explicitly typed.
+[[nodiscard]] inline std::string function_return_type_spelling(
+    std::string_view source,
+    const std::vector<lexical_token>& tokens,
+    const std::vector<std::size_t>& attribute_ends,
+    std::size_t declaration_begin,
+    std::size_t name_token,
+    std::size_t parameter_close,
+    std::size_t declarator_end) {
+    const trailing_return_scan trailing = scan_trailing_return_type(
+        tokens, attribute_ends, parameter_close, declarator_end);
+    if (trailing.state == trailing_return_scan_state::malformed) {
+        return {};
+    }
+    if (trailing.state == trailing_return_scan_state::valid) {
+        return std::string{trim_view(source_between(
+            source, tokens, trailing.type_begin, trailing.type_end))};
+    }
+    return explicit_type_before_name(
+        source,
+        tokens,
+        attribute_ends,
+        declaration_begin,
+        name_token);
+}
+
+/// Reports whether a source-spelled declared type is a deduced placeholder.
+[[nodiscard]] inline bool is_deduced_declared_type(
+    std::string_view spelling) {
+    std::string compact;
+    compact.reserve(spelling.size());
+    std::ranges::copy_if(
+        spelling,
+        std::back_inserter(compact),
+        [](char value) { return !ascii_space(value); });
+    return compact == "auto" || compact == "decltype(auto)";
 }
 
 [[nodiscard]] inline declaration_record make_sliced_declaration(
@@ -3278,7 +3591,8 @@ previous_identifier_token(
                 block.attributes.end());
         }
     }
-    const auto has_token = [&](std::string_view expected) {
+    const auto has_token = [&tokens, begin, head_end](
+                               std::string_view expected) -> bool {
         return std::ranges::any_of(
             tokens.begin() + static_cast<std::ptrdiff_t>(begin),
             tokens.begin() + static_cast<std::ptrdiff_t>(head_end),
@@ -3293,12 +3607,22 @@ previous_identifier_token(
             payload_range.begin.byte_offset,
             payload_range.end.byte_offset
                 - payload_range.begin.byte_offset))};
+    } else if (kind == declaration_kind::function && name_token
+               && bounds.parameter_close) {
+        explicit_type = function_return_type_spelling(
+            source,
+            tokens,
+            attribute_ends,
+            begin,
+            *name_token,
+            *bounds.parameter_close,
+            head_end);
     } else if (name_token) {
         explicit_type = explicit_type_before_name(
             source, tokens, attribute_ends, begin, *name_token);
     }
-    const bool has_deduced_type = explicit_type == "auto"
-        || explicit_type.contains("decltype(auto)");
+    const bool has_deduced_type =
+        is_deduced_declared_type(explicit_type);
     const bool has_default_arguments =
         kind == declaration_kind::function
         && bounds.first_parenthesis
@@ -3507,7 +3831,8 @@ inline void populate_slice_overloads_and_references(
             }
             const bool appears = std::ranges::any_of(
                 tokens,
-                [&](const lexical_token& token) {
+                [&declaration, &referenced](
+                    const lexical_token& token) -> bool {
                     return token.range.begin.byte_offset
                             >= declaration.declaration_head_range
                                    .begin.byte_offset
@@ -3544,7 +3869,7 @@ inline void populate_slice_overloads_and_references(
     std::ranges::copy_if(
         raw_tokens,
         std::back_inserter(structural_tokens),
-        [&](const lexical_token& token) {
+        [&directives](const lexical_token& token) -> bool {
             return !offset_in_directive(
                 token.range.begin.byte_offset, directives);
         });
@@ -3666,7 +3991,8 @@ inline void populate_slice_overloads_and_references(
         std::string qualified_name = target.name;
         const auto semantic_namespace = std::ranges::find_if(
             result.namespaces,
-            [&](const namespace_record& candidate) {
+            [&structural_tokens, &target](
+                const namespace_record& candidate) -> bool {
                 return candidate.name_range.begin.byte_offset
                         == structural_tokens[target.name_token]
                                .range.begin.byte_offset
@@ -3761,7 +4087,7 @@ inline void validate_body_free_probe_syntax(
                 == declaration_payload_kind::variable_initializer
             && std::ranges::any_of(
                 probe.tokens,
-                [&](const lexical_token& token) {
+                [&declaration](const lexical_token& token) -> bool {
                     return token.spelling == "{"
                         && token.range.begin.byte_offset
                             >= declaration.body_or_initializer_range
@@ -3812,6 +4138,8 @@ inline void validate_body_free_probe_syntax(
     const auto [tokens, comments] = detail::lex_source(source);
     const std::vector<detail::attribute_block> blocks =
         detail::collect_attribute_blocks(source, tokens);
+    const std::vector<std::size_t> attribute_ends =
+        detail::attribute_end_by_begin(tokens.size(), blocks);
     const std::vector<detail::scope_region> scopes =
         detail::collect_scopes(tokens, blocks);
 
@@ -3909,36 +4237,57 @@ inline void validate_body_free_probe_syntax(
             }
             if (subject.kind == declaration_kind::function
                 && subject.open_parenthesis && subject.close_parenthesis) {
-                declaration.return_type = detail::source_between(
-                    source,
-                    tokens,
-                    subject.token_begin,
-                    subject.name_token);
+                const detail::sliced_declaration_bounds bounds =
+                    detail::slice_direct_declaration_bounds(
+                        source_path,
+                        tokens,
+                        attribute_ends,
+                        {},
+                        subject.token_begin,
+                        tokens.size());
+                if (!bounds.first_parenthesis
+                    || !bounds.parameter_close) {
+                    throw std::runtime_error(
+                        source_path.string() + ":"
+                        + std::to_string(
+                            tokens[subject.name_token].range.begin.line)
+                        + ": token slicer lost function parameter bounds");
+                }
+                const std::size_t head_end = bounds.body_open.value_or(
+                    bounds.initializer.value_or(
+                        bounds.semicolon.value_or(bounds.token_end)));
+                declaration.return_type =
+                    detail::function_return_type_spelling(
+                        source,
+                        tokens,
+                        attribute_ends,
+                        subject.token_begin,
+                        subject.name_token,
+                        *bounds.parameter_close,
+                        head_end);
+                declaration.explicit_declared_type =
+                    declaration.return_type;
+                declaration.specifiers.has_deduced_type =
+                    detail::is_deduced_declared_type(
+                        declaration.return_type);
+                declaration.specifiers.has_explicit_type =
+                    !declaration.return_type.empty()
+                    && !declaration.specifiers.has_deduced_type;
                 declaration.parameters = detail::parse_parameters(
                     source,
                     tokens,
-                    *subject.open_parenthesis,
-                    *subject.close_parenthesis,
+                    *bounds.first_parenthesis,
+                    *bounds.parameter_close,
                     blocks);
-                std::size_t body_open = *subject.close_parenthesis + 1;
-                while (body_open < tokens.size()
-                       && tokens[body_open].spelling != "{"
-                       && tokens[body_open].spelling != ";") {
-                    ++body_open;
-                }
-                if (body_open < tokens.size()
-                    && tokens[body_open].spelling == "{") {
-                    if (const auto body_close = detail::matching_token(
-                            tokens, body_open, "{", "}")) {
-                        declaration.initializer_text =
-                            detail::source_between(
-                                source,
-                                tokens,
-                                body_open + 1,
-                                *body_close);
-                        declaration.range.end =
-                            tokens[*body_close].range.end;
-                    }
+                if (bounds.body_open && bounds.body_close) {
+                    declaration.initializer_text =
+                        detail::source_between(
+                            source,
+                            tokens,
+                            *bounds.body_open + 1,
+                            *bounds.body_close);
+                    declaration.range.end =
+                        tokens[*bounds.body_close].range.end;
                 }
             }
             if (subject.kind == declaration_kind::variable
@@ -5225,7 +5574,9 @@ class structural_visitor final
             lambda->getCallOperator();
         const source_range body_range = source_range_of(
             body->getSourceRange(), sources_, language_);
-        const auto direct_main_file_location = [&](clang::SourceLocation location) {
+        const auto direct_main_file_location = [this](
+                                                   clang::SourceLocation location)
+            -> clang::SourceLocation {
             if (location.isInvalid() || location.isMacroID()) {
                 return clang::SourceLocation{};
             }
@@ -5236,67 +5587,26 @@ class structural_visitor final
         };
         const clang::SourceLocation lambda_begin =
             direct_main_file_location(lambda->getBeginLoc());
-        clang::SourceLocation declarator_end =
+        clang::SourceLocation attribute_anchor =
             direct_main_file_location(lambda->getIntroducerRange().getEnd());
-        if (lambda->hasExplicitParameters() && call_operator != nullptr) {
-            const clang::FunctionTypeLoc function_type =
-                call_operator->getFunctionTypeLoc();
-            if (!function_type.isNull()) {
-                declarator_end = direct_main_file_location(
-                    function_type.getRParenLoc());
+        if (!lambda->getExplicitTemplateParameters().empty()) {
+            const clang::TemplateParameterList* parameters =
+                lambda->getTemplateParameterList();
+            if (parameters == nullptr) {
+                attribute_anchor = {};
             } else {
-                declarator_end = {};
+                clang::SourceLocation template_end =
+                    parameters->getRAngleLoc();
+                if (const clang::Expr* requires_clause =
+                        parameters->getRequiresClause()) {
+                    template_end = requires_clause->getEndLoc();
+                }
+                attribute_anchor = direct_main_file_location(template_end);
             }
-        } else if (const clang::TemplateParameterList* parameters =
-                       lambda->getTemplateParameterList()) {
-            clang::SourceLocation template_end = parameters->getRAngleLoc();
-            if (const clang::Expr* requires_clause =
-                    parameters->getRequiresClause()) {
-                template_end = requires_clause->getEndLoc();
-            }
-            declarator_end = direct_main_file_location(template_end);
         }
-        source_position insertion = declarator_end.isValid()
-            ? token_range_of(declarator_end, sources_, language_).end
+        const source_position insertion = attribute_anchor.isValid()
+            ? token_range_of(attribute_anchor, sources_, language_).end
             : source_position{};
-        bool attribute_geometry_valid = true;
-        if (declarator_end.isValid() && !lambda->hasExplicitParameters()) {
-            const auto& tokens = output_.tokens;
-            std::size_t cursor = static_cast<std::size_t>(std::distance(
-                tokens.begin(),
-                std::ranges::lower_bound(
-                    tokens,
-                    insertion.byte_offset,
-                    {},
-                    [](const lexical_token& token) {
-                        return token.range.begin.byte_offset;
-                    })));
-            while (cursor < tokens.size()
-                   && tokens[cursor].range.begin.byte_offset
-                       < body_range.begin.byte_offset
-                   && detail::attribute_open(tokens, cursor)) {
-                std::size_t close = cursor + 2u;
-                int nested = 0;
-                for (; close + 1u < tokens.size(); ++close) {
-                    if (detail::attribute_open(tokens, close)) {
-                        ++nested;
-                        ++close;
-                    } else if (detail::attribute_close(tokens, close)) {
-                        if (nested == 0) break;
-                        --nested;
-                        ++close;
-                    }
-                }
-                if (close + 1u >= tokens.size()
-                    || tokens[close + 1u].range.end.byte_offset
-                        > body_range.begin.byte_offset) {
-                    attribute_geometry_valid = false;
-                    break;
-                }
-                insertion = tokens[close + 1u].range.end;
-                cursor = close + 2u;
-            }
-        }
         callable_candidates_.push_back(callable_candidate{
             .record = {
                 .kind = callable_kind::lambda,
@@ -5312,8 +5622,7 @@ class structural_visitor final
             },
             .insertion_proven =
                 lambda_begin.isValid()
-                    && declarator_end.isValid()
-                    && attribute_geometry_valid
+                    && attribute_anchor.isValid()
                     && insertion.byte_offset
                         >= source_position_of(lambda_begin, sources_).byte_offset
                     && insertion.byte_offset <= body_range.begin.byte_offset
@@ -5687,10 +5996,10 @@ class structural_visitor final
         if (const auto* method =
                 llvm::dyn_cast<clang::CXXMethodDecl>(function);
             method != nullptr && method->getParent()->isLambda()) {
-            // Lambda call operators need HWY_ATTR immediately after their
-            // explicit parameter list (or introducer when parentheses are
-            // omitted), before specifiers, standard attributes, or a trailing
-            // return type. The LambdaExpr visitor owns that insertion;
+            // Lambda call operators need a standard-spelling target attribute
+            // in the front attribute slot after the introducer or complete
+            // explicit template head. The LambdaExpr visitor owns that
+            // insertion;
             // treating the synthetic call operator as a normal member would
             // record the body twice.
             return;
@@ -5866,7 +6175,8 @@ class structural_visitor final
                 namespace_qualified_name(immediate_namespace);
             const auto namespace_fact = std::ranges::find_if(
                 output_.namespaces,
-                [&](const namespace_record& candidate) {
+                [&immediate_qualified, &record](
+                    const namespace_record& candidate) -> bool {
                     return candidate.qualified_name
                             == immediate_qualified
                         && record.range.begin.byte_offset
@@ -6101,7 +6411,7 @@ class structural_consumer final : public clang::ASTConsumer {
         std::ranges::copy_if(
             raw_tokens,
             std::back_inserter(structural_tokens),
-            [&](const lexical_token& token) {
+            [&unit](const lexical_token& token) -> bool {
                 return !detail::offset_in_directive(
                     token.range.begin.byte_offset,
                     unit.preprocessor_directives);
@@ -6404,7 +6714,7 @@ structural_arguments_adjuster() {
             append_expanded_argument(argument, expanded);
         }
         clang::tooling::CommandLineArguments result;
-        result.reserve(expanded.size() + 3);
+        result.reserve(expanded.size() + 5);
         for (std::size_t index = 0;
              index < expanded.size();
              ++index) {
@@ -6424,6 +6734,34 @@ structural_arguments_adjuster() {
                 continue;
             }
             result.push_back(argument);
+        }
+        const bool has_resource_directory = std::ranges::any_of(
+            result,
+            [](std::string_view argument) {
+                return argument == "-resource-dir"
+                    || argument.starts_with("-resource-dir=");
+            });
+        if (!has_resource_directory) {
+            // Raw CMake commands rely on compiler-driver discovery, while
+            // the in-process ToolInvocation does not reproduce it.
+            static const std::string linked_resource_directory = [] {
+                const std::filesystem::path linked_clang_driver =
+                    std::filesystem::path{BIOSEQ_LINKED_LLVM_PREFIX}
+                    / "bin/clang++";
+                const std::string resource_directory =
+                    clang::GetResourcesPath(
+                        linked_clang_driver.string());
+                if (resource_directory.empty()
+                    || !std::filesystem::is_directory(
+                        resource_directory)) {
+                    throw std::runtime_error(
+                        "linked Clang driver has no discoverable resource "
+                        "directory");
+                }
+                return resource_directory;
+            }();
+            result.emplace_back("-resource-dir");
+            result.push_back(linked_resource_directory);
         }
         result.emplace_back("-fsyntax-only");
         result.emplace_back("-Wno-unknown-attributes");
@@ -6530,6 +6868,7 @@ class satisfiable_compilation_database final
 
 struct lexical_module_description {
     std::string provided_module;
+    bool provides_named_implementation_partition{};
     std::vector<std::string> imports;
 };
 
@@ -6591,7 +6930,14 @@ struct lexical_module_description {
         }
         const std::string name =
             module_name_from_tokens(tokens, index + 1, end);
-        if (module_declaration && exported && !name.empty()) {
+        const std::size_t partition_separator = name.find(':');
+        const bool named_module_partition =
+            partition_separator != std::string::npos
+            && partition_separator != 0
+            && partition_separator + 1 < name.size();
+        if (module_declaration
+            && !name.empty()
+            && (exported || named_module_partition)) {
             if (!result.provided_module.empty()
                 && result.provided_module != name) {
                 throw std::runtime_error(
@@ -6599,6 +6945,8 @@ struct lexical_module_description {
                     + ": provides more than one named module");
             }
             result.provided_module = name;
+            result.provides_named_implementation_partition =
+                !exported && named_module_partition;
         }
         index = end;
     }
@@ -6874,8 +7222,14 @@ void validate_owned_compile_database(
     std::vector<std::filesystem::path>& dependencies) {
     std::vector<std::string> result;
     std::set<std::filesystem::path> active_responses;
-    std::function<void(const std::string&)> append_argument =
-        [&](const std::string& argument) {
+    std::function<void(const std::string&)> append_argument = [
+                                                                   &active_responses,
+                                                                   &append_argument,
+                                                                   &command,
+                                                                   &dependencies,
+                                                                   &result](
+                                                                   const std::string& argument)
+        -> void {
         if (argument.empty() || argument.front() != '@') {
             result.push_back(argument);
             return;
@@ -7189,7 +7543,7 @@ struct relocation_context {
             case '\t': result += "\\t"; break;
             default:
                 if (character < 0x20) {
-                    static constexpr char hex[] = "0123456789abcdef";
+                    static constexpr std::string_view hex = "0123456789abcdef";
                     result += "\\u00";
                     result.push_back(hex[character >> 4]);
                     result.push_back(hex[character & 0xf]);
@@ -7412,7 +7766,7 @@ parse_make_depfile(
     std::vector<std::filesystem::path> result;
     std::string token;
     escaped = false;
-    const auto flush = [&] {
+    const auto flush = [&command_directory, &result, &token]() -> void {
         if (token.empty()) return;
         std::filesystem::path dependency{token};
         if (dependency.is_relative()) {
@@ -8386,8 +8740,9 @@ class scoped_pcm_publication {
     const std::filesystem::path& pcm_root) {
     std::filesystem::path common =
         absolute_normalized_path(pcm_root);
-    const auto include =
-        [&](const std::filesystem::path& candidate_path) {
+    const auto include = [&common](
+                             const std::filesystem::path& candidate_path)
+        -> void {
             const std::filesystem::path candidate =
                 absolute_normalized_path(candidate_path);
             while (
@@ -9032,7 +9387,8 @@ void scan_make_dependencies(module_build_record& record) {
     if (record.discovered_dependencies.empty()
         || !std::ranges::any_of(
             record.discovered_dependencies,
-            [&](const std::filesystem::path& dependency) {
+            [&canonical_source](
+                const std::filesystem::path& dependency) -> bool {
                 return weakly_canonical_path(dependency)
                     == canonical_source;
             })) {
@@ -9090,11 +9446,14 @@ load_compile_database(const std::filesystem::path& path) {
 
 }  // namespace clang_backend
 
-[[nodiscard]] translation_unit scan_translation_unit_from_code(
+namespace {
+
+[[nodiscard]] translation_unit scan_translation_unit_from_code_with_tool(
     const std::filesystem::path& source_path,
     std::string_view source,
     const std::vector<std::string>& compiler_arguments,
-    std::string_view compiler_profile) {
+    std::string_view compiler_profile,
+    std::string_view compiler_tool) {
     std::vector<translation_unit> units;
     std::vector<std::string> arguments = compiler_arguments;
     if (std::ranges::none_of(
@@ -9111,13 +9470,29 @@ load_compile_database(const std::filesystem::path& path) {
             units, std::string{compiler_profile}),
         llvm::StringRef{source.data(), source.size()},
         arguments,
-        source_path.string());
+        source_path.string(),
+        std::string{compiler_tool});
     if (!success || units.size() != 1) {
         throw std::runtime_error(
             source_path.string()
             + ": Clang structural pass reported errors");
     }
     return std::move(units.front());
+}
+
+}  // namespace
+
+[[nodiscard]] translation_unit scan_translation_unit_from_code(
+    const std::filesystem::path& source_path,
+    std::string_view source,
+    const std::vector<std::string>& compiler_arguments,
+    std::string_view compiler_profile) {
+    return scan_translation_unit_from_code_with_tool(
+        source_path,
+        source,
+        compiler_arguments,
+        compiler_profile,
+        "clang-tool");
 }
 
 [[nodiscard]] translation_unit merge_declaration_probe(
@@ -9285,9 +9660,16 @@ load_compile_database(const std::filesystem::path& path) {
     translation_unit syntax = detail::scan_token_slice_impl(
         probe_identity, body_free_source, true);
     detail::validate_body_free_probe_syntax(syntax);
-    if (!std::ranges::contains(
-            syntax.source_module.imported_modules,
-            signature.source_module.provided_module)) {
+    const bool imports_signature_primary = std::ranges::contains(
+        syntax.source_module.imported_modules,
+        signature.source_module.provided_module);
+    const bool attaches_to_signature_primary =
+        !syntax.source_module.is_interface
+        && !syntax.source_module.is_partition
+        && syntax.source_module.provided_module
+            == signature.source_module.provided_module;
+    if (!imports_signature_primary
+        && !attaches_to_signature_primary) {
         throw std::runtime_error(
             probe_identity.string()
             + ": declaration probe must import its signature-donor module");
@@ -9330,9 +9712,13 @@ load_compile_database(const std::filesystem::path& path) {
     std::map<std::string, std::filesystem::path, std::less<>>
         prepared_pcm_by_module;
     std::set<std::filesystem::path> prepared_pcm_paths;
-    const auto add_prepared_pcm =
-        [&](std::string module_name,
-            const std::filesystem::path& configured_pcm) {
+    const auto add_prepared_pcm = [
+                                      &pcm_root,
+                                      &prepared_pcm_by_module,
+                                      &prepared_pcm_paths](
+                                      std::string module_name,
+                                      const std::filesystem::path& configured_pcm)
+        -> void {
             const std::filesystem::path prepared_pcm =
                 clang_backend::absolute_normalized_path(configured_pcm);
             if (module_name.empty()
@@ -9476,11 +9862,12 @@ load_compile_database(const std::filesystem::path& path) {
         }
         probe_arguments.push_back(argument);
     }
-    translation_unit semantics = scan_translation_unit_from_code(
+    translation_unit semantics = scan_translation_unit_from_code_with_tool(
         probe_identity,
         body_free_source,
         probe_arguments,
-        effective_profile);
+        effective_profile,
+        adjusted[compiler_index]);
     return merge_declaration_probe(
         std::move(syntax), std::move(semantics));
 }
@@ -9500,11 +9887,20 @@ load_compile_database(const std::filesystem::path& path) {
     };
     std::unique_ptr<clang::tooling::CompilationDatabase> database =
         clang_backend::load_compile_database(compile_database);
-    clang_backend::validate_owned_compile_database(
-        *database,
-        source_paths,
-        compiler_profile,
-        pcm_root);
+    const bool has_compiler_profile = !compiler_profile.empty();
+    const bool has_pcm_root = !pcm_root.empty();
+    if (has_compiler_profile != has_pcm_root) {
+        throw std::runtime_error(
+            "compile-database scan received incomplete owned authority: "
+            "compiler_profile and pcm_root must be provided together");
+    }
+    if (has_compiler_profile) {
+        clang_backend::validate_owned_compile_database(
+            *database,
+            source_paths,
+            compiler_profile,
+            pcm_root);
+    }
     const clang_backend::scoped_compile_database_cwd cwd{
         compile_database};
     const std::vector<std::string> units =
@@ -9539,11 +9935,20 @@ load_compile_database(const std::filesystem::path& path) {
     };
     std::unique_ptr<clang::tooling::CompilationDatabase> database =
         clang_backend::load_compile_database(compile_database);
-    clang_backend::validate_owned_compile_database(
-        *database,
-        source_paths,
-        compiler_profile,
-        pcm_root);
+    const bool has_compiler_profile = !compiler_profile.empty();
+    const bool has_pcm_root = !pcm_root.empty();
+    if (has_compiler_profile != has_pcm_root) {
+        throw std::runtime_error(
+            "compile-database scan received incomplete owned authority: "
+            "compiler_profile and pcm_root must be provided together");
+    }
+    if (has_compiler_profile) {
+        clang_backend::validate_owned_compile_database(
+            *database,
+            source_paths,
+            compiler_profile,
+            pcm_root);
+    }
     const clang_backend::scoped_compile_database_cwd cwd{
         compile_database};
     const std::vector<std::string> units =
@@ -9998,8 +10403,26 @@ prepare_compilation_environment(
     std::map<std::string, int, std::less<>> visit_state;
     std::vector<std::string> build_order;
     std::vector<std::string> visit_stack;
-    std::function<void(const std::string&)> visit =
-        [&](const std::string& module_name) {
+    std::function<void(const std::string&)> visit = [
+                                                        &ambiguous_selected_commands,
+                                                        &build_order,
+                                                        &clang_binary,
+                                                        &clang_binary_sha256,
+                                                        &clang_scan_deps,
+                                                        &clang_scan_deps_sha256,
+                                                        &compiler_profile,
+                                                        &dependencies,
+                                                        &import_scan_root,
+                                                        &modules,
+                                                        &observed_actions,
+                                                        &relocation,
+                                                        &relocation_root,
+                                                        &toolchain,
+                                                        &visit,
+                                                        &visit_stack,
+                                                        &visit_state](
+                                                        const std::string& module_name)
+        -> void {
             const int state = visit_state[module_name];
             if (state == 2) return;
             if (state == 1) {
@@ -10186,8 +10609,13 @@ prepare_compilation_environment(
         record.direct_arguments = record.base_arguments;
         std::set<std::string, std::less<>> mapped_modules;
         std::vector<std::string> mapping_order;
-        std::function<void(const std::string&)> collect_mapping =
-            [&](const std::string& imported) {
+        std::function<void(const std::string&)> collect_mapping = [
+                                                                       &collect_mapping,
+                                                                       &mapped_modules,
+                                                                       &mapping_order,
+                                                                       &modules](
+                                                                       const std::string& imported)
+            -> void {
                 if (!mapped_modules.insert(imported).second) {
                     return;
                 }
@@ -10230,7 +10658,8 @@ prepare_compilation_environment(
             || record.discovered_dependencies.empty()
             || !std::ranges::any_of(
                 record.discovered_dependencies,
-                [&](const std::filesystem::path& dependency) {
+                [&canonical_record_source](
+                    const std::filesystem::path& dependency) -> bool {
                     return clang_backend::weakly_canonical_path(
                         dependency) == canonical_record_source;
                 })) {
@@ -10457,9 +10886,29 @@ prepare_compilation_environment(
     std::ostringstream compile_database_json;
     compile_database_json << "[\n";
     bool first_command = true;
+    std::vector<std::string> compile_database_modules;
+    compile_database_modules.reserve(
+        roots.size() + build_order.size());
+    std::set<std::string, std::less<>> recorded_modules;
     for (const std::filesystem::path& root : roots) {
+        const std::string& module_name = module_by_source.at(root);
+        if (recorded_modules.insert(module_name).second) {
+            compile_database_modules.push_back(module_name);
+        }
+    }
+    for (const std::string& module_name : build_order) {
         const clang_backend::module_build_record& record =
-            modules.at(module_by_source.at(root));
+            modules.at(module_name);
+        if (record.description
+                .provides_named_implementation_partition
+            && recorded_modules.insert(module_name).second) {
+            compile_database_modules.push_back(module_name);
+        }
+    }
+    for (const std::string& module_name :
+         compile_database_modules) {
+        const clang_backend::module_build_record& record =
+            modules.at(module_name);
         if (!first_command) compile_database_json << ",\n";
         first_command = false;
         compile_database_json
@@ -10959,7 +11408,7 @@ prepare_compilation_environment(
             retargeted.Filename = source.string();
             const bool has_retargeted_source = std::ranges::any_of(
                 retargeted.CommandLine,
-                [&](const std::string& argument) {
+                [&retargeted, &source](const std::string& argument) -> bool {
                     return !argument.empty()
                         && argument.front() != '-'
                         && clang_backend::absolute_normalized_path(
@@ -11241,7 +11690,8 @@ derive_dependency_compilation_authority(
             !alternates.empty()
             && (std::ranges::any_of(
                     alternates,
-                    [&](const std::filesystem::path& alternate) {
+                    [&raw_source_paths](
+                        const std::filesystem::path& alternate) -> bool {
                         return raw_source_paths.contains(
                                    clang_backend::absolute_normalized_path(
                                        alternate))
@@ -11281,8 +11731,15 @@ derive_dependency_compilation_authority(
 
     std::set<std::filesystem::path> roots{signature_source};
     std::set<std::string, std::less<>> visited_canonical_modules;
-    std::function<void(std::string_view)> visit_canonical =
-        [&](const std::string_view canonical_module) {
+    std::function<void(std::string_view)> visit_canonical = [
+                                                                &canonical_by_module,
+                                                                &canonical_inputs,
+                                                                &providers_by_module,
+                                                                &roots,
+                                                                &visit_canonical,
+                                                                &visited_canonical_modules](
+                                                                const std::string_view canonical_module)
+        -> void {
             if (!visited_canonical_modules.emplace(
                     canonical_module).second) {
                 return;
@@ -11406,24 +11863,26 @@ void validate_dependency_compilation_roots(
         clang_backend::load_compile_database(compile_database);
     const std::vector<clang::tooling::CompileCommand> all_commands =
         database->getAllCompileCommands();
-    if (all_commands.size() != authority.root_source_paths.size()) {
-        throw std::runtime_error(
-            "dependency-only owned compile database root count is stale");
-    }
+    const std::set<std::filesystem::path> expected_roots{
+        authority.root_source_paths.begin(),
+        authority.root_source_paths.end()};
     std::set<std::filesystem::path> actual_roots;
     for (const clang::tooling::CompileCommand& command : all_commands) {
         const std::filesystem::path source =
             clang_backend::absolute_normalized_path(
                 clang_backend::absolute_command_path(
                     command.Directory, command.Filename));
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(source);
+        if (provider.provides_named_implementation_partition
+            && !expected_roots.contains(source)) {
+            continue;
+        }
         if (!actual_roots.insert(source).second) {
             throw std::runtime_error(
                 "dependency-only owned compile database duplicates a root command");
         }
     }
-    const std::set<std::filesystem::path> expected_roots{
-        authority.root_source_paths.begin(),
-        authority.root_source_paths.end()};
     if (actual_roots != expected_roots) {
         throw std::runtime_error(
             "dependency-only owned compile database root authority is stale");
@@ -11740,7 +12199,7 @@ validate_dependency_compilation_environment(
             "PREPARE PCM manifest root is not an object");
     }
     const auto required_string =
-        [&](const llvm::json::Object& object,
+        [](const llvm::json::Object& object,
             std::string_view field) -> std::string {
             const std::optional<llvm::StringRef> value =
                 object.getString(field);
@@ -11839,9 +12298,9 @@ validate_dependency_compilation_environment(
         throw std::runtime_error(
             "PREPARE relocation root differs from generation inputs");
     }
-    const auto require_configured_path =
-        [&](std::string_view field,
-            const std::filesystem::path& configured) {
+    const auto require_configured_path = [root, &required_string](
+            std::string_view field,
+            const std::filesystem::path& configured) -> void {
             const std::filesystem::path sealed =
                 required_string(*root, field);
             if (clang_backend::weakly_canonical_path(sealed)
@@ -12443,8 +12902,17 @@ validate_dependency_compilation_environment(
     }
 
     std::map<std::string, int, std::less<>> validation_state;
-    std::function<void(const std::string&)> validate_module_artifacts =
-        [&](const std::string& name) {
+    std::function<void(const std::string&)> validate_module_artifacts = [
+                                                                            &clang_binary_sha256,
+                                                                            &clang_scan_deps_sha256,
+                                                                            &compiler_profile,
+                                                                            &dependency_root,
+                                                                            &modules,
+                                                                            &pcm_root,
+                                                                            &validate_module_artifacts,
+                                                                            &validation_state](
+                                                                            const std::string& name)
+        -> void {
             if (validation_state[name] == 2) {
                 return;
             }
@@ -12622,8 +13090,12 @@ validate_dependency_compilation_environment(
     }
 
     std::set<std::string, std::less<>> reached;
-    std::function<void(const std::string&)> collect_reached =
-        [&](const std::string& name) {
+    std::function<void(const std::string&)> collect_reached = [
+                                                                  &collect_reached,
+                                                                  &modules,
+                                                                  &reached](
+                                                                  const std::string& name)
+        -> void {
             if (!reached.insert(name).second) {
                 return;
             }
@@ -12654,6 +13126,39 @@ validate_dependency_compilation_environment(
         != normalized_sources.end()) {
         throw std::runtime_error(
             "generation source list contains duplicate identities");
+    }
+    std::set<std::filesystem::path> expected_database_sources{
+        normalized_sources.begin(), normalized_sources.end()};
+    for (const auto& [name, module] : modules) {
+        const clang_backend::lexical_module_description provider =
+            clang_backend::describe_module_provider(module.source);
+        if (provider.provided_module != name) {
+            throw std::runtime_error(
+                "PREPARE source provider identity is stale for module '"
+                + name + "'");
+        }
+        if (provider.provides_named_implementation_partition) {
+            expected_database_sources.insert(module.source);
+        }
+    }
+    const std::vector<clang::tooling::CompileCommand>
+        all_database_commands = database->getAllCompileCommands();
+    std::set<std::filesystem::path> actual_database_sources;
+    for (const clang::tooling::CompileCommand& command :
+         all_database_commands) {
+        const std::filesystem::path source =
+            clang_backend::weakly_canonical_path(
+                clang_backend::absolute_command_path(
+                    command.Directory, command.Filename));
+        if (!actual_database_sources.insert(source).second) {
+            throw std::runtime_error(
+                "owned compile database duplicates a source command");
+        }
+    }
+    if (actual_database_sources != expected_database_sources) {
+        throw std::runtime_error(
+            "owned compile database source/provider boundary differs "
+            "from the PREPARE manifest");
     }
     for (const std::filesystem::path& source :
          normalized_sources) {
@@ -12747,8 +13252,13 @@ validate_dependency_compilation_environment(
             expected_mapping_closure;
         std::vector<std::string> expected_mapping_order;
         std::function<void(const std::string&)>
-            collect_expected_mapping =
-                [&](const std::string& imported) {
+            collect_expected_mapping = [
+                                           &collect_expected_mapping,
+                                           &expected_mapping_closure,
+                                           &expected_mapping_order,
+                                           &modules](
+                                           const std::string& imported)
+                -> void {
                     if (!expected_mapping_closure.insert(
                             imported).second) {
                         return;
@@ -13095,7 +13605,7 @@ frontend_action_outcome_spelling(
          ++index) {
         const dependency_module_identity& input =
             payload.canonical_inputs[index];
-        output << (index == 0u ? "\n" : ",\n")
+        output << (index == 0U ? "\n" : ",\n")
             << "    {\"module\":\""
             << clang_backend::json_escape(input.module_name)
             << "\",\"source_sha256\":\""
@@ -13108,7 +13618,7 @@ frontend_action_outcome_spelling(
          ++index) {
         const frontend_action_record& action =
             payload.actions[index];
-        output << (index == 0u ? "\n" : ",\n")
+        output << (index == 0U ? "\n" : ",\n")
             << "    {\"ordinal\":" << index
             << ",\"kind\":\""
             << frontend_action_kind_spelling(action.kind)
@@ -13493,7 +14003,7 @@ validate_frontend_action_trace(
     if (!prepared_keys.contains(donor_key)
         || std::ranges::any_of(
             canonical_keys,
-            [&](const identity_key& key) {
+            [&prepared_keys](const identity_key& key) -> bool {
                 return prepared_keys.contains(key);
             })) {
         throw std::runtime_error(
@@ -13582,7 +14092,7 @@ validate_frontend_action_trace(
             != recomputed.canonical_token_slice_actions
         || payload.counts.canonical_semantic_frontend_actions
             != recomputed.canonical_semantic_frontend_actions
-        || recomputed.canonical_semantic_frontend_actions != 0u) {
+        || recomputed.canonical_semantic_frontend_actions != 0U) {
         throw std::runtime_error(
             "PREPARE action trace summary differs from observed actions");
     }

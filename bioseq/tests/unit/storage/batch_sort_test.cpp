@@ -1,36 +1,13 @@
-// bioseq/tests/unit/storage/batch_sort_test.cpp
-//
-// Correctness oracle for the GPU sequence sort kernels.
-//
-// Drives the REAL seam (`sequence_batch_sorter::sort`) over randomized dna4
-// (storage widths
-// u8/u16/u32/u64) and dna5 (u64) batches with representative length shapes (empty,
-// sub-unit, multi-unit, shared-prefix, prefix-of, equal, all-`A` tail), and
-// asserts the returned permutation EQUALS `std::sort` under the exact scalar
-// comparator `compare_sequences_scalar` (ascending sequence, index-ascending
-// tiebreak), for BOTH directions.
-//
-//   * vulkan_enabled = true  exercises the GPU façade when a hardware device is
-//     present (and transparently the CPU fallback when it is not — same assertion).
-//   * vulkan_enabled = false exercises the CPU fallback explicitly.
-//
-// The two runs must produce the identical permutation, including on
-// duplicate sequences). When a hardware Vulkan device is present we additionally
-// assert the device key/tiebreak dispatch counter advanced, confirming the GPU
-// path actually executed (not a silent decline).
+/**
+ * @file
+ * @brief Verifies GPU and CPU sequence-sort permutations against a scalar oracle.
+ */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <cstdint>
-#include <deque>
-#include <numeric>
-#include <random>
-#include <span>
-#include <string>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
-import bioseq.common.seqan_adapter;   // seq::dna4 / seq::dna5
+import bioseq.common.seqan_adapter; // seq::dna4 / seq::dna5
 import bioseq.sequences;
 import bioseq.sequences.simd;
 import bioseq.storage.lazy_sequence;
@@ -41,25 +18,32 @@ import bioseq.gpu.vulkan.runtime;
 namespace {
 
 namespace vk = bioseq::gpu::vulkan;
-using bioseq::storage::sequence_sort_options;
 using bioseq::storage::lazy_sequence;
 using bioseq::storage::make_resident_lazy_sequence;
 using bioseq::storage::resident_sequence_scanner;
 using bioseq::storage::sequence_batch_sorter;
+using bioseq::storage::sequence_sort_options;
 
-// A batch of sequences over one record type, keeping the owning symbol vectors and ranges
-// alive (the lazy wrappers are pointer-thin views).
-template <class p_record>
-struct owned_batch {
+/**
+ * @brief Owns symbols, packed ranges, and lazy views for one record type.
+ * @tparam p_record Alphabet and storage-width configuration.
+ *
+ * Deques keep symbol and range addresses stable for every lazy view.
+ */
+template <class p_record> struct owned_batch {
     using alphabet_t = typename p_record::alphabet_type;
     using unit_t = typename compact_sequence_range<p_record>::traits::storage_unit;
     using lazy_t = lazy_sequence<p_record, resident_sequence_scanner<unit_t>>;
     using view_t = bioseq::storage::lazy_sequence_view<alphabet_t>;
 
-    std::deque<std::vector<alphabet_t>> symbols;   // stable addresses
-    std::deque<compact_sequence_range<p_record>> ranges;  // stable addresses
+    std::deque<std::vector<alphabet_t>> symbols;         // stable addresses
+    std::deque<compact_sequence_range<p_record>> ranges; // stable addresses
     std::vector<lazy_t> lazies;
 
+    /**
+     * @brief Appends one rank vector and constructs its resident lazy owner.
+     * @param[in] ranks Valid ranks for the batch alphabet.
+     */
     void push(const std::vector<std::uint8_t>& ranks) {
         std::vector<alphabet_t> v(ranks.size());
         for (std::size_t i = 0; i < ranks.size(); ++i) {
@@ -72,6 +56,10 @@ struct owned_batch {
         lazies.push_back(make_resident_lazy_sequence(ranges.back()));
     }
 
+    /**
+     * @brief Erases all resident owners to their common lazy-view type.
+     * @return Views backed by this batch.
+     */
     [[nodiscard]] std::vector<view_t> views() const {
         std::vector<view_t> result;
         result.reserve(lazies.size());
@@ -80,12 +68,23 @@ struct owned_batch {
         }
         return result;
     }
-    [[nodiscard]] std::size_t size() const { return lazies.size(); }
-    [[nodiscard]] const lazy_t& operator[](std::size_t i) const { return lazies[i]; }
+    /** @brief Returns the number of resident sequence owners. */
+    [[nodiscard]] std::size_t size() const {
+        return lazies.size();
+    }
+    /** @brief Returns the resident owner at `i`. */
+    [[nodiscard]] const lazy_t& operator[](std::size_t i) const {
+        return lazies[i];
+    }
 };
 
-// Scalar oracle order = std::sort with the exact comparator + direction-applied
-// index tiebreak (mirrors both the GPU and CPU paths).
+/**
+ * @brief Computes the scalar sequence order with the production tie-break rule.
+ * @tparam p_batch Owning batch type.
+ * @param[in] batch Sequence owners to compare.
+ * @param[in] descending Whether to reverse sequence and index order.
+ * @return Permutation of batch indices.
+ */
 template <class p_batch>
 [[nodiscard]] std::vector<std::size_t> oracle_order(p_batch& batch, bool descending) {
     const std::size_t n = batch.size();
@@ -94,72 +93,92 @@ template <class p_batch>
     std::sort(order.begin(), order.end(), [&batch, descending](std::size_t i, std::size_t j) {
         const std::strong_ordering c = bioseq::simd::active_target::compare_sequences_scalar(
             batch[i].underlying(), batch[j].underlying());
-        if (c != 0) return descending ? c > 0 : c < 0;
+        if (c != 0)
+            return descending ? c > 0 : c < 0;
         return descending ? i > j : i < j;
     });
     return order;
 }
 
-// Smallest alphabet rank, used for uniform tails.
+/// Smallest alphabet rank used for uniform-tail fixtures.
 constexpr std::uint8_t rank_a = 0;
 
-// Build a varied batch spanning the required length shapes for `alphabet_size`-ary
-// data. `lpu` = letters_per_unit (drives sub-/multi-unit boundary choices).
-std::vector<std::vector<std::uint8_t>> make_shapes(std::mt19937_64& rng,
-                                                   std::size_t count,
-                                                   std::uint32_t alphabet_size,
-                                                   std::size_t lpu) {
+/**
+ * @brief Builds varied rank sequences around packed-unit boundaries.
+ * @param[in,out] rng Deterministic random engine.
+ * @param[in] count Number of sequences to return.
+ * @param[in] alphabet_size Count of valid ranks.
+ * @param[in] lpu Symbols stored in one packed unit.
+ * @return Empty, boundary, shared-prefix, duplicate, and random fixtures.
+ */
+[[nodiscard]] std::vector<std::vector<std::uint8_t>>
+make_shapes(std::mt19937_64& rng, std::size_t count, std::uint32_t alphabet_size, std::size_t lpu) {
     std::vector<std::vector<std::uint8_t>> out;
-    auto rank = [&]() { return static_cast<std::uint8_t>(rng() % alphabet_size); };
-    auto rand_seq = [&](std::size_t len) {
+    auto rank = [&rng, alphabet_size]() {
+        return static_cast<std::uint8_t>(rng() % alphabet_size);
+    };
+    auto rand_seq = [&rank](std::size_t len) {
         std::vector<std::uint8_t> v(len);
-        for (auto& x : v) x = rank();
+        for (auto& x : v) {
+            x = rank();
+        }
         return v;
     };
 
     // A shared prefix used by several rows (forces equal-key runs / deep tie-break).
-    const std::size_t prefix_len = lpu * 3 + 5;   // spans >1 unit + partial
+    const std::size_t prefix_len = lpu * 3 + 5; // spans >1 unit + partial
     std::vector<std::uint8_t> shared_prefix = rand_seq(prefix_len);
 
-    if (count == 0) return out;
+    if (count == 0) {
+        return out;
+    }
 
-    auto add = [&](std::vector<std::uint8_t> v) {
-        if (out.size() < count) out.push_back(std::move(v));
+    auto add = [&out, count](std::vector<std::uint8_t> v) {
+        if (out.size() < count) {
+            out.push_back(std::move(v));
+        }
     };
 
     // Deterministic shape seeds first, then random filler to reach `count`.
-    add({});                                                       // empty
-    add(rand_seq(1));                                              // single base
-    add(rand_seq(lpu - 1));                                        // sub-unit
-    add(rand_seq(lpu));                                            // exactly one unit
-    add(rand_seq(lpu + 1));                                        // just over a unit
-    add(rand_seq(lpu * 4 + 3));                                    // multi-unit + partial
+    add({});                    // empty
+    add(rand_seq(1));           // single base
+    add(rand_seq(lpu - 1));     // sub-unit
+    add(rand_seq(lpu));         // exactly one unit
+    add(rand_seq(lpu + 1));     // just over a unit
+    add(rand_seq(lpu * 4 + 3)); // multi-unit + partial
     {
-        auto p = shared_prefix;                                    // shared prefix, extended
-        auto tail = rand_seq(7); p.insert(p.end(), tail.begin(), tail.end());
+        auto p = shared_prefix; // shared prefix, extended
+        auto tail = rand_seq(7);
+        p.insert(p.end(), tail.begin(), tail.end());
         add(p);
     }
     {
-        auto p = shared_prefix;                                    // SAME shared prefix, diff tail
-        auto tail = rand_seq(9); p.insert(p.end(), tail.begin(), tail.end());
+        auto p = shared_prefix; // SAME shared prefix, diff tail
+        auto tail = rand_seq(9);
+        p.insert(p.end(), tail.begin(), tail.end());
         add(p);
     }
-    add(shared_prefix);                                            // prefix-of the two above
+    add(shared_prefix); // prefix-of the two above
     {
-        auto p = shared_prefix; p.push_back(rank_a);  // prefix + uniform tail
-        for (std::size_t i = 0; i < lpu * 2; ++i) p.push_back(rank_a);
+        auto p = shared_prefix;
+        p.push_back(rank_a); // prefix + uniform tail
+        for (std::size_t i = 0; i < lpu * 2; ++i)
+            p.push_back(rank_a);
         add(p);
     }
-    if (out.size() >= 1) add(out[std::min<std::size_t>(6, out.size() - 1)]);  // exact duplicate
-    add(std::vector<std::uint8_t>(lpu * 2, rank_a));              // smallest rank
-    add(std::vector<std::uint8_t>(lpu * 2,
-        static_cast<std::uint8_t>(alphabet_size - 1)));            // all-max (largest)
+    if (out.size() >= 1)
+        add(out[std::min<std::size_t>(6, out.size() - 1)]); // exact duplicate
+    add(std::vector<std::uint8_t>(lpu * 2, rank_a));        // smallest rank
+    add(std::vector<std::uint8_t>(
+        lpu * 2,
+        static_cast<std::uint8_t>(alphabet_size - 1))); // all-max (largest)
 
     while (out.size() < count) {
         const std::size_t len = rng() % (lpu * 5 + 1);
         // Half the random rows reuse the shared prefix to stress equal-key runs.
         if (rng() & 1u) {
-            auto p = shared_prefix; auto t = rand_seq(len % (lpu + 1));
+            auto p = shared_prefix;
+            auto t = rand_seq(len % (lpu + 1));
             p.insert(p.end(), t.begin(), t.end());
             add(std::move(p));
         } else {
@@ -170,8 +189,18 @@ std::vector<std::vector<std::uint8_t>> make_shapes(std::mt19937_64& rng,
     return out;
 }
 
+/**
+ * @brief Checks both sort directions through GPU-enabled and CPU-only routes.
+ * @tparam p_record Alphabet and storage-width configuration.
+ * @param[in] label Diagnostic fixture label.
+ * @param[in] count Number of sequences in the batch.
+ * @param[in] seed Random fixture seed.
+ * @param[in] alphabet_size Count of valid ranks.
+ */
 template <class p_record>
-void run_case(const char* label, std::size_t count, std::uint64_t seed,
+void run_case(const char* label,
+              std::size_t count,
+              std::uint64_t seed,
               std::uint32_t alphabet_size) {
     using traits = typename compact_sequence_range<p_record>::traits;
     using alphabet_t = typename p_record::alphabet_type;
@@ -182,7 +211,8 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
     auto shapes = make_shapes(rng, count, alphabet_size, traits::letters_per_unit);
 
     owned_batch<p_record> ob;
-    for (auto& s : shapes) ob.push(s);
+    for (auto& s : shapes)
+        ob.push(s);
     const std::vector<view_t> views = ob.views();
     const std::span<const view_t> batch(views.data(), views.size());
 
@@ -194,7 +224,9 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
             const std::vector<std::size_t> expected = oracle_order(ob, descending);
 
             // ---- GPU-enabled path (device when present, else CPU fallback) ----
-            sequence_sort_options gspec{}; gspec.descending = descending; gspec.vulkan_enabled = true;
+            sequence_sort_options gspec{};
+            gspec.descending = descending;
+            gspec.vulkan_enabled = true;
             const std::uint64_t before = rt.seq_sort_dispatch_count();
             const auto got_gpu = sorter::sort(batch, gspec);
             const std::uint64_t after = rt.seq_sort_dispatch_count();
@@ -206,7 +238,9 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
             }
 
             // ---- CPU-only path (vulkan_enabled = false) ----
-            sequence_sort_options cspec{}; cspec.descending = descending; cspec.vulkan_enabled = false;
+            sequence_sort_options cspec{};
+            cspec.descending = descending;
+            cspec.vulkan_enabled = false;
             const auto got_cpu = sorter::sort(batch, cspec);
             REQUIRE(got_cpu == expected);
 
@@ -216,20 +250,24 @@ void run_case(const char* label, std::size_t count, std::uint64_t seed,
     }
 }
 
-template <class p_record>
-void run_oversized_equal_key_case(const char* label) {
+/**
+ * @brief Checks global comparison for an equal-prefix run larger than one workgroup.
+ * @tparam p_record Alphabet and storage-width configuration.
+ * @param[in] label Diagnostic fixture label.
+ */
+template <class p_record> void run_oversized_equal_key_case(const char* label) {
     using traits = typename compact_sequence_range<p_record>::traits;
     using alphabet_t = typename p_record::alphabet_type;
     using view_t = bioseq::storage::lazy_sequence_view<alphabet_t>;
     using sorter = sequence_batch_sorter<alphabet_t>;
 
-    constexpr std::size_t count = 300;  // > seq-sort LOCAL_SIZE_X (256)
-    constexpr std::size_t suffix_digits = 6;  // 4^6 leaves plenty of unique suffixes
+    constexpr std::size_t count = 300;       // > seq-sort LOCAL_SIZE_X (256)
+    constexpr std::size_t suffix_digits = 6; // 4^6 leaves plenty of unique suffixes
     const std::size_t prefix_len = traits::letters_per_unit * 3u;
 
     owned_batch<p_record> ob;
     for (std::size_t i = 0; i < count; ++i) {
-        const std::size_t value = (i * 73u) % count;  // deterministic unsorted permutation
+        const std::size_t value = (i * 73u) % count; // deterministic unsorted permutation
         std::vector<std::uint8_t> ranks(prefix_len, rank_a);
         for (std::size_t digit = 0; digit < suffix_digits; ++digit) {
             const std::size_t shift = 2u * (suffix_digits - 1u - digit);
@@ -246,7 +284,9 @@ void run_oversized_equal_key_case(const char* label) {
         DYNAMIC_SECTION(label << " oversized equal-key run" << (descending ? " DESC" : " ASC")) {
             const std::vector<std::size_t> expected = oracle_order(ob, descending);
 
-            sequence_sort_options gspec{}; gspec.descending = descending; gspec.vulkan_enabled = true;
+            sequence_sort_options gspec{};
+            gspec.descending = descending;
+            gspec.vulkan_enabled = true;
             const std::uint64_t sort_before = rt.seq_sort_dispatch_count();
             const std::uint64_t global_before = rt.seq_sort_global_compare_dispatch_count();
             const auto got_gpu = sorter::sort(batch, gspec);
@@ -259,7 +299,9 @@ void run_oversized_equal_key_case(const char* label) {
                 REQUIRE(global_after > global_before);
             }
 
-            sequence_sort_options cspec{}; cspec.descending = descending; cspec.vulkan_enabled = false;
+            sequence_sort_options cspec{};
+            cspec.descending = descending;
+            cspec.vulkan_enabled = false;
             const auto got_cpu = sorter::sort(batch, cspec);
             REQUIRE(got_cpu == expected);
             REQUIRE(got_gpu == got_cpu);
@@ -267,22 +309,27 @@ void run_oversized_equal_key_case(const char* label) {
     }
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("dna4 GPU sort permutation equals compare_sequences_scalar",
           "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
-    using dna4_u8  = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
+    using dna4_u8 = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
     using dna4_u16 = sequence_custom_alphabet<seq::dna4, std::uint16_t>;
     using dna4_u32 = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
     using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 
     auto& rt = vk::runtime::instance();
     bioseq_log<logging_level::debug>("[gpu.sort.test] device usable={} ({})",
-                    vk::hardware_device_available(rt),
-                    vk::hardware_device_available(rt) ? "GPU path" : "CPU fallback path");
+                                     vk::hardware_device_available(rt),
+                                     vk::hardware_device_available(rt) ? "GPU path"
+                                                                       : "CPU fallback path");
 
-    for (std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{2},
-                          std::size_t{17}, std::size_t{256}, std::size_t{1000}}) {
+    for (std::size_t n : {std::size_t{0},
+                          std::size_t{1},
+                          std::size_t{2},
+                          std::size_t{17},
+                          std::size_t{256},
+                          std::size_t{1000}}) {
         run_case<dna4_u8>("dna4/u8", n, 0xA11CE0000ull + n, 4);
         run_case<dna4_u16>("dna4/u16", n, 0xB0B0B0000ull + n, 4);
         run_case<dna4_u32>("dna4/u32", n, 0xC0FFEE000ull + n, 4);
@@ -295,8 +342,12 @@ TEST_CASE("dna5 generic GPU sort permutation equals compare_sequences_scalar",
           "[component:bioseq][layer:unit][feature:storage][resource:gpu]") {
     using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 
-    for (std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{2},
-                          std::size_t{17}, std::size_t{256}, std::size_t{1000}}) {
+    for (std::size_t n : {std::size_t{0},
+                          std::size_t{1},
+                          std::size_t{2},
+                          std::size_t{17},
+                          std::size_t{256},
+                          std::size_t{1000}}) {
         run_case<dna5_u64>("dna5/u64", n, 0x5E5E5E000ull + n, 5);
     }
 }

@@ -1,3 +1,7 @@
+/**
+ * @file generated_guc_producer_test.cppm
+ * @brief Exports a generated-like enum-GUC registration contract.
+ */
 module;
 
 #include <type_traits>
@@ -26,7 +30,7 @@ struct registrar final {
 
 /**
  * Generated infrastructure is the sole caller of the narrow registration
- * access shim; ordinary importers receive only this typed operation.
+ * access shim. Ordinary importers receive only this typed operation.
  */
 inline void register_storage(
         storage& value,

@@ -1,6 +1,7 @@
-/* Opaque source-domain ABI and callback-scoped read-session shell.  Concrete
- * PostgreSQL scanners/domains live in postgres_sequence_scanner and import this
- * partition; this partition never imports them. */
+/**
+ * @file source_abi.cppm
+ * @brief Opaque source-domain ABI and callback-scoped sequence read sessions.
+ */
 module;
 
 #include <cstdint>
@@ -18,6 +19,7 @@ import :flat_abi;
 import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 
+/// Backend-thread identity captured by a callback-scoped read session.
 export struct pg_sequence_backend_thread_token {
     std::thread::id owner;
 
@@ -32,13 +34,19 @@ export struct pg_sequence_backend_thread_token {
     }
 };
 
+/// Outcome of a source-backed rank read.
 export enum class pg_sequence_source_read_status : std::uint8_t {
     ok,
     wrong_thread,
 };
 
+/* Source callbacks mention the session before its entry and owner records are
+ * declared. The pointer/reference-only declaration keeps the callback table
+ * ahead of the concrete session layout without duplicating that layout. */
+/// Callback-scoped owner of source read state.
 export struct pg_sequence_read_session;
 
+/// Stable identity for one generation of opaque source state.
 export struct pg_sequence_source_identity {
     std::uintptr_t control_address{};
     std::uint64_t generation{};
@@ -46,6 +54,7 @@ export struct pg_sequence_source_identity {
                            pg_sequence_source_identity const&) = default;
 };
 
+/// No-throw lifetime and rank-read callbacks for opaque source state.
 export struct pg_sequence_source_backend_ops {
     void (*retain)(void*) noexcept;
     void (*release)(void*) noexcept;
@@ -61,6 +70,7 @@ export struct pg_sequence_source_backend_ops {
         std::span<std::uint8_t>);
 };
 
+/// Trivially copyable state-and-operations handle for a sequence source.
 export struct pg_sequence_source_handle {
     void* state{};
     pg_sequence_source_backend_ops const* ops{};
@@ -69,6 +79,7 @@ export struct pg_sequence_source_handle {
 static_assert(std::is_trivially_copyable_v<pg_sequence_source_handle>);
 static_assert(std::is_trivially_destructible_v<pg_sequence_source_handle>);
 
+/// Return whether every required source callback and state pointer is present.
 export [[nodiscard]] inline bool pg_sequence_source_handle_valid(
     pg_sequence_source_handle source) noexcept
 {
@@ -79,6 +90,7 @@ export [[nodiscard]] inline bool pg_sequence_source_handle_valid(
         && source.ops->read_ranks != nullptr;
 }
 
+/// Add one source reference when the handle is valid.
 export inline void retain_pg_sequence_source(
     pg_sequence_source_handle source) noexcept
 {
@@ -87,6 +99,7 @@ export inline void retain_pg_sequence_source(
     }
 }
 
+/// Release one source reference when the handle is valid.
 export inline void release_pg_sequence_source(
     pg_sequence_source_handle source) noexcept
 {
@@ -95,12 +108,14 @@ export inline void release_pg_sequence_source(
     }
 }
 
+/// Exact source, locator, and physical type key for one session entry.
 export struct pg_sequence_read_entry_key {
     pg_sequence_source_identity source;
     bioseq::storage::sequence_locator locator;
     compact_sequence_stdc_type_params stored_type_params;
 };
 
+/// Session-owned concrete read state and its terminal callbacks.
 export struct pg_sequence_read_entry {
     pg_sequence_read_entry_key key;
     void* concrete_state{};
@@ -109,12 +124,14 @@ export struct pg_sequence_read_entry {
     pg_sequence_read_entry* next{};
 };
 
+/// Session-owned call-level resource released before read entries.
 export struct pg_sequence_session_owner_entry {
     void* owner{};
     void (*release_noexcept)(void*) noexcept{};
     pg_sequence_session_owner_entry* next{};
 };
 
+/// PG-reset-safe control shell and payload lists for one callback scope.
 export struct pg_sequence_read_session {
     /* The control shell must survive a reset of the caller-owned payload
      * parent long enough for the surrounding PG_CATCH to perform its
@@ -131,6 +148,7 @@ export struct pg_sequence_read_session {
     bool callback_armed{};
 };
 
+/// Factory for concrete state allocated beneath a session payload context.
 export using create_pg_sequence_read_entry_fn = void* (*)(
     void* factory_argument, MemoryContext payload_context);
 
@@ -255,6 +273,7 @@ inline void release_session_control(
 
 } // namespace
 
+/// Begin a read session whose payload is owned by the supplied parent context.
 export [[nodiscard]] inline pg_sequence_read_session*
 begin_pg_sequence_read_session(MemoryContext parent)
 {
@@ -303,6 +322,7 @@ begin_pg_sequence_read_session(MemoryContext parent)
     return const_cast<pg_sequence_read_session*>(pending);
 }
 
+/// Register a call-level owner for no-throw release before session entries.
 export inline void register_pg_sequence_call_owner(
     pg_sequence_read_session& session,
     void* owner,
@@ -333,6 +353,7 @@ export inline void register_pg_sequence_call_owner(
     session.owners = entry;
 }
 
+/// Find cached concrete state or create and publish one error-atomically.
 export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     pg_sequence_read_session& session,
     pg_sequence_read_entry_key const& key,
@@ -386,6 +407,7 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     return const_cast<void*>(concrete);
 }
 
+/// Finish every session entry and release the control shell.
 export inline void finish_pg_sequence_read_session(
     pg_sequence_read_session* session,
     bool is_commit)
@@ -427,6 +449,7 @@ export inline void finish_pg_sequence_read_session(
     release_session_control(session);
 }
 
+/// Abort every live entry without allowing cleanup errors to escape.
 export inline void abort_pg_sequence_read_session_noexcept(
     pg_sequence_read_session* session) noexcept
 {

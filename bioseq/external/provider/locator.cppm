@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/locator.cppm
+ * @brief Provider locator-policy interface and validated remote locators.
+ */
 module;
 
 #include <cstddef>
@@ -14,51 +18,56 @@ import bioseq.external.provider.messages; // locator_scheme
 
 /// @brief Defines locator security-policy profiles.
 // Provider core emits candidate
-// transfer requests plus a static locator_policy_id; the configured pack builds
+// transfer requests plus a static locator_policy_id. The configured pack builds
 // one immutable registry. The concrete transfer service resolves profiles
 // through the registry and contains no provider/hostname switch.
 export namespace bioseq::external::provider {
 
+/// Allowed DNS suffix and whether its apex is included.
 struct locator_host_suffix_view {
-  std::string_view suffix;
-  bool include_apex;
+    std::string_view suffix;
+    bool include_apex;
 };
 
+/// Allowed port for one locator scheme.
 struct locator_port_view {
-  locator_scheme scheme;
-  std::uint16_t port;
+    locator_scheme scheme;
+    std::uint16_t port;
 };
 
+/// Address classes a locator policy permits after DNS resolution.
 enum class locator_address_scope : std::uint8_t { public_only, test_loopback };
 
-enum class locator_proxy_policy : std::uint8_t {
-  disabled,
-  explicit_pinned_connect
-};
+/// Whether proxy routing is forbidden or explicitly pinned.
+enum class locator_proxy_policy : std::uint8_t { disabled, explicit_pinned_connect };
 
+/// Borrowed immutable outbound locator-policy profile.
 struct locator_policy_profile_view {
-  locator_policy_id id;
-  std::span<const locator_scheme> schemes;
-  std::span<const std::string_view> exact_hosts;
-  std::span<const locator_host_suffix_view> host_suffixes;
-  std::span<const locator_port_view> ports;
-  std::size_t maximum_url_bytes;
-  std::size_t maximum_header_bytes;
-  std::uint32_t maximum_redirects;
-  bool permit_https_to_http_downgrade;
-  locator_address_scope address_scope;
-  locator_proxy_policy proxy;
+    locator_policy_id id;
+    std::span<const locator_scheme> schemes;
+    std::span<const std::string_view> exact_hosts;
+    std::span<const locator_host_suffix_view> host_suffixes;
+    std::span<const locator_port_view> ports;
+    std::size_t maximum_url_bytes;
+    std::size_t maximum_header_bytes;
+    std::uint32_t maximum_redirects;
+    bool permit_https_to_http_downgrade;
+    locator_address_scope address_scope;
+    locator_proxy_policy proxy;
 };
 
+/// Type-erased resolver for configured locator policies.
 struct locator_policy_registry_ref {
-  void *object{};
-  std::expected<locator_policy_profile_view, external_error> (*resolve_fn)(
-      void *, provider_id, locator_policy_id){};
+    void* object{};
+    std::expected<locator_policy_profile_view, external_error> (*resolve_fn)(void*,
+                                                                             provider_id,
+                                                                             locator_policy_id){};
 
-  [[nodiscard]] std::expected<locator_policy_profile_view, external_error>
-  resolve(provider_id provider, locator_policy_id policy) const {
-    return resolve_fn(object, provider, policy);
-  }
+    /// Resolve a policy only for its owning provider.
+    [[nodiscard]] std::expected<locator_policy_profile_view, external_error>
+    resolve(provider_id provider, locator_policy_id policy) const {
+        return resolve_fn(object, provider, policy);
+    }
 };
 
 } // namespace bioseq::external::provider

@@ -14,39 +14,54 @@ export module bioseq.instrumentation.configuration;
 
 export namespace bioseq::instrumentation {
 
-/** @brief Required static interface for a profiling feature configuration. */
-template<typename p_configuration>
+/**
+ * @brief Describe the compile-time controls required by instrumentation.
+ *
+ * @tparam p_configuration Candidate configuration with boolean feature gates
+ * and unsigned trace and aggregation capacities.
+ */
+template <class p_configuration>
 concept profiling_configuration = requires {
-    { p_configuration::enable_profiling }      -> std::convertible_to<bool>;
-    { p_configuration::enable_counters }       -> std::convertible_to<bool>;
-    { p_configuration::enable_tracing }        -> std::convertible_to<bool>;
-    { p_configuration::enable_sampling }       -> std::convertible_to<bool>;
+    { p_configuration::enable_profiling } -> std::convertible_to<bool>;
+    { p_configuration::enable_counters } -> std::convertible_to<bool>;
+    { p_configuration::enable_tracing } -> std::convertible_to<bool>;
+    { p_configuration::enable_sampling } -> std::convertible_to<bool>;
     { p_configuration::enable_arena_tracking } -> std::convertible_to<bool>;
-    { p_configuration::trace_capacity }        -> std::convertible_to<unsigned>;
-    { p_configuration::aggregate_block_size }  -> std::convertible_to<unsigned>;
+    { p_configuration::trace_capacity } -> std::convertible_to<unsigned>;
+    { p_configuration::aggregate_block_size } -> std::convertible_to<unsigned>;
 } && std::is_trivially_default_constructible_v<p_configuration>;
 
-/** @brief Configuration whose hot-path instrumentation compiles away. */
+/**
+ * @brief Disable every optional measurement path at compile time.
+ *
+ * Zero trace capacity prevents storage use, while the aggregation block size
+ * remains available to templates whose disabled branches are still parsed.
+ */
 struct profiling_disabled_configuration {
-    static constexpr bool     enable_profiling      = false;
-    static constexpr bool     enable_counters       = false;
-    static constexpr bool     enable_tracing        = false;
-    static constexpr bool     enable_sampling       = false;
-    static constexpr bool     enable_arena_tracking = false;
-    static constexpr unsigned trace_capacity        = 0;
-    static constexpr unsigned aggregate_block_size  = 256;
+    static constexpr bool enable_profiling = false;
+    static constexpr bool enable_counters = false;
+    static constexpr bool enable_tracing = false;
+    static constexpr bool enable_sampling = false;
+    static constexpr bool enable_arena_tracking = false;
+    static constexpr unsigned trace_capacity = 0;
+    static constexpr unsigned aggregate_block_size = 256;
 };
 static_assert(profiling_configuration<profiling_disabled_configuration>);
 
-/** @brief Production configuration with all current instrumentation enabled. */
+/**
+ * @brief Enable every production instrumentation feature at compile time.
+ *
+ * Capacities count trace records and aggregate slots. They do not represent
+ * bytes or allocate from a measurement path.
+ */
 struct production_profiling_configuration {
-    static constexpr bool     enable_profiling      = true;
-    static constexpr bool     enable_counters       = true;
-    static constexpr bool     enable_tracing        = true;
-    static constexpr bool     enable_sampling       = true;
-    static constexpr bool     enable_arena_tracking = true;
-    static constexpr unsigned trace_capacity        = 256;
-    static constexpr unsigned aggregate_block_size  = 256;
+    static constexpr bool enable_profiling = true;
+    static constexpr bool enable_counters = true;
+    static constexpr bool enable_tracing = true;
+    static constexpr bool enable_sampling = true;
+    static constexpr bool enable_arena_tracking = true;
+    static constexpr unsigned trace_capacity = 256;
+    static constexpr unsigned aggregate_block_size = 256;
 };
 static_assert(profiling_configuration<production_profiling_configuration>);
 
@@ -55,17 +70,17 @@ static_assert(profiling_configuration<production_profiling_configuration>);
  *
  * This remains a distinct type because its thread-local state is installed by
  * benchmark dispatch independently of production telemetry. Its current
- * feature set deliberately matches production profiling.
+ * feature set and capacities deliberately match production profiling.
  */
 struct benchmark_profiling_configuration {
-    static constexpr bool     enable_profiling      = true;
-    static constexpr bool     enable_counters       = true;
-    static constexpr bool     enable_tracing        = true;
-    static constexpr bool     enable_sampling       = true;
-    static constexpr bool     enable_arena_tracking = true;
-    static constexpr unsigned trace_capacity        = 256;
-    static constexpr unsigned aggregate_block_size  = 256;
+    static constexpr bool enable_profiling = true;
+    static constexpr bool enable_counters = true;
+    static constexpr bool enable_tracing = true;
+    static constexpr bool enable_sampling = true;
+    static constexpr bool enable_arena_tracking = true;
+    static constexpr unsigned trace_capacity = 256;
+    static constexpr unsigned aggregate_block_size = 256;
 };
 static_assert(profiling_configuration<benchmark_profiling_configuration>);
 
-}  // namespace bioseq::instrumentation
+} // namespace bioseq::instrumentation

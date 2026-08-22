@@ -1,15 +1,13 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file write_state_row_mask.cppm
+ * @brief Transaction-scoped write state for row-mask catalog records.
  *
- * write_state_row_mask.cppm
- *
- * Transaction-scoped management of row-mask catalog records used to
+ * Manages row-mask catalog records used to
  * aggregate row-mask updates (DELETEs against columnar stripes). Commits
  * flush the pending mask deltas into bioseq.row_mask via flush_row_mask_cache.
  *
  * The transaction_scoped_hash_table owns one linked stack of subtransaction
  * frames for each relation file number.
- *
- *-------------------------------------------------------------------------
  */
 module;
 
@@ -22,6 +20,8 @@ module;
 export module bioseq.postgres.storage.metadata:write_state_row_mask;
 
 import :core;
+import :row_mask;
+import :stripe;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.storage.metadata.sql_row_codecs;

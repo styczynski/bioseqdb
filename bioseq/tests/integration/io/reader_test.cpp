@@ -3,35 +3,27 @@
  * @brief Correctness coverage for `bioseq::io::read_sequences_file`.
  *
  * Covers parser and streaming hardening:
- *   * round-trip FASTA / FASTQ on tiny corpora;
- *   * multi-line FASTA + multi-line FASTQ qual;
- *   * CRLF line endings;
- *   * empty file;
- *   * capacity sweep (subset of [3, 100]);
- *   * differential fuzz vs kseqpp (FASTA dna4);
- *   * mmap path round-trip;
- *   * gzip path round-trip;
- *   * strict_alphabet mode rejection of stray bytes;
+ *   * round-trip FASTA / FASTQ on tiny corpora.
+ *   * multi-line FASTA + multi-line FASTQ qual.
+ *   * CRLF line endings.
+ *   * empty file.
+ *   * capacity sweep (subset of [3, 100]).
+ *   * differential fuzz vs kseqpp (FASTA dna4).
+ *   * mmap path round-trip.
+ *   * gzip path round-trip.
+ *   * strict_alphabet mode rejection of stray bytes.
  *   * async pipeline mode round-trip.
  */
-#include <tests/support/common.hpp>
-
-#include <array>
-#include <atomic>
-#include <cstdint>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
-#include <mutex>
-#include <random>
-#include <string>
-#include <utility>
-#include <vector>
 #include <unistd.h>
 #include <zlib.h>
 
 #include <kseq++/seqio.hpp>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
@@ -107,10 +99,9 @@ TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    const std::string corpus =
-        ">seq1\nACGT\n"
-        ">seq2 with comment\nAAAACCCCGGGGTTTT\n"
-        ">seq3\nACGTACGTACGTACGTACGTACGTACGTACGT\n";
+    const std::string corpus = ">seq1\nACGT\n"
+                               ">seq2 with comment\nAAAACCCCGGGGTTTT\n"
+                               ">seq3\nACGTACGTACGTACGTACGTACGTACGTACGT\n";
     const std::string path = write_tmp_file(corpus);
 
     std::vector<std::pair<std::string, std::string>> got;
@@ -118,13 +109,12 @@ TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
-                got.emplace_back(std::string{batch.header(i)},
-                                 decode_to_ascii(batch.sequence(i)));
+                got.emplace_back(std::string{batch.header(i)}, decode_to_ascii(batch.sequence(i)));
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -146,13 +136,12 @@ TEST_CASE("bioseq_io: multi-line FASTA dna4",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    const std::string corpus =
-        ">seq1\n"
-        "ACGT\n"
-        "ACGT\n"
-        "AC\n"
-        ">seq2\n"
-        "T\n";
+    const std::string corpus = ">seq1\n"
+                               "ACGT\n"
+                               "ACGT\n"
+                               "AC\n"
+                               ">seq2\n"
+                               "T\n";
     const std::string path = write_tmp_file(corpus);
 
     std::vector<std::pair<std::string, std::string>> got;
@@ -160,13 +149,12 @@ TEST_CASE("bioseq_io: multi-line FASTA dna4",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
-                got.emplace_back(std::string{batch.header(i)},
-                                 decode_to_ascii(batch.sequence(i)));
+                got.emplace_back(std::string{batch.header(i)}, decode_to_ascii(batch.sequence(i)));
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -192,13 +180,12 @@ TEST_CASE("bioseq_io: CRLF line endings",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
-                got.emplace_back(std::string{batch.header(i)},
-                                 decode_to_ascii(batch.sequence(i)));
+                got.emplace_back(std::string{batch.header(i)}, decode_to_ascii(batch.sequence(i)));
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -222,12 +209,12 @@ TEST_CASE("bioseq_io: empty file",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
                 got.emplace_back(std::string{batch.header(i)});
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -243,9 +230,8 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    const std::string corpus =
-        "@read1\nACGT\n+\nIIII\n"
-        "@read2 desc\nAAAACCCC\n+ also a comment\n!!!!!!!!\n";
+    const std::string corpus = "@read1\nACGT\n+\nIIII\n"
+                               "@read2 desc\nAAAACCCC\n+ also a comment\n!!!!!!!!\n";
     const std::string path = write_tmp_file(corpus);
 
     struct record {
@@ -258,17 +244,16 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
                 auto qspan = batch.quality(i);
-                got.push_back(record{
-                    std::string{batch.header(i)},
-                    decode_to_ascii(batch.sequence(i)),
-                    std::string(reinterpret_cast<const char*>(qspan.data()),
-                                qspan.size())});
+                got.push_back(
+                    record{std::string{batch.header(i)},
+                           decode_to_ascii(batch.sequence(i)),
+                           std::string(reinterpret_cast<const char*>(qspan.data()), qspan.size())});
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -296,13 +281,12 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual",
 
     // 16-letter sequence wrapped over 2 lines, qual wrapped over 2
     // lines.
-    const std::string corpus =
-        "@multi\n"
-        "ACGTACGT\n"
-        "ACGTACGT\n"
-        "+\n"
-        "IIIIIIII\n"
-        "JJJJJJJJ\n";
+    const std::string corpus = "@multi\n"
+                               "ACGTACGT\n"
+                               "ACGTACGT\n"
+                               "+\n"
+                               "IIIIIIII\n"
+                               "JJJJJJJJ\n";
     const std::string path = write_tmp_file(corpus);
 
     struct record {
@@ -315,17 +299,16 @@ TEST_CASE("bioseq_io: multi-line FASTQ qual",
 
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fastq>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
                 auto qspan = batch.quality(i);
-                got.push_back(record{
-                    std::string{batch.header(i)},
-                    decode_to_ascii(batch.sequence(i)),
-                    std::string(reinterpret_cast<const char*>(qspan.data()),
-                                qspan.size())});
+                got.push_back(
+                    record{std::string{batch.header(i)},
+                           decode_to_ascii(batch.sequence(i)),
+                           std::string(reinterpret_cast<const char*>(qspan.data()), qspan.size())});
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); });
 
     REQUIRE(errs.empty());
     REQUIRE(rc.has_value());
@@ -386,12 +369,11 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
     // Subset of [3, 100] — full sweep would push past 30s on a debug
     // build. The chosen sizes exercise tiny (3, 7, 13) up to typical
     // (64, 100), plus 1 KiB for the larger-headers path.
-    const std::vector<std::size_t> sizes_to_sweep{
-        3, 5, 7, 11, 13, 17, 23, 32, 64, 67, 100, 1024};
+    const std::vector<std::size_t> sizes_to_sweep{3, 5, 7, 11, 13, 17, 23, 32, 64, 67, 100, 1024};
     for (const auto initial_size : sizes_to_sweep) {
         reader_options opts;
         opts.io.gzip_auto_detect = false;
-        opts.io.prefer_mmap      = false;
+        opts.io.prefer_mmap = false;
         opts.io.initial_buffer_size = initial_size;
         opts.concurrency.worker_count = 0;
 
@@ -400,13 +382,13 @@ TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
 
         auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
             path,
-            [&](batch_t&& batch) {
+            [&got](batch_t&& batch) {
                 for (std::size_t i = 0; i < batch.size(); ++i) {
                     got.emplace_back(std::string{batch.header(i)},
                                      decode_to_ascii(batch.sequence(i)));
                 }
             },
-            [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+            [&errs](std::string&& msg) { errs.push_back(std::move(msg)); },
             opts);
 
         REQUIRE(errs.empty());
@@ -438,8 +420,7 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         std::vector<std::string> expected_seqs;
         std::vector<std::string> expected_headers;
         const bool use_crlf = (round % 3 == 0);
-        for (std::size_t record_index = 0; record_index < record_count;
-             ++record_index) {
+        for (std::size_t record_index = 0; record_index < record_count; ++record_index) {
             std::string header = fmt::format("seq_{}_{}", round, record_index);
             const std::size_t body_size = 1 + (rng() % 120);
             std::string body;
@@ -448,10 +429,12 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
                 body.push_back(dna4[letter_dist(rng)]);
             }
             corpus.append(">").append(header);
-            if (use_crlf) corpus.append("\r");
+            if (use_crlf)
+                corpus.append("\r");
             corpus.push_back('\n');
             corpus.append(body);
-            if (use_crlf) corpus.append("\r");
+            if (use_crlf)
+                corpus.append("\r");
             corpus.push_back('\n');
             expected_seqs.push_back(std::move(body));
             expected_headers.push_back(std::move(header));
@@ -463,13 +446,13 @@ TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
         std::vector<std::string> ours_errs;
         auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
             path,
-            [&](batch_t&& batch) {
+            [&ours](batch_t&& batch) {
                 for (std::size_t i = 0; i < batch.size(); ++i) {
                     ours.emplace_back(std::string{batch.header(i)},
                                       decode_to_ascii(batch.sequence(i)));
                 }
             },
-            [&](std::string&& msg) { ours_errs.push_back(std::move(msg)); });
+            [&ours_errs](std::string&& msg) { ours_errs.push_back(std::move(msg)); });
         REQUIRE(ours_errs.empty());
         REQUIRE(rc.has_value());
 
@@ -507,27 +490,25 @@ TEST_CASE("bioseq_io: mmap path round-trip",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    const std::string corpus =
-        ">a\nACGTACGT\n"
-        ">b\nGGGGCCCC\n"
-        ">c\nTTTTTTAA\n";
+    const std::string corpus = ">a\nACGTACGT\n"
+                               ">b\nGGGGCCCC\n"
+                               ">c\nTTTTTTAA\n";
     const std::string path = write_tmp_file(corpus);
 
     reader_options opts;
     opts.io.gzip_auto_detect = false;
-    opts.io.prefer_mmap      = true;
+    opts.io.prefer_mmap = true;
 
     std::vector<std::pair<std::string, std::string>> got;
     std::vector<std::string> errs;
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
-                got.emplace_back(std::string{batch.header(i)},
-                                 decode_to_ascii(batch.sequence(i)));
+                got.emplace_back(std::string{batch.header(i)}, decode_to_ascii(batch.sequence(i)));
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); },
         opts);
 
     REQUIRE(errs.empty());
@@ -546,9 +527,8 @@ TEST_CASE("bioseq_io: gzip path round-trip",
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
 
-    const std::string corpus =
-        ">gz1\nACGT\n"
-        ">gz2\nGGGG\n";
+    const std::string corpus = ">gz1\nACGT\n"
+                               ">gz2\nGGGG\n";
     const std::string path = write_tmp_gzip(corpus);
 
     reader_options opts;
@@ -558,13 +538,12 @@ TEST_CASE("bioseq_io: gzip path round-trip",
     std::vector<std::string> errs;
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got](batch_t&& batch) {
             for (std::size_t i = 0; i < batch.size(); ++i) {
-                got.emplace_back(std::string{batch.header(i)},
-                                 decode_to_ascii(batch.sequence(i)));
+                got.emplace_back(std::string{batch.header(i)}, decode_to_ascii(batch.sequence(i)));
             }
         },
-        [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+        [&errs](std::string&& msg) { errs.push_back(std::move(msg)); },
         opts);
 
     REQUIRE(errs.empty());
@@ -605,7 +584,7 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
 
     reader_options opts;
     opts.io.gzip_auto_detect = false;
-    opts.io.prefer_mmap      = false;
+    opts.io.prefer_mmap = false;
     opts.concurrency.worker_count = 2;
     opts.concurrency.batch_target_record_count = 8;
 
@@ -614,16 +593,17 @@ TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
     std::vector<std::string> errs;
     auto rc = read_sequences_file<seq::dna4, sequence_file_format::fasta>(
         path,
-        [&](batch_t&& batch) {
+        [&got, &got_mutex](batch_t&& batch) {
             std::vector<std::pair<std::string, std::string>> local;
             for (std::size_t i = 0; i < batch.size(); ++i) {
                 local.emplace_back(std::string{batch.header(i)},
                                    decode_to_ascii(batch.sequence(i)));
             }
             std::lock_guard<std::mutex> guard{got_mutex};
-            for (auto& record : local) got.push_back(std::move(record));
+            for (auto& record : local)
+                got.push_back(std::move(record));
         },
-        [&](std::string&& msg) {
+        [&errs, &got_mutex](std::string&& msg) {
             std::lock_guard<std::mutex> guard{got_mutex};
             errs.push_back(std::move(msg));
         },

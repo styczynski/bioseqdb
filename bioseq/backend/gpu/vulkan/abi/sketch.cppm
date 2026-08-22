@@ -4,14 +4,9 @@
  */
 module;
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <type_traits>
-
 export module bioseq.gpu.vulkan.abi:sketch;
 
+import std;
 import bioseq.common.checked_arithmetic;
 import :prefix_scan;
 import :runtime;
@@ -151,155 +146,176 @@ struct gpu_target_index_host_scratch_plan {
     bool is_valid = false;
 };
 
-/** @brief Computes the replay overlap required by adjacent sketch tiles. */
-[[nodiscard]] constexpr std::uint32_t sketch_replay_overlap_bp(
-    std::uint32_t k,
-    std::uint32_t window) noexcept
-{
+/**
+ * @brief Computes the replay overlap required by adjacent sketch tiles.
+ * @param[in] kmer_size K-mer length in base pairs.
+ * @param[in] window_size Minimizer window length in k-mers.
+ * @return Replay overlap in base pairs, clamped to the shader tile span.
+ */
+[[nodiscard]] constexpr std::uint32_t sketch_replay_overlap_bp(std::uint32_t kmer_size,
+                                                               std::uint32_t window_size) noexcept {
     const std::uint64_t trigger_span =
-        bioseq::common::saturating_add(
-            bioseq::common::saturating_add(k, window),
-            1u);
+        bioseq::common::saturating_add(bioseq::common::saturating_add(kmer_size, window_size), 1u);
     constexpr std::uint32_t max_replay =
-        k_max_sketch_tile_span_bp > 1u
-            ? k_max_sketch_tile_span_bp - 1u
-            : 1u;
+        k_max_sketch_tile_span_bp > 1u ? k_max_sketch_tile_span_bp - 1u : 1u;
     return trigger_span > max_replay
-        ? max_replay
-        : static_cast<std::uint32_t>(std::max<std::uint64_t>(1u, trigger_span));
+               ? max_replay
+               : static_cast<std::uint32_t>(std::max<std::uint64_t>(1u, trigger_span));
 }
 
 /**
  * @brief Computes the hard semantic upper bound on target minimizer count.
  *
- * Each canonical k-mer end position emits at most once; query gating only
+ * Each canonical k-mer end position emits at most once. Query gating only
  * removes emissions.
+ *
+ * @param[in] bp_count Target length in base pairs.
+ * @param[in] kmer_size K-mer length in base pairs.
+ * @return Maximum possible minimizer count.
  */
-[[nodiscard]] constexpr std::uint64_t target_minimizer_count_upper_bound(
-    std::uint64_t bp_count,
-    std::uint32_t k) noexcept
-{
-    if (k == 0u || bp_count < k) {
+[[nodiscard]] constexpr std::uint64_t
+target_minimizer_count_upper_bound(std::uint64_t bp_count, std::uint32_t kmer_size) noexcept {
+    if (kmer_size == 0u || bp_count < kmer_size) {
         return 0u;
     }
-    return bp_count - static_cast<std::uint64_t>(k) + 1u;
+    return bp_count - static_cast<std::uint64_t>(kmer_size) + 1u;
 }
 
-/** @brief Returns the additional ownership guard required by sketch tiling. */
+/**
+ * @brief Returns the additional ownership guard required by sketch tiling.
+ * @param[in] kmer_size K-mer length in base pairs.
+ * @param[in] window_size Minimizer window length in k-mers.
+ * @param[in] letters_per_unit Packed sequence letters per storage unit.
+ * @return Additional ownership guard in base pairs.
+ */
 [[nodiscard]] constexpr std::uint32_t sketch_ownership_guard_bp(
-    std::uint32_t k,
-    std::uint32_t window,
-    std::uint32_t letters_per_unit) noexcept
-{
-    (void)k;
-    (void)window;
+    std::uint32_t kmer_size, std::uint32_t window_size, std::uint32_t letters_per_unit) noexcept {
+    (void)kmer_size;
+    (void)window_size;
     (void)letters_per_unit;
     return 0u;
 }
 
-/** @brief Adapts sketch tile size to the physical dispatch limit. */
-[[nodiscard]] constexpr std::uint32_t compute_adaptive_sketch_tile_bp(
-    std::uint32_t bp,
-    std::uint32_t max_workgroups,
-    std::uint32_t default_tile_bp) noexcept
-{
-    std::uint32_t tile_bp = std::max<std::uint32_t>(default_tile_bp, 1u);
-    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
-    if (bioseq::common::ceil_div(bp, tile_bp) > cap) {
-        tile_bp = bioseq::common::ceil_div(bp, cap);
+/**
+ * @brief Adapts sketch tile size to the physical dispatch limit.
+ * @param[in] base_pair_count Sequence length in base pairs.
+ * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
+ * @param[in] default_tile_base_pairs Preferred tile length in base pairs.
+ * @return Dispatchable tile length in base pairs.
+ */
+[[nodiscard]] constexpr std::uint32_t
+compute_adaptive_sketch_tile_bp(std::uint32_t base_pair_count,
+                                std::uint32_t maximum_workgroup_count,
+                                std::uint32_t default_tile_base_pairs) noexcept {
+    std::uint32_t tile_bp = std::max<std::uint32_t>(default_tile_base_pairs, 1u);
+    const std::uint32_t workgroup_cap =
+        maximum_workgroup_count > 1u ? maximum_workgroup_count - 1u : 1u;
+    if (bioseq::common::ceil_div(base_pair_count, tile_bp) > workgroup_cap) {
+        tile_bp = bioseq::common::ceil_div(base_pair_count, workgroup_cap);
     }
     constexpr std::uint32_t span_cap =
-        k_max_sketch_tile_span_bp > 64u
-            ? k_max_sketch_tile_span_bp - 64u
-            : 1u;
+        k_max_sketch_tile_span_bp > 64u ? k_max_sketch_tile_span_bp - 64u : 1u;
     if (tile_bp > span_cap) {
         tile_bp = span_cap;
     }
     return std::max<std::uint32_t>(tile_bp, 1u);
 }
 
-/** @brief Computes a storage-unit-aligned sketch tile size when admissible. */
-[[nodiscard]] constexpr std::uint32_t compute_storage_aligned_sketch_tile_bp(
-    std::uint32_t bp,
-    std::uint32_t max_workgroups,
-    std::uint32_t default_tile_bp,
-    std::uint32_t letters_per_unit,
-    std::uint32_t context_bp) noexcept
-{
-    std::uint32_t tile_bp =
-        compute_adaptive_sketch_tile_bp(bp, max_workgroups, default_tile_bp);
-    const std::uint32_t span_cap =
-        k_max_sketch_tile_span_bp > context_bp
-            ? k_max_sketch_tile_span_bp - context_bp
-            : 1u;
+/**
+ * @brief Computes a storage-unit-aligned sketch tile size when admissible.
+ * @param[in] base_pair_count Sequence length in base pairs.
+ * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
+ * @param[in] default_tile_base_pairs Preferred tile length in base pairs.
+ * @param[in] letters_per_unit Packed sequence letters per storage unit.
+ * @param[in] context_base_pairs Required replay context in base pairs.
+ * @return Dispatchable tile length, aligned when alignment preserves coverage.
+ */
+[[nodiscard]] constexpr std::uint32_t
+compute_storage_aligned_sketch_tile_bp(std::uint32_t base_pair_count,
+                                       std::uint32_t maximum_workgroup_count,
+                                       std::uint32_t default_tile_base_pairs,
+                                       std::uint32_t letters_per_unit,
+                                       std::uint32_t context_base_pairs) noexcept {
+    std::uint32_t tile_bp = compute_adaptive_sketch_tile_bp(
+        base_pair_count, maximum_workgroup_count, default_tile_base_pairs);
+    const std::uint32_t span_cap = k_max_sketch_tile_span_bp > context_base_pairs
+                                       ? k_max_sketch_tile_span_bp - context_base_pairs
+                                       : 1u;
     tile_bp = std::min(tile_bp, span_cap);
 
-    const std::uint32_t letters_per_storage_unit =
-        std::max<std::uint32_t>(letters_per_unit, 1u);
-    if (letters_per_storage_unit <= 1u
-        || tile_bp < letters_per_storage_unit) {
+    const std::uint32_t letters_per_storage_unit = std::max<std::uint32_t>(letters_per_unit, 1u);
+    if (letters_per_storage_unit <= 1u || tile_bp < letters_per_storage_unit) {
         return tile_bp;
     }
 
-    const std::uint32_t aligned =
-        (tile_bp / letters_per_storage_unit) * letters_per_storage_unit;
+    const std::uint32_t aligned = (tile_bp / letters_per_storage_unit) * letters_per_storage_unit;
     if (aligned == 0u) {
         return tile_bp;
     }
-    const std::uint32_t cap = max_workgroups > 1u ? max_workgroups - 1u : 1u;
-    return bioseq::common::ceil_div(bp, aligned) <= cap ? aligned : tile_bp;
+    const std::uint32_t workgroup_cap =
+        maximum_workgroup_count > 1u ? maximum_workgroup_count - 1u : 1u;
+    return bioseq::common::ceil_div(base_pair_count, aligned) <= workgroup_cap ? aligned : tile_bp;
 }
 
 /**
  * @brief Builds ordered-sketch tile and scan geometry.
+ * @param[in] bp_count Sequence length in base pairs.
+ * @param[in] kmer_size K-mer length in base pairs.
+ * @param[in] window_size Minimizer window length in k-mers.
+ * @param[in] letters_per_unit Packed sequence letters per storage unit.
+ * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
  * @return A non-dispatchable plan when dimensions or limits are invalid.
  */
 [[nodiscard]] constexpr gpu_sketch_tile_plan make_sketch_tile_plan(
     std::uint64_t bp_count,
-    std::uint32_t k,
-    std::uint32_t window,
+    std::uint32_t kmer_size,
+    std::uint32_t window_size,
     std::uint32_t letters_per_unit,
-    std::uint32_t max_workgroups =
-        (std::numeric_limits<std::uint32_t>::max)()) noexcept
-{
-    if (bp_count == 0u || bp_count > (std::numeric_limits<std::uint32_t>::max)()
-        || k == 0u || window == 0u || max_workgroups == 0u) {
+    std::uint32_t maximum_workgroup_count = (std::numeric_limits<std::uint32_t>::max)()) noexcept {
+    if (bp_count == 0u || bp_count > (std::numeric_limits<std::uint32_t>::max)() ||
+        kmer_size == 0u || window_size == 0u || maximum_workgroup_count == 0u) {
         return {};
     }
-    const std::uint32_t bp = static_cast<std::uint32_t>(bp_count);
-    const std::uint32_t overlap = sketch_replay_overlap_bp(k, window);
+    const std::uint32_t base_pair_count = static_cast<std::uint32_t>(bp_count);
+    const std::uint32_t replay_overlap = sketch_replay_overlap_bp(kmer_size, window_size);
     const std::uint32_t ownership_guard =
-        sketch_ownership_guard_bp(k, window, letters_per_unit);
-    const std::uint32_t context_span = bioseq::common::saturating_add(
-        overlap, ownership_guard)
-        > (std::numeric_limits<std::uint32_t>::max)()
+        sketch_ownership_guard_bp(kmer_size, window_size, letters_per_unit);
+    const std::uint32_t context_span =
+        bioseq::common::saturating_add(replay_overlap, ownership_guard) >
+                (std::numeric_limits<std::uint32_t>::max)()
             ? (std::numeric_limits<std::uint32_t>::max)()
-            : overlap + ownership_guard;
-    const std::uint32_t tile_bp = compute_storage_aligned_sketch_tile_bp(
-        bp,
-        max_workgroups,
-        k_default_sketch_tile_bp,
-        letters_per_unit,
-        context_span);
-    const std::uint32_t tile_count = bioseq::common::ceil_div(bp, tile_bp);
+            : replay_overlap + ownership_guard;
+    const std::uint32_t tile_bp = compute_storage_aligned_sketch_tile_bp(base_pair_count,
+                                                                         maximum_workgroup_count,
+                                                                         k_default_sketch_tile_bp,
+                                                                         letters_per_unit,
+                                                                         context_span);
+    const std::uint32_t tile_count = bioseq::common::ceil_div(base_pair_count, tile_bp);
     // Grid striding lets a physical dispatch process more logical tiles than
     // the device's X-dimension group limit.
     const bool is_dispatchable =
-        tile_bp != 0u
-        && tile_count != 0u
-        && bioseq::common::saturating_add(tile_bp, context_span)
-            <= k_max_sketch_tile_span_bp;
+        tile_bp != 0u && tile_count != 0u &&
+        bioseq::common::saturating_add(tile_bp, context_span) <= k_max_sketch_tile_span_bp;
     return gpu_sketch_tile_plan{
         .tile_bp = tile_bp,
         .tile_count = tile_count,
-        .scan_block_count = bioseq::common::ceil_div(
-            tile_count, k_prefix_scan_block_size),
+        .scan_block_count = bioseq::common::ceil_div(tile_count, k_prefix_scan_block_size),
         .is_dispatchable = is_dispatchable,
     };
 }
 
 /**
  * @brief Builds the complete memory-admission plan for one GPU sketch.
+ * @param[in] bp_count Sequence length in base pairs.
+ * @param[in] sequence_bytes Packed input extent in bytes.
+ * @param[in] rank_lut_bytes Alphabet rank-table extent in bytes.
+ * @param[in] output_capacity Maximum emitted record count.
+ * @param[in] minimizer_output_bytes Minimizer-word output extent in bytes.
+ * @param[in] purpose Sketch consumer and output ownership mode.
+ * @param[in] kmer_size K-mer length in base pairs.
+ * @param[in] window_size Minimizer window length in k-mers.
+ * @param[in] letters_per_unit Packed sequence letters per storage unit.
+ * @param[in] maximum_workgroup_count Device X-dimension workgroup limit.
  * @return Saturating byte accounting and dispatch validity.
  */
 [[nodiscard]] constexpr gpu_sketch_memory_plan make_gpu_sketch_memory_plan(
@@ -309,31 +325,27 @@ struct gpu_target_index_host_scratch_plan {
     std::uint64_t output_capacity,
     std::uint64_t minimizer_output_bytes,
     gpu_sketch_purpose purpose,
-    std::uint32_t k,
-    std::uint32_t window,
+    std::uint32_t kmer_size,
+    std::uint32_t window_size,
     std::uint32_t letters_per_unit,
-    std::uint32_t max_workgroups =
-        (std::numeric_limits<std::uint32_t>::max)()) noexcept
-{
+    std::uint32_t maximum_workgroup_count = (std::numeric_limits<std::uint32_t>::max)()) noexcept {
     gpu_sketch_memory_plan plan{};
     plan.tiles = make_sketch_tile_plan(
-        bp_count, k, window, letters_per_unit, max_workgroups);
+        bp_count, kmer_size, window_size, letters_per_unit, maximum_workgroup_count);
     if (!plan.tiles.is_dispatchable) {
         return plan;
     }
 
     plan.sequence_bytes = std::max<std::uint64_t>(sequence_bytes, 4u);
     plan.rank_lut_bytes = rank_lut_bytes;
-    plan.tile_bytes = bioseq::common::saturating_mul(
-        plan.tiles.tile_count, sizeof(gpu_sketch_tile_wire));
+    plan.tile_bytes =
+        bioseq::common::saturating_mul(plan.tiles.tile_count, sizeof(gpu_sketch_tile_wire));
     plan.tile_count_bytes = bioseq::common::saturating_mul(plan.tiles.tile_count, 4u);
     plan.tile_offset_bytes = bioseq::common::saturating_mul(plan.tiles.tile_count, 4u);
     plan.scan_block_bytes = bioseq::common::saturating_mul(
         std::max<std::uint32_t>(plan.tiles.scan_block_count, 1u), 4u);
-    plan.counter_bytes =
-        purpose == gpu_sketch_purpose::minimizer_words ? 8u : 16u;
-    plan.arena_pair_value_bytes =
-        purpose == gpu_sketch_purpose::minimizer_words ? 16u : 0u;
+    plan.counter_bytes = purpose == gpu_sketch_purpose::minimizer_words ? 8u : 16u;
+    plan.arena_pair_value_bytes = purpose == gpu_sketch_purpose::minimizer_words ? 16u : 0u;
 
     if (purpose == gpu_sketch_purpose::minimizer_words) {
         plan.output_word_bytes = std::max<std::uint64_t>(minimizer_output_bytes, 4u);
@@ -344,11 +356,9 @@ struct gpu_target_index_host_scratch_plan {
 
     const auto add_aligned = [](std::uint64_t total, std::uint64_t bytes) {
         const std::uint64_t aligned_bytes =
-            bioseq::common::checked_align_up(
-                bytes, k_gpu_buffer_offset_alignment)
+            bioseq::common::checked_align_up(bytes, k_gpu_buffer_offset_alignment)
                 .value_or((std::numeric_limits<std::uint64_t>::max)());
-        return bioseq::common::saturating_add(
-            total, aligned_bytes);
+        return bioseq::common::saturating_add(total, aligned_bytes);
     };
     std::uint64_t arena = 0;
     arena = add_aligned(arena, plan.sequence_bytes);
@@ -363,42 +373,36 @@ struct gpu_target_index_host_scratch_plan {
 
     if (purpose == gpu_sketch_purpose::target_index_build) {
         const auto allocation_bytes = [](std::uint64_t bytes) {
-            return bioseq::common::checked_align_up(
-                std::max<std::uint64_t>(bytes, 1u),
-                k_gpu_peak_allocation_alignment)
+            return bioseq::common::checked_align_up(std::max<std::uint64_t>(bytes, 1u),
+                                                    k_gpu_peak_allocation_alignment)
                 .value_or((std::numeric_limits<std::uint64_t>::max)());
         };
-        const std::uint64_t flag_bytes =
-            bioseq::common::saturating_mul(output_capacity, 4u);
+        const std::uint64_t flag_bytes = bioseq::common::saturating_mul(output_capacity, 4u);
         const std::uint64_t scanned_offset =
-            bioseq::common::checked_align_up(
-                flag_bytes, k_gpu_buffer_offset_alignment)
+            bioseq::common::checked_align_up(flag_bytes, k_gpu_buffer_offset_alignment)
                 .value_or((std::numeric_limits<std::uint64_t>::max)());
         plan.target_index_flag_scan_bytes =
             bioseq::common::saturating_add(scanned_offset, flag_bytes);
-        plan.target_index_initial_key_bytes = std::max(
-            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        plan.target_index_initial_key_bytes =
+            std::max(plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
         // The non-result key ping-pong allocation is reused as the aligned
         // flags/scanned allocation after the radix fence.
-        plan.target_index_key_scratch_bytes = std::max(
-            plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
+        plan.target_index_key_scratch_bytes =
+            std::max(plan.pair_key_bytes, plan.target_index_flag_scan_bytes);
         plan.target_index_value_scratch_bytes = plan.pair_value_bytes;
         const std::uint64_t sort_groups = std::min<std::uint64_t>(
-            bioseq::common::ceil_div(output_capacity, 512u), max_workgroups);
-        plan.target_index_histogram_bytes = bioseq::common::saturating_mul(
-            bioseq::common::saturating_mul(sort_groups, 256u), 4u);
+            bioseq::common::ceil_div(output_capacity, 512u), maximum_workgroup_count);
+        plan.target_index_histogram_bytes =
+            bioseq::common::saturating_mul(bioseq::common::saturating_mul(sort_groups, 256u), 4u);
         plan.target_index_scan_block_bytes = bioseq::common::saturating_mul(
-            bioseq::common::ceil_div(
-                output_capacity, k_prefix_scan_block_size),
-            4u);
-        plan.target_index_bucket_bytes =
-            bioseq::common::saturating_mul(output_capacity, 16u);
+            bioseq::common::ceil_div(output_capacity, k_prefix_scan_block_size), 4u);
+        plan.target_index_bucket_bytes = bioseq::common::saturating_mul(output_capacity, 16u);
 
         std::uint64_t sort_peak = 0u;
         sort_peak = bioseq::common::saturating_add(
             sort_peak, allocation_bytes(plan.target_index_initial_key_bytes));
-        sort_peak = bioseq::common::saturating_add(
-            sort_peak, allocation_bytes(plan.pair_value_bytes));
+        sort_peak =
+            bioseq::common::saturating_add(sort_peak, allocation_bytes(plan.pair_value_bytes));
         sort_peak = bioseq::common::saturating_add(
             sort_peak, allocation_bytes(plan.target_index_key_scratch_bytes));
         sort_peak = bioseq::common::saturating_add(
@@ -423,9 +427,9 @@ struct gpu_target_index_host_scratch_plan {
             bucket_peak, allocation_bytes(plan.target_index_bucket_bytes));
         plan.target_index_bucket_peak_bytes = bucket_peak;
         plan.standalone_device_bytes = std::max(sort_peak, bucket_peak);
-        plan.resident_output_bytes = bioseq::common::saturating_add(
-            allocation_bytes(plan.target_index_value_scratch_bytes),
-            allocation_bytes(plan.target_index_bucket_bytes));
+        plan.resident_output_bytes =
+            bioseq::common::saturating_add(allocation_bytes(plan.target_index_value_scratch_bytes),
+                                           allocation_bytes(plan.target_index_bucket_bytes));
     } else {
         plan.standalone_device_bytes = bioseq::common::saturating_add(
             plan.output_word_bytes,
@@ -434,8 +438,7 @@ struct gpu_target_index_host_scratch_plan {
     }
     plan.host_sequence_staging_bytes = plan.sequence_bytes;
     plan.host_tile_staging_bytes = plan.tile_bytes;
-    const std::uint64_t conservative_host_staging_bytes =
-        bioseq::common::saturating_add(
+    const std::uint64_t conservative_host_staging_bytes = bioseq::common::saturating_add(
         plan.host_sequence_staging_bytes, plan.host_tile_staging_bytes);
     if (purpose == gpu_sketch_purpose::target_index_build) {
         // This aggregate is the conservative full-owner count shape used by
@@ -446,35 +449,32 @@ struct gpu_target_index_host_scratch_plan {
         // before execution admission.
         plan.count_submit_host_transient_bytes = conservative_host_staging_bytes;
         plan.execution_submit_host_transient_bytes = 0u;
-        plan.host_transient_released_before_execution_bytes =
-            conservative_host_staging_bytes;
+        plan.host_transient_released_before_execution_bytes = conservative_host_staging_bytes;
     } else {
         plan.count_submit_host_transient_bytes = conservative_host_staging_bytes;
         plan.execution_submit_host_transient_bytes = conservative_host_staging_bytes;
     }
     plan.admission_bytes = bioseq::common::saturating_add(
         plan.arena_scaffold_bytes,
-        bioseq::common::saturating_add(
-            plan.standalone_device_bytes,
-            std::max(plan.count_submit_host_transient_bytes,
-                     plan.execution_submit_host_transient_bytes)));
+        bioseq::common::saturating_add(plan.standalone_device_bytes,
+                                       std::max(plan.count_submit_host_transient_bytes,
+                                                plan.execution_submit_host_transient_bytes)));
 
     const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
-    plan.is_valid = plan.arena_scaffold_bytes != limit
-        && plan.standalone_device_bytes != limit
-        && plan.admission_bytes != limit;
+    plan.is_valid = plan.arena_scaffold_bytes != limit && plan.standalone_device_bytes != limit &&
+                    plan.admission_bytes != limit;
     return plan;
 }
 
 /**
  * @brief Refines target-index host scratch for the actual input ownership.
+ * @param[in] memory_plan Static sketch memory plan for the invocation.
+ * @param[in] owned_sequence_bytes Fragmented input scratch capacity in bytes.
  * @return Host scratch lifetimes bound to the supplied sketch memory plan.
  */
 [[nodiscard]] constexpr gpu_target_index_host_scratch_plan
-make_gpu_target_index_host_scratch_plan(
-    const gpu_sketch_memory_plan& memory_plan,
-    std::uint64_t owned_sequence_bytes) noexcept
-{
+make_gpu_target_index_host_scratch_plan(const gpu_sketch_memory_plan& memory_plan,
+                                        std::uint64_t owned_sequence_bytes) noexcept {
     gpu_target_index_host_scratch_plan plan{
         .owned_sequence_bytes = owned_sequence_bytes,
         .elided_tile_staging_bytes = memory_plan.host_tile_staging_bytes,
@@ -485,12 +485,11 @@ make_gpu_target_index_host_scratch_plan(
     // the caller.
     plan.count_submit_bytes = plan.owned_sequence_bytes;
     plan.execution_submit_bytes = 0u;
-    plan.released_before_execution_bytes = bioseq::common::saturating_add(
-        plan.owned_sequence_bytes, plan.elided_tile_staging_bytes);
+    plan.released_before_execution_bytes =
+        bioseq::common::saturating_add(plan.owned_sequence_bytes, plan.elided_tile_staging_bytes);
     const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
-    plan.is_valid = memory_plan.is_valid
-        && plan.count_submit_bytes != limit
-        && plan.released_before_execution_bytes != limit;
+    plan.is_valid = memory_plan.is_valid && plan.count_submit_bytes != limit &&
+                    plan.released_before_execution_bytes != limit;
     return plan;
 }
 /** @brief Stores one tile-local minimum from ordered minimizer sketching. */

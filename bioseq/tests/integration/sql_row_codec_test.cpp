@@ -1,8 +1,8 @@
-#include <tests/support/postgres.hpp>
+/** @file Integration contracts for SQL metadata row codecs. */
 
-#include <string>
-#include <string_view>
+#include <catch2/catch_test_macros.hpp>
 
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
@@ -11,7 +11,7 @@ namespace {
 
 constexpr std::string_view k_table = "sql_row_codec_storage";
 
-} // namespace
+}  // namespace
 
 TEST_CASE("Metadata row codecs match the live catalog and write rows",
           "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
@@ -112,12 +112,12 @@ TEST_CASE("Metadata row codecs match the live catalog and write rows",
 TEST_CASE("Reaper text codec bridges detoast ERROR after C++ unwind",
           "[component:bioseq][layer:integration][feature:sql_api][resource:postgres]") {
   auto ctx = fresh_context();
-  const sql_error_info injected =
+  const sql_error_info injected_error =
       sql_error(ctx, "SELECT bioseq_internal.arm_sequence_source_failure("
                      "  'row_codec_reaper_text_bridge_error');");
-  INFO(injected.message);
-  REQUIRE(injected.sqlstate == "XX000");
-  REQUIRE(injected.message.find("could not open relation with OID") !=
+  INFO(injected_error.message);
+  REQUIRE(injected_error.sqlstate == "XX000");
+  REQUIRE(injected_error.message.find("could not open relation with OID") !=
           std::string::npos);
   REQUIRE(query_scalar(ctx, "SELECT 390::text;") == "390");
 }

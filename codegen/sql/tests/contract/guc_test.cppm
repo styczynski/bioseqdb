@@ -2,8 +2,10 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <filesystem>
 #include <initializer_list>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,6 +27,12 @@ inline void require(bool condition, std::string_view message) {
         throw std::runtime_error(
             "GUC generator contract: " + std::string{message});
     }
+}
+
+[[nodiscard]] inline bool has_exact_live_value(
+    const std::optional<std::string>& value,
+    std::string_view expected) {
+    return value && *value == expected;
 }
 
 [[nodiscard]] inline std::filesystem::path repository_root() {
@@ -83,6 +91,50 @@ inline void require(bool condition, std::string_view message) {
         found != program.entities.end(),
         "fixture lacks an expected annotated GUC");
     return *found;
+}
+
+[[nodiscard]] inline option_value& guc_option(
+    collected_entity& entity,
+    std::string_view name) {
+    const auto found = std::ranges::find(
+        entity.options, name, &option_value::name);
+    require(
+        found != entity.options.end(),
+        "fixture GUC lacks an expected annotation option");
+    return *found;
+}
+
+[[nodiscard]] inline structural_analysis::translation_unit& owner_unit(
+    collected_program& program,
+    const std::filesystem::path& source_path) {
+    const auto found = std::ranges::find(
+        program.translation_units,
+        source_path,
+        &structural_analysis::translation_unit::source_path);
+    require(
+        found != program.translation_units.end(),
+        "fixture lacks an expected registered owner unit");
+    return *found;
+}
+
+template <typename p_mutator>
+[[nodiscard]] inline guc_detail::resolved_enum_default
+resolve_compression_default(
+    collected_program& program,
+    p_mutator&& mutate_values) {
+    collected_entity& entity = annotated_guc(
+        program,
+        "bioseq::settings::storage::compression::algorithm");
+    const guc_detail::enum_type_reference enum_type =
+        guc_detail::enum_type_from_storage(entity.cpp_return_type);
+    const guc_detail::parsed_enum parsed = guc_detail::parse_enum(
+        program, entity, enum_type);
+    std::vector<collected_guc_enum_value> values =
+        guc_detail::collect_enum_values(
+            program, entity, parsed, guc_profile::production);
+    std::forward<p_mutator>(mutate_values)(values);
+    return guc_detail::resolve_enum_default(
+        program, entity, parsed, values);
 }
 
 template <typename p_operation>
@@ -179,6 +231,491 @@ inline void run_guc_generator_contract_self_tests() {
             && test_indexes.gucs.size() == 76,
         "annotation-derived profile cardinality changed");
 
+    static constexpr std::array<std::string_view, 3>
+        typed_maximum_gucs{
+            "bioseq.index.memory_cap_mb",
+            "bioseq.index_build.run_buffer_bytes",
+            "bioseq.storage.sequence_shard.max_size_gib",
+        };
+    const auto require_typed_maximums = [](
+        const guc_inventory& inventory,
+        std::string_view collection_path) {
+        for (const std::string_view name : typed_maximum_gucs) {
+            const collected_guc& candidate =
+                guc_contract_detail::guc(inventory, name);
+            require(
+                candidate.maximum_expression
+                        == "std::numeric_limits<int>::max()"
+                    && guc_contract_detail::has_exact_live_value(
+                        candidate.generated_live_authority.maximum,
+                        "2147483647"),
+                std::string{collection_path}
+                    + " did not preserve and resolve a typed int maximum");
+        }
+    };
+    require_typed_maximums(production, "source-only collection");
+    require(
+        guc_contract_detail::has_exact_live_value(
+            guc_contract_detail::guc(
+                production, "bioseq.index.memory_cap_mb")
+                .generated_live_authority.boot_value,
+            "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index.memory_cap_mb")
+                    .generated_live_authority.minimum,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.boot_value,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production, "bioseq.index_build.run_buffer_bytes")
+                    .generated_live_authority.minimum,
+                "0")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production,
+                    "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.boot_value,
+                "1024")
+            && guc_contract_detail::has_exact_live_value(
+                guc_contract_detail::guc(
+                    production,
+                    "bioseq.storage.sequence_shard.max_size_gib")
+                    .generated_live_authority.minimum,
+                "0"),
+        "typed-maximum GUC defaults or minimums changed");
+    collected_program compiler_profile_program = program;
+    compiler_profile_program.compiler_profile = "production";
+    const guc_inventory compiler_profile_inventory =
+        collect_guc_inventory(
+            compiler_profile_program, guc_profile::production);
+    require_typed_maximums(
+        compiler_profile_inventory, "compiler-profile collection");
+    const collected_guc& compiler_profile_compression =
+        guc_contract_detail::guc(
+            compiler_profile_inventory,
+            "bioseq.storage.compression.algorithm");
+    require(
+        compiler_profile_compression.enum_default_name == "pglz"
+            && compiler_profile_compression.generated_live_authority
+                    .visible_enum_values
+                == std::vector<std::string>{"none", "pglz"},
+        "compiler-profile collection did not select its sole compiled "
+        "constexpr default candidate");
+
+    static constexpr std::array<std::string_view, 8>
+        core_integer_constant_names{
+            "k_minimum_compression_level",
+            "k_maximum_compression_level",
+            "k_minimum_stripe_row_count",
+            "k_maximum_stripe_row_count",
+            "k_default_stripe_row_count",
+            "k_minimum_chunk_group_row_count",
+            "k_maximum_chunk_group_row_count",
+            "k_default_chunk_group_row_count",
+        };
+    const auto omit_structural_integer_constants = [&owners](
+        collected_program& candidate) {
+        auto& core = guc_contract_detail::owner_unit(
+            candidate, owners[2]);
+        std::erase_if(
+            core.declarations,
+            [](const structural_analysis::declaration_record& declaration) {
+                return std::ranges::contains(
+                    core_integer_constant_names, declaration.name);
+            });
+    };
+    const auto require_core_integer_constants = [](
+        const guc_inventory& inventory,
+        std::string_view collection_path) {
+        const collected_guc& compression_level =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.compression.level");
+        const collected_guc& stripe_row_limit =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.stripe.row_limit");
+        const collected_guc& chunk_group_row_limit =
+            guc_contract_detail::guc(
+                inventory, "bioseq.storage.chunk_group.row_limit");
+        require(
+            compression_level.default_expression == "3"
+                && compression_level.minimum_expression
+                    == "k_minimum_compression_level"
+                && compression_level.maximum_expression
+                    == "k_maximum_compression_level"
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.boot_value,
+                    "3")
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.minimum,
+                    "1")
+                && guc_contract_detail::has_exact_live_value(
+                    compression_level.generated_live_authority.maximum,
+                    "19")
+                && stripe_row_limit.default_expression
+                    == "k_default_stripe_row_count"
+                && stripe_row_limit.minimum_expression
+                    == "k_minimum_stripe_row_count"
+                && stripe_row_limit.maximum_expression
+                    == "k_maximum_stripe_row_count"
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.boot_value,
+                    "150000")
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.minimum,
+                    "1000")
+                && guc_contract_detail::has_exact_live_value(
+                    stripe_row_limit.generated_live_authority.maximum,
+                    "100000000")
+                && chunk_group_row_limit.default_expression
+                    == "k_default_chunk_group_row_count"
+                && chunk_group_row_limit.minimum_expression
+                    == "k_minimum_chunk_group_row_count"
+                && chunk_group_row_limit.maximum_expression
+                    == "k_maximum_chunk_group_row_count"
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.boot_value,
+                    "10000")
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.minimum,
+                    "1000")
+                && guc_contract_detail::has_exact_live_value(
+                    chunk_group_row_limit.generated_live_authority.maximum,
+                    "100000000"),
+            std::string{collection_path}
+                + " did not resolve every live authored integer constant");
+    };
+    require_core_integer_constants(
+        production, "source-only structural inventory");
+    collected_program source_token_program = program;
+    omit_structural_integer_constants(source_token_program);
+    const guc_inventory source_token_inventory = collect_guc_inventory(
+        source_token_program, guc_profile::production);
+    require_core_integer_constants(
+        source_token_inventory, "source-only token inventory");
+    collected_program compiler_profile_token_program = program;
+    compiler_profile_token_program.compiler_profile = "production";
+    omit_structural_integer_constants(compiler_profile_token_program);
+    const guc_inventory compiler_profile_token_inventory =
+        collect_guc_inventory(
+            compiler_profile_token_program,
+            guc_profile::production);
+    require_core_integer_constants(
+        compiler_profile_token_inventory,
+        "compiler-profile registered-source token inventory");
+
+    const auto resolved_integer_bound = [&program](
+        std::string_view option_name,
+        std::string_view expression,
+        bool compiler_profile) -> std::string {
+        collected_program candidate = program;
+        if (compiler_profile) {
+            candidate.compiler_profile = "production";
+        }
+        guc_contract_detail::guc_option(
+            guc_contract_detail::annotated_guc(
+                candidate,
+                "bioseq::settings::index::memory_cap_mb"),
+            option_name)
+                .expression = expression;
+        const guc_inventory inventory = collect_guc_inventory(
+            candidate, guc_profile::production);
+        const collected_guc& resolved = guc_contract_detail::guc(
+            inventory, "bioseq.index.memory_cap_mb");
+        return option_name == "minimum"
+            ? *resolved.generated_live_authority.minimum
+            : *resolved.generated_live_authority.maximum;
+    };
+    require(
+        resolved_integer_bound(
+            "maximum", "std::numeric_limits<int>::max()", false)
+            == "2147483647"
+            && resolved_integer_bound(
+                "minimum", "std::numeric_limits<int>::min()", true)
+                == "-2147483648"
+            && resolved_integer_bound(
+                "maximum", "(std::numeric_limits<int>::max)()", true)
+                == "2147483647"
+            && resolved_integer_bound(
+                "minimum", "(std::numeric_limits<int>::min)()", false)
+                == "-2147483648"
+            && resolved_integer_bound(
+                "maximum",
+                " \n std :: numeric_limits < int > :: max ( ) \t",
+                false)
+                == "2147483647",
+        "typed numeric_limits<int> bounds did not resolve exactly");
+    require(
+        resolved_integer_bound("maximum", "INT_MAX", false)
+                == "2147483647"
+            && resolved_integer_bound("minimum", "INT_MIN", true)
+                == "-2147483648",
+        "intentional legacy INT_MAX/INT_MIN compatibility changed");
+
+    static constexpr std::array<std::string_view, 11>
+        rejected_integer_bounds{
+            "std::numeric_limits<long>::max()",
+            "std::numeric_limits<unsigned>::max()",
+            "std::numeric_limits<int>::lowest()",
+            "std::numeric_limits<int>::max() + 1",
+            "(std::numeric_limits<int>::max)() trailing",
+            "limits<int>::max()",
+            "integer_limits::max()",
+            "static_cast<int>(std::numeric_limits<int>::max())",
+            "bioseq::k_minimum_compression_level",
+            "2147483648",
+            "-2147483649",
+        };
+    for (const std::string_view expression : rejected_integer_bounds) {
+        guc_contract_detail::require_rejected(
+            [&resolved_integer_bound, expression] {
+                static_cast<void>(resolved_integer_bound(
+                    "maximum", expression, false));
+            },
+            {"cannot resolve generated integer GUC expression",
+             expression},
+            "unsupported integer bound escaped the closed resolver");
+    }
+
+    const auto resolve_integer_identifier = [](
+        collected_program& candidate,
+        std::string_view expression) -> std::string {
+        return guc_detail::resolve_integer_expression(
+            candidate,
+            guc_contract_detail::annotated_guc(
+                candidate,
+                "bioseq::settings::storage::compression::level"),
+            expression);
+    };
+    const auto source_declaration_identifier = [](
+        const structural_analysis::translation_unit& unit,
+        std::string_view identifier) -> std::size_t {
+        for (std::size_t index = 0;
+             index + 1 < unit.tokens.size();
+             ++index) {
+            if (unit.tokens[index].spelling == identifier
+                && unit.tokens[index + 1].spelling == "=") {
+                return index;
+            }
+        }
+        require(false, "fixture lacks an expected source declaration token");
+        return 0;
+    };
+    const auto duplicate_source_declaration =
+        [&source_declaration_identifier](
+            structural_analysis::translation_unit& unit,
+            std::string_view identifier) -> std::size_t {
+        const std::size_t identifier_index =
+            source_declaration_identifier(unit, identifier);
+        std::size_t begin = identifier_index;
+        while (begin > 0) {
+            const std::string& prior = unit.tokens[begin - 1].spelling;
+            if (prior == ";" || prior == "{" || prior == "}") break;
+            --begin;
+        }
+        std::size_t end = identifier_index + 1;
+        while (end < unit.tokens.size()
+               && unit.tokens[end].spelling != ";") {
+            ++end;
+        }
+        require(
+            end < unit.tokens.size(),
+            "fixture source declaration has no terminator");
+        const std::vector<structural_analysis::lexical_token> duplicate(
+            unit.tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+            unit.tokens.begin() + static_cast<std::ptrdiff_t>(end + 1));
+        const std::size_t duplicate_identifier =
+            unit.tokens.size() + identifier_index - begin;
+        unit.tokens.insert(
+            unit.tokens.end(), duplicate.begin(), duplicate.end());
+        return duplicate_identifier;
+    };
+    {
+        collected_program non_constexpr_source = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            non_constexpr_source, owners[2]);
+        const std::size_t constant = source_declaration_identifier(
+            core, "k_minimum_compression_level");
+        const std::size_t non_constexpr =
+            source_declaration_identifier(core, "level");
+        core.tokens[constant].spelling =
+            "removed_minimum_compression_level";
+        core.tokens[non_constexpr].spelling =
+            "k_minimum_compression_level";
+        guc_contract_detail::require_rejected(
+            [&non_constexpr_source, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    non_constexpr_source,
+                    "k_minimum_compression_level"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_minimum_compression_level"},
+            "a non-constexpr same-name source token was accepted");
+    }
+    {
+        collected_program duplicate_active_source = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            duplicate_active_source, owners[2]);
+        static_cast<void>(duplicate_source_declaration(
+            core, "k_minimum_compression_level"));
+        guc_contract_detail::require_rejected(
+            [&duplicate_active_source, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    duplicate_active_source,
+                    "k_minimum_compression_level"));
+            },
+            {"ambiguous source-only integer GUC constant",
+             "k_minimum_compression_level"},
+            "duplicate active source constants were accepted");
+    }
+    {
+        collected_program inactive_alternative = source_token_program;
+        auto& core = guc_contract_detail::owner_unit(
+            inactive_alternative, owners[2]);
+        const std::size_t conditional_identifier =
+            source_declaration_identifier(
+                core, "k_default_compression_algorithm");
+        const std::size_t duplicate_identifier =
+            duplicate_source_declaration(
+                core, "k_minimum_compression_level");
+        core.tokens[duplicate_identifier].range =
+            core.tokens[conditional_identifier].range;
+        require(
+            resolve_integer_identifier(
+                inactive_alternative,
+                "k_minimum_compression_level")
+                == "1",
+            "inactive conditional source alternative created ambiguity");
+    }
+    {
+        collected_program missing_identifier = source_token_program;
+        guc_contract_detail::require_rejected(
+            [&missing_identifier, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    missing_identifier,
+                    "k_missing_integer_guc_constant"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_missing_integer_guc_constant"},
+            "missing integer identifier did not fail closed");
+    }
+    // Synthetic aliases retain their registered owner without depending on
+    // which production constants have compiler-derived structural records.
+    const auto add_structural_integer_alias = [&owners](
+        collected_program& candidate,
+        std::string name,
+        std::string initializer)
+        -> structural_analysis::declaration_record& {
+        auto& core = guc_contract_detail::owner_unit(
+            candidate, owners[2]);
+        const std::string qualified_name = "bioseq::" + name;
+        core.declarations.push_back(
+            structural_analysis::declaration_record{
+                .kind = structural_analysis::declaration_kind::variable,
+                .name = std::move(name),
+                .qualified_name = qualified_name,
+                .enclosing_qualified_name = "bioseq",
+                .signature_text =
+                    "inline constexpr int " + qualified_name,
+                .return_type = "int",
+                .initializer_text = std::move(initializer),
+                .active_condition = "true",
+                .owning_module = core.module_name,
+                .source_identity =
+                    structural_analysis::repository_source_identity(
+                        core.source_path)
+                    + "#guc-contract:" + qualified_name,
+                .explicit_declared_type = "int",
+                .linkage = structural_analysis::entity_linkage::module,
+                .attachment =
+                    structural_analysis::module_attachment::named_module,
+                .payload_kind = structural_analysis::
+                    declaration_payload_kind::variable_initializer,
+                .specifiers = {
+                    .direct_namespace_member = true,
+                    .is_definition = true,
+                    .is_variable = true,
+                    .is_constexpr = true,
+                    .is_inline = true,
+                    .has_explicit_type = true,
+                },
+            });
+        return core.declarations.back();
+    };
+    {
+        collected_program non_constexpr_structural = program;
+        auto& declaration = add_structural_integer_alias(
+            non_constexpr_structural,
+            "k_minimum_compression_level",
+            "1");
+        declaration.specifiers.is_constexpr = false;
+        guc_contract_detail::require_rejected(
+            [&non_constexpr_structural, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    non_constexpr_structural,
+                    "k_minimum_compression_level"));
+            },
+            {"cannot resolve generated integer GUC identifier",
+             "k_minimum_compression_level"},
+            "registered structural non-constexpr fact was ignored");
+    }
+    {
+        collected_program chained_aliases = program;
+        add_structural_integer_alias(
+            chained_aliases, "k_integer_alias_two", "1");
+        add_structural_integer_alias(
+            chained_aliases,
+            "k_integer_alias_one",
+            "k_integer_alias_two");
+        require(
+            resolve_integer_identifier(
+                chained_aliases, "k_integer_alias_one")
+                == "1",
+            "bounded chained constexpr integer aliases did not resolve");
+    }
+    {
+        collected_program cyclic_aliases = program;
+        add_structural_integer_alias(
+            cyclic_aliases,
+            "k_integer_cycle_one",
+            "k_integer_cycle_two");
+        add_structural_integer_alias(
+            cyclic_aliases,
+            "k_integer_cycle_two",
+            "k_integer_cycle_one");
+        guc_contract_detail::require_rejected(
+            [&cyclic_aliases, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    cyclic_aliases, "k_integer_cycle_one"));
+            },
+            {"generated integer GUC expression recursion is too deep"},
+            "cyclic constexpr integer aliases were accepted");
+    }
+    {
+        collected_program over_depth_aliases = program;
+        static constexpr std::size_t alias_count = 18;
+        for (std::size_t index = 0; index < alias_count; ++index) {
+            add_structural_integer_alias(
+                over_depth_aliases,
+                "k_integer_depth_" + std::to_string(index),
+                index + 1 == alias_count
+                    ? "1"
+                    : "k_integer_depth_"
+                        + std::to_string(index + 1));
+        }
+        guc_contract_detail::require_rejected(
+            [&over_depth_aliases, &resolve_integer_identifier] {
+                static_cast<void>(resolve_integer_identifier(
+                    over_depth_aliases, "k_integer_depth_0"));
+            },
+            {"generated integer GUC expression recursion is too deep"},
+            "over-depth constexpr integer aliases were accepted");
+    }
+
     const collected_guc& compression = guc_contract_detail::guc(
         production, "bioseq.storage.compression.algorithm");
     require(
@@ -193,17 +730,147 @@ inline void run_guc_generator_contract_self_tests() {
             && compression.default_expression
                 == "bioseq::k_default_compression_algorithm"
             && compression.enum_default_name == "pglz"
-            && compression.generated_live_authority.boot_value
-                == "pglz"
+            && guc_contract_detail::has_exact_live_value(
+                compression.generated_live_authority.boot_value,
+                "pglz")
             && compression.generated_live_authority
                     .visible_enum_values
                 == std::vector<std::string>{"none", "pglz"},
         "qualified constexpr enum default did not resolve from annotations");
     {
+        collected_program active_profile = program;
+        active_profile.compiler_profile = "production";
+        const auto unqualified =
+            guc_contract_detail::resolve_compression_default(
+                active_profile, [](auto&) {});
+        require(
+            unqualified.cpp_expression
+                    == "bioseq::k_default_compression_algorithm"
+                && unqualified.value_name == "pglz",
+            "unqualified constexpr alias did not resolve exactly");
+
+        collected_program qualified_profile = active_profile;
+        std::string& qualified_initializer =
+            guc_contract_detail::annotated_guc(
+                qualified_profile,
+                "bioseq::settings::storage::compression::algorithm")
+                .initializer_expression;
+        const std::size_t alias_offset = qualified_initializer.find(
+            "k_default_compression_algorithm");
+        require(
+            alias_offset != std::string::npos,
+            "fixture lacks the compression-default alias spelling");
+        qualified_initializer.replace(
+            alias_offset,
+            std::string_view{"k_default_compression_algorithm"}.size(),
+            "bioseq::k_default_compression_algorithm");
+        const auto qualified =
+            guc_contract_detail::resolve_compression_default(
+                qualified_profile, [](auto&) {});
+        require(
+            qualified.cpp_expression
+                    == "bioseq::k_default_compression_algorithm"
+                && qualified.value_name == "pglz",
+            "qualified constexpr alias did not resolve exactly");
+
+        guc_contract_detail::require_rejected(
+            [&active_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        active_profile,
+                        [](auto& values) {
+                            const auto zstd = std::ranges::find(
+                                values,
+                                "zstd",
+                                &collected_guc_enum_value::name);
+                            require(
+                                zstd != values.end(),
+                                "fixture lacks the zstd enum value");
+                            zstd->compiled = true;
+                        }));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "two compiled constexpr candidates were not rejected");
+
+        guc_contract_detail::require_rejected(
+            [&active_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        active_profile,
+                        [](auto& values) {
+                            for (auto& value : values) {
+                                value.compiled = false;
+                            }
+                        }));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "zero compiled constexpr candidates did not fail closed");
+
+        for (const bool hidden : {false, true}) {
+            guc_contract_detail::require_rejected(
+                [&active_profile, hidden] {
+                    static_cast<void>(
+                        guc_contract_detail::resolve_compression_default(
+                            active_profile,
+                            [hidden](auto& values) {
+                                const auto pglz = std::ranges::find(
+                                    values,
+                                    "pglz",
+                                    &collected_guc_enum_value::name);
+                                require(
+                                    pglz != values.end(),
+                                    "fixture lacks the pglz enum value");
+                                if (hidden) {
+                                    pglz->hidden = true;
+                                } else {
+                                    pglz->alias_of = "none";
+                                }
+                            }));
+                },
+                {"enum GUC 'bioseq.storage.compression.algorithm'",
+                 "cannot resolve constexpr default "
+                 "'k_default_compression_algorithm' to one enum value"},
+                hidden
+                    ? "hidden constexpr candidate became the default"
+                    : "alias constexpr candidate became the default");
+        }
+
+        collected_program malformed_profile = active_profile;
+        const auto corrupt_alias_initializers = [](auto& units) {
+            for (auto& unit : units) {
+                for (auto& declaration : unit.declarations) {
+                    if (declaration.qualified_name
+                        == "bioseq::k_default_compression_algorithm") {
+                        declaration.initializer_text =
+                            "compression_algorithm::pglz | "
+                            "compression_algorithm::none";
+                    }
+                }
+            }
+        };
+        corrupt_alias_initializers(malformed_profile.translation_units);
+        corrupt_alias_initializers(
+            malformed_profile.enum_authority_units);
+        guc_contract_detail::require_rejected(
+            [&malformed_profile] {
+                static_cast<void>(
+                    guc_contract_detail::resolve_compression_default(
+                        malformed_profile, [](auto&) {}));
+            },
+            {"enum GUC 'bioseq.storage.compression.algorithm'",
+             "cannot resolve constexpr default "
+             "'k_default_compression_algorithm' to one enum value"},
+            "malformed constexpr alias initializer was accepted");
+    }
+    {
         collected_program structural_constexpr = program;
         const auto core_authority = std::ranges::find_if(
             structural_constexpr.enum_authority_units,
-            [&](const auto& unit) {
+            [&owners](const auto& unit) -> bool {
                 return unit.source_path == owners[2];
             });
         require(
@@ -223,8 +890,9 @@ inline void run_guc_generator_contract_self_tests() {
             ++default_declarations;
         }
         require(
-            default_declarations != 0,
-            "fixture lacks the compression-default declarations");
+            default_declarations == 3,
+            "source-only fixture lost a conditional compression-default "
+            "declaration");
         const guc_inventory structural_inventory = collect_guc_inventory(
             structural_constexpr, guc_profile::production);
         require(
@@ -261,7 +929,8 @@ inline void run_guc_generator_contract_self_tests() {
         logging.owner_key == "bioseq"
             && logging.member == "diagnostics_logging_enabled"
             && logging.context == "superuser_set"
-            && logging.generated_live_authority.boot_value == "off"
+            && guc_contract_detail::has_exact_live_value(
+                logging.generated_live_authority.boot_value, "off")
             && logging.source_path.generic_string().contains(
                 "/backend/pg/configuration/core.cppm"),
         "natural GUC name or registered-source provenance changed");
@@ -273,8 +942,14 @@ inline void run_guc_generator_contract_self_tests() {
             && minimizer.member == "minimizer_algorithm"
             && minimizer.enum_cpp_name
                 == "bioseq::aligner::minimizer_algorithm"
-            && minimizer.enum_default_name == "scalar",
-        "nested aligner enum registration changed");
+            && minimizer.enum_default_name == "scalar"
+            && guc_contract_detail::guc(
+                   compiler_profile_inventory,
+                   "bioseq.aligner.minimizer.algorithm")
+                   .enum_default_name
+                == minimizer.enum_default_name,
+        "direct enum default changed across source-only and "
+        "compiler-profile collection");
 
     const collected_guc& fragment_lookup_route =
         guc_contract_detail::guc(
@@ -392,7 +1067,8 @@ inline void run_guc_generator_contract_self_tests() {
             structural_analysis::repository_source_identity(owners[2]);
         std::erase_if(
             missing_owner_source.module_graph.units,
-            [&](const structural_analysis::module_graph_unit& unit) {
+            [&core_source_identity](
+                const structural_analysis::module_graph_unit& unit) -> bool {
                 return unit.source_identity == core_source_identity;
             });
         guc_contract_detail::require_rejected(
@@ -465,7 +1141,7 @@ inline void run_guc_generator_contract_self_tests() {
     require(
         std::ranges::all_of(
             test_only_gucs,
-            [&](std::string_view name) {
+            [&production, &test_indexes](std::string_view name) -> bool {
                 return std::ranges::none_of(
                            production.gucs,
                            [name](const collected_guc& value) {

@@ -17,14 +17,20 @@ extern "C" {
 module bioseq.postgres.extension:alignment_hook_run;
 
 import :alignment_hook_contract;
+import bioseq.postgres.table.alignment_execution;
 
 namespace bioseq::pg::detail {
 
 namespace {
 
-/* count==0 is PostgreSQL's unbounded ExecutorRun contract.  A bounded run is
- * known to have reached EOF only when it produced fewer tuples than requested;
- * producing exactly count rows may have stopped at an upper portal boundary. */
+/**
+ * @brief Reports whether one ExecutorRun call drained forward output.
+ *
+ * A zero count is PostgreSQL's unbounded contract. A bounded run is known to
+ * reach end of output only when it produces fewer tuples than requested.
+ *
+ * @return True only when the run establishes forward end of output.
+ */
 [[nodiscard]] constexpr bool executor_run_output_fully_drained(
 		const ScanDirection direction,
 		const std::uint64_t count,
@@ -43,19 +49,20 @@ static_assert(!executor_run_output_fully_drained(
 
 } // namespace
 
-ExecutorRun_hook_type PreviousExecutorRunHook = nullptr;
+ExecutorRun_hook_type previous_executor_run_hook = nullptr;
 std::vector<alignment_executor_frame*> alignment_current_run{};
 
 namespace {
 
+/** @brief Invokes the previous ExecutorRun hook or PostgreSQL's standard implementation. */
 void call_previous_or_standard_executor_run(
 		QueryDesc* query_desc,
 		ScanDirection direction,
 		uint64 count,
 		bool execute_once)
 {
-	if (PreviousExecutorRunHook != nullptr) {
-		PreviousExecutorRunHook(query_desc, direction, count, execute_once);
+	if (previous_executor_run_hook != nullptr) {
+		previous_executor_run_hook(query_desc, direction, count, execute_once);
 	} else {
 		standard_ExecutorRun(query_desc, direction, count, execute_once);
 	}
@@ -63,6 +70,13 @@ void call_previous_or_standard_executor_run(
 
 } // namespace
 
+/**
+ * @brief Chains ExecutorRun while tracking the active frame and output-drain state.
+ * @param[in,out] query_desc PostgreSQL query descriptor for this executor invocation.
+ * @param[in] direction Requested scan direction.
+ * @param[in] count Maximum tuples to emit, or zero for an unbounded run.
+ * @param[in] execute_once PostgreSQL execute-once hint forwarded unchanged.
+ */
 void bioseq_alignment_executor_run(
 		QueryDesc* query_desc,
 		ScanDirection direction,

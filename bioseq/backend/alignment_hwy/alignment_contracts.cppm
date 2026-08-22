@@ -42,41 +42,43 @@ inline constexpr std::array<std::int32_t, 3> k_fill_band_brackets = {
     16, 32, 64};
 
 /** Round a positive extent up to the first configured bucket boundary. */
-[[nodiscard, gnu::always_inline]] inline std::int32_t round_up_to_bracket(
-    std::int32_t value,
-    std::span<const std::int32_t> brackets) noexcept {
-    for (auto upper_bound : brackets) {
-        if (value <= upper_bound) return upper_bound;
+[[nodiscard, gnu::always_inline]] inline auto
+round_up_to_bracket(std::int32_t value, std::span<const std::int32_t> brackets) noexcept
+    -> std::int32_t {
+    for (const std::int32_t upper_bound : brackets) {
+        if (value <= upper_bound) {
+            return upper_bound;
+        }
     }
     return value;
 }
 
 /** Build the stable bucketing key for one fill descriptor. */
 template <class p_fill_descriptor>
-[[nodiscard, gnu::always_inline]] inline fill_bucket_key bucket_key_for(
-    const p_fill_descriptor& fill,
-    std::int32_t default_bandwidth) noexcept {
+[[nodiscard, gnu::always_inline]] inline auto
+bucket_key_for(const p_fill_descriptor& fill, std::int32_t default_bandwidth) noexcept
+    -> fill_bucket_key {
     const bool is_long = (fill.query_length > 256) || (fill.target_length > 256);
-    fill_bucket_key key{};
     if (is_long) {
-        key.maximum_query_length = fill.query_length;
-        key.maximum_target_length = fill.target_length;
-        key.maximum_bandwidth = fill.bandwidth > 0
-            ? fill.bandwidth
-            : default_bandwidth;
-        key.is_long_fill = true;
-    } else {
-        key.maximum_query_length = round_up_to_bracket(fill.query_length,
-            std::span<const std::int32_t>{k_fill_length_brackets});
-        key.maximum_target_length = round_up_to_bracket(fill.target_length,
-            std::span<const std::int32_t>{k_fill_length_brackets});
-        key.maximum_bandwidth = round_up_to_bracket(
-            fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth,
-            std::span<const std::int32_t>{k_fill_band_brackets});
-        key.is_long_fill = false;
+        return fill_bucket_key{
+            .maximum_query_length = fill.query_length,
+            .maximum_target_length = fill.target_length,
+            .maximum_bandwidth = fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth,
+            .is_long_fill = true,
+            .is_reversed = fill.is_reversed,
+        };
     }
-    key.is_reversed = fill.is_reversed;
-    return key;
+    return fill_bucket_key{
+        .maximum_query_length = round_up_to_bracket(
+            fill.query_length, std::span<const std::int32_t>{k_fill_length_brackets}),
+        .maximum_target_length = round_up_to_bracket(
+            fill.target_length, std::span<const std::int32_t>{k_fill_length_brackets}),
+        .maximum_bandwidth =
+            round_up_to_bracket(fill.bandwidth > 0 ? fill.bandwidth : default_bandwidth,
+                                std::span<const std::int32_t>{k_fill_band_brackets}),
+        .is_long_fill = false,
+        .is_reversed = fill.is_reversed,
+    };
 }
 
 /** Compare fills by bucket geometry and then by stable region order. */
@@ -84,10 +86,9 @@ struct by_bucket_then_order {
     std::int32_t default_bandwidth;  ///< Bandwidth used when a fill omits one.
 
     template <class p_fill_descriptor>
-    [[nodiscard, gnu::always_inline]] inline bool operator()(
-        const p_fill_descriptor& left,
-        const p_fill_descriptor& right) const noexcept
-    {
+    [[nodiscard, gnu::always_inline]] inline auto
+    operator()(const p_fill_descriptor& left, const p_fill_descriptor& right) const noexcept
+        -> bool {
         const fill_bucket_key left_key = bucket_key_for(left, default_bandwidth);
         const fill_bucket_key right_key = bucket_key_for(right, default_bandwidth);
         if (left_key.is_long_fill != right_key.is_long_fill) {
@@ -120,10 +121,9 @@ struct by_bucket_then_order {
 /** Compare fills by their original region and fill order. */
 struct chain_order {
     template <class p_fill_descriptor>
-    [[nodiscard, gnu::always_inline]] inline bool operator()(
-        const p_fill_descriptor& left,
-        const p_fill_descriptor& right) const noexcept
-    {
+    [[nodiscard, gnu::always_inline]] inline auto
+    operator()(const p_fill_descriptor& left, const p_fill_descriptor& right) const noexcept
+        -> bool {
         if (left.region_index != right.region_index) {
             return left.region_index < right.region_index;
         }
@@ -264,18 +264,16 @@ struct block_aligner_execution_stats {
     bool is_saturated = false;  ///< Whether any counter saturated.
 
     /** Return whether an unsigned counter increment would overflow. */
-    [[nodiscard]] static constexpr bool add_would_overflow(
-            std::uint64_t destination,
-            std::uint64_t increment) noexcept {
+    [[nodiscard]] static constexpr auto add_would_overflow(std::uint64_t destination,
+                                                           std::uint64_t increment) noexcept
+        -> bool {
         return increment > (std::numeric_limits<std::uint64_t>::max)()
             - destination;
     }
 
     /** Add to a counter, saturating and recording overflow. */
-    static void add(
-            std::uint64_t& destination,
-            std::uint64_t increment,
-            bool& saturation) noexcept {
+    static auto add(std::uint64_t& destination, std::uint64_t increment, bool& saturation) noexcept
+        -> void {
         if (add_would_overflow(destination, increment)) {
             destination = (std::numeric_limits<std::uint64_t>::max)();
             saturation = true;
@@ -285,12 +283,12 @@ struct block_aligner_execution_stats {
     }
 
     /** Add to a member counter using this record's saturation flag. */
-    void add(std::uint64_t& destination, std::uint64_t increment = 1) noexcept {
+    auto add(std::uint64_t& destination, std::uint64_t increment = 1) noexcept -> void {
         add(destination, increment, is_saturated);
     }
 
     /** Merge another independent execution record into this one. */
-    void merge(const block_aligner_execution_stats& other) noexcept {
+    auto merge(const block_aligner_execution_stats& other) noexcept -> void {
         is_saturated = is_saturated || other.is_saturated;
         add(align_region_invocations, other.align_region_invocations);
         add(serial_align_region_dispatches,
@@ -353,11 +351,10 @@ struct block_aligner_execution_stats {
     }
 
     /** Sum three counters when the exact result is representable. */
-    [[nodiscard]] static constexpr bool sum_three_counters(
-            std::uint64_t first,
-            std::uint64_t second,
-            std::uint64_t third,
-            std::uint64_t& result) noexcept {
+    [[nodiscard]] static constexpr auto sum_three_counters(std::uint64_t first,
+                                                           std::uint64_t second,
+                                                           std::uint64_t third,
+                                                           std::uint64_t& result) noexcept -> bool {
         if (add_would_overflow(first, second)) return false;
         const std::uint64_t partial = first + second;
         if (add_would_overflow(partial, third)) return false;
@@ -366,21 +363,21 @@ struct block_aligner_execution_stats {
     }
 
     /** Return the number of eligible calls, or UINT64_MAX on overflow. */
-    [[nodiscard]] constexpr std::uint64_t eligible_calls() const noexcept {
+    [[nodiscard]] constexpr auto eligible_calls() const noexcept -> std::uint64_t {
         std::uint64_t result = (std::numeric_limits<std::uint64_t>::max)();
         (void)sum_three_counters(left_eligible, gap_eligible, right_eligible, result);
         return result;
     }
 
     /** Return the number of executed calls, or UINT64_MAX on overflow. */
-    [[nodiscard]] constexpr std::uint64_t executed_calls() const noexcept {
+    [[nodiscard]] constexpr auto executed_calls() const noexcept -> std::uint64_t {
         std::uint64_t result = (std::numeric_limits<std::uint64_t>::max)();
         (void)sum_three_counters(left_executed, gap_executed, right_executed, result);
         return result;
     }
 
     /** Validate routing, mode, work, and forbidden-fallback invariants. */
-    [[nodiscard]] constexpr bool is_internally_consistent() const noexcept {
+    [[nodiscard]] constexpr auto is_internally_consistent() const noexcept -> bool {
         std::uint64_t eligible_total = 0;
         std::uint64_t executed_total = 0;
         std::uint64_t requested_xdrop_total = 0;
@@ -476,8 +473,8 @@ struct block_aligner_execution_stats {
     }
 
     /** Compare every counter and saturation state. */
-    [[nodiscard]] constexpr bool operator==(
-        const block_aligner_execution_stats&) const noexcept = default;
+    [[nodiscard]] constexpr auto operator==(const block_aligner_execution_stats&) const noexcept
+        -> bool = default;
 };
 /** Result of the exact equal-length diagonal certification fast path. */
 struct block_diagonal_certificate {
@@ -517,8 +514,8 @@ enum class block_packed_certificate_decision : std::uint8_t {
 };
 
 /// Immutable per-region state for the resident DNA4/u64 gap certificate.
-/// Matrix/contract checks are deliberately hoisted out of the seed-pair loop;
-/// exact coordinates and packed sequence contents remain per-gap inputs.
+/// Matrix and contract checks are deliberately hoisted out of the seed-pair loop.
+/// Exact coordinates and packed sequence contents remain per-gap inputs.
 struct block_global_gap_certificate_plan {
     block_aligner_parameters parameters{};  ///< Validated global parameters.
     std::int8_t match_score = 0;  ///< Projected DNA4 match score.
@@ -552,15 +549,14 @@ enum class block_aligner_contract_error : std::uint8_t {
 };
 
 /** Return whether the active lane shape has a validated Block Aligner path. */
-[[nodiscard]] constexpr bool is_block_aligner_lane_shape_supported(
-        size_t lanes) noexcept {
+[[nodiscard]] constexpr auto is_block_aligner_lane_shape_supported(size_t lanes) noexcept -> bool {
     return lanes == 8 || lanes == 16;
 }
 
 /** Validate invariant-bearing parameters and the active SIMD lane shape. */
-[[nodiscard]] constexpr block_aligner_contract_error validate_block_aligner_contract(
-        const block_aligner_parameters& parameters,
-        size_t lanes) noexcept {
+[[nodiscard]] constexpr auto
+validate_block_aligner_contract(const block_aligner_parameters& parameters, size_t lanes) noexcept
+    -> block_aligner_contract_error {
     if (parameters.gap_open <= 0 || parameters.gap_extend <= 0
         || static_cast<int>(parameters.gap_open) + parameters.gap_extend
              > -static_cast<int>(std::numeric_limits<int8_t>::min())) {
@@ -600,12 +596,12 @@ enum class block_aligner_contract_error : std::uint8_t {
 }
 
 /** Compute the stable semantic identity of an admitted alignment contract. */
-[[nodiscard]] constexpr std::uint64_t block_aligner_configuration_identity(
-        const block_aligner_parameters& parameters,
-        std::uint64_t scoring_identity = 0,
-        bool strand_reversed = false) noexcept {
+[[nodiscard]] constexpr auto
+block_aligner_configuration_identity(const block_aligner_parameters& parameters,
+                                     std::uint64_t scoring_identity = 0,
+                                     bool strand_reversed = false) noexcept -> std::uint64_t {
     std::uint64_t hash = 1469598103934665603ULL;
-    const auto mix = [&hash](std::uint64_t value) constexpr {
+    const auto mix = [&hash](std::uint64_t value) constexpr -> void {
         hash ^= value;
         hash *= 1099511628211ULL;
     };
@@ -625,11 +621,11 @@ enum class block_aligner_contract_error : std::uint8_t {
 }
 
 /** Record a certified gap without re-entering a target namespace. */
-inline void record_block_certified_global_gap(
-        const block_global_gap_certificate_plan& plan,
-        const block_diagonal_certificate& certificate,
-        bool strand_reversed,
-        block_aligner_execution_stats* execution_stats) noexcept {
+inline auto
+record_block_certified_global_gap(const block_global_gap_certificate_plan& plan,
+                                  const block_diagonal_certificate& certificate,
+                                  bool strand_reversed,
+                                  block_aligner_execution_stats* execution_stats) noexcept -> void {
     if (execution_stats == nullptr) return;
     if (!certificate.is_certified || certificate.symbols == 0u
         || certificate.vector_batches == 0u
@@ -669,8 +665,8 @@ inline void record_block_certified_global_gap(
 }
 
 /** Abort if Block Aligner would route to a forbidden KSW2 fallback. */
-[[noreturn]] inline void abort_forbidden_ksw2_fallback(
-        block_aligner_execution_stats& stats) noexcept {
+[[noreturn]] inline auto
+abort_forbidden_ksw2_fallback(block_aligner_execution_stats& stats) noexcept -> void {
     stats.add(stats.forbidden_ksw2_calls);
     std::abort();
 }

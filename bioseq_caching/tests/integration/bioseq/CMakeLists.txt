@@ -38,12 +38,14 @@ if(APPLE)
   endif()
 endif()
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_BIOSEQ_SUPPORT_INTEGRATION_TEST_SOURCES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 4)
 add_executable(bioseq_cache_bioseq_support_integration_tests
   "${CMAKE_CURRENT_LIST_DIR}/../../support/cache_catch_runner.cpp"
-  coexistence_acceptance_test.cpp
-  coexistence_test.cpp
-  exact_provider_test.cpp
-  provider_peer_failopen_test.cpp)
+  ${BIOSEQ_CACHE_BIOSEQ_SUPPORT_INTEGRATION_TEST_SOURCES})
 set_target_properties(
   bioseq_cache_bioseq_support_integration_tests PROPERTIES
   CXX_STANDARD 26

@@ -16,6 +16,10 @@ struct normalized_entity {
     std::string stable_identity;
     std::string installed_identity;
     std::vector<std::string> dependency_identities;
+    std::string planner_support_identity;
+    std::string type_role_owner_identity;
+    std::string type_element_identity;
+    std::string opclass_storage_identity;
     std::size_t strongly_connected_component{};
 };
 

@@ -90,7 +90,6 @@ apt-get install -y --no-install-recommends \
   rsync ninja-build \
   zlib1g-dev libssl-dev \
   minimap2 \
-  doxygen \
   xorg-dev libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
   libxfixes-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-util-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-image0-dev \
@@ -111,11 +110,15 @@ clang_version() {
 llvm_root_meets_min() {
   local root="$1"
   local clang="$root/bin/clang++"
-  local have
-  [ -x "$clang" ] || return 1
-  have="$(clang_version "$clang")"
-  [ -n "$have" ] || return 1
-  dpkg --compare-versions "$have" ge "$LLVM_MIN_VERSION"
+  local clang_tidy="$root/bin/clang-tidy"
+  local clang_have clang_tidy_have
+  [ -x "$clang" ] && [ -x "$clang_tidy" ] || return 1
+  clang_have="$(clang_version "$clang")"
+  clang_tidy_have="$(clang_version "$clang_tidy")"
+  [ -n "$clang_have" ] && [ -n "$clang_tidy_have" ] || return 1
+  [ "${clang_have%%.*}" = "${clang_tidy_have%%.*}" ] || return 1
+  dpkg --compare-versions "$clang_have" ge "$LLVM_MIN_VERSION" || return 1
+  dpkg --compare-versions "$clang_tidy_have" ge "$LLVM_MIN_VERSION"
 }
 
 install_llvm() {
@@ -129,6 +132,7 @@ install_llvm() {
     /tmp/llvm.sh "$LLVM_VERSION" all || true
     apt-get install -y \
       "clang-$LLVM_VERSION" "lld-$LLVM_VERSION" "llvm-$LLVM_VERSION-dev" \
+      "clang-tidy-$LLVM_VERSION" "clang-tools-$LLVM_VERSION" \
       "libc++-$LLVM_VERSION-dev" "libc++abi-$LLVM_VERSION-dev" "libunwind-$LLVM_VERSION-dev" || true
     if llvm_root_meets_min "/usr/lib/llvm-$LLVM_VERSION"; then
       LLVM_ROOT="/usr/lib/llvm-$LLVM_VERSION"
@@ -156,11 +160,19 @@ install_llvm() {
   return 1
 }
 install_llvm || fail "llvm install (apt + tarball both failed)"
-CLANG_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang")"
-[ -n "$CLANG_ACTUAL_VERSION" ] || fail "clang version not parseable at $LLVM_ROOT/bin/clang"
+CLANG_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang++")"
+CLANG_TIDY_ACTUAL_VERSION="$(clang_version "$LLVM_ROOT/bin/clang-tidy")"
+[ -n "$CLANG_ACTUAL_VERSION" ] || fail "clang version not parseable at $LLVM_ROOT/bin/clang++"
+[ -n "$CLANG_TIDY_ACTUAL_VERSION" ] \
+  || fail "clang-tidy missing or version not parseable at $LLVM_ROOT/bin/clang-tidy"
 dpkg --compare-versions "$CLANG_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
   || fail "clang $CLANG_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
-"$LLVM_ROOT/bin/clang" --version | head -1 || fail "clang not runnable"
+dpkg --compare-versions "$CLANG_TIDY_ACTUAL_VERSION" ge "$LLVM_MIN_VERSION" \
+  || fail "clang-tidy $CLANG_TIDY_ACTUAL_VERSION is below required $LLVM_MIN_VERSION"
+[ "${CLANG_ACTUAL_VERSION%%.*}" = "${CLANG_TIDY_ACTUAL_VERSION%%.*}" ] \
+  || fail "clang-tidy major $CLANG_TIDY_ACTUAL_VERSION does not match clang $CLANG_ACTUAL_VERSION"
+"$LLVM_ROOT/bin/clang++" --version | head -1 || fail "clang++ not runnable"
+"$LLVM_ROOT/bin/clang-tidy" --version | head -1 || fail "clang-tidy not runnable"
 
 # --- 4. CMake (pinned: its import-std UUID is hardcoded in CMakeLists.txt) ----
 echo "[bootstrap] CMake $CMAKE_VERSION"
@@ -221,13 +233,36 @@ chown -R "$TARGET_USER:$TARGET_USER" "$VCPKG_ROOT" 2>/dev/null || true
 # Shared binary cache so reconfigures (and a clean re-provision sharing a snapshot) stay fast.
 mkdir -p /opt/vcpkg-cache && chmod 0777 /opt/vcpkg-cache
 
-# --- 7b. Website validation toolchain (§4.4/§11.1): Doxygen 1.9.8 is installed
-# above via apt (Ubuntu Noble). The generated-site validators (html5lib) and the
-# pinned Playwright browser acceptance run from a hash-locked virtualenv the build
-# creates from website/tests/requirements.lock; pre-cache its wheels and the
-# Chromium browser here so an offline `bioseq_website` build never reaches the
-# network. Non-fatal: the build re-resolves against the lock if the cache is cold.
-echo "[bootstrap] website validation toolchain (Doxygen $(doxygen --version 2>/dev/null || echo '?'), Playwright, html5lib)"
+# --- 7b. Website validation toolchain (§4.4/§11.1) --------------------------
+# Prewarm the same archive/member/hash-locked Doxygen cache that website mode
+# owns before CMake configure.  The system package is deliberately not the
+# authority: bootstrap fails closed unless the provisioned executable reports
+# exactly 1.9.8.  The generated-site validators (html5lib) and pinned Playwright
+# browser acceptance run from a hash-locked virtualenv created from
+# website/tests/requirements.lock; pre-cache its wheels and Chromium here so an
+# offline `bioseq_website` build never reaches the network.
+DOXYGEN_PROVISIONER="$REPO_DEST/build_mcp/doxygen_toolchain.py"
+DOXYGEN_CACHE_ROOT="$REPO_DEST/build/toolchains/doxygen"
+[ -f "$DOXYGEN_PROVISIONER" ] \
+  || fail "missing exact Doxygen provisioner: $DOXYGEN_PROVISIONER"
+mkdir -p "$DOXYGEN_CACHE_ROOT" \
+  || fail "create Doxygen cache root: $DOXYGEN_CACHE_ROOT"
+chown "$TARGET_USER:$TARGET_USER" "$DOXYGEN_CACHE_ROOT" \
+  || fail "set Doxygen cache ownership: $DOXYGEN_CACHE_ROOT"
+chmod 0700 "$DOXYGEN_CACHE_ROOT" \
+  || fail "set Doxygen cache permissions: $DOXYGEN_CACHE_ROOT"
+DOXYGEN_EXECUTABLE="$(
+  sudo -u "$TARGET_USER" -H python3 "$DOXYGEN_PROVISIONER" \
+    --cache-root "$DOXYGEN_CACHE_ROOT"
+)" || fail "provision exact Doxygen 1.9.8"
+[ -x "$DOXYGEN_EXECUTABLE" ] \
+  || fail "provisioned Doxygen is not executable: $DOXYGEN_EXECUTABLE"
+DOXYGEN_VERSION_OUTPUT="$("$DOXYGEN_EXECUTABLE" --version 2>&1)" \
+  || fail "query provisioned Doxygen version"
+[ "$DOXYGEN_VERSION_OUTPUT" = "1.9.8" ] \
+  || fail "provisioned Doxygen must report exactly 1.9.8; observed: $DOXYGEN_VERSION_OUTPUT"
+echo "[bootstrap] website validation toolchain: Doxygen $DOXYGEN_VERSION_OUTPUT"
+echo "[bootstrap] Doxygen path: $DOXYGEN_EXECUTABLE; Playwright + html5lib pre-cache"
 WEBSITE_LOCK="$REPO_DEST/website/tests/requirements.lock"
 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 mkdir -p /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH" && chmod 0777 /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH"

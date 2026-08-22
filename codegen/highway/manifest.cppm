@@ -136,7 +136,7 @@ parse_domain_topology_record(
     const std::filesystem::path& path,
     const std::size_t expected_ordinal) {
     require_field_count(
-        path, "domain-topology", fields.size(), 6u);
+        path, "domain-topology", fields.size(), 6U);
     const std::uint32_t ordinal = parse_ordinal(
         fields[1], path, "domain-topology");
     if (ordinal != expected_ordinal) {
@@ -190,7 +190,7 @@ inline void require_field_count(
 [[nodiscard]] inline std::string json_escape(std::string_view value) {
     std::string result;
     result.reserve(value.size() + 8);
-    constexpr char digits[] = "0123456789abcdef";
+    constexpr std::string_view digits = "0123456789abcdef";
     for (const unsigned char character : value) {
         switch (character) {
             case '"': result += "\\\""; break;
@@ -464,10 +464,10 @@ inline void require_field_count(
     }
     const std::size_t expected_artifact_count =
         plan.target_inventory.targets.size()
-            * (2u + plan.extracted_sources.size() + slot_owners.size()
+            * (2U + plan.extracted_sources.size() + slot_owners.size()
                + plan.source_inventory.minimizer_representation_instances
                      .size())
-        + 3u + plan.source_inventory.unit_probes.size();
+        + 3U + plan.source_inventory.unit_probes.size();
     if (plan.target_inventory.targets.empty()
         || artifacts.size() != expected_artifact_count
         || plan.clang_release.empty()

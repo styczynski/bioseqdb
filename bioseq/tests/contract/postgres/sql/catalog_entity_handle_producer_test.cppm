@@ -1,3 +1,7 @@
+/**
+ * @file catalog_entity_handle_producer_test.cppm
+ * @brief Exports generated-like fixed and extension-schema catalog handles.
+ */
 module;
 
 extern "C" {

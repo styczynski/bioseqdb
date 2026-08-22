@@ -1,20 +1,13 @@
 find_package(Catch2 3 REQUIRED)
 
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_UNIT_TEST_SOURCES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
+  INCLUDE_PATTERNS "*_test.cpp"
+  EXPECTED_COUNT 13)
 add_executable(bioseq_cache_unit_tests
   "${CMAKE_CURRENT_LIST_DIR}/../support/fake_provider.cpp"
-  admission_provider_test.cpp
-  checked_math_test.cpp
-  checked_state_ttl_test.cpp
-  column_format_test.cpp
-  coverage_readiness_test.cpp
-  dependency_directory_test.cpp
-  dependency_vector_test.cpp
-  object_definition_dependencies_test.cpp
-  provider_api_abi_test.cpp
-  reusable_planning_test.cpp
-  reusable_registry_test.cpp
-  transition_ledger_test.cpp
-  write_observation_test.cpp)
+  ${BIOSEQ_CACHE_UNIT_TEST_SOURCES})
 
 set_target_properties(bioseq_cache_unit_tests PROPERTIES
   CXX_STANDARD 26

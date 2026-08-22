@@ -2,16 +2,8 @@
  * @file instrumentation/pmu/macos.cppm
  * @brief Apple Silicon kperf backend.
  *
- * Reads cycles / instructions / branches / branch_misses from Apple's
- * private kperf.framework + kperfdata.framework via dlopen. The
- * underlying kpc_get_thread_counters is a sysctl, so per-call overhead
- * is on the order of a few hundred nanoseconds. PMU access on macOS
- * normally requires root (kpc_force_all_ctrs_set returns EPERM
- * otherwise); the public read_thread_counters() falls back to zeros
- * when init fails so the rest of the pipeline keeps running.
- *
- * Only the dynamically resolved kperf/kperfdata boundary used here is
- * represented; no private framework declarations are linked at build time.
+ * Dynamically resolved kperf and kperfdata symbols provide four thread-local
+ * counters. Initialization failure leaves the portable API unavailable.
  */
 module;
 
@@ -21,17 +13,14 @@ module;
 #include <mutex>
 
 #if defined(__APPLE__)
-#  include <dlfcn.h>
-#  include <sys/sysctl.h>
+#include <dlfcn.h>
 #endif
 
 export module bioseq.instrumentation.pmu.macos;
 
 export namespace bioseq::instrumentation::pmu::macos {
 
-/// Canonical 4-event sample. Mirrors the public counter_sample in pmu.cppm
-/// so the dispatch in pmu.cppm can copy field-for-field without having
-/// to know about platform structs.
+/** @brief Four-event sample matching the public PMU counter order. */
 struct counter_sample {
     std::uint64_t cycles        = 0;
     std::uint64_t instructions  = 0;
@@ -49,6 +38,7 @@ inline constexpr std::size_t maximum_kpc_counter_count = 32;
 
 using kpc_configuration_word = std::uint64_t;
 
+/// Private kperf event layout used by the dynamically resolved API.
 struct kpep_event {
     const char* name;
     const char* description;
@@ -62,7 +52,9 @@ struct kpep_event {
     std::uint8_t  is_fixed;
 };
 
+/// Opaque event-database handle owned by kperfdata.
 struct kpep_db {};
+/// Opaque event-configuration handle owned by kperfdata.
 struct kpep_config {};
 
 // Function pointer typedefs for the symbols we resolve at runtime.
@@ -120,11 +112,15 @@ struct process_state {
     std::size_t   counter_map[4] = {0, 0, 0, 0};   // event-index -> counter slot
 };
 
+/// Returns the process-wide state without exposing it outside this module.
+/// @return The state instance retained until process shutdown.
 inline process_state& get_process_state() noexcept {
     static process_state state;
     return state;
 }
 
+/// Returns the guard serializing process-wide PMU initialization.
+/// @return The guard retained until process shutdown.
 inline std::once_flag& initialization_once() noexcept {
     static std::once_flag flag;
     return flag;
@@ -133,6 +129,7 @@ inline std::once_flag& initialization_once() noexcept {
 /// Try to dlopen() kperf.framework / kperfdata.framework and resolve the
 /// minimum symbol set needed for our 4-event group. Returns true iff
 /// every required symbol resolved.
+/// @return `true` when both frameworks and every required symbol are available.
 [[nodiscard]] inline bool resolve_symbols(process_state& state) noexcept {
     constexpr const char* kperf_framework_path =
         "/System/Library/PrivateFrameworks/kperf.framework/kperf";
@@ -145,6 +142,7 @@ inline std::once_flag& initialization_once() noexcept {
         return false;
     }
 
+    // Resolve one borrowed symbol address from a loaded framework.
     auto resolve = [](void* handle, const char* name) noexcept -> void* {
         return ::dlsym(handle, name);
     };
@@ -190,7 +188,7 @@ inline std::once_flag& initialization_once() noexcept {
 }
 
 /// The 4-event canon. The first matching alias (by lookup against the
-/// current host's PMC database) wins; on Apple Silicon the
+/// current host's PMC database) wins. On Apple Silicon the
 /// FIXED_CYCLES / FIXED_INSTRUCTIONS pair lives on dedicated fixed
 /// counters and the two branch counters consume two configurable slots.
 struct event_alias {
@@ -218,6 +216,7 @@ inline constexpr event_alias profile_events[4] = {
 
 /// Walk the alias list and return the first event the loaded PMC
 /// database knows about, or nullptr if none match.
+/// @return A borrowed event descriptor, or `nullptr` when no alias is known.
 [[nodiscard]] inline kpep_event* find_event(
     process_state& state, kpep_db* db, const event_alias& alias) noexcept
 {
@@ -233,11 +232,12 @@ inline constexpr event_alias profile_events[4] = {
 
 /// Process-wide one-shot init. Returns true on success, false on any
 /// failure (permissions, missing symbols, unknown CPU, ...). The caller
-/// can call this once and remember the result; subsequent calls are
+/// can call this once and remember the result. Subsequent calls are
 /// no-ops. Failure modes are reported via stderr (cheap and visible
 /// when running the bench from a TTY) so the operator can tell
 /// `requires sudo` apart from `unknown CPU` apart from `framework
 /// missing` apart from `event not found on this PMU`.
+/// @return `true` when the four-event group is configured and counting.
 [[nodiscard]] inline bool initialize_process_unlocked() noexcept {
     auto& state = get_process_state();
 
@@ -391,12 +391,13 @@ inline constexpr event_alias profile_events[4] = {
 /// success/failure of the *first* invocation. The init is std::call_once
 /// guarded so concurrent threads can race here without corrupting the
 /// kperf state.
+/// @return The cached result of the first initialization attempt.
 [[nodiscard]] inline bool initialize_process() noexcept {
     auto& state = detail::get_process_state();
     if (state.is_initialized.load(std::memory_order_acquire)) return true;
     if (state.has_failed.load(std::memory_order_acquire))      return false;
 
-    std::call_once(detail::initialization_once(), [&] {
+    std::call_once(detail::initialization_once(), [&state] {
         if (detail::initialize_process_unlocked()) {
             state.is_initialized.store(true, std::memory_order_release);
         } else {
@@ -409,6 +410,7 @@ inline constexpr event_alias profile_events[4] = {
 
 /// Per-thread init. Enables thread-local PMU counting on the calling
 /// thread. Idempotent. Thread-local cached after first call.
+/// @return `true` when counters are enabled for the calling thread.
 [[nodiscard]] inline bool initialize_thread() noexcept {
     if (!initialize_process()) return false;
     auto& state = detail::get_process_state();
@@ -426,11 +428,12 @@ inline constexpr event_alias profile_events[4] = {
     return true;
 }
 
+/// Disables counting for the calling thread without releasing process-wide state.
 inline void shutdown_thread() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return;
     // Best-effort disable of per-thread counting. On macOS this is
-    // process-wide for the calling thread; we do not unwind the
+    // process-wide for the calling thread. We do not unwind the
     // process-wide state because other threads might still be using it.
     if (state.kpc_set_thread_counting != nullptr) {
         state.kpc_set_thread_counting(0);
@@ -439,8 +442,9 @@ inline void shutdown_thread() noexcept {
 
 /// Read the current 4-event counter values for this thread. Returns
 /// zeros if the per-thread group is not initialized. The kernel hands
-/// back monotonically-increasing counter values; the caller is expected
+/// back monotonically-increasing counter values. The caller is expected
 /// to subtract a baseline taken at scope-begin to obtain the delta.
+/// @return The cumulative thread-local counters, or zeros when unavailable.
 [[nodiscard]] inline counter_sample read_counters() noexcept {
     auto& state = detail::get_process_state();
     if (!state.is_initialized.load(std::memory_order_acquire)) return counter_sample{};
@@ -458,6 +462,8 @@ inline void shutdown_thread() noexcept {
     };
 }
 
+/// Reports whether process-wide counter initialization succeeded.
+/// @return `true` when the calling thread may attempt a counter read.
 [[nodiscard]] inline bool are_thread_counters_available() noexcept {
     auto& state = detail::get_process_state();
     return state.is_initialized.load(std::memory_order_acquire);
@@ -465,10 +471,19 @@ inline void shutdown_thread() noexcept {
 
 #else  // !defined(__APPLE__)
 
+/// Reports that the macOS backend is unavailable on this platform.
+/// @return Always `false`.
 [[nodiscard]] inline bool initialize_process() noexcept     { return false; }
+/// Reports that thread-local macOS counters are unavailable on this platform.
+/// @return Always `false`.
 [[nodiscard]] inline bool initialize_thread() noexcept      { return false; }
+/// Performs no work when the macOS backend is unavailable.
 inline void shutdown_thread() noexcept                {}
+/// Returns an empty sample when the macOS backend is unavailable.
+/// @return A zero-initialized sample.
 [[nodiscard]] inline counter_sample read_counters() noexcept       { return counter_sample{}; }
+/// Reports that thread-local macOS counters are unavailable on this platform.
+/// @return Always `false`.
 [[nodiscard]] inline bool are_thread_counters_available() noexcept { return false; }
 
 #endif

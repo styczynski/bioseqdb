@@ -18,10 +18,10 @@ export namespace bioseq {
  */
 enum class sink_control : std::uint8_t {
     /// Continue producing items.
-    continue_,
+    continue_ = 0u,
 
     /// Stop production successfully.
-    stop
+    stop = 1u
 };
 
 } // namespace bioseq

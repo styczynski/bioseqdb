@@ -201,6 +201,17 @@ NEGATIVE_DIAGNOSTICS = {
     "authored_guc_registration_type_alias.cppm":
         "BIOSEQ_SQL_E_GUC_REGISTRATION_PROVENANCE",
 }
+BIOSEQ_CMAKE_GRAPH_HELPERS = (
+    "bioseq_highway_target_graph.cmake",
+    "bioseq_test_source_inventory.cmake",
+    "bioseq_postgres_source_graph.cmake",
+    "bioseq_test_target_graph.cmake",
+    "bioseq_sql_generation_target_graph.cmake",
+    "bioseq_sql_contract_target_graph.cmake",
+    "bioseq_postgresql_target_graph.cmake",
+    "bioseq_postgres_error_safety_target_graph.cmake",
+    "bioseq_directory_target_finalization.cmake",
+)
 
 
 def fail(message: str) -> None:
@@ -219,6 +230,33 @@ def read_bytes(path: Path) -> bytes:
 
 def read_text(path: Path) -> str:
     return read_bytes(path).decode("utf-8")
+
+
+def read_bioseq_cmake_graph(root: Path) -> str:
+    """Inline the fixed Bioseq target-graph helpers for static verification."""
+    cmake = read_text(root / "bioseq/CMakeLists.txt")
+    for helper_name in BIOSEQ_CMAKE_GRAPH_HELPERS:
+        include_marker = (
+            'include(\n  "${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+            f'{helper_name}")'
+        )
+        if cmake.count(include_marker) != 1:
+            fail(
+                "Bioseq CMake graph helper include is not unique: "
+                f"{helper_name}"
+            )
+        helper_path = root / "cmake" / helper_name
+        helper = read_text(helper_path)
+        if "CMAKE_CURRENT_LIST_DIR" in helper:
+            fail(
+                "Bioseq target-graph helper retains include-local path scope: "
+                f"{helper_path}"
+            )
+        helper = helper.replace(
+            "CMAKE_CURRENT_SOURCE_DIR", "CMAKE_CURRENT_LIST_DIR"
+        ).rstrip("\n")
+        cmake = cmake.replace(include_marker, helper, 1)
+    return cmake
 
 
 def load_json_bytes(path: Path, raw: bytes) -> dict[str, Any]:
@@ -1519,7 +1557,7 @@ def verify_proof_vs_scan_wiring(cmake_path: Path, cmake: str) -> None:
 
 def run_proof_vs_scan_wiring_mutation_self_tests(root: Path) -> None:
     cmake_path = root / "bioseq/CMakeLists.txt"
-    original = read_text(cmake_path)
+    original = read_bioseq_cmake_graph(root)
     verify_proof_vs_scan_wiring(cmake_path, original)
 
     def expect_rejected(label: str, old: str, new: str) -> None:
@@ -1653,14 +1691,13 @@ def verify_sql_codegen_ast_proof_pool_wiring(
     safety_cmake: str | None = None,
 ) -> None:
     root_cmake_path = root / "CMakeLists.txt"
-    bioseq_cmake_path = root / "bioseq/CMakeLists.txt"
     safety_cmake_path = (
         root / "codegen/safety/postgres_error_safety.cmake"
     )
     if root_cmake is None:
         root_cmake = read_text(root_cmake_path)
     if bioseq_cmake is None:
-        bioseq_cmake = read_text(bioseq_cmake_path)
+        bioseq_cmake = read_bioseq_cmake_graph(root)
     if safety_cmake is None:
         safety_cmake = read_text(safety_cmake_path)
 
@@ -1759,7 +1796,7 @@ def run_sql_codegen_ast_proof_pool_mutation_self_tests(
     root: Path,
 ) -> None:
     root_cmake = read_text(root / "CMakeLists.txt")
-    bioseq_cmake = read_text(root / "bioseq/CMakeLists.txt")
+    bioseq_cmake = read_bioseq_cmake_graph(root)
     safety_cmake = read_text(
         root / "codegen/safety/postgres_error_safety.cmake"
     )
@@ -2128,7 +2165,7 @@ def verify_row_codec_owner_authority_wiring(
 
 def verify_cmake_wiring(root: Path) -> None:
     cmake_path = root / "bioseq/CMakeLists.txt"
-    cmake = read_text(cmake_path)
+    cmake = read_bioseq_cmake_graph(root)
     required = (
         "bioseq_sql_compile_contract_providers",
         "bioseq_sql_gcc_compile_contract_objects",
@@ -2158,6 +2195,28 @@ def verify_cmake_wiring(root: Path) -> None:
         '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_codegen.cmake"',
         '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake"',
         '"${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_gcc_toolchain.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_source_inventory.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_source_guards.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_highway_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_test_source_inventory.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_test_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_postgres_source_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_sql_generation_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_sql_contract_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_postgresql_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_postgres_error_safety_target_graph.cmake"',
+        '"${CMAKE_CURRENT_LIST_DIR}/../cmake/'
+        'bioseq_directory_target_finalization.cmake"',
         '"${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"',
         '"${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"',
         '"${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/contract/index.cppm"',

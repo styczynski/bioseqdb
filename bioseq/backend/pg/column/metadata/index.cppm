@@ -1,16 +1,13 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file index.cppm
+ * @brief Primary interface for the partitioned columnar metadata module.
  *
- * index.cppm
- *
- * Primary interface unit for the `storage_metadata` module. It is a tiny
- * umbrella that re-exports the partitions making up the module: the
+ * This umbrella re-exports the partitions making up the module: the
  * metadata core, the columnar/row-mask write-state machinery, the
  * write-state lifecycle dispatchers and the read-state cache.
  *
  * The partitions share one ownership boundary, avoiding dependency cycles
  * between catalog access and transaction-state lifecycle code.
- *
- *-------------------------------------------------------------------------
  */
 export module bioseq.postgres.storage.metadata;
 

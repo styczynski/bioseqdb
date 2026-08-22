@@ -233,10 +233,10 @@ TEST_CASE("provider PostgreSQL errors and interrupts preserve SQL semantics",
             expected_sqlstate,
             30s,
             bioseq::libpq::transaction_policy::allow_open);
-        CHECK(provider_error.sqlstate == expected_sqlstate);
+        CHECK(provider_error.sql_state == expected_sqlstate);
         const auto aborted = bioseq::postgres_test::execute_expecting_sql_state(
             connection, "SELECT 1", "25P02", 10s, bioseq::libpq::transaction_policy::allow_open);
-        CHECK(aborted.sqlstate == "25P02");
+        CHECK(aborted.sql_state == "25P02");
         bioseq::cache_test::execute(
             connection, "ROLLBACK", 10s, bioseq::libpq::transaction_policy::allow_open);
         bioseq::cache_test::execute(connection,

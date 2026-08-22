@@ -1,15 +1,13 @@
 /**
- * @file instrumentation/aggregate.cppm
+ * @file instrumentation/aggregation.cppm
  * @brief Per-thread storage for region and loop measurements.
  *
- * region_aggregate accumulates one row per (region_id, thread). The
- * Each table has one owning producer thread. Summary reads occur after the
- * measured work is quiescent, so aggregate fields remain non-atomic.
+ * Each table has one producer thread. Summary reads occur after measured work
+ * is quiescent, so aggregate fields remain non-atomic.
  */
 module;
 
 #include <array>
-#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <limits>
@@ -18,7 +16,6 @@ module;
 export module bioseq.instrumentation.aggregation;
 
 import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 
@@ -31,6 +28,7 @@ export namespace bioseq::instrumentation {
 struct duration_histogram {
     std::array<std::uint64_t, 32> buckets{};
 
+    /** @brief Add one nanosecond duration to its saturated base-two bucket. */
     [[gnu::always_inline]]
     inline void add(std::uint64_t value) noexcept {
         if (value == 0) {
@@ -59,6 +57,7 @@ struct alignas(64) region_aggregate {
 static_assert(sizeof(region_aggregate) == 384);
 static_assert(alignof(region_aggregate) == 64);
 
+/** @brief Reset a region aggregate while restoring its minimum sentinel. */
 [[gnu::always_inline]]
 inline void initialize_aggregate(region_aggregate& aggregate) noexcept {
     aggregate.total_ns = 0;
@@ -73,6 +72,7 @@ inline void initialize_aggregate(region_aggregate& aggregate) noexcept {
     aggregate.duration_distribution = duration_histogram{};
 }
 
+/** @brief Accumulate one nanosecond duration for a region visit. */
 [[gnu::always_inline]]
 inline void record_region_duration(
     region_aggregate& aggregate,
@@ -101,6 +101,7 @@ struct alignas(64) loop_aggregate : region_aggregate {
 static_assert(sizeof(loop_aggregate) == 640);
 static_assert(alignof(loop_aggregate) == 64);
 
+/** @brief Reset a loop aggregate and its base region metrics. */
 [[gnu::always_inline]]
 inline void initialize_loop_aggregate(loop_aggregate& aggregate) noexcept {
     initialize_aggregate(static_cast<region_aggregate&>(aggregate));
@@ -112,6 +113,7 @@ inline void initialize_loop_aggregate(loop_aggregate& aggregate) noexcept {
     aggregate.per_iteration_duration_distribution = duration_histogram{};
 }
 
+/** @brief Accumulate one loop visit and its iteration and work totals. */
 [[gnu::always_inline]]
 inline void record_loop_duration(
     loop_aggregate& aggregate,
@@ -136,7 +138,7 @@ inline void record_loop_duration(
     aggregate.per_iteration_duration_distribution.add(per_iteration_ns);
 }
 
-/// Per-thread aggregate table. Direct id-indexed; 4096 blocks of 256
+/// Per-thread aggregate table. It is direct id-indexed with 4096 blocks of 256
 /// aggregates. Each block is allocated lazily on first touch.
 template<profiling_configuration p_configuration_type>
 struct region_aggregate_table {
@@ -145,6 +147,7 @@ struct region_aggregate_table {
 
     std::array<region_aggregate*, maximum_block_count> blocks{};
 
+    /** @brief Release all lazily allocated aggregate blocks. */
     ~region_aggregate_table() noexcept {
         for (auto* block : blocks) {
             if (block != nullptr) {
@@ -153,6 +156,7 @@ struct region_aggregate_table {
         }
     }
 
+    /** @brief Find an existing aggregate by descriptor id. */
     [[nodiscard, gnu::always_inline]]
     inline region_aggregate* find(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;
@@ -165,6 +169,7 @@ struct region_aggregate_table {
         return &block[slot_idx];
     }
 
+    /** @brief Find an aggregate or lazily allocate its owning block. */
     [[nodiscard, gnu::cold]]
     region_aggregate* find_or_create(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;
@@ -186,6 +191,7 @@ struct region_aggregate_table {
     }
 };
 
+/** @brief Lazily allocated descriptor-indexed storage for loop aggregates. */
 template<profiling_configuration p_configuration_type>
 struct loop_aggregate_table {
     static constexpr std::uint32_t block_size = p_configuration_type::aggregate_block_size;
@@ -193,6 +199,7 @@ struct loop_aggregate_table {
 
     std::array<loop_aggregate*, maximum_block_count> blocks{};
 
+    /** @brief Release all lazily allocated aggregate blocks. */
     ~loop_aggregate_table() noexcept {
         for (auto* block : blocks) {
             if (block != nullptr) {
@@ -201,6 +208,7 @@ struct loop_aggregate_table {
         }
     }
 
+    /** @brief Find an existing loop aggregate by descriptor id. */
     [[nodiscard, gnu::always_inline]]
     inline loop_aggregate* find(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;
@@ -213,6 +221,7 @@ struct loop_aggregate_table {
         return &block[slot_idx];
     }
 
+    /** @brief Find a loop aggregate or lazily allocate its owning block. */
     [[nodiscard, gnu::cold]]
     loop_aggregate* find_or_create(std::uint32_t id) noexcept {
         if (id == 0) return nullptr;

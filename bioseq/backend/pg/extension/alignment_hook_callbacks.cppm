@@ -24,27 +24,30 @@ namespace bioseq::pg::detail {
 namespace {
 namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
-ExecutorStart_hook_type PreviousExecutorStartHook = nullptr;
-ExecutorFinish_hook_type PreviousExecutorFinishHook = nullptr;
+ExecutorStart_hook_type previous_executor_start_hook = nullptr;
+ExecutorFinish_hook_type previous_executor_finish_hook = nullptr;
 
+/** @brief Invokes the previous ExecutorStart hook or PostgreSQL's standard implementation. */
 void call_previous_or_standard_executor_start(QueryDesc* query_desc, int eflags)
 {
-	if (PreviousExecutorStartHook != nullptr) {
-		PreviousExecutorStartHook(query_desc, eflags);
+	if (previous_executor_start_hook != nullptr) {
+		previous_executor_start_hook(query_desc, eflags);
 	} else {
 		standard_ExecutorStart(query_desc, eflags);
 	}
 }
 
+/** @brief Invokes the previous ExecutorFinish hook or PostgreSQL's standard implementation. */
 void call_previous_or_standard_executor_finish(QueryDesc* query_desc)
 {
-	if (PreviousExecutorFinishHook != nullptr) {
-		PreviousExecutorFinishHook(query_desc);
+	if (previous_executor_finish_hook != nullptr) {
+		previous_executor_finish_hook(query_desc);
 	} else {
 		standard_ExecutorFinish(query_desc);
 	}
 }
 
+/** @brief Creates and registers the alignment frame surrounding ExecutorStart. */
 void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 {
 	auto* frame = new alignment_executor_frame{};
@@ -87,6 +90,7 @@ void bioseq_alignment_executor_start(QueryDesc* query_desc, int eflags)
 	PG_END_TRY();
 }
 
+/** @brief Publishes and retires the alignment frame surrounding ExecutorFinish. */
 void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 {
 	alignment_executor_frame* frame = find_alignment_frame(query_desc);
@@ -113,11 +117,12 @@ void bioseq_alignment_executor_finish(QueryDesc* query_desc)
 }
 } // namespace
 
+/** @brief Installs the three executor hooks and the scan-node binder. */
 void install_alignment_execution_hooks()
 {
-	PreviousExecutorStartHook = ExecutorStart_hook;
-	PreviousExecutorRunHook = ExecutorRun_hook;
-	PreviousExecutorFinishHook = ExecutorFinish_hook;
+	previous_executor_start_hook = ExecutorStart_hook;
+	previous_executor_run_hook = ExecutorRun_hook;
+	previous_executor_finish_hook = ExecutorFinish_hook;
 	ExecutorStart_hook = bioseq_alignment_executor_start;
 	ExecutorRun_hook = bioseq_alignment_executor_run;
 	ExecutorFinish_hook = bioseq_alignment_executor_finish;

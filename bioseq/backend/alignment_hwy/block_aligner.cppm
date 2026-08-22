@@ -1,6 +1,10 @@
 /**
  * @file block_aligner.cppm
- * @brief Exposes target-neutral adaptive-block alignment contracts.
+ * @brief Provides the public adaptive-block alignment facade.
+ *
+ * @details Re-exports `bioseq.alignment.contracts` through the public
+ * `bioseq.alignment.block_aligner` module. Target selection and algorithm implementation
+ * remain outside this facade.
  */
 export module bioseq.alignment.block_aligner;
 

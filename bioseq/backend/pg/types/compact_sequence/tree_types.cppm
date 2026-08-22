@@ -1,9 +1,13 @@
-/* Immutable arena-qualified piece-tree and expanded-object POD types. */
+/**
+ * @file tree_types.cppm
+ * @brief Arena-qualified piece-tree and expanded-object data types.
+ */
 module;
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 #include <bioseq/pg_compat.h>
@@ -19,7 +23,9 @@ import bioseq.storage.layout;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
 
+/// Arena owning persistent piece-tree nodes and dependency records.
 export struct piece_tree_arena;
+/// Immutable node metadata stored inside a piece-tree arena.
 export struct piece_node;
 
 /* Materialization tracing is owned by :packed_output.  The expanded-object
@@ -28,18 +34,22 @@ export struct piece_node;
  * introducing a partition cycle. */
 export struct slice_trace_attachment;
 
+/// Owning arena-qualified view of one logical tree edge.
 export struct piece_edge {
     piece_tree_arena* arena{};
     piece_node const* node{};
     bioseq::storage::sequence_transform transform{
         bioseq::storage::sequence_transform::identity};
 
+    /// @brief Tests whether this edge names a node.
+    /// @return `true` when `node` is non-null.
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return node != nullptr;
     }
 };
 
+/// Public spelling for a retained piece-tree root.
 export using piece_tree_ref = piece_edge;
 
 /* PostgreSQL ERROR bypasses C++ destructors.  Persistent concat therefore
@@ -48,16 +58,20 @@ export using piece_tree_ref = piece_edge;
  * height-bounded AVL join needs fewer than two tokens per level; 256 keeps the
  * guard independent of corrupt input metadata while remaining fixed-size. */
 export inline constexpr std::size_t max_pending_piece_edge_tokens = 256u;
-static_assert(max_pending_piece_edge_tokens < UINT16_MAX);
+static_assert(max_pending_piece_edge_tokens <
+              static_cast<int>(std::numeric_limits<std::uint16_t>::max()));
 
+/// Sentinel identifying no cleanup-ledger slot.
 export inline constexpr std::uint16_t invalid_piece_edge_cleanup_slot =
-    UINT16_MAX;
+    static_cast<int>(std::numeric_limits<std::uint16_t>::max());
 
+/// Generation-qualified handle for one cleanup-ledger token.
 export struct piece_edge_cleanup_handle {
     std::uint16_t slot{invalid_piece_edge_cleanup_slot};
     std::uint32_t generation{};
 };
 
+/// Intrusive storage for one pending owning edge token.
 export struct piece_edge_cleanup_slot {
     piece_edge token;
     std::uint16_t next_active;
@@ -67,6 +81,7 @@ export struct piece_edge_cleanup_slot {
     bool active;
 };
 
+/// Fixed-capacity owner ledger drained after PostgreSQL longjmp.
 export struct piece_edge_cleanup_ledger {
     std::array<piece_edge_cleanup_slot, max_pending_piece_edge_tokens> slots;
     std::uint16_t token_count;
@@ -76,15 +91,20 @@ export struct piece_edge_cleanup_ledger {
     bool initialized;
 };
 
+/// Piece edge paired with the ledger handle that owns its token.
 export struct tracked_piece_edge {
     piece_edge edge;
     piece_edge_cleanup_handle cleanup;
 
+    /// @brief Tests whether the tracked edge names a node.
+    /// @return `true` when the underlying edge is populated.
     [[nodiscard]] explicit operator bool() const noexcept
     {
         return static_cast<bool>(edge);
     }
 
+    /// @brief Borrows the underlying edge without transferring its cleanup token.
+    /// @return Arena-qualified edge value.
     [[nodiscard]] operator piece_edge() const noexcept
     {
         return edge;
@@ -94,16 +114,19 @@ export struct tracked_piece_edge {
 static_assert(std::is_trivially_destructible_v<piece_edge_cleanup_ledger>);
 static_assert(std::is_trivially_destructible_v<tracked_piece_edge>);
 
+/// Byte encoding used by a literal leaf.
 export enum class literal_encoding : std::uint8_t {
     packed,
     unbound_ascii,
 };
 
+/// Validation state carried by a literal leaf.
 export enum class literal_validation : std::uint8_t {
     unvalidated,
     alphabet_validated,
 };
 
+/// Source-backed half-open range stored by one leaf.
 export struct source_piece {
     pg_sequence_source_handle source;
     bioseq::storage::sequence_locator locator;
@@ -113,6 +136,7 @@ export struct source_piece {
     std::uint64_t to;
 };
 
+/// Arena-backed half-open byte or packed-symbol range stored by one leaf.
 export struct literal_piece {
     piece_tree_arena* storage_arena;
     std::byte const* bytes;
@@ -123,16 +147,20 @@ export struct literal_piece {
     literal_validation validation;
 };
 
+/// Physical children of one immutable branch node.
 export struct branch_piece {
     piece_edge left;
     piece_edge right;
 };
 
+/// Cached length, piece count, height, and payload for one immutable node.
 export struct piece_node {
+    /// @brief Selects the active payload representation.
     enum class kind : std::uint8_t { branch, source, literal } node_kind;
     std::uint64_t bp_length;
     std::uint32_t piece_count;
     std::uint16_t height;
+    /// @brief Stores exactly the payload selected by `node_kind`.
     union payload_union {
         branch_piece branch;
         source_piece source;
@@ -142,11 +170,13 @@ export struct piece_node {
 
 static_assert(std::is_trivially_destructible_v<piece_node>);
 
+/// Retained dependency on an older piece-tree arena.
 export struct arena_dependency {
     piece_tree_arena* child;
     arena_dependency* next;
 };
 
+/// Retained dependency on opaque source state.
 export struct source_dependency {
     pg_sequence_source_handle source;
     source_dependency* next;
@@ -159,6 +189,7 @@ export struct source_dependency {
  * size without changing the trusted-concat hot path. */
 export inline constexpr std::size_t max_retired_join_roots = 64u;
 
+/// Arena-accounted overflow block for binding-time retired roots.
 export struct retired_join_root_block {
     std::array<piece_edge, max_retired_join_roots> roots;
     retired_join_root_block* next;
@@ -167,6 +198,7 @@ export struct retired_join_root_block {
 
 static_assert(std::is_trivially_destructible_v<retired_join_root_block>);
 
+/// Reference-counted arena and exact allocation-accounting ledger.
 export struct piece_tree_arena {
     MemoryContext payload_context;
     std::uint32_t refcount;
@@ -194,21 +226,25 @@ export struct piece_tree_arena {
 
 static_assert(std::is_trivially_destructible_v<piece_tree_arena>);
 
+/// Maximum combined literal payload copied during boundary coalescing.
 export inline constexpr std::size_t small_literal_coalesce_bytes = 4u * 1024u;
 static_assert(small_literal_coalesce_bytes <= MaxAllocSize);
 
+/// Conservative aligned metadata footprint charged per piece.
 export inline constexpr Size worst_piece_metadata =
     MAXALIGN(sizeof(piece_node))
     + MAXALIGN(sizeof(arena_dependency))
     + MAXALIGN(sizeof(source_dependency));
 
+/// Piece-count ceiling implied by PostgreSQL's allocation limit.
 export inline constexpr std::uint32_t max_piece_count =
     static_cast<std::uint32_t>(
         (MaxAllocSize / worst_piece_metadata)
-            < static_cast<Size>(UINT32_MAX)
+            < static_cast<Size>(std::numeric_limits<std::uint32_t>::max())
         ? (MaxAllocSize / worst_piece_metadata)
-        : static_cast<Size>(UINT32_MAX));
+        : static_cast<Size>(std::numeric_limits<std::uint32_t>::max()));
 
+/// PostgreSQL expanded-object wrapper for a persistent sequence root.
 export struct pg_sequence_expanded {
     ExpandedObjectHeader hdr;
     MemoryContext object_context;
@@ -223,9 +259,12 @@ export struct pg_sequence_expanded {
 
 /* Defined by :packed_output after its two EOH callbacks.  The declaration is
  * the representation identity used by Datum classification. */
+/// @brief Returns the singleton expanded-object method table.
+/// @return Process-lifetime callbacks for flattening and sizing expanded sequences.
 export [[nodiscard]] ExpandedObjectMethods const&
 pg_sequence_expanded_methods() noexcept;
 
+/// Storage class identified for one compact-sequence Datum.
 export enum class pg_sequence_datum_kind : std::uint8_t {
     flat_bound,
     flat_unbound,
@@ -234,6 +273,7 @@ export enum class pg_sequence_datum_kind : std::uint8_t {
     expanded_read_write,
 };
 
+/// Allocation-free logical and physical description of a sequence Datum.
 export struct pg_sequence_descriptor {
     pg_sequence_datum_kind kind;
     std::uint8_t alphabet_code;
@@ -242,6 +282,7 @@ export struct pg_sequence_descriptor {
     bioseq::storage::sequence_size_t bp_length;
 };
 
+/// Borrowed read handle retaining expanded backing for one callback scope.
 export struct pg_sequence_read_handle {
     pg_sequence_expanded const* backing;
     piece_edge root_value;
@@ -249,23 +290,30 @@ export struct pg_sequence_read_handle {
     bioseq::storage::sequence_size_t logical_length;
     bool alphabet_bound;
 
+    /// @brief Returns the retained root used by the current read scope.
+    /// @return Borrowed arena-qualified root edge.
     [[nodiscard]] piece_edge root() const noexcept { return root_value; }
+    /// @brief Returns the cached logical sequence length.
+    /// @return Length in base pairs.
     [[nodiscard]] bioseq::storage::sequence_size_t bp_length() const noexcept
     {
         return logical_length;
     }
 };
 
+/// Writable expanded value plus whether its wrapper was reused.
 export struct acquired_sequence {
     pg_sequence_expanded* value;
     bool wrapper_reused;
 };
 
+/// Alphabet-qualified rank returned by element access.
 export struct sequence_letter_value {
     std::uint8_t alphabet_code;
     std::uint8_t rank;
 };
 
+/// Ledger-owned left and right results of a persistent split.
 export struct split_result {
     tracked_piece_edge left;
     tracked_piece_edge right;

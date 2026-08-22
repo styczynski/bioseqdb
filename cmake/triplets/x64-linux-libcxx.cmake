@@ -20,13 +20,13 @@ set(VCPKG_CMAKE_SYSTEM_NAME Linux)
 
 # Applied on top of each port's own flags by the vcpkg toolchain.
 set(VCPKG_C_FLAGS "")
-set(VCPKG_C_FLAGS_RELEASE "-O0")
+set(VCPKG_C_FLAGS_RELEASE "-O3")
 # oneTBB's `_tpause` (WAITPKG) intrinsic is `always_inline`, but clang errors if
 # it is compiled into a function without the waitpkg target feature. Disabling
 # that optional path is safer than adding `-mwaitpkg`, because the current AWS
 # m4 host does not advertise WAITPKG.
 set(VCPKG_CXX_FLAGS "-stdlib=libc++ -D__TBB_WAITPKG_INTRINSICS_PRESENT=0 -Wno-unused-command-line-argument")
-set(VCPKG_CXX_FLAGS_RELEASE "-O0")
+set(VCPKG_CXX_FLAGS_RELEASE "-O3")
 set(VCPKG_LINKER_FLAGS "-stdlib=libc++")
 
 # Pins the compiler to clang-22 for port builds (vcpkg uses its own bundled

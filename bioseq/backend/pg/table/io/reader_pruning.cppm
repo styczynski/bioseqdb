@@ -14,6 +14,7 @@ import bioseq.postgres.types.compact_sequence;
 
 using namespace bioseq::postgres::support;
 
+/** @brief Resolve a comparison operator for a type and B-tree strategy. */
 static Oid
 get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number)
 {
@@ -27,6 +28,7 @@ get_operator_for_type(Oid type_id, Oid access_method_id, int16_t strategy_number
 	return operator_id;
 }
 
+/** @brief Create a nullable comparison expression for a scan variable. */
 static OpExpr *
 make_operator_expression(Var *variable, int16_t strategy_number)
 {
@@ -64,6 +66,7 @@ make_operator_expression(Var *variable, int16_t strategy_number)
 	return expression;
 }
 
+/** @brief Build the min/max constraint template for one scan variable. */
 static Node *
 build_chunk_constraint(Var *variable)
 {
@@ -76,6 +79,7 @@ build_chunk_constraint(Var *variable)
 	return base_constraint;
 }
 
+/** @brief Set a chunk-constraint template's inclusive min/max bounds. */
 static void
 update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max_value)
 {
@@ -100,6 +104,7 @@ update_chunk_constraint_bounds(Node *base_constraint, Datum min_value, Datum max
 	max_constant->constbyval = true;
 }
 
+/** @brief Collect one variable per referenced physical attribute. */
 export List *
 collect_clause_variables(List *filter_clauses, int natts)
 {
@@ -142,6 +147,7 @@ collect_clause_variables(List *filter_clauses, int natts)
 	return filter_variables.release();
 }
 
+/** @brief Select chunk groups whose min/max metadata cannot refute the filters. */
 export bool *
 select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 				  List *filter_variables, int64 *filtered_chunk_groups)
@@ -214,6 +220,7 @@ select_chunk_mask(stripe_skip_list *skip_list, List *filter_clauses,
 	return selected_chunk_mask;
 }
 
+/** @brief Project a skip list down to selected chunk groups and columns. */
 export stripe_skip_list *
 select_chunk_skip_list(stripe_skip_list *skip_list, bool *projected_column_mask,
 					  bool *selected_chunk_mask)
@@ -297,6 +304,7 @@ select_chunk_skip_list(stripe_skip_list *skip_list, bool *projected_column_mask,
 	return selected_chunk_skip_list;
 }
 
+/** @brief Sum row counts across the selected chunk groups. */
 export uint32_t
 count_stripe_skip_rows(stripe_skip_list *skip_list)
 {
@@ -313,6 +321,7 @@ count_stripe_skip_rows(stripe_skip_list *skip_list)
 	return stripe_skip_list_row_count;
 }
 
+/** @brief Construct a zero-based physical-column projection mask. */
 export bool *
 build_projected_column_mask(uint32_t column_count, List *projected_columns)
 {

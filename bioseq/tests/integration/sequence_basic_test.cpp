@@ -1,25 +1,22 @@
-// Integration scenarios:
-//   * `bioseq.seq` text-roundtrip: `'ACGT'::bioseq.seq(...)::text` returns the
-//     original ASCII even on a vanilla heap table (no `USING bioseq`).
-//   * `bioseq.len` reports the base-pair count and `bioseq.unit_len` reports
-//     the number of storage units, regardless of typmod.
-//   * Lexicographic ordering between sequences via the default btree opclass,
-//     both as expression-level cmp and as `ORDER BY seq` driven by the
-//     opclass-default sort.
-//   * Equality / range predicates (`=`, `<`, `BETWEEN`) work as plain SQL
-//     comparisons, not memcmp on the encoded payload.
-//   * Empty literal round-trips on every (alphabet, width) combination.
-//   * Empty literal also survives an INSERT-then-SELECT roundtrip on a heap
-//     table — exercises the recv-side path that special-cases length 0.
-//   * `seq_typmod_in` rejects every malformed typmod we can express.
-//
-// All scenarios use a heap table because columnar `USING bioseq` storage only
-// emits tuples for SELECTs that include a `WHERE mmsearch(...)` qual (see
-// the supported alphabet profile). Round-trip and metadata checks live on a
-// heap table to keep the assertions tight on the type itself.
+/**
+ * @file Core `bioseq.seq` type integration scenarios.
+ *
+ *   * `bioseq.seq` text-roundtrip preserves ASCII on a vanilla heap table.
+ *   * `bioseq.len` and `bioseq.unit_len` report logical and storage lengths.
+ *   * The default btree opclass provides lexicographic ordering.
+ *   * Equality and range predicates use logical sequence comparisons.
+ *   * Empty literals round-trip through supported typmods and heap storage.
+ *   * `seq_typmod_in` rejects every expressible malformed typmod.
+ *
+ * Heap tables isolate type semantics from the columnar mmsearch scan contract.
+ */
 
-#include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+#include <catch2/catch_template_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
@@ -28,7 +25,7 @@ namespace {
 
 constexpr std::string_view k_table = "sequence_basic";
 
-} // namespace
+}  // namespace
 
 TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
           "[component:bioseq][layer:integration][feature:sequence][resource:postgres]") {

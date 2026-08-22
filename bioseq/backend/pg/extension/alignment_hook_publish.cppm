@@ -36,6 +36,7 @@ std::int64_t last_alignment_execution_id = 0;
 
 } // namespace
 
+/** @brief Aggregates and publishes one root executor's alignment snapshot. */
 void publish_alignment_root(alignment_executor_frame* frame)
 {
 	if (frame == nullptr || frame->nested
@@ -118,6 +119,10 @@ void publish_alignment_root(alignment_executor_frame* frame)
 	last_alignment_execution_id = execution_id;
 }
 
+/**
+ * @brief Returns the most recent complete or partial alignment snapshot.
+ * @return A backend-local optional snapshot reference.
+ */
 [[nodiscard]] const std::optional<
     bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_alignment_execution_snapshot_ref() noexcept
@@ -125,6 +130,10 @@ last_alignment_execution_snapshot_ref() noexcept
     return last_alignment_execution_snapshot;
 }
 
+/**
+ * @brief Returns the most recent fully drained alignment snapshot.
+ * @return A backend-local optional snapshot reference.
+ */
 [[nodiscard]] const std::optional<
     bioseq::postgres::table::alignment_execution::alignment_execution_snapshot>&
 last_completed_alignment_snapshot_ref() noexcept

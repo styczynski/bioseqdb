@@ -129,6 +129,47 @@ class CachePresetContractTest(unittest.TestCase):
 
 
 class CacheModeResolutionTest(unittest.TestCase):
+    def test_website_presets_are_host_native_and_overrideable(self) -> None:
+        cases = (
+            ("darwin", False, "bench-opt", "bench-opt"),
+            ("darwin", True, "bench-opt-debug", "bench-opt-debug"),
+            ("linux", False, "bench-opt", "website-aws-x64-linux"),
+            (
+                "linux",
+                True,
+                "bench-opt-debug",
+                "website-aws-x64-linux-debug",
+            ),
+        )
+        for platform, debug, default, expected in cases:
+            with self.subTest(platform=platform, debug=debug):
+                self.assertEqual(
+                    build_presets._website_build_preset(
+                        {}, platform, default, debug=debug),
+                    expected,
+                )
+
+        self.assertEqual(
+            build_presets._website_build_preset(
+                {"BIOSEQ_WEBSITE_BUILD_PRESET": "custom-website"},
+                "darwin",
+                "bench-opt",
+            ),
+            "custom-website",
+        )
+        self.assertEqual(
+            build_presets._website_build_preset(
+                {
+                    "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET":
+                        "custom-website-debug",
+                },
+                "linux",
+                "bench-opt-debug",
+                debug=True,
+            ),
+            "custom-website-debug",
+        )
+
     def test_benchmark_filter_rejects_unknown_axes(self) -> None:
         arguments, error = build_presets._filter_to_cli_args({
             "unknown_axis": ["silently-dropping-this-is-unsafe"],
@@ -566,7 +607,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertNotIn("postgres_cluster_rss_bytes", source)
         self.assertIn(
             "peak_postmaster_process_tree_rss_bytes", source)
-        self.assertIn("postgres_test::resource_sampler", source)
+        self.assertIn("postgres_test::cluster_resource_sampler", source)
         self.assertIn("peak_postgres_rss_bytes", source)
         self.assertIn("benchmark_resource_tracker", source)
         self.assertIn("rss_sample_interval", source)
@@ -574,12 +615,15 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertNotIn("RUSAGE_SELF", source)
 
         self.assertIn(
-            "postgres_test::artifact_reports("
+            "postgres_test::collect_artifact_observations("
             "\n        fixture.cluster().staged_artifacts())",
             source,
         )
         self.assertLess(
-            source.index("report.artifacts = postgres_test::artifact_reports"),
+            source.index(
+                "report.artifacts = "
+                "postgres_test::collect_artifact_observations"
+            ),
             source.index("benchmark_resource_tracker resource_tracker"),
         )
         self.assertIn(
@@ -587,7 +631,9 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn(
             "write_failure_report(", source)
         self.assertIn(
-            "postgres_test::sha256_file(executable).hex()", source)
+            "postgres_test::hash_sha256_file(executable).render_hex()",
+            source,
+        )
         self.assertIn("::uname(&information)", source)
         self.assertIn("finalize_build_identity(report)", source)
 
@@ -668,7 +714,22 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("Threads::Threads", cmake)
         self.assertIn(
             "bioseq_cache_benchmark_report_contract_tests", cmake)
-        self.assertIn("cache_benchmark_report_test.cpp", cmake)
+        self.assertRegex(
+            cmake,
+            r"bioseq_collect_authored_sources\(\s+"
+            r"BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES\s+"
+            r"BASE_DIRECTORY\s+"
+            r'"\$\{CMAKE_CURRENT_SOURCE_DIR\}/\.\./tests/contract/'
+            r'benchmark"\s+'
+            r'INCLUDE_PATTERNS "\*_test\.cpp"\s+'
+            r"EXPECTED_COUNT 1\s*\)",
+        )
+        self.assertRegex(
+            cmake,
+            r"add_executable\(\s+"
+            r"bioseq_cache_benchmark_report_contract_tests\s+"
+            r"\$\{BIOSEQ_CACHE_BENCHMARK_CONTRACT_TEST_SOURCES\}\s*\)",
+        )
         self.assertNotIn("run_private_cluster_bench.py", cmake)
         cache_unit = build_presets.MODES["cache-unit"]
         self.assertIn(
@@ -786,6 +847,14 @@ class CacheModeRoutingTest(unittest.TestCase):
             / "bioseq_caching"
             / "tests"
             / "integration"
+            / "bioseq"
+            / "CMakeLists.txt"
+        ).read_text(encoding="utf-8")
+        production_e2e_cmake = (
+            REPOSITORY_ROOT
+            / "bioseq_caching"
+            / "tests"
+            / "e2e"
             / "bioseq"
             / "CMakeLists.txt"
         ).read_text(encoding="utf-8")
@@ -1015,7 +1084,7 @@ class CacheModeRoutingTest(unittest.TestCase):
                 combined_cmake,
             "bioseq_cache_bioseq_only_postgres_stage": combined_cmake,
             "bioseq_cache_bioseq_production_postgres_stage":
-                combined_cmake,
+                production_e2e_cmake,
         }
         for stage_target, source in consumer_sources.items():
             for stage_property in inventory_properties.values():
@@ -1027,7 +1096,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                         f"{stage_property}>",
                         source,
                     )
-        for cmake in (integration_cmake, combined_cmake):
+        for cmake in (
+                integration_cmake, combined_cmake, production_e2e_cmake):
             self.assertNotIn(
                 '--postgres-bin-dir "${PostgreSQL_BIN_DIR}"', cmake)
         self.assertNotIn("MODULE_PATHNAME_OVERRIDES", cache_cmake)
@@ -1080,7 +1150,7 @@ class CacheModeRoutingTest(unittest.TestCase):
         for executable_seal in (
             "executed_executable_sha256",
             "sha256_file(",
-            "executed_executable).hex()",
+            "hash_sha256_file(executed_executable).render_hex()",
             "watchdog_launch_configuration",
             "executable_sha256",
             "file_sha256_unchanged",
@@ -1191,6 +1261,13 @@ class CacheModeRoutingTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual(build_presets.post_build_targets_for(mode, False), ())
                 self.assertEqual(build_presets.post_build_targets_for(mode, True), ())
+
+    def test_cache_integration_materializes_receipted_production_stage(
+            self) -> None:
+        self.assertIn(
+            "bioseq_cache_production_postgres_stage",
+            build_presets.MODES["cache-integration"].targets,
+        )
 
     def test_existing_install_modes_remain_unchanged(self) -> None:
         install_modes = {
@@ -2041,8 +2118,7 @@ class CacheModeRoutingTest(unittest.TestCase):
             context = multiprocessing.get_context("fork")
             start_barrier = context.Barrier(3)
             results = context.Queue()
-            real_named_temporary_file = (
-                tempfile.NamedTemporaryFile)
+            real_mkstemp = tempfile.mkstemp
 
             def update_from_worker(
                     mode: str, fields: dict[str, object],
@@ -2050,12 +2126,12 @@ class CacheModeRoutingTest(unittest.TestCase):
                 process_state.STATE_FILE = state_path
                 process_state.LOCK_FILE = lock_path
 
-                def tracked_temporary_file(*args, **kwargs):
-                    handle = real_named_temporary_file(*args, **kwargs)
-                    results.put(("temporary", handle.name))
-                    return handle
+                def tracked_mkstemp(*args, **kwargs):
+                    descriptor, path = real_mkstemp(*args, **kwargs)
+                    results.put(("temporary", path))
+                    return descriptor, path
 
-                tempfile.NamedTemporaryFile = tracked_temporary_file
+                tempfile.mkstemp = tracked_mkstemp
                 try:
                     start_barrier.wait(timeout=5.0)
                     if nested_lock:
@@ -2184,10 +2260,21 @@ class CacheModeRoutingTest(unittest.TestCase):
                 self.assertEqual(test_flags, focused_flags)
                 self.assertIsNotNone(report_path)
                 command_receipts.append((command[0], report_path))
-                return [command[0], str(report_path), *test_flags]
+                watchdog_option = command.index(
+                    "--case-timeout-seconds")
+                return [
+                    command[0],
+                    "--report",
+                    str(report_path),
+                    "--case-timeout-seconds",
+                    command[watchdog_option + 1],
+                    *test_flags,
+                ]
 
             def publish_report(argv, *_args, **_kwargs):
-                Path(argv[1]).write_text("{}", encoding="utf-8")
+                report_option = argv.index("--report")
+                Path(argv[report_option + 1]).write_text(
+                    "{}", encoding="utf-8")
                 return 0
 
             def record_update(_mode, **fields):
@@ -2359,11 +2446,20 @@ class CacheModeRoutingTest(unittest.TestCase):
                     bench_flags=None, test_flags=None,
                     report_path=None):
                 self.assertIsNotNone(report_path)
-                return [command[0], str(report_path)]
+                watchdog_option = command.index(
+                    "--case-timeout-seconds")
+                return [
+                    command[0],
+                    "--report",
+                    str(report_path),
+                    "--case-timeout-seconds",
+                    command[watchdog_option + 1],
+                ]
 
             def publish_unsafe_terminal_report(
                     argv, *_args, **_kwargs):
-                Path(argv[-1]).write_text(json.dumps({
+                report_option = argv.index("--report")
+                Path(argv[report_option + 1]).write_text(json.dumps({
                     "schema_revision": 2,
                     "cleanup": {"succeeded": True},
                     "cleanup_observations": [{
@@ -2399,7 +2495,8 @@ class CacheModeRoutingTest(unittest.TestCase):
                     root / "build",
                     {},
                     io.StringIO(),
-                    time.time() + 10,
+                    time.time()
+                    + cache_modes.CACHE_BIOSEQ_RUNTIME_TOTAL_SEC,
                     set(),
                 )
 

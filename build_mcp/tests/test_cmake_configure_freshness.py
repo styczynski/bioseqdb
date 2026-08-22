@@ -15,6 +15,7 @@ sys.path.insert(0, str(BUILD_MCP_DIR))
 
 import build_presets  # noqa: E402
 import build_worker  # noqa: E402
+import publication  # noqa: E402
 
 
 class CMakeConfigureFreshnessTest(unittest.TestCase):
@@ -70,6 +71,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             *,
             secret: str = "secret-one",
             extra_environment: dict[str, str] | None = None,
+            managed_toolchain_identity: dict[str, object] | None = None,
     ) -> dict[str, object]:
         environment = {
             "CONFIGURE_FRESHNESS_SECRET": secret,
@@ -87,6 +89,7 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
                 "sha256": "1" * 64,
                 "version_line": "cmake version test",
             },
+            managed_toolchain_identity=managed_toolchain_identity,
             presets_file=presets,
         )
 
@@ -322,6 +325,60 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             "cmake version 9.9-test",
         )
         self.assertRegex(identity["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_managed_doxygen_identity_changes_configure_seal(self) -> None:
+        identity: dict[str, object] = {
+            "doxygen": {
+                "archive_sha256": "2" * 64,
+                "architecture": "x86_64",
+                "executable_path": "/cache/doxygen/1.9.8/bin/doxygen",
+                "executable_sha256": "3" * 64,
+                "name": "doxygen",
+                "platform": "linux",
+                "version": "1.9.8",
+                "version_output": "1.9.8",
+            },
+        }
+        mutations = {
+            "archive_sha256": "4" * 64,
+            "executable_path": "/different/cache/doxygen",
+            "executable_sha256": "5" * 64,
+            "version_output": "1.9.8 (different build)",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parent = root / "parent.json"
+            self._write_base_include(parent)
+            presets = self._write_project_presets(
+                root,
+                include=["parent.json"],
+            )
+            baseline = self._document(
+                presets,
+                managed_toolchain_identity=identity,
+            )
+            unmanaged = self._document(presets)
+            for field, value in mutations.items():
+                changed_identity = json.loads(json.dumps(identity))
+                changed_identity["doxygen"][field] = value
+                with self.subTest(field=field):
+                    changed = self._document(
+                        presets,
+                        managed_toolchain_identity=changed_identity,
+                    )
+                    self.assertNotEqual(
+                        baseline["inputs_sha256"],
+                        changed["inputs_sha256"],
+                    )
+
+        self.assertEqual(
+            baseline["inputs"]["managed_toolchain_identity"],
+            identity,
+        )
+        self.assertNotIn(
+            "managed_toolchain_identity",
+            unmanaged["inputs"],
+        )
 
     def test_matching_stamp_skips_existing_tree_configure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -625,9 +682,9 @@ class CMakeConfigureFreshnessTest(unittest.TestCase):
             }
             with (
                 mock.patch.object(
-                    build_worker,
-                    "_fsync_cmake_configure_stamp_directory",
-                    side_effect=RuntimeError("fsync failed"),
+                    publication,
+                    "fsync_directory",
+                    side_effect=OSError("fsync failed"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "fsync failed"),
             ):

@@ -1,27 +1,13 @@
-// bioseq/tests/unit/indexing/index_chunk_io_test.cpp
-//
-// Per-fragment chunk byte plumbing for the fragment_chunks
-// storage concept, exercised on fake_fragment_storage<1024> (a tiny maximum
-// chunk size, so a modest payload splits across several chunks). Pure storage
-// I/O — no SIMD kernel, so no Highway namespace wrapper is needed.
+/**
+ * @file index_chunk_io_test.cpp
+ * @brief Tests chunk sizing, addressing, reads, and writes with small fake chunks.
+ */
 
-#include <tests/support/common.hpp>
-
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
 #include <cstring>
-#include <initializer_list>
-#include <limits>
-#include <map>
-#include <span>
-#include <string>
-#include <string_view>
-#include <tuple>
-#include <utility>
-#include <vector>
 
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
@@ -53,7 +39,9 @@ using bioseq::indexing::index_sub_key_range;
 using bioseq::indexing::index_sub_key_request;
 using bioseq::indexing::index_sub_key_t;
 
+/// Small chunk size used to force multi-row test payloads.
 constexpr std::size_t k_maximum_chunk_bytes = 1024;
+/// Fake fragmented storage with the pinned chunk size.
 using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
 
 /// Independent bit-at-a-time oracle for the normal (non-reflected),
@@ -92,16 +80,19 @@ using storage_type = fake_fragment_storage<k_maximum_chunk_bytes>;
     return checksum;
 }
 
-// Deterministic byte fill for chunk (sub_key, global byte offset).
-[[nodiscard]] char fill_byte(index_sub_key_t sub_key, std::size_t global_off) {
-    return (char)(((std::size_t)sub_key * 1315423911u + global_off * 2654435761u) & 0xFF);
+/// Generate one deterministic byte from a sub-key and global offset.
+[[nodiscard]] char fill_byte(index_sub_key_t sub_key, std::size_t global_offset) {
+    return static_cast<char>(
+        (static_cast<std::size_t>(sub_key) * 1315423911u + global_offset * 2654435761u) & 0xFFu);
 }
 
+/// Store one declared qualified text chunk.
 void store_text(storage_type& storage, const index_chunk_address& address, std::string_view payload) {
     storage.store_qualified_chunk_for_test(
         address, std::span<const char>{payload.data(), payload.size()});
 }
 
+/// Store one physical text chunk without adding it to the logical declaration.
 void store_undeclared_text(
         storage_type& storage,
         const index_chunk_address& address,
@@ -110,6 +101,7 @@ void store_undeclared_text(
         address, std::span<const char>{payload.data(), payload.size()});
 }
 
+/// Build a checksummed request for consecutive fixture chunks.
 [[nodiscard]] index_sub_key_request extent_request(
         std::uint64_t generation_id,
         std::int32_t position_segment,
@@ -133,6 +125,7 @@ void store_undeclared_text(
     };
 }
 
+/// Callable used to check qualified-reader concept conformance.
 struct qualified_sink_probe {
     void operator()(const index_chunk_address&, const char*, std::size_t) const noexcept {}
 };
@@ -445,16 +438,19 @@ TEST_CASE("resize splits into ceil(bytes/p_max_chunk_size) chunks and round-trip
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
     const index_sub_key_t sub_key = 3;
-    const std::size_t total_bytes = k_maximum_chunk_bytes * 2 + 200;          // 3 chunks: 1024, 1024, 200
+    const std::size_t total_bytes = k_maximum_chunk_bytes * 2 + 200;
+    // Three chunks contain 1024, 1024, and 200 bytes.
     storage.resize(sub_key, total_bytes);
 
     // Fill each chunk with a deterministic per-(sub_key, global-offset) pattern.
     std::size_t base = 0;
-    storage.write_to_each<char>(sub_key, [&](std::size_t chunk_no, char* buf, std::size_t cap) {
-        for (std::size_t i = 0; i < cap; ++i) buf[i] = fill_byte(sub_key, base + i);
-        base += cap;
-        return chunk_no;   // advance by 1
-    });
+    storage.write_to_each<char>(
+        sub_key, [&sub_key, &base](std::size_t chunk_no, char* buf, std::size_t cap) {
+            for (std::size_t i = 0; i < cap; ++i)
+                buf[i] = fill_byte(sub_key, base + i);
+            base += cap;
+            return chunk_no; // advance by 1
+        });
 
     REQUIRE(storage.number_of_chunks(sub_key) == 3u);
     REQUIRE(storage.chunk_byte_size(sub_key, 0) == k_maximum_chunk_bytes);
@@ -480,8 +476,10 @@ TEST_CASE("resize_chunks honours an explicit small plan",
     const std::array<std::size_t, 3> plan{16, 64, 8};
     storage.resize_chunks(sub_key, std::span<const std::size_t>(plan));
 
-    storage.write_to_each<char>(sub_key, [&](std::size_t chunk_no, char* buf, std::size_t cap) {
-        for (std::size_t i = 0; i < cap; ++i) buf[i] = (char)(chunk_no * 11 + i);
+    storage.write_to_each<char>(sub_key, [](std::size_t chunk_no, char* buf, std::size_t cap) {
+        for (std::size_t i = 0; i < cap; ++i) {
+            buf[i] = static_cast<char>(chunk_no * 11u + i);
+        }
         return chunk_no;
     });
 
@@ -492,7 +490,7 @@ TEST_CASE("resize_chunks honours an explicit small plan",
     for (std::size_t chunk_no = 0; chunk_no < 3; ++chunk_no) {
         const char* p = storage.read_chunk<char>(sub_key, chunk_no);
         for (std::size_t i = 0; i < storage.chunk_byte_size(sub_key, chunk_no); ++i)
-            REQUIRE(p[i] == (char)(chunk_no * 11 + i));
+            REQUIRE(p[i] == static_cast<char>(chunk_no * 11u + i));
     }
 }
 
@@ -501,14 +499,17 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
     storage_type storage;
     // Three sub_keys, each multi-chunk, written ascending.
     for (index_sub_key_t sub_key : {index_sub_key_t{0}, index_sub_key_t{1}, index_sub_key_t{2}}) {
-        const std::size_t bytes = k_maximum_chunk_bytes + (std::size_t)(sub_key + 1) * 7;   // 2 chunks each
+        const std::size_t bytes =
+            k_maximum_chunk_bytes + static_cast<std::size_t>(sub_key + 1) * 7u;
         storage.resize(sub_key, bytes);
         std::size_t base = 0;
-        storage.write_to_each<char>(sub_key, [&](std::size_t chunk_no, char* buf, std::size_t cap) {
-            for (std::size_t i = 0; i < cap; ++i) buf[i] = fill_byte(sub_key, base + i);
-            base += cap;
-            return chunk_no;
-        });
+        storage.write_to_each<char>(
+            sub_key, [&sub_key, &base](std::size_t chunk_no, char* buf, std::size_t cap) {
+                for (std::size_t i = 0; i < cap; ++i)
+                    buf[i] = fill_byte(sub_key, base + i);
+                base += cap;
+                return chunk_no;
+            });
     }
 
     // Expected: the per-chunk read_chunk<char> walk in (sub_key, chunk_no) order.
@@ -527,11 +528,14 @@ TEST_CASE("read_chunks_in_range concatenation equals the per-chunk walk in order
     std::vector<char> got;
     std::vector<std::pair<index_sub_key_t, std::size_t>> got_order;
     std::map<index_sub_key_t, std::size_t> per_sub_chunk;
-    storage.read_chunks_in_range(0, 3, [&](index_sub_key_t f, const char* blob, std::size_t bytes) {
-        got.insert(got.end(), blob, blob + bytes);
-        const std::size_t cno = per_sub_chunk[f]++;
-        got_order.emplace_back(f, cno);
-    });
+    storage.read_chunks_in_range(
+        0,
+        3,
+        [&got, &per_sub_chunk, &got_order](index_sub_key_t f, const char* blob, std::size_t bytes) {
+            got.insert(got.end(), blob, blob + bytes);
+            const std::size_t cno = per_sub_chunk[f]++;
+            got_order.emplace_back(f, cno);
+        });
 
     REQUIRE(got == expected);
     REQUIRE(got_order == expected_order);
@@ -545,15 +549,19 @@ TEST_CASE("empty read_chunks_in_range ranges fire no callback",
           "[component:bioseq][layer:unit][feature:io]") {
     storage_type storage;
     storage.resize(7, 32);
-    storage.write_to_each<char>(7, [&](std::size_t c, char* buf, std::size_t cap) {
-        for (std::size_t i = 0; i < cap; ++i) buf[i] = (char)i;
+    storage.write_to_each<char>(7, [](std::size_t c, char* buf, std::size_t cap) {
+        for (std::size_t i = 0; i < cap; ++i) {
+            buf[i] = static_cast<char>(i);
+        }
         return c;
     });
 
     std::size_t calls = 0;
-    storage.read_chunks_in_range(0, 0, [&](index_sub_key_t, const char*, std::size_t) { ++calls; });
+    storage.read_chunks_in_range(
+        0, 0, [&calls](index_sub_key_t, const char*, std::size_t) { ++calls; });
     REQUIRE(calls == 0u);
-    storage.read_chunks_in_range(7, 7, [&](index_sub_key_t, const char*, std::size_t) { ++calls; });
+    storage.read_chunks_in_range(
+        7, 7, [&calls](index_sub_key_t, const char*, std::size_t) { ++calls; });
     REQUIRE(calls == 0u);
 }
 
@@ -585,8 +593,11 @@ TEST_CASE("qualified bulk read is ordered, exact, and fully attested",
     std::vector<index_chunk_address> addresses;
     std::vector<std::string> payloads;
     const index_chunk_read_stats stats = storage.read_chunks_in_range(
-        ranges, requests, index_chunk_cache_policy::bypass_one_shot,
-        [&](const index_chunk_address& address, const char* payload, std::size_t bytes) {
+        ranges,
+        requests,
+        index_chunk_cache_policy::bypass_one_shot,
+        [&addresses,
+         &payloads](const index_chunk_address& address, const char* payload, std::size_t bytes) {
             addresses.push_back(address);
             payloads.emplace_back(payload, bytes);
         });
@@ -647,8 +658,10 @@ TEST_CASE("qualified requests permit disjoint first-chunk extents on one subkey"
     };
     std::vector<std::uint32_t> chunks;
     const auto stats = storage.read_chunks_in_range(
-        ranges, requests, index_chunk_cache_policy::bypass_one_shot,
-        [&](const index_chunk_address& address, const char*, std::size_t) {
+        ranges,
+        requests,
+        index_chunk_cache_policy::bypass_one_shot,
+        [&chunks](const index_chunk_address& address, const char*, std::size_t) {
             chunks.push_back(address.chunk_no);
         });
 
@@ -671,10 +684,12 @@ TEST_CASE("qualified fake is state-free across cache policies and repeated group
     const std::array requests{extent_request(9, 0, 3, 2, {"payload"})};
 
     std::size_t calls = 0;
-    const auto run = [&](index_chunk_cache_policy policy) {
+    const auto run = [&storage, &ranges, &requests, &calls](index_chunk_cache_policy policy) {
         return storage.read_chunks_in_range(
-            ranges, requests, policy,
-            [&](const index_chunk_address&, const char*, std::size_t) { ++calls; });
+            ranges,
+            requests,
+            policy,
+            [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; });
     };
     storage.reset_cache_touch_probe_for_test();
     const auto populate = run(index_chunk_cache_policy::populate_residency);
@@ -727,8 +742,10 @@ TEST_CASE("skip budget is predeclared and undeclared wide-gap rows fail",
     std::size_t callbacks = 0;
     REQUIRE_THROWS_AS(
         storage.read_chunks_in_range(
-            ranges, requests, index_chunk_cache_policy::bypass_one_shot,
-            [&](const index_chunk_address&, const char*, std::size_t) { ++callbacks; }),
+            ranges,
+            requests,
+            index_chunk_cache_policy::bypass_one_shot,
+            [&callbacks](const index_chunk_address&, const char*, std::size_t) { ++callbacks; }),
         fake_qualified_chunk_read_error);
     // The declared subkey-2 row consumes the sole pre-scan budget. The first
     // injected row at subkey 3 is rejected instead of enlarging that budget.
@@ -760,9 +777,10 @@ TEST_CASE("qualified bulk read rejects unordered, overlapping, and unqualified p
     storage_type storage;
     store_text(storage, {1, 0, 1, 0}, "a");
     const index_sub_key_request valid_request = extent_request(1, 0, 1, 0, {"a"});
-    const auto read = [&](std::span<const index_sub_key_range> ranges,
-                          std::span<const index_sub_key_request> requests,
-                          index_chunk_cache_policy policy = index_chunk_cache_policy::bypass_one_shot) {
+    const auto read = [&storage](std::span<const index_sub_key_range> ranges,
+                                 std::span<const index_sub_key_request> requests,
+                                 index_chunk_cache_policy policy =
+                                     index_chunk_cache_policy::bypass_one_shot) {
         return storage.read_chunks_in_range(ranges, requests, policy, qualified_sink_probe{});
     };
 
@@ -882,7 +900,7 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
             ranges, requests, index_chunk_cache_policy::bypass_one_shot,
             std::forward<decltype(sink)>(sink));
     };
-    const auto run = [&](storage_type& storage, const index_sub_key_request& request) {
+    const auto run = [&run_with_sink](storage_type& storage, const index_sub_key_request& request) {
         return run_with_sink(storage, request, qualified_sink_probe{});
     };
 
@@ -911,8 +929,10 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         const auto request = extent_request(3, 0, 4, 5, {"a"});
         std::size_t calls = 0;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
+            run_with_sink(
+                storage,
+                request,
+                [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
             fake_qualified_chunk_read_error);
         REQUIRE(calls == 0);
     }
@@ -924,8 +944,10 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         const auto request = extent_request(3, 0, 4, 5, {"a"});
         std::size_t calls = 0;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
+            run_with_sink(
+                storage,
+                request,
+                [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
             fake_qualified_chunk_read_error);
         REQUIRE(calls == 0);
     }
@@ -937,8 +959,10 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         const auto request = extent_request(3, 0, 4, 5, {"a"});
         std::size_t calls = 0;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
+            run_with_sink(
+                storage,
+                request,
+                [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
             fake_qualified_chunk_read_error);
         REQUIRE(calls == 0);
     }
@@ -957,8 +981,10 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         const auto request = extent_request(3, 0, 4, 5, {payload});
         std::size_t calls = 0;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
+            run_with_sink(
+                storage,
+                request,
+                [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
             fake_qualified_chunk_read_error);
         REQUIRE(calls == 0);
     }
@@ -969,10 +995,11 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         ++request.expected_total_bytes;
         std::vector<std::string> staged;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char* payload, std::size_t bytes) {
-                    staged.emplace_back(payload, bytes);
-                }),
+            run_with_sink(storage,
+                          request,
+                          [&staged](const index_chunk_address&,
+                                    const char* payload,
+                                    std::size_t bytes) { staged.emplace_back(payload, bytes); }),
             fake_qualified_chunk_read_error);
         // Streaming is intentionally not transactional: row validation permits
         // the callback, then the late aggregate mismatch rejects the group. The
@@ -986,8 +1013,10 @@ TEST_CASE("qualified bulk read rejects missing and corrupt extent data",
         request.expected_checksum ^= 1;
         std::size_t calls = 0;
         REQUIRE_THROWS_AS(
-            run_with_sink(storage, request,
-                [&](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
+            run_with_sink(
+                storage,
+                request,
+                [&calls](const index_chunk_address&, const char*, std::size_t) { ++calls; }),
             fake_qualified_chunk_read_error);
         REQUIRE(calls == 1);
     }
@@ -1002,17 +1031,22 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
     storage.resize(sub_key, total_units * sizeof(std::int64_t));
 
     std::size_t base = 0;
-    storage.write_to_each<std::int64_t>(sub_key, [&](std::size_t chunk_no, std::int64_t* buf, std::size_t cap_units) {
-        // cap_units is the chunk byte size / sizeof(int64), NEVER the byte size. The
-        // chunk is committed only AFTER this writer returns, so verify cap_units against
-        // the planned split (k_maximum_chunk_bytes/8 = 128 units for chunk 0; the remainder for chunk 1)
-        // rather than calling chunk_byte_size() mid-write.
-        REQUIRE(cap_units == (chunk_no == 0 ? k_maximum_chunk_bytes / sizeof(std::int64_t)
-                                            : total_units - k_maximum_chunk_bytes / sizeof(std::int64_t)));
-        for (std::size_t i = 0; i < cap_units; ++i) buf[i] = (std::int64_t)(base + i);
-        base += cap_units;
-        return chunk_no;
-    });
+    storage.write_to_each<std::int64_t>(
+        sub_key,
+        [&total_units, &base](std::size_t chunk_no, std::int64_t* buf, std::size_t cap_units) {
+            // cap_units is the chunk byte size / sizeof(int64), NEVER the byte size. The
+            // chunk is committed only AFTER this writer returns, so verify cap_units against
+            // the planned split (k_maximum_chunk_bytes/8 = 128 units for chunk 0; the remainder for
+            // chunk 1) rather than calling chunk_byte_size() mid-write.
+            REQUIRE(cap_units ==
+                    (chunk_no == 0 ? k_maximum_chunk_bytes / sizeof(std::int64_t)
+                                   : total_units - k_maximum_chunk_bytes / sizeof(std::int64_t)));
+            for (std::size_t i = 0; i < cap_units; ++i) {
+                buf[i] = static_cast<std::int64_t>(base + i);
+            }
+            base += cap_units;
+            return chunk_no;
+        });
 
     REQUIRE(storage.number_of_chunks(sub_key) == 2u);
     REQUIRE(storage.chunk_byte_size(sub_key, 0) == k_maximum_chunk_bytes);                 // 128 units
@@ -1022,7 +1056,9 @@ TEST_CASE("write_to_each<int64_t> caps capacity in T-units, not bytes",
     for (std::size_t chunk_no = 0; chunk_no < 2; ++chunk_no) {
         const std::size_t units = storage.chunk_byte_size(sub_key, chunk_no) / sizeof(std::int64_t);
         const std::int64_t* p = storage.read_chunk<std::int64_t>(sub_key, chunk_no);
-        for (std::size_t i = 0; i < units; ++i) REQUIRE(p[i] == (std::int64_t)(global + i));
+        for (std::size_t i = 0; i < units; ++i) {
+            REQUIRE(p[i] == static_cast<std::int64_t>(global + i));
+        }
         global += units;
     }
     REQUIRE(global == total_units);

@@ -1,7 +1,13 @@
+/**
+ * @file external/tests/io/sequence_stream_live_test.cpp
+ * @brief Live NCBI streaming and bounded-channel cancellation tests.
+ */
+
 // Exercise NCBI sequence streaming and deterministic bounded-channel
 // accounting. Provider-backed cases select the network resource explicitly.
 
 #include <atomic>
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -11,8 +17,6 @@
 #include <utility>
 #include <variant>
 #include <vector>
-
-#include <catch2/catch_test_macros.hpp>
 
 import bioseq.external.provider.base;
 import bioseq.external.provider.errors;
@@ -31,11 +35,10 @@ namespace {
 struct payload_collector {
     std::vector<prov::owning_sequence_payload> rows;
 
-    static std::expected<void, prov::external_error> push(
-        void* self, prov::owning_provider_message&& message) {
+    static std::expected<void, prov::external_error> push(void* self,
+                                                          prov::owning_provider_message&& message) {
         auto* collector = static_cast<payload_collector*>(self);
-        if (auto* payload =
-                std::get_if<prov::owning_sequence_payload>(&message)) {
+        if (auto* payload = std::get_if<prov::owning_sequence_payload>(&message)) {
             collector->rows.push_back(std::move(*payload));
         }
         return {};
@@ -46,14 +49,17 @@ struct payload_collector {
     }
 };
 
-}  // namespace
+} // namespace
 
-TEST_CASE("run_ncbi_sequence_stream chunks NC_012920.1 as one final chunk",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "run_ncbi_sequence_stream chunks NC_012920.1 as one final chunk",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
-    auto stats = exio::run_ncbi_sequence_stream(
-        "NC_012920.1", prov::query_target::sequence_chunk,
-        exio::k_default_chunk_bases, collector.ref(), std::stop_token{});
+    auto stats = exio::run_ncbi_sequence_stream("NC_012920.1",
+                                                prov::query_target::sequence_chunk,
+                                                exio::k_default_chunk_bases,
+                                                collector.ref(),
+                                                std::stop_token{});
     INFO("error: " << (stats.has_value() ? std::string{}
                                          : std::string(stats.error().message.view())));
     REQUIRE(stats.has_value());
@@ -64,13 +70,16 @@ TEST_CASE("run_ncbi_sequence_stream chunks NC_012920.1 as one final chunk",
     REQUIRE(collector.rows[0].end_of_record == true);
 }
 
-TEST_CASE("run_ncbi_sequence_stream streams a 4.6 Mbp genome as ordered chunks",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "run_ncbi_sequence_stream streams a 4.6 Mbp genome as ordered chunks",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
-    const std::uint64_t chunk_bases = exio::k_default_chunk_bases;  // 1048572
-    auto stats = exio::run_ncbi_sequence_stream(
-        "NC_000913.3", prov::query_target::sequence_chunk, chunk_bases,
-        collector.ref(), std::stop_token{});
+    const std::uint64_t chunk_bases = exio::k_default_chunk_bases; // 1048572
+    auto stats = exio::run_ncbi_sequence_stream("NC_000913.3",
+                                                prov::query_target::sequence_chunk,
+                                                chunk_bases,
+                                                collector.ref(),
+                                                std::stop_token{});
     INFO("error: " << (stats.has_value() ? std::string{}
                                          : std::string(stats.error().message.view())));
     REQUIRE(stats.has_value());
@@ -91,12 +100,15 @@ TEST_CASE("run_ncbi_sequence_stream streams a 4.6 Mbp genome as ordered chunks",
     REQUIRE(collector.rows.back().bases.size() == 447364);
 }
 
-TEST_CASE("run_ncbi_sequence_stream whole-record sequence target",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "run_ncbi_sequence_stream whole-record sequence target",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     payload_collector collector;
-    auto stats = exio::run_ncbi_sequence_stream(
-        "NC_012920.1", prov::query_target::sequence, exio::k_default_chunk_bases,
-        collector.ref(), std::stop_token{});
+    auto stats = exio::run_ncbi_sequence_stream("NC_012920.1",
+                                                prov::query_target::sequence,
+                                                exio::k_default_chunk_bases,
+                                                collector.ref(),
+                                                std::stop_token{});
     REQUIRE(stats.has_value());
     REQUIRE(collector.rows.size() == 1);
     REQUIRE(collector.rows[0].bases.size() == 16569);
@@ -129,16 +141,16 @@ TEST_CASE("bounded_channel charges bytes/items and enforces backpressure",
         prov::bounded_channel<int> channel(/*bytes=*/150, /*items=*/8);
         REQUIRE(channel.push(1, 100, std::stop_token{}).has_value());
         std::atomic<bool> second_pushed{false};
-        std::thread producer([&] {
-            // 100 more would exceed 150 with one item already charged; blocks.
+        std::thread producer([&channel, &second_pushed] {
+            // 100 more would exceed 150 with one item already charged and blocks.
             (void)channel.push(2, 100, std::stop_token{});
             second_pushed.store(true);
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        REQUIRE_FALSE(second_pushed.load());  // backpressure held
+        REQUIRE_FALSE(second_pushed.load()); // backpressure held
         auto lease = channel.pop_for(std::chrono::milliseconds(10));
         REQUIRE(lease.status == prov::pop_status::item);
-        lease.item->release();  // frees capacity -> producer proceeds
+        lease.item->release(); // frees capacity -> producer proceeds
         producer.join();
         REQUIRE(second_pushed.load());
         REQUIRE(channel.high_water_bytes() <= 200);

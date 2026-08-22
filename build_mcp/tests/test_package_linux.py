@@ -53,6 +53,7 @@ class PackageLinuxPureContractTests(unittest.TestCase):
         self.assertEqual(subject.ARCHITECTURE, "arm64")
         self.assertEqual(subject.IMAGE_TAG, "debian:trixie")
         self.assertEqual(subject.POSTGRES_MAJOR, 17)
+        self.assertEqual(subject.PACKAGE_PROFILE_REVISION, 3)
         self.assertEqual(
             subject.PACKAGE_CACHE_VALUES[
                 "BIOSEQ_TEMPLATE_FLATTEN_PROFILE"],
@@ -281,14 +282,15 @@ class PackageLinuxServerModeTests(unittest.TestCase):
         run.assert_called_once_with(entry)
 
     def test_remote_run_rejects_before_provisioning(self) -> None:
-        with mock.patch.object(remote, "_start_or_poll_remote") as remote:
+        with mock.patch.object(
+                remote, "_start_or_poll_remote") as remote_start:
             result = remote.tool_remote_run({
                 "operation": "build", "mode": subject.MODE,
                 "branch": "main",
                 "sync": False, "auto_provision": False,
             })
         self.assertIn("local-only", result)
-        remote.assert_not_called()
+        remote_start.assert_not_called()
 
 
 class DockerHealthTests(unittest.TestCase):

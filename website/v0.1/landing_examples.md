@@ -10,10 +10,10 @@ slots:
 
 # Bioseq landing examples
 
-This file is the runnable-example source for the marketing landing page (§15.2).
-It is parsed into the private build plan, executed against the installed Bioseq
-extension, and its captured result rows are rendered into the landing template's
-named slots. It is never emitted as a page or search result.
+This file supplies the runnable examples for the landing page. The private site
+build executes each example against the installed Bioseq extension and renders
+the captured rows in the named landing-page slot. This file is not emitted as a
+page or search result.
 
 Each block declares its hidden `setup`/`teardown` and its `visible` query with the
 `-- bioseq:setup` / `-- bioseq:visible` / `-- bioseq:teardown` markers, exactly as
@@ -100,11 +100,10 @@ DROP TABLE run_reads;
 
 ## Filter and sort
 
-This slot executes the supplied metadata-filtered [[sql:public.mmsearch]] story
-over a `USING bioseq` table. The same visible phase creates and seeds its compact
-fixture, then combines organism, date, sequence-length, and sequence-match
-predicates before sorting by ordinary metadata. A hidden `EXPLAIN` guard proves
-the exact final predicate still plans as the `BioseqScan` custom scan.
+This slot runs a metadata-filtered [[sql:public.mmsearch]] query over a
+`USING bioseq` table. The visible SQL creates and fills a small table, then
+combines organism, date, sequence-length, and sequence-match predicates. A
+hidden `EXPLAIN` check confirms that the final predicate uses `BioseqScan`.
 
 ```sql runnable id=landing_similarity_search timeout=20s
 -- bioseq:setup

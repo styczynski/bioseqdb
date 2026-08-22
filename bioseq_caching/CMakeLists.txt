@@ -3,6 +3,9 @@ option(BIOSEQ_CACHE_BUILD_TESTS
 option(BIOSEQ_CACHE_TESTING
   "Build the noninstalled bioseq_cache test-support DSO" OFF)
 
+include(
+  "${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_source_inventory.cmake")
+
 function(_bioseq_cache_verify_sql_row_profile_guard)
   set(_rows_source "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows/index.cppm")
   file(READ "${_rows_source}" _rows_text)
@@ -56,38 +59,28 @@ add_subdirectory(core)
 
 include("${CMAKE_CURRENT_LIST_DIR}/../cmake/bioseq_sql_codegen.cmake")
 
-set(BIOSEQ_CACHE_PRODUCTION_MODULES
-  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/provider/reusable_adapter.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/shared_registry.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/dependency_runtime.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/object_dependency_hooks.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/guc.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/context/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/lifecycle.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/exact_scan.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/executor/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/planner/exact.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/planner/reuse.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/planner/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/storage.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/maintenance.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/runtime.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/rows/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/index.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/diagnostics.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/admin.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_PRODUCTION_MODULES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/pg"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS
+    "provider/registry_implementation.cppm"
+    "sql/test_controls.cppm"
+    "test_provider.cppm"
+  EXPECTED_COUNT 22)
 set(BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/pg/provider/registry_implementation.cppm")
 set_source_files_properties(
   ${BIOSEQ_CACHE_PRODUCTION_IMPLEMENTATION_SOURCES}
   PROPERTIES COMPILE_OPTIONS "-x;c++")
-set(BIOSEQ_CACHE_TEST_SUPPORT_MODULES
-  ${BIOSEQ_CACHE_PRODUCTION_MODULES}
-  "${CMAKE_CURRENT_LIST_DIR}/pg/test_provider.cppm"
-  "${CMAKE_CURRENT_LIST_DIR}/pg/sql/test_controls.cppm")
+bioseq_collect_authored_sources(
+  BIOSEQ_CACHE_TEST_SUPPORT_MODULES
+  BASE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/pg"
+  RECURSE
+  INCLUDE_PATTERNS "*.cppm"
+  EXCLUDE_PATHS "provider/registry_implementation.cppm"
+  EXPECTED_COUNT 24)
 
 # SQL ownership is explicit and profile-complete. Production remains the
 # independently installable sibling extension; test_support is its strict

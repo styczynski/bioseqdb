@@ -40,7 +40,7 @@ SANITIZERS = {
 }
 SANITIZER_BASE = "test-opt-sanitizer"
 COMMON_COMPILE_FLAGS = {
-    "-O1",
+    "-O3",
     "-DNDEBUG",
     "-g",
     "-fno-omit-frame-pointer",
@@ -532,6 +532,410 @@ if Path(runtime.__file__).resolve() != expected_helper.resolve():
                 restart_env[DYLD_INSERT_ENV], str(runtime.resolve()))
             self.assertEqual(
                 restart_env[SANITIZER_RUNTIME_ENV], str(runtime.resolve()))
+
+    def test_postgresql_shared_preload_preserves_existing_entries(self) -> None:
+        psql = "/opt/homebrew/opt/postgresql@17/bin/psql"
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="pg_stat_statements\n", stderr="")
+        redirected = {
+            key: f"ambient-{key.lower()}"
+            for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS
+        }
+        redirected["PATH"] = "/usr/bin"
+        log = mock.Mock()
+        with mock.patch.object(
+            postgres_runtime.sys, "platform", "darwin",
+        ), mock.patch.dict(
+            postgres_runtime.os.environ, redirected, clear=True,
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ) as inspect, mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=0,
+        ) as alter:
+            postgres_runtime._ensure_postgresql_shared_preload(
+                psql, "test-opt", log, 123.0)
+
+        inspect.assert_called_once()
+        self.assertEqual(
+            inspect.call_args.args[0],
+            [psql, "-X", "-Atq", "--dbname", "postgres",
+             "--command", "SHOW shared_preload_libraries;"],
+        )
+        alter.assert_called_once()
+        self.assertEqual(
+            alter.call_args.args[0],
+            [psql, "-X", "-v", "ON_ERROR_STOP=1",
+             "--dbname", "postgres", "--command",
+             "ALTER SYSTEM SET shared_preload_libraries = "
+             "'pg_stat_statements,bioseq';"],
+        )
+        for call in (inspect.call_args, alter.call_args):
+            self.assertEqual(call.kwargs["env"]["PATH"], "/usr/bin")
+            for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS:
+                self.assertNotIn(key, call.kwargs["env"])
+
+    def test_postgresql_shared_preload_is_idempotent(self) -> None:
+        psql = "/opt/homebrew/opt/postgresql@17/bin/psql"
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="pg_stat_statements, $libdir/bioseq\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess",
+        ) as alter:
+            postgres_runtime._ensure_postgresql_shared_preload(
+                psql, "test-opt", mock.Mock(), 123.0)
+
+        alter.assert_not_called()
+
+    def test_postgresql_shared_preload_verification_fails_closed(self) -> None:
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout="pg_stat_statements\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "restarted without bioseq"):
+                postgres_runtime._verify_postgresql_shared_preload(
+                    "/opt/homebrew/opt/postgresql@17/bin/psql",
+                    "test-opt")
+
+    def test_postgresql_max_prepared_transactions_sets_project_minimum(
+            self) -> None:
+        psql = "/opt/homebrew/opt/postgresql@17/bin/psql"
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="0\n", stderr="")
+        redirected = {
+            key: f"ambient-{key.lower()}"
+            for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS
+        }
+        redirected["PATH"] = "/usr/bin"
+        log = mock.Mock()
+        with mock.patch.object(
+            postgres_runtime.sys, "platform", "darwin",
+        ), mock.patch.dict(
+            postgres_runtime.os.environ, redirected, clear=True,
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ) as inspect, mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=0,
+        ) as alter:
+            postgres_runtime._ensure_postgresql_max_prepared_transactions(
+                psql, "test-opt", log, 123.0)
+
+        inspect.assert_called_once()
+        self.assertEqual(
+            inspect.call_args.args[0],
+            [psql, "-X", "-Atq", "--dbname", "postgres",
+             "--command", "SHOW max_prepared_transactions;"],
+        )
+        alter.assert_called_once()
+        self.assertEqual(
+            alter.call_args.args[0],
+            [psql, "-X", "-v", "ON_ERROR_STOP=1",
+             "--dbname", "postgres", "--command",
+             "ALTER SYSTEM SET max_prepared_transactions = '16';"],
+        )
+        for call in (inspect.call_args, alter.call_args):
+            self.assertEqual(call.kwargs["env"]["PATH"], "/usr/bin")
+            for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS:
+                self.assertNotIn(key, call.kwargs["env"])
+
+    def test_postgresql_max_prepared_transactions_preserves_higher_value(
+            self) -> None:
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="64\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess",
+        ) as alter:
+            postgres_runtime._ensure_postgresql_max_prepared_transactions(
+                "/opt/homebrew/opt/postgresql@17/bin/psql",
+                "test-opt", mock.Mock(), 123.0)
+
+        alter.assert_not_called()
+
+    def test_postgresql_max_prepared_transactions_uses_aws_postgres_uid(
+            self) -> None:
+        psql = "/usr/lib/postgresql/17/bin/psql"
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="0\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.sys, "platform", "linux",
+        ), mock.patch.object(
+            postgres_runtime, "_is_aws_preset", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ) as inspect, mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=0,
+        ) as alter:
+            postgres_runtime._ensure_postgresql_max_prepared_transactions(
+                psql, "aws-test-opt", mock.Mock(), 123.0)
+
+        prefix = ["sudo", "-n", "-u", "postgres", psql]
+        self.assertEqual(inspect.call_args.args[0][:5], prefix)
+        self.assertEqual(alter.call_args.args[0][:5], prefix)
+        self.assertIn(
+            "ALTER SYSTEM SET max_prepared_transactions = '16';",
+            alter.call_args.args[0],
+        )
+
+    def test_postgresql_max_prepared_transactions_propagates_setup_failure(
+            self) -> None:
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="0\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=7,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "setup exited with code 7"):
+                postgres_runtime._ensure_postgresql_max_prepared_transactions(
+                    "/opt/homebrew/opt/postgresql@17/bin/psql",
+                    "test-opt", mock.Mock(), 123.0)
+
+    def test_postgresql_max_prepared_transactions_rejects_invalid_value(
+            self) -> None:
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="not-an-integer\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "returned an invalid"):
+                postgres_runtime._ensure_postgresql_max_prepared_transactions(
+                    "/opt/homebrew/opt/postgresql@17/bin/psql",
+                    "test-opt", mock.Mock(), 123.0)
+
+    def test_postgresql_max_prepared_transactions_verification_fails_closed(
+            self) -> None:
+        shown = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="0\n", stderr="")
+        with mock.patch.object(
+            postgres_runtime.subprocess, "run", return_value=shown,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "tests require at least 16"):
+                postgres_runtime._verify_postgresql_max_prepared_transactions(
+                    "/opt/homebrew/opt/postgresql@17/bin/psql",
+                    "test-opt")
+
+    def test_aws_restart_configures_before_one_systemd_restart_and_verifies(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build_dir = Path(temporary)
+            pg_config = "/usr/lib/postgresql/17/bin/pg_config"
+            bindir = "/usr/lib/postgresql/17/bin"
+            (build_dir / "CMakeCache.txt").write_text(
+                f"PostgreSQL_CONFIG:FILEPATH={pg_config}\n",
+                encoding="utf-8")
+            bindir_result = subprocess.CompletedProcess(
+                args=[pg_config, "--bindir"], returncode=0,
+                stdout=f"{bindir}\n", stderr="")
+            log = mock.Mock()
+            order = mock.Mock()
+            with mock.patch.object(
+                postgres_runtime.sys, "platform", "linux",
+            ), mock.patch.object(
+                postgres_runtime, "_is_aws_preset", return_value=True,
+            ), mock.patch.object(
+                postgres_runtime.subprocess, "run",
+                return_value=bindir_result,
+            ), mock.patch.object(
+                postgres_runtime.os.path, "isfile", return_value=True,
+            ), mock.patch.object(
+                postgres_runtime.os.path, "isdir", return_value=True,
+            ), mock.patch.object(
+                postgres_runtime, "_query_postgresql_data_directory",
+                return_value="/var/lib/postgresql/17/main",
+            ), mock.patch.object(
+                postgres_runtime, "_postgresql_restart_environment",
+                return_value={"PATH": "/usr/bin"},
+            ), mock.patch.object(
+                postgres_runtime.shutil, "which",
+                return_value="/usr/bin/systemctl",
+            ), mock.patch.object(
+                postgres_runtime, "_ensure_postgresql_shared_preload",
+            ) as preload, mock.patch.object(
+                postgres_runtime,
+                "_ensure_postgresql_max_prepared_transactions",
+            ) as prepared, mock.patch.object(
+                postgres_runtime, "_run_postgresql_restart_cmd",
+            ) as restart, mock.patch.object(
+                postgres_runtime, "_verify_postgresql_shared_preload",
+            ) as verify_preload, mock.patch.object(
+                postgres_runtime,
+                "_verify_postgresql_max_prepared_transactions",
+            ) as verify_prepared:
+                order.attach_mock(preload, "preload")
+                order.attach_mock(prepared, "prepared")
+                order.attach_mock(restart, "restart")
+                order.attach_mock(verify_preload, "verify_preload")
+                order.attach_mock(verify_prepared, "verify_prepared")
+                postgres_runtime._restart_postgresql(
+                    build_dir, "aws-test-opt", log, 123.0)
+
+        psql = f"{bindir}/psql"
+        self.assertEqual(order.mock_calls, [
+            mock.call.preload(psql, "aws-test-opt", log, 123.0),
+            mock.call.prepared(psql, "aws-test-opt", log, 123.0),
+            mock.call.restart(
+                ["sudo", "-n", "/usr/bin/systemctl", "restart",
+                 "postgresql"],
+                log,
+                env={"PATH": "/usr/bin"}),
+            mock.call.verify_preload(psql, "aws-test-opt"),
+            mock.call.verify_prepared(psql, "aws-test-opt"),
+        ])
+
+    def test_local_postgresql_test_database_uses_configured_tools(self) -> None:
+        bindir = Path("/opt/homebrew/opt/postgresql@17/bin")
+        pg_config_result = subprocess.CompletedProcess(
+            args=[str(bindir / "pg_config"), "--bindir"],
+            returncode=0,
+            stdout=f"{bindir}\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            postgres_runtime, "_pg_config_from_cache",
+            return_value=str(bindir / "pg_config"),
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run",
+            return_value=pg_config_result,
+        ), mock.patch.object(
+            Path, "is_file", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=0,
+        ) as run, mock.patch.object(
+            postgres_runtime, "_is_aws_preset", return_value=False,
+        ):
+            redirected = {
+                key: f"ambient-{key.lower()}"
+                for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS
+            }
+            redirected["PATH"] = "/usr/bin"
+            postgres_runtime._prepare_postgresql_test_database(
+                Path("/tmp/build"), "test-opt", mock.Mock(), 123.0,
+                env=redirected,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        role_argv = run.call_args_list[0].args[0]
+        self.assertEqual(role_argv[0], str(bindir / "psql"))
+        self.assertIn("ALTER ROLE postgres", role_argv[-1])
+        for key in postgres_runtime._LIBPQ_CONNECTION_ENVIRONMENT_KEYS:
+            self.assertNotIn(key, run.call_args_list[0].kwargs["env"])
+            self.assertNotIn(key, run.call_args_list[1].kwargs["env"])
+        self.assertEqual(run.call_args_list[0].kwargs["env"]["PATH"],
+                         "/usr/bin")
+        create_argv = run.call_args_list[1].args[0]
+        self.assertEqual(create_argv[:2], ["/bin/bash", "-lc"])
+        self.assertIn(str(bindir / "createdb"), create_argv[2])
+        self.assertIn("WHERE datname = 'bioseq'", create_argv[2])
+        self.assertNotIn("DROP DATABASE", create_argv[2])
+
+    def test_local_postgresql_test_database_propagates_role_failure(self) -> None:
+        bindir = Path("/opt/homebrew/opt/postgresql@17/bin")
+        pg_config_result = subprocess.CompletedProcess(
+            args=[str(bindir / "pg_config"), "--bindir"],
+            returncode=0,
+            stdout=f"{bindir}\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            postgres_runtime, "_pg_config_from_cache",
+            return_value=str(bindir / "pg_config"),
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run",
+            return_value=pg_config_result,
+        ), mock.patch.object(
+            Path, "is_file", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=9,
+        ) as run, mock.patch.object(
+            postgres_runtime, "_is_aws_preset", return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "test role setup exited with code 9"):
+                postgres_runtime._prepare_postgresql_test_database(
+                    Path("/tmp/build"), "test-opt", mock.Mock(), 123.0,
+                )
+
+        run.assert_called_once()
+
+    def test_local_postgresql_test_database_propagates_database_failure(self) -> None:
+        bindir = Path("/opt/homebrew/opt/postgresql@17/bin")
+        pg_config_result = subprocess.CompletedProcess(
+            args=[str(bindir / "pg_config"), "--bindir"],
+            returncode=0,
+            stdout=f"{bindir}\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            postgres_runtime, "_pg_config_from_cache",
+            return_value=str(bindir / "pg_config"),
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run",
+            return_value=pg_config_result,
+        ), mock.patch.object(
+            Path, "is_file", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess", side_effect=(0, 8),
+        ) as run, mock.patch.object(
+            postgres_runtime, "_is_aws_preset", return_value=False,
+        ):
+            with self.assertRaisesRegex(
+                    RuntimeError, "test database setup exited with code 8"):
+                postgres_runtime._prepare_postgresql_test_database(
+                    Path("/tmp/build"), "test-opt", mock.Mock(), 123.0,
+                )
+
+        self.assertEqual(run.call_count, 2)
+
+    def test_aws_postgresql_test_database_retains_postgres_uid_setup(self) -> None:
+        bindir = Path("/usr/lib/postgresql/17/bin")
+        pg_config_result = subprocess.CompletedProcess(
+            args=[str(bindir / "pg_config"), "--bindir"],
+            returncode=0,
+            stdout=f"{bindir}\n",
+            stderr="",
+        )
+        with mock.patch.object(
+            postgres_runtime.sys, "platform", "linux",
+        ), mock.patch.object(
+            postgres_runtime, "_is_aws_preset", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime, "_pg_config_from_cache",
+            return_value=str(bindir / "pg_config"),
+        ), mock.patch.object(
+            postgres_runtime.subprocess, "run",
+            return_value=pg_config_result,
+        ), mock.patch.object(
+            Path, "is_file", return_value=True,
+        ), mock.patch.object(
+            postgres_runtime, "_stream_subprocess", return_value=0,
+        ) as run:
+            postgres_runtime._prepare_postgresql_test_database(
+                Path("/tmp/build"), "aws-test-opt", mock.Mock(), 123.0,
+            )
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            run.call_args_list[0].args[0][:5],
+            ["sudo", "-n", "-u", "postgres", str(bindir / "psql")],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0][:5],
+            ["sudo", "-n", "-u", "postgres", "/bin/bash"],
+        )
+        self.assertIn(str(bindir / "psql"), run.call_args_list[1].args[0][-1])
+        self.assertIn(str(bindir / "createdb"),
+                      run.call_args_list[1].args[0][-1])
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 /**
- * @file chaining_vulkan.cppm
+ * @file vulkan.cppm
  * @brief Vulkan G3SA tiled-DP anchor-chaining backend.
  *
  * Consumes the anchors `collect_seed_hits` already produced and sorted, runs
  * the G3SA-style tiled dynamic-programming score generation on Vulkan, then
  * reuses bioseq's `backtrack_chains` to emit the same `(chain, reordered
  * anchor)` ABI the downstream stages already consume. The shader returns the DP
- * arrays (`best_scores`, absolute `predecessors`); this module never ports
+ * arrays (`best_scores`, absolute `predecessors`). This module does not run
  * G3SA's CUDA backtracking stack.
  *
  * Alphabet-neutral by construction: chaining reads anchor coordinates and
@@ -75,8 +75,8 @@ inline void require_vulkan_chaining_supported() {
 
 /// Pick the tile/local workgroup dimensions for the chaining pipeline from the
 /// device limits. 384 is the portable floor (~12 KiB shared stays under the
-/// 16 KiB Vulkan guaranteed minimum); 1024 is only chosen on devices that can
-/// host G3SA's original tile footprint comfortably.
+/// 16 KiB Vulkan guaranteed minimum). 1024 is only chosen on devices that can
+/// host the largest tile footprint comfortably.
 [[nodiscard]] inline bioseq::gpu::vulkan::chaining_pipeline_key
 choose_vulkan_chaining_pipeline(
     const bioseq::gpu::vulkan::vulkan_feature_set& features) noexcept
@@ -255,6 +255,11 @@ public:
     vulkan_chaining_memory_plan plan{};
     bioseq::parallelism::memory_admission_failure admission{};
 
+    /**
+     * @brief Builds a Vulkan admission error that retains both diagnostic records.
+     * @param memory_plan Exact byte plan that was rejected.
+     * @param failure Memory-admission snapshot captured at rejection.
+     */
     vulkan_chaining_admission_error(
             vulkan_chaining_memory_plan memory_plan,
             bioseq::parallelism::memory_admission_failure failure)
@@ -352,18 +357,26 @@ constexpr std::uint32_t k_gpu_chain_compact_range_threshold = 131'072u;
 constexpr std::uint32_t k_gpu_chain_compact_range_target = 65'536u;
 constexpr std::size_t k_coordinate_only_fast_probe_limit = 16u;
 
+/** @brief Counts hard ranges and the device anchor population after optional compaction. */
 struct vulkan_chaining_shape_plan {
     std::size_t range_count = 0;
     std::size_t device_anchor_count = 0;
     bool compaction_required = false;
 };
 
+/**
+ * @brief Analyzes range boundaries and long-range compaction without allocating.
+ * @param anchors Canonically ordered anchors.
+ * @param max_ref_dist Maximum reference-coordinate separation within a range.
+ * @return Range count, device anchor count, and compaction decision.
+ */
 [[nodiscard]] inline vulkan_chaining_shape_plan analyze_gpu_chaining_shape(
         std::span<const anchor> anchors,
         std::uint64_t max_ref_dist) noexcept {
     vulkan_chaining_shape_plan shape{};
     if (anchors.empty()) return shape;
 
+    // Adds one range using the same sampling count as device compaction.
     auto add_range = [&shape](std::size_t length) noexcept {
         ++shape.range_count;
         if (length > k_gpu_chain_compact_range_threshold) {
@@ -402,7 +415,7 @@ struct vulkan_chaining_shape_plan {
 /// Very long hard ranges are usually near-colinear dense minimizer runs where
 /// chaining every anchor adds DP cost without improving the downstream extension
 /// seed. Keep sorted order and both range endpoints, but adaptively thin the
-/// interior so the GPU DP critical path is bounded.
+/// interior so the GPU DP inner path is bounded.
 [[nodiscard]] inline bool compact_long_gpu_chain_ranges(
     std::span<const anchor> anchors,
     std::span<const bioseq::gpu::vulkan::gpu_chain_range> ranges,
@@ -533,7 +546,7 @@ struct vulkan_chaining_shape_plan {
 }
 
 /// Run the Vulkan tiled-DP chaining path. Throws `vulkan_runtime_error` on any
-/// selected-GPU decline; algorithm fallback must be chosen by the caller before
+/// selected-GPU decline. Algorithm fallback must be chosen by the caller before
 /// entering the pipeline.
 [[nodiscard]] inline bool execute_vulkan_chaining(
     std::span<const anchor> anchors,
@@ -778,6 +791,14 @@ struct vulkan_chaining_shape_plan {
  *
  * Pins the @ref anchor ABI before dispatch. Once selected, the function never
  * falls back to scalar execution and propagates every unsupported condition.
+ *
+ * @param anchors Canonically ordered anchors to chain.
+ * @param params Chaining distances, penalties, and execution policy.
+ * @param chains_out Arena-backed destination for chain descriptors.
+ * @param reordered_anchors_out Arena-backed destination for anchors in chain order.
+ * @return `true` when Vulkan completed the selected operation.
+ * @throws vulkan_runtime_error If the device, shape, dispatch, or result contract is rejected.
+ * @throws vulkan_chaining_admission_error If the exact memory plan is denied.
  */
 inline bool chain_anchors_vulkan(
     std::span<const anchor> anchors,

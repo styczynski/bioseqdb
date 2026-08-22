@@ -1,3 +1,7 @@
+/**
+ * @file result_materialization_test.cppm
+ * @brief Checks compile-time SQL result materialization contracts.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -25,6 +29,7 @@ using bioseq::postgres::support::table_rows;
 using bioseq::storage::reaper_event;
 using bioseq::table::teardown_diagnostics_row;
 
+/** @brief Encodes a storage reaper event into two named SQL fields. */
 struct reaper_event_encoder final {
     inline static constexpr std::array<std::string_view, 2>
         column_names{"action", "target"};
@@ -37,6 +42,7 @@ struct reaper_event_encoder final {
     }
 };
 
+/** @brief Encodes teardown diagnostics into two named SQL fields. */
 struct teardown_diagnostics_encoder final {
     inline static constexpr std::array<std::string_view, 2>
         column_names{
@@ -51,6 +57,7 @@ struct teardown_diagnostics_encoder final {
     }
 };
 
+/** @brief Supplies an intentionally invalid encoder result for rejection checks. */
 struct invalid_result_encoder final {
     inline static constexpr std::array<std::string_view, 2>
         column_names{"action", "target"};
@@ -61,6 +68,7 @@ struct invalid_result_encoder final {
     }
 };
 
+/** @brief Omits column names to exercise named-result rejection. */
 struct unnamed_result_encoder final {
     [[nodiscard]] auto operator()(
             const reaper_event& row) const {
@@ -70,6 +78,7 @@ struct unnamed_result_encoder final {
     }
 };
 
+/** @brief Matches fields accepted by the SQL result row encoder. */
 template<class p_value>
 concept encodable_result_field =
     requires(p_value&& value) {
@@ -77,6 +86,7 @@ concept encodable_result_field =
             std::forward<p_value>(value));
     };
 
+/** @brief Matches owned result values accepted by SQL materialization. */
 template<class p_result, class p_encoder>
 concept materializable_owned_result =
     requires(
@@ -91,6 +101,7 @@ concept materializable_owned_result =
         } -> std::same_as<Datum>;
     };
 
+/** @brief Matches borrowed result values accepted by SQL materialization. */
 template<class p_result, class p_encoder>
 concept materializable_borrowed_result =
     requires(

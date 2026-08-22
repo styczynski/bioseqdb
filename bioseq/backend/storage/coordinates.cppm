@@ -30,19 +30,21 @@ enum class sequence_transform : std::uint8_t {
     return static_cast<sequence_transform>(bits);
 }
 
+/** @brief Return whether a transform reverses logical coordinate order. */
 [[nodiscard]] constexpr bool is_reversed(
     sequence_transform transform) noexcept
 {
     return (std::to_underlying(transform) & 1u) != 0u;
 }
 
+/** @brief Return whether a transform complements alphabet ranks. */
 [[nodiscard]] constexpr bool is_complemented(
     sequence_transform transform) noexcept
 {
     return (std::to_underlying(transform) & 2u) != 0u;
 }
 
-/** Return `abs(value)` in the unsigned domain, including `INT64_MIN`. */
+/** Return a negative value's unsigned magnitude, including `INT64_MIN`. */
 [[nodiscard]] constexpr std::uint64_t negative_magnitude(
     std::int64_t value) noexcept
 {

@@ -22,6 +22,7 @@ namespace bioseq::pg::detail {
 
 namespace alignment_exec = bioseq::postgres::table::alignment_execution;
 
+/** @brief Destroys an unregistered frame and detaches its cleanup token. */
 void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {
@@ -38,6 +39,7 @@ void destroy_alignment_frame(alignment_executor_frame* frame) noexcept
 
 namespace {
 
+/** @brief Releases a frame when PostgreSQL resets its query memory context. */
 void alignment_frame_context_cleanup(void* argument)
 {
 	auto* token = static_cast<alignment_frame_cleanup_token*>(argument);
@@ -54,6 +56,11 @@ void alignment_frame_context_cleanup(void* argument)
 
 } // namespace
 
+/**
+ * @brief Registers query-context cleanup for an executor frame once.
+ * @param[in,out] frame Frame whose heap lifetime is tied to the query context.
+ * @param[in] estate Executor state that owns the query memory context.
+ */
 void ensure_alignment_frame_cleanup(
 		alignment_executor_frame* frame,
 		EState* estate)
@@ -73,6 +80,12 @@ void ensure_alignment_frame_cleanup(
 	frame->cleanup_token = token;
 }
 
+/**
+ * @brief Attaches an alignment scan node to the executor frame running it.
+ * @param[in] estate Executor state for the scan node.
+ * @param[in] scan_node_id Statement-local scan-node identifier.
+ * @return A borrowed registration handle valid until its frame is retired.
+ */
 [[nodiscard]] alignment_exec::alignment_node_registration_handle
 bind_alignment_node_to_starting_frame(
 		EState* estate,
@@ -119,6 +132,10 @@ bind_alignment_node_to_starting_frame(
 	};
 }
 
+/**
+ * @brief Marks an executor frame finished and releases it when cleanup no longer owns it.
+ * @param[in,out] frame Frame to unlink, or null when no frame was registered.
+ */
 void retire_alignment_frame(alignment_executor_frame* frame) noexcept
 {
 	if (frame == nullptr) {

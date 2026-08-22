@@ -35,10 +35,13 @@ add_library(jinja2cpp
   "${JINJA2CPP_SOURCE_DIR}/src/testers.cpp"
   "${JINJA2CPP_SOURCE_DIR}/src/value.cpp"
 )
+# Keep the manifest-selected dependency headers ahead of ambient system-prefix
+# headers so the compiled archive and its imported link targets share one ABI.
 set_target_properties(jinja2cpp PROPERTIES
   CXX_EXTENSIONS OFF
   CXX_STANDARD 17
   CXX_STANDARD_REQUIRED ON
+  NO_SYSTEM_FROM_IMPORTED ON
   POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(jinja2cpp

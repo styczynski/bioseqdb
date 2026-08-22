@@ -1,17 +1,22 @@
-// Integration coverage for `bioseq.create_sample_table`,
-// `bioseq.inspect_locator`, and the per-fragment row layout.
-//
-// USING bioseq tables emit zero rows for SELECT-without-mmsearch by design
-// (the columnar custom scan only fires when mmsearch is in the qual list).
-// The same applies to sub-tables, which also use bioseq. Verification uses:
-//   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
-//   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
-//      written; positive size verifies that data exists on disk.
-//   3. `bioseq.inspect_locator` on inline literals verifies the locator layout
-//      is wired. The insertion scenario exercises the stub path by writing
-//      locator stubs into the parent relation.
+/**
+ * @file Integration coverage for `bioseq.create_sample_table`,
+ * `bioseq.inspect_locator`, and the per-fragment row layout.
+ *
+ * USING bioseq tables emit zero rows for SELECT-without-mmsearch by design
+ * (the columnar custom scan only fires when mmsearch is in the qual list).
+ * The same applies to sub-tables, which also use bioseq. Verification uses:
+ *   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
+ *   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
+ *      written. Positive size verifies that data exists on disk.
+ *   3. `bioseq.inspect_locator` on inline literals verifies the locator layout
+ *      is wired. The insertion scenario exercises the stub path by writing
+ *      locator stubs into the parent relation.
+ */
 
-#include <tests/support/postgres.hpp>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;

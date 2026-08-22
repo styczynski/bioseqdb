@@ -257,6 +257,11 @@ def _address_space_preexec(limit_mib: int | None):
     """Return a preexec hook that caps RLIMIT_AS, or None when unbounded."""
     if limit_mib is None:
         return None
+    if sys.platform == "darwin":
+        raise ClusterCommandError(
+            "address-space-limit-mib is unsupported on Darwin: RLIMIT_AS "
+            "includes mandatory process mappings that already exceed the "
+            "requested website limit; omit the option or run on Linux")
     import resource
 
     limit_bytes = int(limit_mib) * 1024 * 1024
@@ -310,7 +315,10 @@ class UniquePrivateCluster:
         socket_parent = inputs.socket_dir_parent or Path(tempfile.gettempdir())
         socket_parent.mkdir(parents=True, exist_ok=True)
         self.socket_dir = Path(
-            tempfile.mkdtemp(prefix=f"bqpg_{os.getpid()}_", dir=str(socket_parent)))
+            tempfile.mkdtemp(
+                prefix=f"bqpg_{os.getpid()}_", dir=str(socket_parent)
+            )
+        ).resolve(strict=True)
         self.log_dir = inputs.log_dir or self.run_dir
         self.server_log = self.log_dir / "server_startup.log"
         self.lifecycle_log = self.log_dir / "lifecycle.log"

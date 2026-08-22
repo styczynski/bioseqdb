@@ -36,11 +36,16 @@ from build_presets import (
     BENCH_CLI_MODES,
     CATCH_FILTER_MODES,
     FIXED_BUILD_ONLY_MODES,
+    LINT_FOCUSED_MODE,
+    LINT_FULL_MODE,
+    LINT_MODES,
     POSTGRES_ERROR_SAFETY_MODE,
     REMOTE_RUN_BUILD_MODES,
     VALID_MODES,
     _MAX_CATCH2_TEST_SPECS,
     _MAX_CATCH2_TEST_SPEC_LENGTH,
+    _MAX_LINT_PATHS,
+    _MAX_LINT_PATH_LENGTH,
     get_modes_short_documentation,
 )
 from build_worker import (
@@ -51,8 +56,6 @@ from build_worker import (
     tool_papers_inspect,
     tool_start_build,
     tool_status,
-    tool_subagent,
-    tool_subagent_status,
 )
 from process_state import (
     _log,
@@ -71,6 +74,7 @@ from remote import (
     tool_remote_status,
     tool_remote_status_ps,
 )
+from subagent import tool_subagent
 
 
 
@@ -125,10 +129,15 @@ TOOL_DEFINITIONS = [
             f"expressions in filter.tags. They are OR-combined and applied to "
             f"every executable in the mode; a binary with no matching test is "
             f"allowed so tags local to one executable work as intended."
+            f"\n\nFocused lint: {LINT_FOCUSED_MODE} requires filter.paths "
+            "with exact repository-relative authored units or build-relative "
+            "generated units. Generated diagnostics include authored Ninja "
+            "owner candidates. lint-full accepts no filter."
             f"\nGuarded build-only calls may set fresh=true and "
             f"build_timeout_sec up to {MAX_BUILD_PHASE_TIMEOUT_SEC}; "
             "TERM begins one minute before that hard cutoff. Runtime-only "
-            "calls require a matching successful build receipt."
+            "calls require a matching successful build receipt. Lint modes "
+            "use their mode-wide analysis deadline and reject build_timeout_sec."
         ),
         "inputSchema": {
             "type": "object",
@@ -166,7 +175,8 @@ TOOL_DEFINITIONS = [
                         "Build-only configure/generate/compile/link cutoff. "
                         "At one minute before the cutoff the exact worker "
                         "descendant groups receive TERM; validated survivors "
-                        "receive KILL by the cutoff."
+                        "receive KILL by the cutoff. Lint modes reject this "
+                        "build-phase-only control."
                     ),
                 },
                 "run_only": {
@@ -211,7 +221,8 @@ TOOL_DEFINITIONS = [
                         "OR-combined and applied to every executable in the mode. For CLI "
                         f"benchmark modes ({', '.join(BENCH_CLI_MODES)}), tags/benchmarks/cases "
                         "map to repeatable --filter flags; arrays are OR-sets and axes AND "
-                        "together. Other modes do not accept filter. Omit it for the full run."
+                        f"together. {LINT_FOCUSED_MODE} accepts only paths. Other modes do "
+                        "not accept filter. Omit it for the full run."
                     ),
                     "properties": {
                         "tags":       {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
@@ -219,7 +230,28 @@ TOOL_DEFINITIONS = [
                         "cases":      {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
                                        "description": "Within selected benchmarks, run only these matrix.over cases (algorithm names)."},
                         "benchmarks": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1,
-                                       "description": "Run only these benchmark keys. (Maps to the bench CLI's singular `benchmark=`.)"}
+                                       "description": (
+                                           "Run only these benchmark keys. (Maps to the "
+                                           "bench CLI's singular `benchmark=`.)"
+                                       )},
+                        "paths": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": _MAX_LINT_PATHS,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": _MAX_LINT_PATH_LENGTH,
+                                "pattern": (
+                                    "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))"
+                                    "(?!.*//)(?!.*\\\\).+\\.(?:c|cc|cpp|cppm|cxx)$"
+                                ),
+                            },
+                            "description": (
+                                "lint-focused only. Exact normalized source-root-relative "
+                                "authored units or build-root-relative generated units."
+                            ),
+                        },
                     }
                 },
                 "bench_e2e_config": {
@@ -245,6 +277,71 @@ TOOL_DEFINITIONS = [
                 }
             },
             "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": LINT_FOCUSED_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "required": ["filter"],
+                        "properties": {
+                            "filter": {
+                                "required": ["paths"],
+                                "not": {
+                                    "anyOf": [
+                                        {"required": ["tags"]},
+                                        {"required": ["benchmarks"]},
+                                        {"required": ["cases"]},
+                                    ],
+                                },
+                            },
+                        },
+                    },
+                    "else": {
+                        "properties": {
+                            "filter": {
+                                "not": {"required": ["paths"]},
+                            },
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"enum": sorted(LINT_MODES)},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "required": ["build_only"],
+                        "properties": {
+                            "build_only": {"const": True},
+                        },
+                        "not": {
+                            "anyOf": [
+                                {"required": ["debug"]},
+                                {"required": ["debug_report"]},
+                                {"required": ["bench_e2e_config"]},
+                                {"required": ["build_timeout_sec"]},
+                                {"required": ["run_only"]},
+                                {"required": ["reuse_build_receipt"]},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {"const": LINT_FULL_MODE},
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "not": {"required": ["filter"]},
+                    },
+                },
                 {
                     "if": {
                         "properties": {"run_only": {"const": True}},
@@ -640,75 +737,223 @@ TOOL_DEFINITIONS = [
     {
         "name": "subagent",
         "description": (
-            "CROSS-MODEL SUBAGENT ONLY — this tool is specifically for delegating work to a "
-            "different AI model (Codex). For same-model subtasks use the built-in Agent tool "
-            "instead; reserve this tool for hard tasks that genuinely benefit from an independent "
-            "model's perspective (e.g. deep refactors, second-opinion code reviews, complex "
-            "multi-file edits).\n\n"
-            "Schedules a detached Codex subagent (returns immediately — mirrors the start_build "
-            "pattern). At most one subagent runs at a time; calling while one is already running "
-            "returns the current status instead of starting a duplicate. "
-            "Use subagent_status to poll for completion and read the result.\n\n"
-            "The subagent: (1) reads the project coding guidelines "
-            "(0321_BIOSEQ_CODE_AND_WORKFLOW_GUIDELINES.md), (2) executes the given task in full "
-            "(non-interactive, no deferral), (3) self-reviews via a nested sub-subagent until "
-            "saturation, and (4) writes a structured JSON result file containing:\n"
-            "  task_status  — detailed completion summary\n"
-            "  bugs         — bugs surfaced during the task\n"
-            "  risks        — risks to flag to the parent agent\n"
-            "  changed_files — list of files modified\n"
-            "  review_tldr  — key takeaways from the self-review pass\n"
-            "  output       — one entry per requested_output item, in order"
+            "Persistent multi-account subagent workforce. A repository-scoped registry and "
+            "message bus are atomically written under one cross-process lock and shared by ROOT "
+            "and every recursively spawned agent. Numeric IDs are monotonic and never reused; "
+            "descriptions, server-derived parents, labels, lifecycle, quotas, logs, metrics, and "
+            "bus messages survive MCP restarts. Agent terminals use a private tmux socket and "
+            "survive an MCP crash. Caller ID plus an opaque capability are inherited through the "
+            "environment. An unmarked caller defaults to ID 0, but only the oldest validated "
+            "unmarked process can be ROOT; managed-process ancestry blocks marker deletion. These "
+            "controls are cooperative defense-in-depth, not a hostile security boundary, because "
+            "every --yolo agent runs as the same OS user.\n\n"
+            "Commands:\n"
+            "- status: lazily sample each available account's weekly quota no more than once per "
+            "five minutes through the structured Codex endpoint that backs /status, then return "
+            "weekly percent remaining, every registered agent, and its "
+            "account. Metrics include direct/recursive child counts (ever and live); tokens for "
+            "self, self plus direct children, and the full recursive subtree; interruption count; "
+            "and time since state change, last interruption, newest CLI log, and newest assistant "
+            "message. Unknown token data is explicitly incomplete, never zero. After six valid "
+            "five-minute samples, status reports average depletion plus per-account and aggregate "
+            "linear exhaustion estimates. More than 10 interruptions warns that resumes resend "
+            "growing context.\n"
+            "- create: atomically reserve budget/account/ID before launching a tmux-backed agent. "
+            "instructions are the task; description is human-readable workforce metadata of at "
+            "least 200 characters after surrounding whitespace is removed.\n"
+            "- interrupt: send Escape to a WORKING Codex agent. Without instructions it becomes "
+            "INTERRUPTED; meaningful instructions receive the coordination prefix and transition "
+            "it to WORKING. Cursor print mode is one-shot: the controller requires its documented "
+            "system/init chat ID, sends Escape, briefly observes whether the headless process "
+            "exits, then atomically replaces it with an owned idle supervisor or an exact-chat "
+            "resume. Each Cursor invocation has a generation-specific stream log, also copied to "
+            "the agent's aggregate log, so delayed output from an earlier process cannot prove a "
+            "new resume. If headless Cursor does not acknowledge Escape, operation_state and warnings "
+            "say FORCED_STOP instead of pretending interactive cancellation. Without a chat ID, "
+            "the replacement is rejected without stopping current work. Bare and instruction-"
+            "bearing interrupts both use the five-minute quota cache and return warnings when "
+            "quota is stale, unknown, or below 3%.\n"
+            "- logs: read a sanitized tail of at most 2,000 lines and 60,000 characters from any "
+            "agent's persistent CLI log; logs are open regardless of tier.\n"
+            "- kill: terminate the owned process while preserving record, logs, metrics, vendor "
+            "conversation ID, and KILLED state. Kill is the sole operation allowed to supersede a "
+            "stale cleanup-required transaction, so ambiguous delivery never strands paid budget.\n"
+            "- repurpose: update description/label/ceiling and submit a new assignment. KILLED "
+            "agents resume the exact vendor conversation on the original account. If that account "
+            "is exhausted, the tool honestly rejects resume and recommends load-balanced create.\n"
+            "- bus-write / bus-read: append to the locked shared JSON bus or read its newest "
+            "messages (25 by default); authorship is derived from caller identity.\n\n"
+            "Public lifecycle has exactly four states. ROOT is ID 0 with no managed process. "
+            "WORKING means a launch/resume or active assignment is consuming budget. INTERRUPTED "
+            "means an owned runtime is live but idle after explicit interruption or natural Codex "
+            "turn completion and still consumes budget (Cursor uses an idle supervisor). KILLED "
+            "means no live managed provider process, "
+            "including requested kill or normal completion of one-shot Cursor; operation_state "
+            "records the precise completion/failure reason. Killed records may retain resumable "
+            "vendor context.\n\n"
+            "Tiers and fixed live-budget costs: specialist = gpt-5.6-sol/max (100) for the hardest "
+            "architecture/research/implementation; senior = gpt-5.6-sol/high (70) for difficult "
+            "design, review, and implementation; mid = gpt-5.6-terra/high (50) for ordinary "
+            "nontrivial work; intern = gpt-5.6-terra/medium (22) for bounded simple work; and "
+            "contractor-intern = fast, cheap, weaker Cursor Composer 2.5 (canonical Cursor CLI "
+            "model ID composer-2.5; cost 1) for simplistic or "
+            "mechanical tasks only. Use contractor-intern first only when the work is truly "
+            "trivial, then escalate to intern if needed. The hardcoded simultaneous budget is "
+            "4000; it is adjustable in code but callers must never alter it to force allocation. "
+            "WORKING and INTERRUPTED both count. Codex allocation chooses fewer live agents, then "
+            "more weekly quota. Below 3%, an account gets no new agents, but existing work may "
+            "continue even at 0%; avoid interruptions because the next resume can fail.\n\n"
+            "On create, omitted/null highest_spawn_tier defaults to the new agent's tier; an "
+            "explicit value can narrow or raise it only within the caller's authority. On "
+            "repurpose, omission preserves the ceiling and explicit null resets it to the target's "
+            "own tier. This authority governs create, interrupt, kill, and repurpose; status, logs, "
+            "and bus-read are open. Targeted commands default agent_id to 0, whose mutation is "
+            "rejected. Repurpose label omission preserves the old label. Labels general-purpose, "
+            "review, audit, and implementation are display-only matters of taste. create, "
+            "repurpose, and instruction-bearing interrupt prepend only a compact coordination "
+            "prefix with ID, tier, bus count, effective tiers, and anti-passive-delegation advice.\n\n"
+            "ROOT MUST use quota and activity metrics to prevent delegation degradation. An agent "
+            "that waits while recursively delegating makes interns do the substantive work and "
+            "degrades quality; uncontrolled recursion burns quota on duplicates. Specialists and "
+            "seniors may delegate justified parallel slices but must do most work themselves. "
+            "Lower tiers should spawn only in critical cases. Several specialists may be justified "
+            "for a genuinely complex refactor plan; an army for a minor utility edit is wasteful."
         ),
         "inputSchema": {
             "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": (
-                        "The task prompt to send to the Codex subagent. Write it as you "
-                        "would a detailed ticket: include context, goals, acceptance criteria, "
-                        "and any file paths or symbols the subagent should focus on."
-                    ),
+            "oneOf": [
+                {
+                    "title": "status",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "status"},
+                    },
+                    "required": ["command"],
                 },
-                "requested_outputs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Optional list of named outputs you want the subagent to produce "
-                        "in the `output` array of its JSON response. Each string is a "
-                        "free-form request — e.g. 'review feedback summary', "
-                        "'describe the most critical bug found', 'list all changed APIs'. "
-                        "The subagent fills one `output` slot per item, in the same order. "
-                        "Omit or pass [] to leave `output` empty."
-                    ),
+                {
+                    "title": "create",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "create"},
+                        "reasoning_effort": {
+                            "type": "string",
+                            "enum": ["contractor-intern", "intern", "mid", "senior", "specialist"],
+                            "description": "Portable workforce tier; mapped to the documented model and vendor effort.",
+                        },
+                        "instructions": {
+                            "type": "string", "minLength": 1, "maxLength": 100000,
+                            "description": "Concrete task sent to the new agent; whitespace-only text is rejected at runtime.",
+                        },
+                        "description": {
+                            "type": "string", "minLength": 200, "maxLength": 8000,
+                            "description": "Human-readable purpose shown in status; at least 200 characters after trimming.",
+                        },
+                        "highest_spawn_tier": {
+                            "type": ["string", "null"],
+                            "enum": [None, "contractor-intern", "intern", "mid", "senior", "specialist"],
+                            "description": "Omitted/null defaults to the new agent's tier; explicit values cannot exceed caller authority.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "enum": ["general-purpose", "review", "audit", "implementation"],
+                            "default": "general-purpose",
+                            "description": "Display-only organizational label with no scheduling or permission effect.",
+                        },
+                    },
+                    "required": ["command", "reasoning_effort", "instructions", "description"],
                 },
-                "timeout_sec": {
-                    "type": "integer",
-                    "default": 3600,
-                    "minimum": 60,
-                    "maximum": 7200,
-                    "description": "Hard timeout in seconds (default 3600 = 60 min).",
+                {
+                    "title": "interrupt",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "interrupt"},
+                        "agent_id": {
+                            "type": "integer", "minimum": 0, "default": 0,
+                            "description": "Target numeric ID; omitted means ROOT (0), whose mutation is rejected.",
+                        },
+                        "instructions": {
+                            "type": "string", "minLength": 1, "maxLength": 100000,
+                            "description": "Optional new assignment; omission is Escape-only and whitespace-only text is rejected.",
+                        },
+                    },
+                    "required": ["command"],
                 },
-            },
-            "required": ["prompt"],
-        },
-    },
-    {
-        "name": "subagent_status",
-        "description": (
-            "Report the status of the most recently scheduled subagent. "
-            "While running, returns current step, elapsed time, and ETA. "
-            "After completion, returns the full result content (if ≤ 8 KB) "
-            "or the path to the result file for larger outputs, plus the "
-            "log file path for detailed JSONL event inspection."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {},
-            "required": [],
+                {
+                    "title": "logs",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "logs"},
+                        "agent_id": {"type": "integer", "minimum": 0, "default": 0},
+                        "lines": {
+                            "type": "integer", "minimum": 1, "maximum": 2000, "default": 200,
+                            "description": "Tail line count; the response is additionally capped at 60,000 characters.",
+                        },
+                    },
+                    "required": ["command"],
+                },
+                {
+                    "title": "kill",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "kill"},
+                        "agent_id": {"type": "integer", "minimum": 0, "default": 0},
+                    },
+                    "required": ["command"],
+                },
+                {
+                    "title": "repurpose",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "repurpose"},
+                        "agent_id": {"type": "integer", "minimum": 0, "default": 0},
+                        "instructions": {
+                            "type": "string", "minLength": 1, "maxLength": 100000,
+                            "description": "New assignment submitted in the retained context.",
+                        },
+                        "description": {
+                            "type": "string", "minLength": 200, "maxLength": 8000,
+                            "description": "Replacement human-readable purpose shown in status.",
+                        },
+                        "highest_spawn_tier": {
+                            "type": ["string", "null"],
+                            "enum": [None, "contractor-intern", "intern", "mid", "senior", "specialist"],
+                            "description": "Omission preserves the ceiling; null resets it to the target's own tier.",
+                        },
+                        "label": {
+                            "type": "string",
+                            "enum": ["general-purpose", "review", "audit", "implementation"],
+                            "description": "Display-only label; omission preserves the existing label.",
+                        },
+                    },
+                    "required": ["command", "instructions", "description"],
+                },
+                {
+                    "title": "bus-read",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "bus-read"},
+                        "message_count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 25},
+                    },
+                    "required": ["command"],
+                },
+                {
+                    "title": "bus-write",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "command": {"type": "string", "const": "bus-write"},
+                        "message": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    },
+                    "required": ["command", "message"],
+                },
+            ],
         },
     },
 ]
@@ -1490,7 +1735,12 @@ def _handle_tools_call(params: dict) -> dict:
         args = params["arguments"]
         if not isinstance(args, dict):
             raise RuntimeError("tool arguments must be an object")
-    _reject_unknown_tool_arguments(name, args)
+    # subagent performs complete branch-aware validation itself so direct and
+    # public MCP calls return the same stable JSON envelope.  The generic
+    # helper only rejects unknown keys and would otherwise turn these expected
+    # validation failures into transport-level JSON-RPC errors.
+    if name != "subagent":
+        _reject_unknown_tool_arguments(name, args)
     if name == "start_build":
         mode = args.get("mode", "")
         build_only: bool = parse_bool("build_only", args.get("build_only", False))
@@ -1540,15 +1790,7 @@ def _handle_tools_call(params: dict) -> dict:
     elif name == "papers-inspect":
         return tool_papers_inspect(args)
     elif name == "subagent":
-        prompt_text = args.get("prompt", "")
-        timeout_sec = int(args.get("timeout_sec", 3600))
-        requested_outputs = args.get("requested_outputs") or []
-        if not isinstance(requested_outputs, list):
-            requested_outputs = []
-        text = tool_subagent(prompt_text, timeout_sec=timeout_sec,
-                             requested_outputs=requested_outputs)
-    elif name == "subagent_status":
-        text = tool_subagent_status()
+        text = tool_subagent(args)
     elif name == "remote-status":
         text = tool_remote_status()
     elif name == "remote-debug":

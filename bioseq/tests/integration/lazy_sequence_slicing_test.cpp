@@ -1,24 +1,17 @@
-// SQL slicing, letter, algebra, bridge, and durable-boundary integration tests.
+/** @file SQL slicing, algebra, bridge, and durable-boundary integration tests. */
 
-#include <tests/support/postgres.hpp>
-#include <bioseq/pg_build_profile.h>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cstdint>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
 
 namespace {
 
-std::optional<std::string> boundary_explain_property(
+/** Return one property from the matching lazy-boundary EXPLAIN section. */
+[[nodiscard]] std::optional<std::string> boundary_explain_property(
         std::span<const std::string> plan,
         std::string_view mechanism,
         std::string_view reason,
@@ -55,16 +48,20 @@ std::optional<std::string> boundary_explain_property(
     return std::nullopt;
 }
 
-std::optional<std::size_t> plan_line_index(
+/** Locate the first plan line containing the requested marker. */
+[[nodiscard]] std::optional<std::size_t> plan_line_index(
         std::span<const std::string> plan,
         std::string_view needle) {
     for (std::size_t index = 0; index < plan.size(); ++index) {
-        if (plan[index].find(needle) != std::string::npos) return index;
+        if (plan[index].find(needle) != std::string::npos) {
+            return index;
+        }
     }
     return std::nullopt;
 }
 
-std::size_t plan_line_count(
+/** Count plan lines containing the requested marker. */
+[[nodiscard]] std::size_t plan_line_count(
         std::span<const std::string> plan,
         std::string_view needle) {
     return static_cast<std::size_t>(std::count_if(
@@ -118,16 +115,16 @@ TEST_CASE("Python coordinates and letter access are exact",
     REQUIRE(unbound.sqlstate == "42804");
 }
 
-TEST_CASE("letter validation hook chains and walks nested queries",
+TEST_CASE("letter validation hook walks nested queries without reentry",
           "[component:bioseq][layer:integration][feature:alphabet][resource:postgres]") {
     auto ctx = fresh_context({"sequence_slicing_letter_hook_ctas"});
     exec_sql(ctx, "SET statement_timeout='2s';");
 
     REQUIRE(query_scalar(
         ctx,
-        "SELECT current_setting('shared_preload_libraries') LIKE "
-        "       '%auth_permission_dialog%' "
-        "   AND current_setting('shared_preload_libraries') LIKE '%bioseq%';")
+        "SELECT EXISTS (SELECT 1 FROM unnest(string_to_array("
+        "       current_setting('shared_preload_libraries'), ',')) AS entry "
+        "       WHERE btrim(entry) = 'bioseq');")
         == "t");
 
     const auto simple_before = query_scalar_int(
@@ -137,9 +134,8 @@ TEST_CASE("letter validation hook chains and walks nested queries",
         ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
     // The second diagnostic query contributes one call itself.  The other
     // delta entry is the probe SELECT, confirming bioseq is reached exactly once
-    // through the installed preload-hook chain rather than skipped or
-    // recursively re-entered.  This remains exact whichever preload hook was
-    // installed last and therefore owns the outermost callback.
+    // through the installed preload hook rather than skipped or recursively
+    // re-entered.
     REQUIRE(simple_after - simple_before == 2);
 
     const auto nested_before = query_scalar_int(

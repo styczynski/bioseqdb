@@ -1,4 +1,7 @@
-/* Explicit string and array materialization/concat bridges for bioseq.seq. */
+/**
+ * @file array_string.cppm
+ * @brief String and array materialization bridges for compact sequences.
+ */
 module;
 
 #include <algorithm>
@@ -35,12 +38,14 @@ import bioseq.sequences.rank_pack;
 
 namespace {
 
+/** @brief Deconstructed PostgreSQL array elements as Datum pointers and null flags. */
 struct deconstructed_array {
     Datum* values;
     bool* nulls;
     int count;
 };
 
+/** @brief Unbound literal sequence built from array elements plus source array metadata. */
 struct literal_array_value {
     Datum literal;
     int count;
@@ -48,6 +53,11 @@ struct literal_array_value {
     std::uint8_t alphabet_code;
 };
 
+/**
+ * @brief Rejects PostgreSQL arrays with more than one dimension for bridge operations.
+ * @param array Input array whose dimension count is checked.
+ * @param kind Label inserted into the error message, such as `text` or `letter`.
+ */
 inline void validate_bridge_array_shape(
     ArrayType const* array,
     char const* kind)
@@ -60,6 +70,11 @@ inline void validate_bridge_array_shape(
     }
 }
 
+/**
+ * @brief Reports a PostgreSQL error for a null array element during concatenation.
+ * @param array Source array used to compute the reported subscript.
+ * @param offset Zero-based element index within the deconstructed array.
+ */
 [[noreturn]] inline void array_null_error(
     ArrayType const* array,
     int offset)
@@ -73,6 +88,11 @@ inline void validate_bridge_array_shape(
     __builtin_unreachable();
 }
 
+/**
+ * @brief Deconstructs a `text[]` array into Datum values and per-element null flags.
+ * @param array PostgreSQL array value to deconstruct.
+ * @return Element pointers, null bitmap, and count owned by the deconstruction buffers.
+ */
 [[nodiscard]] inline deconstructed_array deconstruct_text_values(
     ArrayType* array)
 {
@@ -83,6 +103,11 @@ inline void validate_bridge_array_shape(
     return result;
 }
 
+/**
+ * @brief Deconstructs a `bioseq.letter[]` array into Datum values and per-element null flags.
+ * @param array PostgreSQL array value to deconstruct.
+ * @return Element pointers, null bitmap, and count owned by the deconstruction buffers.
+ */
 [[nodiscard]] inline deconstructed_array deconstruct_letter_values(
     ArrayType* array)
 {
@@ -93,6 +118,11 @@ inline void validate_bridge_array_shape(
     return result;
 }
 
+/**
+ * @brief Concatenates `text[]` element payloads into one unbound sequence literal Datum.
+ * @param array Zero- or one-dimensional text array with no null elements.
+ * @return Literal Datum, element count, and unbound alphabet metadata for concatenation.
+ */
 [[nodiscard]] inline literal_array_value text_array_literal(ArrayType* array)
 {
     validate_bridge_array_shape(array, "text");
@@ -141,6 +171,11 @@ inline void validate_bridge_array_shape(
     };
 }
 
+/**
+ * @brief Reports a PostgreSQL error when letter array elements use different alphabets.
+ * @param expected Alphabet code recorded from the first validated element.
+ * @param actual Alphabet code from the conflicting element.
+ */
 [[noreturn]] inline void mixed_letter_alphabet_error(
     std::uint8_t expected,
     std::uint8_t actual)
@@ -159,6 +194,11 @@ inline void validate_bridge_array_shape(
     __builtin_unreachable();
 }
 
+/**
+ * @brief Builds an unbound sequence literal from `bioseq.letter[]` ranks as ASCII symbols.
+ * @param array Zero- or one-dimensional letter array with no null elements.
+ * @return Literal Datum, element count, and inferred alphabet metadata when non-empty.
+ */
 [[nodiscard]] inline literal_array_value letter_array_literal(ArrayType* array)
 {
     validate_bridge_array_shape(array, "letter");
@@ -197,6 +237,11 @@ inline void validate_bridge_array_shape(
     };
 }
 
+/**
+ * @brief Classifies a sequence Datum and rejects unresolved locator values.
+ * @param input Inline, expanded, or toasted sequence Datum.
+ * @return Descriptor with alphabet binding and logical length for the resolved value.
+ */
 [[nodiscard]] inline pg_sequence_descriptor inspect_sequence(Datum input)
 {
     Datum dispatch = input;
@@ -218,6 +263,14 @@ inline void validate_bridge_array_shape(
     return descriptor;
 }
 
+/**
+ * @brief Concatenates a sequence with an array-derived unbound literal leaf.
+ * @param sequence Existing sequence operand.
+ * @param literal Unbound literal built from array elements, freed after use when non-empty.
+ * @param array_on_left Whether the literal is placed before the sequence operand.
+ * @param letter_array Whether alphabet binding rules apply to the literal side.
+ * @return New concatenated sequence Datum allocated in the current memory context.
+ */
 [[nodiscard]] inline Datum concat_array_literal(
     Datum sequence,
     literal_array_value literal,
@@ -251,6 +304,12 @@ inline void validate_bridge_array_shape(
     return result;
 }
 
+/**
+ * @brief Maps alphabet and width bits into normalized bound-sequence type parameters.
+ * @param alphabet Compiled alphabet code for the packed result.
+ * @param width_bits Storage width in bits, one of 8, 16, 32, or 64.
+ * @return Normalized alphabet and storage-unit byte width for dispatch.
+ */
 [[nodiscard]] inline compact_sequence_stdc_type_params array_target_type(
     std::uint8_t alphabet,
     int32_t width_bits)
@@ -270,6 +329,14 @@ inline void validate_bridge_array_shape(
     };
 }
 
+/**
+ * @brief Packs a `bioseq.letter[]` array into a bound flat `bioseq.seq` value.
+ * @param array Letter array whose elements are validated and rank-packed.
+ * @param alphabet Expected alphabet when inference is disabled, or overridden when required.
+ * @param width_bits Storage width in bits for the packed flat header.
+ * @param require_nonempty When true, requires a one-dimensional non-empty array and infers alphabet from the first element.
+ * @return Flat bound sequence Datum allocated in the current memory context.
+ */
 [[nodiscard]] inline Datum packed_from_letter_array(
     ArrayType* array,
     std::uint8_t alphabet,
@@ -404,6 +471,12 @@ inline void validate_bridge_array_shape(
 
 export namespace bioseq::pg_types::sql_routines {
 
+/**
+ * @brief Concatenates a sequence with a `text[]` array using the `||` operator.
+ * @param sequence Left sequence operand.
+ * @param array Right text array whose element text is concatenated in order.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -430,6 +503,12 @@ Datum seq_concat_text_array(
         sequence, literal, false, false);
 }
 
+/**
+ * @brief Concatenates a `text[]` array with a sequence using the `||` operator.
+ * @param array Left text array whose element text is concatenated in order.
+ * @param sequence Right sequence operand.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -456,6 +535,12 @@ Datum text_array_concat_seq(
         sequence, literal, true, false);
 }
 
+/**
+ * @brief Concatenates a sequence with a `bioseq.letter[]` array using the `||` operator.
+ * @param sequence Left bound sequence operand.
+ * @param array Right letter array whose ranks are appended after alphabet validation.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -482,6 +567,12 @@ Datum seq_concat_letter_array(
         sequence, literal, false, true);
 }
 
+/**
+ * @brief Concatenates a `bioseq.letter[]` array with a sequence using the `||` operator.
+ * @param array Left letter array whose ranks are prepended after alphabet validation.
+ * @param sequence Right bound sequence operand.
+ * @return Concatenated sequence Datum.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -508,6 +599,12 @@ Datum letter_array_concat_seq(
         sequence, literal, true, true);
 }
 
+/**
+ * @brief Returns PostgreSQL `array_length` for dimension one of a sequence.
+ * @param input Sequence whose logical letter count is measured.
+ * @param dimension Requested dimension index, only `1` yields a length.
+ * @return Letter count for dimension one, or empty when the dimension is not one.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -527,6 +624,11 @@ std::optional<std::int64_t> array_length(
         sequence_logical_length(input));
 }
 
+/**
+ * @brief Returns the number of logical letters in a sequence.
+ * @param input Sequence whose logical length is read without full materialization.
+ * @return Base-pair letter count as a signed 64-bit integer.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -542,6 +644,11 @@ std::int64_t cardinality(
         sequence_logical_length(input));
 }
 
+/**
+ * @brief Assignment cast from `bioseq.seq` to PostgreSQL `text`.
+ * @param input Sequence Datum materialized as ASCII text.
+ * @return Allocated `text` value in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -563,6 +670,11 @@ text* to_text(
         input, materialization_reason::sql_conversion);
 }
 
+/**
+ * @brief Assignment cast from `bioseq.seq` to PostgreSQL `varchar`.
+ * @param input Sequence Datum materialized as ASCII text.
+ * @return Allocated `text` value in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -584,6 +696,11 @@ text* to_varchar(
         input, materialization_reason::sql_conversion);
 }
 
+/**
+ * @brief Materializes a bound sequence as a one-dimensional `bioseq.letter[]` array.
+ * @param input Bound sequence Datum whose ranks are copied into letter Datums.
+ * @return PostgreSQL array allocated in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -623,7 +740,8 @@ ArrayType* to_array(
             static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
         return result;
     }
-    if (descriptor.bp_length > static_cast<std::uint64_t>(INT_MAX)) {
+    if (descriptor.bp_length >
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to materialize as letter[]")));
@@ -681,6 +799,12 @@ ArrayType* to_array(
     return result;
 }
 
+/**
+ * @brief Builds a bound sequence from a letter array with alphabet inferred from the first element.
+ * @param array One-dimensional non-empty `bioseq.letter[]` input.
+ * @param width_bits Storage width in bits for the packed flat header.
+ * @return Flat bound sequence Datum allocated in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,
@@ -700,6 +824,13 @@ Datum from_array(
         array, pgseq_unbound_alphabet_code, width_bits, true);
 }
 
+/**
+ * @brief Builds a bound sequence from a letter array with an explicit alphabet name.
+ * @param array `bioseq.letter[]` input whose elements must match the named alphabet.
+ * @param alphabet_name Supported alphabet name parsed for dispatch.
+ * @param width_bits Storage width in bits for the packed flat header.
+ * @return Flat bound sequence Datum allocated in the current memory context.
+ */
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
     .volatility = bioseq::sql::volatility::immutable,

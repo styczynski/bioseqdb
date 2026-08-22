@@ -34,13 +34,19 @@ import bioseq.sequences.kmers.highway_minimizer_contract;
 
 namespace bioseq::indexing::detail {
 
+/** @brief Tracks live and peak bytes allocated by the transient hash table. */
 struct minimizer_hashmap_table_allocation_state {
     std::uint64_t live_bytes = 0u;
     std::uint64_t peak_bytes = 0u;
 };
 
+/**
+ * @brief Accounts allocations made by the transient Boost hash table.
+ * @tparam p_value Allocated value type
+ */
 template <class p_value>
 struct minimizer_hashmap_table_allocator {
+    /// Element type allocated for the Boost table.
     using value_type = p_value;
     using propagate_on_container_copy_assignment = std::false_type;
     using propagate_on_container_move_assignment = std::false_type;
@@ -50,15 +56,20 @@ struct minimizer_hashmap_table_allocator {
     minimizer_hashmap_table_allocation_state* state = nullptr;
 
     minimizer_hashmap_table_allocator() noexcept = default;
+    /// Bind allocations to one table-local live and peak byte counter.
     explicit minimizer_hashmap_table_allocator(
             minimizer_hashmap_table_allocation_state* state_) noexcept
         : state(state_) {}
 
+    /// Rebind an allocator while preserving its shared accounting state.
+    /// @tparam p_other_value Source allocator element type.
     template <class p_other_value>
     minimizer_hashmap_table_allocator(
             const minimizer_hashmap_table_allocator<p_other_value>& other) noexcept
         : state(other.state) {}
 
+    /// Allocate `count` elements and update live and peak byte accounting.
+    /// @throws std::bad_alloc When byte accounting overflows or allocation fails.
     [[nodiscard]] p_value* allocate(std::size_t count) {
         if (state == nullptr
             || count > (std::numeric_limits<std::uint64_t>::max)()
@@ -82,6 +93,7 @@ struct minimizer_hashmap_table_allocator {
         }
     }
 
+    /// Deallocate `count` elements and subtract their bytes from live accounting.
     void deallocate(p_value* allocation, std::size_t count) noexcept {
         const std::uint64_t bytes =
             static_cast<std::uint64_t>(count) * sizeof(p_value);
@@ -92,6 +104,8 @@ struct minimizer_hashmap_table_allocator {
         }
     }
 
+    /// Compare allocator identity by the shared accounting state address.
+    /// @tparam p_other_value Compared allocator element type.
     template <class p_other_value>
     friend struct minimizer_hashmap_table_allocator;
 
@@ -102,9 +116,12 @@ struct minimizer_hashmap_table_allocator {
     }
 };
 
+/** @brief Owns the transient hash table and its allocation accounting. */
 struct minimizer_hashmap_fragment_index_table {
+    /// Accounting allocator used by the pinned Boost flat-map implementation.
     using allocator_type = minimizer_hashmap_table_allocator<
         std::pair<const std::uint64_t, std::uint64_t>>;
+    /// Transient hash-to-packed-position-range table type.
     using table_type = boost::unordered_flat_map<
         std::uint64_t,
         std::uint64_t,
@@ -115,6 +132,7 @@ struct minimizer_hashmap_fragment_index_table {
     minimizer_hashmap_table_allocation_state allocation;
     table_type table;
 
+    /// Construct an empty table bound to its own allocation counters.
     minimizer_hashmap_fragment_index_table()
         : allocation{},
           table(
@@ -123,12 +141,14 @@ struct minimizer_hashmap_fragment_index_table {
               std::equal_to<std::uint64_t>{},
               allocator_type{&allocation}) {}
 
+    /// Copy table contents into fresh allocation-accounting state.
     minimizer_hashmap_fragment_index_table(
             const minimizer_hashmap_fragment_index_table& other)
         : minimizer_hashmap_fragment_index_table() {
         table = other.table;
     }
 
+    /// Replace table contents while retaining this table's accounting state.
     minimizer_hashmap_fragment_index_table& operator=(
             const minimizer_hashmap_fragment_index_table& other) {
         if (this != &other) table = other.table;
@@ -154,6 +174,11 @@ namespace {
 using exact_status = bioseq::minimizers::two_stack_continuation_status;
 using exact_stats = bioseq::minimizers::two_stack_execution_stats;
 
+/**
+ * @brief Maps a two-stack continuation status to the indexing bridge status.
+ * @param status Kernel-family status
+ * @return Corresponding indexing status
+ */
 [[nodiscard]] constexpr exact_simd_index_status bridge_status(
         exact_status status) noexcept {
     switch (status) {
@@ -190,6 +215,11 @@ using exact_stats = bioseq::minimizers::two_stack_execution_stats;
     return exact_simd_index_status::invalid_state;
 }
 
+/**
+ * @brief Projects two-stack execution counters into indexing counters.
+ * @param stats Kernel-family counters
+ * @return Indexing bridge counters
+ */
 [[nodiscard]] constexpr exact_simd_index_execution_stats bridge_exact_stats(
         const exact_stats& stats) noexcept {
     return exact_simd_index_execution_stats{
@@ -213,6 +243,11 @@ using exact_stats = bioseq::minimizers::two_stack_execution_stats;
     };
 }
 
+/**
+ * @brief Creates a rejected exact-SIMD bridge result.
+ * @param status Rejection status
+ * @return Result with one fail-closed rejection
+ */
 [[nodiscard]] constexpr exact_simd_index_bridge_result rejected_bridge_result(
         exact_simd_index_status status) noexcept {
     return {
@@ -222,6 +257,7 @@ using exact_stats = bioseq::minimizers::two_stack_execution_stats;
     };
 }
 
+/** @brief Adapts the generic minimizer sink to indexing collector callbacks. */
 struct kernel_sink_adapter {
     using sketch_type = bioseq::minimizers::minimap_sketch_data;
     static constexpr std::size_t batch_capacity = 256u;
@@ -233,6 +269,7 @@ struct kernel_sink_adapter {
     static_assert(std::is_standard_layout_v<sketch_type>);
     static_assert(std::same_as<sketch_type::storage_type, std::uint64_t>);
 
+    /// Bind collector callbacks to one fixed-capacity typed output batch.
     explicit kernel_sink_adapter(
             void* context,
             exact_simd_index_append_records records_callback,
@@ -244,13 +281,16 @@ struct kernel_sink_adapter {
     void* collector_context = nullptr;
     exact_simd_index_append_records append_records = nullptr;
     exact_simd_index_append_raw append_raw = nullptr;
-    alignas(sketch_type)
-        std::array<std::byte, batch_capacity * sizeof(sketch_type)> batch;
+    alignas(sketch_type) std::array<std::byte, batch_capacity * sizeof(sketch_type)> batch;
     std::exception_ptr exception{};
     std::size_t committed = 0u;
     bool accepted = true;
     bool acquired = false;
 
+    /**
+     * @brief Validates sink completion against the kernel result.
+     * @param result Completed kernel result
+     */
     void validate(
             const bioseq::minimizers::minimizer_kernel_result& result) {
         if (exception != nullptr) {
@@ -261,6 +301,12 @@ struct kernel_sink_adapter {
         }
     }
 
+    /**
+     * @brief Acquires one typed output batch for the kernel.
+     * @param opaque Adapter state
+     * @param minimum Minimum requested capacity
+     * @return Writable batch view or an empty view on rejection
+     */
     [[nodiscard]] static bioseq::minimizers::minimizer_sink_batch_view acquire(
             void* opaque,
             std::size_t minimum) {
@@ -279,6 +325,11 @@ struct kernel_sink_adapter {
         };
     }
 
+    /**
+     * @brief Commits initialized records from the acquired batch.
+     * @param opaque Adapter state
+     * @param initialized Number of initialized records
+     */
     static void commit(void* opaque, std::size_t initialized) noexcept {
         auto& self = *static_cast<kernel_sink_adapter*>(opaque);
         if (!self.acquired || initialized > batch_capacity) {
@@ -287,6 +338,7 @@ struct kernel_sink_adapter {
         }
         auto* records = std::launder(
             reinterpret_cast<sketch_type*>(self.batch.data()));
+        // Destroy initialized records and release the single acquired batch.
         const auto destroy_records =
             [&self, records, initialized]() noexcept {
                 std::destroy_n(records, initialized);
@@ -310,6 +362,14 @@ struct kernel_sink_adapter {
         }
     }
 
+    /**
+     * @brief Appends an already encoded packed-64 output batch.
+     * @param opaque Adapter state
+     * @param layout Runtime output-layout identity
+     * @param values Packed output values
+     * @param count Number of values
+     * @return `true` when the collector accepted the batch
+     */
     [[nodiscard]] static bool append_raw_u64(
             void* opaque,
             bioseq::minimizers::minimizer_output_layout layout,
@@ -337,6 +397,10 @@ struct kernel_sink_adapter {
         return self.accepted;
     }
 
+    /**
+     * @brief Creates the generic kernel sink view for this adapter.
+     * @return Non-owning kernel sink callbacks
+     */
     [[nodiscard]] bioseq::minimizers::minimizer_sink sink() noexcept {
         return {
             .state = this,
@@ -347,6 +411,7 @@ struct kernel_sink_adapter {
     }
 };
 
+/** @brief Adapts fragmented packed storage to the exact-SIMD kernel source. */
 struct exact_fragment_source_adapter {
     const exact_simd_index_bridge_request* request = nullptr;
     std::size_t letters_per_unit = 0u;
@@ -354,6 +419,12 @@ struct exact_fragment_source_adapter {
     std::size_t consume_begin_bp = 0u;
     std::size_t consume_end_bp = 0u;
 
+    /**
+     * @brief Borrows one packed fragment and computes its consumed bounds.
+     * @param opaque Adapter state
+     * @param fragment_no Fragment ordinal
+     * @return Borrowed kernel fragment
+     */
     [[nodiscard]] static bioseq::minimizers::packed_sequence_kernel_fragment read(
             void* opaque,
             std::size_t fragment_no) {
@@ -383,6 +454,11 @@ struct exact_fragment_source_adapter {
         };
     }
 
+    /**
+     * @brief Releases one borrowed fragment.
+     * @param opaque Adapter state
+     * @param fragment_no Fragment ordinal
+     */
     static void release(void* opaque, std::size_t fragment_no) noexcept {
         const auto& self = *static_cast<exact_fragment_source_adapter*>(opaque);
         self.request->release_fragment(
@@ -390,6 +466,12 @@ struct exact_fragment_source_adapter {
     }
 };
 
+/**
+ * @brief Combines generic and family-specific exact-kernel status.
+ * @param result Kernel result
+ * @param sink_accepted Whether the output sink accepted every record
+ * @return Indexing bridge status
+ */
 [[nodiscard]] constexpr exact_simd_index_status exact_status_from_kernel(
         const bioseq::minimizers::minimizer_kernel_result& result,
         bool sink_accepted) noexcept {
@@ -423,6 +505,11 @@ static_assert(k_packed_bounded_nthash_kernel_scheme_id
 static_assert(k_packed_bounded_nthash_maximum_window
     == bioseq::minimizers::k_bounded_nthash_max_window);
 
+/**
+ * @brief Maps bounded-ntHash status to the indexing bridge status.
+ * @param status Kernel-family status
+ * @return Corresponding indexing status
+ */
 [[nodiscard]] constexpr packed_bounded_nthash_index_status bridge_bounded_status(
         packed_bounded_status status) noexcept {
     switch (status) {
@@ -448,6 +535,11 @@ static_assert(k_packed_bounded_nthash_maximum_window
     return packed_bounded_nthash_index_status::invalid_state;
 }
 
+/**
+ * @brief Projects bounded-ntHash counters into indexing counters.
+ * @param stats Kernel-family counters
+ * @return Indexing bridge counters
+ */
 [[nodiscard]] constexpr packed_bounded_nthash_index_execution_stats
 bridge_bounded_stats(const packed_bounded_stats& stats) noexcept {
     return {
@@ -496,6 +588,13 @@ bridge_bounded_stats(const packed_bounded_stats& stats) noexcept {
     };
 }
 
+/**
+ * @brief Appends packed-64 bounded-ntHash output to a sketch collector.
+ * @param opaque Sketch collector
+ * @param raw Packed values
+ * @param count Number of values
+ * @return `true` when the collector accepted the batch
+ */
 [[nodiscard]] bool append_bounded_raw(
         void* opaque,
         const std::uint64_t* raw,
@@ -504,6 +603,13 @@ bridge_bounded_stats(const packed_bounded_stats& stats) noexcept {
         ->append_raw_storage(raw, count);
 }
 
+/**
+ * @brief Appends typed bounded-ntHash output to a sketch collector.
+ * @param opaque Sketch collector
+ * @param records Typed minimizer records
+ * @param count Number of records
+ * @return `true` when the collector accepted the batch
+ */
 [[nodiscard]] bool append_bounded_records(
         void* opaque,
         const bioseq::minimizers::minimap_sketch_data* records,
@@ -513,6 +619,12 @@ bridge_bounded_stats(const packed_bounded_stats& stats) noexcept {
             records, count});
 }
 
+/**
+ * @brief Combines generic and family-specific bounded-kernel status.
+ * @param result Kernel result
+ * @param sink_accepted Whether the output sink accepted every record
+ * @return Indexing bridge status
+ */
 [[nodiscard]] constexpr packed_bounded_nthash_index_status bounded_status_from_kernel(
         const bioseq::minimizers::minimizer_kernel_result& result,
         bool sink_accepted) noexcept {
@@ -893,7 +1005,7 @@ void minimizer_hashmap_fragment_index::build_from_pairs(
     positions.clear();
     const std::size_t n = pairs.size();
     if (n == 0) return;
-    if (n > UINT32_MAX) {
+    if (n > std::numeric_limits<std::uint32_t>::max()) {
         index_corruption_panic(
             "build_from_pairs: >UINT32_MAX positions (pos_offset is u32)");
     }
@@ -910,7 +1022,7 @@ void minimizer_hashmap_fragment_index::build_from_pairs(
             positions[j] = pairs[j].second;
             ++j;
         }
-        if (j - i > UINT32_MAX) {
+        if (j - i > std::numeric_limits<std::uint32_t>::max()) {
             index_corruption_panic(
                 "build_from_pairs: kmer count > u32 (packed count field)");
         }

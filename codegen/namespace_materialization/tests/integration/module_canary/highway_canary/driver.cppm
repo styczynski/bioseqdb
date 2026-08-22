@@ -1,5 +1,6 @@
 module;
 
+#include <array>
 #include <cstdint>
 
 module bioseq.highway.gcc_canary;
@@ -8,14 +9,14 @@ import :highway_registry;
 
 namespace bioseq::highway_gcc_canary {
 
-[[nodiscard]] canary_run run_imported_binder_canary() noexcept {
+[[nodiscard]] auto run_imported_binder_canary() noexcept -> canary_run {
   if (!attributed_binder_is_linked()) {
     return {};
   }
   constexpr std::uint32_t count = 16;
-  std::uint32_t input[count]{};
-  std::uint32_t first_output[count]{};
-  std::uint32_t second_output[count]{};
+  std::array<std::uint32_t, count> input{};
+  std::array<std::uint32_t, count> first_output{};
+  std::array<std::uint32_t, count> second_output{};
   for (std::uint32_t index = 0; index < count; ++index) {
     input[index] = index * std::uint32_t{3} + std::uint32_t{7};
   }
@@ -27,8 +28,8 @@ namespace bioseq::highway_gcc_canary {
     return {};
   }
 
-  first->kernels->add_one(input, first_output, count);
-  second->kernels->add_one(input, second_output, count);
+  first->kernels->add_one(input.data(), first_output.data(), count);
+  second->kernels->add_one(input.data(), second_output.data(), count);
 
   std::uint32_t checksum = 0;
   for (std::uint32_t index = 0; index < count; ++index) {

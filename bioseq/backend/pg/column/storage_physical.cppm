@@ -1,6 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * storage_physical.cppm
+/**
+ * @file storage_physical.cppm
+ * @brief Physical page, WAL, and metapage operations for columnar storage.
  *
  * Low-level storage layer for the bioseq columnar table format.
  *   - Translates columnar read/write operations on logical offsets into
@@ -26,7 +26,6 @@
  * so callers only need an ordinary lock on the relation. Initializing
  * the metapage or truncating the relation requires AccessExclusiveLock.
  *
- *-------------------------------------------------------------------------
  */
 module;
 #include <bioseq/pg_compat.h>
@@ -91,13 +90,15 @@ constexpr uint64_t maximum_logical_reservation =
 constexpr uint64_t maximum_logical_offset = maximum_logical_reservation - 1;
 
 [[nodiscard]] inline constexpr bool
-is_valid_logical_offset(uint64_t logical_offset) noexcept {
+is_valid_logical_offset(uint64_t logical_offset) noexcept
+{
 	return logical_offset >= first_logical_offset
 		&& logical_offset <= maximum_logical_offset;
 }
 
 [[nodiscard]] inline constexpr bool
-is_valid_logical_reservation(uint64_t logical_reservation) noexcept {
+is_valid_logical_reservation(uint64_t logical_reservation) noexcept
+{
 	return logical_reservation >= first_logical_offset
 		&& logical_reservation <= maximum_logical_reservation;
 }
@@ -294,11 +295,13 @@ validate_logical_storage_range(
  * true, don't check pd_lower; useful when reading a metapage whose format
  * has not yet been validated.
  */
-static void
-read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *buf,
-			  uint32_t len, bool force)
-{
-	Buffer buffer = ReadBuffer(rel, block_number);
+static void read_from_block(Relation rel,
+                            BlockNumber block_number,
+                            uint32_t offset,
+                            char* destination,
+                            uint32_t len,
+                            bool force) {
+    Buffer buffer = ReadBuffer(rel, block_number);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	Page page = BufferGetPage(buffer);
 	PageHeader phdr = reinterpret_cast<PageHeader>(page);
@@ -321,8 +324,8 @@ read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *b
 			});
 	}
 
-	memcpy_s(buf, len, page + offset, len);
-	UnlockReleaseBuffer(buffer);
+    memcpy_s(destination, len, page + offset, len);
+    UnlockReleaseBuffer(buffer);
 }
 
 /*
@@ -332,11 +335,13 @@ read_from_block(Relation rel, BlockNumber block_number, uint32_t offset, char *b
  * be equal to pd_lower and pd_lower will be set to the end of the written
  * data.
  */
-static void
-write_to_block(Relation rel, BlockNumber block_number, uint32_t offset, const char *buf,
-			 uint32_t len, bool clear)
-{
-	Buffer buffer = ReadBuffer(rel, block_number);
+static void write_to_block(Relation rel,
+                           BlockNumber block_number,
+                           uint32_t offset,
+                           const char* source,
+                           uint32_t len,
+                           bool clear) {
+    Buffer buffer = ReadBuffer(rel, block_number);
 	GenericXLogState *state = GenericXLogStart(rel);
 
 	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
@@ -380,8 +385,8 @@ write_to_block(Relation rel, BlockNumber block_number, uint32_t offset, const ch
 		phdr->pd_lower = offset;
 	}
 
-	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-	phdr->pd_lower = static_cast<LocationIndex>(*write_end);
+    memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, source, len);
+    phdr->pd_lower = static_cast<LocationIndex>(*write_end);
 
 	GenericXLogFinish(state);
 
@@ -532,11 +537,10 @@ overwrite_column_metapage(Relation relation, const column_metapage& metapage)
 
 
 
-/*
- * initialize_column_storage - initialize a new metapage in an empty relation
- * with the given storage_id.
+/**
+ * @brief Initializes an empty relation with a columnar metapage.
  *
- * Caller must hold AccessExclusiveLock on the relation.
+ * @pre The caller holds `AccessExclusiveLock` and the main fork is empty.
  */
 export void
 initialize_column_storage(SMgrRelation srel, uint64_t storage_id)
@@ -657,43 +661,40 @@ update_column_storage_format(Relation rel, bool is_upgrade, uint64_t next_stripe
 }
 
 
-/*
- * column_storage_id - return storage ID from the metapage.
+/**
+ * @brief Reads the storage identity from a relation's metapage.
  *
- * Throw an error if the metapage is not the current version, unless
- * 'force' is true.
+ * @param force Skip the current-format check when true.
+ * @return Persistent storage identity for the relation.
  */
 export uint64_t
 column_storage_id(Relation rel, bool force)
 {
-	column_metapage metapage = read_column_metapage(rel, force);
+	const column_metapage metapage = read_column_metapage(rel, force);
 
 	return metapage.storage_id;
 }
 
 
-/*
- * column_storage_uses_current_format - return true if metapage exists and is at
- * the current version.
- */
+/** @return Whether the relation has a metapage in the current storage format. */
 export bool
 column_storage_uses_current_format(Relation rel)
 {
-	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+	const BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
 	if (nblocks < 2)
 	{
 		return false;
 	}
 
-	column_metapage metapage = read_column_metapage(rel, true);
+	const column_metapage metapage = read_column_metapage(rel, true);
 	return column_metapage_uses_current_format(&metapage);
 }
 
 
-/*
- * reserve_column_row_numbers returns next_row_number and advances
- * it for next row number reservation.
+/**
+ * @brief Atomically reserves a consecutive range of logical row numbers.
+ * @return First row number in the reserved range.
  */
 export uint64_t
 reserve_column_row_numbers(Relation rel, uint64_t nrows)
@@ -722,11 +723,9 @@ reserve_column_row_numbers(Relation rel, uint64_t nrows)
 }
 
 
-/*
- * reserve_column_stripe_id returns stripe_id and advances it for next
- * stripe_id reservation.
- * Note that this function doesn't handle row number reservation.
- * See reserve_column_row_numbers function.
+/**
+ * @brief Atomically reserves the next stripe identity.
+ * @return Reserved stripe identity. Row numbers are reserved separately.
  */
 export uint64_t
 reserve_column_stripe_id(Relation rel)
@@ -753,8 +752,9 @@ reserve_column_stripe_id(Relation rel)
 }
 
 
-/*
- * reserve_column_storage_bytes - reserve logical data offsets for writing.
+/**
+ * @brief Atomically reserves aligned logical storage for a write.
+ * @return First logical byte offset, or invalid_logical_offset for zero bytes.
  */
 export uint64_t
 reserve_column_storage_bytes(Relation rel, uint64_t amount)
@@ -812,10 +812,7 @@ reserve_column_storage_bytes(Relation rel, uint64_t amount)
 }
 
 
-/*
- * read_column_storage - map the logical offset to a block and offset, then
- * read the buffer from multiple blocks if necessary.
- */
+/** @brief Reads a logical byte range across the required PostgreSQL pages. */
 export void
 read_column_storage(Relation rel, uint64_t logical_offset, char *data, uint32_t amount)
 {
@@ -844,10 +841,7 @@ read_column_storage(Relation rel, uint64_t logical_offset, char *data, uint32_t 
 }
 
 
-/*
- * write_column_storage - map the logical offset to a block and offset, then
- * write the buffer across multiple blocks if necessary.
- */
+/** @brief Writes a logical byte range across the required PostgreSQL pages. */
 export void
 write_column_storage(Relation rel, uint64_t logical_offset, const char *data, uint32_t amount)
 {
@@ -876,14 +870,11 @@ write_column_storage(Relation rel, uint64_t logical_offset, const char *data, ui
 }
 
 
-/*
- * truncate_column_storage - truncate the columnar storage such that
- * new_data_reservation will be the first unused logical offset available. Free
- * pages at the end of the relation.
+/**
+ * @brief Truncates storage after the last page needed by a reservation.
  *
- * Caller must hold AccessExclusiveLock on the relation.
- *
- * Returns true if pages were truncated; false otherwise.
+ * @pre The caller holds `AccessExclusiveLock` on the relation.
+ * @return True when physical pages were removed.
  */
 export bool
 truncate_column_storage(Relation rel, uint64_t new_data_reservation)

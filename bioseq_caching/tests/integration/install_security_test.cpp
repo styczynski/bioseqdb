@@ -42,7 +42,7 @@ TEST_CASE("cache install, preload diagnostics, and ACLs are native",
                                                     connection.escape_literal(scenario.mode));
                 } catch (const bioseq::libpq::command_error& error) {
                     rejected = true;
-                    sqlstate = error.sqlstate();
+                    sqlstate = error.sql_state();
                     diagnostic = error.what();
                     hint = error.hint();
                 }

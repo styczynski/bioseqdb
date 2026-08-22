@@ -41,6 +41,16 @@ namespace detail {
     });
 }
 
+[[nodiscard]] inline bool valid_lambda_front_attribute_follower(
+    const std::string_view spelling) noexcept {
+    static constexpr std::array<std::string_view, 12> fixed_spellings{
+        "{", "(", "mutable", "constexpr", "consteval", "static",
+        "noexcept", "[", "->", "requires", "__attribute__", "__declspec",
+    };
+    return identifier(spelling)
+        || std::ranges::contains(fixed_spellings, spelling);
+}
+
 [[nodiscard]] inline bool domain_name(std::string_view value) noexcept {
     if (value.empty() || value.front() < 'a' || value.front() > 'z') {
         return false;
@@ -164,29 +174,29 @@ inline void require_regular_file(
 [[nodiscard]] inline std::string_view terminal_identifier(
     const std::string_view qualified_name) noexcept {
     std::size_t separator = std::string_view::npos;
-    std::size_t angle_depth = 0u;
+    std::size_t angle_depth = 0U;
     for (std::size_t index = 0; index < qualified_name.size(); ++index) {
         if (qualified_name[index] == '<') {
             ++angle_depth;
         } else if (qualified_name[index] == '>') {
-            if (angle_depth != 0u) --angle_depth;
-        } else if (angle_depth == 0u && qualified_name[index] == ':'
-                   && index + 1u < qualified_name.size()
-                   && qualified_name[index + 1u] == ':') {
+            if (angle_depth != 0U) --angle_depth;
+        } else if (angle_depth == 0U && qualified_name[index] == ':'
+                   && index + 1U < qualified_name.size()
+                   && qualified_name[index + 1U] == ':') {
             separator = index;
             ++index;
         }
     }
     const std::string_view terminal = separator == std::string_view::npos
         ? qualified_name
-        : qualified_name.substr(separator + 2u);
+        : qualified_name.substr(separator + 2U);
     std::size_t length = 0;
     while (length < terminal.size()
            && identifier_character(terminal[length])) {
         ++length;
     }
-    if (length == 0u || !identifier(terminal.substr(0u, length))) return {};
-    return terminal.substr(0u, length);
+    if (length == 0U || !identifier(terminal.substr(0U, length))) return {};
+    return terminal.substr(0U, length);
 }
 
 struct parsed_slot_callable final {
@@ -204,54 +214,54 @@ struct parsed_slot_callable final {
             "Highway slot '" + label
             + "' must be an address-of qualified callable expression");
     }
-    expression.erase(0u, 1u);
-    if (expression.starts_with("::")) expression.erase(0u, 2u);
+    expression.erase(0U, 1U);
+    if (expression.starts_with("::")) expression.erase(0U, 2U);
 
     constexpr std::string_view target_marker = "{target_namespace}";
     const std::size_t marker = expression.find(target_marker);
     if (marker == std::string::npos
         || expression.find(target_marker, marker + target_marker.size())
             != std::string::npos
-        || (marker != 0u
-            && (marker < 2u || expression.substr(marker - 2u, 2u) != "::"))) {
+        || (marker != 0U
+            && (marker < 2U || expression.substr(marker - 2U, 2U) != "::"))) {
         throw std::runtime_error(
             "Highway slot '" + label
             + "' has no unique qualified target-namespace component");
     }
 
     const std::size_t suffix_begin = marker + target_marker.size();
-    if (expression.substr(suffix_begin, 2u) != "::") {
+    if (expression.substr(suffix_begin, 2U) != "::") {
         throw std::runtime_error(
             "Highway slot '" + label
             + "' target namespace must qualify a callable");
     }
-    const std::string_view suffix{expression.data() + suffix_begin + 2u,
-                                  expression.size() - suffix_begin - 2u};
+    const std::string_view suffix{expression.data() + suffix_begin + 2U,
+                                  expression.size() - suffix_begin - 2U};
     if (suffix.empty()) {
         throw std::runtime_error(
             "Highway slot '" + label + "' has no terminal callable");
     }
 
-    std::size_t terminal_begin = 0u;
-    std::size_t angle_depth = 0u;
+    std::size_t terminal_begin = 0U;
+    std::size_t angle_depth = 0U;
     for (std::size_t index = 0; index < suffix.size(); ++index) {
         if (suffix[index] == '<') {
             ++angle_depth;
         } else if (suffix[index] == '>') {
-            if (angle_depth == 0u) {
+            if (angle_depth == 0U) {
                 throw std::runtime_error(
                     "Highway slot '" + label
                     + "' has an unbalanced callable template-id");
             }
             --angle_depth;
-        } else if (angle_depth == 0u && suffix[index] == ':'
-                   && index + 1u < suffix.size()
-                   && suffix[index + 1u] == ':') {
-            terminal_begin = index + 2u;
+        } else if (angle_depth == 0U && suffix[index] == ':'
+                   && index + 1U < suffix.size()
+                   && suffix[index + 1U] == ':') {
+            terminal_begin = index + 2U;
             ++index;
         }
     }
-    if (angle_depth != 0u) {
+    if (angle_depth != 0U) {
         throw std::runtime_error(
             "Highway slot '" + label
             + "' has an unbalanced callable template-id");
@@ -271,19 +281,19 @@ struct parsed_slot_callable final {
                 "Highway slot '" + label
                 + "' terminal callable may only add a template argument list");
         }
-        std::size_t depth = 0u;
+        std::size_t depth = 0U;
         for (std::size_t index = 0; index < remainder.size(); ++index) {
             const char character = remainder[index];
             if (character == '<') {
                 ++depth;
             } else if (character == '>') {
-                if (depth == 0u) {
+                if (depth == 0U) {
                     throw std::runtime_error(
                         "Highway slot '" + label
                         + "' has an unbalanced callable template-id");
                 }
                 --depth;
-                if (depth == 0u && index + 1u != remainder.size()) {
+                if (depth == 0U && index + 1U != remainder.size()) {
                     throw std::runtime_error(
                         "Highway slot '" + label
                         + "' has tokens after its callable template-id");
@@ -295,7 +305,7 @@ struct parsed_slot_callable final {
                     + "' has forbidden tokens in its callable template-id");
             }
         }
-        if (depth != 0u) {
+        if (depth != 0U) {
             throw std::runtime_error(
                 "Highway slot '" + label
                 + "' has an unbalanced callable template-id");
@@ -361,11 +371,13 @@ inline void validate_no_forbidden_source_macros(
             ? std::string_view{}
             : value.substr(first);
     };
-    const auto directive_argument = [&](std::string_view line,
-                                        std::string_view directive) noexcept {
+    const auto directive_argument = [trim_left](
+                                        std::string_view line,
+                                        std::string_view directive) noexcept
+        -> std::string_view {
         line = trim_left(line);
         if (line.empty() || line.front() != '#') return std::string_view{};
-        line = trim_left(line.substr(1u));
+        line = trim_left(line.substr(1U));
         if (!line.starts_with(directive)) return std::string_view{};
         line.remove_prefix(directive.size());
         if (!line.empty() && line.front() != ' ' && line.front() != '\t') {
@@ -374,7 +386,7 @@ inline void validate_no_forbidden_source_macros(
         return trim_left(line);
     };
 
-    for (std::size_t begin = 0u; begin <= source.size();) {
+    for (std::size_t begin = 0U; begin <= source.size();) {
         const std::size_t end = source.find_first_of("\r\n", begin);
         const std::string_view line = source.substr(
             begin,
@@ -391,7 +403,7 @@ inline void validate_no_forbidden_source_macros(
 
         std::string_view definition = directive_argument(line, "define");
         const std::size_t name_end = definition.find_first_of(" \t(");
-        const std::string_view name = definition.substr(0u, name_end);
+        const std::string_view name = definition.substr(0U, name_end);
         if (name == "module" || name == "target") {
             throw std::runtime_error(
                 path.string() + ": registered Highway source contains forbidden '#define "
@@ -399,7 +411,7 @@ inline void validate_no_forbidden_source_macros(
         }
 
         if (end == std::string_view::npos) break;
-        begin = end + 1u;
+        begin = end + 1U;
         if (begin < source.size() && source[end] == '\r'
             && source[begin] == '\n') {
             ++begin;
@@ -448,15 +460,15 @@ inline void validate_slot_expression(const slot_spec& slot) {
 [[nodiscard]] inline domain_topology_manifest_input
 parse_domain_topology_manifest_argument(const std::string_view value) {
     const std::size_t separator = value.find('=');
-    if (separator == std::string_view::npos || separator == 0u
-        || separator + 1u == value.size()) {
+    if (separator == std::string_view::npos || separator == 0U
+        || separator + 1U == value.size()) {
         throw std::runtime_error(
             "Highway domain topology must use <name>=<absolute-manifest-path>");
     }
     domain_topology_manifest_input result{
-        .name = std::string{value.substr(0u, separator)},
+        .name = std::string{value.substr(0U, separator)},
         .path = std::filesystem::path{
-            std::string{value.substr(separator + 1u)}},
+            std::string{value.substr(separator + 1U)}},
     };
     if (!detail::domain_name(result.name)) {
         throw std::runtime_error(
@@ -882,7 +894,7 @@ inline void validate_inventories(
             || !detail::identifier(target.target_namespace)
             || !target.token.starts_with("HWY_")
             || !target.target_namespace.starts_with("N_")
-            || target.bit == 0u
+            || target.bit == 0U
             || (target.bit & (target.bit - 1U)) != 0) {
             throw std::runtime_error(
                 "invalid Highway target record for token '" + target.token + "'");
@@ -914,11 +926,62 @@ inline void validate_inventories(
         || sources.contract_module == sources.dispatch_module) {
         throw std::runtime_error("invalid Highway contract or dispatch module name");
     }
+
+    struct required_source_record final {
+        std::string_view key;
+        std::string_view family;
+    };
+    static constexpr std::array required_source_records{
+        required_source_record{"alignment_utils", "alignment"},
+        required_source_record{"block_aligner", "alignment"},
+        required_source_record{"block_aligner_certificates", "alignment"},
+        required_source_record{"block_aligner_dp", "alignment"},
+        required_source_record{"block_aligner_traceback", "alignment"},
+        required_source_record{"chaining", "chaining"},
+        required_source_record{"chaining_backtracking", "chaining"},
+        required_source_record{"chaining_candidate_scoring", "chaining"},
+        required_source_record{"chaining_forward", "chaining"},
+        required_source_record{"hasher_base", "hasher_base"},
+        required_source_record{"hasher_lexic", "hasher_lexic"},
+        required_source_record{"hasher_minimap_int", "hasher_minimap_int"},
+        required_source_record{"indexing", "indexing"},
+        required_source_record{"ksw2", "alignment"},
+        required_source_record{"ksw2_batched", "alignment"},
+        required_source_record{"ksw2_primitives", "alignment"},
+        required_source_record{"minimizer_bounded_nthash", "minimizers"},
+        required_source_record{
+            "minimizer_minimap2_reference", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_continuation", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_drivers", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_chronological", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_decode", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_k15_w10", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_exact_vectors", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_resident_stream", "minimizers"},
+        required_source_record{
+            "minimizer_two_stack_nthash_state", "minimizers"},
+        required_source_record{"prefilter", "common"},
+        required_source_record{"sequence_ops", "sequence_ops"},
+        required_source_record{"simd_utils", "simd_utils"},
+        required_source_record{"vector_stream", "vector_stream"},
+        required_source_record{
+            "vector_stream_operations", "vector_stream"},
+    };
     if (sources.require_complete_table
-        && sources.sources.size() != highway_source_record_count) {
+        && sources.sources.size() != required_source_records.size()) {
         throw std::runtime_error(
-            "complete Highway generation requires exactly 16 registered "
-            "source records");
+            "complete Highway generation requires exactly "
+            + std::to_string(required_source_records.size())
+            + " registered source records");
     }
 
     std::map<std::string, const source_spec*, std::less<>> by_key;
@@ -961,34 +1024,6 @@ inline void validate_inventories(
         }
     }
     if (sources.require_complete_table) {
-        struct required_source_record final {
-            std::string_view key;
-            std::string_view family;
-        };
-        static constexpr std::array<
-            required_source_record,
-            highway_source_record_count> required_source_records{
-                required_source_record{"alignment_utils", "alignment"},
-                required_source_record{"block_aligner", "alignment"},
-                required_source_record{"chaining", "chaining"},
-                required_source_record{"hasher_base", "hasher_base"},
-                required_source_record{"hasher_lexic", "hasher_lexic"},
-                required_source_record{
-                    "hasher_minimap_int", "hasher_minimap_int"},
-                required_source_record{"indexing", "indexing"},
-                required_source_record{"ksw2", "alignment"},
-                required_source_record{"ksw2_batched", "alignment"},
-                required_source_record{
-                    "minimizer_bounded_nthash", "minimizers"},
-                required_source_record{
-                    "minimizer_minimap2_reference", "minimizers"},
-                required_source_record{
-                    "minimizer_two_stack_nthash", "minimizers"},
-                required_source_record{"prefilter", "common"},
-                required_source_record{"sequence_ops", "sequence_ops"},
-                required_source_record{"simd_utils", "simd_utils"},
-                required_source_record{"vector_stream", "vector_stream"},
-            };
         for (const required_source_record& expected
              : required_source_records) {
             const auto source = by_key.find(expected.key);
@@ -1048,7 +1083,7 @@ inline void validate_inventories(
             }
         }
     };
-    validate_probes(sources.unit_probes, 4u, "unit");
+    validate_probes(sources.unit_probes, 4U, "unit");
 
     struct expected_representation_owner final {
         std::string_view algorithm;
@@ -1076,17 +1111,17 @@ inline void validate_inventories(
     if (sources.require_complete_table
         || !sources.minimizer_representation_instances.empty()) {
         const bool high_profile =
-            sources.minimizer_representation_instances.size() == 13u;
+            sources.minimizer_representation_instances.size() == 13U;
         if (!high_profile
-            && sources.minimizer_representation_instances.size() != 7u) {
+            && sources.minimizer_representation_instances.size() != 7U) {
             throw std::runtime_error(
                 "Highway minimizer representation owners must contain "
                 "exactly 7 K15-only or 13 high-profile identities");
         }
         std::set<std::string, std::less<>> observed_owners;
-        std::size_t typed_instantiations = 0u;
-        std::size_t minimap2_reference_instantiations = 0u;
-        std::size_t bounded_nthash_instantiations = 0u;
+        std::size_t typed_instantiations = 0U;
+        std::size_t minimap2_reference_instantiations = 0U;
+        std::size_t bounded_nthash_instantiations = 0U;
         for (const minimizer_representation_instance_spec& instance :
              sources.minimizer_representation_instances) {
             const auto expected = expected_representation_owners.find(instance.owner_key);
@@ -1126,12 +1161,12 @@ inline void validate_inventories(
                     + std::string{owner} + "'");
             }
         }
-        const std::size_t expected_total = high_profile ? 24u : 14u;
+        const std::size_t expected_total = high_profile ? 24U : 14U;
         const std::size_t expected_minimap2_reference =
-            high_profile ? 18u : 8u;
+            high_profile ? 18U : 8U;
         if (typed_instantiations != expected_total
             || minimap2_reference_instantiations != expected_minimap2_reference
-            || bounded_nthash_instantiations != 6u) {
+            || bounded_nthash_instantiations != 6U) {
             throw std::runtime_error(
                 "Highway minimizer representation instantiation caps diverged");
         }
@@ -1139,7 +1174,8 @@ inline void validate_inventories(
 
     enum class visit_state : std::uint8_t { unseen, active, complete };
     std::map<std::string, visit_state, std::less<>> states;
-    std::function<void(const source_spec&)> visit = [&](const source_spec& source) {
+    std::function<void(const source_spec&)> visit =
+        [&states, &visit, &by_key](const source_spec& source) -> void {
         visit_state& state = states[source.key];
         if (state == visit_state::active) {
             throw std::runtime_error(
@@ -1275,7 +1311,9 @@ inline void validate_inventories(
         }
         const std::string content = read_artifact_bytes(source.path);
         detail::validate_no_forbidden_source_macros(source.path, content);
-        const auto exact_text = [&](const structural_analysis::source_range& range) {
+        const auto exact_text = [&content](
+                                    const structural_analysis::source_range& range)
+            -> std::string {
             const std::size_t begin = range.begin.byte_offset;
             const std::size_t end = range.end.byte_offset;
             if (begin > end || end > content.size()) return std::string{};
@@ -1332,12 +1370,14 @@ inline void validate_inventories(
                 == structural_analysis::callable_kind::lambda;
             const auto preceding_token = std::ranges::find_if(
                 unit.tokens,
-                [&](const structural_analysis::lexical_token& token) {
+                [insertion](
+                    const structural_analysis::lexical_token& token) -> bool {
                     return token.range.end.byte_offset == insertion;
                 });
             const auto following_token = std::ranges::find_if(
                 unit.tokens,
-                [&](const structural_analysis::lexical_token& token) {
+                [insertion](
+                    const structural_analysis::lexical_token& token) -> bool {
                     return token.range.begin.byte_offset >= insertion;
                 });
             const bool valid_lambda_suffix = !lambda
@@ -1345,12 +1385,7 @@ inline void validate_inventories(
                     && following_token != unit.tokens.end()
                     && following_token->range.begin.byte_offset
                         <= callable.body_range.begin.byte_offset
-                    && std::ranges::contains(
-                        std::array<std::string_view, 11>{
-                            "{", "mutable", "constexpr", "consteval", "static",
-                            "noexcept", "[", "->", "requires", "__attribute__",
-                            "__declspec",
-                        },
+                    && detail::valid_lambda_front_attribute_follower(
                         following_token->spelling));
             const bool valid_lambda = !lambda
                 || (insertion
@@ -1365,7 +1400,8 @@ inline void validate_inventories(
                 || !insertion_offsets.insert(insertion).second) {
                 throw std::runtime_error(
                     source.path.string()
-                    + ": callable has no unique proven HWY_ATTR insertion point");
+                    + ": callable has no unique proven target-attribute "
+                      "insertion point");
             }
             extracted.callables.push_back(callable_insertion{
                 .body_relative_offset = insertion - body_begin,
@@ -1379,7 +1415,7 @@ inline void validate_inventories(
                     : std::string{},
                 .lambda_following_relative_offset = lambda
                     ? following_token->range.begin.byte_offset - body_begin
-                    : 0u,
+                    : 0U,
             });
         }
         std::ranges::sort(
@@ -1391,7 +1427,14 @@ inline void validate_inventories(
 
         std::set<std::string, std::less<>> actual_target_dependencies;
         std::set<std::string, std::less<>> neutral_imports;
-        const auto consume_import = [&](const std::string& imported_module) {
+        const auto consume_import = [
+                                        &actual_target_dependencies,
+                                        &inventory,
+                                        &neutral_imports,
+                                        &source,
+                                        &sources_by_module](
+                                        const std::string& imported_module)
+            -> void {
             validate_highway_direct_import(
                 inventory, source, imported_module);
             if (const auto target = sources_by_module.find(imported_module);
@@ -1421,7 +1464,7 @@ inline void validate_inventories(
             const auto describe = [](const auto& values) {
                 std::string result{"["};
                 for (const std::string& value : values) {
-                    if (result.size() != 1u) result += ",";
+                    if (result.size() != 1U) result += ",";
                     result += value;
                 }
                 result += "]";

@@ -351,7 +351,7 @@ inline void run_runtime_inventory_contract_self_tests() {
         bad.entries.front().site_id =
             "probe:" + std::string(64, '0');
         require_failure(
-            [&] {
+            [&bad]() -> void {
                 validate_runtime_probe_inventory(bad);
             },
             "site id differs");
@@ -372,7 +372,7 @@ inline void run_runtime_inventory_contract_self_tests() {
         };
         bad.entries.push_back(std::move(duplicate));
         require_failure(
-            [&] {
+            [&bad]() -> void {
                 validate_runtime_probe_inventory(bad);
             },
             "(sql_identity, fault_key) case key");
@@ -384,7 +384,13 @@ inline void run_runtime_inventory_contract_self_tests() {
         const std::string bad_json =
             render_safety_ledger_json(bad);
         require_failure(
-            [&] {
+            [&bad,
+             &bad_json,
+             &compile_graph,
+             &facts,
+             &facts_json,
+             &producer_bytes,
+             &sql_manifest]() -> void {
                 static_cast<void>(
                     build_runtime_probe_inventory(
                         bad,
@@ -398,7 +404,12 @@ inline void run_runtime_inventory_contract_self_tests() {
             "does not join");
     }
     require_failure(
-        [&] {
+        [&compile_graph,
+         &facts,
+         &facts_json,
+         &ledger,
+         &ledger_json,
+         &sql_manifest]() -> void {
             static_cast<void>(
                 build_runtime_probe_inventory(
                     ledger,
@@ -415,7 +426,7 @@ inline void run_runtime_inventory_contract_self_tests() {
         std::get<json_value::object>(bad.value).emplace(
             "unexpected", json_value{true});
         require_failure(
-            [&] {
+            [&bad]() -> void {
                 static_cast<void>(
                     parse_runtime_probe_inventory_json(
                         render_json(bad)));

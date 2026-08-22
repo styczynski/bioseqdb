@@ -1,11 +1,9 @@
-/*-------------------------------------------------------------------------
+/**
+ * @file index.cppm
+ * @brief PostgreSQL columnar table-access and hook module interface.
  *
- * index.cppm
- *
- * Module entry point for the bioseq columnar extension. Installs the
+ * Installs the
  * table-access-method, planner, storage, and executor hooks.
- *
- *-------------------------------------------------------------------------
  */
 module;
 

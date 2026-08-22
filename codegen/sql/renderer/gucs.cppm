@@ -112,7 +112,7 @@ template <typename p_indexed_gucs>
 [[nodiscard]] inline std::string cpp_string(std::string_view value) {
     std::string result{"\""};
     result.reserve(value.size() + 2);
-    constexpr char hex[] = "0123456789abcdef";
+    constexpr std::string_view hex = "0123456789abcdef";
     for (const unsigned char item : value) {
         switch (item) {
             case '"': result += "\\\""; break;
@@ -382,11 +382,12 @@ inline void render_condition_end(
     }
 }
 
+/// Emits a sentinel-terminated PostgreSQL enum table with fixed storage.
 inline void render_enum_table(
     std::ostringstream& output,
     const collected_guc& guc) {
-    output << "const config_enum_entry " << guc.member
-           << "_values[] = {\n";
+    output << "constexpr auto " << guc.member
+           << "_values = std::to_array<config_enum_entry>({\n";
     for (const collected_guc_enum_value& value : guc.enum_values) {
         render_condition_begin(output, value.active_condition);
         output << "    {" << cpp_string(value.name)
@@ -397,7 +398,7 @@ inline void render_enum_table(
         render_condition_end(output, value.active_condition);
     }
     output << "    {nullptr, 0, false},\n"
-           << "};\n\n";
+           << "});\n\n";
 }
 
 [[nodiscard]] inline std::string assign_value_type(
@@ -456,12 +457,13 @@ inline void render_plan_cache_assign_hook(
            << "}\n\n";
 }
 
+/// Emits compile-time checks for PostgreSQL planner log-level wire values.
 inline void render_planner_assertions(
     std::ostringstream& output,
     const collected_guc& guc) {
     if (guc.name != "bioseq.planner.diagnostics.log_level") return;
-    static constexpr std::pair<std::string_view, std::string_view>
-        levels[] = {
+    static constexpr auto levels = std::to_array<
+        std::pair<std::string_view, std::string_view>>({
             {"debug5", "DEBUG5"},
             {"debug4", "DEBUG4"},
             {"debug3", "DEBUG3"},
@@ -471,7 +473,7 @@ inline void render_planner_assertions(
             {"info", "INFO"},
             {"notice", "NOTICE"},
             {"warning", "WARNING"},
-        };
+        });
     for (const auto& [value, macro] : levels) {
         output << "static_assert(static_cast<int>("
                << global_cpp_name(guc.enum_cpp_name) << "::" << value
@@ -481,6 +483,7 @@ inline void render_planner_assertions(
     output << "\n";
 }
 
+/// Emits one idempotent primitive GUC registration function.
 inline void render_primitive_registration(
     std::ostringstream& output,
     const collected_guc& guc) {
@@ -494,11 +497,11 @@ inline void render_primitive_registration(
         + description_argument(guc.long_description) + ", &"
         + cell + ", "
         + boot_value;
-    output << "inline void "
-           << registration_function_name(guc) << "() {\n"
+    output << "inline auto "
+           << registration_function_name(guc) << "() -> void {\n"
            << "    static bool complete = false;\n"
            << "    if (complete) return;\n"
-           << "    auto define_variable = [] {\n        ";
+           << "    auto define_variable = []() -> void {\n        ";
     switch (guc.kind) {
         case guc_kind::boolean:
             output << "DefineCustomBoolVariable(\n"
@@ -564,12 +567,13 @@ inline void render_primitive_registration(
            << "}\n\n";
 }
 
+/// Emits one enum GUC registration wired to its stable table storage.
 inline void render_enum_registration(
     std::ostringstream& output,
     const collected_guc& guc) {
     render_planner_assertions(output, guc);
-    output << "inline void "
-           << registration_function_name(guc) << "() {\n"
+    output << "inline auto "
+           << registration_function_name(guc) << "() -> void {\n"
            << "    using enum_type = "
            << global_cpp_name(guc.enum_cpp_name) << ";\n"
            << "    static const "
@@ -583,7 +587,7 @@ inline void render_enum_registration(
            << description_argument(guc.long_description) << ",\n"
            << "            .boot_value = "
            << global_cpp_name(guc.default_expression) << ",\n"
-           << "            .entries = " << guc.member << "_values,\n"
+           << "            .entries = " << guc.member << "_values.data(),\n"
            << "            .context = " << pg_context(guc.context) << ",\n"
            << "            .flags = " << pg_flags(guc) << ",\n"
            << "            .check_hook = "
@@ -600,6 +604,7 @@ inline void render_enum_registration(
            << "}\n\n";
 }
 
+/// Renders one GUC owner module without changing provider cardinality.
 [[nodiscard]] inline rendered_guc_owner_module render_owner(
     const guc_inventory& inventory,
     std::string_view owner_key,
@@ -647,6 +652,7 @@ inline void render_enum_registration(
         << "extern \"C\" {\n"
         << "#include \"utils/plancache.h\"\n"
         << "}\n\n"
+        << "#include <array>\n"
         << "#include <cstring>\n"
         << "#include <type_traits>\n\n"
         << "export module " << module_name << ";\n\n"
@@ -719,7 +725,7 @@ inline void render_enum_registration(
                    ? "true"
                    : "false")
            << ";\n\n"
-           << "inline void register_gucs() {\n"
+           << "inline auto register_gucs() -> void {\n"
            << "    static bool complete = false;\n"
            << "    if (complete) return;\n";
     std::vector<std::string> names;
@@ -826,12 +832,12 @@ render_primitive_guc_registration_contract_probe(
         "bioseq.postgres.sql.generated",
     std::string_view boundary_module =
         "bioseq.postgres.support.sql_boundary") {
-    static constexpr std::string_view owner_order[] = {
+    static constexpr auto owner_order = std::to_array<std::string_view>({
         "bioseq",
         "scheduler",
         "storage",
         "aligner",
-    };
+    });
     std::map<
         std::string,
         std::vector<const collected_guc*>,
@@ -998,12 +1004,12 @@ make_guc_profile_projection(
             validation.removed_from_test_indexes.push_back(name);
         }
     }
-    static constexpr std::string_view owners[] = {
+    static constexpr auto owners = std::to_array<std::string_view>({
         "bioseq",
         "scheduler",
         "storage",
         "aligner",
-    };
+    });
     for (const std::string_view owner : owners) {
         bool invariant = true;
         for (const auto& [name, row] : production_by_name) {
@@ -1135,12 +1141,12 @@ make_guc_profile_delta_evidence(
             validation.removed_from_test_indexes.push_back(name);
         }
     }
-    static constexpr std::string_view owners[] = {
+    static constexpr auto owners = std::to_array<std::string_view>({
         "bioseq",
         "scheduler",
         "storage",
         "aligner",
-    };
+    });
     for (const std::string_view owner : owners) {
         bool invariant = true;
         for (const auto& [name, guc] : production_by_name) {

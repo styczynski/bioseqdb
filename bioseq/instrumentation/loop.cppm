@@ -21,6 +21,7 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
+/** @brief Scoped loop measurement for one compile-time configuration. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] loop_scope {
     const loop_descriptor* descriptor = nullptr;
@@ -30,6 +31,7 @@ struct [[nodiscard]] loop_scope {
     bool is_skipped = true;
     pmu::counter_sample counter_start{};
 
+    /** @brief Begin a loop measurement when profiling is active. */
     [[gnu::always_inline]]
     explicit loop_scope(const loop_descriptor* loop_descriptor) noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
@@ -48,6 +50,7 @@ struct [[nodiscard]] loop_scope {
         }
     }
 
+    /** @brief Record elapsed time, work, and available PMU deltas. */
     [[gnu::always_inline]] ~loop_scope() noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             if (is_skipped) return;
@@ -74,6 +77,7 @@ struct [[nodiscard]] loop_scope {
         }
     }
 
+    /** @brief Add one iteration and its logical work-unit count. */
     [[gnu::always_inline]] void record_iteration(std::uint64_t work_units = 1) noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             iterations += 1;
@@ -89,6 +93,7 @@ struct [[nodiscard]] loop_scope {
     loop_scope& operator=(const loop_scope&) = delete;
 };
 
+/** @brief Create a loop scope for an explicit profiling configuration. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
 inline loop_scope<p_configuration_type> loop(const loop_descriptor* descriptor) noexcept {
@@ -96,8 +101,8 @@ inline loop_scope<p_configuration_type> loop(const loop_descriptor* descriptor) 
 }
 
 /// Non-templated convenience overload — see region.cppm for rationale.
-/// Pins to `benchmark_profiling_configuration` so the per-iteration
-/// loop scope skips the PMU read on construction/destruction.
+/// Pins to `benchmark_profiling_configuration`, including its current PMU
+/// feature gate and independently installed profiler state.
 [[nodiscard, gnu::always_inline]]
 inline loop_scope<benchmark_profiling_configuration>
 loop(const loop_descriptor* descriptor) noexcept {

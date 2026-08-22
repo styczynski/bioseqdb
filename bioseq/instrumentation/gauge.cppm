@@ -22,11 +22,15 @@ import bioseq.instrumentation.descriptor;
 
 export namespace bioseq::instrumentation {
 
+/** @brief Canonical process-wide gauge and its most recent value. */
 struct named_gauge {
     const region_descriptor* descriptor = nullptr;
     std::atomic<std::int64_t> value{0};
 
+    /** @brief Construct an unregistered zero-valued gauge. */
     named_gauge() = default;
+
+    /** @brief Construct a zero-valued gauge for a registered descriptor. */
     explicit named_gauge(const region_descriptor* metric_descriptor) noexcept
         : descriptor(metric_descriptor) {}
 };
@@ -35,11 +39,13 @@ struct named_gauge {
 
 namespace bioseq::instrumentation::detail {
 
+/** @brief Owns canonical gauges indexed by metric name. */
 struct gauge_registry {
     std::mutex mutex;
     std::unordered_map<std::string, named_gauge*> by_name;
 };
 
+/** @brief Return the process-wide gauge registry. */
 [[nodiscard]] inline gauge_registry& get_gauge_registry() noexcept {
     static gauge_registry registry;
     return registry;
@@ -49,6 +55,7 @@ struct gauge_registry {
 
 export namespace bioseq::instrumentation {
 
+/** @brief Return the canonical gauge for a name, creating it on first use. */
 [[nodiscard, gnu::cold]]
 inline named_gauge& get_named_gauge(
     std::string_view name,
@@ -65,6 +72,7 @@ inline named_gauge& get_named_gauge(
     return *created_gauge;
 }
 
+/** @brief Store the gauge's current value when profiling is compiled in. */
 template<profiling_configuration p_configuration_type>
 [[gnu::always_inline]]
 inline void set_gauge_value(named_gauge& gauge, std::int64_t value) noexcept {
@@ -76,6 +84,7 @@ inline void set_gauge_value(named_gauge& gauge, std::int64_t value) noexcept {
     }
 }
 
+/** @brief Read the gauge's current value. */
 [[nodiscard, gnu::always_inline]]
 inline std::int64_t current_gauge_value(const named_gauge& gauge) noexcept {
     return gauge.value.load(std::memory_order_relaxed);

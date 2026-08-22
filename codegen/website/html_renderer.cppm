@@ -89,7 +89,7 @@ struct code_language_view {
         hash ^= static_cast<unsigned char>(character);
         hash *= 1099511628211ULL;
     }
-    static constexpr char digits[] = "0123456789abcdef";
+    static constexpr std::string_view digits = "0123456789abcdef";
     std::string id = "code-";
     for (int shift = 60; shift >= 0; shift -= 4) {
         id.push_back(digits[(hash >> shift) & 0xF]);
@@ -208,13 +208,13 @@ struct html_content_writer {
             break;
         case content_node_kind::paragraph: {
             bool paragraph_open = false;
-            const auto open_paragraph = [&] {
+            const auto open_paragraph = [this, &paragraph_open]() -> void {
                 if (!paragraph_open) {
                     out += "<p class=\"doc-paragraph\">";
                     paragraph_open = true;
                 }
             };
-            const auto close_paragraph = [&] {
+            const auto close_paragraph = [this, &paragraph_open]() -> void {
                 if (paragraph_open) {
                     out += "</p>";
                     paragraph_open = false;
@@ -262,7 +262,8 @@ struct html_content_writer {
                 out += level > 2 ? "\" data-toc-sub data-title=\""
                                  : "\" data-toc data-title=\"";
                 std::string title;
-                const auto collect_text = [&](const content_node& item,
+                const auto collect_text = [&title](
+                                              const content_node& item,
                                               auto&& self_collect) -> void {
                     title += item.text;
                     for (const content_node& child : item.children) {

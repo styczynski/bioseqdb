@@ -11,6 +11,7 @@ REPOSITORY_ROOT = BUILD_MCP_DIR.parent
 sys.path.insert(0, str(BUILD_MCP_DIR))
 
 import build_presets  # noqa: E402
+import build_worker  # noqa: E402
 import protocol  # noqa: E402
 
 
@@ -101,12 +102,23 @@ class HighwayGccCanaryModeContractTest(unittest.TestCase):
         self.assertIn("build_only=false", docs)
         self.assertIn("executes neither binary", docs)
         self.assertIn("executes the imported-binder canary", docs)
+        self.assertIn("exact PATH/locale-only environment", docs)
         self.assertIn("both selected target IDs and names", docs)
         self.assertIn(
             "GCC Highway module/attribute/dispatch boundary",
             docs,
         )
         self.assertIn("Neither form proves the full external-api", docs)
+
+    def test_runtime_environment_is_an_exact_non_inheriting_allowlist(self) -> None:
+        self.assertEqual(
+            build_worker.HIGHWAY_GCC_CANARY_RUNTIME_ENVIRONMENT,
+            {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LC_ALL": "C",
+                "LANG": "C",
+            },
+        )
 
     def test_runtime_output_records_numeric_target_ids(self) -> None:
         source = (REPOSITORY_ROOT / HIGHWAY_CANARY_MAIN).read_text()

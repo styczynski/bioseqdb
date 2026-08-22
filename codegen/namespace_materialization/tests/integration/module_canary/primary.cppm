@@ -2,6 +2,6 @@ export module bioseq.codegen.namespace_materialization.canary;
 
 export namespace bioseq::codegen::namespace_materialization::canary {
 
-[[nodiscard]] int linked_sum() noexcept;
+[[nodiscard]] auto linked_sum() noexcept -> int;
 
 }  // namespace bioseq::codegen::namespace_materialization::canary

@@ -1,16 +1,10 @@
 /**
  * @file file_kind_test.cpp
- * @brief Unit coverage for `bioseq::io::detect_sequence_file_kind`.
- *
- * Covers: .fasta / .fa / .FASTA (case-insensitive) / .fastq.gz / .fq /
- * x.fasta.bgz, the unrecognised-extension error path (a.txt, a), and the
- * "no stem" error (.fasta — the extension equals the whole name).
+ * @brief Verifies sequence file suffix classification.
  */
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <string>
-#include <string_view>
-
+import std;
 import bioseq.common.logging;
 import bioseq.io.options;
 import bioseq.io.file_kind;
@@ -20,12 +14,12 @@ namespace {
 using bioseq::io::detect_sequence_file_kind;
 using bioseq::io::sequence_file_format;
 
-}  // namespace
+} // namespace
 
 TEST_CASE("file_utils: FASTA extensions map to FASTA",
           "[component:bioseq][layer:unit][feature:io]") {
-    for (const std::string_view path : {"a.fasta", "a.fa", "a.fna",
-                                        "/tmp/dir.with.dots/genome.fasta"}) {
+    for (const std::string_view path :
+         {"a.fasta", "a.fa", "a.fna", "/tmp/dir.with.dots/genome.fasta"}) {
         const auto kind = detect_sequence_file_kind(path);
         REQUIRE(kind.has_value());
         REQUIRE(kind->format == sequence_file_format::fasta);

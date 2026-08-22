@@ -1,32 +1,37 @@
-// bioseq.update_index reindexes stub-backed rows with the fragmented PostgreSQL
-// scanner. The scenarios cover query_key == columnar rowno on the
-// reindex path (each row's distinct sub_keys == its fragment count, filed under the
-// rowno the query path resolves), plus strict assemble==recompute on the fragmented
-// PostgreSQL scanner path (dna4, single segment).
-#include <tests/support/postgres.hpp>
+/**
+ * @file Reindex coverage for stub-backed rows and fragmented PostgreSQL scans.
+ */
 #include <libpq-fe.h>
-#include <chrono>
-#include <set>
-#include <thread>
-#include <tuple>
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.tests.integration.support;
 
 using namespace bioseq_int_tests;
 
 namespace {
-inline std::set<std::tuple<long long, long long, long long>> mmsearch_set(
+/** Return stable alignment coordinates for every matching row. */
+[[nodiscard]] std::set<std::tuple<long long, long long, long long>>
+mmsearch_set(
         const connection_test_context& ctx, std::string_view table_name) {
-    auto rows = query_rows(ctx, fmt::format(
+    const auto rows = query_rows(ctx, fmt::format(
         "SELECT id, bioseq.target_start(id), bioseq.target_end(id) FROM {} "
         "WHERE mmsearch(target, query) ORDER BY id", table_name));
-    std::set<std::tuple<long long, long long, long long>> out;
-    for (auto& r : rows)
-        if (r[0] && r[1] && r[2])
-            out.emplace(std::stoll(*r[0]), std::stoll(*r[1]), std::stoll(*r[2]));
-    return out;
+    std::set<std::tuple<long long, long long, long long>> matches;
+    for (const auto& row : rows) {
+        if (row[0] && row[1] && row[2]) {
+            matches.emplace(
+                std::stoll(*row[0]),
+                std::stoll(*row[1]),
+                std::stoll(*row[2]));
+        }
+    }
+    return matches;
 }
 
-inline void require_expression_index_ids(
+/** Require an expression index plan and its ordered result identifiers. */
+void require_expression_index_ids(
         const connection_test_context& ctx, std::string_view index_name,
         std::string_view sql, std::initializer_list<long long> expected_ids) {
     const auto plan = explain_text<false>(ctx, sql);
@@ -41,7 +46,8 @@ inline void require_expression_index_ids(
             == std::vector<long long>(expected_ids));
 }
 
-inline void require_flat_mirror_equivalence(
+/** Require the columnar relation to match its heap mirror exactly. */
+void require_flat_mirror_equivalence(
         const connection_test_context& ctx, long long expected_rows) {
     REQUIRE(query_scalar_int(ctx,
         "SELECT count(*) FROM expression_reindex;") == expected_rows);
@@ -74,13 +80,14 @@ TEST_CASE("update_index reindexes stub-backed rows with row-number query keys",
 
     // Every resolved columnar rowno has its full fragment count
     // (~7 for a 200 kbp target), filed under that rowno.
-    auto rownos = query_int_column(ctx,
+    const auto row_numbers = query_int_column(ctx,
         "SELECT bioseq.column_row_number('reindex_stub_rows'::regclass, ctid) FROM reindex_stub_rows ORDER BY 1");
-    REQUIRE(rownos.size() == 3);
-    for (long long sequence_rowno : rownos)
+    REQUIRE(row_numbers.size() == 3);
+    for (const long long sequence_row_number : row_numbers) {
         REQUIRE(index_distinct_sub_keys(
             ctx, "minimizers_per_fragment", "reindex_stub_rows",
-            sequence_rowno) >= 7);
+            sequence_row_number) >= 7);
+    }
 
     // Assemble and recompute results match on the scanner_pg fragmented path.
     guc_scope sequence_read_on(ctx, "bioseq.index.sequence_read.enabled", "on");

@@ -1,10 +1,6 @@
-/**-------------------------------------------------------------------------
- *
- * highway_target_test_support.cppm
- *
- * SQL test seam for selecting one runnable Highway target.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file highway_target_test_support.cppm
+ * @brief Exposes test-only SQL routines for selecting a Highway target.
  */
 module;
 
@@ -22,34 +18,37 @@ export module bioseq.highway_target_test_support;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.sql_boundary;
-import bioseq.postgres.scheduler.dispatch_processor;
+import bioseq.postgres.scheduler.dispatch_processor.reprepare_probe;
 
 namespace {
 
 #if defined(BIOSEQ_TEST_INDEXES)
+/** @brief Retains the unforced runnable-target mask for test validation. */
 struct highway_target_test_state_record {
 	std::int64_t baseline_runnable_targets = 0;
 };
 
-[[nodiscard]] highway_target_test_state_record&
-highway_target_test_state() noexcept {
-	static highway_target_test_state_record state{};
-	return state;
+/** @return Process-local state for Highway target-forcing tests. */
+[[nodiscard]] auto highway_target_test_state() noexcept -> highway_target_test_state_record& {
+    static highway_target_test_state_record target_test_state{};
+	return target_test_state;
 }
 
-[[nodiscard]] std::int64_t highway_baseline_runnable_targets() {
-	auto& state = highway_target_test_state();
-	if (state.baseline_runnable_targets != 0) {
-		return state.baseline_runnable_targets;
+/** @return The validated unforced runnable-target mask. */
+[[nodiscard]] auto highway_baseline_runnable_targets() -> std::int64_t {
+    auto& target_test_state = highway_target_test_state();
+	if (target_test_state.baseline_runnable_targets != 0) {
+		return target_test_state.baseline_runnable_targets;
 	}
-	const auto info = bioseq::simd_dispatch::
+	const auto dispatch_plan = bioseq::simd_dispatch::
 		registered_highway_dispatch_plan();
-	if (info.compiled_targets == 0
-		|| info.cpu_supported_targets == 0
-		|| info.runnable_targets == 0
-		|| info.planned_target == 0
-		|| info.runnable_targets
-			!= (info.compiled_targets & info.cpu_supported_targets)) {
+	if (dispatch_plan.compiled_targets == 0
+		|| dispatch_plan.cpu_supported_targets == 0
+		|| dispatch_plan.runnable_targets == 0
+		|| dispatch_plan.planned_target == 0
+		|| dispatch_plan.runnable_targets
+			!= (dispatch_plan.compiled_targets
+				& dispatch_plan.cpu_supported_targets)) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
 			{
@@ -59,8 +58,8 @@ highway_target_test_state() noexcept {
 					"at least one internally consistent runnable target.",
 			});
 	}
-	state.baseline_runnable_targets = info.runnable_targets;
-	return state.baseline_runnable_targets;
+	target_test_state.baseline_runnable_targets = dispatch_plan.runnable_targets;
+	return target_test_state.baseline_runnable_targets;
 }
 #endif
 
@@ -77,8 +76,7 @@ export namespace bioseq::pg::sql_routines {
     .from = bioseq::sql::public_role,
 })]]
 bool cpu_prepared_target_same_object_reprepare_probe() {
-	return bioseq::simd::batch_processor::
-		cpu_prepared_target_same_object_reprepare_probe();
+	return bioseq::simd::cpu_prepared_target_same_object_reprepare_probe();
 }
 
 [[bioseq_sql::function({
@@ -125,8 +123,9 @@ std::string set_highway_target_for_test(std::int64_t target) {
 				.message = "Highway test target must be one positive bit",
 			});
 	}
-	const std::int64_t baseline = highway_baseline_runnable_targets();
-	if ((baseline & target) != target) {
+	const std::int64_t baseline_runnable_targets =
+		highway_baseline_runnable_targets();
+	if ((baseline_runnable_targets & target) != target) {
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INVALID_PARAMETER_VALUE,
 			{
@@ -144,15 +143,15 @@ std::string set_highway_target_for_test(std::int64_t target) {
 				.message = "Highway forced target has no canonical name",
 			});
 	}
-	std::string canonical_target_name{target_name};
+    std::string canonical_target_name{target_name};
 
-	hwy::SetSupportedTargetsForTest(target);
-	const auto forced = bioseq::simd_dispatch::
+    hwy::SetSupportedTargetsForTest(target);
+	const auto forced_dispatch_plan = bioseq::simd_dispatch::
 		registered_highway_dispatch_plan();
-	if (forced.cpu_supported_targets != target
-		|| forced.runnable_targets != target
-		|| forced.planned_target != target
-		|| (forced.compiled_targets & target) != target) {
+	if (forced_dispatch_plan.cpu_supported_targets != target
+		|| forced_dispatch_plan.runnable_targets != target
+		|| forced_dispatch_plan.planned_target != target
+		|| (forced_dispatch_plan.compiled_targets & target) != target) {
 		hwy::SetSupportedTargetsForTest(0);
 		bioseq::postgres::support::raise_sql_error(
 			ERRCODE_INTERNAL_ERROR,
@@ -165,7 +164,7 @@ std::string set_highway_target_for_test(std::int64_t target) {
 	}
 	return canonical_target_name;
 #else
-	(void)target;
+	static_cast<void>(target);
 	bioseq::postgres::support::raise_sql_error(
 		ERRCODE_FEATURE_NOT_SUPPORTED,
 		{

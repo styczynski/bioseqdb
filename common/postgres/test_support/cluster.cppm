@@ -1178,7 +1178,7 @@ simulate_process_tree_controller(
 /// @param socket_directory Private Unix-domain socket directory.
 /// @param runtime_library_directory Authorized per-case DSO directory, if any.
 /// @param preload_libraries Validated shared-preload library names.
-/// @param startup_gucs Additional validated startup settings.
+/// @param startup_gucs Additional settings validated for postmaster arguments.
 /// @return Complete configuration text appended after initdb.
 [[nodiscard]] inline std::string render_private_cluster_configuration(
     int port,
@@ -1214,10 +1214,13 @@ simulate_process_tree_controller(
         configuration += "shared_preload_libraries = "
             + cluster_detail::configuration_literal(preloads) + '\n';
     }
+    // PostgreSQL's file grammar rejects multi-component custom GUC names.
+    // Validate here, then carry every setting as a distinct postmaster -c
+    // argument in start().
     for (const auto& [name, value] : startup_gucs) {
         cluster_detail::validate_guc_name(name);
-        configuration += name + " = "
-            + cluster_detail::configuration_literal(value) + '\n';
+        static_cast<void>(
+            cluster_detail::configuration_literal(value));
     }
     return configuration;
 }
@@ -1389,11 +1392,20 @@ public:
                     options_.postgres_bin_dir / "postgres"});
             const std::filesystem::path postgres =
                 program("postgres");
+            std::vector<std::string> postgres_arguments{
+                "-D", data_directory_.string()};
+            for (const auto& [name, value] : options_.startup_gucs) {
+                cluster_detail::validate_guc_name(name);
+                static_cast<void>(
+                    cluster_detail::configuration_literal(value));
+                postgres_arguments.emplace_back("-c");
+                postgres_arguments.emplace_back(name + "=" + value);
+            }
             postmaster_spawn_attempted_ = true;
             postmaster_process_.emplace(
                 owned_process::spawn(process_launch_options{
                     .executable = postgres,
-                    .arguments = {"-D", data_directory_.string()},
+                    .arguments = std::move(postgres_arguments),
                     .environment = options_.process_environment,
                     .preferred_path_directory =
                         options_.postgres_bin_dir,

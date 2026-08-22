@@ -11,6 +11,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <string_view>
 
@@ -29,42 +30,56 @@ export namespace bioseq::common::templating {
 template <std::size_t p_extent>
 struct compile_time_string {
     /// Characters including the terminating null byte.
-    char data[p_extent] {};
+    std::array<char, p_extent> data{};
 
-    /// Constructs an empty value-initialized buffer.
+    /** @brief Constructs an empty value-initialized buffer. */
     constexpr compile_time_string() = default;
 
     /**
      * @brief Copies a character array into structural storage.
-     * @param string Source array, normally a string literal.
+     * @param[in] string Source array, normally a string literal.
      */
     constexpr compile_time_string(const char (&string)[p_extent]) {
-        std::copy_n(string, p_extent, data);
+        std::copy_n(string, p_extent, data.begin());
     }
 
-    /// Returns the logical character count, excluding the terminator.
+    /**
+     * @brief Returns the logical character count.
+     * @return Character count excluding the terminating null byte.
+     */
     [[nodiscard]] consteval std::size_t size() const noexcept {
         return p_extent - 1u;
     }
 
-    /// Returns the complete buffer extent, including the terminator.
+    /**
+     * @brief Returns the complete buffer extent.
+     * @return Character count including the terminating null byte.
+     */
     [[nodiscard]] consteval std::size_t buffer_size() const noexcept {
         return p_extent;
     }
 
-    /// Returns the null-terminated character buffer.
+    /**
+     * @brief Returns the null-terminated character buffer.
+     * @return Pointer valid for the lifetime of this structural string.
+     */
     [[nodiscard]] consteval const char* c_str() const noexcept {
-        return data;
+        return data.data();
     }
 
-    /// Returns a view excluding the terminating null byte.
+    /**
+     * @brief Returns a view of the logical string.
+     * @return View excluding the terminating null byte and sharing this object's lifetime.
+     */
     [[nodiscard]] consteval std::string_view view() const noexcept {
-        return std::string_view{data, p_extent - 1u};
+        return std::string_view{data.data(), p_extent - 1u};
     }
 
     /**
      * @brief Returns the character at an unchecked buffer index.
-     * @param index Index into the complete buffer, including its terminator.
+     * @param[in] index Index into the complete buffer, including its terminator.
+     * @return Character at `index`.
+     * @pre `index < buffer_size()`.
      */
     [[nodiscard]] consteval char operator[](std::size_t index) const noexcept {
         return data[index];
@@ -73,7 +88,7 @@ struct compile_time_string {
     /**
      * @brief Concatenates two structural strings.
      * @tparam p_other_extent Right-hand buffer extent.
-     * @param other Right-hand structural string.
+     * @param[in] other Right-hand structural string.
      * @return A structural string containing both logical strings and one terminator.
      */
     template <std::size_t p_other_extent>
@@ -81,8 +96,11 @@ struct compile_time_string {
     operator+(const compile_time_string<p_other_extent>& other) const noexcept
     {
         compile_time_string<p_extent + p_other_extent - 1u> result{};
-        std::copy_n(data, p_extent - 1u, result.data);
-        std::copy_n(other.data, p_other_extent, result.data + p_extent - 1u);
+        std::copy_n(data.begin(), p_extent - 1u, result.data.begin());
+        std::copy_n(
+            other.data.begin(),
+            p_other_extent,
+            result.data.begin() + static_cast<std::ptrdiff_t>(p_extent - 1u));
         return result;
     }
 
@@ -103,12 +121,19 @@ struct compile_time_string {
     }
 };
 
-/// Deduces structural-string extent from a character array.
+/**
+ * @brief Deduces structural-string extent from a character array.
+ * @tparam p_extent Character-array extent including its terminator.
+ */
 template <std::size_t p_extent>
 compile_time_string(const char (&)[p_extent]) -> compile_time_string<p_extent>;
 
 /**
  * @brief Compares two structural strings.
+ * @tparam p_left_extent Left-hand buffer extent.
+ * @tparam p_right_extent Right-hand buffer extent.
+ * @param[in] left Left-hand structural string.
+ * @param[in] right Right-hand structural string.
  * @return `true` when their extents and complete buffers are identical.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>
@@ -119,12 +144,16 @@ template <std::size_t p_left_extent, std::size_t p_right_extent>
     if constexpr (p_left_extent != p_right_extent) {
         return false;
     } else {
-        return std::equal(left.data, left.data + p_left_extent, right.data);
+        return left.data == right.data;
     }
 }
 
 /**
  * @brief Compares a structural string with a character array.
+ * @tparam p_left_extent Left-hand buffer extent.
+ * @tparam p_right_extent Right-hand character-array extent.
+ * @param[in] left Left-hand structural string.
+ * @param[in] right Right-hand character array.
  * @return `true` when both strings have identical contents and extent.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>
@@ -137,6 +166,10 @@ template <std::size_t p_left_extent, std::size_t p_right_extent>
 
 /**
  * @brief Compares a character array with a structural string.
+ * @tparam p_left_extent Left-hand character-array extent.
+ * @tparam p_right_extent Right-hand buffer extent.
+ * @param[in] left Left-hand character array.
+ * @param[in] right Right-hand structural string.
  * @return `true` when both strings have identical contents and extent.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>
@@ -149,6 +182,10 @@ template <std::size_t p_left_extent, std::size_t p_right_extent>
 
 /**
  * @brief Concatenates a structural string and a character array.
+ * @tparam p_left_extent Left-hand buffer extent.
+ * @tparam p_right_extent Right-hand character-array extent.
+ * @param[in] left Left-hand structural string.
+ * @param[in] right Right-hand character array.
  * @return A structural string containing both operands and one terminator.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>
@@ -161,6 +198,10 @@ template <std::size_t p_left_extent, std::size_t p_right_extent>
 
 /**
  * @brief Concatenates a character array and a structural string.
+ * @tparam p_left_extent Left-hand character-array extent.
+ * @tparam p_right_extent Right-hand buffer extent.
+ * @param[in] left Left-hand character array.
+ * @param[in] right Right-hand structural string.
  * @return A structural string containing both operands and one terminator.
  */
 template <std::size_t p_left_extent, std::size_t p_right_extent>

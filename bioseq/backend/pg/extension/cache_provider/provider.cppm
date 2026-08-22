@@ -1,3 +1,7 @@
+/**
+ * @file provider.cppm
+ * @brief Publishes PostgreSQL cache-provider callbacks through the stable cache ABI.
+ */
 module;
 
 extern "C" {
@@ -48,6 +52,10 @@ inline std::array<bioseq_cache_provider_registration,
 inline std::array<bool, k_provider_descriptor_count> g_registered{};
 inline bool g_directory_published = false;
 
+/**
+ * @brief Mixes process-local identity into a nonzero rendezvous cookie.
+ * @return A nonzero cookie for the provider directory instance.
+ */
 [[nodiscard]] std::uint64_t mix_cookie(std::uint64_t value) noexcept {
     value ^= value >> 30U;
     value *= 0xbf58476d1ce4e5b9ULL;
@@ -57,12 +65,14 @@ inline bool g_directory_published = false;
     return value == 0 ? 1U : value;
 }
 
+/** @return The unsupported status for an unimplemented query analysis route. */
 [[nodiscard]] bioseq_cache_status unsupported_analyze_query(
         const Query*,
         bioseq_cache_query_intent*) {
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The unsupported status for an unimplemented path description route. */
 [[nodiscard]] bioseq_cache_status unsupported_describe_path(
         PlannerInfo*,
         RelOptInfo*,
@@ -72,6 +82,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The unsupported status for an unimplemented source mapping route. */
 [[nodiscard]] bioseq_cache_status unsupported_map_source(
         PlannerInfo*,
         const bioseq_cache_path_domain*,
@@ -80,6 +91,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The unsupported status for an unimplemented path decoration route. */
 [[nodiscard]] bioseq_cache_status unsupported_decorate_path(
         PlannerInfo*,
         RelOptInfo*,
@@ -90,6 +102,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The unsupported status for an unimplemented occurrence route. */
 [[nodiscard]] bioseq_cache_status unsupported_extract_occurrence(
         List*,
         TupleTableSlot*,
@@ -97,6 +110,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The unsupported status for an unimplemented late-fetch route. */
 [[nodiscard]] bioseq_cache_status unsupported_late_fetch(
         List*,
         EState*,
@@ -108,6 +122,7 @@ inline bool g_directory_published = false;
     return bioseq_cache_status_unsupported;
 }
 
+/** @return The immutable exact-scan provider ABI descriptor. */
 [[nodiscard]] const bioseq_cache_provider& provider_descriptor() noexcept {
     static const bioseq_cache_provider provider{
         .struct_size =
@@ -138,6 +153,7 @@ inline bool g_directory_published = false;
     return provider;
 }
 
+/** @return The immutable batch-join provider ABI descriptor. */
 [[nodiscard]] const bioseq_cache_provider&
 batch_join_provider_descriptor() noexcept {
     static const bioseq_cache_provider provider{
@@ -170,6 +186,7 @@ batch_join_provider_descriptor() noexcept {
     return provider;
 }
 
+/** @return The immutable provider descriptor selected by registration index. */
 [[nodiscard]] const bioseq_cache_provider& provider_descriptor(
         std::size_t index) noexcept {
     return index == k_batch_join_provider_index
@@ -177,13 +194,17 @@ batch_join_provider_descriptor() noexcept {
         : provider_descriptor();
 }
 
+/** @return True when every provider descriptor owns a registration token. */
 [[nodiscard]] bool all_providers_registered() noexcept {
     for (const bool registered : g_registered) {
-        if (!registered) return false;
+        if (!registered) {
+            return false;
+        }
     }
     return true;
 }
 
+/** @brief Clears one process-local provider registration record. */
 void reset_registration(std::size_t index) noexcept {
     g_registered[index] = false;
     g_registrations[index] = bioseq_cache_provider_registration{
@@ -192,6 +213,7 @@ void reset_registration(std::size_t index) noexcept {
     };
 }
 
+/** @return True when the peer API satisfies the complete provider ABI contract. */
 [[nodiscard]] bool cache_api_valid(
         const bioseq_cache_api* api) noexcept {
     return api != nullptr
@@ -214,6 +236,7 @@ void reset_registration(std::size_t index) noexcept {
         && api->planner_bridge->after_planned_statement != nullptr;
 }
 
+/** @return True when a registration receipt matches the expected provider. */
 [[nodiscard]] bool registration_valid(
         const bioseq_cache_provider_registration& registration,
         std::uint32_t provider_id) noexcept {
@@ -224,21 +247,30 @@ void reset_registration(std::size_t index) noexcept {
         && registration.owner_cookie != 0;
 }
 
+/** @brief Unregisters accepted providers in reverse registration order. */
 void rollback_registrations(const bioseq_cache_api* api) {
     for (std::size_t offset = 0;
          offset < k_provider_descriptor_count;
          ++offset) {
         const std::size_t index =
             k_provider_descriptor_count - offset - 1U;
-        if (!g_registered[index]) continue;
+        if (!g_registered[index]) {
+            continue;
+        }
         const bool removed = bioseq::postgres::support::invoke_pg_as_cpp(
             [api, index] {
                 return api->unregister_provider(&g_registrations[index]);
             });
-        if (removed) reset_registration(index);
+        if (removed) {
+            reset_registration(index);
+        }
     }
 }
 
+/**
+ * @brief Binds both provider descriptors to one compatible cache API instance.
+ * @return The provider ABI status returned to the rendezvous caller.
+ */
 extern "C" bioseq_cache_status bind_cache_api(
         const bioseq_cache_api* api) noexcept {
     if (!cache_api_valid(api)) {
@@ -325,6 +357,11 @@ inline bioseq_cache_provider_directory g_directory{
 
 } // namespace detail
 
+/**
+ * @brief Validates and retains cache rendezvous slots before hook publication.
+ *
+ * PostgreSQL errors remain inside the extension initialization C boundary.
+ */
 export void bioseq_cache_provider_preflight() {
     void** const directory_slot = find_rendezvous_variable(
         bioseq::cache::k_provider_directory_rendezvous_name);
@@ -372,6 +409,7 @@ export void bioseq_cache_provider_preflight() {
     }
 }
 
+/** @brief Publishes the provider directory and binds a compatible peer API. */
 export void bioseq_cache_provider_publish_directory() {
     if (detail::g_directory_slot == nullptr
         || detail::g_cache_api_slot == nullptr) {
@@ -390,7 +428,9 @@ export void bioseq_cache_provider_publish_directory() {
         static_cast<void*>(&detail::g_directory);
     detail::g_directory_published = true;
 
-    if (*detail::g_cache_api_slot == nullptr) return;
+    if (*detail::g_cache_api_slot == nullptr) {
+        return;
+    }
     const auto* api =
         static_cast<const bioseq_cache_api*>(
             *detail::g_cache_api_slot);
@@ -425,6 +465,7 @@ export void bioseq_cache_provider_publish_directory() {
     }
 }
 
+/** @return True when the directory and both providers are bound to one peer. */
 export bool bioseq_cache_provider_is_bound() noexcept {
     return detail::g_directory_published
         && detail::all_providers_registered()
@@ -433,8 +474,8 @@ export bool bioseq_cache_provider_is_bound() noexcept {
 }
 
 /**
- * Notify the cache only after Bioseq's outer planner hook has completed every
- * post-setrefs mutation of the main Plan tree and PlannedStmt::subplans.
+ * @brief Notifies the cache after all Bioseq planner mutations are complete.
+ * @param[in] statement Final planned statement including its subplans.
  */
 export void bioseq_cache_provider_after_planned_statement(
         PlannedStmt* statement) noexcept {

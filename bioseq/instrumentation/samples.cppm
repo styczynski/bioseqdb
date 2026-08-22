@@ -16,6 +16,7 @@ import bioseq.instrumentation.configuration;
 
 export namespace bioseq::instrumentation {
 
+/** @brief Fixed-layout sample captured without signal-side allocation. */
 struct alignas(64) sample_record {
     std::uint64_t timestamp_ns = 0;
     std::uint64_t cycles = 0;
@@ -30,13 +31,14 @@ struct alignas(64) sample_record {
     std::uint16_t active_region_id = 0;
     std::uint32_t reserved = 0;
 };
-// Two cache lines on 64-bit platforms; the second line stays cold during
+// Two cache lines on 64-bit platforms. The second line stays cold during
 // region-only profiling and is touched only when the sampler service is
 // activated. Keeping it 128 B (instead of squeezing to 64) avoids losing
 // signal-side fields and prevents alignment surprises.
 static_assert(sizeof(sample_record) == 128);
 static_assert(alignof(sample_record) == 64);
 
+/** @brief Bounded single-producer sample ring for one profiler configuration. */
 template<profiling_configuration p_configuration_type>
 struct sample_ring {
     static constexpr std::size_t ring_capacity = 4096;
@@ -46,11 +48,13 @@ struct sample_ring {
     std::atomic<std::uint64_t> read_sequence{0};
     std::uint64_t dropped_sample_count = 0;
 
+    /** @brief Allocate ring storage only when sampling is compiled in. */
     sample_ring() noexcept {
         if constexpr (p_configuration_type::enable_sampling) {
             buffer = new (std::align_val_t{64}) sample_record[ring_capacity]{};
         }
     }
+    /** @brief Release sampling storage when one was allocated. */
     ~sample_ring() noexcept {
         if (buffer != nullptr) {
             ::operator delete[](buffer, std::align_val_t{64});
@@ -62,6 +66,7 @@ struct sample_ring {
     sample_ring(sample_ring&&) = delete;
     sample_ring& operator=(sample_ring&&) = delete;
 
+    /** @brief Append a sample or count it as dropped when the ring is full. */
     [[gnu::always_inline]]
     void push(const sample_record& sample) noexcept {
         if constexpr (!p_configuration_type::enable_sampling) {

@@ -33,6 +33,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace detail {
 
+/// @brief Appends one valid rank to local packing state and grows its output.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -58,6 +59,7 @@ HWY_INLINE void append_valid_rank_to_locals(
                  "growing SIMD rank pack unexpectedly overflowed");
 }
 
+/// @brief Encodes dna4 text with the selected unknown-byte policy.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit,
@@ -262,8 +264,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
     state.total_letters = local_total_letters;
 }
 
-
-
+/// @brief Encodes dna4 text while dropping unknown input bytes.
 void encode_body_chunk_dna4_simd_drop_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -272,6 +273,7 @@ void encode_body_chunk_dna4_simd_drop_impl(
         unknown_byte_policy::drop>(state, body_bytes, body_size);
 }
 
+/// @brief Encodes dna4 text while mapping unknown bytes to the default rank.
 void encode_body_chunk_dna4_simd_map_to_default_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -280,6 +282,7 @@ void encode_body_chunk_dna4_simd_map_to_default_impl(
         unknown_byte_policy::map_to_default>(state, body_bytes, body_size);
 }
 
+/// @brief Encodes multiline dna4 text while ignoring line separators.
 template <typename p_storage_unit,
           std::size_t p_bits_per_character,
           std::size_t p_letters_per_unit>
@@ -375,8 +378,7 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline_impl(
     state.total_letters = local_total_letters;
 }
 
-
-
+/// @brief Dispatch leaf for multiline dna4 encoding.
 void encode_body_chunk_dna4_simd_multiline_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -385,6 +387,7 @@ void encode_body_chunk_dna4_simd_multiline_impl(
         state, body_bytes, body_size);
 }
 
+/// @brief Encodes multiline dna4 input until a boundary byte is encountered.
 [[nodiscard]] HWY_INLINE std::size_t
 encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
     encode_state<std::uint64_t, 2, 32>& state,
@@ -427,7 +430,12 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
 
     std::size_t read_cursor = 0;
 
-    auto flush_state_and_return = [&](std::size_t consumed) {
+    auto flush_state_and_return = [&state,
+                                   &local_partial_word,
+                                   &local_partial_letters,
+                                   &local_total_letters,
+                                   &newline_count_out,
+                                   &local_newline_count](std::size_t consumed) {
         state.partial_word = local_partial_word;
         state.partial_letters = local_partial_letters;
         state.total_letters = local_total_letters;
@@ -546,8 +554,7 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
     return flush_state_and_return(read_cursor);
 }
 
-
-
+/// @brief Dispatch leaf for boundary-limited multiline dna4 encoding.
 [[nodiscard]] std::size_t encode_body_chunk_dna4_simd_multiline_until_byte_impl(
     encode_state<std::uint64_t, 2, 32>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -558,6 +565,7 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
         state, body_bytes, body_size, newline_count_out, boundary_char);
 }
 
+/// @brief Expands sixteen packed dna4 bytes into sixty-four ASCII symbols.
 template <class p_simd_tag>
 HWY_INLINE void unpack_16_bytes_to_64_ascii(
     p_simd_tag simd_tag,
@@ -637,7 +645,7 @@ HWY_INLINE void unpack_16_bytes_to_64_ascii(
         destination + 3 * k_lanes_per_chunk);
 }
 
-
+/// @brief Decodes packed dna4 words into ASCII without reading past the tail.
 void decode_dna4_words_to_ascii_impl(
     const std::uint64_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT destination,
@@ -680,7 +688,7 @@ void decode_dna4_words_to_ascii_impl(
     }
 }
 
-
+/// @brief Encodes two-ranks-per-byte dna5 input with a selected unknown policy.
 template <unknown_byte_policy p_unknown_byte_policy>
 HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     encode_state<std::uint8_t, 3, 2>& state,
@@ -708,7 +716,10 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     std::size_t local_partial_letters = state.partial_letters;
     std::size_t local_total_letters = state.total_letters;
 
-    auto append_one_rank = [&](std::uint8_t rank) {
+    auto append_one_rank = [&local_partial_word,
+                            &local_partial_letters,
+                            &local_total_letters,
+                            &packed_words](std::uint8_t rank) {
         append_valid_rank_to_locals<std::uint8_t, 3u, 2u>(
             local_partial_word,
             local_partial_letters,
@@ -814,8 +825,7 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     state.total_letters = local_total_letters;
 }
 
-
-
+/// @brief Encodes dna5 bytes while dropping unknown symbols.
 void encode_body_chunk_dna5_uint8_simd_drop_impl(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -824,6 +834,7 @@ void encode_body_chunk_dna5_uint8_simd_drop_impl(
         state, body_bytes, body_size);
 }
 
+/// @brief Encodes dna5 bytes while mapping unknown symbols to the default rank.
 void encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
     encode_state<std::uint8_t, 3, 2>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
@@ -832,6 +843,7 @@ void encode_body_chunk_dna5_uint8_simd_map_to_default_impl(
         state, body_bytes, body_size);
 }
 
+/// @brief Decodes two-ranks-per-byte dna5 storage into ASCII.
 void decode_dna5_uint8_words_to_ascii_impl(
     const std::uint8_t* HWY_RESTRICT words,
     std::uint8_t* HWY_RESTRICT destination,
@@ -886,8 +898,7 @@ void decode_dna5_uint8_words_to_ascii_impl(
     }
 }
 
-
-
+/// @brief Maps ASCII bytes to ranks through a fixed-target lookup table.
 template <sequence_alphabet p_alphabet,
           unknown_byte_policy p_unknown_byte_policy>
 HWY_INLINE void ascii_to_rank_lut_simd_impl(
@@ -922,6 +933,7 @@ HWY_INLINE void ascii_to_rank_lut_simd_impl(
     }
 }
 
+/// @brief Maps dna4 ASCII bytes and preserves the unknown sentinel.
 void ascii_to_rank_lut_simd_dna4_drop_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -930,6 +942,7 @@ void ascii_to_rank_lut_simd_dna4_drop_impl(
         source, destination, size);
 }
 
+/// @brief Maps dna4 ASCII bytes and replaces unknown bytes with rank zero.
 void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -939,6 +952,7 @@ void ascii_to_rank_lut_simd_dna4_map_to_default_impl(
             source, destination, size);
 }
 
+/// @brief Maps dna5 ASCII bytes and preserves the unknown sentinel.
 void ascii_to_rank_lut_simd_dna5_drop_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,
@@ -947,6 +961,7 @@ void ascii_to_rank_lut_simd_dna5_drop_impl(
         source, destination, size);
 }
 
+/// @brief Maps dna5 ASCII bytes and replaces unknown bytes with rank zero.
 void ascii_to_rank_lut_simd_dna5_map_to_default_impl(
     const std::uint8_t* HWY_RESTRICT source,
     std::uint8_t* HWY_RESTRICT destination,

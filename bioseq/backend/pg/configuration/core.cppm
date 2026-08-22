@@ -1,7 +1,11 @@
+/**
+ * @file core.cppm
+ * @brief Declares PostgreSQL settings shared across Bioseq subsystems.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
-#include <climits>
+#include <limits>
 
 export module bioseq.postgres.configuration.core;
 
@@ -386,7 +390,7 @@ struct settings final {
         [[bioseq_sql::guc({
             .flags = bioseq::sql::guc_flag::unit_mb,
             .minimum = 0,
-            .maximum = INT_MAX,
+            .maximum = std::numeric_limits<int>::max(),
         })]]
         static inline int memory_cap_mb = 0;
 
@@ -419,7 +423,7 @@ struct settings final {
             .context = bioseq::sql::guc_context::superuser,
             .flags = bioseq::sql::guc_flag::no_show_all | bioseq::sql::guc_flag::not_in_sample,
             .minimum = 0,
-            .maximum = INT_MAX,
+            .maximum = std::numeric_limits<int>::max(),
         })]]
         static inline int run_buffer_bytes = 0;
     };

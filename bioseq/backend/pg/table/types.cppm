@@ -9,7 +9,6 @@
 module;
 
 #include <bioseq/pg_compat.h>
-
 #include <cstddef>
 #include <type_traits>
 
@@ -30,7 +29,7 @@ export inline constexpr int k_vectorized_aggregate_private_marker = 1;
  * that initialization are retained in the scan memory context.
  */
 export struct column_scan_descriptor {
-    /// @brief PostgreSQL table-scan base; must remain the first member.
+    /// @brief PostgreSQL table-scan base that must remain the first member.
     TableScanDescData scan_base;
     /// @brief Lazily initialized column-store reader state.
     column_read_state* read_state;
@@ -50,12 +49,10 @@ export struct column_scan_descriptor {
     void* sequence_cache;
 };
 
-static_assert(
-    std::is_standard_layout_v<column_scan_descriptor>,
-    "column_scan_descriptor must remain standard-layout across TableScanDesc callbacks");
-static_assert(
-    offsetof(column_scan_descriptor, scan_base) == 0,
-    "column_scan_descriptor::scan_base must remain the first member");
+static_assert(std::is_standard_layout_v<column_scan_descriptor>,
+              "column_scan_descriptor must remain standard-layout across TableScanDesc callbacks");
+static_assert(offsetof(column_scan_descriptor, scan_base) == 0,
+              "column_scan_descriptor::scan_base must remain the first member");
 
 /// @brief PostgreSQL table-scan handle reinterpreted as the Bioseq descriptor.
 export using column_scan_handle = column_scan_descriptor*;
@@ -67,7 +64,7 @@ export using column_scan_handle = column_scan_descriptor*;
  * using the memory context captured by the begin callback.
  */
 export struct index_fetch_state {
-    /// @brief PostgreSQL index-fetch base; must remain the first member.
+    /// @brief PostgreSQL index-fetch base that must remain the first member.
     IndexFetchTableData fetch_base;
     /// @brief Lazily initialized column-store reader state.
     column_read_state* read_state;
@@ -85,12 +82,10 @@ export struct index_fetch_state {
     void* sequence_cache;
 };
 
-static_assert(
-    std::is_standard_layout_v<index_fetch_state>,
-    "index_fetch_state must remain standard-layout across IndexFetchTableData callbacks");
-static_assert(
-    offsetof(index_fetch_state, fetch_base) == 0,
-    "index_fetch_state::fetch_base must remain the first member");
+static_assert(std::is_standard_layout_v<index_fetch_state>,
+              "index_fetch_state must remain standard-layout across IndexFetchTableData callbacks");
+static_assert(offsetof(index_fetch_state, fetch_base) == 0,
+              "index_fetch_state::fetch_base must remain the first member");
 
 /// @brief Predicate used to classify PostgreSQL planner paths.
 export using path_predicate = bool (*)(Path* path);

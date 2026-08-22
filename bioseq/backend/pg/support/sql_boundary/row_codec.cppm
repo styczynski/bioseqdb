@@ -1,11 +1,6 @@
-/*-------------------------------------------------------------------------
- *
- * support/sql_boundary/row_codec.cppm
- *
- * Generic ownership and validation primitives used by generated SQL row
- * codecs.
- *
- *-------------------------------------------------------------------------
+/**
+ * @file row_codec.cppm
+ * @brief Provides ownership and validation primitives for generated SQL row codecs.
  */
 module;
 
@@ -33,11 +28,13 @@ import bioseq.postgres.support;
 
 export namespace bioseq::postgres::support {
 
+/** @brief Reports a generated row-codec contract or conversion violation. */
 class row_codec_error final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
+/** @brief PostgreSQL btree comparison strategies accepted by generated codecs. */
 enum class scan_comparison {
     equal,
     less,
@@ -46,6 +43,7 @@ enum class scan_comparison {
     greater_equal,
 };
 
+/** @brief Expected PostgreSQL tuple-descriptor facts for one row field. */
 struct row_descriptor_field final {
     AttrNumber attribute_number;
     std::string_view name;
@@ -53,6 +51,10 @@ struct row_descriptor_field final {
     bool nullable;
 };
 
+/**
+ * @brief Validates a live tuple descriptor against generated field metadata.
+ * @throws row_codec_error If arity or any field property differs.
+ */
 template<std::size_t p_field_count>
 void validate_row_descriptor(
         TupleDesc tuple_descriptor,
@@ -82,6 +84,7 @@ void validate_row_descriptor(
     }
 }
 
+/** @brief Rejects a null result context before row deformation or copying. */
 inline void require_row_result_context(
         MemoryContext result_context,
         std::string_view row_name) {
@@ -92,6 +95,7 @@ inline void require_row_result_context(
     }
 }
 
+/** @brief Rejects a null value for a generated required attribute. */
 inline void require_row_attribute_not_null(
         bool is_null,
         AttrNumber attribute_number,
@@ -122,7 +126,7 @@ struct by_reference_datum_copy_policy final {
  *
  * The input bytes remain owned by the caller.  Only raw pointer, length, and
  * MemoryContext values cross the PostgreSQL ERROR bridge.  On success there is
- * exactly one allocation, already owned by result_context; on ERROR the bridge
+ * exactly one allocation, already owned by result_context. On ERROR the bridge
  * restores the caller's memory context before throwing postgres_error.
  */
 [[nodiscard]] inline Datum encode_text_to_memory_context(
@@ -151,11 +155,16 @@ struct by_reference_datum_copy_policy final {
     return invoke_pg_as_cpp(encode);
 }
 
+/**
+ * @brief Copies a non-null by-reference Datum into @p result_context.
+ * @throws row_codec_error If the policy describes a by-value or invalid type.
+ */
 [[nodiscard]] Datum copy_pg_datum_to_memory_context(
     Datum value,
     by_reference_datum_copy_policy policy,
     MemoryContext result_context);
 
+/** @brief Copies a by-reference Datum and returns its typed context-owned pointer. */
 template<class p_value>
     requires std::is_object_v<p_value>
 [[nodiscard]] p_value* copy_pg_datum_to_memory_context(
@@ -170,6 +179,7 @@ template<class p_value>
                 result_context)));
 }
 
+/** @return The PostgreSQL btree strategy number for @p comparison. */
 [[nodiscard]] constexpr StrategyNumber
 row_scan_strategy(scan_comparison comparison) {
     switch (comparison) {
@@ -187,12 +197,14 @@ row_scan_strategy(scan_comparison comparison) {
     return InvalidStrategy;
 }
 
+/** @brief Encoded comparison facts used to initialize one scan key. */
 struct encoded_scan_value final {
     StrategyNumber strategy;
     RegProcedure procedure;
     pg_datum datum;
 };
 
+/** @brief Builds a PostgreSQL scan key from generated comparison metadata. */
 [[nodiscard]] inline ScanKeyData make_row_scan_key(
         AttrNumber attribute_number,
         encoded_scan_value encoded) {
@@ -209,6 +221,7 @@ struct encoded_scan_value final {
     return result;
 }
 
+/** @brief Owns encoded Datum/null arrays for one generated row. */
 template<std::size_t p_field_count>
 class encoded_row_data final {
 public:
@@ -299,6 +312,7 @@ private:
     pg_datum_list<p_field_count> storage_{};
 };
 
+/** @brief Owns deformed row values tied to an explicit result context. */
 template<std::size_t p_field_count>
 class deformed_row_data final {
 public:
@@ -358,6 +372,7 @@ private:
     MemoryContext result_context_;
 };
 
+/** @brief Collects field replacements for one generated row update. */
 template<std::size_t p_field_count>
 class row_update_data final {
 public:

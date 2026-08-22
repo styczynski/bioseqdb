@@ -178,7 +178,7 @@ struct minimap2_parameters {
      * @return Chaining parameters with derived values prepared and the shared
      * chaining mode synchronized with chaining_algorithm.
      */
-    [[nodiscard]] chaining_parameters make_chaining_parameters() const {
+    [[nodiscard]] auto make_chaining_parameters() const -> chaining_parameters {
         chaining_parameters parameters;
         parameters.kmer_size = kmer_size;
         parameters.max_gap = max_gap;
@@ -227,7 +227,7 @@ struct minimap2_parameters {
 struct alignment_region {
     /** Region identifier. */
     std::int32_t region_id = 0;
-    /** Parent identifier, or -1 when unset; self denotes a primary region. */
+    /** Parent identifier, or -1 when unset. Self denotes a primary region. */
     std::int32_t parent = -1;
     /** Current chain score. */
     std::int32_t score = 0;
@@ -295,10 +295,9 @@ struct scalar_minimizer_execution_stats {
      * @param increment Value to add.
      * @param is_saturated Saturation state updated on overflow.
      */
-    static constexpr void add(
-            std::uint64_t& destination,
-            const std::uint64_t increment,
-            bool& is_saturated) noexcept {
+    static constexpr auto add(std::uint64_t& destination,
+                              const std::uint64_t increment,
+                              bool& is_saturated) noexcept -> void {
         if (increment > (std::numeric_limits<std::uint64_t>::max)()
                             - destination) {
             destination = (std::numeric_limits<std::uint64_t>::max)();
@@ -312,7 +311,7 @@ struct scalar_minimizer_execution_stats {
      * @brief Record one scalar minimizer call and its input size.
      * @param symbols Number of input symbols processed by the call.
      */
-    constexpr void record_input(const std::uint64_t symbols) noexcept {
+    constexpr auto record_input(const std::uint64_t symbols) noexcept -> void {
         add(calls, std::uint64_t{1}, saturated);
         add(input_symbols, symbols, saturated);
     }
@@ -321,8 +320,7 @@ struct scalar_minimizer_execution_stats {
      * @brief Merge another execution sample into this aggregate.
      * @param other Execution sample to merge.
      */
-    constexpr void merge(
-            const scalar_minimizer_execution_stats& other) noexcept {
+    constexpr auto merge(const scalar_minimizer_execution_stats& other) noexcept -> void {
         bool is_saturated = saturated || other.saturated;
         add(calls, other.calls, is_saturated);
         add(input_symbols, other.input_symbols, is_saturated);
@@ -335,16 +333,16 @@ struct scalar_minimizer_execution_stats {
      * required.
      * @return `true` when the counter relationships are coherent.
      */
-    [[nodiscard]] constexpr bool is_coherent(
-            const bool is_nonempty_work_required = true) const noexcept {
+    [[nodiscard]] constexpr auto
+    is_coherent(const bool is_nonempty_work_required = true) const noexcept -> bool {
         return !saturated
             && calls > 0
             && (!is_nonempty_work_required || input_symbols > 0);
     }
 
     /** @brief Compare all counters and saturation state. */
-    constexpr bool operator==(
-        const scalar_minimizer_execution_stats&) const noexcept = default;
+    constexpr auto operator==(const scalar_minimizer_execution_stats&) const noexcept
+        -> bool = default;
 };
 
 static_assert(std::is_standard_layout_v<scalar_minimizer_execution_stats>);
@@ -375,8 +373,7 @@ struct ksw2_batched_execution_stats {
      * @brief Record one alignment-region invocation.
      * @param region_count Number of regions presented to the invocation.
      */
-    constexpr void record_invocation(
-            const std::uint64_t region_count) noexcept {
+    constexpr auto record_invocation(const std::uint64_t region_count) noexcept -> void {
         scalar_minimizer_execution_stats::add(
             alignment_region_invocations, std::uint64_t{1}, saturated);
         scalar_minimizer_execution_stats::add(
@@ -387,8 +384,7 @@ struct ksw2_batched_execution_stats {
      * @brief Record deferred fills collected by one invocation.
      * @param fill_count Number of collected fills.
      */
-    constexpr void record_collected_fills(
-            const std::uint64_t fill_count) noexcept {
+    constexpr auto record_collected_fills(const std::uint64_t fill_count) noexcept -> void {
         scalar_minimizer_execution_stats::add(
             fills_collected, fill_count, saturated);
     }
@@ -397,8 +393,7 @@ struct ksw2_batched_execution_stats {
      * @brief Record one short-fill bucket dispatch.
      * @param lane_count Number of active lanes in the bucket.
      */
-    constexpr void record_short_bucket_dispatch(
-            const std::uint64_t lane_count) noexcept {
+    constexpr auto record_short_bucket_dispatch(const std::uint64_t lane_count) noexcept -> void {
         scalar_minimizer_execution_stats::add(
             short_bucket_dispatches, std::uint64_t{1}, saturated);
         scalar_minimizer_execution_stats::add(
@@ -411,10 +406,9 @@ struct ksw2_batched_execution_stats {
      * @param target_symbols Target length in symbols.
      * @param is_long_fill Whether the fill used the long-fill route.
      */
-    constexpr void record_nonempty_fill(
-            const std::uint64_t query_symbols,
-            const std::uint64_t target_symbols,
-            const bool is_long_fill) noexcept {
+    constexpr auto record_nonempty_fill(const std::uint64_t query_symbols,
+                                        const std::uint64_t target_symbols,
+                                        const bool is_long_fill) noexcept -> void {
         scalar_minimizer_execution_stats::add(
             nonempty_fill_calls, std::uint64_t{1}, saturated);
         if (is_long_fill) {
@@ -438,8 +432,7 @@ struct ksw2_batched_execution_stats {
      * @brief Merge another execution sample into this aggregate.
      * @param other Execution sample to merge.
      */
-    constexpr void merge(
-            const ksw2_batched_execution_stats& other) noexcept {
+    constexpr auto merge(const ksw2_batched_execution_stats& other) noexcept -> void {
         bool is_saturated = saturated || other.saturated;
         scalar_minimizer_execution_stats::add(
             alignment_region_invocations,
@@ -468,8 +461,8 @@ struct ksw2_batched_execution_stats {
      * non-empty region and fill.
      * @return `true` when every counter relationship is coherent.
      */
-    [[nodiscard]] constexpr bool is_coherent(
-            const bool is_nonempty_work_required) const noexcept {
+    [[nodiscard]] constexpr auto is_coherent(const bool is_nonempty_work_required) const noexcept
+        -> bool {
         const bool is_short_route_coherent =
             (short_bucket_dispatches == 0u)
                 == (short_bucket_lanes == 0u);
@@ -494,8 +487,7 @@ struct ksw2_batched_execution_stats {
     }
 
     /** @brief Compare all counters and saturation state. */
-    constexpr bool operator==(
-        const ksw2_batched_execution_stats&) const noexcept = default;
+    constexpr auto operator==(const ksw2_batched_execution_stats&) const noexcept -> bool = default;
 };
 
 static_assert(std::is_standard_layout_v<ksw2_batched_execution_stats>);
@@ -576,9 +568,8 @@ inline constexpr bool is_alignment_kernel_table_neutral =
  * @return `true` when every callable is non-null.
  */
 template <sequence_alphabet p_alphabet>
-[[nodiscard]] constexpr bool is_alignment_kernel_table_complete(
-    const alignment_kernels<p_alphabet>& kernels) noexcept
-{
+[[nodiscard]] constexpr auto
+is_alignment_kernel_table_complete(const alignment_kernels<p_alphabet>& kernels) noexcept -> bool {
     return kernels.align_ksw2_single_affine != nullptr
         && kernels.align_ksw2_dual_affine != nullptr
         && kernels.align_ksw2_batched != nullptr

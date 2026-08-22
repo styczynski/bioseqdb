@@ -19,7 +19,13 @@ foreach(_required IN ITEMS
     BIOSEQ_GCC_CANARY_CXX_SHA256
     BIOSEQ_GCC_CANARY_MODULES_SHA256
     BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256
-    BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256)
+    BIOSEQ_GCC_CANARY_DRIVER_CLOSURE_SHA256
+    BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR
+    BIOSEQ_GCC_CANARY_APPLE_SDK_PATH
+    BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT
+    BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION
+    BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION
+    BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST)
   if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
     message(FATAL_ERROR "Highway GCC nested canary requires ${_required}")
   endif()
@@ -69,6 +75,8 @@ endforeach()
 
 set(CMAKE_CXX_COMPILER "${BIOSEQ_GCC_CANARY_CXX}"
   CACHE FILEPATH "Authenticated Homebrew g++-16" FORCE)
+set(CMAKE_OSX_SYSROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  CACHE PATH "Authenticated active Apple SDK for Homebrew g++-16" FORCE)
 set(CMAKE_CXX_MODULE_STD OFF CACHE BOOL
   "The canary intentionally does not import the standard-library module" FORCE)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON CACHE BOOL
@@ -78,6 +86,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE BOOL
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_FIND_USE_PACKAGE_REGISTRY OFF)
 set(CMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY ON)
+
+include("${BIOSEQ_GCC_CANARY_CANARY_HELPER}")
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
 
 project(bioseq_highway_gcc_module_canary LANGUAGES CXX)
 
@@ -108,6 +126,50 @@ if(CMAKE_CXX_STDLIB_MODULES_JSON)
   message(FATAL_ERROR
     "Highway GCC nested canary authenticates but does not import std modules")
 endif()
+if(NOT DEFINED _CMAKE_OSX_SYSROOT_PATH
+    OR "${_CMAKE_OSX_SYSROOT_PATH}" STREQUAL "")
+  message(FATAL_ERROR
+    "Highway GCC nested CMake did not resolve the sealed active Apple SDK")
+endif()
+file(REAL_PATH "${CMAKE_OSX_SYSROOT}" _configured_apple_sdk)
+file(REAL_PATH "${_CMAKE_OSX_SYSROOT_PATH}" _resolved_apple_sdk)
+if(NOT "${_configured_apple_sdk}" STREQUAL
+      "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+    OR NOT "${_resolved_apple_sdk}" STREQUAL
+      "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}")
+  message(FATAL_ERROR
+    "Highway GCC nested CMake resolved a different Apple SDK: configured="
+    "${_configured_apple_sdk}, resolved=${_resolved_apple_sdk}, expected="
+    "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}")
+endif()
+if(NOT CMAKE_CXX_SYSROOT_FLAG STREQUAL "-isysroot")
+  message(FATAL_ERROR
+    "Highway GCC nested CMake did not enable the GNU Apple -isysroot flag: "
+    "${CMAKE_CXX_SYSROOT_FLAG}")
+endif()
+foreach(_forbidden_sysroot IN ITEMS
+    CMAKE_SYSROOT CMAKE_SYSROOT_COMPILE CMAKE_SYSROOT_LINK)
+  if(DEFINED ${_forbidden_sysroot}
+      AND NOT "${${_forbidden_sysroot}}" STREQUAL "")
+    message(FATAL_ERROR
+      "Highway GCC nested canary forbids generic sysroot override "
+      "${_forbidden_sysroot}=${${_forbidden_sysroot}}")
+  endif()
+endforeach()
+if((DEFINED CMAKE_CXX_COMPILER_LAUNCHER
+      AND NOT "${CMAKE_CXX_COMPILER_LAUNCHER}" STREQUAL "")
+    OR (DEFINED CMAKE_CXX_FLAGS AND NOT "${CMAKE_CXX_FLAGS}" STREQUAL ""))
+  message(FATAL_ERROR
+    "Highway GCC nested canary forbids compiler launchers and ambient flags")
+endif()
+_bioseq_highway_gcc_canary_verify_apple_sdk(
+  CXX "${BIOSEQ_GCC_CANARY_CXX}"
+  DEVELOPER_DIR "${BIOSEQ_GCC_CANARY_APPLE_DEVELOPER_DIR}"
+  SDK_PATH "${BIOSEQ_GCC_CANARY_APPLE_SDK_PATH}"
+  SDK_ROOT "${BIOSEQ_GCC_CANARY_APPLE_SDK_ROOT}"
+  VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_VERSION}"
+  BUILD_VERSION "${BIOSEQ_GCC_CANARY_APPLE_SDK_BUILD_VERSION}"
+  DIGEST "${BIOSEQ_GCC_CANARY_APPLE_SDK_DIGEST}")
 
 include("${BIOSEQ_GCC_CANARY_TOOLCHAIN_HELPER}")
 bioseq_verify_gcc16_toolchain_identity(
@@ -122,7 +184,6 @@ bioseq_verify_gcc16_toolchain_identity(
   MODULE_SOURCE_CLOSURE_SHA256
     "${BIOSEQ_GCC_CANARY_MODULE_SOURCE_CLOSURE_SHA256}")
 
-include("${BIOSEQ_GCC_CANARY_CANARY_HELPER}")
 _bioseq_highway_gcc_canary_driver_closure(
   _observed_driver_closure _gcc_libstdcxx _gcc_libgcc
   "${BIOSEQ_GCC_CANARY_ROOT}" "${BIOSEQ_GCC_CANARY_CXX}")

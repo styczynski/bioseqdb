@@ -1,6 +1,10 @@
+/**
+ * @file storage.cppm
+ * @brief Declares PostgreSQL settings for Bioseq sequence storage.
+ */
 module;
 
-#include <climits>
+#include <limits>
 
 export module bioseq.postgres.configuration.storage;
 
@@ -24,7 +28,7 @@ struct settings final {
         [[bioseq_sql::guc({
             .context = bioseq::sql::guc_context::superuser,
             .minimum = 0,
-            .maximum = INT_MAX,
+            .maximum = std::numeric_limits<int>::max(),
         })]]
         static inline int max_size_gib = 1'024;
     };

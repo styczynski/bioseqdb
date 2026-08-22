@@ -23,8 +23,6 @@
  *     `printf`/`cerr` outside `standard_error_capture`'s redirect plumbing,
  *     and no helper that throws on cleanup.
  */
-#include <tests/support/common.hpp>
-
 #include <catch2/catch_approx.hpp>
 
 #include <simdjson.h>
@@ -33,37 +31,16 @@
 
 #include <oneapi/tbb/global_control.h>
 
-#include <algorithm>
-#include <array>
-#include <atomic>
 #include <cerrno>
-#include <chrono>
-#include <cmath>
-#include <condition_variable>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <optional>
-#include <random>
-#include <set>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <tuple>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.common.logging;
 import bioseq.instrumentation;
 import bioseq.parallelism.concepts;
@@ -5411,7 +5388,7 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
             != std::string::npos);
 }
 
-TEST_CASE("Paper ntHash unequal-work sketch comparisons are prototype diagnostics",
+TEST_CASE("Bounded ntHash unequal-work sketch comparisons are nonblocking diagnostics",
           "[component:benchmark_framework][layer:contract][feature:configuration][resource:filesystem]") {
     const auto source_path = std::filesystem::path{__FILE__};
     auto config_path = source_path.parent_path().parent_path()
@@ -5426,20 +5403,21 @@ TEST_CASE("Paper ntHash unequal-work sketch comparisons are prototype diagnostic
     std::ifstream config_stream{config_path};
     REQUIRE(config_stream.good());
     const nlohmann::json config = nlohmann::json::parse(config_stream);
-    const auto& probe = config.at("bench_paper_nthash_xxl_hifi_probe");
+    const auto& probe =
+        config.at("bench_bounded_nthash_xxl_hifi_validation");
     const std::string description =
         probe.at("description").get<std::string>();
     REQUIRE(description.find("unequal work") != std::string::npos);
     REQUIRE(description.find("1.46-1.48") != std::string::npos);
-    REQUIRE(description.find("nonblocking prototype diagnostic")
+    REQUIRE(description.find("visible nonblocking comparison diagnostic")
             != std::string::npos);
 
     const auto& rules = probe.at("matrix").at("metrics")
         .at("region_total_ns").at("rules");
     REQUIRE(rules.size() == 2);
     const std::set<std::string> expected_rule_names{
-        "bounded_paper_nthash_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
-        "bounded_paper_nthash_block_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
+        "bounded_nthash_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
+        "bounded_nthash_block_sketch_vs_exactsimd_lt_1_comparison_diagnostic",
     };
     std::set<std::string> configured_rule_names;
     for (const auto& rule : rules) {
@@ -7432,10 +7410,10 @@ TEST_CASE("GPU historical timing policies isolate curated concurrency diagnostic
                 "Wall timing is diagnostic only")
             != std::string::npos);
     REQUIRE(curated.at("description").get<std::string>().find(
-                "Report163 is the first biologically correct")
+                "five concurrent groups share a process-wide Vulkan queue mutex")
             != std::string::npos);
     REQUIRE(curated.at("description").get<std::string>().find(
-                "Reports164, 170, and 171")
+                "independent row P50/P99 estimates are not acceptance-grade")
             != std::string::npos);
     REQUIRE(curated.at("description").get<std::string>().find(
                 "Blocking GPU speed acceptance")

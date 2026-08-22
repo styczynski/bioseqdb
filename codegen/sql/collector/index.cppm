@@ -445,7 +445,8 @@ inline void validate_options(
                            std::initializer_list<std::string_view> allowed) {
         return std::ranges::find(allowed, name) != allowed.end();
     };
-    const auto natural_option = [&](std::string_view name) {
+    const auto natural_option = [kind, one_of](
+                                    std::string_view name) -> bool {
         switch (kind) {
             case entity_kind::function:
                 return one_of(name, {
@@ -459,7 +460,8 @@ inline void validate_options(
             case entity_kind::table:
                 return one_of(name, {
                     "schema", "persistence", "create",
-                    "access_method", "user_catalog_table"});
+                    "access_method", "user_catalog_table",
+                    "relation_options"});
             case entity_kind::column:
                 return one_of(name, {
                     "sql_type", "default_value", "collation"});
@@ -486,7 +488,7 @@ inline void validate_options(
                     "schema", "internal_length", "variable_length",
                     "passed_by_value", "alignment", "storage",
                     "category", "preferred", "delimiter",
-                    "collatable", "element", "array",
+                    "collatable", "element",
                     "default_value"});
             case entity_kind::type_role:
                 return one_of(name, {"for_type"});
@@ -866,7 +868,11 @@ struct aggregate_location {
     std::string_view requested_name,
     const collected_entity& owner,
     const std::vector<structural_analysis::translation_unit>& units) {
+    const bool globally_qualified = collector_trim(requested_name)
+        .starts_with("::");
     std::string requested = compact_cpp_type(requested_name);
+    const bool qualified = globally_qualified
+        || requested.contains("::");
     std::string owner_scope = owner.cpp_qualified_name;
     if (const std::size_t separator = owner_scope.rfind("::");
         separator != std::string::npos) {
@@ -877,7 +883,7 @@ struct aggregate_location {
 
     std::vector<std::string> candidates;
     candidates.push_back(requested);
-    if (!owner_scope.empty()) {
+    if (!qualified && !owner_scope.empty()) {
         candidates.push_back(owner_scope + "::" + requested);
     }
     for (const std::string& candidate : candidates) {
@@ -899,6 +905,12 @@ struct aggregate_location {
         if (match.aggregate) return match;
     }
 
+    if (qualified) {
+        throw std::runtime_error(
+            entity_diagnostic(owner.source_path, owner.source_range)
+            + ": result Row '" + requested
+            + "' was not found in an imported .sql_rows module");
+    }
     aggregate_location suffix_match;
     const std::string suffix = "::" + requested;
     for (const structural_analysis::translation_unit& unit : units) {
@@ -1296,6 +1308,29 @@ inline void bind_routine_companion_metadata(
     }
 }
 
+inline void rebind_operator_companion_parameters(
+    std::vector<collected_entity>& entities) {
+    std::map<std::string, const collected_entity*, std::less<>>
+        routines_by_cpp_name;
+    for (const collected_entity& entity : entities) {
+        if (!routine_kind(entity.kind)) continue;
+        const auto [owner, inserted] = routines_by_cpp_name.emplace(
+            entity.cpp_qualified_name, &entity);
+        if (!inserted) owner->second = nullptr;
+    }
+    for (collected_entity& entity : entities) {
+        if (entity.kind != entity_kind::operator_) continue;
+        const auto owner = routines_by_cpp_name.find(
+            entity.cpp_qualified_name);
+        if (owner == routines_by_cpp_name.end()
+            || owner->second == nullptr) {
+            throw std::runtime_error(
+                "operator companion lost its unique natural routine owner");
+        }
+        entity.parameters = owner->second->parameters;
+    }
+}
+
 [[nodiscard]] inline std::string resolve_type_of_sql_type(
     std::string_view sql_type,
     const std::vector<collected_entity>& entities,
@@ -1326,8 +1361,12 @@ inline void bind_routine_companion_metadata(
             std::string{diagnostic}
             + ": malformed bioseq::sql::type_of SQL type");
     }
-    const std::string reference =
-        compact_cpp_type(sql_type.substr(begin, end - begin));
+    const std::string_view raw_reference = collector_trim(
+        sql_type.substr(begin, end - begin));
+    const bool globally_qualified = raw_reference.starts_with("::");
+    std::string reference = compact_cpp_type(raw_reference);
+    const bool qualified = globally_qualified
+        || reference.contains("::");
     std::vector<const collected_entity*> matches;
     for (const collected_entity& candidate : entities) {
         if (candidate.kind != entity_kind::type) {
@@ -1336,7 +1375,7 @@ inline void bind_routine_companion_metadata(
         const bool exact =
             candidate.cpp_qualified_name == reference;
         const bool suffix =
-            !reference.contains("::")
+            !qualified
             && candidate.cpp_qualified_name.ends_with(
                 "::" + reference);
         if (exact || suffix) {
@@ -1373,7 +1412,27 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 program.entities,
                 row.source_path.string() + ":"
                     + std::to_string(field.source_range.begin.line)
-                    + ": result field '" + field.name + "'");
+                    + ": result field '" + field.name + "'",
+                &field.stable_identity_sql_type);
+        }
+    }
+
+    for (collected_entity& entity : program.entities) {
+        if (entity.kind != entity_kind::column) continue;
+        const std::string declared = find_option(entity, "sql_type")
+            ? option_literal(entity, "sql_type")
+            : sql_type_from_cpp(entity.cpp_return_type);
+        if (declared.contains("type_of<")) {
+            entity.resolved_sql_type = resolve_type_of_sql_type(
+                declared,
+                program.entities,
+                entity_diagnostic(entity.source_path, entity.source_range)
+                    + ": SQL column '" + entity.name + "'");
+        } else {
+            entity.resolved_sql_type = leaf_identifier(declared);
+            if (entity.resolved_sql_type == "double_precision") {
+                entity.resolved_sql_type = "double precision";
+            }
         }
     }
 
@@ -1395,7 +1454,8 @@ inline void resolve_type_of_sql_types(collected_program& program) {
         entity.result.sql_type = resolve_type_of_sql_type(
             entity.result.sql_type,
             program.entities,
-            diagnostic + " result");
+            diagnostic + " result",
+            &entity.result.stable_identity_sql_type);
         switch (entity.result.form) {
             case routine_result_form::set_of:
                 entity.result_sql_type =
@@ -1434,6 +1494,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                 break;
         }
     }
+
 }
 
 }  // namespace detail
@@ -1627,9 +1688,12 @@ inline void resolve_type_of_sql_types(collected_program& program) {
                     .options = std::move(options),
                     .dependencies = declaration_dependencies,
                     .documentation = declaration.documentation,
-                    .public_documentation = std::ranges::contains(
-                        declaration.documentation.groups,
-                        std::string{"bioseq_sql_public_api"}),
+                    .public_documentation =
+                        *kind != entity_kind::grant
+                        && *kind != entity_kind::revoke
+                        && std::ranges::contains(
+                            declaration.documentation.groups,
+                            std::string{"bioseq_sql_public_api"}),
                     .companion = detail::companion_kind(*kind)
                         || attribute.name == "am_catalog_dependencies",
                 };
@@ -1779,6 +1843,7 @@ inline void resolve_type_of_sql_types(collected_program& program) {
             });
     }
     detail::resolve_type_of_sql_types(result);
+    detail::rebind_operator_companion_parameters(result.entities);
     if (result.entities.empty()) {
         throw std::runtime_error(
             "SQL source collection found no bioseq_sql annotations");
@@ -2002,7 +2067,9 @@ collect_direct_import_enum_authorities(
         if (authority.module_name.empty()
             || !std::ranges::any_of(
                 module_graph.units,
-                [&](const structural_analysis::module_graph_unit& owner) {
+                [&authority](
+                    const structural_analysis::module_graph_unit& owner)
+                    -> bool {
                     return std::ranges::contains(
                                owner.exported_imports,
                                authority.module_name)

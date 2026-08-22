@@ -9,21 +9,15 @@
  *        mis-mapped dna5 result can never pass). The dna5 path exercises the nt4
  *        normalization (N resets, T valid) end-to-end through the SQL surface.
  */
-#include <tests/support/common.hpp>
-#include <bioseq/pg_build_profile.h>
-#include <fmt/format.h>
-
-#include <array>
-#include <charconv>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
-#include <string>
-#include <string_view>
-#include <vector>
 
+#include <fmt/format.h>
+#include <catch2/catch_test_macros.hpp>
+#include <libassert/assert.hpp>
+#include <libassert/assert-catch2.hpp>
+
+import std;
 import bioseq.sequences;
 import bioseq.sequences.generation;
 import bioseq.common.logging;
@@ -32,206 +26,261 @@ import bioseq.tests.integration.support;
 
 namespace {
 
-namespace it = bioseq_int_tests;
-namespace gen = bioseq::sequences::generation;
+namespace integration_support = bioseq_int_tests;
+namespace sequence_generation = bioseq::sequences::generation;
 
 constexpr long long k_position_tolerance_bp = 50;
 
+/// Write one FASTA record using deterministic 60-column wrapping.
 void write_fasta(const std::string& path, std::string_view header,
                  const std::string& body) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    f << '>' << header << '\n';
-    for (std::size_t i = 0; i < body.size(); i += 60) {
-        f << body.substr(i, 60) << '\n';
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output << '>' << header << '\n';
+    for (std::size_t offset = 0; offset < body.size(); offset += 60) {
+        output << body.substr(offset, 60) << '\n';
     }
 }
 
-// minimap2 PAF target-start of the primary (or widest) alignment. Single-record
-// target (no split), so PAF col 7 is already the absolute coordinate. Returns
-// -1 if nothing maps.
-[[nodiscard]] long long run_minimap2_target_start(const std::string& target_fa,
-                                                  const std::string& query_fa) {
-    const std::string cmd =
-        fmt::format("minimap2 -c -t1 -k15 -w10 {} {} 2>/dev/null", target_fa, query_fa);
-    std::FILE* pipe = ::popen(cmd.c_str(), "r");
-    if (pipe == nullptr) return -1;
-    std::string out;
-    std::array<char, 1 << 16> buf;
-    std::size_t n;
-    while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-    ::pclose(pipe);
+/// Return the primary or widest minimap2 PAF target start, or -1 if unmapped.
+[[nodiscard]] long long run_minimap2_target_start(
+        const std::string& target_fasta_path,
+        const std::string& query_fasta_path) {
+    const std::string command =
+        fmt::format(
+            "minimap2 -c -t1 -k15 -w10 {} {} 2>/dev/null",
+            target_fasta_path,
+            query_fasta_path);
+    std::FILE* process_stream = ::popen(command.c_str(), "r");
+    if (process_stream == nullptr) {
+        return -1;
+    }
+    std::string process_output;
+    std::array<char, 1 << 16> buffer;
+    while (const std::size_t bytes_read =
+               std::fread(buffer.data(), 1, buffer.size(), process_stream);
+           bytes_read > 0) {
+        process_output.append(buffer.data(), bytes_read);
+    }
+    ::pclose(process_stream);
 
-    long long best_start = -1, best_span = -1;
-    std::size_t pos = 0;
-    while (pos < out.size()) {
-        const std::size_t eol = out.find('\n', pos);
-        const std::string_view line{out.data() + pos,
-            (eol == std::string::npos ? out.size() : eol) - pos};
-        pos = (eol == std::string::npos) ? out.size() : eol + 1;
-        if (line.empty()) continue;
-        std::vector<std::string_view> col;
-        std::size_t cs = 0;
-        for (std::size_t i = 0; i <= line.size(); ++i)
-            if (i == line.size() || line[i] == '\t') { col.emplace_back(line.substr(cs, i - cs)); cs = i + 1; }
-        if (col.size() < 9) continue;
-        long long rstart = 0, rend = 0;
-        std::from_chars(col[7].data(), col[7].data() + col[7].size(), rstart);
-        std::from_chars(col[8].data(), col[8].data() + col[8].size(), rend);
-        const long long span = rend - rstart;
+    long long best_start = -1;
+    long long best_span = -1;
+    std::size_t line_start = 0;
+    while (line_start < process_output.size()) {
+        const std::size_t line_end = process_output.find('\n', line_start);
+        const std::string_view line{
+            process_output.data() + line_start,
+            (line_end == std::string::npos ? process_output.size() : line_end)
+                - line_start};
+        line_start = line_end == std::string::npos
+            ? process_output.size()
+            : line_end + 1;
+        if (line.empty()) {
+            continue;
+        }
+        std::vector<std::string_view> columns;
+        std::size_t column_start = 0;
+        for (std::size_t index = 0; index <= line.size(); ++index) {
+            if (index == line.size() || line[index] == '\t') {
+                columns.emplace_back(
+                    line.substr(column_start, index - column_start));
+                column_start = index + 1;
+            }
+        }
+        if (columns.size() < 9) {
+            continue;
+        }
+        long long target_start = 0;
+        long long target_end = 0;
+        std::from_chars(
+            columns[7].data(),
+            columns[7].data() + columns[7].size(),
+            target_start);
+        std::from_chars(
+            columns[8].data(),
+            columns[8].data() + columns[8].size(),
+            target_end);
+        const long long span = target_end - target_start;
         const bool primary = (line.find("tp:A:P") != std::string_view::npos);
-        if (primary || span > best_span) { best_span = primary ? (1LL << 62) : span; best_start = rstart; }
+        if (primary || span > best_span) {
+            best_span = primary ? (1LL << 62) : span;
+            best_start = target_start;
+        }
     }
     return best_start;
 }
 
+/// Exercise the complete load, index, and alignment pipeline for one alphabet.
 template <sequence_alphabet p_alphabet>
-void run_smoke(const std::string& alpha_name, const std::string& seq_type,
-               const std::string& table) {
-    gen::generator_params gp{};
-    gp.reference_length       = 300'000;
-    gp.fragment_count         = 4;            // several loci
-    gp.fragment_length_mean   = 5'000;        // long N-free runs (dna5 ref is ~1% N)
-    gp.fragment_length_stddev = 200.0;
-    gp.substitution_rate      = 0.001;
-    gp.insertion_rate         = 0.0005;
-    gp.deletion_rate          = 0.0005;
-    gp.reverse_complement_rate = 0.0;         // forward-only -> deterministic positions
-    gp.seed                   = 20260286;
+void run_pipeline_smoke(
+        const std::string& alphabet_name,
+        const std::string& sequence_type,
+        const std::string& table_name) {
+    sequence_generation::generator_params parameters{};
+    parameters.reference_length       = 300'000;
+    parameters.fragment_count         = 4;            // several loci
+    parameters.fragment_length_mean   = 5'000;        // long N-free runs (dna5 ref is ~1% N)
+    parameters.fragment_length_stddev = 200.0;
+    parameters.substitution_rate      = 0.001;
+    parameters.insertion_rate         = 0.0005;
+    parameters.deletion_rate          = 0.0005;
+    parameters.reverse_complement_rate = 0.0;         // forward-only -> deterministic positions
+    parameters.seed                   = 20260286;
 
-    auto pairs = gen::alphabet_sequence_generator<p_alphabet, std::uint64_t>(gp)
-                     .generate_sequences_pairs(gp.fragment_count);
-    ASSERT(pairs.size() == gp.fragment_count, "generator under-produced", pairs.size());
+    const auto pairs = sequence_generation::alphabet_sequence_generator<
+                           p_alphabet,
+                           std::uint64_t>(parameters)
+                           .generate_sequences_pairs(parameters.fragment_count);
+    ASSERT(
+        pairs.size() == parameters.fragment_count,
+        "generator under-produced",
+        pairs.size());
     const std::string target_bases = pairs.front().target->to_string();
-    if (alpha_name == "dna5") {
+    if (alphabet_name == "dna5") {
         // The dna5 generator must produce N so the nt4 path is covered.
         ASSERT(target_bases.find('N') != std::string::npos,
                "dna5 smoke target unexpectedly contains no N", target_bases.size());
     }
 
-    const std::string target_fa = fmt::format("/tmp/bioseq_pipeline_smoke_{}_target.fasta", alpha_name);
-    write_fasta(target_fa, "ref", target_bases);
+    const std::string target_fasta_path = fmt::format(
+        "/tmp/bioseq_pipeline_smoke_{}_target.fasta", alphabet_name);
+    write_fasta(target_fasta_path, "ref", target_bases);
 
-    it::connection_test_context ctx;
-    it::reset_extension(ctx, { std::string_view{table} });
-    it::exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
-    it::exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm       = 'simd_minimap2';");
-    it::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm      = 'two_stack_nthash';");
+    integration_support::connection_test_context ctx;
+    integration_support::reset_extension(ctx, {std::string_view{table_name}});
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.base_alignment.algorithm = 'block_aligner';");
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.chaining.algorithm       = 'simd_minimap2';");
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm      = 'two_stack_nthash';");
     // Verify that the minimizer-algorithm GUC is applied end to end
     // (the enum GUC → minimap2_parameters::minimizer_algorithm plumbing). dna4 and
     // dna5 both run the checked exact-SIMD two-stack kernel; dna5 is normalized
     // to nt4 in vectors and N performs minimap2's continuous l=0/max-slot
     // transition while the existing minimizer ring keeps advancing.
-    REQUIRE(it::query_scalar(ctx, "SHOW bioseq.aligner.minimizer.algorithm") == "two_stack_nthash");
-    it::exec_sqlf(ctx, "CREATE TABLE {} (header text, seq {}) USING bioseq;", table, seq_type);
-    it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
-    it::exec_sqlf(ctx, "SELECT bioseq.load('{}'::regclass, '{}');", table, target_fa);
-    it::exec_sqlf(ctx, "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_sequence');", table);
-    it::exec_sqlf(ctx, "SELECT bioseq.set_active_read_index('{}'::regclass, 'minimizers_per_sequence');", table);
-    it::exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
+    REQUIRE(integration_support::query_scalar(
+                ctx, "SHOW bioseq.aligner.minimizer.algorithm") == "two_stack_nthash");
+    integration_support::exec_sqlf(
+        ctx,
+        "CREATE TABLE {} (header text, seq {}) USING bioseq;",
+        table_name,
+        sequence_type);
+    integration_support::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = on;");
+    integration_support::exec_sqlf(
+        ctx,
+        "SELECT bioseq.load('{}'::regclass, '{}');",
+        table_name,
+        target_fasta_path);
+    integration_support::exec_sqlf(ctx, "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_sequence');", table_name);
+    integration_support::exec_sqlf(ctx, "SELECT bioseq.set_active_read_index('{}'::regclass, 'minimizers_per_sequence');", table_name);
+    integration_support::exec_sql(ctx, "SET bioseq.index.sequence_read.enabled = on;");
 
-    for (std::size_t i = 0; i < pairs.size(); ++i) {
-        const std::string query = pairs[i].query.to_string();
-        const long long truth = static_cast<long long>(pairs[i].truth_target_start);
-        const std::string query_fa = fmt::format("/tmp/bioseq_pipeline_smoke_{}_q{}.fasta", alpha_name, i);
-        write_fasta(query_fa, fmt::format("q{}", i), query);
+    for (std::size_t index = 0; index < pairs.size(); ++index) {
+        const std::string query = pairs[index].query.to_string();
+        const long long truth =
+            static_cast<long long>(pairs[index].truth_target_start);
+        const std::string query_fasta_path = fmt::format(
+            "/tmp/bioseq_pipeline_smoke_{}_q{}.fasta",
+            alphabet_name,
+            index);
+        write_fasta(query_fasta_path, fmt::format("q{}", index), query);
 
         // bioseq: assemble-on mmsearch must map within tolerance of truth.
-        const auto rows = it::query_rows(ctx, fmt::format(
+        const auto rows = integration_support::query_rows(ctx, fmt::format(
             "SELECT bioseq.target_start(header) FROM {} WHERE mmsearch(seq, '{}'::{}) "
-            "ORDER BY header", table, query, seq_type));
+            "ORDER BY header", table_name, query, sequence_type));
         ASSERT(!rows.empty() && rows[0][0].has_value(),
-               fmt::format("{} query {} did not map via bioseq mmsearch", alpha_name, i),
-               i);
+               fmt::format("{} query {} did not map via bioseq mmsearch", alphabet_name, index),
+               index);
         const long long bioseq_start = std::stoll(rows[0][0].value());
         ASSERT(std::llabs(bioseq_start - truth) <= k_position_tolerance_bp,
                fmt::format("{} query {} bioseq start {} vs truth {} (> {} tol)",
-                           alpha_name, i, bioseq_start, truth, k_position_tolerance_bp),
-               i);
+                           alphabet_name, index, bioseq_start, truth, k_position_tolerance_bp),
+               index);
 
         // minimap2 cross-check: must also map within tolerance, and agree with bioseq.
-        const long long mm2_start = run_minimap2_target_start(target_fa, query_fa);
-        ASSERT(mm2_start >= 0 && std::llabs(mm2_start - truth) <= k_position_tolerance_bp,
+        const long long minimap2_start = run_minimap2_target_start(
+            target_fasta_path, query_fasta_path);
+        ASSERT(minimap2_start >= 0 && std::llabs(minimap2_start - truth) <= k_position_tolerance_bp,
                fmt::format("{} query {} minimap2 start {} vs truth {} (> {} tol)",
-                           alpha_name, i, mm2_start, truth, k_position_tolerance_bp),
-               i);
-        ASSERT(std::llabs(bioseq_start - mm2_start) <= k_position_tolerance_bp,
+                           alphabet_name, index, minimap2_start, truth, k_position_tolerance_bp),
+               index);
+        ASSERT(std::llabs(bioseq_start - minimap2_start) <= k_position_tolerance_bp,
                fmt::format("{} query {} bioseq {} vs minimap2 {} disagree",
-                           alpha_name, i, bioseq_start, mm2_start),
-               i);
+                           alphabet_name, index, bioseq_start, minimap2_start),
+               index);
     }
     bioseq_log<logging_level::debug>(
             "[pipeline_smoke] {} ok: {} queries mapped within {} bp on "
             "bioseq + minimap2",
-            alpha_name, pairs.size(), k_position_tolerance_bp);
+            alphabet_name, pairs.size(), k_position_tolerance_bp);
 }
 
 }  // namespace
 
 TEST_CASE("DNA4 load, indexing, and alignment match minimap2", "[component:bioseq][layer:integration][feature:pipeline][resource:postgres][resource:filesystem][resource:subprocess]") {
-    run_smoke<seq::dna4>("dna4", "bioseq.seq('dna4', 64)", "pipeline_smoke_dna4");
+    run_pipeline_smoke<seq::dna4>("dna4", "bioseq.seq('dna4', 64)", "pipeline_smoke_dna4");
 }
 
 #if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
 TEST_CASE("DNA5 load, indexing, and alignment with N match minimap2", "[component:bioseq][layer:integration][feature:pipeline][resource:postgres][resource:filesystem][resource:subprocess]") {
-    run_smoke<seq::dna5>("dna5", "bioseq.seq('dna5', 64)", "pipeline_smoke_dna5");
+    run_pipeline_smoke<seq::dna5>("dna5", "bioseq.seq('dna5', 64)", "pipeline_smoke_dna5");
 }
 #endif
 
 TEST_CASE(
         "hash-major minimizer indexing uses the loaded table row identity",
         "[component:bioseq][layer:integration][feature:pipeline][resource:postgres][resource:filesystem]") {
-    constexpr std::string_view table = "pipeline_index_row_identity";
-    const std::string target_fa =
+    constexpr std::string_view table_name = "pipeline_index_row_identity";
+    const std::string target_fasta_path =
         "/tmp/pipeline_index_row_identity_target.fasta";
     std::string target(65'565, 'A');
     constexpr std::string_view bases = "ACGT";
     std::uint64_t state = 236'729'555'479ULL;
-    for (std::size_t i = 0; i < target.size(); ++i) {
+    for (std::size_t index = 0; index < target.size(); ++index) {
         state ^= state << 13U;
         state ^= state >> 7U;
         state ^= state << 17U;
-        target[i] = bases[state & 3U];
+        target[index] = bases[state & 3U];
     }
-    write_fasta(target_fa, "ref", target);
+    write_fasta(target_fasta_path, "ref", target);
 
-    it::connection_test_context ctx;
-    it::reset_extension(ctx, {table});
-    it::exec_sqlf(
+    integration_support::connection_test_context ctx;
+    integration_support::reset_extension(ctx, {table_name});
+    integration_support::exec_sqlf(
         ctx,
         "CREATE TABLE {} (header text, seq bioseq.seq('dna4', 64)) "
         "USING bioseq;",
-        table);
-    it::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
-    it::exec_sql(
+        table_name);
+    integration_support::exec_sql(ctx, "SET bioseq.index.insert_maintenance.enabled = off;");
+    integration_support::exec_sql(
         ctx,
         "SET bioseq.aligner.grouped_soa_generation.enabled = on;");
-    it::exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
-    it::exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = off;");
-    it::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
-    it::exec_sql(ctx, "SET bioseq.aligner.minimizer.kmer_size = 15;");
-    it::exec_sql(ctx, "SET bioseq.aligner.minimizer.window_size = 10;");
+    integration_support::exec_sql(ctx, "SET bioseq.index.async_persistence.enabled = off;");
+    integration_support::exec_sql(ctx, "SET bioseq.index.recompute_async_persistence.enabled = off;");
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.algorithm = 'scalar';");
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.kmer_size = 15;");
+    integration_support::exec_sql(ctx, "SET bioseq.aligner.minimizer.window_size = 10;");
 
-    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+    REQUIRE(integration_support::query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.load('{}'::regclass, '{}');",
-        table,
-        target_fa)) == 1);
-    const auto source_rows = it::query_rows(ctx, fmt::format(
+        table_name,
+        target_fasta_path)) == 1);
+    const auto source_rows = integration_support::query_rows(ctx, fmt::format(
         "SELECT bioseq.column_row_number('{}'::regclass, ctid) "
         "FROM {} ORDER BY ctid;",
-        table,
-        table));
+        table_name,
+        table_name));
     REQUIRE(source_rows.size() == 1);
     REQUIRE(source_rows.front().size() == 1);
     REQUIRE(source_rows.front().front().has_value());
-    const long long source_rowno =
+    const long long source_row_number =
         std::stoll(source_rows.front().front().value());
-    REQUIRE(source_rowno > 0);
+    REQUIRE(source_row_number > 0);
 
-    REQUIRE(it::query_scalar_int(ctx, fmt::format(
+    REQUIRE(integration_support::query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
-        table)) == 1);
-    const auto inspected = it::query_one(ctx, fmt::format(
+        table_name)) == 1);
+    const auto inspected = integration_support::query_one(ctx, fmt::format(
         "WITH inspected AS ("
         " SELECT bioseq.inspect_ready_hash_major_minimizer_generation("
         "  '{}'::regclass,'minimizers_per_sequence',{}) AS j"
@@ -315,15 +364,15 @@ TEST_CASE(
         "       'stored_posting_width_bytes')::bigint "
         " THEN '1' ELSE '0' END "
         "FROM inspected;",
-        table,
-        source_rowno));
+        table_name,
+        source_row_number));
     REQUIRE(inspected.size() == 11);
     for (const auto& field : inspected) {
         REQUIRE(field.has_value());
     }
     REQUIRE(inspected[0].value() == "hash_major");
     REQUIRE(std::stoll(inspected[1].value()) > 0);
-    REQUIRE(inspected[2].value() == std::to_string(source_rowno));
+    REQUIRE(inspected[2].value() == std::to_string(source_row_number));
     REQUIRE(inspected[3].value() == std::to_string(target.size()));
     REQUIRE(inspected[4].value() == "15");
     REQUIRE(inspected[5].value() == "10");

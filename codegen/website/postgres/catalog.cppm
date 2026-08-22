@@ -36,15 +36,20 @@ export namespace bioseq::codegen::website {
 
 /// @brief Loads extension-owned type entities from the live PostgreSQL catalog.
 /// @param connection_info Unix-socket connection parameters for the private cluster.
+/// @param extension_name Exact owning extension name from the validated manifest.
 /// @param included_schemas Schemas whose extension objects may be returned.
 /// @return SQL type entities ordered first by requested schema and then by name.
 /// @throws bioseq::libpq::command_error When the catalog command fails.
 [[nodiscard]] std::vector<reference_entity> load_extension_type_entities(
     const std::string& connection_info,
+    const std::string& extension_name,
     const std::vector<std::string>& included_schemas) {
     std::vector<reference_entity> entities;
     bioseq::libpq::client_connection connection(connection_info);
+    const std::string extension_literal =
+        connection.escape_literal(extension_name);
     for (const std::string& schema : included_schemas) {
+        const std::string schema_literal = connection.escape_literal(schema);
         // Extension membership, rather than schema/name coincidence, defines the
         // public surface. PostgreSQL-generated array types are excluded.
         const std::string query =
@@ -52,8 +57,9 @@ export namespace bioseq::codegen::website {
             "from pg_type t join pg_namespace n on n.oid = t.typnamespace "
             "join pg_depend d on d.classid = 'pg_type'::regclass and d.objid = t.oid "
             "  and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' "
-            "join pg_extension e on e.oid = d.refobjid and e.extname = 'bioseq' "
-            "where n.nspname = '" + schema + "' and t.typtype in ('b','c','d','e') "
+            "join pg_extension e on e.oid = d.refobjid and e.extname = "
+            + extension_literal + " where n.nspname = " + schema_literal
+            + " and t.typtype in ('b','c','d','e') "
             "and t.typcategory <> 'A' order by t.typname";
         const bioseq::libpq::command_result catalog_rows =
             connection.execute(query);
@@ -78,15 +84,19 @@ export namespace bioseq::codegen::website {
 
 /// @brief Loads extension-owned function entities from the live PostgreSQL catalog.
 /// @param connection_info Unix-socket connection parameters for the private cluster.
+/// @param extension_name Exact owning extension name from the validated manifest.
 /// @param included_schemas Schemas whose extension functions may be returned.
 /// @return SQL function entities with normalized identity arguments, ordered first
 /// by requested schema and then by catalog identity.
 /// @throws bioseq::libpq::command_error When the catalog command fails.
 [[nodiscard]] std::vector<reference_entity> load_extension_function_entities(
     const std::string& connection_info,
+    const std::string& extension_name,
     const std::vector<std::string>& included_schemas) {
     std::vector<reference_entity> entities;
     bioseq::libpq::client_connection connection(connection_info);
+    const std::string extension_literal =
+        connection.escape_literal(extension_name);
     // format_type() qualifies every type that is not on the search path, so pinning
     // the path to pg_catalog gives schema-qualified identity types for extension
     // types (bioseq.seq, public.bioseq_aligner_options) while built-ins stay bare
@@ -95,7 +105,9 @@ export namespace bioseq::codegen::website {
     // keeps parameter names, so we rebuild the signature structurally instead.
     (void)connection.execute("set search_path = pg_catalog");
     for (const std::string& schema : included_schemas) {
-        // Only pg_depend members of extension bioseq (deptype 'e') are candidates
+        const std::string schema_literal = connection.escape_literal(schema);
+        // Only exact pg_depend members of the requested extension (deptype 'e')
+        // are candidates.
         // Their identity argument types are normalized and joined
         // without parameter names, defaults, or insignificant whitespace.
         const std::string query =
@@ -107,8 +119,9 @@ export namespace bioseq::codegen::website {
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
             "join pg_depend d on d.classid = 'pg_proc'::regclass and d.objid = p.oid "
             "  and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' "
-            "join pg_extension e on e.oid = d.refobjid and e.extname = 'bioseq' "
-            "where n.nspname = '" + schema + "' order by p.proname, p.oid";
+            "join pg_extension e on e.oid = d.refobjid and e.extname = "
+            + extension_literal + " where n.nspname = " + schema_literal
+            + " order by p.proname, p.oid";
         const bioseq::libpq::command_result catalog_rows =
             connection.execute(query);
         for (std::size_t row = 0; row < catalog_rows.row_count(); ++row) {

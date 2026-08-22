@@ -489,6 +489,27 @@ if(BIOSEQ_PACKAGE_BUILD)
     message(FATAL_ERROR
       "BIOSEQ_PACKAGE_BUILD requires AWS_MACHINE_LINUX_CLANG22")
   endif()
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR
+      "BIOSEQ_PACKAGE_BUILD requires CMAKE_BUILD_TYPE=Release; got "
+      "'${CMAKE_BUILD_TYPE}'")
+  endif()
+  set(_bioseq_package_release_flags
+    "-O3 -DNDEBUG -fno-omit-frame-pointer")
+  foreach(_bioseq_package_language IN ITEMS C CXX)
+    set(_bioseq_package_flags_variable
+      "CMAKE_${_bioseq_package_language}_FLAGS_RELEASE")
+    if(NOT "${${_bioseq_package_flags_variable}}" STREQUAL
+        "${_bioseq_package_release_flags}")
+      message(FATAL_ERROR
+        "BIOSEQ_PACKAGE_BUILD requires ${_bioseq_package_flags_variable}="
+        "'${_bioseq_package_release_flags}'; got "
+        "'${${_bioseq_package_flags_variable}}'")
+    endif()
+  endforeach()
+  unset(_bioseq_package_flags_variable)
+  unset(_bioseq_package_language)
+  unset(_bioseq_package_release_flags)
   if(NOT DEFINED ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}
       OR NOT "$ENV{BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64"
       OR NOT "${BIOSEQ_TEMPLATE_FLATTEN_PROFILE}" STREQUAL "dna4_uint64")
@@ -716,6 +737,7 @@ endif()
 # the returned bioseq_codegen / bioseq_codegen_project targets and never create
 # another ExternalProject.
 include(bioseq_codegen)
+include(bioseq_build_config_codegen)
 include(bioseq_highway_codegen)
 include(bioseq_template_flatten_codegen)
 if(BIOSEQ_BUILD_CORE)
@@ -749,6 +771,13 @@ if(BIOSEQ_BUILD_CORE)
     USES_TERMINAL)
 endif()
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
+  add_test(
+    NAME bioseq_build_config_mapping_contract
+    COMMAND "${CMAKE_COMMAND}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tests/contract/build_config_mapping_test.cmake")
+  set_tests_properties(
+    bioseq_build_config_mapping_contract
+    PROPERTIES LABELS "core;unit;cmake;build_config")
   add_test(
     NAME bioseq_highway_header_closure_contract
     COMMAND "${CMAKE_COMMAND}"
@@ -786,7 +815,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
 endif()
 set(_bioseq_codegen_components)
 if(BIOSEQ_BUILD_CORE OR BIOSEQ_BUILD_CACHE)
-  list(APPEND _bioseq_codegen_components sql)
+  list(APPEND _bioseq_codegen_components sql build_config)
 endif()
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(APPEND _bioseq_codegen_components external)
@@ -812,6 +841,8 @@ if(BIOSEQ_BUILD_CORE)
   # both supported toolchains is the contract.
   add_subdirectory(
     codegen/namespace_materialization/tests/integration/module_canary)
+  add_subdirectory(
+    codegen/namespace_materialization/tests/integration/owner_canary)
 endif()
 
 # Include extensions and their shared code
@@ -848,7 +879,19 @@ if(TARGET bioseq_cache_unit_tests)
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/cmake/tests/contract/test_bioseq_io_source_inventory.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
       "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_server.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_clang_tidy.py"
+    COMMAND
+      "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_SOURCE_DIR}/build_mcp/tests/test_subagent.py"
     COMMAND
       "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
       "${Python3_EXECUTABLE}"
@@ -882,7 +925,8 @@ if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
   set(_bioseq_highway_validation_dependencies
     bioseq_highway_builder_contracts
-    bioseq_namespace_materialization_module_canary)
+    bioseq_namespace_materialization_module_canary
+    bioseq_namespace_materialization_owner_canary)
   if(TARGET bioseq_highway_clang_imported_binder_canary)
     list(APPEND _bioseq_highway_validation_dependencies
       bioseq_highway_clang_imported_binder_canary)
@@ -979,9 +1023,6 @@ if(BIOSEQ_PACKAGE_BUILD)
     endif()
     target_link_libraries(${_bioseq_package_target} PRIVATE
       bioseq_package_static_cxx_runtime)
-    target_compile_definitions(${_bioseq_package_target} PRIVATE
-      BIOSEQ_PACKAGE_O0_PROFILE=1
-      BIOSEQ_PIPELINE_FORCE_INLINE=0)
     set_target_properties(${_bioseq_package_target} PROPERTIES
       BUILD_RPATH ""
       INSTALL_RPATH ""

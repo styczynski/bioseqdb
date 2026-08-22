@@ -1,20 +1,11 @@
-// bioseq/tests/unit/indexing/storage_concept_test.cpp
-//
-// Chunked-storage concepts and the supported_indexes<...> registry. This test
-// does NOT touch the SIMD minimizer
-// kernels, so it needs no Highway namespace wrapper. It relies on
-// bioseq.tests.support.indexing_storage_fakes, whose four conformance
-// static_asserts already demonstrate that the fakes model their concepts.
+/**
+ * @file storage_concept_test.cpp
+ * @brief Tests chunked-storage concepts and compile-time index registration.
+ */
 
-#include <tests/support/common.hpp>
+#include <catch2/catch_test_macros.hpp>
 
-#include <array>
-#include <cstdint>
-#include <map>
-#include <span>
-#include <utility>
-#include <vector>
-
+import std;
 import bioseq.common.logging;
 import bioseq.common.seqan_adapter;
 import bioseq.sequences;
@@ -145,10 +136,12 @@ TEST_CASE("fake_sequence_storage INLINE resize round-trips a valid plan",
 
     constexpr std::size_t k_storage_bytes = 4 * sizeof(std::int64_t);
     storage.resize(k_storage_bytes);
-    storage.write_to_each<std::int64_t>([&](std::size_t c, std::int64_t* buf, std::size_t cap) {
+    storage.write_to_each<std::int64_t>([](std::size_t c, std::int64_t* buf, std::size_t cap) {
         REQUIRE(c == 0u);
         REQUIRE(cap == k_storage_bytes / sizeof(std::int64_t));
-        for (std::size_t i = 0; i < cap; ++i) buf[i] = (std::int64_t)(100 + i);
+        for (std::size_t i = 0; i < cap; ++i) {
+            buf[i] = static_cast<std::int64_t>(100u + i);
+        }
         return c;   // exactly one inline chunk
     });
 
@@ -156,5 +149,5 @@ TEST_CASE("fake_sequence_storage INLINE resize round-trips a valid plan",
     REQUIRE(storage.chunk_byte_size() == k_storage_bytes);
     const std::int64_t* read = storage.read_chunk<std::int64_t>();
     for (std::size_t i = 0; i < k_storage_bytes / sizeof(std::int64_t); ++i)
-        REQUIRE(read[i] == (std::int64_t)(100 + i));
+        REQUIRE(read[i] == static_cast<std::int64_t>(100u + i));
 }

@@ -1,3 +1,7 @@
+/**
+ * @file sequence_storage_sql_entities.cppm
+ * @brief SQL entities governing persisted sequence-source identity.
+ */
 module;
 
 #include <cstdint>

@@ -972,6 +972,7 @@ struct cpp_template_binding final {
     return output.str();
 }
 
+/// Renders one typed overload adapter from PostgreSQL arguments to C++.
 [[nodiscard]] inline std::string render_overload_helper(
         const normalized_entity& entity,
         const sql_graph& graph,
@@ -1002,7 +1003,7 @@ struct cpp_template_binding final {
         captures += "]";
         owner_call =
             "bioseq::postgres::support::invoke_pg_as_cpp(" + captures
-            + " { return "
+            + "() -> decltype(auto) { return "
             + owner_call + "; })";
     }
     const collected_result_row* row =
@@ -1030,9 +1031,9 @@ struct cpp_template_binding final {
             entity.source, *row, artifact.sql_arity);
     }
     output
-        << "[[nodiscard]] Datum "
+        << "[[nodiscard]] auto "
         << overload_helper_name(entity.source.name, artifact.sql_arity)
-        << "(FunctionCallInfo fcinfo) {\n";
+        << "(FunctionCallInfo fcinfo) -> Datum {\n";
     for (const std::string& initializer : argument_initializers) {
         output << initializer;
     }
@@ -1056,15 +1057,18 @@ struct cpp_template_binding final {
     return output.str();
 }
 
+/// Renders one PostgreSQL ABI wrapper and its arity dispatch.
 [[nodiscard]] inline std::string render_public_wrapper(
         const rendered_fmgr_wrapper& wrapper) {
     std::ostringstream output;
     output
         << "extern \"C\" {\n"
+        << "// NOLINTNEXTLINE(modernize-use-trailing-return-type): "
+           "PostgreSQL emits the mandated C declaration.\n"
         << "PG_FUNCTION_INFO_V1(" << wrapper.public_symbol << ");\n"
         << "}\n\n"
-        << "extern \"C\" PGDLLEXPORT Datum "
-        << wrapper.public_symbol << "(PG_FUNCTION_ARGS) {\n";
+        << "extern \"C\" PGDLLEXPORT auto "
+        << wrapper.public_symbol << "(PG_FUNCTION_ARGS) -> Datum {\n";
     if (wrapper.overloads.size() > 1) {
         output << "    switch (PG_NARGS()) {\n";
         for (const rendered_fmgr_overload& overload :
@@ -1442,6 +1446,7 @@ inline void validate_vector_associations(
     }
 }
 
+/// Renders the complete, deterministically ordered comparison registry.
 [[nodiscard]] inline rendered_fmgr_entrypoint_module
 render_vector_comparison_registry_from_associations(
         std::vector<vector_association> associations,
@@ -1485,8 +1490,8 @@ render_vector_comparison_registry_from_associations(
     }
     output
         << "}};\n\n"
-        << "[[nodiscard]] inline std::span<const association> all() "
-           "noexcept {\n"
+        << "[[nodiscard]] inline auto all() noexcept "
+           "-> std::span<const association> {\n"
         << "    return associations;\n"
         << "}\n\n"
         << "}  // namespace bioseq::sql::generated::"
@@ -1761,6 +1766,7 @@ inline void validate_vector_aggregate_associations(
         + std::string{sql_type} + "'");
 }
 
+/// Renders the complete, deterministically ordered aggregate registry.
 [[nodiscard]] inline rendered_fmgr_entrypoint_module
 render_vector_aggregate_registry_from_associations(
         std::vector<vector_aggregate_association> associations,
@@ -1813,8 +1819,8 @@ render_vector_aggregate_registry_from_associations(
     }
     output
         << "}};\n\n"
-        << "[[nodiscard]] inline std::span<const association> all() "
-           "noexcept {\n"
+        << "[[nodiscard]] inline auto all() noexcept "
+           "-> std::span<const association> {\n"
         << "    return associations;\n"
         << "}\n\n"
         << "}  // namespace bioseq::sql::generated::"

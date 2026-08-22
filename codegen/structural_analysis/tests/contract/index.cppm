@@ -250,7 +250,7 @@ inline void write_file(
             case '\t': result += "\\t"; break;
             default:
                 if (character < 0x20U) {
-                    constexpr char hex[] = "0123456789abcdef";
+                    constexpr std::string_view hex = "0123456789abcdef";
                     result += "\\u00";
                     result.push_back(hex[character >> 4U]);
                     result.push_back(hex[character & 0x0fU]);
@@ -461,6 +461,114 @@ inline void publish_prepared(
         pcm_root, ".p1689.json");
 }
 
+inline void assert_compile_database_scan_authority_contract(
+    const configured_toolchain& toolchain,
+    const std::filesystem::path& root) {
+    const std::filesystem::path source =
+        root / "codegen/raw_compile_database_mode.cppm";
+    const std::filesystem::path raw_database =
+        root / "raw-scan-compile-commands.json";
+    const std::filesystem::path pcm_root =
+        root / "pcm/raw-scan-owned-authority";
+    write_file(
+        source,
+        "module;\n"
+        "#include <stdarg.h>\n"
+        "export module fixture.raw_compile_database_mode;\n"
+        "export int raw_compile_database_mode_value();\n");
+    write_file(
+        raw_database,
+        render_compile_database({
+            make_command(toolchain, root, source),
+        }));
+
+    const structural_index raw_structural =
+        scan_translation_units_from_database(
+            {source}, raw_database);
+    require(
+        raw_structural.translation_units.size() == 1U
+            && raw_structural.translation_units.front().module_name
+                == "fixture.raw_compile_database_mode"
+            && raw_structural.translation_units.front()
+                .compiler_profile.empty(),
+        "default compile-database structural scan did not retain raw "
+        "CMake database semantics");
+    const module_graph raw_graph =
+        scan_module_graph_from_database(
+            {source}, raw_database);
+    require(
+        raw_graph.units.size() == 1U
+            && raw_graph.units.front().provided_module
+                == "fixture.raw_compile_database_mode",
+        "default compile-database module-graph scan did not retain raw "
+        "CMake database semantics");
+
+    const auto require_incomplete_authority =
+        [](const auto& operation, std::string_view case_name) {
+            require_failure(
+                operation,
+                "incomplete owned authority",
+                case_name);
+        };
+    require_incomplete_authority(
+        [&source, &raw_database] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source}, raw_database, "production"));
+        },
+        "structural scan profile without PCM root");
+    require_incomplete_authority(
+        [&source, &raw_database, &pcm_root] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source},
+                    raw_database,
+                    std::string_view{},
+                    pcm_root));
+        },
+        "structural scan PCM root without profile");
+    require_incomplete_authority(
+        [&source, &raw_database] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source}, raw_database, "production"));
+        },
+        "module-graph scan profile without PCM root");
+    require_incomplete_authority(
+        [&source, &raw_database, &pcm_root] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source},
+                    raw_database,
+                    std::string_view{},
+                    pcm_root));
+        },
+        "module-graph scan PCM root without profile");
+
+    require_failure(
+        [&source, &raw_database, &pcm_root] {
+            static_cast<void>(
+                scan_translation_units_from_database(
+                    {source},
+                    raw_database,
+                    "production",
+                    pcm_root));
+        },
+        "has no content-keyed PCM output",
+        "explicit structural scan owned authority");
+    require_failure(
+        [&source, &raw_database, &pcm_root] {
+            static_cast<void>(
+                scan_module_graph_from_database(
+                    {source},
+                    raw_database,
+                    "production",
+                    pcm_root));
+        },
+        "has no content-keyed PCM output",
+        "explicit module-graph scan owned authority");
+}
+
 inline void assert_toolchain_exists(
     const configured_toolchain& toolchain) {
     require(
@@ -649,7 +757,7 @@ constexpr int indirect = 9;
                     && declaration->stable_usr.empty();
             }),
         "token-slice direct children mixed semantic identity into raw facts");
-    const auto selected_child = [&](std::string_view name)
+    const auto selected_child = [&selected_children](std::string_view name)
         -> const declaration_record& {
         const auto found = std::ranges::find(
             selected_children,
@@ -837,6 +945,345 @@ constexpr int indirect = 9;
         "token-slice raw lexer discarded a valid final token at the "
         "buffer end");
 
+    constexpr std::string_view trailing_return_source = R"CPP(
+export module fixture.trailing_return;
+namespace fixture::trailing_return {
+using value_type = int;
+
+[[bioseq::template_flatten_when("shape", "leaf")]]
+[[bioseq::template_flatten_entry("leaf")]]
+[[nodiscard]] auto leaf(const int abi_code, const int value) noexcept
+    -> value_type {
+    return abi_code + value;
+}
+
+template <class p_value>
+[[bioseq::template_flatten_entry("nested")]]
+auto nested(p_value value) noexcept(noexcept(
+    [](p_value item) -> decltype(item.operator->()) {
+        return item.operator->();
+    }(value)))
+    [[maybe_unused]]
+    -> std::array<std::pair<int, long>, 2>
+    requires requires(p_value item) {
+        item.operator->();
+        []() -> int { return 0; }();
+    }
+{
+    return {};
+}
+
+auto deduced_auto() { return 1; }
+decltype(auto) deduced_decltype() { return (deduced_auto()); }
+
+auto nested_requires_type()
+    -> decltype(requires {
+        requires (sizeof(value_type) > 0);
+    }) {
+    return true;
+}
+
+auto nested_requires_noise()
+    -> decltype(requires(value_type value) {
+        requires (sizeof(value_type) > 0);
+        value_type{};
+        []() -> value_type { return {}; }();
+        value.operator->();
+    }) {
+    return true;
+}
+
+auto arrow_noise() noexcept(noexcept(
+    []() -> int { return 1; }()
+    + pointer_like.operator->()))
+{
+    return 1;
+}
+
+auto lambda_holder = []() -> long { return 2L; };
+
+auto trailing_deduced() -> decltype(auto) {
+    return (deduced_auto());
+}
+
+auto missing_type() -> requires true;
+auto unbalanced_type() -> std::array<int, 2;
+auto unbalanced_requires_type()
+    -> decltype(requires {
+        requires (sizeof(value_type) > 0);
+    )};
+}
+)CPP";
+    const translation_unit trailing_return_slice = scan_token_slice(
+        "trailing_return_contract.cppm", trailing_return_source);
+    const auto trailing_declaration =
+        [&trailing_return_slice](std::string_view name)
+        -> const declaration_record& {
+        const auto found = std::ranges::find(
+            trailing_return_slice.declarations,
+            name,
+            &declaration_record::name);
+        if (found == trailing_return_slice.declarations.end()) {
+            throw std::runtime_error(
+                "PREPARE trailing-return fixture cannot find declaration '"
+                + std::string{name} + "'");
+        }
+        return *found;
+    };
+
+    const declaration_record& trailing_leaf =
+        trailing_declaration("leaf");
+    require(
+        trailing_leaf.kind == declaration_kind::function
+            && trailing_leaf.return_type == "value_type"
+            && trailing_leaf.explicit_declared_type == "value_type"
+            && trailing_leaf.specifiers.has_explicit_type
+            && !trailing_leaf.specifiers.has_deduced_type
+            && trailing_leaf.parameters.size() == 2
+            && trailing_leaf.parameters[0].name == "abi_code"
+            && trailing_leaf.parameters[0].cpp_type == "const int"
+            && trailing_leaf.parameters[1].name == "value"
+            && trailing_leaf.parameters[1].cpp_type == "const int"
+            && source_text(
+                   trailing_return_source,
+                   trailing_leaf.declaration_head_range)
+                == "[[bioseq::template_flatten_when(\"shape\", \"leaf\")]]\n"
+                   "[[bioseq::template_flatten_entry(\"leaf\")]]\n"
+                   "[[nodiscard]] auto leaf(const int abi_code, "
+                   "const int value) noexcept\n"
+                   "    -> value_type "
+            && source_text(
+                   trailing_return_source,
+                   trailing_leaf.body_or_initializer_range)
+                == "{\n    return abi_code + value;\n}"
+            && trailing_leaf.declaration_range.begin.byte_offset
+                == trailing_leaf.declaration_head_range.begin.byte_offset
+            && trailing_leaf.declaration_head_range.end.byte_offset
+                == trailing_leaf.body_or_initializer_range.begin.byte_offset
+            && trailing_leaf.declaration_range.end.byte_offset
+                == trailing_leaf.body_or_initializer_range.end.byte_offset,
+        "token-slice canary-shaped trailing return changed type, "
+        "parameters, or declaration geometry");
+
+    const declaration_record& nested_return =
+        trailing_declaration("nested");
+    require(
+        nested_return.return_type
+                == "std::array<std::pair<int, long>, 2>"
+            && nested_return.explicit_declared_type
+                == "std::array<std::pair<int, long>, 2>"
+            && nested_return.specifiers.has_explicit_type
+            && !nested_return.specifiers.has_deduced_type
+            && nested_return.parameters.size() == 1
+            && nested_return.parameters.front().name == "value"
+            && source_text(
+                   trailing_return_source,
+                   nested_return.declaration_head_range)
+                   .contains(
+                       "requires requires(p_value item) {\n"
+                       "        item.operator->();\n"
+                       "        []() -> int { return 0; }();\n"
+                       "    }")
+            && source_text(
+                   trailing_return_source,
+                   nested_return.body_or_initializer_range)
+                == "{\n    return {};\n}",
+        "token-slice trailing return did not preserve a nested template "
+        "type or stop before the top-level requires-clause");
+
+    const declaration_record& nested_requires_type =
+        trailing_declaration("nested_requires_type");
+    require(
+        nested_requires_type.return_type
+                == "decltype(requires {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "    })"
+            && nested_requires_type.explicit_declared_type
+                == nested_requires_type.return_type
+            && nested_requires_type.specifiers.has_explicit_type
+            && !nested_requires_type.specifiers.has_deduced_type
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_type.declaration_head_range)
+                == "auto nested_requires_type()\n"
+                   "    -> decltype(requires {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "    }) "
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_type.body_or_initializer_range)
+                == "{\n    return true;\n}"
+            && nested_requires_type.declaration_head_range.end.byte_offset
+                == nested_requires_type.body_or_initializer_range
+                       .begin.byte_offset,
+        "token-slice trailing return truncated a requires-expression "
+        "nested inside the type-id");
+
+    const declaration_record& nested_requires_noise =
+        trailing_declaration("nested_requires_noise");
+    require(
+        nested_requires_noise.return_type
+                == "decltype(requires(value_type value) {\n"
+                   "        requires (sizeof(value_type) > 0);\n"
+                   "        value_type{};\n"
+                   "        []() -> value_type { return {}; }();\n"
+                   "        value.operator->();\n"
+                   "    })"
+            && nested_requires_noise.explicit_declared_type
+                == nested_requires_noise.return_type
+            && nested_requires_noise.specifiers.has_explicit_type
+            && !nested_requires_noise.specifiers.has_deduced_type
+            && source_text(
+                   trailing_return_source,
+                   nested_requires_noise.body_or_initializer_range)
+                == "{\n    return true;\n}",
+        "token-slice trailing type-id lost nested requirements, lambdas, "
+        "operator arrows, or expression requirements");
+
+    const declaration_record& deduced_auto =
+        trailing_declaration("deduced_auto");
+    const declaration_record& deduced_decltype =
+        trailing_declaration("deduced_decltype");
+    const declaration_record& trailing_deduced =
+        trailing_declaration("trailing_deduced");
+    require(
+        deduced_auto.return_type == "auto"
+            && deduced_auto.explicit_declared_type == "auto"
+            && !deduced_auto.specifiers.has_explicit_type
+            && deduced_auto.specifiers.has_deduced_type
+            && deduced_decltype.return_type == "decltype(auto)"
+            && deduced_decltype.explicit_declared_type
+                == "decltype(auto)"
+            && !deduced_decltype.specifiers.has_explicit_type
+            && deduced_decltype.specifiers.has_deduced_type
+            && trailing_deduced.return_type == "decltype(auto)"
+            && trailing_deduced.explicit_declared_type
+                == "decltype(auto)"
+            && !trailing_deduced.specifiers.has_explicit_type
+            && trailing_deduced.specifiers.has_deduced_type,
+        "token-slice genuinely deduced function returns became explicit");
+
+    const declaration_record& arrow_noise =
+        trailing_declaration("arrow_noise");
+    const declaration_record& lambda_holder =
+        trailing_declaration("lambda_holder");
+    require(
+        arrow_noise.return_type == "auto"
+            && arrow_noise.specifiers.has_deduced_type
+            && !arrow_noise.specifiers.has_explicit_type
+            && lambda_holder.kind == declaration_kind::variable
+            && lambda_holder.explicit_declared_type == "auto"
+            && lambda_holder.specifiers.has_deduced_type,
+        "nested lambda or operator-> tokens created a false trailing return");
+
+    for (const std::string_view malformed_name : {
+             std::string_view{"missing_type"},
+             std::string_view{"unbalanced_type"},
+             std::string_view{"unbalanced_requires_type"},
+         }) {
+        const declaration_record& malformed =
+            trailing_declaration(malformed_name);
+        require(
+            malformed.return_type.empty()
+                && malformed.explicit_declared_type.empty()
+                && !malformed.specifiers.has_explicit_type
+                && !malformed.specifiers.has_deduced_type,
+            "malformed trailing return invented a declared type for "
+                + std::string{malformed_name});
+    }
+
+    constexpr std::string_view structural_trailing_source = R"CPP(
+namespace fixture::structural_trailing {
+struct pointer_like {
+    [[bioseq_sql::function]]
+    auto operator->() const noexcept { return this; }
+
+    template <class p_value>
+    [[bioseq_sql::function]]
+    auto qualified(p_value value) const & noexcept(noexcept(value))
+        [[maybe_unused]]
+        -> std::array<std::pair<int, long>, 2>
+        requires (sizeof(p_value) > 0) {
+        return {};
+    }
+};
+
+[[bioseq_sql::function]]
+auto nested_arrow_noise() noexcept(noexcept(
+    []() -> int { return 0; }())) {
+    return 0;
+}
+
+[[bioseq_sql::function]]
+auto nested_requires_source()
+    -> decltype(requires {
+        requires (sizeof(int) > 0);
+    }) {
+    return true;
+}
+
+[[bioseq_sql::function]]
+decltype(auto) source_deduced() { return (nested_arrow_noise()); }
+}
+)CPP";
+    const translation_unit structural_trailing = scan_translation_unit(
+        "structural_trailing_contract.cppm",
+        structural_trailing_source);
+    const auto structural_declaration =
+        [&structural_trailing](std::string_view name)
+        -> const declaration_record& {
+        const auto found = std::ranges::find(
+            structural_trailing.declarations,
+            name,
+            &declaration_record::name);
+        if (found == structural_trailing.declarations.end()) {
+            throw std::runtime_error(
+                "PREPARE structural trailing-return fixture cannot find '"
+                + std::string{name} + "'");
+        }
+        return *found;
+    };
+    const declaration_record& qualified =
+        structural_declaration("qualified");
+    const declaration_record& operator_arrow =
+        structural_declaration("operator");
+    const declaration_record& nested_arrow_noise =
+        structural_declaration("nested_arrow_noise");
+    const declaration_record& nested_requires_source =
+        structural_declaration("nested_requires_source");
+    const declaration_record& source_deduced =
+        structural_declaration("source_deduced");
+    require(
+        qualified.return_type
+                == "std::array<std::pair<int, long>, 2>"
+            && qualified.explicit_declared_type
+                == "std::array<std::pair<int, long>, 2>"
+            && qualified.specifiers.has_explicit_type
+            && !qualified.specifiers.has_deduced_type
+            && qualified.parameters.size() == 1
+            && qualified.parameters.front().name == "value"
+            && operator_arrow.return_type == "auto"
+            && operator_arrow.specifiers.has_deduced_type
+            && !operator_arrow.specifiers.has_explicit_type
+            && nested_arrow_noise.return_type == "auto"
+            && nested_arrow_noise.specifiers.has_deduced_type
+            && !nested_arrow_noise.specifiers.has_explicit_type
+            && nested_requires_source.return_type
+                == "decltype(requires {\n"
+                   "        requires (sizeof(int) > 0);\n"
+                   "    })"
+            && nested_requires_source.explicit_declared_type
+                == nested_requires_source.return_type
+            && nested_requires_source.specifiers.has_explicit_type
+            && !nested_requires_source.specifiers.has_deduced_type
+            && nested_requires_source.initializer_text
+                == "return true;"
+            && source_deduced.return_type == "decltype(auto)"
+            && source_deduced.specifiers.has_deduced_type
+            && !source_deduced.specifiers.has_explicit_type,
+        "source-only structural entry points disagree on trailing-return "
+        "or deduced-return facts");
+
     constexpr std::string_view probe_source = R"CPP(
 export module fixture.declaration_probe;
 export namespace bioseq::fixture {
@@ -925,7 +1372,7 @@ extern int global_value;
         "declaration probe did not distinguish global-module attachment");
 
     require_failure(
-        [&] {
+        [] {
             constexpr std::string_view source = R"CPP(
 export module fixture.invalid_body_probe;
 export namespace bioseq::fixture {
@@ -942,7 +1389,7 @@ int invalid_body() { return 3; }
         "declaration probe contains a function body",
         "body-free function-declaration probe");
     require_failure(
-        [&] {
+        [] {
             constexpr std::string_view source = R"CPP(
 export module fixture.invalid_initializer_probe;
 export namespace bioseq::fixture {
@@ -984,7 +1431,9 @@ struct worker {
 };
 
 inline int invoke() {
-    auto local = []() constexpr [[gnu::always_inline]] -> int { return 3; };
+    auto local = [] [[nodiscard]] () constexpr noexcept(true)
+        [[gnu::always_inline]]
+        -> int { return 3; };
     auto implicit = [] { return 4; };
     auto generic_implicit = []<class p_value> { return sizeof(p_value); };
     return local() + implicit()
@@ -1001,7 +1450,7 @@ namespace [[bioseq::similar]] decoy {}
         "lexical structural scan accepts only exact bioseq::simd markers");
     const marked_namespace_record& lexical_namespace =
         lexical_simd.marked_namespaces.front();
-    const auto source_slice = [&](source_range range) {
+    const auto source_slice = [&simd_marker_source](source_range range) {
         return simd_marker_source.substr(
             range.begin.byte_offset,
             range.end.byte_offset - range.begin.byte_offset);
@@ -1037,7 +1486,7 @@ namespace [[bioseq::similar]] decoy {}
     const translation_unit clang_simd = scan_translation_unit_from_code(
         "simd_marker_ast.cppm",
         simd_marker_source,
-        {"-std=c++20", "-xc++"},
+        {"-std=c++26", "-xc++"},
         "simd_marker_contract");
     require(
         clang_simd.marked_namespaces.size() == 1,
@@ -1073,7 +1522,7 @@ namespace [[bioseq::similar]] decoy {}
     require(
         std::ranges::all_of(
             clang_namespace.callables,
-            [&](const callable_insertion_record& callable) {
+            [&simd_marker_source](const callable_insertion_record& callable) {
                 const bool lambda =
                     callable.kind == callable_kind::lambda;
                 return (lambda
@@ -1092,48 +1541,136 @@ namespace [[bioseq::similar]] decoy {}
                            callable.body_range.begin.byte_offset]
                         == '{';
             }),
-        "Clang structural scan proves function-prefix and lambda-declarator "
-        "HWY_ATTR insertion points");
+        "Clang structural scan proves named-callable prefix and lambda-front "
+        "target-attribute insertion points");
     const auto lambda = std::ranges::find(
         clang_namespace.callables,
         callable_kind::lambda,
         &callable_insertion_record::kind);
+    constexpr std::string_view lambda_attribute_boundary =
+        "] [[nodiscard]]";
+    constexpr std::string_view lambda_introducer_suffix = "]";
     require(
         lambda != clang_namespace.callables.end()
+            && lambda->highway_attribute_insertion.byte_offset
+                >= lambda_introducer_suffix.size()
             && simd_marker_source.substr(
-                lambda->highway_attribute_insertion.byte_offset,
-                std::string_view{" constexpr"}.size()) == " constexpr",
-        "Clang structural scan did not place the lambda HWY_ATTR insertion "
-        "immediately after its explicit parameter list; "
+                lambda->highway_attribute_insertion.byte_offset
+                    - lambda_introducer_suffix.size(),
+                lambda_attribute_boundary.size())
+                == lambda_attribute_boundary,
+        "Clang structural scan did not place the lambda target attribute in "
+        "the front slot after its introducer and before authored attributes; "
             + clang_callable_inventory);
     require(
         std::ranges::any_of(
             clang_namespace.callables,
-            [&](const callable_insertion_record& callable) {
+            [&simd_marker_source](const callable_insertion_record& callable) {
                 return callable.kind == callable_kind::lambda
                     && simd_marker_source.substr(
                         callable.highway_attribute_insertion.byte_offset,
                         std::string_view{" {"}.size()) == " {";
             }),
         "Clang structural scan did not place the parenthesis-free lambda "
-        "HWY_ATTR insertion immediately after its introducer; "
+        "target-attribute insertion immediately after its introducer; "
             + clang_callable_inventory);
     require(
         std::ranges::any_of(
             clang_namespace.callables,
-            [&](const callable_insertion_record& callable) {
+            [&simd_marker_source](const callable_insertion_record& callable) {
                 const std::size_t insertion =
                     callable.highway_attribute_insertion.byte_offset;
                 return callable.kind == callable_kind::lambda
-                    && insertion > 0u
-                    && simd_marker_source[insertion - 1u] == '>'
+                    && insertion > 0U
+                    && simd_marker_source[insertion - 1U] == '>'
                     && simd_marker_source.substr(
                         insertion,
                         std::string_view{" {"}.size()) == " {";
             }),
         "Clang structural scan did not place the parenthesis-free generic "
-        "lambda insertion after its complete template head; "
+        "lambda target-attribute insertion after its complete template head; "
             + clang_callable_inventory);
+
+    constexpr std::string_view lambda_geometry_source = R"CPP(
+export module fixture.lambda_geometry;
+export namespace bioseq::fixture {
+namespace [[bioseq::simd]] target {
+inline int exercise_lambda_geometry() {
+    int state = 0;
+    auto explicit_generic = []<class T> [[nodiscard]] (T value) constexpr
+        noexcept(noexcept(T{value})) [[gnu::always_inline]] -> T
+        requires (sizeof(T) > 0) { return value; };
+    auto template_requires = []<class T> requires (sizeof(T) > 0)
+        [[nodiscard]] (T value) static noexcept { return value; };
+    auto mutable_case = [state] [[nodiscard]] (int value) mutable noexcept {
+        return state += value;
+    };
+    auto consteval_case = []() consteval { return 3; };
+    auto static_case = [] static noexcept { return 4; };
+    auto implicit_case = [] [[nodiscard]] constexpr noexcept -> int {
+        return 5;
+    };
+    auto invented_generic = [] [[nodiscard]] (auto value)
+        noexcept(noexcept(value + 1)) { return value; };
+    return explicit_generic(1) + template_requires(1) + mutable_case(1)
+        + consteval_case() + static_case() + implicit_case()
+        + invented_generic(1);
+}
+}
+}
+)CPP";
+    const translation_unit lambda_geometry = scan_translation_unit_from_code(
+        "lambda_geometry.cppm",
+        lambda_geometry_source,
+        {"-std=c++26", "-xc++"},
+        "lambda_geometry_contract");
+    require(
+        lambda_geometry.marked_namespaces.size() == 1,
+        "lambda geometry contract expected one marked namespace");
+    const auto& geometry_callables =
+        lambda_geometry.marked_namespaces.front().callables;
+    const auto require_lambda_anchor =
+        [&lambda_geometry_source, &geometry_callables](std::string_view declaration_marker,
+            std::string_view anchor,
+            std::string_view following) {
+            const std::size_t declaration =
+                lambda_geometry_source.find(declaration_marker);
+            const std::size_t anchor_begin =
+                lambda_geometry_source.find(anchor, declaration);
+            const std::size_t expected = anchor_begin + anchor.size();
+            const auto found = std::ranges::find_if(
+                geometry_callables,
+                [&expected](const callable_insertion_record& callable) {
+                    return callable.kind == callable_kind::lambda
+                        && callable.declaration_range.begin.byte_offset
+                            <= expected
+                        && expected <= callable.body_range.begin.byte_offset;
+                });
+            require(
+                declaration != std::string_view::npos
+                    && anchor_begin != std::string_view::npos
+                    && found != geometry_callables.end()
+                    && found->highway_attribute_insertion.byte_offset
+                        == expected
+                    && lambda_geometry_source.substr(
+                           expected, following.size()) == following,
+                "lambda front-attribute anchor mismatch for "
+                    + std::string{declaration_marker});
+        };
+    require_lambda_anchor(
+        "explicit_generic", "[]<class T>", " [[nodiscard]]");
+    require_lambda_anchor(
+        "template_requires",
+        "requires (sizeof(T) > 0)",
+        "\n        [[nodiscard]]");
+    require_lambda_anchor(
+        "mutable_case", "[state]", " [[nodiscard]]");
+    require_lambda_anchor("consteval_case", "[]", "()");
+    require_lambda_anchor("static_case", "[]", " static");
+    require_lambda_anchor(
+        "implicit_case", "[]", " [[nodiscard]]");
+    require_lambda_anchor(
+        "invented_generic", "[]", " [[nodiscard]]");
     for (const auto [kind, description] : {
              std::pair{callable_kind::function, "free function"},
              std::pair{callable_kind::constructor, "constructor"},
@@ -1201,9 +1738,7 @@ namespace [[bioseq::similar]] decoy {}
         "insertion to the writable expansion site; "
             + clang_callable_inventory);
 
-    require_failure(
-        [&] {
-            constexpr std::string_view source = R"CPP(
+    constexpr std::string_view macro_lambda_source = R"CPP(
 export module fixture.macro_lambda;
 export namespace bioseq::fixture {
 namespace [[bioseq::simd]] target {
@@ -1216,28 +1751,51 @@ inline int invoke() {
 }
 }
 )CPP";
-            static_cast<void>(scan_translation_unit_from_code(
-                "macro_lambda.cppm",
-                source,
-                {"-std=c++20", "-xc++"},
-                "macro_lambda_contract"));
-        },
-        "has no confirmed compound-body attribute insertion point",
-        "macroized lambda declarator rejection");
+    const translation_unit macro_lambda = scan_translation_unit_from_code(
+        "macro_lambda.cppm",
+        macro_lambda_source,
+        {"-std=c++26", "-xc++"},
+        "macro_lambda_contract");
+    const std::size_t macro_lambda_declaration =
+        macro_lambda_source.find("auto local");
+    const std::size_t macro_lambda_introducer_end =
+        macro_lambda_source.find(']', macro_lambda_declaration) + 1U;
+    require(
+        macro_lambda_declaration != std::string_view::npos
+            && macro_lambda_introducer_end != 0U
+            && macro_lambda.marked_namespaces.size() == 1
+            && std::ranges::any_of(
+                macro_lambda.marked_namespaces.front().callables,
+                [&macro_lambda_introducer_end](const callable_insertion_record& callable) {
+                    return callable.kind == callable_kind::lambda
+                        && callable.declaration_range.begin.byte_offset
+                            <= macro_lambda_introducer_end
+                        && macro_lambda_introducer_end
+                            <= callable.body_range.begin.byte_offset
+                        && callable.highway_attribute_insertion.byte_offset
+                            == macro_lambda_introducer_end;
+                }),
+        "macroized lambda parameters must not invalidate the direct writable "
+        "front-attribute slot");
 
     const configured_toolchain toolchain;
     assert_toolchain_exists(toolchain);
     temporary_tree temporary;
     const std::filesystem::path root = temporary.root();
+    assert_compile_database_scan_authority_contract(
+        toolchain, root);
 
     const std::filesystem::path identical_dependency_source =
         root / "dependency-only-identical.cppm";
     const auto require_dependency_only_failure =
-        [&](const auto& canonical_sources,
+        [&identical_dependency_source, &root, &toolchain](const auto& canonical_sources,
             std::string_view expected_diagnostic,
             std::string_view case_name) {
             require_failure(
-                [&] {
+                [&canonical_sources,
+                 &identical_dependency_source,
+                 &root,
+                 &toolchain] {
                     static_cast<void>(
                         prepare_dependency_compilation_environment(
                             canonical_sources,
@@ -1350,7 +1908,11 @@ inline int invoke() {
             make_command(toolchain, guard_root, guard_donor),
             make_command(toolchain, guard_root, guard_provider),
         }));
-    const auto prepare_guard = [&] {
+    const auto prepare_guard = [&guard_canonical,
+                                &guard_donor,
+                                &guard_raw_database,
+                                &toolchain,
+                                &guard_pcm_root] {
         return prepare_dependency_compilation_environment(
             guard_canonical,
             guard_donor,
@@ -1374,8 +1936,8 @@ inline int invoke() {
             guard_raw_database,
             "production");
     require(
-        guard_authority.root_source_paths.size() == 2u
-            && guard_authority.canonical_inputs.size() == 1u
+        guard_authority.root_source_paths.size() == 2U
+            && guard_authority.canonical_inputs.size() == 1U
             && guard_authority.signature_donor.module_name
                 == "fixture.dependency_guard.donor",
         "dependency-only positive guard derived the wrong canonical, "
@@ -1384,7 +1946,12 @@ inline int invoke() {
         dependency_compilation_manifest_authority(
             "support", guard_authority);
     const auto validate_guard_environment =
-        [&](const dependency_compilation_environment& prepared) {
+        [&guard_owned_database,
+         &guard_pcm_manifest,
+         &guard_authority,
+         &guard_pcm_root,
+         &toolchain,
+         &guard_manifest_authority](const dependency_compilation_environment& prepared) {
             publish_prepared(
                 prepared,
                 guard_owned_database,
@@ -1413,7 +1980,7 @@ inline int invoke() {
            const frontend_action_outcome outcome) {
             return std::ranges::count_if(
                 prepared.observed_actions,
-                [&](const frontend_action_record& action) {
+                [&kind, &outcome](const frontend_action_record& action) {
                     return action.kind == kind
                         && action.outcome == outcome;
                 });
@@ -1422,23 +1989,23 @@ inline int invoke() {
     const dependency_compilation_environment cold_guard =
         prepare_guard();
     require(
-        cold_guard.observed_actions.size() == 7u
+        cold_guard.observed_actions.size() == 7U
             && count_actions(
                    cold_guard,
                    frontend_action_kind::canonical_token_slice,
-                   frontend_action_outcome::executed) == 1u
+                   frontend_action_outcome::executed) == 1U
             && count_actions(
                    cold_guard,
                    frontend_action_kind::p1689_dependency_discovery,
-                   frontend_action_outcome::executed) == 2u
+                   frontend_action_outcome::executed) == 2U
             && count_actions(
                    cold_guard,
                    frontend_action_kind::make_dependency_scan,
-                   frontend_action_outcome::executed) == 2u
+                   frontend_action_outcome::executed) == 2U
             && count_actions(
                    cold_guard,
                    frontend_action_kind::pcm_compilation,
-                   frontend_action_outcome::executed) == 2u,
+                   frontend_action_outcome::executed) == 2U,
         "cold dependency-only PREPARE did not observe the exact token, "
         "P1689, make-dependency, and PCM action set");
     const dependency_compilation_validation cold_guard_validation =
@@ -1460,17 +2027,17 @@ inline int invoke() {
             cold_guard_validation);
     require(
         cold_trace_validation.counts.canonical_token_slice_actions
-                == 1u
+                == 1U
             && cold_trace_validation.counts
                     .canonical_semantic_frontend_actions
-                == 0u,
+                == 0U,
         "cold dependency-only action trace did not prove one canonical "
         "token scan and zero canonical semantic actions");
 
     const auto rewrite_guard_depfile_identity =
-        [&](const std::filesystem::path& from,
+        [&guard_pcm_root](const std::filesystem::path& from,
             const std::filesystem::path& to) {
-            std::size_t rewritten = 0u;
+            std::size_t rewritten = 0U;
             const std::filesystem::path dependency_root =
                 guard_pcm_root / ".dependencies";
             for (const std::filesystem::directory_entry& entry :
@@ -1482,7 +2049,7 @@ inline int invoke() {
                 std::string document = read_file(entry.path());
                 const std::string source = from.string();
                 const std::string replacement = to.string();
-                std::size_t position = 0u;
+                std::size_t position = 0U;
                 bool changed = false;
                 while ((position = document.find(source, position))
                        != std::string::npos) {
@@ -1504,7 +2071,7 @@ inline int invoke() {
     require(
         !guard_alias_error
             && rewrite_guard_depfile_identity(
-                   guard_header, guard_header_alias) == 1u,
+                   guard_header, guard_header_alias) == 1U,
         "dependency-only guard could not rewrite one cached depfile "
         "through a same-file symlink alias");
 
@@ -1513,9 +2080,9 @@ inline int invoke() {
         replace_json_string_field(
             cold_guard_trace,
             "trace_identity",
-            std::string(64u, '0')));
+            std::string(64U, '0')));
     require_failure(
-        [&] {
+        [&guard_action_trace, &guard_authority, &cold_guard_validation] {
             static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
@@ -1531,7 +2098,7 @@ inline int invoke() {
         guard_action_trace,
         render_frontend_action_trace(semantic_tamper));
     require_failure(
-        [&] {
+        [&guard_action_trace, &guard_authority, &cold_guard_validation] {
             static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
@@ -1546,7 +2113,7 @@ inline int invoke() {
         guard_action_trace,
         render_frontend_action_trace(closure_tamper));
     require_failure(
-        [&] {
+        [&guard_action_trace, &guard_authority, &cold_guard_validation] {
             static_cast<void>(validate_frontend_action_trace(
                 guard_action_trace,
                 guard_authority,
@@ -1558,21 +2125,21 @@ inline int invoke() {
     const dependency_compilation_environment warm_guard =
         prepare_guard();
     require(
-        warm_guard.observed_actions.size() == 7u
+        warm_guard.observed_actions.size() == 7U
             && count_actions(
                    warm_guard,
                    frontend_action_kind::p1689_dependency_discovery,
-                   frontend_action_outcome::executed) == 2u
+                   frontend_action_outcome::executed) == 2U
             && count_actions(
                    warm_guard,
                    frontend_action_kind::make_dependency_scan,
                    frontend_action_outcome::validated_cache_hit)
-                == 2u
+                == 2U
             && count_actions(
                    warm_guard,
                    frontend_action_kind::pcm_compilation,
                    frontend_action_outcome::validated_cache_hit)
-                == 2u,
+                == 2U,
         "warm dependency-only PREPARE did not authenticate exact scanner "
         "and PCM cache-hit actions");
     const dependency_compilation_validation warm_guard_validation =
@@ -1587,10 +2154,10 @@ inline int invoke() {
             warm_guard_validation);
     require(
         warm_trace_validation.counts.canonical_token_slice_actions
-                == 1u
+                == 1U
             && warm_trace_validation.counts
                     .canonical_semantic_frontend_actions
-                == 0u,
+                == 0U,
         "warm dependency-only action trace did not preserve the "
         "canonical Sema exclusion evidence");
 
@@ -1612,12 +2179,12 @@ inline int invoke() {
         count_actions(
             recovered_guard,
             frontend_action_kind::pcm_compilation,
-            frontend_action_outcome::executed) == 1u
+            frontend_action_outcome::executed) == 1U
             && count_actions(
                    recovered_guard,
                    frontend_action_kind::pcm_compilation,
                    frontend_action_outcome::validated_cache_hit)
-                == 1u,
+                == 1U,
         "an interrupted PCM tuple was not rebuilt while the committed "
         "sibling remained a validated hit");
     require(
@@ -1629,7 +2196,7 @@ inline int invoke() {
         count_actions(
             recovered_warm_guard,
             frontend_action_kind::pcm_compilation,
-            frontend_action_outcome::validated_cache_hit) == 2u,
+            frontend_action_outcome::validated_cache_hit) == 2U,
         "a recovered PCM tuple did not become a warm validated hit");
 
     write_file(
@@ -1644,15 +2211,15 @@ inline int invoke() {
     require(
         !guard_alias_error
             && rewrite_guard_depfile_identity(
-                   guard_header_alias, guard_distinct_alias) == 1u,
+                   guard_header_alias, guard_distinct_alias) == 1U,
         "dependency-only guard could not install a distinct-file depfile "
         "alias");
     require_failure(
-        [&] { static_cast<void>(prepare_guard()); },
+        [&prepare_guard] { static_cast<void>(prepare_guard()); },
         "dependency scan and PCM compilation disagree",
         "distinct compiler depfile identity");
     require_failure(
-        [&] { static_cast<void>(prepare_guard()); },
+        [&prepare_guard] { static_cast<void>(prepare_guard()); },
         "dependency scan and PCM compilation disagree",
         "distinct compiler depfile identity immediate retry");
 
@@ -2218,7 +2785,7 @@ inline int invoke() {
     configured_toolchain different_toolchain = toolchain;
     different_toolchain.clang_binary = different_clang;
     require_failure(
-        [&] {
+        [&different_toolchain, &conditional_root, &raw_database, &root] {
             static_cast<void>(prepare(
                 different_toolchain,
                 {conditional_root},
@@ -2252,8 +2819,12 @@ inline int invoke() {
 
     const std::filesystem::path partition_source =
         source_root / "partitioned_entities.cppm";
+    const std::filesystem::path partition_implementation =
+        source_root / "partitioned_implementation.cppm";
     const std::filesystem::path partitioned_primary =
         source_root / "partitioned.cppm";
+    const std::filesystem::path ordinary_implementation =
+        source_root / "partitioned_ordinary_implementation.cppm";
     const std::filesystem::path partition_consumer =
         source_root / "partition_consumer.cppm";
     write_file(
@@ -2261,9 +2832,23 @@ inline int invoke() {
         "export module fixture.partitioned:entities;\n"
         "export inline constexpr int partition_value = 42;\n");
     write_file(
+        partition_implementation,
+        "module;\n"
+        "#include <cstdint>\n"
+        "module fixture.partitioned:implementation;\n"
+        "inline constexpr std::int32_t implementation_value = 7;\n");
+    write_file(
         partitioned_primary,
         "export module fixture.partitioned;\n"
-        "export import :entities;\n");
+        "export import :entities;\n"
+        "import :implementation;\n"
+        "static_assert(implementation_value == 7);\n"
+        "module :private;\n"
+        "inline constexpr int private_value = 9;\n");
+    write_file(
+        ordinary_implementation,
+        "module fixture.partitioned;\n"
+        "inline constexpr int ordinary_implementation_value = 11;\n");
     write_file(
         partition_consumer,
         "export module fixture.partition_consumer;\n"
@@ -2278,7 +2863,11 @@ inline int invoke() {
                 make_command(
                     toolchain, root, partition_source),
                 make_command(
+                    toolchain, root, partition_implementation),
+                make_command(
                     toolchain, root, partitioned_primary),
+                make_command(
+                    toolchain, root, ordinary_implementation),
                 make_command(
                     toolchain, root, partition_consumer),
             }));
@@ -2292,7 +2881,16 @@ inline int invoke() {
             partition_pcm_root);
     require(
         partition_prepared.compile_database_json.contains(
+            partition_implementation.string())
+            && !partition_prepared.compile_database_json.contains(
+                ordinary_implementation.string()),
+        "owned compile database did not preserve the named implementation "
+        "partition provider boundary");
+    require(
+        partition_prepared.compile_database_json.contains(
             "-fmodule-file=fixture.partitioned:entities=")
+            && partition_prepared.compile_database_json.contains(
+                "-fmodule-file=fixture.partitioned:implementation=")
             && partition_prepared.compile_database_json.contains(
                 "-fmodule-file=fixture.partitioned="),
         "consumer command omitted a transitive partition PCM mapping");
@@ -2301,7 +2899,8 @@ inline int invoke() {
             "\"direct_imports\": [\"fixture.partitioned\"]")
             && partition_prepared.pcm_manifest_json.contains(
                 "\"direct_imports\": "
-                "[\"fixture.partitioned:entities\"]"),
+                "[\"fixture.partitioned:entities\", "
+                "\"fixture.partitioned:implementation\"]"),
         "partition fixture flattened the manifest's direct import graph");
     const std::filesystem::path partition_owned_database =
         root / "partition-owned-compile-commands.json";
@@ -2358,7 +2957,8 @@ inline int invoke() {
         dependency_scan_result,
         original_dependency_scan_result + "\n");
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2414,7 +3014,8 @@ inline int invoke() {
     const std::string original_pcm = read_file(pcm);
     write_file(pcm, original_pcm + "corrupt-nonzero-pcm");
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2433,7 +3034,8 @@ inline int invoke() {
         provenance,
         original_provenance + "corrupt-provenance");
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2450,7 +3052,8 @@ inline int invoke() {
         conditional_root,
         original_source + "\n// stale source\n");
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2467,7 +3070,8 @@ inline int invoke() {
         owned_database,
         original_owned_database + "\n");
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2503,7 +3107,8 @@ inline int invoke() {
             "depfile",
             alternate_depfile.string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2523,7 +3128,8 @@ inline int invoke() {
             "pcm",
             alternate_pcm.string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2543,7 +3149,8 @@ inline int invoke() {
             "pcm_provenance",
             alternate_provenance.string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2565,7 +3172,8 @@ inline int invoke() {
         ",\n  \"unknown_contract_field\": \"rejected\"");
     write_file(manifest, unknown_field_manifest);
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2582,7 +3190,8 @@ inline int invoke() {
             "clang_binary_sha256",
             std::string(64, '0')));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2599,7 +3208,8 @@ inline int invoke() {
             "clang_resource_dir",
             (root / "untrusted-resource-dir").string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2616,7 +3226,8 @@ inline int invoke() {
             "relocatable_compilation_signature",
             std::string(64, '0')));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2627,7 +3238,8 @@ inline int invoke() {
         "relocatable compilation signature is stale");
     write_file(manifest, original_manifest);
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2661,7 +3273,8 @@ inline int invoke() {
             "clang_binary",
             fake_clang.string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest, &fake_clang] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2698,7 +3311,8 @@ inline int invoke() {
             "pcm",
             pcm_escape.string()));
     require_failure(
-        [&] {
+        [&toolchain, &conditional_root, &owned_database,
+         &production_pcm_root, &manifest] {
             static_cast<void>(validate(
                 toolchain,
                 {conditional_root},
@@ -2753,7 +3367,13 @@ inline int invoke() {
         "outside PREPARE sentinel must remain unchanged\n"};
     write_file(outside_sentinel, sentinel_bytes);
     const auto require_owned_directory_symlink_rejection =
-        [&](std::string_view component,
+        [&root,
+         &outside_sentinel_directory,
+         &toolchain,
+         &conditional_root,
+         &raw_database,
+         &outside_sentinel,
+         &sentinel_bytes](std::string_view component,
             std::string_view case_name) {
             const std::filesystem::path case_root =
                 root / ("linked-owned-directory-"
@@ -2773,7 +3393,7 @@ inline int invoke() {
                 "PREPARE contract fixture cannot create nested owned "
                 "directory symlink");
             require_failure(
-                [&] {
+                [&toolchain, &conditional_root, &raw_database, &case_root] {
                     static_cast<void>(prepare(
                         toolchain,
                         {conditional_root},
@@ -2801,7 +3421,12 @@ inline int invoke() {
             raw_database,
             leaf_pcm_root);
     const auto reject_leaf_symlink =
-        [&](const std::filesystem::path& leaf,
+        [&outside_sentinel,
+         &toolchain,
+         &conditional_root,
+         &raw_database,
+         &leaf_pcm_root,
+         &sentinel_bytes](const std::filesystem::path& leaf,
             std::string_view expected_diagnostic,
             std::string_view case_name) {
             const std::string original =
@@ -2818,7 +3443,7 @@ inline int invoke() {
                 "PREPARE contract fixture cannot create owned leaf "
                 "symlink");
             require_failure(
-                [&] {
+                [&toolchain, &conditional_root, &raw_database, &leaf_pcm_root] {
                     static_cast<void>(prepare(
                         toolchain,
                         {conditional_root},
@@ -2867,7 +3492,7 @@ inline int invoke() {
     const std::filesystem::path invalid_root =
         root / "invalid";
     const auto invalid_database =
-        [&](std::string_view name,
+        [&invalid_root](std::string_view name,
             const std::vector<raw_command>& commands) {
             const std::filesystem::path path =
                 invalid_root / (std::string{name} + ".json");
@@ -2880,7 +3505,7 @@ inline int invoke() {
     const std::filesystem::path empty_database =
         invalid_database("empty", {});
     require_failure(
-        [&] {
+        [&toolchain, &missing_source, &empty_database, &invalid_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {missing_source},
@@ -2900,7 +3525,7 @@ inline int invoke() {
         other,
         "export module fixture.other;\n");
     require_failure(
-        [&] {
+        [&toolchain, &no_command, &invalid_database, &invalid_root, &other] {
             static_cast<void>(prepare(
                 toolchain,
                 {no_command},
@@ -2913,7 +3538,7 @@ inline int invoke() {
         "no command for registered source");
 
     require_failure(
-        [&] {
+        [&toolchain, &no_command, &invalid_database, &invalid_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {no_command, no_command},
@@ -2938,7 +3563,11 @@ inline int invoke() {
         duplicate_b,
         "export module fixture.duplicate;\n");
     require_failure(
-        [&] {
+        [&toolchain,
+         &duplicate_a,
+         &invalid_database,
+         &invalid_root,
+         &duplicate_b] {
             static_cast<void>(prepare(
                 toolchain,
                 {duplicate_a},
@@ -2965,7 +3594,7 @@ inline int invoke() {
         "export module fixture.missing_provider_root;\n"
         "import fixture.provider_that_does_not_exist;\n");
     require_failure(
-        [&] {
+        [&toolchain, &missing_provider, &invalid_database, &invalid_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {missing_provider},
@@ -2993,7 +3622,11 @@ inline int invoke() {
         "export module fixture.cycle_b;\n"
         "import fixture.cycle_a;\n");
     require_failure(
-        [&] {
+        [&toolchain,
+         &cycle_a,
+         &invalid_database,
+         &invalid_root,
+         &cycle_b] {
             static_cast<void>(prepare(
                 toolchain,
                 {cycle_a},
@@ -3020,7 +3653,7 @@ inline int invoke() {
         "export module fixture.unknown_std;\n"
         "import std.unknown;\n");
     require_failure(
-        [&] {
+        [&toolchain, &unknown_std, &invalid_database, &invalid_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {unknown_std},
@@ -3055,7 +3688,11 @@ inline int invoke() {
             opposite_test_profile),
     };
     require_failure(
-        [&] {
+        [&toolchain,
+         &opposite_root,
+         &invalid_database,
+         &opposite_only_commands,
+         &invalid_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {opposite_root},
@@ -3111,10 +3748,15 @@ inline int invoke() {
 
     for (unsigned int order = 0; order < 2; ++order) {
         require_failure(
-            [&] {
-                static_cast<void>(prepare(
-                    toolchain,
-                    {ambiguous},
+            [&toolchain,
+             &ambiguous,
+             &invalid_database,
+             &order,
+             &ambiguous_commands,
+             &invalid_root] {
+            static_cast<void>(prepare(
+                toolchain,
+                {ambiguous},
                     invalid_database(
                         "ambiguous-" + std::to_string(order),
                         ambiguous_commands),
@@ -3267,7 +3909,10 @@ inline int invoke() {
         "nested response closure is incomplete");
 
     require_failure(
-        [&] {
+        [&toolchain,
+         &response_source,
+         &invalid_database,
+         &response_root] {
             static_cast<void>(prepare(
                 toolchain,
                 {response_source},
@@ -3294,7 +3939,11 @@ inline int invoke() {
         cycle_response_b,
         "@" + cycle_response_a.string() + "\n");
     require_failure(
-        [&] {
+        [&toolchain,
+         &response_source,
+         &invalid_database,
+         &response_root,
+         &cycle_response_a] {
             static_cast<void>(prepare(
                 toolchain,
                 {response_source},

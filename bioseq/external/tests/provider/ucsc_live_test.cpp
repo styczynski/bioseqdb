@@ -1,9 +1,13 @@
-#include <catch2/catch_test_macros.hpp>
+/**
+ * @file external/tests/provider/ucsc_live_test.cpp
+ * @brief Live UCSC provider query and sequence-delivery tests.
+ */
 
+#include <catch2/catch_test_macros.hpp>
 #include <expected>
+#include <stop_token>
 #include <string>
 #include <string_view>
-#include <stop_token>
 #include <variant>
 #include <vector>
 
@@ -32,8 +36,7 @@ struct catalog_collector {
     std::expected<void, external_error> push(owning_provider_message&& message) {
         if (auto* row = std::get_if<owning_catalog_row>(&message)) {
             catalogs.push_back(std::move(*row));
-        } else if (auto* diag =
-                       std::get_if<owning_provider_diagnostic>(&message)) {
+        } else if (auto* diag = std::get_if<owning_provider_diagnostic>(&message)) {
             diagnostics.push_back(std::move(*diag));
         }
         return {};
@@ -42,17 +45,16 @@ struct catalog_collector {
 
 provider_message_sink_ref make_sink(catalog_collector& collector) {
     return provider_message_sink_ref{
-        .object = &collector,
-        .push_fn = [](void* self, owning_provider_message&& message) {
-            return static_cast<catalog_collector*>(self)->push(
-                std::move(message));
+        .object = &collector, .push_fn = [](void* self, owning_provider_message&& message) {
+            return static_cast<catalog_collector*>(self)->push(std::move(message));
         }};
 }
 
-}  // namespace
+} // namespace
 
-TEST_CASE("UCSC provider session normalizes live genome catalog",
-          "[component:external_api][layer:integration][feature:external_source][resource:network]") {
+TEST_CASE(
+    "UCSC provider session normalizes live genome catalog",
+    "[component:external_api][layer:integration][feature:external_source][resource:network]") {
     context::context memory;
     auto& pool = bioseq::parallelism::global_pool::instance();
 
@@ -65,8 +67,7 @@ TEST_CASE("UCSC provider session normalizes live genome catalog",
     external_slot_budget budget;
     budget.provider = provider_id{.value = "ucsc"};
 
-    auto session =
-        ucsc_provider::open(memory, pool, runtime, std::nullopt, plan, budget);
+    auto session = ucsc_provider::open(memory, pool, runtime, std::nullopt, plan, budget);
     REQUIRE(session.has_value());
 
     catalog_collector collector;
@@ -79,7 +80,7 @@ TEST_CASE("UCSC provider session normalizes live genome catalog",
     REQUIRE(stats->is_complete);
     REQUIRE(stats->wire_bytes > 0);
 
-    // Live UCSC lists hundreds of assemblies; the normalized catalog must be
+    // Live UCSC lists hundreds of assemblies. The normalized catalog must be
     // non-empty and contain the human hg38 assembly with its provider database
     // key set (proving the common model preserved the UCSC-specific field).
     REQUIRE_FALSE(collector.catalogs.empty());

@@ -4,7 +4,7 @@
  *
  * The module owns the shared contracts used by scalar, SIMD, RMQ, and Vulkan
  * chaining. Coordinates remain 64-bit through sorting and exact score
- * calculations; packed accessors exist only for canonical ordering.
+ * calculations. Packed accessors exist only for canonical ordering.
  */
 module;
 
@@ -115,6 +115,14 @@ struct canonical_anchor_sort_stats {
 
 namespace canonical_anchor_sort_detail {
 
+/**
+ * @brief Applies the primary in-place radix pass and records its payload.
+ * @tparam p_key_type Callable that extracts the radix key from an anchor.
+ * @param anchors Mutable anchor span to order.
+ * @param key Key extractor used by the radix sorter.
+ * @param bounded_u32_primary_key Whether the selected key is the bounded 32-bit form.
+ * @return Sort counters for this primary pass.
+ */
 template <class p_key_type>
 [[nodiscard]] inline canonical_anchor_sort_stats sort_primary(
         std::span<anchor> anchors,
@@ -153,6 +161,11 @@ template <class p_key_type>
 
 } // namespace canonical_anchor_sort_detail
 
+/**
+ * @brief Orders anchors by the full canonical reference key.
+ * @param anchors Mutable anchor span to order.
+ * @return Primary-pass counters.
+ */
 [[nodiscard]] inline canonical_anchor_sort_stats sort_canonical_anchor_primary(
         std::span<anchor> anchors) noexcept {
     struct anchor_reference_sort_key {
@@ -165,6 +178,8 @@ template <class p_key_type>
         anchors, anchor_reference_sort_key{}, false);
 }
 
+/// @brief Orders one orientation-homogeneous anchor slice by reference position.
+///
 /// Fragment-native callers present one orientation-homogeneous slice at a
 /// time and have already authenticated every reference position against the
 /// target length.  For targets whose exclusive length fits in u32, the
@@ -173,6 +188,9 @@ template <class p_key_type>
 /// radix from scanning four constant high bytes.  Larger targets retain the
 /// full `reference_sort_key()` authority without first scanning the anchor payload for
 /// a narrower maximum.
+/// @param orientation_homogeneous_anchors Mutable single-orientation anchor span.
+/// @param authenticated_target_length Exclusive target length already validated by the caller.
+/// @return Primary-pass counters, including which key width was selected.
 [[nodiscard]] inline canonical_anchor_sort_stats
 sort_canonical_anchor_primary_bounded(
         std::span<anchor> orientation_homogeneous_anchors,
@@ -193,6 +211,11 @@ sort_canonical_anchor_primary_bounded(
     return sort_canonical_anchor_primary(orientation_homogeneous_anchors);
 }
 
+/**
+ * @brief Establishes canonical query ordering within equal reference groups.
+ * @param anchors Anchors already ordered by their canonical reference key.
+ * @return Counters for the tie-normalization radix passes.
+ */
 [[nodiscard]] inline canonical_anchor_sort_stats
 normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
     canonical_anchor_sort_stats stats{};
@@ -276,6 +299,11 @@ normalize_canonical_anchor_ties(std::span<anchor> anchors) noexcept {
     return stats;
 }
 
+/**
+ * @brief Produces the complete canonical anchor order in place.
+ * @param anchors Mutable anchor span to order.
+ * @return Combined primary and tie-normalization counters.
+ */
 [[nodiscard]] inline canonical_anchor_sort_stats sort_canonical_anchors(
         std::span<anchor> anchors) noexcept {
     canonical_anchor_sort_stats stats =
@@ -308,7 +336,7 @@ struct chain {
 ///
 /// Allocates via `context::current().alloc_chain_array<element_type>(...)` so the
 /// underlying storage is reclaimed at the surrounding `arena::chain` scope
-/// unwind.  `push_back` grows geometrically; orphaned slabs land in the
+/// unwind. `push_back` grows geometrically. Orphaned slabs land in the
 /// arena and are freed in O(1) at scope exit.
 ///
 /// Two patterns are supported:
@@ -316,7 +344,7 @@ struct chain {
 ///   1. Trivially-copyable `element_type` (e.g. `anchor`, `chain`, `minimizer_record`):
 ///      callers use `reserve(N)` + `push_back` or `reserve(N)` + write
 ///      through `data()` + `resize(actual_n)`.  The arena scope reclaims
-///      the slab without per-element work; element destructors are no-op.
+///      the slab without per-element work. Element destructors are no-op.
 ///
 ///   2. Non-trivially-destructible `element_type` (e.g. `alignment_region` with its
 ///      `std::vector<cigar_operation>` member): callers MUST use
@@ -329,6 +357,7 @@ struct chain {
 /// (`bioseq::simd::HWY_NAMESPACE::pipe`) import this module already.
 template <class p_element>
 struct arena_slab {
+    /** @brief Element type stored in arena-owned memory. */
     using element_type = p_element;
 
     element_type* data_ = nullptr;
@@ -336,7 +365,16 @@ struct arena_slab {
     std::size_t capacity_ = 0;
     context::context* arena_ = nullptr;
 
+    /** @brief Creates an unbound empty slab. */
     constexpr arena_slab() noexcept = default;
+
+    /**
+     * @brief Binds a live prefix and capacity to a caller-owned arena.
+     * @param data_ptr First element slot, or null for an empty slab.
+     * @param length Number of live elements.
+     * @param capacity Number of allocated element slots.
+     * @param arena Arena that owns the backing allocation.
+     */
     constexpr arena_slab(element_type* data_ptr, std::size_t length, std::size_t capacity,
                         context::context* arena) noexcept
         : data_(data_ptr), size_(length), capacity_(capacity), arena_(arena) {}
@@ -344,6 +382,7 @@ struct arena_slab {
     arena_slab(const arena_slab&)            = delete;
     arena_slab& operator=(const arena_slab&) = delete;
 
+    /** @brief Transfers the slab view and live-element destruction responsibility. */
     arena_slab(arena_slab&& other) noexcept
         : data_(other.data_), size_(other.size_), capacity_(other.capacity_), arena_(other.arena_)
     {
@@ -353,6 +392,11 @@ struct arena_slab {
         other.arena_ = nullptr;
     }
 
+    /**
+     * @brief Destroys this live prefix and takes ownership metadata from another slab.
+     * @param other Slab whose binding is transferred.
+     * @return This slab after the transfer.
+     */
     arena_slab& operator=(arena_slab&& other) noexcept {
         if (this != &other) {
             destroy_live_elements();
@@ -368,10 +412,16 @@ struct arena_slab {
         return *this;
     }
 
+    /** @brief Destroys live non-trivial elements without releasing arena storage. */
     ~arena_slab() noexcept {
         destroy_live_elements();
     }
 
+    /**
+     * @brief Ensures capacity for trivially copyable elements by arena relocation.
+     * @param expected_capacity Minimum number of element slots.
+     * @throws std::length_error If the requested byte count is not addressable.
+     */
     void reserve(std::size_t expected_capacity) {
         static_assert(std::is_trivially_copyable_v<element_type>,
             "arena_slab::reserve uses memcpy to relocate live elements during "
@@ -418,7 +468,7 @@ struct arena_slab {
     /// Allocate exactly @p capacity uninitialised slots in the arena.
     ///
     /// Use this once (not in a growth loop) for non-trivially-destructible
-    /// `element_type`.  Callers then `construct_at_back(args...)` per element; the
+    /// `element_type`. Callers then `construct_at_back(args...)` per element. The
     /// slab's destructor walks the live prefix and calls `~element_type()` on each.
     void reserve_for_placement_new(std::size_t capacity) {
         DEBUG_ASSERT(capacity_ == 0, "reserve_for_placement_new must be called on a fresh slab");
@@ -444,7 +494,7 @@ struct arena_slab {
 
     /// `push_back` overload restricted to trivially-copyable types.
     ///
-    /// Geometric growth via `memcpy` of the live prefix; non-trivial types
+    /// Geometric growth via `memcpy` of the live prefix. Non-trivial types
     /// must use the `reserve_for_placement_new` + `construct_at_back`
     /// pattern instead so destructors are called.
     void push_back(element_type value) {
@@ -509,19 +559,30 @@ struct arena_slab {
         return true;
     }
 
+    /**
+     * @brief Changes the live prefix length within existing capacity.
+     * @param new_len New live-element count.
+     */
     void resize(std::size_t new_len) noexcept {
         DEBUG_ASSERT(new_len <= capacity_, "arena_slab::resize beyond reserved capacity");
         size_ = new_len;
     }
 
+    /** @brief Returns the first mutable element slot, or null when unallocated. */
     [[nodiscard]] element_type*          data() noexcept       { return data_; }
+    /** @brief Returns the first element slot, or null when unallocated. */
     [[nodiscard]] const element_type*    data() const noexcept { return data_; }
+    /** @brief Returns the number of live elements. */
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    /** @brief Returns the number of allocated element slots. */
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
+    /** @brief Borrows the mutable live prefix. */
     [[nodiscard]] std::span<element_type>       as_span()       noexcept { return {data_, size_}; }
+    /** @brief Borrows the read-only live prefix. */
     [[nodiscard]] std::span<const element_type> as_const_span() const noexcept { return {data_, size_}; }
 
 private:
+    /** @brief Destroys the live prefix when elements have non-trivial destructors. */
     void destroy_live_elements() noexcept {
         if constexpr (!std::is_trivially_destructible_v<element_type>) {
             if (data_ == nullptr) return;
@@ -533,7 +594,9 @@ private:
     }
 };
 
-/// Helper: make a fresh arena_slab bound to the current pipeline arena context.
+/// @brief Creates an empty slab bound to the current pipeline arena.
+/// @tparam p_element Element type stored by the slab.
+/// @return Empty slab whose future allocations use the current context.
 template <class p_element>
 [[nodiscard]] inline arena_slab<p_element> make_arena_slab() noexcept {
     return arena_slab<p_element>{nullptr, 0u, 0u, &context::current()};
@@ -561,7 +624,9 @@ enum class simd_chaining_policy : std::uint8_t {
     bounded_batch_approximate = 1,
 };
 
-/// Stable diagnostic spelling for a selected SIMD chaining policy.
+/// @brief Returns the stable diagnostic spelling for a SIMD chaining policy.
+/// @param policy Policy identity.
+/// @return Static lower-snake-case name.
 [[nodiscard]] constexpr std::string_view simd_chaining_policy_name(
     simd_chaining_policy policy) noexcept
 {
@@ -592,7 +657,7 @@ struct chaining_parameters {
         bioseq::chaining::chaining_mode::simd_dp;
 
     /// Named SIMD forward-search policy. Exact is the permanent default and
-    /// oracle; accelerated execution must always be requested explicitly.
+    /// oracle. Accelerated execution must always be requested explicitly.
     simd_chaining_policy simd_policy = simd_chaining_policy::exact_visited;
 
     /// Enable Vulkan execution for the vulkan_tiled_dp chaining backend. When
@@ -602,7 +667,7 @@ struct chaining_parameters {
 
     /// True when downstream stages only need a mapped coordinate/strand result,
     /// not the full secondary list or base-alignment metadata. The scalar/SIMD
-    /// chaining backends ignore this hint; the Vulkan backend uses it to keep the
+    /// chaining backends ignore this hint. The Vulkan backend uses it to keep the
     /// selected GPU coordinate path from spending CPU time backtracking every
     /// chain when SQL did not request CIGAR, divergence, or MAPQ.
     bool    coordinate_only    = false;
@@ -711,7 +776,7 @@ struct chaining_parameters {
 /// Reports whether the score is "exact" (no gap penalty applied)
 /// and the diagonal width.
 ///
-/// IMPORTANT: The penalty trigger condition is `diagonal_deviation != 0 || query_distance > predecessor_span`.
+/// The penalty trigger condition is `diagonal_deviation != 0 || query_distance > predecessor_span`.
 /// This uses raw query_distance, NOT gap_length = min(ref_distance, query_distance).
 /// This differs from the full compute_chaining_score which uses gap_length > predecessor_span.
 ///
@@ -758,35 +823,16 @@ struct chaining_parameters {
 // Shared backtracking and chain extraction
 // ============================================================================
 
-/// Extract chains from DP arrays via backtracking.
-///
-/// Equivalent to mg_chain_backtrack() + compact_a() in lchain.c.
-/// Processes anchors from highest to lowest score, tracing predecessor
-/// chains and filtering by min_score and min_seed_count.
-///
-/// Rejected traces remain visited. This matches the source algorithm and
-/// prevents repeated traversal through already-explored anchors.
-///
-/// @param anchors                  Original (AoS) anchor array
-/// @param best_scores              f[i] -- best chain score ending at anchor i
-/// @param predecessors             p[i] -- predecessor index (-1 if chain start)
-/// @param peak_scores              v[i] -- peak score along the chain through i
-/// @param min_score                Minimum chain score to keep
-/// @param min_seed_count           Minimum number of anchors per chain
-/// @param chains_out               Output slab — surviving chains are appended.
-/// @param reordered_anchors_out    Output slab — anchors of surviving chains
-///                                 appended in chain order; `chain::anchor_start`
-///                                 indexes into this slab.
-///
-/// The two output slabs are written directly in the per-query chain arena.
-/// No intermediate vector or output-side copy is allocated.
+/// @brief Couples a qualifying dynamic-programming score with its anchor index.
 struct scored_anchor_index {
     int32_t score;
     int64_t anchor_index;
 };
 static_assert(sizeof(scored_anchor_index) == 16u);
 
+/// @brief Orders scored anchor indices by score and then anchor position.
 struct score_ascending {
+    /// @brief Compares two scored indices for ascending backtracking order.
     [[nodiscard, gnu::always_inline]] inline bool operator()(
         const scored_anchor_index& left,
         const scored_anchor_index& right) const noexcept
@@ -797,6 +843,20 @@ struct score_ascending {
     }
 };
 
+/// @brief Extracts accepted chains from dynamic-programming arrays.
+///
+/// Processes anchors from highest to lowest score, tracing predecessor
+/// chains and filtering by `min_score` and `min_seed_count`. Rejected traces
+/// remain visited so later starts do not traverse them again.
+///
+/// @param anchors Input anchors in dynamic-programming order.
+/// @param best_scores Best score ending at each anchor.
+/// @param predecessors Predecessor index for each anchor, or negative at a chain start.
+/// @param peak_scores Peak scores retained by the chaining contract.
+/// @param min_score Minimum terminal score to consider.
+/// @param min_seed_count Minimum anchors required for an emitted chain.
+/// @param chains_out Arena-backed destination for accepted chain descriptors.
+/// @param reordered_anchors_out Arena-backed destination for anchors in chain order.
 inline void backtrack_chains(
     std::span<const anchor> anchors,
     std::span<const int32_t> best_scores,
@@ -841,8 +901,8 @@ inline void backtrack_chains(
     for (int64_t rank_idx = static_cast<int64_t>(scored_count) - 1;
          rank_idx >= 0; --rank_idx)
     {
-        // NOTE: Do NOT skip candidates where visited[candidate] != 0.
-        // The trace naturally stops at visited nodes. (lchain.c:35-56)
+        // Do not skip previously visited candidates here. The trace naturally
+        // stops at the first visited predecessor.
         std::size_t chain_len = 0;
         int64_t trace_idx;
         for (trace_idx = scored[rank_idx].anchor_index;
@@ -878,9 +938,8 @@ inline void backtrack_chains(
                 reordered_anchors_out.push_back(anchors[chain_idx[i]]);
             }
         }
-        // CRITICAL: Do NOT unmark visited[] for rejected chains.
-        // This prevents re-tracing through already-explored anchors.
-        // (lchain.c:43,55 deliberately leaves t[i]=1)
+        // Keep visited marks for rejected chains so later candidates do not
+        // retrace already-explored anchors.
     }
 
     bioseq_log<logging_level::debug>("[chaining] Backtracking: {} chains from {} anchors",

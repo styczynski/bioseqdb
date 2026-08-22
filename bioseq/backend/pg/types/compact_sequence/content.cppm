@@ -1,4 +1,7 @@
-/* Total logical comparison and hashing for every valid seq state. */
+/**
+ * @file content.cppm
+ * @brief Logical comparison and hashing for every valid compact-sequence state.
+ */
 module;
 
 #include <algorithm>

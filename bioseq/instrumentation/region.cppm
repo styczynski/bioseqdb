@@ -23,18 +23,20 @@ import bioseq.instrumentation.pmu;
 
 export namespace bioseq::instrumentation {
 
-/// Stack-local state captured at region begin. ~16 bytes; never allocated.
+/// Stack-local state captured at region begin. It occupies about 16 bytes and is never allocated.
 struct region_measurement {
     const region_descriptor* descriptor = nullptr;
     std::uint64_t start_time_ns = 0;
     bool is_skipped = true;
 };
 
+/** @brief Scoped region measurement for one compile-time configuration. */
 template<profiling_configuration p_configuration_type>
 struct [[nodiscard]] region_scope {
     region_measurement measurement{};
     pmu::counter_sample counter_start{};
 
+    /** @brief Begin a region measurement when profiling is active. */
     [[gnu::always_inline]]
     inline explicit region_scope(const region_descriptor* descriptor) noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
@@ -53,6 +55,7 @@ struct [[nodiscard]] region_scope {
         }
     }
 
+    /** @brief Record elapsed time and available PMU deltas. */
     [[gnu::always_inline]] inline ~region_scope() noexcept {
         if constexpr (p_configuration_type::enable_profiling) {
             if (measurement.is_skipped) return;
@@ -85,6 +88,7 @@ struct [[nodiscard]] region_scope {
     region_scope& operator=(const region_scope&) = delete;
 };
 
+/** @brief Create a region scope for an explicit profiling configuration. */
 template<profiling_configuration p_configuration_type>
 [[nodiscard, gnu::always_inline]]
 inline region_scope<p_configuration_type> region(const region_descriptor* descriptor) noexcept {

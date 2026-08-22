@@ -1,3 +1,7 @@
+/**
+ * @file plan_recipe.cppm
+ * @brief Builds and validates exact cache-provider plan recipes and digests.
+ */
 module;
 
 #include <bioseq/pg_compat.h>
@@ -17,12 +21,18 @@ import bioseq.postgres.table;
 
 export namespace bioseq::postgres::extension::cache_provider {
 
+/** @brief Stable provider identifier for exact Bioseq scans. */
 inline constexpr std::uint32_t k_bioseq_scan_provider_id = 0x42535153U;
+/** @brief Stable provider name for exact Bioseq scans. */
 inline constexpr char k_bioseq_scan_provider_name[] = "bioseq.scan.exact";
+/** @brief Digest recipe revision for exact Bioseq scans. */
 inline constexpr std::uint32_t k_bioseq_scan_recipe_revision = 1U;
+/** @brief Stable provider identifier for exact Bioseq batch joins. */
 inline constexpr std::uint32_t k_bioseq_batch_join_provider_id = 0x4253514aU;
+/** @brief Stable provider name for exact Bioseq batch joins. */
 inline constexpr char k_bioseq_batch_join_provider_name[] =
     "bioseq.batch_join.exact";
+/** @brief Digest recipe revision for exact Bioseq batch joins. */
 inline constexpr std::uint32_t k_bioseq_batch_join_recipe_revision = 1U;
 
 namespace detail {
@@ -47,6 +57,7 @@ inline constexpr int k_batch_join_recipe_semantic_snapshot = 5;
 inline constexpr std::size_t k_maximum_plan_walk_nodes = 4'096;
 inline constexpr std::uint32_t k_maximum_plan_walk_depth = 256;
 
+/** @return True when a valid digest sink accepted the supplied byte range. */
 [[nodiscard]] bool append_bytes(
         bioseq_cache_digest_sink* sink,
         const void* bytes,
@@ -58,6 +69,7 @@ inline constexpr std::uint32_t k_maximum_plan_walk_depth = 256;
         && sink->append(sink->opaque, bytes, size);
 }
 
+/** @brief Encodes one integer into a fixed little-endian byte array. */
 template <class p_integer>
 void encode_little_endian(
         p_integer value,
@@ -71,6 +83,7 @@ void encode_little_endian(
     }
 }
 
+/** @brief Mixes one serialized recipe byte into every digest lane. */
 void mix_digest_byte(
         std::array<std::uint64_t, 4>& state,
         std::uint8_t byte,
@@ -84,15 +97,20 @@ void mix_digest_byte(
     }
 }
 
+/** @return True when a PostgreSQL node recipe was serialized and digested. */
 [[nodiscard]] bool digest_recipe(
         const List* recipe,
         std::uint32_t provider_id,
         std::uint32_t recipe_revision,
         std::array<std::uint8_t, bioseq::cache::k_provider_digest_bytes>*
             output) {
-    if (recipe == nullptr || output == nullptr) return false;
+    if (recipe == nullptr || output == nullptr) {
+        return false;
+    }
     char* serialized = nodeToString(recipe);
-    if (serialized == nullptr) return false;
+    if (serialized == nullptr) {
+        return false;
+    }
     const std::size_t byte_count = std::strlen(serialized);
     std::array<std::uint64_t, 4> state{
         0xcbf29ce484222325ULL ^ provider_id,
@@ -117,6 +135,7 @@ void mix_digest_byte(
     return true;
 }
 
+/** @return True when the selected recipe node is an integer value. */
 [[nodiscard]] bool integer_node_value(
         const List* nodes,
         int index,
@@ -126,11 +145,14 @@ void mix_digest_byte(
         return false;
     }
     const Node* node = reinterpret_cast<const Node*>(list_nth(nodes, index));
-    if (node == nullptr || !IsA(node, Integer)) return false;
+    if (node == nullptr || !IsA(node, Integer)) {
+        return false;
+    }
     *output = intVal(node);
     return true;
 }
 
+/** @return True when the selected recipe node is a list or PostgreSQL NIL. */
 [[nodiscard]] bool list_or_nil_node(
         const List* nodes,
         int index,
@@ -140,11 +162,14 @@ void mix_digest_byte(
         return false;
     }
     const Node* node = reinterpret_cast<const Node*>(list_nth(nodes, index));
-    if (node != nullptr && !IsA(node, List)) return false;
+    if (node != nullptr && !IsA(node, List)) {
+        return false;
+    }
     *output = reinterpret_cast<const List*>(node);
     return true;
 }
 
+/** @return The relation OID addressed by a planner scan index. */
 [[nodiscard]] Oid planner_relation_oid(
         PlannerInfo* root,
         Index scan_relid) noexcept {
@@ -158,6 +183,7 @@ void mix_digest_byte(
         ? rte->relid : InvalidOid;
 }
 
+/** @return The relation OID addressed by a planned statement scan index. */
 [[nodiscard]] Oid statement_relation_oid(
         const PlannedStmt* statement,
         Index scan_relid) noexcept {
@@ -171,11 +197,14 @@ void mix_digest_byte(
         ? rte->relid : InvalidOid;
 }
 
+/** @return A copied exact-scan recipe or PostgreSQL NIL when invalid. */
 [[nodiscard]] List* make_recipe(
         const CustomScan& scan,
         Oid relation_oid) {
     List* private_payload = bioseq_customscan_cache_private_payload(&scan);
-    if (private_payload == NIL) return NIL;
+    if (private_payload == NIL) {
+        return NIL;
+    }
     List* recipe = list_make5(
         makeInteger(k_recipe_magic),
         makeInteger(static_cast<int>(k_bioseq_scan_recipe_revision)),
@@ -197,12 +226,17 @@ void mix_digest_byte(
     return recipe;
 }
 
+/** @return A copied exact batch-join recipe or PostgreSQL NIL when invalid. */
 [[nodiscard]] List* make_batch_join_recipe(
         const CustomScan& scan,
         List* semantic_snapshot) {
-    if (semantic_snapshot == NIL) return NIL;
+    if (semantic_snapshot == NIL) {
+        return NIL;
+    }
     List* plan_payload = bioseq_batch_join_cache_plan_payload(&scan);
-    if (plan_payload == NIL) return NIL;
+    if (plan_payload == NIL) {
+        return NIL;
+    }
     List* recipe = list_make5(
         makeInteger(k_batch_join_recipe_magic),
         makeInteger(static_cast<int>(k_bioseq_batch_join_recipe_revision)),
@@ -214,6 +248,7 @@ void mix_digest_byte(
     return recipe;
 }
 
+/** @brief Finds one exact CustomScan identity in a bounded planned-statement walk. */
 struct plan_finder {
     const CustomScanMethods* methods = nullptr;
     std::int32_t plan_node_id = -1;
@@ -224,15 +259,20 @@ struct plan_finder {
     std::size_t visited_count = 0;
     bool valid = true;
 
+    /** @return True while the bounded plan walk remains valid. */
     [[nodiscard]] bool visit(const Plan* plan, std::uint32_t depth) {
-        if (!valid || plan == nullptr) return valid;
+        if (!valid || plan == nullptr) {
+            return valid;
+        }
         if (depth > k_maximum_plan_walk_depth
             || visited_count >= visited.size()) {
             valid = false;
             return false;
         }
         for (std::size_t index = 0; index < visited_count; ++index) {
-            if (visited[index] == plan) return true;
+            if (visited[index] == plan) {
+                return true;
+            }
         }
         visited[visited_count++] = plan;
         if (IsA(plan, CustomScan)) {
@@ -319,18 +359,22 @@ struct plan_finder {
         }
     }
 
+    /** @return True when every plan in a PostgreSQL list was visited safely. */
     [[nodiscard]] bool visit_list(
             const List* plans,
             std::uint32_t depth) {
         const ListCell* cell = nullptr;
         foreach(cell, plans) {
             const auto* child = static_cast<const Plan*>(lfirst(cell));
-            if (!visit(child, depth)) return false;
+            if (!visit(child, depth)) {
+                return false;
+            }
         }
         return true;
     }
 };
 
+/** @return True when an exact-scan recipe has the expected shape and identity. */
 [[nodiscard]] bool parse_recipe_header(
         const List* recipe,
         std::int32_t* plan_node_id,
@@ -384,6 +428,7 @@ struct plan_finder {
     return true;
 }
 
+/** @return True when an exact batch-join recipe has the expected shape. */
 [[nodiscard]] bool parse_batch_join_recipe_header(
         const List* recipe,
         std::int32_t* plan_node_id) noexcept {
@@ -437,6 +482,10 @@ struct plan_finder {
 
 } // namespace detail
 
+/**
+ * @brief Builds an exact-scan plan recipe and expected generation digest.
+ * @return Provider ABI status describing acceptance or failure.
+ */
 [[nodiscard]] bioseq_cache_status bioseq_build_plan_digest_recipe(
         PlannerInfo* root,
         const Plan* provider_plan,
@@ -475,6 +524,10 @@ struct plan_finder {
     return bioseq_cache_status_ok;
 }
 
+/**
+ * @brief Revalidates an exact-scan recipe against the runtime plan tree.
+ * @return Provider ABI status after appending the runtime generation digest.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_append_runtime_generation_digest(
         const List* plan_domain_nodes,
@@ -526,6 +579,10 @@ bioseq_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/**
+ * @brief Builds an exact batch-join plan recipe and expected digest.
+ * @return Provider ABI status describing acceptance or failure.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_build_plan_digest_recipe(
         PlannerInfo* root,
@@ -569,6 +626,10 @@ bioseq_batch_join_build_plan_digest_recipe(
     return bioseq_cache_status_ok;
 }
 
+/**
+ * @brief Revalidates a batch-join recipe against the runtime plan tree.
+ * @return Provider ABI status after appending the runtime generation digest.
+ */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_runtime_generation_digest(
         const List* plan_domain_nodes,
@@ -617,6 +678,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending the exact-scan domain identity. */
 [[nodiscard]] bioseq_cache_status bioseq_append_domain_digest(
         const bioseq_cache_path_domain* domain,
         bioseq_cache_digest_sink* sink) {
@@ -624,11 +686,12 @@ bioseq_batch_join_append_runtime_generation_digest(
         || domain->provider_id != k_bioseq_scan_provider_id) {
         return bioseq_cache_status_unsupported;
     }
-    constexpr std::array<std::uint8_t, 8> identity{
+    constexpr std::array<std::uint8_t, 8> k_domain_identity{
         0x53, 0x51, 0x53, 0x42,  // provider id, little endian
         0x01, 0x00, 0x00, 0x00,  // recipe revision
     };
-    return detail::append_bytes(sink, identity.data(), identity.size())
+    return detail::append_bytes(
+               sink, k_domain_identity.data(), k_domain_identity.size())
             && detail::append_bytes(
                 sink,
                 k_bioseq_scan_provider_name,
@@ -637,6 +700,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending exact-scan generation inputs. */
 [[nodiscard]] bioseq_cache_status bioseq_append_generation_digest(
         const bioseq_cache_path_domain* domain,
         bioseq_cache_digest_sink* sink) {
@@ -648,8 +712,12 @@ bioseq_batch_join_append_runtime_generation_digest(
     char* dependency = nodeToString(domain->dependency_nodes);
     char* private_nodes = nodeToString(domain->provider_private_nodes);
     if (dependency == nullptr || private_nodes == nullptr) {
-        if (dependency != nullptr) pfree(dependency);
-        if (private_nodes != nullptr) pfree(private_nodes);
+        if (dependency != nullptr) {
+            pfree(dependency);
+        }
+        if (private_nodes != nullptr) {
+            pfree(private_nodes);
+        }
         return bioseq_cache_status_error;
     }
     const std::size_t dependency_size = std::strlen(dependency);
@@ -673,6 +741,7 @@ bioseq_batch_join_append_runtime_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending the batch-join domain identity. */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_domain_digest(
         const bioseq_cache_path_domain* domain,
@@ -681,11 +750,12 @@ bioseq_batch_join_append_domain_digest(
         || domain->provider_id != k_bioseq_batch_join_provider_id) {
         return bioseq_cache_status_unsupported;
     }
-    constexpr std::array<std::uint8_t, 8> identity{
+    constexpr std::array<std::uint8_t, 8> k_domain_identity{
         0x4a, 0x51, 0x53, 0x42,  // provider id, little endian
         0x01, 0x00, 0x00, 0x00,  // recipe revision
     };
-    return detail::append_bytes(sink, identity.data(), identity.size())
+    return detail::append_bytes(
+               sink, k_domain_identity.data(), k_domain_identity.size())
             && detail::append_bytes(
                 sink,
                 k_bioseq_batch_join_provider_name,
@@ -694,6 +764,7 @@ bioseq_batch_join_append_domain_digest(
         : bioseq_cache_status_error;
 }
 
+/** @return Provider ABI status after appending batch-join generation inputs. */
 [[nodiscard]] bioseq_cache_status
 bioseq_batch_join_append_generation_digest(
         const bioseq_cache_path_domain* domain,
@@ -706,8 +777,12 @@ bioseq_batch_join_append_generation_digest(
     char* dependency = nodeToString(domain->dependency_nodes);
     char* private_nodes = nodeToString(domain->provider_private_nodes);
     if (dependency == nullptr || private_nodes == nullptr) {
-        if (dependency != nullptr) pfree(dependency);
-        if (private_nodes != nullptr) pfree(private_nodes);
+        if (dependency != nullptr) {
+            pfree(dependency);
+        }
+        if (private_nodes != nullptr) {
+            pfree(private_nodes);
+        }
         return bioseq_cache_status_error;
     }
     const std::size_t dependency_size = std::strlen(dependency);
@@ -731,10 +806,13 @@ bioseq_batch_join_append_generation_digest(
         : bioseq_cache_status_error;
 }
 
+/** @brief Emits cache-domain EXPLAIN properties for an exact batch join. */
 void bioseq_batch_join_explain_exact_domain(
         List* plan_domain_nodes,
         bioseq_cache_explain_sink* sink) {
-    if (sink == nullptr || sink->struct_size < sizeof(*sink)) return;
+    if (sink == nullptr || sink->struct_size < sizeof(*sink)) {
+        return;
+    }
     std::int32_t plan_node_id = -1;
     const bool valid = detail::parse_batch_join_recipe_header(
         plan_domain_nodes,
@@ -765,10 +843,13 @@ void bioseq_batch_join_explain_exact_domain(
     }
 }
 
+/** @brief Emits cache-domain EXPLAIN properties for an exact Bioseq scan. */
 void bioseq_explain_exact_domain(
         List* plan_domain_nodes,
         bioseq_cache_explain_sink* sink) {
-    if (sink == nullptr || sink->struct_size < sizeof(*sink)) return;
+    if (sink == nullptr || sink->struct_size < sizeof(*sink)) {
+        return;
+    }
     std::int32_t plan_node_id = -1;
     Index scan_relid = 0;
     Oid relation_oid = InvalidOid;

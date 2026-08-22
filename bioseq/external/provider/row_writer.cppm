@@ -1,3 +1,7 @@
+/**
+ * @file external/provider/row_writer.cppm
+ * @brief Type-erased callback boundary for provider row emission.
+ */
 module;
 
 #include <concepts>
@@ -19,6 +23,7 @@ import bioseq.external.provider.messages; // provider_diagnostic_view
 // session.
 export namespace bioseq::external::provider {
 
+/// Consumer contract for provider rows and diagnostics.
 template <class p_writer_type>
 concept external_row_writer_compatible =
     requires(p_writer_type &writer, const taxonomy_row_view &taxon,
@@ -33,6 +38,7 @@ concept external_row_writer_compatible =
       { writer.finish() } -> std::same_as<std::expected<void, external_error>>;
     };
 
+/// Non-owning type-erased provider-row writer.
 struct external_row_writer_ref {
   void *object{};
   sink_control (*taxon_fn)(void *, const taxonomy_row_view &){};
@@ -42,28 +48,35 @@ struct external_row_writer_ref {
   sink_control (*diagnostic_fn)(void *, const provider_diagnostic_view &){};
   std::expected<void, external_error> (*finish_fn)(void *){};
 
+  /// Emit one taxonomy row.
   [[nodiscard]] sink_control write_taxon(const taxonomy_row_view &row) const {
     return taxon_fn(object, row);
   }
+  /// Emit one catalog record.
   [[nodiscard]] sink_control write_record(const catalog_row_view &row) const {
     return record_fn(object, row);
   }
+  /// Emit one gene projection.
   [[nodiscard]] sink_control write_gene(const record_gene_row_view &row) const {
     return gene_fn(object, row);
   }
+  /// Emit one record-location projection.
   [[nodiscard]] sink_control
   write_location(const record_location_row_view &row) const {
     return location_fn(object, row);
   }
+  /// Emit one provider diagnostic.
   [[nodiscard]] sink_control
   write_diagnostic(const provider_diagnostic_view &row) const {
     return diagnostic_fn(object, row);
   }
+  /// Finalize the writer and return any terminal error.
   [[nodiscard]] std::expected<void, external_error> finish() const {
     return finish_fn(object);
   }
 };
 
+/// Erase a concrete row writer without taking ownership.
 template <external_row_writer_compatible p_writer_type>
 [[nodiscard]] external_row_writer_ref
 make_external_row_writer_ref(p_writer_type &writer) noexcept {

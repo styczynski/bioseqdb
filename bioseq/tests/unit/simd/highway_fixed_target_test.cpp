@@ -1,13 +1,22 @@
-#include <tests/support/common.hpp>
-#include "common/simd/highway_test_probes/contract.h"
+/**
+ * @file
+ * @brief Verifies fixed-target Highway probes without runtime redispatch.
+ */
 
+#include <catch2/catch_test_macros.hpp>
+
+import std;
 import bioseq.highway.test_support;
 
 #if defined(BIOSEQ_TEST_INDEXES)
 
 namespace {
 
-[[nodiscard]] std::int64_t fixed_target() {
+/**
+ * @brief Returns the target bit bound to the generated test kernel table.
+ * @return Nonzero Highway target bit selected by the fixed-target fixture.
+ */
+[[nodiscard]] auto fixed_target() -> std::int64_t {
     return bioseq::simd_dispatch::highway_test_target_binding().target;
 }
 
@@ -60,6 +69,6 @@ TEST_CASE("fixed-target two-stack internals satisfy low-level property checks",
     REQUIRE(receipt.selector_cases != 0u);
 }
 
-}  // namespace
+} // namespace
 
-#endif  // BIOSEQ_TEST_INDEXES
+#endif // BIOSEQ_TEST_INDEXES

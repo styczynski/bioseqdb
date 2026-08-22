@@ -1,6 +1,7 @@
 module;
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -626,7 +627,7 @@ inline void validate_runtime_probe_facts(
         }
         if (std::ranges::any_of(
                 referenced,
-                [&](const owned_call* value) {
+                [&referenced](const owned_call* value) -> bool {
                     return value->owner->stable_usr
                         != referenced.front()
                                ->owner->stable_usr;
@@ -1206,8 +1207,11 @@ inline void require_complete_function(
     }
     bool call_lifetimes_in_inventory = true;
     for (const flow_call_site& call : function.calls) {
-        const auto check_objects =
-            [&](const std::vector<flow_object>& objects) {
+        const auto check_objects = [
+                                       &call_lifetimes_in_inventory,
+                                       &lifetime_ids](
+                                       const std::vector<flow_object>& objects)
+            -> void {
                 for (const flow_object& object : objects) {
                     call_lifetimes_in_inventory &=
                         std::binary_search(
@@ -1320,13 +1324,26 @@ inline void require_complete_function(
         std::vector<flow_object>,
         std::vector<const function_flow*>)>
         visit;
-    visit =
-        [&](const function_flow& function,
+    visit = [
+                &append_unique_objects,
+                &callsite_owner_by_identity,
+                &canonicalized_calls,
+                &canonicalized_functions,
+                &functions_by_usr,
+                &objects_by_identity,
+                &provenance,
+                &result,
+                &root,
+                &seen_contexts,
+                &severity_authority,
+                &site_by_key,
+                &stop_by_key,
+                &visit](const function_flow& function,
             bridge_kind active_bridge,
             const flow_call_site* active_bridge_transition,
             std::vector<flow_object> crossing_objects,
             std::vector<flow_object> capture_objects,
-            std::vector<const function_flow*> path) {
+            std::vector<const function_flow*> path) -> void {
             result.reachable_function_usrs.insert(
                 function.stable_usr);
             const std::tuple context_key{
@@ -1425,8 +1442,11 @@ inline void require_complete_function(
                         "stable call-site identity is reused by "
                         "multiple functions");
                 }
-                const auto register_object =
-                    [&](const flow_object& object) {
+                const auto register_object = [
+                                                 &call,
+                                                 &objects_by_identity](
+                                                 const flow_object& object)
+                    -> void {
                         const auto [existing, inserted] =
                             objects_by_identity.emplace(
                                 object.stable_object_id, object);
@@ -1956,14 +1976,14 @@ converter_families(const safety_manifest_overload& overload) {
         arguments == std::string_view::npos
             ? identity
             : identity.substr(0, arguments)};
-    constexpr std::string_view required[] = {
+    constexpr auto required = std::to_array<std::string_view>({
         "bioseq.reap_orphan_seq_sub_tables",
         "bioseq.vacuum_seq_storage",
         "bioseq_internal.add_to_extension_secdef",
         "bioseq_internal.bioseq_ensure_am_depends_catalog",
         "pg_catalog.alter_bioseq_table_reset",
         "pg_catalog.alter_bioseq_table_set",
-    };
+    });
     return std::ranges::contains(required, owner)
         ? std::vector<std::string>{owner}
         : std::vector<std::string>{};

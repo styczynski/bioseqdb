@@ -32,7 +32,7 @@ endfunction()
 #   TARGET bioseq_codegen
 #   PROJECT_TARGET bioseq_codegen_project
 #   BINARY_DIR "<root-build>/codegen"
-#   COMPONENTS external website sql highway namespace_materialization)
+#   COMPONENTS external website sql highway namespace_materialization build_config)
 #
 # Provisions ONE isolated host-tool generator as an ExternalProject and an
 # imported executable handle. It prefers GCC 16.1/libstdc++ when that toolchain
@@ -57,6 +57,7 @@ function(bioseq_add_codegen)
   set(_enable_sql OFF)
   set(_enable_highway OFF)
   set(_enable_namespace_materialization OFF)
+  set(_enable_build_config OFF)
   foreach(_component IN LISTS ARG_COMPONENTS)
     if(_component STREQUAL "external")
       set(_enable_external ON)
@@ -71,6 +72,8 @@ function(bioseq_add_codegen)
       set(_enable_namespace_materialization ON)
     elseif(_component STREQUAL "namespace_materialization")
       set(_enable_namespace_materialization ON)
+    elseif(_component STREQUAL "build_config")
+      set(_enable_build_config ON)
     else()
       message(FATAL_ERROR "bioseq_add_codegen: unknown component '${_component}'")
     endif()
@@ -734,8 +737,8 @@ function(bioseq_add_codegen)
       "-DBIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS:BOOL=OFF"
       "-DCMAKE_C_FLAGS:STRING="
       "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -fno-rtti"
-      "-DCMAKE_C_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer"
-      "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer")
+      "-DCMAKE_C_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -fno-omit-frame-pointer"
+      "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O3 -DNDEBUG -fno-omit-frame-pointer")
   endif()
 
   # Reuse the parent dependency graph for the isolated generator. The nested
@@ -794,6 +797,7 @@ function(bioseq_add_codegen)
       "-DBIOSEQ_CODEGEN_ENABLE_SQL:BOOL=${_enable_sql}"
       "-DBIOSEQ_CODEGEN_ENABLE_HIGHWAY:BOOL=${_enable_highway}"
       "-DBIOSEQ_CODEGEN_ENABLE_NAMESPACE_MATERIALIZATION:BOOL=${_enable_namespace_materialization}"
+      "-DBIOSEQ_CODEGEN_ENABLE_BUILD_CONFIG:BOOL=${_enable_build_config}"
       "-DCLANG_BINARY:FILEPATH=${BIOSEQ_CODEGEN_CLANG_BINARY}"
       "-DLLVM_CONFIG_BINARY:FILEPATH=${BIOSEQ_CODEGEN_LLVM_CONFIG}"
       "-DLLVM_VERSION_EXPLICIT:STRING=${_llvm_version}"

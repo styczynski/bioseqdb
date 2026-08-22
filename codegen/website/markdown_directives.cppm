@@ -1,5 +1,6 @@
 module;
 
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
@@ -155,7 +156,7 @@ struct info_token {
 [[nodiscard]] std::vector<info_token> tokenize_info(std::string_view info) {
     std::vector<info_token> tokens;
     std::size_t index = 0;
-    const auto skip_ws = [&] {
+    const auto skip_ws = [info, &index]() -> void {
         while (index < info.size() && (info[index] == ' ' || info[index] == '\t')) {
             ++index;
         }
@@ -260,7 +261,7 @@ struct fence_descriptor {
     }
     fence_descriptor descriptor;
     std::vector<std::string_view> seen;
-    const auto once = [&](std::string_view key) {
+    const auto once = [&seen](std::string_view key) -> void {
         for (const std::string_view existing : seen) {
             if (existing == key) {
                 throw std::runtime_error("duplicate fence attribute '"
@@ -418,11 +419,11 @@ struct sql_example_sections {
 /// @param code Raw fenced SQL body.
 /// @return The three SQL sections.
 [[nodiscard]] sql_example_sections parse_sql_example_sections(std::string_view code) {
-    constexpr std::string_view markers[] = {
-        "-- bioseq:setup", "-- bioseq:visible", "-- bioseq:teardown"};
+    constexpr auto markers = std::to_array<std::string_view>({
+        "-- bioseq:setup", "-- bioseq:visible", "-- bioseq:teardown"});
     int active_section = -1;
-    std::string sections[3];
-    bool seen[3] = {false, false, false};
+    std::array<std::string, 3> sections;
+    std::array seen{false, false, false};
     std::size_t position = 0;
     while (position <= code.size()) {
         std::size_t newline = code.find('\n', position);

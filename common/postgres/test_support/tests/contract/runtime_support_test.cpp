@@ -1347,6 +1347,24 @@ TEST_CASE("private cluster configuration is portable and stage-first",
               "dynamic_library_path = '$libdir'\n")
           != std::string::npos);
     CHECK(configuration.find("/private/stage") == std::string::npos);
+    CHECK(configuration.find("bioseq_cache.query_cache.mode")
+          == std::string::npos);
+    CHECK_THROWS_WITH(
+        static_cast<void>(render_private_cluster_configuration(
+            54321, socket_directory, std::nullopt,
+            preload_libraries,
+            std::array<std::pair<std::string, std::string>, 1>{{
+                {"bioseq_cache.invalid-name", "value"},
+            }})),
+        "invalid startup GUC name: bioseq_cache.invalid-name");
+    CHECK_THROWS_WITH(
+        static_cast<void>(render_private_cluster_configuration(
+            54321, socket_directory, std::nullopt,
+            preload_libraries,
+            std::array<std::pair<std::string, std::string>, 1>{{
+                {"bioseq_cache.mode", "invalid\nvalue"},
+            }})),
+        "PostgreSQL configuration contains newline");
 
     const std::filesystem::path runtime_library_directory{
         "/private/case/runtime-library"};
@@ -2606,7 +2624,7 @@ TEST_CASE("unjournaled supervised child spawn fails synchronously",
         supervision_journal_fault::create_staging_file);
 
     CHECK_THROWS_AS(
-        spawned_process::spawn(process_launch_options{
+        owned_process::spawn(process_launch_options{
             .executable = sleeper,
             .arguments = {"30"},
             .supervise = true}),
@@ -2641,7 +2659,7 @@ TEST_CASE("supervised spawn preserves exact argv zero and PostgreSQL PATH",
     const scoped_environment_override host_pgdata{
         "PGDATA", poisoned_directory.c_str()};
 
-    spawned_process child = spawned_process::spawn(process_launch_options{
+    owned_process child = owned_process::spawn(process_launch_options{
         .executable = executable,
         .environment = {{"PATH", poisoned_directory.string()}},
         .preferred_path_directory = preferred_directory,
@@ -2673,7 +2691,7 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
                 BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
     const std::filesystem::path canonical_data =
         std::filesystem::canonical(tree.data_directory());
-    spawned_process broker = spawned_process::spawn(process_launch_options{
+    owned_process broker = owned_process::spawn(process_launch_options{
         .executable = executable,
         .arguments = {
             "--postmaster", "-D", canonical_data.string()},
@@ -2693,7 +2711,7 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
     REQUIRE(broker_session > 1);
     REQUIRE(::getsid(static_cast<pid_t>(identity->pid))
             == broker_session);
-    REQUIRE_FALSE(broker.leader_exited_unreaped());
+    REQUIRE_FALSE(broker.has_unreaped_exited_leader());
     REQUIRE_FALSE(
         broker.reap_after_verified_target_termination(0ms));
 
@@ -2722,11 +2740,11 @@ TEST_CASE("retained launch broker pins a foreground postmaster process group",
     REQUIRE_FALSE(is_supervised_process_identity_current(*identity));
     const auto broker_finish =
         std::chrono::steady_clock::now() + 2s;
-    while (!broker.leader_exited_unreaped()
+    while (!broker.has_unreaped_exited_leader()
            && std::chrono::steady_clock::now() < broker_finish) {
         std::this_thread::sleep_for(5ms);
     }
-    REQUIRE(broker.leader_exited_unreaped());
+    REQUIRE(broker.has_unreaped_exited_leader());
     REQUIRE_FALSE(is_supervised_process_group_absent(
         identity->process_group));
 
@@ -2766,7 +2784,7 @@ TEST_CASE("retained broker owns startup failure before any postmaster pidfile",
                 BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
     const std::filesystem::path canonical_data =
         std::filesystem::canonical(tree.data_directory());
-    spawned_process broker = spawned_process::spawn(process_launch_options{
+    owned_process broker = owned_process::spawn(process_launch_options{
         .executable = executable,
         .arguments = {"--hold", "-D", canonical_data.string()},
         .output_file =
@@ -2780,18 +2798,18 @@ TEST_CASE("retained broker owns startup failure before any postmaster pidfile",
         executable, canonical_data, 50ms, 5ms));
     REQUIRE(broker.pid() > 1);
     REQUIRE(broker.process_group() == broker.pid());
-    REQUIRE_FALSE(broker.leader_exited_unreaped());
+    REQUIRE_FALSE(broker.has_unreaped_exited_leader());
     REQUIRE_FALSE(
         broker.reap_after_verified_target_termination(0ms));
 
     REQUIRE(broker.signal_owned_group_while_unreaped(SIGKILL));
     const auto exit_finish =
         std::chrono::steady_clock::now() + 2s;
-    while (!broker.leader_exited_unreaped()
+    while (!broker.has_unreaped_exited_leader()
            && std::chrono::steady_clock::now() < exit_finish) {
         std::this_thread::sleep_for(5ms);
     }
-    REQUIRE(broker.leader_exited_unreaped());
+    REQUIRE(broker.has_unreaped_exited_leader());
     const std::int64_t owned_group = broker.process_group();
     REQUIRE_FALSE(is_supervised_process_group_absent(
         owned_group));
@@ -3128,7 +3146,7 @@ TEST_CASE("postmaster identity polling observes a delayed pidfile",
             BIOSEQ_POSTGRES_TEST_PROCESS_CONTRACT_CHILD_PATH});
     const std::filesystem::path canonical_data =
         std::filesystem::canonical(tree.data_directory());
-    spawned_process child = spawned_process::spawn(process_launch_options{
+    owned_process child = owned_process::spawn(process_launch_options{
         .executable = executable,
         .arguments = {
             "--hold", "-D", canonical_data.string()}});

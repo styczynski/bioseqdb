@@ -474,7 +474,7 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
  * @param[in] objective_c Loaded Objective-C runtime interface.
  * @param[in] device MTLDevice-compatible object.
  * @param[in] metallib_path Metal-library input path.
- * @param[in] entry_name Compute entry-point name; an empty value selects
+ * @param[in] entry_name Compute entry-point name. An empty value selects
  * `main0`.
  * @param[out] transcript Receives the exact library-load transcript.
  * @return MTLFunction-compatible object, or `nullptr` on failure.
@@ -566,7 +566,7 @@ make_compute_pipeline_descriptor(objective_c_runtime& objective_c,
  *
  * @param[in] objective_c Loaded Objective-C runtime interface.
  * @param[in] archive MTLBinaryArchive-compatible object.
- * @param[in] archive_path Output path; an empty path preserves the existing
+ * @param[in] archive_path Output path. An empty path preserves the existing
  * skip behavior.
  * @param[out] transcript Receives the exact serialization transcript.
  * @return `true` when serialization succeeds or is skipped for an empty path.
