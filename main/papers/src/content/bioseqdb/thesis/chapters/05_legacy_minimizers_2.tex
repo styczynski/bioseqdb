@@ -1,0 +1,3183 @@
+
+%%% HUJ
+
+
+
+
+
+
+
+% The clean fix would have been to use ntHash~\cite{nthash_2016}, the
+% rolling hash recommended by the SIMD-Minimizers
+% paper~\cite{groot_koerkamp_simd_minimizers_2025}.  ntHash is a
+% sequence of \texttt{rotate\,+\,XOR\,+\,table-lookup} operations
+% where the table is indexed by the 2-bit nucleotide rank, so on NEON
+% it can be implemented as a $4$-entry \texttt{tbl.16b} lookup per
+% character.  This produces a uniform hash distribution across the
+% $k$-mer space, which removes the AT-bias.
+
+% V14 implements canonical ntHash inside the V13 dual-stream chassis.
+% The implementation is correct -- it preserves the warmup-cancellation
+% invariant by precomputing constants that subtract the
+% $c_\text{old} = 0$-padding contribution after $k$ rolling steps --
+% and the integration suite passes.
+
+% What V14 \emph{didn't} buy was wall-clock:
+
+% \begin{itemize}
+% \item \texttt{mm\_sketch\_simd} cost \emph{increased} by 2\,ms
+%   (the table lookup adds a NEON \texttt{tbl.16b}, two rotates, and
+%   some XORs per stream per BP).
+% \item \texttt{collect\_seed\_hits} dropped by \emph{0.4\,ms}, not
+%   the predicted 5\,ms.
+% \item Net: V14 is statistically tied with V13 at LONG and
+%   VERY\_LONG, and slightly slower at XL.
+% \end{itemize}
+
+% The lesson is that the AT-bias hypothesis was wrong.  The
+% \texttt{collect\_seed\_hits} regression is dominated not by the
+% minimizer hash distribution but by the \texttt{std::unordered\_map}
+% lookup overhead: bioseq's target index uses STL's default hash
+% table, while the C minimap2 path uses an open-addressing
+% \texttt{khash\_t<uint64\_t>}.  The next-most-impactful single edit
+% for closing Goal~2 -- replacing \texttt{std::unordered\_map} with a
+% flat hash on a uint32 $\to$ vector layout -- is in the post-V14
+% future-work list of the engineering report and is not part of this
+% chapter.
+
+% \subsection{V15 -- dual-batch chaining}
+% \label{sec:v15-chain-v2}
+
+% The dual-stream interleaving idea that delivered for the minimizer
+% loop (\S\ref{sec:v11-v12}) also worked beautifully for an aggressive
+% unrolling of the SIMD chaining inner loop. Unfortunately, the
+% chaining loop is not register-bound and 4-pipe-issue-limited;
+% \emph{it is load-store-bound}.  V15 doubles the SoA loads per inner
+% iteration from 4 to 8, which queues up on the M1's 4 load-store
+% pipes and stalls the issue queue.  Net wall-clock effect:
+
+% \begin{itemize}
+% \item \texttt{mg\_lchain\_simd} regresses by 5--13\,\% at 903\,kbp.
+% \item Total pipeline regresses by 7\,\% versus V13 chaining + V13 minimizer.
+% \end{itemize}
+
+% The lesson is that the unrolling-with-multiple-reduction-streams
+% pattern only helps register-bound, issue-width-limited kernels.
+% Apply it only after confirming the target kernel is issue-width
+% limited, not load-store limited.  V15 stays in the codebase as a
+% documented negative result.
+
+% \subsection{Goal~2-style \texttt{prefix\_kmer} drop}
+
+% A future-work item from V12 proposed dropping the parallel
+% \texttt{ring\_buf\_hs} buffer and the \texttt{prefix\_kmer} state
+% register by packing the strand bit into bit~16 of \texttt{elem}.
+% The estimated saving was $\sim 3$ ops/stream/iter and 22 vec\_t of
+% register-pressure relief.  We implemented and benchmarked.  Result:
+
+% \begin{verbatim}
+%                                   V12 (pre)   V12 (post-Goal-2)   delta
+% mm_sketch_simd                    9.0 ms      9.5 ms              +0.5 ms (matches estimate)
+% target_index_build                24.7 ms     4.9 ms              -19.8 ms (~85% fewer keys)
+% collect_seed_hits                 12.3 ms     842.0 ms            +830 ms (70x regression)
+% mg_lchain_simd                    8.9 ms      299.9 ms            +291 ms (34x regression)
+% mm_align_skeleton                 87.2 ms    4811.0 ms            +4724 ms (56x regression)
+% \end{verbatim}
+
+% The kmer space stored in \texttt{elem} after the trick was only 14
+% bits -- not the 16 bits the V12 future-work entry assumed -- so the
+% \texttt{target\_index} hash buckets collapsed to $\sim 16\,000$
+% distinct keys for $168\,000$ query minimizers.  Each query had
+% $\sim 10$ collisions per bucket, the chain-anchor count exploded,
+% and the alignment skeleton had to walk through all of them.  The
+% pipeline is $36\times$ slower as a result.
+
+% The lesson is that hash-precision losses in a sketching scheme
+% \emph{compound} catastrophically through the downstream pipeline.
+% Even an apparently small precision loss must be validated against
+% the full pipeline's wall-clock, not just the sketch phase's.
+
+% \section{Round 5 -- the divergence-estimator fix (V13)}
+% \label{sec:v13-est-err}
+
+% The single biggest \emph{non-minimizer} contribution to closing
+% Goal~2 is the V13 rewrite of
+% \texttt{estimate\_divergence\_from\_seeds} in
+% \path{bioseq/backend/sequences/minimap_port.cppm}, which dropped
+% \texttt{mm\_est\_err} from V12-pre's 7.88\,ms to V13's 0.85\,ms --
+% a $9\times$ speedup, removing one of the two large downstream
+% regressions in the SIMD pipeline.
+
+% \subsection{Why \texttt{mm\_est\_err} mattered}
+
+% For each chain, minimap2 estimates the per-base sequence divergence
+% from a Poisson model on the minimizer-set
+% intersection~\cite{minimap2_paper}:
+% \[
+% \hat{\epsilon} = \frac{1}{k} \log \frac{n}{m}
+% \]
+% where $n$ is the number of query minimizers in the chain's reference
+% span and $m$ is the number of those that are actually seeded
+% (i.e.\ that appear as anchors in the chain).  Computing $n$ requires
+% \emph{knowing which positions are query minimizers}, which is a
+% membership test against the query's minimizer-position set.
+
+% The pre-V13 implementation:
+
+% \begin{enumerate}
+% \item Built a sorted array \texttt{minimizer\_positions[]} of every
+%   query minimizer's position via \texttt{std::sort}.  The V12
+%   dual-stream collector emits in lane-interleaved order, so the
+%   array is \emph{not} sorted on output, and \texttt{std::sort}
+%   sees worst-case input.
+% \item For each chain anchor, did a \texttt{std::lower\_bound} into
+%   the sorted array to test membership.
+% \end{enumerate}
+
+% The dominant cost was the \texttt{std::sort} on 168\,k entries:
+% $\sim 5$--$6$\,ms per pair.  The \texttt{lower\_bound} loop added
+% another $\sim 1$--$2$\,ms.
+
+% \subsection{The sort-free prefix-count rewrite}
+
+% V13 replaces both with a single linear-pass prefix-sum:
+
+% \[
+% \textit{prefix\_count}[i] = \big|\{ \, p \in \textit{minimizer\_positions} \mid p < i \,\}\big|
+% \]
+
+% Built in $O(N + L)$ where $N$ is the minimizer count and $L$ is the
+% query length.  After construction:
+
+% \begin{itemize}
+% \item $\textit{is\_minimizer}(p) = (\textit{prefix\_count}[p+1] > \textit{prefix\_count}[p])$ -- $O(1)$.
+% \item $\textit{range\_count}(a, b) = \textit{prefix\_count}[b+1] - \textit{prefix\_count}[a]$ -- $O(1)$.
+% \end{itemize}
+
+% The per-region inner loop is now a single $O(\textit{seed\_count})$
+% walk via $O(1)$ probes.  No sort, no binary search.
+
+% The fix landed for \emph{all} configs (scalar pipeline included) so
+% even the scalar path got a small speedup: scalar
+% \texttt{mm\_est\_err} dropped from 1.21\,ms to 0.85\,ms, V12-SIMD
+% \texttt{mm\_est\_err} dropped from 7.88\,ms to 0.85\,ms.  The
+% SIMD-minus-scalar regression is gone.
+
+% There was also a correctness bug exposed by the rewrite: the V10
+% ``reverse-chain fix'' was wrong, because for both forward and
+% reverse chains the lambda \texttt{compute\_forward\_pos} was
+% already producing monotonically-increasing forward positions in
+% chain order. We removed the reverse-chain split entirely.
+
+% \subsection{Net pipeline impact}
+
+% Figure~\ref{fig:phase-stack-v13} stacks the per-phase cost at
+% 903\,kbp for V12-pre versus V13.  The two large gains are
+% \texttt{mm\_est\_err} (from 7.88\,ms to 0.85\,ms) and the V12
+% \texttt{mm\_sketch} stack (from 14.99\,ms to 9.23\,ms, already
+% covered in \S\ref{sec:v11-v12}).
+
+% \begin{figure}[ht]
+%   \centering
+%   \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib.pyplot as plt
+%     import matplotlib
+%     import numpy as np
+%     matplotlib.use("pgf")
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
+%     configs = ['scalar', 'V6 SIMD', 'V8 two-stack', 'V12 v3 (pre-V13)', 'V12 v3 (post-V13)']
+%     phases = [
+%         ('mm\\_sketch + mm\\_sketch\\_simd', [12.50, 38.82, 32.43, 14.99, 14.52], '#9999cc'),
+%         ('target\\_index\\_build',         [16.0,  14.3,  14.6,  26.38, 23.83], '#1f77b4'),
+%         ('collect\\_seed\\_hits',          [6.5,   11.0,  11.3,  12.32, 12.0],  '#2ca02c'),
+%         ('mg\\_lchain\\_dp/simd',          [16.0,  8.9,   8.9,   8.88,  8.78],  '#ff7f0e'),
+%         ('mm\\_est\\_err',                 [0.7,   7.2,   7.1,   7.88,  0.85],  '#d62728'),
+%         ('mm\\_align\\_skeleton',          [87.5,  86.4,  86.5,  87.25, 85.42], '#888888'),
+%     ]
+%     bottoms = np.zeros(len(configs))
+%     for name, vals, color in phases:
+%         ax.bar(configs, vals, bottom=bottoms, label=name, color=color)
+%         bottoms = bottoms + np.array(vals)
+%     for i, b in enumerate(bottoms):
+%         ax.text(i, b + 1.5, f'{b:.0f}', ha='center', fontsize=7)
+%     ax.set_ylabel('Per-pair phase cost (ms) at 903\\,kbp', fontsize=8)
+%     ax.set_title('Per-phase pipeline composition (903\\,kbp, mean of 3 runs)', fontsize=9)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=6, frameon=False, loc='upper right', ncol=2)
+%     ax.grid(True, alpha=0.3, axis='y')
+%     plt.xticks(rotation=15, ha='right', fontsize=7)
+%     print(get_filename_from_extension(".pgf"))
+%     plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+%   \end{CacheMeCode}
+%   \caption{Per-phase composition of the per-pair pipeline at
+%     903\,kbp for the headline configurations.  ``V12 v3 (pre-V13)''
+%     is the V12 collector with the pre-V13 \texttt{mm\_est\_err}
+%     code; ``V12 v3 (post-V13)'' is the same minimizer collector with
+%     the V13 sort-free prefix-count rewrite.  The pre/post pair lets
+%     the reader visually separate the V12 (minimizer-side) wins from
+%     the V13 (\texttt{mm\_est\_err}) wins.  The \texttt{mm\_align\_skeleton}
+%     bar is identical across all configs, accounting for $\sim 50\,\%$
+%     of total wall-clock, and is not addressed by any of the work in
+%     this chapter.}
+%   \label{fig:phase-stack-v13}
+% \end{figure}
+
+% \section{Final results}
+% \label{sec:final-results}
+
+% The combination of the V12 minimizer collector and the V13
+% \texttt{mm\_est\_err} rewrite is the production state at the time of
+% writing.  Across the five sequence-length buckets the bench
+% exercises (LONG, VERY\_LONG, XL), V13 is the fastest of the SIMD
+% configurations on every bucket and is the fastest config
+% \emph{overall} on the LONG sub-buckets (47\,kbp, 49\,kbp, 52\,kbp).
+% At VERY\_LONG (903\,kbp) it is 8.8\,\% faster than scalar -- just
+% short of the 10\,\% Goal-2 target.  At XL (5\,Mbp) it is 4.9\,\%
+% faster than scalar.
+
+% \begin{figure}[ht]
+%   \centering
+%   \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib.pyplot as plt
+%     import matplotlib
+%     import numpy as np
+%     matplotlib.use("pgf")
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.50*__LINEWIDTH__, forward=True)
+%     buckets = ['47 kbp', '49 kbp', '52 kbp', '903 kbp', '5.0 Mbp']
+%     delta_v6   = [(15.21 - 14.56) / 14.56 * 100,
+%                   (15.90 - 14.94) / 14.94 * 100,
+%                   (16.05 - 15.09) / 15.09 * 100,
+%                   (201.68 - 188.93) / 188.93 * 100,
+%                   (1207.99 - 1171.0) / 1171.0 * 100]
+%     delta_v8   = [(14.64 - 14.56) / 14.56 * 100,
+%                   (15.07 - 14.94) / 14.94 * 100,
+%                   (15.24 - 15.09) / 15.09 * 100,
+%                   (183.77 - 188.93) / 188.93 * 100,
+%                   (1131.87 - 1171.0) / 1171.0 * 100]
+%     delta_v13  = [(13.78 - 14.56) / 14.56 * 100,
+%                   (14.02 - 14.94) / 14.94 * 100,
+%                   (13.82 - 15.09) / 15.09 * 100,
+%                   (172.38 - 188.93) / 188.93 * 100,
+%                   (1113.3 - 1171.0) / 1171.0 * 100]
+%     x = np.arange(len(buckets))
+%     width = 0.27
+%     ax.bar(x - width, delta_v6,  width, label='V6 SIMD (rescan)', color='#1f77b4')
+%     ax.bar(x,         delta_v8,  width, label='V8 two-stack',     color='#2ca02c')
+%     ax.bar(x + width, delta_v13, width, label='V13 (production)', color='#d62728')
+%     ax.axhline(-10, linestyle='--', linewidth=1, color='#ff0000',
+%                 label='-10\\% Goal-2 target')
+%     ax.axhline(0, linewidth=0.6, color='#000000')
+%     ax.set_xticks(x)
+%     ax.set_xticklabels(buckets)
+%     ax.set_ylabel('Wall-clock delta vs scalar (\\%, negative = faster)', fontsize=8)
+%     ax.set_title('SIMD vs scalar speedup across iterations', fontsize=9)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=7, frameon=False, loc='upper right', ncol=2)
+%     ax.grid(True, alpha=0.3, axis='y')
+%     print(get_filename_from_extension(".pgf"))
+%     plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+%   \end{CacheMeCode}
+%   \caption{Wall-clock delta versus scalar for the three headline
+%     SIMD configurations, expressed as percent (negative = faster).
+%     The dashed line is the $-10\,\%$ Goal-2 target. V13 approaches
+%     the target across the LONG / VERY\_LONG buckets (between
+%     $-8.4\,\%$ and $-8.8\,\%$ on the plotted three-run means) and
+%     is within 5\,\% of the target on XL.}
+%   \label{fig:speedup-summary}
+% \end{figure}
+
+% The summary table:
+
+% \begin{table}[ht]
+%   \centering
+%   \small
+%   \begin{tabular}{lrrrr}
+%     \toprule
+%     Length     & scalar (ms) & V13 (ms) & V13 vs scalar & V13 vs V6 SIMD \\
+%     \midrule
+%     47\,kbp   &  14.56  & 13.78 & $-5.4\,\%$ & $-9.4\,\%$ \\
+%     49\,kbp   &  14.94  & 14.02 & $-6.2\,\%$ & $-11.8\,\%$ \\
+%     52\,kbp   &  15.09  & 13.82 & $-8.4\,\%$ & $-13.9\,\%$ \\
+%     903\,kbp  & 188.93  & 172.38 & $-8.8\,\%$ & $-14.5\,\%$ \\
+%     5.0\,Mbp  & 1171.0  & 1113.3 & $-4.9\,\%$ & $-7.8\,\%$ \\
+%     \bottomrule
+%   \end{tabular}
+%   \caption{Final V13-state speedup numbers across the five
+%     sequence-length buckets, expressed as wall-clock per pair
+%     (mean of 3 runs from
+%     \texttt{[quick-long-sequence-benchmark]}, bench-opt
+%     \texttt{-O3 -DNDEBUG}, CCS error rate, seed
+%     \texttt{0xBEEFCAFE12345678}). The $-10\,\%$ Goal-2 target is
+%     narrowly missed at 903\,kbp and 5.0\,Mbp; on the LONG sub-buckets
+%     (47, 49, 52\,kbp) it is met or comfortably approached.}
+%   \label{tab:final-numbers}
+% \end{table}
+
+% $$$ SUPEREND
+
+% \begin{table}[H]
+%   \centering
+%   \small
+%   \begin{tabularx}{\linewidth}{p{.20\linewidth}XX}
+%   \toprule
+%   Method & What happens when one candidate enters & Why it matters here \\
+%   \midrule
+%   Saved minimum plus rescan & Compare once; scan all $w$ slots only when the
+%   saved record leaves & Excellent scalar common case; one expiring SIMD lane
+%   starts shared work \\
+%   Monotone deque & Remove expired records at the front and larger records at the
+%   back & The number of removals depends on the hash values \\
+%   Prefix and suffix minima & Rebuild a fixed block summary every $w$ steps and
+%   combine two saved values per crossing window & The instruction schedule
+%   depends on the step number, not on which lane contains the minimum \\
+%   \bottomrule
+%   \end{tabularx}
+%   \caption{Three ways to maintain a sliding minimum. The next section uses the
+%   third method because every lane performs the same fixed steps.}
+%   \label{tab:rewrite-sliding-minimum-methods}
+%   \end{table}
+
+%   \paragraph{Is the specialized kernel different from the generic kernel?}
+%   Yes in implementation, but not in minimizer semantics: both calculate
+%   chronological adjacent windows, choose the rightmost equal minimum, and use
+%   the same transition and tie-output rules.
+  
+%   \begin{enumerate}
+%     \item \textbf{Batching.}  A generic full call is one $L$-window group.
+%           The fast call stages eight candidates and runs two sequential
+%           four-window groups; eight is fixed in the code, not derived from
+%           $k$ or $w$.
+%     \item \textbf{Construction.}  The generic kernel constructs $L$ exact
+%           $k$-mers in $k$ shifted-vector steps.  The fast kernel constructs
+%           eight exact K15 records with fixed SWAR operations in a 24-byte
+%           scratch area: 14 retained ranks, eight new ranks, and two safety
+%           bytes.
+%     \item \textbf{Reduction.}  The generic group reduces
+%           $(w-1)+L$ records in $w$ steps.  Each fast group reduces
+%           $9+4=13$ records in ten steps, updates the tail, and feeds the next
+%           group; a full call therefore performs 20 reduction steps.
+%     \item \textbf{Applicability.}  The fast route is restricted to its
+%           K15/W10 DNA4 packed-u32 layout and vector target.  Other admitted
+%           parameters, and ambiguity-aware DNA5 input, use the generic route.
+%   \end{enumerate}
+  
+%   \subsection{Algorithmic differences: fixed and probability-dependent work}
+  
+%   Let $N$ be the number of useful candidate positions and let $L$ be the one
+%   lane-count symbol used for all three methods.  Thus
+%   $\lceil N/L\rceil$ is the number of SIMD groups.  A1 and A2 place separated
+%   sequence streams in those lanes, whereas A3 places adjacent windows in them.
+  
+%   Use the requested two-event model.  Let $p$ be the per-lane probability that
+%   the saved minimum expires, and let $r>p$ be the per-lane probability that a
+%   window contains a repeated minimum hash.  To obtain a closed form from only
+%   $p$ and $r$, assume these events are independent within a lane and assume
+%   independent lanes.  This is a deliberately simplified estimate because
+%   adjacent A3 lanes share $w-1$ candidates.  Define
+%   \[
+%     \pi_p=1-(1-p)^L,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^L .
+%   \]
+%   The first quantity estimates the probability that some lane expires.  The
+%   second estimates the probability that some lane both expires and contains a
+%   repeated minimum hash.  A raw-distinct output tie is a subset of the latter
+%   event, so terms using $\pi_{pr}$ below are upper bounds.  Notice that $r>p$
+%   does not make the tie branch more frequent than expiry: $pr\leq p$, hence
+%   $\pi_{pr}\leq\pi_p$.  One-time startup and final-tail effects are included in
+%   the additive $O(k+w)$ term.
+  
+%   \begin{table}[H]
+%   \centering
+%   \scriptsize
+%   \begin{tabularx}{\linewidth}{p{.11\linewidth}p{.25\linewidth}
+%                                p{.29\linewidth}X}
+%   \toprule
+%   Method & Fixed-schedule work & Probability-dependent work
+%          & Expected and worst-case work \\
+%   \midrule
+%   A1: naive SIMD rescan &
+%   One constant-cost advance per group after $O(k+w)$ setup. &
+%   With probability $\pi_p$, the shared slow path performs one $w$-slot minimum
+%   rescan and one $w$-slot equal-minimum scan.  The value of $r$ changes output,
+%   not this schedule. &
+%   \[
+%    \begin{aligned}
+%    \mathbb{E}[T_{\mathrm{A1}}]=O\biggl(&k+w\\[-2pt]
+%      &+\left\lceil\frac NL\right\rceil(1+2w\pi_p)\biggr).
+%    \end{aligned}
+%   \]
+%   Worst case:
+%   $O\!\left(k+w+\lceil N/L\rceil w\right)$. \\
+%   \addlinespace
+%   A2: rolling ntHash and prefix--suffix minima &
+%   Rolling hash update and two aggregate merges per group; one deterministic
+%   $(w-1)$-merge suffix rebuild every $w$ groups. &
+%   None.  Expiry and ties do not change the instruction schedule. &
+%   Minimum maintenance performs
+%   \[
+%     \begin{aligned}
+%     &2\left\lceil\frac NL\right\rceil\\[-2pt]
+%     &\quad +(w-1)\left\lfloor
+%         \frac{\lceil N/L\rceil}{w}\right\rfloor
+%     \end{aligned}
+%   \]
+%   merges.  Expected and worst case:
+%   $O(k+w+N/L)$. \\
+%   \addlinespace
+%   A3: generic chronological reduction &
+%   Every group performs $k$ shifted exact-$k$-mer construction steps and $w$
+%   shifted adjacent-window reductions:
+%   \[
+%     \begin{aligned}
+%     \Theta\biggl(&k+w\\[-2pt]
+%       &+\left\lceil\frac NL\right\rceil(k+w)\biggr).
+%     \end{aligned}
+%   \]
+%   Leading term: $\Theta(N(k+w)/L)$. &
+%   An expiry-gated group adds a $w$-slot tie-verification pass.  A confirmed tie
+%   adds an event construction, transpose, ordering, and compression path costing
+%   $O(L(w+L))$ per affected group.  Neither path recomputes a minimum. &
+%   \[
+%    \begin{aligned}
+%    \mathbb{E}[T_{\mathrm{A3}}]=O\biggl(
+%      &k+w\\[-2pt]
+%      &+\frac NL[k+w(1+\pi_p)]\\[-2pt]
+%      &+N(w+L)\pi_{pr}\biggr).
+%    \end{aligned}
+%   \]
+%   Worst case:
+%   $O\!\left(k+N[k/L+w+L]\right)$. \\
+%   \bottomrule
+%   \end{tabularx}
+%   \caption{Fixed and conditional source-level work using only $N,L,w,k,p,r$.
+%   The table counts vector-loop and tie-layout work, not machine instructions.}
+%   \label{tab:rewrite-fixed-variable-work}
+%   \end{table}
+  
+%   For the fixed K15/W10 specialization, substitute $k=15$, $w=10$, and $L=4$.
+%   A full eight-candidate call is simply two consecutive four-lane groups, so
+%   the sustained stream still contains $\lceil N/L\rceil$ groups.  The numeral
+%   eight never enters the asymptotic expression.  Under the two-probability
+%   model above, the following is a conservative upper estimate:
+%   \[
+%     O\!\left(
+%       k+w+\left\lceil\frac{N}{2L}\right\rceil
+%       +\left\lceil\frac NL\right\rceil
+%       \left[
+%         w(1+\pi_p+2\pi_{pr})+L(w+L)\pi_{pr}
+%       \right]
+%     \right).
+%   \]
+%   The first ceiling counts one fixed packed K15 construction per pair of
+%   four-lane groups.  The bracket contains the always-run minimum reduction, the
+%   expiry hash prefilter, the tie raw-verification and event-enumeration passes,
+%   and the rare event layout.  With $k=15,w=10,L=4$ all of these are constants,
+%   so expected and worst-case time are both $\Theta(N)$.
+  
+%   For one full fast call, the minimum loop itself always performs
+%   \[
+%     \underbrace{10}_{\text{first group}}
+%     +\underbrace{10}_{\text{second group}}
+%     =20
+%   \]
+%   shifted hash comparisons.  Its expected count of ten-slot reduction or
+%   verification loops is bounded by
+%   \[
+%     20(1+\pi_p+2\pi_{pr}),
+%     \qquad
+%     \pi_p=1-(1-p)^4,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^4.
+%   \]
+%   The two $\pi_{pr}$ terms conservatively charge both raw verification and
+%   event enumeration whenever the repeated-hash gate succeeds; the source can
+%   reject the event before the latter pass.  The fixed twenty reduction steps
+%   load 20 u32 hash vectors, 40 u64 raw-record
+%   vectors, and 40 u64 ordinal vectors.  Expiry adds no minimum-reduction load;
+%   it can only trigger the separate verification work shown above.
+  
+%   Algorithmically, A2 has the best guaranteed scaling in $k$ and $w$: after
+%   initialization it is $O(N/L)$ and its schedule is independent of $p$ and $r$.
+%   A1 can execute fewer minimum operations when expiry is extremely rare, but
+%   its worst case grows as $Nw/L$.  Generic A3 deliberately pays
+%   $N(k+w)/L$ fixed work to calculate complete adjacent windows.  These orders do
+%   not predict fixed-$k$, fixed-$w$ wall-clock speed, where the specialized
+%   packing and the different metadata operations can dominate.
+  
+
+% \begin{figure}[H]
+%   \centering
+%   \begin{tikzpicture}[
+%     x=.56cm,
+%     y=.56cm,
+%     font=\footnotesize,
+%     >=Latex,
+%     base old/.style={draw=black!70,fill=rewriteGray!18,
+%       minimum width=.36cm,minimum height=.42cm,inner sep=0pt},
+%     base new/.style={draw=rewriteBlue!90!black,fill=rewriteBlue!14,
+%       minimum width=.36cm,minimum height=.42cm,inner sep=0pt},
+%     base next/.style={draw=rewriteBlue!90!black,densely dashed,
+%       fill=rewriteBlue!7,minimum width=.36cm,minimum height=.42cm,inner sep=0pt},
+%     unused/.style={draw=rewriteGray!75,dashed,fill=rewriteGray!6,
+%       text=rewriteGray!85!black,minimum width=.36cm,
+%       minimum height=.42cm,inner sep=0pt},
+%     slot/.style={draw=black!65,fill=white,
+%       minimum width=.36cm,minimum height=.34cm,inner sep=0pt},
+%     picked/.style={draw=rewriteOrange!90!black,very thick,
+%       fill=rewriteOrange!20,minimum width=.36cm,
+%       minimum height=.34cm,inner sep=0pt},
+%     tied/.style={draw=rewriteOrange!90!black,densely dashed,
+%       fill=rewriteOrange!7,minimum width=.36cm,
+%       minimum height=.34cm,inner sep=0pt},
+%     answer/.style={draw=rewriteOrange!90!black,very thick,
+%       fill=rewriteOrange!14,rounded corners,
+%       minimum width=1.45cm,minimum height=.40cm,inner sep=2pt},
+%     flow/.style={-{Latex[length=1.8mm]},thick}
+%   ]
+  
+%   % (a) Generic dimensions and the only partial call.
+%   \node[anchor=west,font=\bfseries] at (0,21.35)
+%     {(a) One ordinary generic DNA4 iteration processes exactly $L$ candidates};
+  
+%   \node[anchor=east] at (1.90,20.45) {base ranks};
+%   \node[base old,minimum width=4.20cm] (goldbase) at (5.95,20.45)
+%     {$k-1$ retained};
+%   \node[base new,minimum width=2.25cm] (gnewbase) at (11.71,20.45)
+%     {$L$ new};
+%   \draw[flow] (gnewbase.east)--(15.10,20.45);
+%   \node[anchor=west] at (15.25,20.45)
+%     {$k$ shifted updates $\longrightarrow L$ hashes};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (2.18,20.02)--(13.72,20.02)
+%     node[midway,below=4pt] {$(k-1)+L$ live ranks};
+  
+%   \node[anchor=east] at (1.90,18.70) {candidate row};
+%   \node[base old,minimum width=4.20cm] (goldcand) at (5.95,18.70)
+%     {$w-1$ retained};
+%   \node[base new,minimum width=2.25cm] (gnewcand) at (11.71,18.70)
+%     {$L$ new};
+%   \draw[flow] (gnewcand.east)--(15.10,18.70);
+%   \node[anchor=west] at (15.25,18.70)
+%     {$w$ shifted reductions $\longrightarrow L$ minima};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (2.18,18.27)--(13.72,18.27)
+%     node[midway,below=4pt] {$(w-1)+L$ candidate records};
+  
+%   \node[anchor=east] at (1.90,16.85) {ordinary};
+%   \node[base new,minimum width=2.25cm] (fullpending) at (4.15,16.85)
+%     {$L$ pending};
+%   \draw[flow] (fullpending.east)--(7.00,16.85);
+%   \node[anchor=west] at (7.15,16.85) {run one full group};
+  
+%   \node[anchor=east] at (12.50,16.85) {end of input only};
+%   \node[base new,minimum width=1.25cm] (tailactive) at (14.10,16.85)
+%     {$q$};
+%   \node[unused,minimum width=1.75cm] (tailidle) at (16.80,16.85)
+%     {$L-q$};
+%   \draw[flow] (tailidle.east)--(19.35,16.85);
+%   \node[anchor=west] at (19.50,16.85) {one masked group};
+  
+%   % (b) Fixed K15/W10 staging and the two chronological groups.
+%   \node[anchor=west,font=\bfseries] at (0,14.25)
+%     {(b) The fixed $k=15,w=10$ fast call stages eight new candidates};
+  
+%   \node[anchor=east] at (1.85,13.35) {base scratch};
+%   \foreach \i in {0,...,13}
+%     \node[base old,minimum width=.27cm] at (2.35+.52*\i,13.35) {};
+%   \foreach \i in {14,...,17}
+%     \node[base new,minimum width=.27cm] at (2.35+.52*\i,13.35) {};
+%   \foreach \i in {18,...,21}
+%     \node[base next,minimum width=.27cm] at (2.35+.52*\i,13.35) {};
+%   \foreach \i in {22,23}
+%     \node[unused,minimum width=.27cm] at (2.35+.52*\i,13.35) {$0$};
+  
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (2.08,12.93)--(9.38,12.93)
+%     node[midway,below=3pt] {$14$ retained};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (9.42,12.93)--(11.46,12.93)
+%     node[midway,below=3pt] {first $4$};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (11.50,12.93)--(13.54,12.93)
+%     node[midway,below=3pt] {next $4$};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (13.58,12.93)--(14.58,12.93)
+%     node[midway,below=3pt] {$2$};
+  
+%   \node[anchor=west] at (16.00,13.35)
+%     {$14+8=22$ live ranks};
+%   \node[anchor=west,text=rewriteGray!90!black] at (16.00,12.70)
+%     {fixed scratch: $24$ bytes};
+  
+%   % (c) One complete group reduction.
+%   \node[anchor=west,font=\bfseries] at (0,10.20)
+%     {(c) Group 0: four adjacent windows are reduced in the same ten SIMD steps};
+  
+%   \node[anchor=east] at (1.85,9.35) {row};
+%   \foreach \i/\v/\sty in {
+%     0/8/base old,1/6/base old,2/5/base old,3/9/base old,
+%     4/4/base old,5/7/base old,6/4/base old,7/8/base old,8/3/base old,
+%     9/6/base new,10/3/base new,11/5/base new,12/2/base new}
+%     \node[\sty] at (2.35+.72*\i,9.35) {\v};
+%   \foreach \i in {0,...,12}
+%     \node[font=\tiny,anchor=north] at (2.35+.72*\i,9.00) {$D_{\i}$};
+  
+%   \foreach \ell/\first/\winner/\value/\result in {
+%     0/0/8/3/$3@D_8$,
+%     1/1/10/3/$3@D_{10}$,
+%     2/2/10/3/$3@D_{10}$,
+%     3/3/12/2/$2@D_{12}$} {
+%     \pgfmathsetmacro{\yy}{8.15-.72*\ell}
+%     \node[anchor=east] at (1.85,\yy) {$W_{\ell}$};
+%     \foreach \j in {0,...,9} {
+%       \pgfmathtruncatemacro{\idx}{\first+\j}
+%       \pgfmathparse{int(\idx==\winner)}
+%       \ifnum\pgfmathresult=1
+%         \node[picked] at (2.35+.72*\idx,\yy) {\value};
+%       \else
+%         \node[slot] at (2.35+.72*\idx,\yy) {};
+%       \fi
+%     }
+%     \node[answer] at (12.95,\yy) {\result};
+%   }
+%   \node[tied] at (2.35+.72*8,7.43) {3};
+%   \node[tied] at (2.35+.72*8,6.71) {3};
+  
+%   \draw[flow,rewriteOrange!90!black]
+%     (2.35,5.30)--(11.65,5.30)
+%     node[midway,below=3pt]
+%       {$r=0,\ldots,w-1$: $V_r=(D_r,D_{r+1},D_{r+2},D_{r+3})$};
+%   \node[anchor=west,text=rewriteOrange!90!black] at (14.70,6.55)
+%     {$10$ shifted reductions};
+%   \node[anchor=west,text=rewriteGray!90!black] at (14.70,5.90)
+%     {dashed: earlier equal minimum};
+  
+%   % (d) State update and the second group.
+%   \node[anchor=west,font=\bfseries] at (0,4.35)
+%     {(d) Advance four positions, retain the overlap, and repeat};
+  
+%   \node[anchor=east] at (1.85,3.55) {group 1 row};
+%   \foreach \i/\v/\sty in {
+%     0/4/base old,1/7/base old,2/4/base old,3/8/base old,4/3/base old,
+%     5/6/base old,6/3/base old,7/5/base old,8/2/base old,
+%     9/7/base next,10/1/base next,11/9/base next,12/1/base next}
+%     \node[\sty] at (2.35+.72*\i,3.55) {\v};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (2.03,3.13)--(8.43,3.13)
+%     node[midway,below=3pt] {new tail $D_4,\ldots,D_{12}$};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (8.51,3.13)--(11.31,3.13)
+%     node[midway,below=3pt] {$D_{13},\ldots,D_{16}$};
+  
+%   \node[anchor=east] at (15.55,3.55) {saved current};
+%   \node[answer] at (17.25,3.55) {$2@D_{12}$};
+  
+%   \draw[flow] (1.00,3.15)--(1.00,1.95);
+%   \node[anchor=west,text=rewriteOrange!90!black] at (14.50,2.55)
+%     {same ten reductions};
+  
+%   \node[anchor=east] at (1.45,1.55) {minima};
+%   \foreach \i/\v in {
+%     0/$2@D_{12}$,1/$1@D_{14}$,2/$1@D_{14}$,3/$1@D_{16}$}
+%     \node[answer,minimum width=1.50cm] at (3.10+3.10*\i,1.55) {\v};
+%   \node[anchor=west] at (14.50,1.85)
+%     {final tail $D_8,\ldots,D_{16}$};
+%   \node[anchor=west] at (14.50,1.20) {current $1@D_{16}$};
+  
+%   \node[anchor=west,text=rewriteOrange!90!black,font=\small] at (.80,.45)
+%     {$2w=20$ fixed reductions};
+%   \node[anchor=west,text=rewriteGreen!70!black] at (10.50,.45)
+%     {expiry: $+0$ reductions};
+%   \node[anchor=west,text=rewriteGray!90!black] at (17.00,.45)
+%     {tie: output reread};
+  
+%   \end{tikzpicture}
+%   \caption{Chronological adjacent-window reduction.  A generic full DNA4 call
+%   processes $L$ candidates using $(k-1)+L$ base ranks and a $(w-1)+L$
+%   candidate row; only its final call can be partially active.  The fixed
+%   $k=15,w=10$ path constructs eight candidates and reduces them as two
+%   successive four-window groups.  Eight is an implementation choice, not a
+%   function of $k$ or $w$.  Each group always executes ten shifted reductions,
+%   hence twenty per full fast call.  Expiry adds no minimum rescan; tie handling
+%   only rereads records for output.}
+%   \label{fig:rewrite-chronological-call}
+%   \end{figure}
+  
+%   \begin{algorithm}[H]
+%   \caption{Generic chronological adjacent-window kernel}
+%   \label{alg:rewrite-generic-chronological}
+%   \small
+%   \begin{enumerate}
+%     \item Let $L$ be the hardware u64 SIMD lane count.  Retain the last $k-1$
+%           base ranks, the last $w-1$ candidate records, the current selected
+%           record, and a pending-rank count.  The pending array is storage; it is
+%           not an algorithmic batch-size parameter.
+%     \item Warm up until $k-1$ ranks are retained.  On the DNA4 path, queue every
+%           later rank.  Do not invoke the ordinary kernel until exactly $L$
+%           ranks are pending.
+%     \item For one ordinary invocation, process those $L$ ranks as follows.
+%           \begin{enumerate}
+%             \item Concatenate the $k-1$ retained ranks and the $L$ pending ranks.
+%                   Perform the fixed loop of $k$ shifted vector updates to form
+%                   $L$ exact forward and reverse-complement encodings.
+%                   Canonicalize them, reject exact palindromes, calculate the
+%                   minimap integer hashes, and attach position and strand.
+%             \item Prepend the $w-1$ retained candidate records:
+%                   \[
+%                     D=(x_{a-w+1},\ldots,x_{a-1},
+%                        x_a,\ldots,x_{a+L-1}).
+%                   \]
+%                   For each $r=0,\ldots,w-1$, load
+%                   \[
+%                     V_r=(D_r,D_{r+1},\ldots,D_{r+L-1})
+%                   \]
+%                   and update the $L$ running minima with $\leq$.  The result in
+%                   lane $\ell$ is the rightmost minimum of the complete adjacent
+%                   window ending at $x_{a+\ell}$.
+%             \item Align the saved selections as
+%                   $(\mathit{current},m_0,\ldots,m_{L-2})$.  Emit the preceding
+%                   selection when the entering candidate wins or when that
+%                   selection expires.  Expiry uses $m_\ell$, which was already
+%                   calculated by the fixed $w$-step reduction.
+%             \item If the first-window or expiry gate admits a possible
+%                   equal-hash case, reread the relevant window records.  A
+%                   confirmed raw-distinct tie uses the chronological event
+%                   matrix and compressed output path.  This reread constructs
+%                   output records; it never recalculates a window minimum.
+%             \item Advance by exactly $L$:
+%                   \[
+%                     \mathit{candidate\ tail}\gets
+%                       (D_L,\ldots,D_{L+w-2}),\qquad
+%                     \mathit{current}\gets m_{L-1}.
+%                   \]
+%                   Retain the last $k-1$ ranks and clear the pending count.
+%           \end{enumerate}
+%     \item On the ambiguity-capable DNA5 path, process any pending valid ranks
+%           before an ambiguity, clear the exact $k$-mer context, and advance
+%           invalid sentinel candidates until the context has been rebuilt.
+%     \item At finalization, set $q$ to the positive pending remainder.  If the
+%           $k$-mer context is complete, then $q<L$.  Invoke the same routine once
+%           with lanes $0,\ldots,q-1$ active and the remaining lanes set to
+%           sentinels, then advance the two tails and current selection by $q$.
+%           Finally append the saved current record if it is valid.
+%   \end{enumerate}
+%   \end{algorithm}
+  
+%   \paragraph{Is the specialized kernel different from the generic kernel?}
+%   Yes.  It implements the same chronological adjacent-window algorithm and the
+%   same rightmost-minimum and output rules, but replaces the generic data path by
+%   a fixed $k=15,w=10$ microkernel.
+  
+%   \begin{enumerate}
+%     \item \textbf{Scheduling.}  One ordinary generic call processes exactly
+%           $L$ candidates.  One ordinary fast call stages exactly eight
+%           candidates and processes them sequentially as two four-lane groups.
+%           The numeral eight is fixed by this implementation; it is not computed
+%           from $k$ or $w$.  A final remainder uses one masked generic group or
+%           one or two partially active four-lane fast groups.
+%     \item \textbf{$k$-mer construction.}  The generic path performs $k$ shifted
+%           u64 vector updates.  The specialization constructs eight K15
+%           encodings with fixed SWAR operations from 22 meaningful ranks in a
+%           zero-initialized 24-byte scratch array.  The last two bytes are load
+%           padding, not candidates.
+%     \item \textbf{Window reduction.}  The generic path uses one
+%           $(w-1)+L$ record row and exactly $w$ shifted reductions.  Each fast
+%           group fixes this to $9+4=13$ records and ten reductions.  Therefore a
+%           full fast call performs $10+10=20$ reductions.
+%     \item \textbf{Vector representation.}  The generic path carries hash, raw
+%           record, and ordinal in u64 vectors.  The specialization carries four
+%           u32 hashes but splits the four raw records and ordinals across pairs
+%           of u64x2 vectors.
+%     \item \textbf{Domain and fallback.}  The specialization requires DNA4,
+%           packed-u32 input, the admitted minimizer layout, and a u32x4/u64x2
+%           non-scalar target.  Otherwise the selector uses the generic u64
+%           kernel.  Only the generic DNA5 route handles ambiguous symbols by
+%           advancing invalid candidates while rebuilding the $k$-mer context.
+%   \end{enumerate}
+  
+%   \subsection{Algorithmic differences: fixed and probability-dependent work}
+  
+%   Let $N$ be the number of useful candidate positions and let $L$ be the one
+%   lane-count symbol used for all three methods.  Thus
+%   $\lceil N/L\rceil$ is the number of SIMD groups.  A1 and A2 place separated
+%   sequence streams in those lanes, whereas A3 places adjacent windows in them.
+  
+%   Use the requested two-event model.  Let $p$ be the per-lane probability that
+%   the saved minimum expires, and let $r>p$ be the per-lane probability that a
+%   window contains a repeated minimum hash.  To obtain a closed form from only
+%   $p$ and $r$, assume these events are independent within a lane and assume
+%   independent lanes.  This is a deliberately simplified estimate because
+%   adjacent A3 lanes share $w-1$ candidates.  Define
+%   \[
+%     \pi_p=1-(1-p)^L,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^L .
+%   \]
+%   The first quantity estimates the probability that some lane expires.  The
+%   second estimates the probability that some lane both expires and contains a
+%   repeated minimum hash.  A raw-distinct output tie is a subset of the latter
+%   event, so terms using $\pi_{pr}$ below are upper bounds.  Notice that $r>p$
+%   does not make the tie branch more frequent than expiry: $pr\leq p$, hence
+%   $\pi_{pr}\leq\pi_p$.  One-time startup and final-tail effects are included in
+%   the additive $O(k+w)$ term.
+  
+%   \begin{table}[H]
+%   \centering
+%   \scriptsize
+%   \begin{tabularx}{\linewidth}{p{.11\linewidth}p{.25\linewidth}
+%                                p{.29\linewidth}X}
+%   \toprule
+%   Method & Fixed-schedule work & Probability-dependent work
+%          & Expected and worst-case work \\
+%   \midrule
+%   A1: naive SIMD rescan &
+%   One constant-cost advance per group after $O(k+w)$ setup. &
+%   With probability $\pi_p$, the shared slow path performs one $w$-slot minimum
+%   rescan and one $w$-slot equal-minimum scan.  The value of $r$ changes output,
+%   not this schedule. &
+%   \[
+%    \begin{aligned}
+%    \mathbb{E}[T_{\mathrm{A1}}]=O\biggl(&k+w\\[-2pt]
+%      &+\left\lceil\frac NL\right\rceil(1+2w\pi_p)\biggr).
+%    \end{aligned}
+%   \]
+%   Worst case:
+%   $O\!\left(k+w+\lceil N/L\rceil w\right)$. \\
+%   \addlinespace
+%   A2: rolling ntHash and prefix--suffix minima &
+%   Rolling hash update and two aggregate merges per group; one deterministic
+%   $(w-1)$-merge suffix rebuild every $w$ groups. &
+%   None.  Expiry and ties do not change the instruction schedule. &
+%   Minimum maintenance performs
+%   \[
+%     \begin{aligned}
+%     &2\left\lceil\frac NL\right\rceil\\[-2pt]
+%     &\quad +(w-1)\left\lfloor
+%         \frac{\lceil N/L\rceil}{w}\right\rfloor
+%     \end{aligned}
+%   \]
+%   merges.  Expected and worst case:
+%   $O(k+w+N/L)$. \\
+%   \addlinespace
+%   A3: generic chronological reduction &
+%   Every group performs $k$ shifted exact-$k$-mer construction steps and $w$
+%   shifted adjacent-window reductions:
+%   \[
+%     \begin{aligned}
+%     \Theta\biggl(&k+w\\[-2pt]
+%       &+\left\lceil\frac NL\right\rceil(k+w)\biggr).
+%     \end{aligned}
+%   \]
+%   Leading term: $\Theta(N(k+w)/L)$. &
+%   An expiry-gated group adds a $w$-slot tie-verification pass.  A confirmed tie
+%   adds an event construction, transpose, ordering, and compression path costing
+%   $O(L(w+L))$ per affected group.  Neither path recomputes a minimum. &
+%   \[
+%    \begin{aligned}
+%    \mathbb{E}[T_{\mathrm{A3}}]=O\biggl(
+%      &k+w\\[-2pt]
+%      &+\frac NL[k+w(1+\pi_p)]\\[-2pt]
+%      &+N(w+L)\pi_{pr}\biggr).
+%    \end{aligned}
+%   \]
+%   Worst case:
+%   $O\!\left(k+N[k/L+w+L]\right)$. \\
+%   \bottomrule
+%   \end{tabularx}
+%   \caption{Fixed and conditional source-level work using only $N,L,w,k,p,r$.
+%   The table counts vector-loop and tie-layout work, not machine instructions.}
+%   \label{tab:rewrite-fixed-variable-work}
+%   \end{table}
+  
+%   For the fixed K15/W10 specialization, substitute $k=15$, $w=10$, and $L=4$.
+%   A full eight-candidate call is simply two consecutive four-lane groups, so
+%   the sustained stream still contains $\lceil N/L\rceil$ groups.  The numeral
+%   eight never enters the asymptotic expression.  Under the two-probability
+%   model above, the following is a conservative upper estimate:
+%   \[
+%     O\!\left(
+%       k+w+\left\lceil\frac{N}{2L}\right\rceil
+%       +\left\lceil\frac NL\right\rceil
+%       \left[
+%         w(1+\pi_p+2\pi_{pr})+L(w+L)\pi_{pr}
+%       \right]
+%     \right).
+%   \]
+%   The first ceiling counts one fixed packed K15 construction per pair of
+%   four-lane groups.  The bracket contains the always-run minimum reduction, the
+%   expiry hash prefilter, the tie raw-verification and event-enumeration passes,
+%   and the rare event layout.  With $k=15,w=10,L=4$ all of these are constants,
+%   so expected and worst-case time are both $\Theta(N)$.
+  
+%   For one full fast call, the minimum loop itself always performs
+%   \[
+%     \underbrace{10}_{\text{first group}}
+%     +\underbrace{10}_{\text{second group}}
+%     =20
+%   \]
+%   shifted hash comparisons.  Its expected count of ten-slot reduction or
+%   verification loops is bounded by
+%   \[
+%     20(1+\pi_p+2\pi_{pr}),
+%     \qquad
+%     \pi_p=1-(1-p)^4,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^4.
+%   \]
+%   The two $\pi_{pr}$ terms conservatively charge both raw verification and
+%   event enumeration whenever the repeated-hash gate succeeds; the source can
+%   reject the event before the latter pass.  The fixed twenty reduction steps
+%   load 20 u32 hash vectors, 40 u64 raw-record
+%   vectors, and 40 u64 ordinal vectors.  Expiry adds no minimum-reduction load;
+%   it can only trigger the separate verification work shown above.
+  
+%   Algorithmically, A2 has the best guaranteed scaling in $k$ and $w$: after
+%   initialization it is $O(N/L)$ and its schedule is independent of $p$ and $r$.
+%   A1 can execute fewer minimum operations when expiry is extremely rare, but
+%   its worst case grows as $Nw/L$.  Generic A3 deliberately pays
+%   $N(k+w)/L$ fixed work to calculate complete adjacent windows.  These orders do
+%   not predict fixed-$k$, fixed-$w$ wall-clock speed, where the specialized
+%   packing and the different metadata operations can dominate.
+  
+
+% \begin{figure}[H]
+%   \centering
+%   \begin{tikzpicture}[
+%     x=.62cm,
+%     y=.58cm,
+%     font=\footnotesize,
+%     >=Latex,
+%     work cell/.style={draw=black!75,minimum width=.47cm,
+%       minimum height=.46cm,inner sep=0pt},
+%     retained/.style={work cell,fill=rewriteGray!20},
+%     entering/.style={work cell,draw=rewriteBlue!90!black,
+%       fill=rewriteBlue!14},
+%     entering two/.style={work cell,draw=rewriteBlue!90!black,
+%       densely dashed,fill=rewriteBlue!7},
+%     padding/.style={work cell,draw=rewriteGray!80,dashed,
+%       fill=rewriteGray!7,text=rewriteGray!85!black},
+%     picked/.style={work cell,draw=rewriteOrange!90!black,
+%       very thick,fill=rewriteOrange!20},
+%     passed tie/.style={work cell,draw=rewriteOrange!90!black,
+%       densely dashed,fill=rewriteOrange!7},
+%     result/.style={draw=rewriteOrange!90!black,very thick,
+%       fill=rewriteOrange!15,rounded corners,align=center,
+%       minimum height=.62cm,inner sep=3pt},
+%     output/.style={draw=rewriteGreen!80!black,very thick,
+%       fill=rewriteGreen!13,rounded corners,align=center,
+%       minimum height=.68cm,inner sep=4pt},
+%     box/.style={draw=black!70,rounded corners,fill=black!2,
+%       align=center,inner sep=4pt},
+%     blue box/.style={box,draw=rewriteBlue!85!black,
+%       fill=rewriteBlue!10},
+%     orange box/.style={box,draw=rewriteOrange!90!black,
+%       fill=rewriteOrange!12},
+%     green box/.style={box,draw=rewriteGreen!80!black,
+%       fill=rewriteGreen!11},
+%     note/.style={draw=black!60,rounded corners,align=left,
+%       inner sep=4pt,font=\scriptsize},
+%     flow/.style={-{Latex[length=1.8mm]},thick}
+%   ]
+%     % ------------------------------------------------------------------------
+%     % (a) Parameter anatomy and base staging.
+%     % ------------------------------------------------------------------------
+%     \node[anchor=west,font=\bfseries] at (0,28.00)
+%       {(a) Parameters: batching width is a SIMD choice, not a function of $k$ or $w$};
+  
+%     \node[note,text width=13.45cm,anchor=center] at (11.15,26.65) {
+%       $L$ is the hardware lane count of one reduction group.  $B$ is the nominal
+%       candidate capacity of one outer block.  $A$ is the actual active count,
+%       $1\leq A\leq B$.  The active block uses $G=\lceil A/L\rceil$ groups.
+%     };
+  
+%     \node[blue box,text width=6.55cm,font=\scriptsize] at (5.45,23.35) {
+%       \textbf{Generic chronological kernel}\\[-1pt]
+%       $L=L_{64}\in\{2,4,8,16\}$,\quad $B=L$,\quad $G=1$\\
+%       $K_{\max}=31$,\quad target-specific $L_{\max}\leq16$\\
+%       base allocation: $(K_{\max}-1)+L_{\max}\leq46$ bytes\\
+%       base footprint: $(k-1)+L$ loaded, $(k-1)+A$ meaningful\\
+%       three candidate arrays: $(W_{\mathrm{cap}}-1)+L_{\max}$ u64 each\\
+%       reduction row: $(w-1)+L$, with $A$ live lanes\\
+%       $W_{\mathrm{cap}}=w$ when static or $256$ when runtime
+%     };
+%     \node[orange box,text width=5.80cm,font=\scriptsize] at (16.45,23.35) {
+%       \textbf{K15/W10/B8 specialization}\\[-1pt]
+%       $B=8$,\quad $L=L_{32}=4$,\quad full block: $G=B/L=2$\\
+%       full-block meaningful ranks: $14+8=22$\\
+%       candidate row: $9+4=13$ records\\
+%       minimum work: $10$ shifted steps/group
+%     };
+  
+%     \node[anchor=east] at (2.05,20.35) {generic staging};
+%     \node[retained,minimum width=3.65cm] at (5.30,20.35)
+%       {$k-1$ retained ranks};
+%     \node[entering,minimum width=1.90cm] at (10.25,20.35)
+%       {$A$ new};
+%     \node[padding,minimum width=1.80cm] at (13.55,20.35)
+%       {$L-A$ unused};
+  
+%     \node[anchor=east] at (2.05,18.85) {fast base scratch};
+%     \foreach \i in {0,...,13}
+%       \node[retained,minimum width=.34cm,minimum height=.42cm]
+%         at (2.38+.61*\i,18.85) {\scriptsize o};
+%     \foreach \i in {14,...,21}
+%       \node[entering,minimum width=.34cm,minimum height=.42cm]
+%         at (2.38+.61*\i,18.85) {\scriptsize n};
+%     \foreach \i in {22,23}
+%       \node[padding,minimum width=.34cm,minimum height=.42cm]
+%         at (2.38+.61*\i,18.85) {\scriptsize 0};
+%     \node[anchor=south] at (6.35,19.27) {$k-1=14$ retained};
+%     \node[anchor=south,text=rewriteBlue!90!black] at (12.95,19.27)
+%       {$B=8$ entering};
+%     \node[anchor=south,text=rewriteGray!85!black] at (16.05,19.27)
+%       {2 padding};
+%     \node[note,text width=3.15cm,anchor=west] at (17.15,18.85) {
+%       A full block uses $22$ meaningful ranks and two padding bytes.  The equality
+%       $24=k+w-1$ is accidental: the biological window span and this
+%       24-byte safety-padded allocation are different quantities.  A partial
+%       block has only $14+A$ meaningful ranks in the same zeroed array.
+%     };
+  
+%     % ------------------------------------------------------------------------
+%     % (b) One B8 block, split into two sequential four-lane groups.
+%     % ------------------------------------------------------------------------
+%     \node[anchor=west,font=\bfseries] at (0,17.45)
+%       {(b) One outer block: $B=8$ new candidates become two sequential $L=4$ groups};
+  
+%     \node[anchor=east] at (2.15,16.25) {hash records};
+%     \foreach \i/\v in {0/8,1/6,2/5,3/9,4/4,5/7,6/4,7/8,8/3}
+%       \node[retained] at (2.60+.90*\i,16.25) {\v};
+%     \foreach \i/\v in {9/6,10/3,11/5,12/2}
+%       \node[entering] at (2.60+.90*\i,16.25) {\v};
+%     \foreach \i/\v in {13/7,14/1,15/9,16/1}
+%       \node[entering two] at (2.60+.90*\i,16.25) {\v};
+%     \foreach \i in {0,...,16}
+%       \node[font=\tiny,anchor=north] at (2.60+.90*\i,15.80) {$D_{\i}$};
+  
+%     \draw[draw=rewriteOrange!90!black,very thick]
+%       (2.18,15.35) -- (13.82,15.35);
+%     \node[anchor=north,text=rewriteOrange!90!black] at (8.00,15.29)
+%       {group 0 row: $D_0,\ldots,D_{12}$, length $(w-1)+L=13$};
+%     \draw[draw=rewriteBlue!90!black,very thick,densely dashed]
+%       (5.78,14.57) -- (17.42,14.57);
+%     \node[anchor=north,text=rewriteBlue!90!black] at (11.60,14.51)
+%       {after advancing four: group 1 row $D_4,\ldots,D_{16}$, again 13 records};
+  
+%     \node[note,text width=3.05cm,anchor=west] at (18.05,15.70) {
+%       Here $a$ is the ordinal of the first entering candidate and
+%       $D_i=x_{a-w+1+i}$, so $D_9=x_a$.  The notation $v@D_i$ means hash value
+%       $v$ at record $D_i$.  Gray is the saved tail and both blue styles are
+%       entering groups.  State advances between them.
+%     };
+  
+%     % ------------------------------------------------------------------------
+%     % (c) The ten shifted comparisons in group 0.
+%     % ------------------------------------------------------------------------
+%     \node[anchor=west,font=\bfseries] at (0,13.35)
+%       {(c) One group iteration: all $w=10$ shifted SIMD comparisons always run};
+%     \node[anchor=east] at (2.15,12.35) {step $r$};
+%     \foreach \c in {0,...,9}
+%       \node[font=\scriptsize] at (2.80+.90*\c,12.35) {\c};
+%     \node[font=\scriptsize,align=center] at (13.45,12.35) {rightmost\\minimum};
+  
+%     \node[anchor=east,font=\scriptsize,inner sep=1pt] at (2.15,11.35)
+%       {$\ell=0$: end $a$};
+%     \foreach \c/\v in {0/8,1/6,2/5,3/9,4/4,5/7,6/4,7/8,8/3,9/6}
+%       \node[work cell] at (2.80+.90*\c,11.35) {\v};
+%     \node[picked] at (2.80+.90*8,11.35) {3};
+%     \node[result,minimum width=1.35cm] at (13.45,11.35) {$3@D_8$};
+  
+%     \node[anchor=east,font=\scriptsize,inner sep=1pt] at (2.15,10.35)
+%       {$\ell=1$: end $a+1$};
+%     \foreach \c/\v in {0/6,1/5,2/9,3/4,4/7,5/4,6/8,7/3,8/6,9/3}
+%       \node[work cell] at (2.80+.90*\c,10.35) {\v};
+%     \node[passed tie] at (2.80+.90*7,10.35) {3};
+%     \node[picked] at (2.80+.90*9,10.35) {3};
+%     \node[result,minimum width=1.35cm] at (13.45,10.35) {$3@D_{10}$};
+  
+%     \node[anchor=east,font=\scriptsize,inner sep=1pt] at (2.15,9.35)
+%       {$\ell=2$: end $a+2$};
+%     \foreach \c/\v in {0/5,1/9,2/4,3/7,4/4,5/8,6/3,7/6,8/3,9/5}
+%       \node[work cell] at (2.80+.90*\c,9.35) {\v};
+%     \node[passed tie] at (2.80+.90*6,9.35) {3};
+%     \node[picked] at (2.80+.90*8,9.35) {3};
+%     \node[result,minimum width=1.35cm] at (13.45,9.35) {$3@D_{10}$};
+  
+%     \node[anchor=east,font=\scriptsize,inner sep=1pt] at (2.15,8.35)
+%       {$\ell=3$: end $a+3$};
+%     \foreach \c/\v in {0/9,1/4,2/7,3/4,4/8,5/3,6/6,7/3,8/5,9/2}
+%       \node[work cell] at (2.80+.90*\c,8.35) {\v};
+%     \node[picked] at (2.80+.90*9,8.35) {2};
+%     \node[result,minimum width=1.35cm] at (13.45,8.35) {$2@D_{12}$};
+  
+%     \pgfmathsetmacro{\vx}{2.80+.90*3}
+%     \draw[draw=rewriteBlue!90!black,very thick,rounded corners]
+%       ({\vx-.43},7.91) rectangle ({\vx+.43},11.79);
+  
+%     \node[orange box,text width=7.65cm,minimum height=.78cm,
+%           font=\tiny,inner sep=2pt] at (7.90,7.00) {
+%       At every column $r$, compare
+%       $V_r[\ell]=h(D_{r+\ell})$ with lane $\ell$'s running minimum.
+%       The same $\leq$ mask selects hash, raw record, and ordinal.  The outlined
+%       column is $V_3=(D_3,D_4,D_5,D_6)$.
+%     };
+%     \node[note,text width=4.05cm,anchor=west] at (15.55,9.85) {
+%       Each row is one complete adjacent window.  Dashed orange cells are
+%       earlier equal minima.  Because the update uses $\leq$, lanes 1 and 2
+%       finish at the later $3@D_{10}$.
+%     };
+  
+%     % ------------------------------------------------------------------------
+%     % (d) State update, group 1, and all additional work.
+%     % ------------------------------------------------------------------------
+%     \node[anchor=west,font=\bfseries] at (0,5.85)
+%       {(d) Finish the group, advance the state, and distinguish minimum work from output work};
+  
+%     \node[orange box,text width=2.20cm] (gzero) at (1.80,4.05)
+%       {group 0 minima\\$(3@D_8,3@D_{10},$\\$3@D_{10},2@D_{12})$};
+%     \node[green box,text width=2.45cm,font=\scriptsize] (events) at (6.40,4.05)
+%       {steady lane: emit the preceding selection if entering hash $\leq$ saved
+%        hash, or the saved ordinal expires};
+%     \node[blue box,text width=2.65cm] (advance) at (11.40,4.05)
+%       {$\text{tail}\gets D_4,\ldots,D_{12}$\\
+%        $\text{current}\gets2@D_{12}$\\
+%        $\text{count}\gets\text{count}+4$};
+%     \node[blue box,text width=1.85cm] (gone) at (16.15,4.05)
+%       {group 1\\same ten comparison steps};
+%     \node[orange box,text width=2.55cm,font=\scriptsize] (gtwo) at (20.55,4.05)
+%       {group 1 minima\\$(2@D_{12},1@D_{14},$\\
+%        $1@D_{14},1@D_{16})$\\
+%        tail $\gets D_8,\ldots,D_{16}$\\current $\gets1@D_{16}$};
+%     \draw[flow] (gzero)--(events);
+%     \draw[flow] (events)--(advance);
+%     \draw[flow] (advance)--(gone);
+%     \draw[flow] (gone)--(gtwo);
+  
+%     \node[orange box,text width=5.30cm,minimum height=.92cm,font=\scriptsize] (fixed)
+%       at (4.90,1.00) {
+%         \textbf{Always-run minimum work}\\
+%         $G\,w=2\cdot10=20$ shifted SIMD reduction steps per full B8 block,
+%         hence $80$ lane-wise hash comparisons.  Each step loads one u32x4 hash
+%         vector plus two raw and two ordinal u64x2 metadata vectors.
+%     };
+%     \node[output,text width=4.15cm,minimum height=.92cm] (expiry)
+%       at (14.20,1.00) {
+%         \textbf{Minimum expires}\\
+%         use the minimum already calculated above:
+%         \emph{zero additional minimum-reduction steps}
+%     };
+%     \node[blue box,text width=2.35cm,minimum height=.92cm] (basetail)
+%       at (20.25,1.00) {
+%         end of block\\
+%         base tail $\gets$ last $k-1=14$ ranks
+%     };
+  
+%     \node[note,dashed,text width=8.50cm,anchor=center] (rare)
+%       at (11.20,-1.80) {
+%         \textbf{Rare tie-output branch:}
+%         possible first-window or expiry tie $\longrightarrow$
+%         $w$ hash-prefilter slots $\longrightarrow$ duplicate hash
+%         $\longrightarrow$ $w$ raw-verification slots $\longrightarrow$
+%         raw-distinct tie $\longrightarrow$ $w$ event-enumeration and ordering
+%         slots.  No step recomputes the minimum.
+%     };
+%     \draw[flow,dashed]
+%       (events.south) -- ++(0,-.10)
+%       -| ([xshift=-2.4cm]rare.west) -- (rare.west);
+%   \end{tikzpicture}
+%   \caption{One steady-state, full outer-block iteration of the chronological
+%   $k=15,w=10,B=8$ fast path, with generic dimensions shown in panel (a).
+%   The block first constructs eight adjacent candidate records.  Two sequential
+%   $L=4$ groups each concatenate four entering records with the retained
+%   $w-1=9$ records.  This is a batched full-window reduction: every group
+%   recomputes four complete minima with exactly $w=10$ shifted loads.  Group state
+%   advances before the second group, so the full block calculates eight adjacent
+%   window minima using twenty fixed reduction steps.  There is no saved-minimum
+%   fast path and expiry never starts another minimum rescan.  A possible
+%   first-window or expiry tie can initiate a window probe even when the probe
+%   disproves the tie.  Confirmed ties add output enumeration, never minimum
+%   recalculation.}
+%   \label{fig:rewrite-exact-iteration-upgraded}
+%   \end{figure}
+  
+%   \begin{algorithm}[H]
+%   \caption{Generic chronological adjacent-window kernel}
+%   \label{alg:rewrite-generic-chronological}
+%   \small
+%   \begin{enumerate}
+%     \item Let $L$ be the hardware u64 SIMD lane count and set the nominal
+%           full-block capacity to $B=L$.  Let $A\leq L$ be the active count in
+%           the present block.  Initialize the $w-1$ candidate tail and saved
+%           current selection to maximum sentinels.
+%     \item Warm up until $k-1$ base ranks have been retained.  Packed DNA4 fills
+%           this rank tail without advancing the candidate state.  Its first real
+%           $k$-mer has ordinal zero and final-base position $k-1$.  DNA5 instead
+%           advances one invalid candidate for every warm-up rank so valid-run
+%           lengths and explicit positions remain aligned.  Neither route forms a
+%           real $k$-mer during warm-up.
+%     \item Take $A$ new consecutive positions and concatenate their ranks with
+%           the $k-1$ base tail in a zero-initialized scratch array.  Shifted SIMD
+%           loads touch $(k-1)+L$ entries, while only $(k-1)+A$ ranks are
+%           biologically meaningful.
+%     \item Form up to $A$ exact forward and reverse-complement $k$-mer encodings
+%           from the shifted rank loads.  Canonicalize each active lane, reject
+%           exact palindromes, calculate its minimap integer hash, and attach its
+%           ordinal, final-base position, and strand.  Replace every inactive
+%           candidate hash, raw record, and ordinal by its maximum sentinel.
+%     \item Form the logical candidate row
+%           \[
+%             D=(\underbrace{x_{a-w+1},\ldots,x_{a-1}}_{w-1\text{ retained}},
+%                \underbrace{x_a,\ldots,x_{a+L-1}}_{L\text{ SIMD slots}}),
+%           \]
+%           whose full width is $(w-1)+L$.  Inactive final-block slots contain
+%           sentinels.
+%     \item Initialize the $L$ running minima to sentinels.  For every
+%           $r=0,\ldots,w-1$, unconditionally load
+%           \[
+%             V_r=(D_r,D_{r+1},\ldots,D_{r+L-1})
+%           \]
+%           and update every lane with $\leq$.  Use the same comparison mask to
+%           select the winning raw record and ordinal.  This produces up to $L$
+%           adjacent-window rightmost minima after exactly $w$ shifted steps.
+%           Denote the lane results by $m_0,\ldots,m_{L-1}$.
+%     \item Align the selection preceding each lane as
+%           $(\textit{current},m_0,\ldots,m_{L-2})$.  For each steady full-window
+%           lane with a valid predecessor, emit that preceding saved record when
+%           the entering hash is less than or equal to its hash.  Also emit it
+%           when its ordinal expires while the entering hash is larger.  Expiry
+%           consumes the already-calculated lane minimum and does not repeat the
+%           $w$-step reduction.  Compress ordinary events in lane order.
+%     \item If the first-window or expiry gate indicates a possible tie, reread
+%           the relevant window slots to verify it.  If raw-distinct equal-minimum
+%           records exist, construct one event row per lane, transpose the event
+%           matrix, and remove only sentinels.  The first full window has no
+%           ordinary emit-old event.  Only its additional equal-minimum records
+%           use this special rule, while a unique minimum remains saved for a
+%           later transition or final flush.  No tie pass recomputes a minimum.
+%     \item Advance by the actual $A$ positions:
+%           \[
+%             \textit{candidate tail}\gets(D_A,\ldots,D_{A+w-2}),\qquad
+%             \textit{current}\gets m_{A-1},
+%           \]
+%           and retain the last $k-1$ base ranks from the staging region.  In the
+%           generic DNA5 route, an ambiguity first processes pending real
+%           candidates, clears the exact $k$-mer context, and advances one invalid
+%           candidate for the ambiguous symbol.  Subsequent warm-up ranks also
+%           advance invalid candidates until the context is rebuilt.  This does
+%           not create an artificial final flush.
+%     \item At finalization, process a nonempty partial block only when $k$-mer
+%           warm-up is complete.  Then perform the final-current flush, which
+%           appends the saved record only if it is valid.
+%   \end{enumerate}
+%   \end{algorithm}
+  
+%   \paragraph{Is the specialized kernel different from the generic kernel?}
+%   Yes.  Both kernels use adjacent windows, rightmost replacement on $\leq$, the
+%   same minimap-style event rules, and no expiry-triggered minimum rescan.  The
+%   specialization replaces the generic data path with a fixed K15/W10
+%   microkernel:
+%   \begin{enumerate}
+%     \item \textbf{Batch geometry.}  The generic kernel uses one u64 group with
+%           $B=L_{64}$.  The specialization hard-codes $B=8$ and runs two
+%           sequential u32x4 hash groups, while raw records and ordinals use
+%           u64x2 vectors.
+%     \item \textbf{$k$-mer staging.}  The generic kernel incorporates $k$ shifted
+%           rank vectors into exact encodings and uses a maximum-capacity scratch
+%           allocation.  For a full B8 block, the specialization packs 22
+%           meaningful K15/B8 ranks into a fixed 24-byte packed-word staging array
+%           with two safety-padding bytes.  A partial block copies only $14+A$
+%           meaningful ranks into the same zero-initialized allocation.
+%     \item \textbf{Window reduction.}  Both retain $w-1$ records and perform $w$
+%           unconditional shifted steps.  The specialization fixes these values
+%           to a 13-record group row and ten steps.  A full B8 block has two groups
+%           and therefore twenty steps.
+%     \item \textbf{Metadata movement and tie output.}  A generic step loads one
+%           u64 vector each for hash, raw record, and ordinal.  A specialized step
+%           uses one u32x4 hash load plus two u64x2 raw and two u64x2 ordinal loads.
+%           Its rare tie path uses fixed four-lane prefilter, verification, event
+%           layout, and compressed-store operations.
+%     \item \textbf{Admission and fallback.}  The fast path requires DNA4,
+%           $k=15,w=10$, packed-u32 input, an admitted output layout, a
+%           u32x4/u64x2 non-scalar target, and
+%           $\textit{consumed\_bp}\leq\texttt{UINT32\_MAX}$.  When fast-path
+%           admission fails, the selector chooses the generic-u64 kind, which
+%           still requires an admitted multi-lane u64 target.  The fragmented
+%           driver never opts into the fast kind.
+%     \item \textbf{Ambiguous symbols.}  The specialization is DNA4-only.  The
+%           generic DNA5 route processes pending candidates at an ambiguity,
+%           clears the $k$-mer context, and advances invalid candidates without a
+%           boundary final flush.
+%   \end{enumerate}
+  
+%   \subsection{Algorithmic differences: fixed and probability-dependent work}
+  
+%   Let $N$ be the number of useful candidate positions and use one symbol $L$
+%   for logical group width throughout.  The symbolic comparison holds this $L$
+%   equal across methods.  Let $B$ be the number of consecutive candidates formed
+%   by one A3 outer block, so a full block has $G=B/L$ groups for the implemented
+%   divisible sizes.  Concrete implementation counts substitute $L=8$ logical
+%   separated streams for A2 and $L=4$, $B=8$ for the A3 fast path.
+  
+%   Assume lanes are mutually independent and, within each lane, assume that
+%   expiry and the relevant tie event are independent.  Let $p$ be the per-lane
+%   probability that the saved minimum expires and let $r$ be the per-lane
+%   probability of a relevant raw-distinct equal-minimum hash tie.  For the
+%   illustrative scenario below, assume $r>p$, so
+%   $0\leq p<r\leq1$.  This ordering is a model input, not a property guaranteed
+%   by the kernels.  For a logical SIMD stage, define
+%   \[
+%     \pi_p=1-(1-p)^L,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^L.
+%   \]
+%   Here $\pi_p$ is the probability that at least one lane expires.  The second
+%   quantity is the probability that at least one lane both expires and has a
+%   tie, under the stated independence model.  First-window setup and collector
+%   writes are omitted.  A ``stage'' below is an algorithmic vector-loop stage,
+%   not necessarily one machine instruction.
+  
+%   \begin{table}[H]
+%   \centering
+%   \scriptsize
+%   \begin{tabularx}{\linewidth}{p{.12\linewidth}p{.21\linewidth}p{.21\linewidth}X}
+%   \toprule
+%   Method & Fixed schedule & Probability-dependent schedule & Expected time and worst case \\
+%   \midrule
+%   A1: naive SIMD rescan &
+%   After $O(k)$ warm-up, one rolling $k$-mer-code update, minimap hash evaluation,
+%   ring update, and entering-versus-saved comparison advance $L$ separated
+%   candidates. &
+%   If any lane expires, the code always performs one $w$-slot minimum rescan and
+%   a second $w$-slot tie scan, even when that scan emits nothing.  This occurs
+%   with probability $\pi_p$.  The tie probability $r$ changes output count, not
+%   the number of scans. &
+%   \[
+%     \begin{aligned}
+%     &\mathbb{E}[T_{\mathrm{A1}}]
+%       =O\!\biggl(k+\frac NL\\[-2pt]
+%     &\qquad{}\cdot(1+2w\pi_p)\biggr).
+%     \end{aligned}
+%   \]
+%   Worst case: $O(k+Nw/L)$. \\
+%   \addlinespace
+%   A2: rolling ntHash with prefix--suffix minima &
+%   After $O(k)$ initialization, every $L$-candidate advance performs rolling
+%   hash work and two aggregate-minimum merges.  Every $w$ advances add one fixed
+%   $(w-1)$-merge suffix rebuild. &
+%   Neither expiry nor a hash tie starts a window reread.  Ties update the two
+%   stored endpoints and may change output count, but not the minimum schedule. &
+%   With $T=N/L$ logical advances, the minimum structure executes
+%   \[
+%     2T+(w-1)\left\lfloor\frac Tw\right\rfloor
+%   \]
+%   merges.  Total and worst case: $O(k+N/L)$. \\
+%   \addlinespace
+%   A3: chronological adjacent-window reduction &
+%   The generic path performs $O(k)$ exact-code stages per $B$-candidate block,
+%   then exactly $w$ shifted reductions per $L$-window group.  Its fixed work is
+%   $O(Nk/B+Nw/L)$. &
+%   An expiry-gated group adds one $w$-slot verification pass.  If that probe also
+%   contains a raw-distinct equal minimum, the padded event construction,
+%   transpose, ordering, and compression cost $O(L(w+L))$ per group when $L$ is
+%   an asymptotic variable.  The fast path first adds a $w$-slot raw-verification
+%   pass. &
+%   \[
+%     \begin{aligned}
+%     &\mathbb{E}[T_{\mathrm{A3,g}}]\\[-2pt]
+%     &\quad=O\!\biggl(\frac{Nk}{B}
+%       +\frac{Nw}{L}(1+\pi_p)\\[-2pt]
+%     &\qquad{}+N(w+L)\pi_{pr}\biggr),
+%     \end{aligned}
+%   \]
+%   \[
+%     \begin{aligned}
+%     &\mathbb{E}[T_{\mathrm{A3,f}}]\\[-2pt]
+%     &\quad=O\!\biggl(\frac{N}{B}
+%       +\frac{Nw}{L}(1+\pi_p)\\[-2pt]
+%     &\qquad{}+N(w+L)\pi_{pr}\biggr).
+%     \end{aligned}
+%   \]
+%   Worst case: $O(Nk/B+Nw/L+N(w+L))$ generically and
+%   $O(N/B+Nw/L+N(w+L))$ for fixed K15. \\
+%   \bottomrule
+%   \end{tabularx}
+%   \caption{Source-level work for A1, A2, and A3 using one lane-count symbol
+%   $L$.  A1 and A2 lanes are separated streams, whereas an A3 group contains
+%   adjacent windows.  Probability changes conditional work but not the stated
+%   worst-case orders.}
+%   \label{tab:rewrite-fixed-variable-work}
+%   \end{table}
+  
+%   For the concrete A3 specialization, $k=15$, $w=10$, $B=8$, $L=4$, and
+%   $G=2$.  Its fixed minimum work is
+%   \[
+%     Gw=20
+%   \]
+%   shifted reductions per block.  Excluding matrix ordering and compression, its
+%   exact expected count of ten-slot reduction or scan loops is
+%   \[
+%     Gw(1+\pi_p+2\pi_{pr})
+%     =20(1+\pi_p+2\pi_{pr}),
+%     \qquad
+%     \pi_p=1-(1-p)^4,
+%     \qquad
+%     \pi_{pr}=1-(1-pr)^4.
+%   \]
+%   Confirmed ties additionally incur
+%   $O(G L(w+L)\pi_{pr})$ expected event-matrix ordering and compression work in
+%   the $L$-variable model.  With the implemented fixed $L=4$, this is
+%   $O(G(w+L)\pi_{pr})$.
+%   The fixed twenty reductions perform 20 u32 hash loads and comparisons, 40 u64
+%   raw-record loads, and 40 u64 ordinal loads.  A2 with $L=8$ and $w=10$
+%   performs $3w-1=29$ logical aggregate merges per ten advances, covering 80
+%   candidates.  These counts are not instruction-equivalent because an A2
+%   aggregate merge is heavier than one A3 hash comparison.
+  
+%   The corresponding asymptotic working memories are
+%   \[
+%     M_{\mathrm{A1}}=O(wL),
+%     \qquad
+%     M_{\mathrm{A2}}=O((k+w)L),
+%     \qquad
+%     M_{\mathrm{A3}}=O(k+B+wL+L^2).
+%   \]
+  
+%   A2 has the lowest guaranteed asymptotic minimum-maintenance cost as $w$
+%   grows: it is amortized $O(1)$ per logical candidate and its schedule is
+%   independent of $p$ and $r$.  A1 has expected cost
+%   $O(1+2w\pi_p)$ per $L$-candidate advance and an $O(w)$ slow-path burst.  A3
+%   pays $O(w/L)$ fixed reductions per candidate,
+%   $O(w\pi_p/L)$ expected expiry-verification work,
+%   $O((w+L)\pi_{pr})$ expected tie ordering, and the generic $O(k/B)$
+%   hash-construction term.  Thus A2 has the best guaranteed scaling in $w$ under
+%   these assumptions.  This does not rank
+%   fixed-$k$, fixed-$w$ wall-clock performance because the kernels move different
+%   metadata and implement different score and tie semantics.
+  
+
+
+
+
+% \subsection{What \texttt{bounded\_nthash\_kernel.cppm} does}
+% \label{sec:rewrite-bounded-source}
+
+% The bounded kernel fixes $k=15$, $w=10$, DNA4 input, and eight logical
+% streams.  A physical target with four 32-bit lanes holds those streams in two
+% vector registers; a target with eight 32-bit lanes holds them in one.  Logical
+% stream $q$ begins at a different packed-sequence offset, owns a disjoint range
+% of output windows, and reads right-hand context.  Therefore lanes at one SIMD
+% step are far apart in the biological sequence.  They are not $W_j,W_{j+1},
+% \ldots$.
+
+% Let $r_i\in\{0,1,2,3\}$ be the DNA4 rank and let
+% \[
+%   T=(\mathtt{95c60474},\mathtt{62a02b4c},
+%      \mathtt{82572324},\mathtt{4be24456})
+% \]
+% be the four 32-bit table words written in hexadecimal.  With 32-bit rotation
+% \(\operatorname{ROL}\), the kernel initializes
+% \begin{align}
+%   F_i &= \bigoplus_{j=0}^{k-1}
+%     \operatorname{ROL}_{7(k-1-j)}\!\left(T[r_{i+j}]\right),\\
+%   R_i &= \bigoplus_{j=0}^{k-1}
+%     \operatorname{ROL}_{7j}\!\left(T[3-r_{i+j}]\right).
+% \end{align}
+% If $a=r_i$ leaves and $b=r_{i+k}$ enters, the steady-state update is
+% \begin{align}
+%   F_{i+1} &= \operatorname{ROL}_{7}(F_i)
+%     \oplus \operatorname{ROL}_{7k}(T[a]) \oplus T[b],\\
+%   R_{i+1} &= \operatorname{ROR}_{7}(R_i)
+%     \oplus \operatorname{ROR}_{7}(T[3-a])
+%     \oplus \operatorname{ROL}_{7(k-1)}(T[3-b]).
+% \end{align}
+% All rotation counts are modulo 32; hence for $k=15$ the two compile-time
+% left rotations are $7k\bmod32=9$ and $7(k-1)\bmod32=2$.  The ordering score
+% and strand bit are
+% \[
+%   h_i=(F_i+R_i)\bmod 2^{32},
+%   \qquad z_i=\mathbf 1[R_i<F_i].
+% \]
+% This is a rolling ntHash-like score.  It is not
+% $\min(F_i,R_i)$ and it is not minimap's integer permutation.
+
+% For each far-apart stream, the kernel feeds these records into the A2
+% prefix--suffix structure.  Its persistent state contains a ring of $k=15$
+% symbol vectors, a prefix-minimum aggregate, and a ring of $w=10$
+% suffix-minimum aggregates.  Every tenth candidate it rebuilds all suffixes in
+% a fixed descending loop; every window is then obtained by combining the
+% current prefix with one saved suffix.  Equal scores are merged into an
+% aggregate that remembers only the leftmost and rightmost attaining positions.
+% The left endpoint is considered for output first and the right endpoint is
+% also considered when distinct.  Output suppression compares the complete
+% identity $(h,p,z)$, not merely $h$, and only against the immediately preceding
+% identity in that logical stream.  Consequently, a persistent tied pair written
+% as left--right may be written as left--right again for the next window;
+% interior occurrences of a three-way or larger tie are never retained.  The
+% first event of streams 1 through 7 is temporarily retained so that the
+% duplicated chunk boundary can be suppressed when the eight streams are joined.
+% Physical collector order across the lockstep streams is intentionally
+% unspecified.  There is no matrix transpose, no conditional minimum rescan, and
+% no minimap-style final-current flush in this kernel: every owned full window is
+% considered online, after which finalization only reconciles deferred stream
+% boundaries.
+
+% The quantity $k+w-1=24$ here is the number of biological bases required to
+% finish a minimizer window that starts at a chunk boundary.  Because a packed
+% 32-bit word contains 16 DNA4 bases, the iterator rounds that context to two
+% words, i.e. 32 decoded bases.  It is not a 24-element hash buffer.  The
+% algorithmic state is the separate 15-entry symbol ring and 10-entry minimum
+% ring described above.
+
+% The bounded kernel contains no explicit palindrome mask.  This is harmless
+% for its only admitted $k$: an exact reverse-complement palindrome over DNA4
+% cannot have odd length, because its middle base would have to equal its own
+% complement.  Equality $F_i=R_i$ can still occur as a 32-bit hash collision;
+% the code retains that candidate and assigns strand zero.
+
+% \subsection{The chronological adjacent-window kernel}
+% \label{sec:rewrite-adjacent-correct}
+
+% The following description is specifically of
+% \texttt{two\_stack\_nthash}'s chronological DNA4 $k=15,w=10$ fast path in
+% \texttt{exact\_k15\_w10.cppm}.  It must not be attributed to
+% \texttt{bounded\_nthash\_kernel.cppm} or to the resident-vector route.
+
+% Let $\rho(A)=0$, $\rho(C)=1$, $\rho(G)=2$, and $\rho(T)=3$.  For the $k$-mer
+% beginning at $i$, this path constructs the exact two-bit encodings
+% \begin{align}
+%   F_i &= \sum_{j=0}^{k-1}\rho(s_{i+j})\,2^{2(k-1-j)},\\
+%   R_i &= \sum_{j=0}^{k-1}\bigl(3-\rho(s_{i+j})\bigr)\,2^{2j},\\
+%   C_i &= \min(F_i,R_i),
+%   &z_i&=\mathbf 1[R_i<F_i],
+%   &q_i&=\mathbf 1[F_i=R_i].
+% \end{align}
+% Thus $q_i$ is the explicit reverse-complement-palindrome test that was absent
+% from the previous description.  A palindromic lane is changed to an invalid
+% maximum sentinel before minimum selection.  Again $q_i$ is necessarily zero
+% for valid DNA4 when $k=15$, but the check is present in the executed code and
+% the generic route also supports other $k$ values.
+
+% For $k=15$, put $M=2^{30}-1$ and $u_0=C_i$.  The actual minimap integer
+% permutation $\phi$ is the following sequence of unsigned 32-bit operations:
+% \begin{align}
+%   u_1&=(\operatorname{not}u_0+(u_0\ll21))\mathbin{\&}M,
+%   &u_2&=u_1\oplus(u_1\gg24),\\
+%   u_3&=(u_2+(u_2\ll3)+(u_2\ll8))\mathbin{\&}M,
+%   &u_4&=u_3\oplus(u_3\gg14),\\
+%   u_5&=(u_4+(u_4\ll2)+(u_4\ll4))\mathbin{\&}M,
+%   &u_6&=u_5\oplus(u_5\gg28),\\
+%   h_i=\phi(C_i)&=(u_6+(u_6\ll31))\mathbin{\&}M.
+% \end{align}
+% Let
+% \[
+%   H_\infty=
+%   \operatorname{uint32}\!\left(
+%     \texttt{maximum\_record.kmer()}\right)
+% \]
+% be the hash sentinel supplied by the selected output representation.  A lane
+% is usable only when $q_i=0$ and $h_i\ne H_\infty$; otherwise its hash and raw
+% record are replaced by maximum sentinels.  This distinction matters: for the
+% 30-bit target layout $H_\infty=M$, whereas for the 35-bit query layout its
+% 32-bit cast is $2^{32}-1$, so the genuine 30-bit value $h_i=M$ remains valid.
+% The stored coordinate is the final base of the $k$-mer, $p_i=i+k-1$, and the
+% raw identity includes $(h_i,p_i,z_i)$.  No rolling-hash recurrence is used: up
+% to eight overlapping exact encodings are formed together by SWAR packing and
+% SIMD bit operations.
+
+% \subsubsection{What ``block'', ``group'', and ``lane'' mean}
+
+% The specialized routine accepts $A\in\{1,\ldots,8\}$ active consecutive
+% candidate positions, with a full-block capacity $B=8$.  For a full block, hash
+% construction uses a 24-byte array of which only
+% \[
+%   (k-1)+B=14+8=22
+% \]
+% bytes contain bases: 14 retained ranks followed by eight new ranks.  The final
+% two zero bytes exist only so that three eight-byte SWAR loads remain in bounds.
+% For a final partial block, only $14+A$ bytes are meaningful and the remaining
+% $10-A$ bytes stay zero in the value-initialized array.  These bytes are
+% padding, not sequence context.
+
+% The up to eight candidate hashes are split into at most two \emph{groups} of
+% $L=4$, because the admitted fast shape has four 32-bit lanes (and two 64-bit
+% lanes for packed output metadata).  Inactive lanes become sentinels.  Before
+% reducing one group, the code concatenates the
+% $w-1=9$ retained candidate records with its four entering candidates.  The
+% minimum buffer therefore contains
+% \[
+%   (w-1)+L=9+4=13
+% \]
+% candidate records.  If $a$ is the ordinal of the first entering candidate in
+% the group, write this combined row as
+% \[
+%   D_r=x_{a-w+1+r},\qquad 0\le r<w+L-1.
+% \]
+% During startup, define $x_j=\bot$ for $j<0$ with
+% $h(\bot)=H_\infty$.  A lane represents a complete biological window, and is
+% eligible for emission, only when $a+\ell\ge w-1$; earlier lanes are padded
+% warm-up reductions.
+
+% For each slot $r=0,\ldots,w-1$, the unaligned hash-vector load produces
+% \[
+%   V_r[\ell]=h(D_{r+\ell})
+%             =h_{a-w+1+r+\ell},
+%   \qquad 0\le\ell<L.
+% \]
+% The ten vectors are reduced lane-wise.  Hence lane $\ell$ sees exactly
+% \[
+%   \{V_0[\ell],\ldots,V_{w-1}[\ell]\}
+%   =\{h_{a-w+1+\ell},\ldots,h_{a+\ell}\},
+% \]
+% For an active lane after warm-up, this is the complete window ending at
+% candidate $a+\ell$.  A group therefore performs four adjacent lane reductions
+% representing up to four active complete windows; inactive or warm-up lanes are
+% sentinel-padded and are not emitted.  After the first group updates the
+% nine-record tail, the second group processes up to four further windows in the
+% same way.  This is unrelated to the far-apart lanes in A1, A2, or the resident
+% route.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize,x=1cm,y=1cm]
+%   \node[anchor=west,font=\bfseries] at (0,7.55)
+%     {(a) Full-block hash construction: 22 meaningful bytes in a 24-byte array};
+%   \node[anchor=east] at (1.55,6.85) {base ranks};
+%   \foreach \i in {0,...,13}
+%     \node[rewrite old,minimum width=.43cm,minimum height=.44cm]
+%       at (1.82+.46*\i,6.85) {o};
+%   \foreach \i in {14,...,21}
+%     \node[rewrite new,minimum width=.43cm,minimum height=.44cm]
+%       at (1.82+.46*\i,6.85) {n};
+%   \foreach \i in {22,23}
+%     \node[rewrite cell,draw=rewriteGray!80,dashed,fill=rewriteGray!8,
+%           minimum width=.43cm,minimum height=.44cm]
+%       at (1.82+.46*\i,6.85) {0};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (1.59,6.50)--(7.99,6.50)
+%     node[midway,below=4pt] {$k-1=14$ retained bases};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (8.03,6.50)--(11.71,6.50)
+%     node[midway,below=4pt] {$B=8$ new bases};
+%   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+%     (11.75,6.50)--(12.63,6.50)
+%     node[midway,below=4pt] {padding};
+
+%   \node[anchor=west,font=\bfseries] at (0,5.35)
+%     {(b) One group: 9 retained candidates plus 4 new candidates};
+%   \node[anchor=east] at (1.55,4.72) {candidate row};
+%   \foreach \i/\v in {0/8,1/6,2/5,3/9,4/4,5/7,6/4,7/8,8/3}
+%     \node[rewrite old,minimum width=.52cm] at (1.85+.57*\i,4.72) {\v};
+%   \foreach \i/\v in {9/6,10/3,11/5,12/2}
+%     \node[rewrite new,minimum width=.52cm] at (1.85+.57*\i,4.72) {\v};
+%   \foreach \i in {0,...,12}
+%     \node[font=\scriptsize,anchor=north] at (1.85+.57*\i,4.39) {$D_{\i}$};
+
+%   \foreach \ell/\first/\winner/\result in {0/0/8/3,1/1/10/3,2/2/10/3,3/3/12/2} {
+%     \pgfmathsetmacro{\yy}{3.72-.62*\ell}
+%     \node[anchor=east] at (1.55,\yy) {lane $\ell$};
+%     \foreach \j in {0,...,9} {
+%       \pgfmathtruncatemacro{\idx}{\first+\j}
+%       \pgfmathparse{int(\idx==\winner)}
+%       \ifnum\pgfmathresult=1
+%         \node[rewrite min,minimum width=.52cm]
+%           at (1.85+.57*\idx,\yy) {\result};
+%       \else
+%         \node[rewrite cell,minimum width=.52cm]
+%           at (1.85+.57*\idx,\yy) {};
+%       \fi
+%     }
+%   }
+%   \node[rewrite note,text width=3.65cm,anchor=west] at (9.35,2.78)
+%     {Hash step $r$ supplies the diagonal
+%      $(D_r,D_{r+1},D_{r+2},D_{r+3})$ to lanes 0--3.
+%      Lanes 1 and 2 tie at $D_8,D_{10}$; the $\leq$ update selects
+%      $D_{10}$ in both.};
+% \end{tikzpicture}
+% \caption{The two different working sets in the $k=15,w=10,B=8$ fast path.
+% Panel (a) is the base scratch used to construct eight exact $k$-mers.  Panel
+% (b) is the 13-record candidate buffer used to reduce one four-window group.
+% A minimizer window itself spans $k+w-1=24$ biological bases, but neither
+% working set is a 24-candidate minimizer buffer.}
+% \label{fig:rewrite-exact-buffer-and-group}
+% \end{figure}
+
+% The reduction initializes each lane to the maximum sentinel and visits slots
+% from left to right using $\leq$.  Therefore a later occurrence replaces an
+% earlier occurrence with the same hash:
+% \[
+%   m_{\ell}^{(-1)}=\bot,\qquad
+%   m_{\ell}^{(r)}=
+%   \begin{cases}
+%     D_{r+\ell}, & h(D_{r+\ell})\le h(m_{\ell}^{(r-1)}),\\
+%     m_{\ell}^{(r-1)}, & \text{otherwise},
+%   \end{cases}
+%   \quad r=0,\ldots,w-1.
+% \]
+% Thus $m_{\ell}^{(w-1)}$ is the rightmost argmin of the corresponding window.
+% The loop over all $w=10$ slots runs for every group.  Each slot performs one
+% shifted hash-vector comparison step and loads the corresponding metadata as
+% two u64 raw-record vectors and two u64 ordinal vectors.  It is best understood
+% as an \emph{unconditional batched full-window reduction}: four fixed lane
+% reductions are performed together by ten comparison steps, with
+% sentinel padding for inactive or warm-up lanes.  It is not A1's conditional
+% rescan, because expiry does not decide whether the reduction runs, and it is
+% not A2's prefix--suffix method, because no two saved minima are combined to
+% obtain these windows.
+
+% \begin{algorithm}[H]
+% \caption{Chronological $k=15,w=10,B=8$ adjacent-window kernel}
+% \label{alg:rewrite-exact-adjacent}
+% \small
+% \begin{enumerate}
+%   \item Retain the last 14 DNA4 ranks, the last nine complete candidate
+%         records, and the current minimap-style selected record.
+%   \item Append $A\leq8$ new ranks to the 14 retained ranks in a zero-initialized
+%         24-byte array.  A full block has two padding bytes; a partial block has
+%         $10-A$ padding bytes.  The padding makes all three SWAR loads safe.
+%   \item Construct up to eight consecutive forward and reverse-complement
+%         30-bit encodings.  Canonicalize them, apply the minimap integer
+%         permutation, record final-base position and strand, and replace
+%         palindromes, inactive lanes, or representation-reserved maximum hashes
+%         by sentinels.
+%   \item Split the active candidates into at most two chronological groups of
+%         four.  For each group, prepend the nine retained candidate records and
+%         perform ten shifted hash-vector comparison steps.  Each step also
+%         loads two raw-record and two ordinal u64 vectors.  Reduce with $\leq$,
+%         so each full-window lane obtains the rightmost minimum.
+%   \item In increasing window order, apply the exact minimap event rules
+%         described below.  Use two stable compressed stores, one for each u64
+%         lane half, for the ordinary event mask; use the event-matrix path only
+%         if a raw-distinct equal-hash tie really exists.
+%   \item After a group, retain its last nine candidate records.  After the B8
+%         block, retain its last 14 base ranks.  At end of input, process a
+%         partial block and append the final saved minimum if it is valid.
+% \end{enumerate}
+% \end{algorithm}
+
+% \subsubsection{Output events, equal hashes, and the matrix path}
+
+% Calculating one rightmost argmin per window is not, by itself, sufficient to
+% reproduce minimap's output.  Let $e_t$ be the entering candidate at ordinal
+% $t$ and let $c_{t-1}$ be the saved selected record immediately before it.  On
+% an ordinary full-window step, the old record becomes an output event when
+% \[
+%   h(e_t)\le h(c_{t-1})
+%   \quad\text{or}\quad
+%   \operatorname{ord}(c_{t-1})=t-w.
+% \]
+% The first condition introduces a new, possibly equal, rightmost selection;
+% the second says that the saved identity just expired.  A minimum that persists
+% through many adjacent windows is therefore eventually written once, while an
+% equal hash at a different position remains a different raw record.  The last
+% saved-record flush is called unconditionally at end of input, even if fewer
+% than $w$ candidates were seen, and appends a record only when that saved state
+% is valid.
+
+% Most groups contain no complicated tie.  Their old records are selected by a
+% lane mask and appended by stable compressed stores, already in chronological
+% lane order.  The uncommon path is entered only after a hash-level prefilter and
+% a raw-record check establish a relevant equal-hash, different-identity case.
+% For the first complete window, the special search is for records matching the
+% previously saved warm-up hash; for an expiry, it searches for records matching
+% the newly reduced minimum hash.  The kernel then constructs event slots for
+% all four lanes, rearranges the interleaved slot-major data into one row per
+% chronological window, and stably compresses away only maximum sentinels.  It
+% does not deduplicate two genuine records.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize,>=Latex]
+%   \node[rewrite box,fill=rewriteBlue!12,minimum width=3.00cm] (mins)
+%     at (1.80,4.55) {four adjacent-window minima\\in chronological lanes};
+%   \node[rewrite box,minimum width=3.00cm] (events)
+%     at (5.40,4.55) {event tests\\entering $\leq$ old or old expired};
+%   \draw[rewrite flow] (mins)--(events);
+
+%   \node[rewrite out,align=center,minimum width=3.30cm] (common) at (9.10,5.35)
+%     {ordinary lane mask\\two stable compressed stores};
+%   \node[rewrite min,align=center,minimum width=3.30cm] (rare) at (9.10,3.62)
+%     {raw-distinct equal-hash tie\\build event-slot matrix};
+%   \draw[rewrite flow] (events.east) -- ++(.45,0) |- (common.west);
+%   \draw[rewrite flow] (events.east) -- ++(.45,0) |- (rare.west);
+
+%   \node[rewrite box,minimum width=3.30cm] (ordered) at (13.00,3.62)
+%     {rearrange to one row per window\\stable removal of sentinels};
+%   \draw[rewrite flow] (rare)--(ordered);
+
+%   \node[rewrite note,text width=3.80cm,anchor=north] at (9.10,2.72)
+%     {This matrix restores event order. It is not the A2 transpose used to put
+%      far-apart chunk traces into rows, and it is not a deduplication pass.};
+%   \node[rewrite out,align=center,minimum width=3.00cm] (flush) at (1.80,2.05)
+%     {end of input\\flush final saved record};
+%   \draw[rewrite flow] (mins.south) -- (flush.north);
+% \end{tikzpicture}
+% \caption{Output processing after the adjacent-window reduction.  The common
+% path directly compresses chronological event lanes.  The rare matrix path is
+% required only to preserve the order and multiplicity of raw-distinct tied
+% records.  Neither path removes equal hashes merely because their values are
+% equal.}
+% \label{fig:rewrite-exact-event-path}
+% \end{figure}
+
+% For DNA5 in the generic chronological implementation, an ambiguous base
+% resets the exact $k$-mer context and advances an invalid maximum candidate
+% through the minimizer state.  It does not trigger an artificial
+% end-of-sequence flush.  Fragment boundaries likewise preserve the continuation
+% state.  These rules are outside the DNA4 B8 fast path, but they explain why the
+% chronological route owns explicit continuation and finalization operations.
+
+% \subsection{Algorithmic differences}
+
+% \begin{table}[H]
+% \centering
+% \small
+% \begin{tabularx}{\linewidth}{p{.19\linewidth}p{.18\linewidth}p{.20\linewidth}X}
+% \toprule
+% Configured method & Meaning of one SIMD lane & Hash construction & Sliding-minimum work \\
+% \midrule
+% \texttt{simd\_minimap2\_}\newline\texttt{reference} &
+% One of several separated input chunks &
+% Exact canonical code and minimap-style hashing & Saved minimum; a lane expiry
+% causes a conditional shared scan of all $w$ ring slots \\
+% \texttt{bounded\_nthash\_}\newline\texttt{simd} &
+% One of exactly eight separated input streams &
+% Rolling 32-bit ntHash-like forward and reverse state; score $F+R$ & Blockwise
+% prefix and suffix minima; a fixed suffix rebuild every $w$ candidates \\
+% \texttt{two\_stack\_}\newline\texttt{nthash}:\newline
+% chronological K15/W10\newline fast path & One of up to four active
+% adjacent windows inside a group & Up to eight exact canonical 30-bit codes per block,
+% then minimap integer permutation & Ten shifted hash-vector comparison steps
+% for every group, with corresponding metadata loads; an unconditional
+% four-lane reduction of up to four complete windows \\
+% \texttt{two\_stack\_}\newline\texttt{nthash}:\newline resident route &
+% One of separated resident input
+% streams & Select by the high half of canonical-code multiplication plus local
+% position; emit $\phi(C\mathbin{\&}\mathord{\sim}1)$ & Prefix and suffix minima
+% on a fixed schedule \\
+% \bottomrule
+% \end{tabularx}
+% \caption{The algorithms differ independently along three axes: lane geometry,
+% hash construction, and sliding-minimum data structure.  Calling all of them
+% ``SIMD minimizers'' does not make their inner loops equivalent.}
+% \label{tab:rewrite-backend-source-differences}
+% \end{table}
+
+% The adjacent chronological kernel performs $w$ shifted hash comparison steps
+% for each $L=4$-window group, i.e. fixed $\Theta(w)$ vector work per group and
+% $\Theta(w/L)$ vector reduction steps per candidate.  Each step also moves the
+% raw and ordinal metadata selected by the hash comparison.  Its
+% window-reduction loop has a branch-stable, value-independent schedule and
+% reuses each shifted hash load across four neighboring lanes; the subsequent
+% event path still contains data-dependent tie branches.  The A2 bounded kernel
+% instead pays an amortized constant number of minimum operations per candidate
+% by rebuilding $w$ suffix aggregates once per $w$ steps.  A1 retains the best
+% scalar common case but sometimes pays a complete ring scan, and SIMD lockstep
+% makes one lane's expiry activate that work for the whole vector.  These are
+% three distinct algorithms, not three names for the same rescan.
+
+% \paragraph{Implementation anchors.}
+% The dispatch distinction is visible in
+% \texttt{bioseq/backend/pipeline/runtime\_contract.cppm}, lines 81--103, and
+% \texttt{minimizer\_scalar\_highway.cppm}, lines 455--466 and 914--1018.
+% The bounded ntHash table, rolling recurrence, two-stack update, tie endpoints,
+% and eight-stream geometry are in \texttt{bounded\_nthash\_kernel.cppm}, lines
+% 45--49, 317--376, 516--607, 618--849, 904--1005, 1178--1217, and
+% 1299--1401.  B8 admission is in
+% \texttt{two\_stack\_nthash/exact\_vectors.cppm}, lines 49--80, while the
+% nonfragmented and fragmented driver choices are in
+% \texttt{two\_stack\_nthash/drivers.cppm}, lines 120--129, 319--328, and
+% 523--746.  The chronological B8 hashing and its 24-byte scratch are in
+% \texttt{two\_stack\_nthash/exact\_k15\_w10.cppm}, lines 595--766; its shifted
+% window reduction and event paths are at lines 38--87 and 154--487.  The exact
+% minimap permutation is in \texttt{hashers/minimap\_int.cppm}, lines 85--101,
+% generic ambiguity handling and event logic are in
+% \texttt{two\_stack\_nthash/exact\_chronological.cppm}, lines 312--568 and
+% 571--753, and finalization is in
+% \texttt{two\_stack\_nthash/continuation.cppm}, lines 494--599.  The resident
+% selection and emission scores are in
+% \texttt{two\_stack\_nthash/resident\_stream.cppm}, lines 223--451 and
+% 584--631.
+
+
+
+% \section{TRASHLOLZ}
+
+
+
+
+
+% Past V8 adopted the paper's useful way of finding window minima: each lane
+% followed a far-apart input piece, every lane kept prefix and suffix summaries,
+% and the suffix pass ran on a fixed schedule.  The complete algorithm was still
+% different.  V8 selected with a cheaper key derived from the canonical packed
+% $k$-mer, deferred the full minimap-style scramble until output, resolved an
+% equal key with its packed local position, and appended selected lanes through
+% a scalar loop.  It did not implement the paper's output transpose and
+% cross-stream join removal.  Its ring and summaries were fixed arrays; no
+% \texttt{std::map} was part of the minimum calculation.
+
+% The inspected V8 snapshot also contains two representation errors, separate
+% from the intended algorithm.  For the usual 32-bit, $k=15$ form, the mask used
+% for the multiplied ordering key retains only fourteen useful hash bits.  In a
+% 64-bit instantiation of the same expression, its two masks do not overlap and
+% the ordering hash becomes zero.  The code also stores strand in the low bit of
+% the packed canonical word and clears that bit before calculating the emitted
+% minimap-style hash.  A word whose original low bit was one therefore receives
+% the wrong emitted hash.  These errors are additional reasons not to treat V8
+% output as an exact minimap2 stream; they are not properties of the
+% prefix/suffix method itself.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,8.10)
+%     {(a) One V8 lane follows one far-apart, overlapping input piece};
+%   \foreach \r/\x in {0/.65,1/2.25,2/3.85,3/5.45} {
+%     \pgfmathsetmacro{\yy}{7.38-.52*\r}
+%     \node[anchor=east] at (.48,\yy) {lane \r};
+%     \draw[fill=rewriteGray!20] (\x,\yy-.22) rectangle (\x+.72,\yy+.22);
+%     \draw[fill=rewriteBlue!14,draw=rewriteBlue!90!black]
+%       (\x+.72,\yy-.22) rectangle (\x+2.32,\yy+.22);
+%   }
+%   \node[rewrite note,text width=4.30cm,anchor=west] at (8.05,6.62)
+%     {Neighboring lanes read some of the same bases. Their minimum state does
+%      not cross the lane boundary.};
+
+%   \node[anchor=west,font=\bfseries] at (0,5.12)
+%     {(b) SIMD calculates four independent window minima};
+%   \foreach \r/\lab in {0/L0,1/L1,2/L2,3/L3}
+%     \node[anchor=east] at (1.05,4.43-.48*\r) {\lab};
+%   \foreach \r/\c/\v in {
+%       0/0/9,0/1/4,0/2/7,0/3/2,
+%       1/0/8,1/1/3,1/2/6,1/3/5,
+%       2/0/6,2/1/1,2/2/8,2/3/4,
+%       3/0/7,3/1/5,3/2/2,3/3/6}
+%     \node[rewrite cell] at (1.48+.67*\c,4.43-.48*\r) {\v};
+%   \foreach \r/\c/\v in {0/3/2,1/1/3,2/1/1,3/2/2}
+%     \node[rewrite min] at (1.48+.67*\c,4.43-.48*\r) {\v};
+%   \node[rewrite box,minimum width=2.35cm,text width=1.95cm] (fixed)
+%     at (5.60,3.72) {fixed prefix/suffix combine};
+%   \draw[rewrite flow] (4.02,3.72)--(fixed.west);
+%   \foreach \r/\v in {0/2,1/3,2/1,3/2}
+%     \node[rewrite min] at (7.34,4.43-.48*\r) {\v};
+%   \node[rewrite note,text width=4.15cm,anchor=west] at (7.95,3.72)
+%     {The minimum update is vectorized. The branch is controlled by the shared
+%      step counter, not by a lane's hash.};
+
+%   \node[anchor=west,font=\bfseries] at (0,2.02)
+%     {(c) Sparse output returns to scalar lane handling};
+%   \node[rewrite box,minimum width=2.30cm,text width=1.95cm] (store)
+%     at (2.00,.74) {store hash, position, strand, and mask};
+%   \node[rewrite box,minimum width=2.25cm,text width=1.90cm] (loop)
+%     at (5.00,.74) {scalar loop over lane 0 to lane 3};
+%   \node[rewrite out,minimum width=1.65cm] at (8.00,1.09) {lane 1 record};
+%   \node[rewrite out,minimum width=1.65cm] at (8.00,.37) {lane 3 record};
+%   \draw[rewrite flow] (store)--(loop);
+%   \draw[rewrite flow] (loop.east)-|(7.05,1.09);
+%   \draw[rewrite flow] (loop.east)-|(7.05,.37);
+%   \node[rewrite note,text width=3.6cm,anchor=west] at (9.10,.74)
+%     {Only repetition within one lane is suppressed. Overlap records from two
+%      neighboring lanes can remain.};
+% \end{tikzpicture}
+% \caption{Past V8 lane processing. Input lanes are far apart, the
+% prefix/suffix minimum is calculated with SIMD operations, and sparse records
+% are appended by a scalar lane loop. V8 has an input rearrangement for distant
+% pieces, but it has no SIMD-Minimizers output rearrangement and join removal.}
+% \label{fig:rewrite-v8-lanes}
+% \end{figure}
+
+% \begin{table}[H]
+% \centering
+% \footnotesize
+% \begin{tabularx}{\linewidth}{p{.18\linewidth}XX}
+% \toprule
+% Question & SIMD-Minimizers & Past V8 \\
+% \midrule
+% What is one lane? & One of eight far-apart, overlapping input streams & One
+% far-apart, overlapping input piece \\
+% How is the hash advanced? & Rolling forward and reverse ntHash & Rolling
+% canonical packed word with a cheaper multiplied ordering key; full
+% minimap-style mix delayed until output \\
+% How is the minimum found? & Block prefixes and suffixes & The same
+% prefix/suffix minimum structure \\
+% How is an equal minimum chosen? & For an odd complete span, more G/T than A/C
+% selects the leftmost occurrence; otherwise the rightmost occurrence is
+% selected & Packed local position selects one earlier equal key;
+% complete minimap2 tie events are not reproduced \\
+% How is output collected? & Rearrange vector-step output into stream rows and
+% remove repeated join identities & Store vectors, inspect lanes in scalar code,
+% and suppress repetition only within a lane \\
+% Is a tree map used? & No & No \\
+% \bottomrule
+% \end{tabularx}
+% \caption{The shared prefix/suffix minimum does not make V8 and SIMD-Minimizers the
+% same complete algorithm. Their hash, equal-minimum rule, and output handling
+% differ.}
+% \label{tab:rewrite-sea-v8-differences}
+% \end{table}
+
+% \section{Current BioSeq algorithms and the route selected by the benchmark}
+% \label{sec:rewrite-current-bioseq}
+
+% The public name
+% \begin{center}
+% \footnotesize
+% \texttt{bioseq\_block\_simd\_dp\_}\\
+% \texttt{two\_stack\_nthash\_no\_index}
+% \end{center}
+% preserves names from earlier development.  Static routing is more specific:
+% the named large no-index case maps target pieces and the query through the
+% state-carrying adjacent-window SIMD routine.  Its active window-minimum loop
+% does not call the separate whole-input prefix/suffix routine and does not call
+% the bounded rolling-ntHash routine.  The phrase \emph{adjacent-window
+% routine} is used below because lane~0 handles one window, lane~1 handles the
+% very next window, and so on.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[rewrite box,minimum width=7.25cm,fill=rewriteGray!15] (name)
+%     at (6.30,6.35)
+%     {named E2E row:\\
+%      \texttt{bioseq\_block\_simd\_dp\_}\\
+%      \texttt{two\_stack\_nthash\_no\_index}};
+%   \node[rewrite box,minimum width=4.20cm] (select) at (6.30,5.05)
+%     {public selector \texttt{TWO\_STACK\_NTHASH}\\chooses the exact SIMD family};
+%   \draw[rewrite flow] (name)--(select);
+
+%   \node[rewrite box,minimum width=4.25cm,fill=rewriteBlue!12] (target)
+%     at (3.20,3.45) {each target segment\\state carried to the next segment};
+%   \node[rewrite box,minimum width=4.25cm,fill=rewriteBlue!12] (query)
+%     at (9.40,3.45) {query sketch\\same exact seed rules};
+%   \draw[rewrite flow] (select.south) |- (target.north);
+%   \draw[rewrite flow] (select.south) |- (query.north);
+
+%   \node[rewrite box,minimum width=5.15cm,fill=rewriteOrange!14] (adj)
+%     at (6.30,1.90) {adjacent-window SIMD block\\exact minimap-style hash and ties};
+%   \draw[rewrite flow] (target.south) |- (adj.west);
+%   \draw[rewrite flow] (query.south) |- (adj.east);
+
+%   \node[rewrite note,text width=4.45cm,anchor=west,fill=rewriteGray!10]
+%     at (.35,.35) {Not selected here: whole-input \texttt{vector\_stream}
+%     two-stack control.};
+%   \node[rewrite note,text width=4.45cm,anchor=west,fill=rewriteGray!10]
+%     at (7.85,.35) {Not selected here: bounded rolling-ntHash scheme.};
+% \end{tikzpicture}
+% \caption{What the named no-index E2E row actually runs. Both target segments
+% and the query use the state-carrying adjacent-window SIMD routine. The
+% words ``two stack'' and ``nthash'' in the public row name do not describe the
+% active inner minimum or hash in this route.}
+% \label{fig:rewrite-current-e2e-route}
+% \end{figure}
+
+% \subsection{The adjacent-window calculation}
+
+% Let $B$ be the number of candidate positions handled together.  The routine
+% retains the last $k-1$ bases and the last $w-1$ candidate records.  It adds $B$
+% new consecutive bases, forms $B$ consecutive $k$-mers, calculates the exact
+% minimap-style hash for each, and places the retained and new candidates next
+% to one another.  It then makes $w$ shifted SIMD loads.  Lane $j$ is the whole
+% window beginning at the $j$th candidate, so lanes are neighboring windows in
+% this routine.  This is the opposite of V8, where lanes are far-apart input
+% pieces.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,9.05)
+%     {(a) Retained context plus $B$ new consecutive positions};
+%   \node[rewrite box,minimum width=4.0cm,fill=rewriteGray!18] (basesold)
+%     at (2.35,8.28) {last $k-1$ bases};
+%   \node[rewrite box,minimum width=2.40cm,fill=rewriteBlue!14] (basesnew)
+%     at (5.75,8.28) {$B$ new bases};
+%   \node[rewrite box,minimum width=4.05cm] (make) at (9.65,8.28)
+%     {$B$ consecutive canonical $k$-mers\\and exact minimap-style hashes};
+%   \draw[rewrite flow] (basesold.east)--(basesnew.west);
+%   \draw[rewrite flow] (basesnew.east)--(make.west);
+
+%   \node[anchor=west,font=\bfseries] at (0,7.28)
+%     {(b) Four neighboring windows are calculated together ($B=4,w=4$ shown)};
+%   \node[anchor=east] at (1.78,6.58) {candidate row};
+%   \foreach \i/\v/\sty in {0/7/rewrite old,1/6/rewrite old,2/5/rewrite old,
+%                             3/9/rewrite new,4/4/rewrite new,5/8/rewrite new,
+%                             6/3/rewrite new}
+%     \node[\sty] at (2.20+.70*\i,6.58) {\v};
+
+%   \foreach \r/\lab in {0/$W_0$,1/$W_1$,2/$W_2$,3/$W_3$}
+%     \node[anchor=east] at (1.78,5.82-.54*\r) {\lab};
+%   \foreach \r/\c/\v in {
+%       0/0/7,0/1/6,0/2/5,0/3/9,
+%       1/0/6,1/1/5,1/2/9,1/3/4,
+%       2/0/5,2/1/9,2/2/4,2/3/8,
+%       3/0/9,3/1/4,3/2/8,3/3/3}
+%     \node[rewrite cell] at (2.20+.70*\c,5.82-.54*\r) {\v};
+%   \foreach \r/\c/\v in {0/2/5,1/3/4,2/2/4,3/3/3}
+%     \node[rewrite min] at (2.20+.70*\c,5.82-.54*\r) {\v};
+
+%   \node[rewrite box,minimum width=2.45cm] (reduce) at (6.38,5.02)
+%     {$w$ shifted loads\\and $\leq$ reduction};
+%   \draw[rewrite flow] (5.02,5.02)--(reduce.west);
+%   \foreach \r/\v in {0/5,1/4,2/4,3/3}
+%     \node[rewrite min] at (8.32,5.82-.54*\r) {\v};
+%   \node[rewrite note,text width=3.80cm,anchor=west] at (8.92,5.02)
+%     {One lane is one complete window. The next lane is the window one
+%      candidate position to the right.};
+
+%   \node[anchor=west,font=\bfseries] at (0,3.15)
+%     {(c) The ordinary output path writes only changed selections};
+%   \node[anchor=east] at (1.93,2.45) {previous};
+%   \node[anchor=east] at (1.93,1.88) {current};
+%   \node[anchor=east] at (1.93,1.31) {write?};
+%   \foreach \i/\v in {0/5@3,1/5@3,2/4@5,3/4@5}
+%     \node[rewrite old,minimum width=.93cm] at (2.48+.98*\i,2.45) {\v};
+%   \foreach \i/\v in {0/5@3,1/4@5,2/4@5,3/3@7}
+%     \node[rewrite new,minimum width=.93cm] at (2.48+.98*\i,1.88) {\v};
+%   \foreach \i/\v in {0/0,1/1,2/0,3/1}
+%     \node[rewrite cell,minimum width=.93cm] at (2.48+.98*\i,1.31) {\v};
+%   \node[rewrite box,minimum width=2.35cm,fill=rewriteGreen!13] (compress)
+%     at (7.45,1.88) {compressed store\\of marked lanes};
+%   \draw[rewrite flow] (5.95,1.88)--(compress.west);
+%   \node[rewrite out,minimum width=1.28cm] at (9.55,2.20) {5@3};
+%   \node[rewrite out,minimum width=1.28cm] at (9.55,1.55) {4@5};
+%   \node[rewrite note,text width=2.55cm,anchor=west] at (10.35,1.88)
+%     {3@7 remains saved until a later event.};
+% \end{tikzpicture}
+% \caption{The current adjacent-window minimum with small values for
+% legibility. Gray candidates come from the preceding block and blue candidates
+% are new. Four lanes hold four neighboring windows. The real $k=15,w=10$
+% specialization reads ten shifted vectors and produces $B$ window minima.}
+% \label{fig:rewrite-current-adjacent-windows}
+% \end{figure}
+
+% The comparison uses $\leq$, so a later equal-hash position replaces an earlier
+% one.  Ordinary changes form one lane mask and are written in a compressed
+% batch.  Equal hashes at several different positions can require several
+% records for one window.  That rare case rearranges an event matrix so all
+% records for $W_0$ precede all records for $W_1$, and so on.  The rearrangement
+% restores output order; it is not a deduplication pass.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[font=\bfseries] at (2.45,5.32) {before: one row per event slot};
+%   \foreach \c/\lab in {0/$W_0$,1/$W_1$,2/$W_2$,3/$W_3$}
+%     \node at (1.35+.78*\c,4.72) {\lab};
+%   \foreach \r/\lab in {0/old,1/tie 1,2/tie 2}
+%     \node[anchor=east] at (.87,4.12-.56*\r) {\lab};
+%   \foreach \r/\c/\v in {0/0/a,0/1/b,0/2/--,0/3/f,
+%                           1/0/c,1/1/--,1/2/e,1/3/g,
+%                           2/0/d,2/1/--,2/2/--,2/3/--}
+%     \node[rewrite cell] at (1.35+.78*\c,4.12-.56*\r) {\v};
+
+%   \node[rewrite box,minimum width=1.85cm] (swap) at (5.60,3.55)
+%     {rows become\\columns};
+%   \draw[rewrite flow] (4.28,3.55)--(swap.west);
+%   \draw[rewrite flow] (swap.east)--(6.83,3.55);
+
+%   \node[font=\bfseries] at (9.18,5.32) {after: one row per window};
+%   \foreach \c/\lab in {0/old,1/tie 1,2/tie 2}
+%     \node at (8.05+.90*\c,4.72) {\lab};
+%   \foreach \r/\lab in {0/$W_0$,1/$W_1$,2/$W_2$,3/$W_3$}
+%     \node[anchor=east] at (7.53,4.12-.56*\r) {\lab};
+%   \foreach \r/\c/\v in {0/0/a,0/1/c,0/2/d,
+%                           1/0/b,1/1/--,1/2/--,
+%                           2/0/--,2/1/e,2/2/--,
+%                           3/0/f,3/1/g,3/2/--}
+%     \node[rewrite cell] at (8.05+.90*\c,4.12-.56*\r) {\v};
+
+%   \node[rewrite out,minimum width=2.25cm] at (2.10,.85) {a\quad c\quad d};
+%   \node[rewrite out,minimum width=.85cm] at (3.82,.85) {b};
+%   \node[rewrite out,minimum width=.85cm] at (4.78,.85) {e};
+%   \node[rewrite out,minimum width=1.55cm] at (6.02,.85) {f\quad g};
+%   \node[rewrite note,text width=5.25cm,anchor=west] at (7.05,.85)
+%     {Every named record remains. Only empty sentinel cells disappear.};
+% \end{tikzpicture}
+% \caption{Rare equal-minimum output in the current adjacent-window routine.
+% The matrix is rearranged to put records in window order. A compressed store
+% removes empty cells; it does not compare or remove two real records.}
+% \label{fig:rewrite-current-event-order}
+% \end{figure}
+
+% \subsection{State across input fragments}
+
+% A normal storage-fragment boundary does not end the biological sequence.  The
+% routine retains at most $k-1$ bases, fewer than one incomplete vector group,
+% $w-1$ candidates, and the selected record of the last complete window.  An
+% ambiguous base is different: it clears the valid $k$-mer run and advances a
+% maximum-valued candidate through the window.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \draw[fill=rewriteGray!18] (.55,4.55) rectangle (5.35,5.25);
+%   \node at (2.95,4.90) {packed fragment $f_i$};
+%   \draw[fill=rewriteBlue!14,draw=rewriteBlue!90!black]
+%     (7.05,4.55) rectangle (11.85,5.25);
+%   \node at (9.45,4.90) {packed fragment $f_{i+1}$};
+%   \draw[rewrite flow] (5.35,4.90)--(7.05,4.90);
+%   \node[above,align=center] at (6.20,5.05) {storage boundary\\no reset};
+
+%   \node[rewrite box,minimum width=11.30cm,fill=rewriteGray!12] (state)
+%     at (6.20,3.02) {retained state: $k-1$ bases \quad $w-1$ candidates
+%       \quad incomplete group \quad selected record};
+%   \draw[rewrite flow] (4.25,4.50)|-(state.north);
+%   \draw[rewrite flow] (state.north)-|(8.15,4.50);
+
+%   \node[rewrite box,minimum width=9.90cm,fill=rewriteOrange!13] (amb)
+%     at (6.20,1.40) {ambiguous base: clear the valid $k$-mer context and
+%       insert a maximum-valued candidate};
+%   \draw[rewrite flow] (state)--(amb);
+%   \node[rewrite note,text width=10.8cm,anchor=west] at (.80,.20)
+%     {Only end-of-input performs the final saved-record write. A fragment
+%      boundary and an ambiguous base therefore have different effects.};
+% \end{tikzpicture}
+% \caption{Bounded continuation in the current adjacent-window SIMD path. State is carried
+% across a normal storage boundary, so a window can cross it without rereading
+% an overlapping chunk. An ambiguous base resets the valid $k$-mer run but does
+% not masquerade as end-of-input.}
+% \label{fig:rewrite-current-continuation}
+% \end{figure}
+
+% \begin{algorithm}[H]
+% \caption{Current $k=15,w=10$ adjacent-window block, simplified}
+% \label{alg:rewrite-current-adjacent-block}
+% \small
+% \begin{enumerate}
+%   \item Join retained base context with $B$ new positions and build $B$
+%         consecutive forward and reverse-complement $k$-mers.
+%   \item Choose each canonical $k$-mer, mark invalid or palindromic candidates
+%         with a maximum sentinel, and calculate the exact minimap-style hash.
+%   \item Join the retained $w-1$ candidate tail with the $B$ new candidates.
+%         Read $w$ shifted vectors and reduce with $\leq$; lane $j$ now contains
+%         the minimum of the $j$th neighboring window.
+%   \item Form masks for a smaller entering value, an expired saved record,
+%         first-window output, and final output.
+%   \item On the common path, compressed-store the marked records.  If equal
+%         hashes at different identities are present, build the tie-event
+%         matrix, rearrange it into window order, and compressed-store all real
+%         cells.
+%   \item Retain the final base context, candidate tail, incomplete group, and
+%         selected record for the next input fragment.
+% \end{enumerate}
+% \end{algorithm}
+
+% \subsection{Why this complete route can be faster than V8}
+
+% The current minimum operation is not an asymptotically cheaper form of V8's
+% two-stack minimum.  V8 rebuilds $w$ suffix entries once every $w$ steps.  The
+% current routine makes $w$ shifted comparisons for every group of $B$ adjacent
+% windows and also calculates the exact selection hash.  A speed advantage, when
+% measured, must therefore come from the complete route around that reduction:
+
+% \begin{itemize}
+%   \item new $k$-mers come from one short consecutive input region, rather than
+%         from an input rearrangement of far-apart pieces;
+%   \item state crosses ordinary fragments directly, without overlapping lane
+%         reads and their repeated join records;
+%   \item the ordinary output is written as one compressed batch rather than by
+%         visiting every lane in scalar code; and
+%   \item the larger exact tie calculation runs only after a hash precheck says
+%         it is needed.
+% \end{itemize}
+
+% Those are code-level reasons, not timing results.  Section
+% \ref{sec:rewrite-performance-evidence} keeps the older measurements separate
+% and does not present them as a V8-versus-current measurement.
+
+% \subsection{Other current minimizer routes}
+
+% BioSeq has several routes because they do not all produce the same seed
+% stream. In particular, the three values assigned to
+% \texttt{dispatch.params.minimizer\_algorithm} select three different ways of
+% making minimizers. They do not select the prefilter, chaining method, or final
+% alignment method; those are chosen by other fields. The same minimizer setting
+% is used for the query and target so that a query seed can be found in the
+% target table.
+
+% \subsubsection{What the three ordinary benchmark settings mean}
+
+% The ordinary alignment benchmark normally supplies DNA4 packed into 32-bit
+% words, with the complete query and target already available in memory, and
+% uses $k=15,w=10$. Under those conditions the three assignments in the
+% benchmark source mean the following.
+
+% \begin{description}
+%   \item[\texttt{two\_stack\_nthash}.]
+%     The four \texttt{bioseq\_prefilter\_*} rows and the six ordinary alignment
+%     rows whose names contain \texttt{two\_stack\_nthash} run the whole-input
+%     descendant of V8. One lane follows one far-apart part of the sequence. It
+%     advances packed forward and reverse-complement $k$-mers, updates a prefix
+%     minimum, and rebuilds suffix minima once every $w$ positions. Long inputs
+%     advance two independent Highway vector groups. Despite the setting's
+%     historical name, this route does not calculate ntHash. The E2E caller
+%     shown earlier uses the same setting but supplies the target as pieces and
+%     requires exact minimap-style output for its target table, so it
+%     deliberately selects the adjacent-window algorithm instead.
+
+%   \item[\texttt{bounded\_nthash\_simd}.]
+%     The two ordinary rows whose names contain \texttt{bounded\_nthash} call
+%     the bounded-input entry point. The query is processed as one range and the
+%     target as one or more ranges. Every range uses eight logical ntHash
+%     streams and the prefix/suffix minimum. This is the maintained successor of
+%     the old \texttt{PAPER\_NTHASH\_SIMD} setting. It is the BioSeq algorithm
+%     closest to SIMD-Minimizers, but its exact hash and tied-minimum output differ from
+%     the paper, as explained below.
+
+%   \item[\texttt{simd\_minimap2\_reference}.]
+%     This setting is used by the ordinary slow-reference row. It runs the naive
+%     SIMD rescan from
+%     Figure~\ref{fig:rewrite-naive-simd-rescan}. One lane follows one far-apart
+%     sequence part and saves one minimum. If any lane loses its saved minimum,
+%     the shared loop reads all $w$ vector slots; masks ensure that only expired
+%     lanes change their answer.
+% \end{description}
+
+% Words such as \texttt{ksw2}, \texttt{block}, \texttt{prefilter}, or
+% \texttt{vulkan\_tiled\_dp} elsewhere in an ordinary row name describe later
+% mapping work. They do not change the minimizer route just described. Highway
+% chooses the available processor target and physical lane count; there is no
+% separate handwritten AVX algorithm. If a required input shape is unsupported,
+% the checked SIMD setting reports failure. It does not silently change to the
+% scalar minimizer after entering that checked route.
+
+% \subsubsection{The whole-input prefix/suffix route}
+
+% When \texttt{two\_stack\_nthash} receives one complete, already available
+% DNA4 sequence stored in 32-bit words with $k=15,w=10$, it can choose the
+% whole-input descendant of V8.  This is the route reached by the ordinary
+% in-memory benchmark names that contain \texttt{two\_stack\_nthash}.  Each lane
+% owns a far-apart sequence piece.  The code shifts packed forward and
+% reverse-complement words, ranks their canonical word with the multiplied
+% ordering key, updates a prefix minimum, and rebuilds suffix minima every $w$
+% steps.  Long inputs advance two independent Highway lane groups together.
+
+% This route still does not calculate ntHash.  It applies the minimap-style mix
+% only when it emits, stores SIMD results to arrays, and then visits output lanes
+% with scalar code.  It has no state format for continuing through ordinary
+% input fragments.  For these reasons it cannot be substituted for the
+% adjacent-window route while a target index and query are being built from
+% pieces.
+
+% \begin{table}[H]
+% \centering
+% \footnotesize
+% \begin{tabularx}{\linewidth}{p{.22\linewidth}p{.22\linewidth}X
+%   p{.10\linewidth}}
+% \toprule
+% Minimizer setting & Input for this row & Actual algorithm & Named
+% no-index E2E? \\
+% \midrule
+% \texttt{scalar} & DNA4 or DNA5 scalar input & saved minimum plus occasional
+% ring rescan & no \\
+% \shortstack[l]{\texttt{simd\_minimap2\_}\\\texttt{reference}} &
+% one complete DNA4 input & distant
+% lane streams with one saved minimum per lane and a shared SIMD rescan & no \\
+% \texttt{two\_stack\_nthash} & a target table or input supplied in pieces &
+% neighboring windows, full $w$-slot SIMD reduction, minimap-style hash & yes \\
+% \texttt{two\_stack\_nthash} & complete DNA4 stored in 32-bit words,
+% $k=15,w=10$ &
+% distant lane streams with V8-descended prefix/suffix minima & no \\
+% \texttt{bounded\_nthash\_simd} & DNA4 query or bounded target range,
+% $k=15,w=10$ & eight rolling-ntHash streams with prefix/suffix minima & no \\
+% \shortstack[l]{\texttt{vulkan\_minimap\_}\\\texttt{integer}} &
+% supported GPU and input & many GPU
+% tiles, each using a serial minimap-style ring/rescan & no \\
+% \bottomrule
+% \end{tabularx}
+% \caption{Current minimizer settings and their actual inner algorithms.  The
+% \texttt{two\_stack\_nthash} selector is the confusing case: its caller and
+% input shape choose between two different algorithms.}
+% \label{tab:rewrite-current-routing}
+% \end{table}
+
+% \begin{table}[H]
+% \centering
+% \footnotesize
+% \begin{tabularx}{\linewidth}{p{.40\linewidth}XX}
+% \toprule
+% Configured run name or family & Query minimizers & Target minimizers \\
+% \midrule
+% \shortstack[l]{Named E2E \texttt{two\_stack\_nthash\_}\\
+% \texttt{no\_index}} & adjacent-window SIMD &
+% adjacent-window SIMD while building a temporary target table \\
+% \shortstack[l]{Named E2E \texttt{two\_stack\_nthash\_}\\
+% \texttt{just\_index}} & adjacent-window SIMD &
+% matching adjacent-window target index built before mapping \\
+% Ordinary \texttt{bioseq\_prefilter\_*} and names containing
+% \texttt{two\_stack\_nthash} & whole-input V8 descendant & whole-input V8
+% descendant \\
+% Ordinary \texttt{simd\_minimap2\_slow} & direct SIMD rescan & direct SIMD
+% rescan \\
+% Ordinary names containing \texttt{bounded\_nthash} & bounded rolling ntHash &
+% bounded rolling ntHash \\
+% Scalar BioSeq rows & scalar rescan & scalar rescan \\
+% Vulkan-minimizer rows & Vulkan tile rescan & Vulkan tile rescan or its
+% device target-index builder \\
+% External minimap2 rows & bundled minimap2 sketch & bundled minimap2 sketch or
+% its prebuilt index \\
+% \bottomrule
+% \end{tabularx}
+% \caption{What the configured test families actually execute.  This mapping
+% comes from the current call paths, not from interpreting a historical word in
+% the displayed run name.  No current configured run calls the old V8 source
+% body directly.}
+% \label{tab:rewrite-configured-routes}
+% \end{table}
+
+% \begin{table}[H]
+% \centering
+% \footnotesize
+% \begin{tabularx}{\linewidth}{p{.19\linewidth}XX}
+% \toprule
+% Question & Past V8 & Current adjacent-window E2E path \\
+% \midrule
+% What is one lane? & One far-apart, overlapping input piece & One of the next
+% $B$ neighboring windows \\
+% How is input prepared? & Rearrange packed input so every lane receives the
+% next base of its own piece & Read consecutive bases and retain $k-1$ bases
+% across input pieces \\
+% How is the minimum found? & Update a prefix; rebuild suffixes once per $w$
+% steps; compare one prefix and suffix & Read $w$ shifted vectors and reduce
+% each of $B$ complete windows \\
+% Which hash selects it? & Cheaper multiplied ordering key; full minimap-style
+% mix delayed until output & Exact minimap-style hash before selection \\
+% How are normal records written? & Store vectors and inspect lanes in scalar
+% code & One event mask and one compressed SIMD store \\
+% What is rearranged? & Input values for far-apart pieces & Rare equal-minimum
+% output records, solely to restore window order \\
+% Is there a deduplication pass? & No; suppression is within one lane & No;
+% unchanged selections are suppressed before output and real ties remain \\
+% \bottomrule
+% \end{tabularx}
+% \caption{Past V8 and the current route selected by the named no-index E2E
+% row. The current code did not replace V8 with a cheaper two-stack minimum; it
+% changed lane meaning, input handling, exactness, and record writing.}
+% \label{tab:rewrite-v8-current}
+% \end{table}
+
+% \subsubsection{How BioSeq bounded ntHash differs from SIMD-Minimizers}
+
+% Earlier versions called this route \texttt{PAPER\_NTHASH\_SIMD}, and some
+% development text abbreviated its output format as PNT1.  It was not removed.
+% The production route was renamed \texttt{bounded\_nthash\_simd}; its numeric
+% selector stayed unchanged. Target tables made by this algorithm still carry
+% the four-letter marker PNT1, which tells the reader that the bounded hash and
+% tied-position rules were used. The current bounded kernel is therefore the
+% maintained successor of that earlier production kernel. A different
+% experimental helper that accepted an unpacked array of base numbers was
+% removed, but the query, index, and benchmark routes never called that helper.
+% Restoring the old production source would create a second copy of an
+% algorithm that is already present.
+
+% Here \emph{bounded} means that one call receives a finite DNA range and clear
+% limits saying which window starts belong to that range. The kernel rereads
+% enough neighboring bases to rebuild its state; it does not carry rolling-hash
+% or prefix/suffix state from one storage fragment to the next.
+
+% The algorithm always has eight logical input pieces. A Highway target with
+% eight physical 32-bit lanes holds them in one vector group; a target with four
+% physical lanes holds them in two groups. The checked implementation rejects
+% other physical lane counts instead of changing the algorithm.
+
+% The current bounded algorithm works as follows.
+
+% \begin{enumerate}
+%   \item It divides one DNA4 range into eight far-apart pieces. Each piece is
+%         assigned its own interval of window starts; these intervals do not
+%         overlap. To finish windows at a boundary, a piece needs $k+w-2$ bases
+%         to its right. Packed reads are rounded to whole 32-bit words and can
+%         therefore include more bases.
+%   \item It rearranges packed input words so the next SIMD value contains the
+%         next DNA letter from every far-apart piece. This is the same kind of
+%         \emph{input} rearrangement used by SIMD-Minimizers. It removes no output.
+%   \item Every lane maintains a forward and reverse-complement rolling hash.
+%         The two unsigned 32-bit values are added, with overflow wrapping back
+%         into 32 bits, to obtain the value compared inside a window.
+%   \item Every lane updates a prefix minimum on each step and rebuilds $w$
+%         suffix minima once per $w$ candidates. One prefix/suffix comparison
+%         gives the next window minimum. This is the paper's two-stack idea.
+%   \item If the minimum hash occurs once, the algorithm writes that occurrence.
+%         If it occurs several times, it writes the leftmost and rightmost
+%         occurrences; it does not write equal occurrences between them.
+%   \item While one piece is processed, a record is skipped when its hash,
+%         position, and forward/reverse mark are identical to the
+%         preceding selected event for that piece. The first record of each
+%         later piece is held back and compared with the last record of the
+%         preceding non-empty piece. An identical boundary record is written
+%         once.
+% \end{enumerate}
+
+% Step 6 is important: bounded ntHash does \emph{not} implement the paper's
+% output-matrix rearrangement. SIMD-Minimizers first produces one selected position for
+% every window, rearranges a block of those positions into one ordered row per
+% input piece, and then compares neighboring positions in SIMD. Bounded ntHash
+% instead compares an event with the preceding event while each lane advances,
+% stores the lane results in small arrays, and appends them with a scalar loop.
+% Both methods avoid many repeated outputs from neighboring windows, but they do
+% so at different times and with different instructions.
+
+% The hash and tied-minimum rules also differ. These are not small storage
+% details: they can select different positions from the same DNA sequence.
+
+% \begin{table}[H]
+% \centering
+% \footnotesize
+% \begin{tabularx}{\linewidth}{p{.18\linewidth}XX}
+% \toprule
+% Question & SIMD-Minimizers & BioSeq bounded ntHash \\
+% \midrule
+% How is the rolling value updated? & Use one-bit rotations and a fixed lookup
+% table. The packed DNA order is A, C, T, G. & Use seven-bit rotations and
+% BioSeq's own four lookup values. BioSeq's packed DNA order is A, C, G, T. The
+% resulting 32-bit numbers are therefore not the same as the paper's numbers. \\
+% How much of the hash chooses the minimum? & Compare only the upper 16 bits;
+% the lower 16 bits of the packed value hold a local position. & Compare all 32
+% hash bits and keep the position separately. Two values tied by the paper's
+% upper 16 bits may be ordered differently here. \\
+% What happens when the minimum occurs twice? & For odd $k+w-1$, count G/T
+% against A/C over the complete span. More G/T chooses the leftmost minimum;
+% otherwise choose the rightmost. Return one occurrence. & Return both extreme
+% occurrences: leftmost first and rightmost second. \\
+% How is a forward/reverse value recorded? & The whole-span count chooses an
+% endpoint; the paper does not attach a per-$k$-mer strand bit to that returned
+% position. & Mark an endpoint as reverse only when its reverse rolling value
+% is smaller than its forward value. Equality is marked forward. \\
+% How are repeated positions removed? & Rearrange an output matrix into one row
+% per input piece, compare neighboring positions, compact the changes, and
+% remove the repeated position at a piece join. & Compare with the preceding
+% record during each lane's walk and compare the last/first records at a piece
+% join. There is no output-matrix rearrangement. \\
+% \bottomrule
+% \end{tabularx}
+% \caption{A direct comparison of SIMD-Minimizers and BioSeq bounded ntHash. They share
+% far-apart input pieces, an input rearrangement, rolling forward/reverse hash
+% state, and prefix/suffix minima. They calculate different hash numbers, make
+% different choices for tied minima, and remove repeated output by different
+% methods.}
+% \label{tab:rewrite-sea-bounded-nthash}
+% \end{table}
+
+% For BioSeq's usual $k=15,w=10$, the complete span has
+% $k+w-1=24$ bases, which is even. This does not prevent rolling ntHash or the
+% prefix/suffix minimum, but it does not satisfy the odd-span condition of the
+% paper's canonical endpoint rule. BioSeq bounded ntHash does not use that
+% rule; it reports both extreme occurrences of a tied minimum.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,7.85)
+%     {(a) One window has the same minimum at two positions};
+%   \node[anchor=east] at (2.15,6.25) {position};
+%   \node[anchor=east,align=right] at (2.15,5.58) {compared\\key};
+%   \foreach \i in {0,...,3}
+%     \node[rewrite cell] at (2.65+.78*\i,6.25) {\i};
+%   \foreach \i/\v in {0/9,1/2,2/5,3/2}
+%     \node[rewrite cell] at (2.65+.78*\i,5.58) {\v};
+%   \node[rewrite min] at (2.65+.78*1,5.58) {2};
+%   \node[rewrite min] at (2.65+.78*3,5.58) {2};
+
+%   \node[rewrite box,text width=3.30cm,minimum width=3.65cm,
+%         fill=rewriteBlue!10] at (7.25,6.12)
+%     {SIMD-Minimizers, odd span:\\more G/T selects position 1; otherwise
+%      position 3; write one};
+%   \node[rewrite box,text width=3.30cm,minimum width=3.65cm,
+%         fill=rewriteOrange!12] at (11.15,6.12)
+%     {BioSeq bounded:\\write positions 1 and 3; mark each reverse only if its
+%      reverse hash is smaller};
+
+%   \node[anchor=west,font=\bfseries] at (0,4.35)
+%     {(b) Repeated selections from neighboring windows};
+%   \node[rewrite box,minimum width=2.25cm] (events) at (1.70,3.05)
+%     {positions\\$[1,1,5,5]$};
+%   \node[rewrite box,text width=3.70cm,minimum width=4.05cm,
+%         fill=rewriteBlue!10] (seaout) at (5.40,3.05)
+%     {SIMD-Minimizers:\\rearrange output into one row per input piece; compare
+%      neighboring positions};
+%   \node[rewrite out,minimum width=1.85cm] (searesult) at (8.70,3.05)
+%     {$[1,5]$};
+%   \draw[rewrite flow] (events)--(seaout);
+%   \draw[rewrite flow] (seaout)--(searesult);
+
+%   \node[rewrite box,minimum width=2.25cm] (eventsb) at (1.70,1.05)
+%     {positions\\$[1,1,5,5]$};
+%   \node[rewrite box,text width=3.70cm,minimum width=4.05cm,
+%         fill=rewriteOrange!10] (boundout) at (5.40,1.05)
+%     {bounded:\\compare each event with the preceding event while its input
+%      piece is being processed};
+%   \node[rewrite out,minimum width=1.85cm] (boundresult) at (8.70,1.05)
+%     {$[1,5]$};
+%   \draw[rewrite flow] (eventsb)--(boundout);
+%   \draw[rewrite flow] (boundout)--(boundresult);
+%   \node[rewrite note,text width=3.05cm,anchor=west] at (9.85,2.05)
+%     {At an input-piece join, bounded ntHash also compares the preceding
+%      piece's last record with the next piece's first record.};
+% \end{tikzpicture}
+% \caption{Two visible output differences. The small numbers in panel (a) are
+% the keys seen by the minimum comparison: the paper obtains them from the
+% upper 16 hash bits, while bounded ntHash normally compares all 32 bits.
+% SIMD-Minimizers
+% returns one end of this tie, while bounded ntHash returns both ends. Panel (b)
+% shows that the same simple run of repeated positions can reduce to the same
+% two outputs, but SIMD-Minimizers first rearranges an output matrix whereas bounded ntHash
+% compares successive events during the lane walk.}
+% \label{fig:rewrite-sea-bounded-output}
+% \end{figure}
+
+% Because these choices can produce different hashes and different positions,
+% the bounded query must be compared with a target table made by the bounded
+% algorithm. The named \texttt{two\_stack\_nthash} E2E rows do not select it.
+% The ordinary rows whose names contain \texttt{bounded\_nthash} do.
+
+% \subsubsection{Vulkan: many serial tile walks run together}
+
+% On the GPU, a segment is a memory-sized part of a large input, not one
+% minimizer window.  A segment includes context around an owned core.  Inside
+% the uploaded segment, each shader invocation owns a smaller tile.  It starts
+% before the tile, replays enough bases to rebuild rolling and window state, and
+% then writes only events triggered inside its half-open owned interval.  The
+% window minimum inside one tile is the same saved-minimum plus ring-rescan
+% method shown in Figure~\ref{fig:rewrite-minimap-rescan}; it is not a
+% prefix/suffix minimum.
+
+% Because the number of output events is not known in advance, the compact
+% route runs a count pass, an exclusive scan of tile counts, and an emit pass.
+% Each tile receives a non-overlapping output range before it writes.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,10.45)
+%     {(a) One memory segment has context around its owned core};
+%   \draw[fill=rewriteGray!20] (.55,9.50) rectangle (2.55,10.18);
+%   \draw[fill=rewriteBlue!14,draw=rewriteBlue!90!black]
+%     (2.55,9.50) rectangle (10.55,10.18);
+%   \draw[fill=rewriteGray!20] (10.55,9.50) rectangle (12.55,10.18);
+%   \node at (1.55,9.84) {context};
+%   \node at (6.55,9.84) {owned core};
+%   \node at (11.55,9.84) {context};
+
+%   \node[anchor=west,font=\bfseries] at (0,8.88)
+%     {(b) Tile invocations own adjacent trigger intervals};
+%   \draw[fill=rewriteGray!20] (.55,7.90) rectangle (2.40,8.58);
+%   \draw[fill=rewriteBlue!14,draw=rewriteBlue!90!black]
+%     (2.40,7.90) rectangle (6.15,8.58);
+%   \draw[fill=rewriteGray!20] (4.30,6.80) rectangle (6.15,7.48);
+%   \draw[fill=rewriteBlue!14,draw=rewriteBlue!90!black]
+%     (6.15,6.80) rectangle (9.90,7.48);
+%   \node at (1.48,8.24) {replay};
+%   \node at (4.28,8.24) {tile $i$ owns $[b_i,e_i)$};
+%   \node at (5.23,7.14) {replay};
+%   \node at (8.03,7.14) {tile $i+1$ owns next interval};
+%   \draw[densely dashed,rewriteGray!90] (6.15,6.48)--(6.15,8.85);
+%   \node[anchor=west] at (10.20,7.69)
+%     {$e_i=b_{i+1}$};
+
+%   \node[anchor=west,font=\bfseries] at (0,5.98)
+%     {(c) One tile walks positions in order and uses a ring with rescan};
+%   \node at (.65,4.98) {$\cdots$};
+%   \foreach \i/\v/\sty in {0/2/rewrite min,1/7/rewrite old,2/6/rewrite old,
+%                             3/5/rewrite new,4/9/rewrite cell,5/4/rewrite cell,
+%                             6/3/rewrite cell}
+%     \node[\sty] at (1.25+.72*\i,4.98) {\v};
+%   \draw[very thick,rewriteGray!90] (3.06,4.55)--(3.06,5.41);
+%   \draw[draw=rewriteOrange!90!black,very thick]
+%     (.88,4.50) rectangle (3.82,5.46);
+%   \node[rewrite note,text width=5.15cm,anchor=west] at (7.05,4.55)
+%     {Roll one canonical $k$-mer, push it into the $w$-slot ring, compare it
+%      with the saved minimum, and rescan only when that saved slot leaves.};
+%   \node[anchor=west,rewriteGray!90!black] at (1.10,4.15)
+%     {events during replay are not written};
+
+%   \node[anchor=west,font=\bfseries] at (0,3.35)
+%     {(d) Compact output allocation};
+%   \node[rewrite box,minimum width=2.35cm] (count) at (1.65,2.45)
+%     {count events\\per tile};
+%   \node[rewrite box,minimum width=2.35cm] (scan) at (4.72,2.45)
+%     {exclusive scan\\of counts};
+%   \node[rewrite box,minimum width=2.35cm] (emit) at (7.79,2.45)
+%     {replay tile and\\write events};
+%   \node[rewrite box,minimum width=2.65cm,fill=rewriteGreen!14] (ranges)
+%     at (11.05,2.45) {separate output\\range for each tile};
+%   \draw[rewrite flow] (count)--(scan);
+%   \draw[rewrite flow] (scan)--(emit);
+%   \draw[rewrite flow] (emit)--(ranges);
+%   \node[rewrite note,text width=11.3cm,anchor=west] at (.65,.78)
+%     {Parallelism comes from many tile invocations. Positions inside one tile
+%      are processed in order because the rolling $k$-mer and saved minimum
+%      depend on earlier positions.};
+% \end{tikzpicture}
+% \caption{How the current Vulkan sketch divides work. Context is read again,
+% but only the owned core or tile can publish an event. Each tile uses a serial
+% ring/rescan state machine. Count--scan--emit gives tiles exact, separate
+% output ranges while many tiles execute at the same time.}
+% \label{fig:rewrite-vulkan-sketch}
+% \end{figure}
+
+% \subsubsection{Why target and query must use the same minimizer rules}
+
+% A target table is looked up by the hash written by its minimizer algorithm.
+% BioSeq bounded ntHash and the minimap-style algorithms can write different
+% hashes and different tied positions for the same DNA. If the target table was
+% made by bounded ntHash but the query was made by adjacent-window SIMD, many
+% query hashes would simply not exist in that table even when the DNA matched.
+
+% BioSeq therefore first asks which minimizer rules made the target table. It
+% then chooses an implementation that produces exactly those rules. If that
+% implementation cannot handle the alphabet, $k$, $w$, input layout, or
+% available Highway lane count, the operation reports an error. Secretly
+% switching to another minimizer algorithm would produce a plausible-looking
+% but incorrect lookup.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[rewrite box,minimum width=3.20cm,fill=rewriteBlue!12] (scheme)
+%     at (6.20,6.75) {How was the target table made?};
+%   \node[rewrite box,minimum width=3.10cm] (pntproof) at (2.70,5.00)
+%     {Can bounded ntHash\\handle this input?};
+%   \node[rewrite box,minimum width=3.30cm] (mmproof) at (9.70,5.00)
+%     {Which minimap-style\\implementation was requested?};
+%   \coordinate (routefork) at (6.20,5.90);
+%   \draw[thick] (scheme.south)--(routefork);
+%   \draw[rewrite flow] (routefork)-|(pntproof.north)
+%     node[pos=.38,above] {bounded ntHash};
+%   \draw[rewrite flow] (routefork)-|(mmproof.north)
+%     node[pos=.38,above] {minimap-style};
+
+%   \node[rewrite box,minimum width=2.75cm,fill=rewriteGreen!14] (pnt)
+%     at (2.70,3.45) {bounded ntHash\\SIMD};
+%   \node[rewrite box,minimum width=2.75cm,fill=rewriteOrange!14] (rejectp)
+%     at (2.70,1.90) {reject mismatch};
+%   \draw[rewrite flow] (pntproof)--(pnt) node[midway,right] {yes};
+%   \draw[rewrite flow] (pntproof.west)-|(rejectp.west)
+%     node[pos=.25,left] {no};
+
+%   \node[rewrite box,minimum width=2.35cm,fill=rewriteGreen!14] (exact)
+%     at (7.10,3.45) {adjacent-window\\SIMD};
+%   \node[rewrite box,minimum width=2.35cm,fill=rewriteGreen!14] (vk)
+%     at (9.70,3.45) {Vulkan};
+%   \node[rewrite box,minimum width=2.35cm,fill=rewriteGreen!14] (scalar)
+%     at (12.30,3.45) {Scalar};
+%   \draw[rewrite flow] (mmproof.south)-|(exact.north);
+%   \draw[rewrite flow] (mmproof)--(vk);
+%   \draw[rewrite flow] (mmproof.south)-|(scalar.north);
+
+%   \node[rewrite box,minimum width=5.25cm,fill=rewriteOrange!14] (fail)
+%     at (9.70,1.55) {requested implementation cannot handle input: error};
+%   \draw[rewrite flow] (exact.south)--++(0,-.45)
+%     -| ($(fail.north)+(-1.65,0)$);
+%   \draw[rewrite flow] (vk)--(fail);
+%   \draw[rewrite flow] (scalar.south)--++(0,-.45)
+%     -| ($(fail.north)+(1.65,0)$);
+% \end{tikzpicture}
+% \caption{Why a checked implementation cannot silently change minimizer
+% algorithms. The query must use the same hash and tied-position rules as the
+% target table. Bounded ntHash therefore cannot fall through to a minimap-style
+% implementation, and a failed adjacent-window or Vulkan check is reported.}
+% \label{fig:rewrite-backend-selection}
+% \end{figure}
+
+% \section{Performance evidence}
+% \label{sec:rewrite-performance-evidence}
+
+% Timing claims are grouped here so they cannot be mistaken for algorithm
+% definitions.  The first four charts preserve an older three-run measurement
+% series.  They are useful history, but they predate the current adjacent-window
+% route and use a different binary and experiment scope.  Their source retained
+% means but not the raw samples or sample standard deviations; the figures
+% therefore show no error bars.  They must not be used as a direct measured
+% V8-versus-current comparison.
+
+% \subsection{Older end-to-end series}
+
+% \begin{figure}[H]
+%   \centering
+% \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib
+%     matplotlib.use("pgf")
+%     import matplotlib.pyplot as plt
+%     import numpy as np
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
+%     buckets = ['47 kbp', '49 kbp', '52 kbp', '903 kbp', '5.0 Mbp']
+%     minimap2 = [20.11, 20.10, 20.13, 190.95, 1060.13]
+%     scalar = [14.56, 14.94, 15.09, 188.93, 1171.0]
+%     simd_v6 = [15.21, 15.90, 16.05, 201.68, 1207.99]
+%     v8 = [14.64, 15.07, 15.24, 183.77, 1131.87]
+%     historical_v13 = [13.78, 14.02, 13.82, 172.38, 1113.3]
+%     x = np.arange(len(buckets))
+%     width = 0.16
+%     ax.bar(x-2*width, minimap2, width, label='minimap2', color='#6F6F6F')
+%     ax.bar(x-width, scalar, width, label='scalar', color='#B8B8B8')
+%     ax.bar(x, simd_v6, width, label='naive SIMD rescan', color='#4C78A8')
+%     ax.bar(x+width, v8, width, label='past V8', color='#F28E2B')
+%     ax.bar(x+2*width, historical_v13, width,
+%            label='historical V12/V13 route', color='#59A14F')
+%     ax.set_xticks(x)
+%     ax.set_xticklabels(buckets)
+%     ax.set_yscale('log')
+%     ax.set_ylabel('wall time per pair (ms, log scale)', fontsize=8)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=7, frameon=False, loc='upper left', ncol=2)
+%     ax.grid(True, alpha=0.25, axis='y', which='both')
+%     print(get_filename_from_extension('.pgf'))
+%     plt.savefig(get_filename_from_extension('.pgf'), bbox_inches='tight')
+% \end{CacheMeCode}
+%   \caption{Older end-to-end wall times across five sequence lengths. Each bar
+%   is the recorded mean of three runs; raw samples and sample standard
+%   deviations were not retained with this chart. ``Historical V12/V13 route''
+%   is not the current adjacent-window E2E route. The log scale allows the short
+%   and long inputs to share one axis.}
+%   \label{fig:rewrite-historical-headline}
+% \end{figure}
+
+% \subsection{How the older minimizer phase changed}
+
+% \begin{figure}[H]
+%   \centering
+% \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib
+%     matplotlib.use("pgf")
+%     import matplotlib.pyplot as plt
+%     import numpy as np
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.53*__LINEWIDTH__, forward=True)
+%     names = ['V6\nrescan', 'V8\nprefix/suffix', 'V8.5\ndelayed mix',
+%              'V11\ntwo streams', 'V12\ninlined', 'scalar']
+%     inner = [23.88, 19.90, 13.60, 13.60, 9.23, 0.0]
+%     wrapper = [14.94, 12.43, 8.62, 8.62, 5.76, 12.50]
+%     x = np.arange(len(names))
+%     ax.bar(x, wrapper, label='recorded wrapper field', color='#4C78A8')
+%     ax.bar(x, inner, bottom=wrapper, label='recorded inner field',
+%            color='#F28E2B')
+%     ax.axhline(12.50, linestyle='--', linewidth=1, color='#6F6F6F',
+%                label='scalar recorded field')
+%     for i, total in enumerate(np.array(inner)+np.array(wrapper)):
+%         ax.text(i, total+0.5, f'{total:.1f}', ha='center', fontsize=7)
+%     ax.set_xticks(x)
+%     ax.set_xticklabels(names)
+%     ax.set_ylabel('recorded time per 903-kbp pair (ms)', fontsize=8)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=7, frameon=False, loc='upper right')
+%     ax.grid(True, alpha=0.25, axis='y')
+%     print(get_filename_from_extension('.pgf'))
+%     plt.savefig(get_filename_from_extension('.pgf'), bbox_inches='tight')
+% \end{CacheMeCode}
+%   \caption{Older minimizer-phase fields for one 903-kbp case, recorded as
+%   means of three runs without retained raw samples or sample standard
+%   deviations. The chart preserves the original stacked presentation. Before
+%   using the stack as an additive time, the instrumentation must confirm that
+%   the wrapper and inner fields are exclusive rather than nested.}
+%   \label{fig:rewrite-historical-phase-evolution}
+% \end{figure}
+
+% \subsection{Older complete-run phase composition}
+
+% \begin{figure}[H]
+%   \centering
+% \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib
+%     matplotlib.use("pgf")
+%     import matplotlib.pyplot as plt
+%     import numpy as np
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.58*__LINEWIDTH__, forward=True)
+%     configs = ['scalar', 'V6 rescan', 'V8', 'V12 before V13',
+%                'V12 after V13']
+%     phases = [
+%       ('sketch fields', [12.50,38.82,32.43,14.99,14.52], '#4C78A8',''),
+%       ('target index', [16.0,14.3,14.6,26.38,23.83], '#A0A0A0',''),
+%       ('seed hits', [6.5,11.0,11.3,12.32,12.0], '#59A14F',''),
+%       ('chain', [16.0,8.9,8.9,8.88,8.78], '#F28E2B',''),
+%       ('error estimate', [0.7,7.2,7.1,7.88,0.85], '#F28E2B','//'),
+%       ('alignment', [87.5,86.4,86.5,87.25,85.42], '#6F6F6F','..'),
+%     ]
+%     bottom = np.zeros(len(configs))
+%     for label, values, color, hatch in phases:
+%         ax.bar(configs, values, bottom=bottom, label=label, color=color,
+%                hatch=hatch, edgecolor='#404040', linewidth=.25)
+%         bottom += np.array(values)
+%     ax.set_ylabel('recorded time per 903-kbp pair (ms)', fontsize=8)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=6.5, frameon=False, loc='upper right', ncol=2)
+%     ax.grid(True, alpha=0.25, axis='y')
+%     plt.xticks(rotation=13, ha='right')
+%     print(get_filename_from_extension('.pgf'))
+%     plt.savefig(get_filename_from_extension('.pgf'), bbox_inches='tight')
+% \end{CacheMeCode}
+%   \caption{Older phase composition for one 903-kbp experiment. Values are
+%   recorded means of three runs; no sample standard deviations are available.
+%   The chart separates a minimizer-side change from the later error-estimation
+%   change, but it does not describe the current named no-index route.}
+%   \label{fig:rewrite-historical-phase-stack}
+% \end{figure}
+
+% \subsection{Older percentage view of the same end-to-end series}
+
+% \begin{figure}[H]
+%   \centering
+% \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+%     import matplotlib
+%     matplotlib.use("pgf")
+%     import matplotlib.pyplot as plt
+%     import numpy as np
+%     matplotlib.rcParams.update({
+%       "font.family": "serif",
+%       "font.serif": [],
+%       "text.usetex": True,
+%     })
+%     fig, ax = plt.subplots()
+%     fig.set_size_inches(__LINEWIDTH__, 0.50*__LINEWIDTH__, forward=True)
+%     buckets = ['47 kbp', '49 kbp', '52 kbp', '903 kbp', '5.0 Mbp']
+%     scalar = np.array([14.56,14.94,15.09,188.93,1171.0])
+%     v6 = np.array([15.21,15.90,16.05,201.68,1207.99])
+%     v8 = np.array([14.64,15.07,15.24,183.77,1131.87])
+%     old13 = np.array([13.78,14.02,13.82,172.38,1113.3])
+%     x = np.arange(len(buckets))
+%     width = .27
+%     ax.bar(x-width, (v6-scalar)/scalar*100, width,
+%            label='naive SIMD rescan', color='#4C78A8')
+%     ax.bar(x, (v8-scalar)/scalar*100, width,
+%            label='past V8', color='#F28E2B')
+%     ax.bar(x+width, (old13-scalar)/scalar*100, width,
+%            label='historical V12/V13 route', color='#59A14F')
+%     ax.axhline(0, linewidth=.7, color='#6F6F6F')
+%     ax.axhline(-10, linestyle='--', linewidth=1, color='#A0A0A0',
+%                label='historical -10\% target')
+%     ax.set_xticks(x)
+%     ax.set_xticklabels(buckets)
+%     ax.set_ylabel('difference from scalar (\%, negative is faster)', fontsize=8)
+%     ax.tick_params(axis='both', labelsize=7)
+%     ax.legend(fontsize=7, frameon=False, loc='upper right', ncol=2)
+%     ax.grid(True, alpha=0.25, axis='y')
+%     print(get_filename_from_extension('.pgf'))
+%     plt.savefig(get_filename_from_extension('.pgf'), bbox_inches='tight')
+% \end{CacheMeCode}
+%   \caption{Percentage form of the older three-run end-to-end means. This is a
+%   transformation of Figure~\ref{fig:rewrite-historical-headline}, not an
+%   independent experiment. Raw samples and sample standard deviations were not
+%   retained with the chart.}
+%   \label{fig:rewrite-historical-speedup}
+% \end{figure}
+
+% \subsection{A later historical CPU checkpoint}
+
+% A later experiment recorded four complete observations per configuration and
+% reported their median.  Its bounded-ntHash row used a target index built with
+% that scheme, while the minimap2 and adjacent-window rows used their matching
+% seed schemes.  It is therefore
+% a comparison of complete valid configurations, not interchangeable function
+% bodies.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[x=.82cm,y=.80cm,font=\footnotesize]
+%   \draw[rewrite flow] (0,0)--(10.9,0) node[right] {sketch time (s)};
+%   \foreach \x in {0,2,4,6,8,10} {
+%     \draw (\x,-.08)--(\x,.08);
+%     \node[below] at (\x,-.08) {\x};
+%   }
+%   \fill[rewriteGreen!75] (0,.48) rectangle (2.923,1.10);
+%   \node[anchor=east] at (-.20,.79) {bounded ntHash};
+%   \node[anchor=west] at (3.05,.79) {2.923};
+%   \fill[rewriteGray!75] (0,1.50) rectangle (4.733,2.12);
+%   \node[anchor=east] at (-.20,1.81) {minimap2};
+%   \node[anchor=west] at (4.86,1.81) {4.733};
+%   \fill[rewriteBlue!75] (0,2.52) rectangle (9.256,3.14);
+%   \node[anchor=east] at (-.20,2.83) {adjacent SIMD};
+%   \node[anchor=west] at (9.39,2.83) {9.256};
+% \end{tikzpicture}
+% \caption{Sketch component in a later historical CPU checkpoint. Each value is
+% the median of four observations. The retained summary does not provide a
+% sample standard deviation. Bounded ntHash uses a different target/query seed scheme, so
+% the chart compares complete configurations rather than identical output.}
+% \label{fig:rewrite-historical-cpu-checkpoint}
+% \end{figure}
+
+% \subsection{GPU before and after the rolling, all-tiles rewrite}
+
+% \begin{table}[H]
+% \centering
+% \small
+% \begin{tabular}{lrrr}
+% \toprule
+% GPU sketch version & per-call sketch & throughput & complete probe \\
+% \midrule
+% rebuild-heavy, too few active lanes & 272.0\,ms & 73\,Mbp/s & 21.83\,s \\
+% rolling update, all-tile schedule & 40.3\,ms & 494\,Mbp/s & 11.70\,s \\
+% \bottomrule
+% \end{tabular}
+% \caption{One controlled GPU before/after measurement. The two rows use the
+% same recorded workload and exact DNA4 output check. Repetition count and
+% sample spread were not retained in the source summary, so these values should
+% not be given error bars.}
+% \label{tab:rewrite-gpu-progression}
+% \end{table}
+
+% \subsection{Limit of the retained measurements}
+
+% None of the preserved charts runs past V8 and the current adjacent-window
+% kernel with the same input, output rule, binary, and timed boundary.  The
+% figures therefore do not establish a numerical speedup between those two
+% algorithms.  The supported conclusion is the code-level explanation in
+% Section~\ref{sec:rewrite-current-bioseq}: the current route removes V8's
+% far-apart input preparation and scalar lane-output loop, but its window
+% minimum itself performs more comparisons.
+
+% \subsection{Related seed designs retained as visual reference}
+
+% The following two figures are retained because they explain terms used when
+% comparing sketching work, although they are not steps of the E2E minimizer
+% route described above.  A spaced seed masks positions in one span.  A linked
+% seed chooses separated components.  BLEND constructs a fuzzy fingerprint by
+% letting token hashes vote on each output bit.
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,8.85) {(a) Minimizer};
+%   \foreach \i/\txt/\rank/\sty in {
+%       0/GCTATTA/161/rewrite cell,1/CTATTAC/2/rewrite min,
+%       2/TATTACC/252/rewrite cell,3/ATTACCT/69/rewrite cell}
+%     \node[\sty,minimum width=2.25cm,minimum height=.82cm,align=center]
+%       at (1.35+2.55*\i,8.02) {\texttt{\txt}\\rank \rank};
+%   \node[rewrite box,minimum width=2.50cm] (mselect) at (6.45,6.72)
+%     {choose the\\lowest rank};
+%   \node[rewrite out,minimum width=2.50cm] (mout) at (10.15,6.72)
+%     {\texttt{CTATTAC}};
+%   \foreach \x in {1.35,3.90,6.45,9.00}
+%     \draw[rewrite flow] (\x,7.58)|-(mselect.north);
+%   \draw[rewrite flow] (mselect)--(mout);
+
+%   \node[anchor=west,font=\bfseries] at (0,5.72) {(b) Spaced seed};
+%   \node[rewrite box,minimum width=2.25cm] (sin) at (1.50,4.82)
+%     {\texttt{GCTATTA}\\\texttt{GATACTA}};
+%   \node[rewrite box,minimum width=2.55cm,fill=rewriteBlue!12] (mask)
+%     at (4.65,4.82) {mask \texttt{1011011}\\keep the 1 positions};
+%   \node[rewrite out,minimum width=2.25cm,align=center] (skeep)
+%     at (7.80,4.82)
+%     {\texttt{GTATA}\\\texttt{GTATA}};
+%   \node[rewrite box,minimum width=2.15cm] (shash) at (10.65,4.82)
+%     {hash retained\\symbols};
+%   \draw[rewrite flow] (sin)--(mask);
+%   \draw[rewrite flow] (mask)--(skeep);
+%   \draw[rewrite flow] (skeep)--(shash);
+
+%   \node[anchor=west,font=\bfseries] at (0,3.55) {(c) Linked seed};
+%   \node[rewrite out,minimum width=1.65cm,align=center] (l1) at (1.30,2.52)
+%     {$s_1$\\\texttt{GCTA}};
+%   \node[rewrite box,minimum width=2.25cm] (lw2) at (3.72,2.52)
+%     {$W_2$ candidates\\\texttt{CCTT}, \texttt{TTAA}};
+%   \node[rewrite out,minimum width=1.65cm,align=center] (l2) at (6.08,2.52)
+%     {choose\\\texttt{TTAA}};
+%   \node[rewrite box,minimum width=2.25cm] (lw3) at (8.45,2.52)
+%     {$W_3$ candidates\\\texttt{GTGA}, \texttt{TGGA}};
+%   \node[rewrite out,minimum width=1.65cm,align=center] (l3) at (10.80,2.52)
+%     {choose\\\texttt{TGGA}};
+%   \draw[rewrite flow] (l1)--(lw2);
+%   \draw[rewrite flow] (lw2)--(l2);
+%   \draw[rewrite flow] (l2)--(lw3);
+%   \draw[rewrite flow] (lw3)--(l3);
+%   \node[rewrite note,text width=10.9cm,anchor=west] at (.55,.72)
+%     {A linked key contains the chosen components. Bases between its component
+%      windows are not part of the key.};
+% \end{tikzpicture}
+% \caption{Three distinct seed constructions. A minimizer selects one complete
+% $k$-mer by rank. A spaced seed hashes only positions marked by a binary mask.
+% A linked seed chooses components from explicit downstream windows and joins
+% those components into one key.}
+% \label{fig:rewrite-related-seeds}
+% \end{figure}
+
+% \begin{figure}[H]
+% \centering
+% \begin{tikzpicture}[font=\footnotesize]
+%   \node[anchor=west,font=\bfseries] at (0,6.75)
+%     {(a) BLEND-I on two nearby contiguous seeds};
+%   \node[rewrite box,minimum width=2.20cm] (b1) at (1.45,5.66)
+%     {\texttt{GCTATTAC}\\\texttt{GCTACTAC}};
+%   \node[rewrite box,minimum width=2.50cm,fill=rewriteBlue!12] (tokens)
+%     at (4.55,5.66) {overlapping\\tokens};
+%   \node[rewrite box,minimum width=2.40cm] (bits) at (7.52,5.66)
+%     {ordinary token\\hash bits};
+%   \node[rewrite box,minimum width=2.15cm,fill=rewriteOrange!14] (vote)
+%     at (10.28,5.66) {signed vote\\for each bit};
+%   \node[rewrite out,minimum width=2.05cm,align=center] (fp) at (12.82,5.66)
+%     {fuzzy\\fingerprint};
+%   \draw[rewrite flow] (b1)--(tokens);
+%   \draw[rewrite flow] (tokens)--(bits);
+%   \draw[rewrite flow] (bits)--(vote);
+%   \draw[rewrite flow] (vote)--(fp);
+%   \node[rewrite note,text width=11.9cm,anchor=west] at (.55,4.12)
+%     {Similar seeds share many token hashes, so many bit votes remain the same.
+%      A shared fingerprint is possible, not guaranteed.};
+
+%   \node[anchor=west,font=\bfseries] at (0,3.25)
+%     {(b) BLEND-S on linked components};
+%   \node[rewrite box,minimum width=2.75cm] (linked) at (1.75,2.15)
+%     {\texttt{GCTA|TTAA|TGGA}};
+%   \node[rewrite box,minimum width=2.35cm,fill=rewriteBlue!12] (ctok)
+%     at (5.00,2.15) {component\\token hashes};
+%   \node[rewrite box,minimum width=2.20cm,fill=rewriteOrange!14] (cvote)
+%     at (7.90,2.15) {bit vote};
+%   \node[rewrite box,minimum width=2.20cm] (lookup) at (10.70,2.15)
+%     {index lookup};
+%   \node[rewrite out,minimum width=2.10cm,align=center] (verify)
+%     at (13.35,2.15)
+%     {candidates\\to verify};
+%   \draw[rewrite flow] (linked)--(ctok);
+%   \draw[rewrite flow] (ctok)--(cvote);
+%   \draw[rewrite flow] (cvote)--(lookup);
+%   \draw[rewrite flow] (lookup)--(verify);
+%   \node[rewrite note,text width=11.9cm,anchor=west] at (.55,.57)
+%     {A fuzzy-key match proposes candidates. It does not establish that the
+%      underlying sequence regions are equal.};
+% \end{tikzpicture}
+% \caption{Fuzzy fingerprint construction in BLEND~\cite{blend}. Token hashes
+% vote independently on each output bit. Nearby seeds can retain enough votes
+% to share a fingerprint, after which downstream work still verifies the
+% candidate match.}
+% \label{fig:rewrite-blend-fuzzy-hash}
+% \end{figure}
+
+% \section*{Chapter conclusion}
+
+% Minimap2 saves one minimum and scans the complete window only when that record
+% leaves. The naive SIMD port keeps the same rule in every lane, so one expiring
+% lane makes the complete lane group scan. SIMD-Minimizers avoids that shared surprise
+% with rolling ntHash and fixed prefix/suffix summaries. Past V8 keeps the
+% prefix/suffix minimum but changes the hash, equal-minimum rule, and output
+% collection. The named current no-index E2E row does something else again: it
+% calculates exact minimap-style minima for neighboring windows and writes
+% ordinary events with a compressed SIMD store. Vulkan uses many serial tile
+% walks, each with a ring and rescan. These routes can be compared only after the
+% seed rule and the timed work have been stated explicitly.
