@@ -1417,7 +1417,7 @@ and the alignment had to walk through all of them. This means that we sped up in
 \subsection{Seeding prototypes summary}
 
 %TODO: Cite this stack overflow answer: https://stackoverflow.com/a/25027750
-The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \texttt{boost::unordered\_map} (marked as {V13}^{*}) yielded observable improvements. We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
+The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \texttt{boost::unordered\_map} (marked as ${V13}^{*}$) yielded observable improvements. We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
 
 \begin{figure}[ht]
   \centering
@@ -1469,7 +1469,7 @@ The combination of the V12 inlinening fixes, the V13 estimator fix and replacing
   \end{CacheMeCode}
   \caption{Wall-clock delta versus scalar for the three
     SIMD configurations, expressed as percent (negative = faster).
-    {V13}^{*} now performs better than scalar, however this is nowhere near results reported in SIMD Minimizers paper.
+    ${V13}^{*}$ now performs better than scalar, however this is nowhere near results reported in SIMD Minimizers paper.}
   \label{fig:speedup-summary}
 \end{figure}
 
@@ -1495,4 +1495,463 @@ The summary table:
   \label{tab:final-numbers}
 \end{table}
 
-\section{}
+\section{Current BioseqDB Minimizer pipeline}
+
+
+\section{Packed minimizer representation}
+\label{sec:packed-minimizer-representation}
+
+A minimizer record carries three values: a hash, the zero-based final
+position of its $k$-mer, and a strand bit.  BioSeqDB's CPU minimizer producers
+and collectors pack them in \texttt{minimizer\_representation<L,K>}.  Here
+$L$ is the number of position bits and $K$ is the $k$-mer length.  This use of
+$L$ is unrelated to the SIMD lane count used earlier in the chapter.
+
+The type first reserves
+\[
+  H=\min(2K,56)
+\]
+hash bits.  Let $R=H+L+1$, where the last term is the strand bit.  The type uses
+the first width $W\in\{16,32,64\}$ for which $R\leq W$.  Every bit above the
+position and strand fields then belongs to the hash, so the stored hash field
+has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
+contains a 56-bit hash and an 8-bit span, which is initialized from $K$.  The
+other contains the position, the strand bit, and any unused high bits.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=.09cm,
+  y=.88cm,
+  font=\footnotesize,
+  hashfield/.style={draw=black!75,fill=rewriteBlue!18},
+  posfield/.style={draw=black!75,fill=rewriteOrange!20},
+  strandfield/.style={draw=black!75,fill=rewriteGreen!25},
+  spanfield/.style={draw=black!75,fill=purple!16}
+]
+  \node[anchor=west,font=\bfseries] at (0,5.55)
+    {Rectangle width is proportional to stored bits};
+
+  \node[anchor=east] at (-4,4.55) {$\langle 2,2\rangle$};
+  \draw[hashfield] (0,4.22) rectangle (13,4.88);
+  \draw[posfield] (13,4.22) rectangle (15,4.88);
+  \draw[strandfield,thick] (15,4.22) rectangle (16,4.88);
+  \node at (6.5,4.55) {hash 13};
+  \node[anchor=west] at (20,4.55) {2 bytes};
+
+  \node[anchor=east] at (-4,3.35) {$\langle 7,7\rangle$};
+  \draw[hashfield] (0,3.02) rectangle (24,3.68);
+  \draw[posfield] (24,3.02) rectangle (31,3.68);
+  \draw[strandfield,thick] (31,3.02) rectangle (32,3.68);
+  \node at (12,3.35) {hash 24};
+  \node at (27.5,3.35) {7};
+  \node[anchor=west] at (36,3.35) {4 bytes};
+
+  \node[anchor=east] at (-4,2.15) {$\langle 28,15\rangle$};
+  \draw[hashfield] (0,1.82) rectangle (35,2.48);
+  \draw[posfield] (35,1.82) rectangle (63,2.48);
+  \draw[strandfield,thick] (63,1.82) rectangle (64,2.48);
+  \draw[draw=rewriteBlue!85!black,very thick]
+    (0,1.82) rectangle (64,2.48);
+  \node at (17.5,2.15) {hash 35};
+  \node at (49,2.15) {final position 28};
+  \node[anchor=west] at (68,2.15) {8 bytes};
+
+  \node[anchor=east] at (-4,.55) {$\langle 63,15\rangle$};
+  \node[font=\scriptsize] at (32,1.25) {high word: hash and span};
+  \node[font=\scriptsize] at (96,1.25) {low word: position and strand};
+  \draw[hashfield] (0,.22) rectangle (56,.88);
+  \draw[spanfield] (56,.22) rectangle (64,.88);
+  \draw[posfield] (64,.22) rectangle (127,.88);
+  \draw[strandfield,thick] (127,.22) rectangle (128,.88);
+  \node at (28,.55) {hash 56};
+  \node at (60,.55) {8};
+  \node at (95.5,.55) {final position 63};
+  \node[anchor=west] at (132,.55) {16 bytes};
+
+  \draw[hashfield] (2,-.48) rectangle (6,-.13);
+  \node[anchor=west] at (8,-.305) {hash};
+  \draw[posfield] (31,-.48) rectangle (35,-.13);
+  \node[anchor=west] at (37,-.305) {position};
+  \draw[strandfield] (66,-.48) rectangle (70,-.13);
+  \node[anchor=west] at (72,-.305) {one-bit strand};
+  \draw[spanfield] (109,-.48) rectangle (113,-.13);
+  \node[anchor=west] at (115,-.305) {span};
+\end{tikzpicture}
+\caption{Bit fields in four \texttt{minimizer\_representation<L,K>}
+instantiations, shown from high bits on the left to low bits on the right.
+Blue is the hash, orange is the zero-based final position, green is the
+one-bit strand, and purple is the span in the two-word form.  The highlighted
+$\langle28,15\rangle$ record is the default 64-bit sketch-data form.}
+\label{fig:minimizer-representation-layout}
+\end{figure}
+
+The $L$-bit field represents final positions from zero through
+$2^L-1$, so it can describe a local sequence span of at most $2^L$ bases.
+For $K=15$, values through $L=33$ still fit in 64 bits, while $L=34$
+requires the two-word form.  The $\langle28,15\rangle$ form has a 35-bit hash
+field, but its minimap2 integer hash occupies only 30 bits.
+
+The template can produce a two-byte record for small $K$ and $L$, but no
+current output route uses it.  The ordinary $K=15$ profile uses eight-byte or
+sixteen-byte records.  Extended $K=7$ profiles can use four-byte records.
+Dispatch uses a small set of compiled $L$ values rather than every possible
+value.  For example, a $K=15$ request that needs 20 position bits uses the
+$\langle33,15\rangle$ form.  The all-ones hash field is reserved as the
+maximum sentinel and is not emitted as a minimizer.
+
+
+\subsection{What the Vulkan sketch computes}
+
+The Vulkan path uses the word \emph{segment} for a memory-sized part of a long
+input.  A segment is not one minimizer window.  When an input is too large for
+one admitted upload, the input is divided into disjoint owned cores.  Each
+core is uploaded with context on both sides, rounded to packed storage units.
+The context length is based on $k+w+1$ bases.  Results are translated back to
+global positions, and only minimizer positions in the owned core are kept.
+Neighboring segments may therefore read overlapping bases without owning the
+same output position.
+
+Inside one uploaded segment, the device uses a second, smaller partition: GPU
+\emph{tiles}.  A tile normally owns 256 base positions, although the size is
+adjusted for packed-storage alignment and the device dispatch limit.  One
+shader invocation handles one tile.  It starts before the tile at a left
+replay position, normally $k+w+1$ bases earlier, and walks forward to the end
+of the tile.  Different invocations process different tiles at the same time,
+but positions inside one tile are processed in order.
+
+At a base position $t$, after a valid $k$-mer ending at $t$ has been formed,
+the active hash window is
+\[
+  (h_{t-w+1},\ldots,h_t).
+\]
+These are $w$ overlapping $k$-mers covering the biological interval from
+$t-(w+k-2)$ through $t$.  The invocation maintains the forward and
+reverse-complement two-bit words, applies the minimap-style integer hash,
+pushes the candidate into a $w$-slot ring, and updates one saved minimum.  If
+the saved slot is overwritten, it rescans the ring.  Thus the minimum
+calculation inside a tile is the rescan algorithm, not the two-stack
+algorithm.
+
+Replay has a precise purpose.  The first window triggered inside a tile can
+begin before the tile boundary, and its minimum can also be a $k$-mer from
+before that boundary.  Replaying the preceding bases reconstructs the rolling
+$k$-mer, the ring, the validity counters, and the saved minimum.  Events seen
+during replay are discarded.  An event is owned only when the base position
+that triggers it lies in the tile's half-open interval.  The final tile alone
+performs the end-of-sequence flush.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  hashcell/.style={draw,minimum width=.66cm,minimum height=.50cm,inner sep=0pt},
+  replaycell/.style={draw,fill=gray!14,minimum width=.66cm,
+                     minimum height=.50cm,inner sep=0pt},
+  mincell/.style={draw=orange!85!black,very thick,fill=orange!13,
+                  minimum width=.66cm,minimum height=.50cm,inner sep=0pt},
+  nextmin/.style={draw=blue!70!black,very thick,fill=blue!9,
+                  minimum width=.66cm,minimum height=.50cm,inner sep=0pt},
+  stage/.style={draw,minimum width=2.45cm,minimum height=.80cm,
+                align=center,inner sep=3pt}
+]
+  \node[anchor=west,font=\bfseries] at (.35,10.60)
+    {(a) A memory segment: context surrounds one owned core};
+  \draw[fill=gray!14] (.75,9.45) rectangle (2.65,10.15);
+  \draw[fill=orange!10] (2.65,9.45) rectangle (10.55,10.15);
+  \draw[fill=gray!14] (10.55,9.45) rectangle (12.45,10.15);
+  \node at (1.70,9.80) {left context};
+  \node at (6.60,9.80) {owned core};
+  \node at (11.50,9.80) {right context};
+  \node[anchor=west] at (.75,9.15)
+    {Context is read again; only record positions in the core are retained.};
+
+  \node[anchor=west,font=\bfseries] at (.35,8.52)
+    {(b) GPU tiles inside one uploaded segment};
+  \draw[fill=blue!5] (.75,7.60) rectangle (4.35,8.22);
+  \draw[fill=orange!9] (4.35,7.60) rectangle (7.95,8.22);
+  \draw[fill=blue!5] (7.95,7.60) rectangle (11.55,8.22);
+  \node at (2.55,7.91) {tile 0 owns these triggers};
+  \node at (6.15,7.91) {tile 1 owns these triggers};
+  \node at (9.75,7.91) {tile 2 owns these triggers};
+  \node at (12.00,7.91) {$\cdots$};
+  \draw[fill=gray!14] (2.80,6.35) rectangle (4.35,7.00);
+  \draw[fill=orange!9] (4.35,6.35) rectangle (7.95,7.00);
+  \node at (3.58,6.68) {left replay};
+  \node at (6.15,6.68) {tile 1 owned interval};
+  \draw[-{Latex[length=1.8mm]},thick]
+    (2.90,6.05) -- (7.85,6.05)
+    node[midway,below] {one invocation processes these positions in order};
+  \node[anchor=west,align=left,text width=4.15cm] at (8.35,6.67)
+    {Other tile invocations run concurrently.\\Replay events are not emitted.};
+
+  \node[anchor=west,font=\bfseries] at (.35,4.95)
+    {(c) One tile invocation, $w=4$};
+  \node at (.92,3.85) {$\cdots$};
+  \foreach \x/\v/\sty in {
+      1.50/2/mincell,2.25/7/replaycell,3.00/6/replaycell,
+      3.75/5/nextmin,4.50/9/hashcell,5.25/4/hashcell,6.00/3/hashcell}
+    \node[\sty] at (\x,3.85) {\v};
+  \draw[very thick] (3.38,3.45) -- (3.38,4.25);
+  \node[gray!70!black] at (2.25,3.45) {replay};
+  \node[orange!85!black] at (4.88,3.45) {owned triggers};
+  \draw[blue!70!black,thick]
+    (1.89,4.25) -- (1.89,4.42) -- (4.86,4.42) -- (4.86,4.25);
+  \node[blue!70!black] at (3.38,4.65)
+    {next window: 2 leaves, so rescan and select 5};
+  \draw[orange!85!black,thick]
+    (1.14,3.43) -- (1.14,3.24) -- (4.11,3.24) -- (4.11,3.43);
+  \node[orange!85!black] at (2.63,3.00)
+    {first owned window: minimum 2};
+  \node[draw,anchor=west,align=left,text width=5.15cm,
+        minimum height=1.68cm,inner sep=5pt] at (7.00,3.70)
+    {At each base, the invocation:\\
+     1. rolls and hashes the canonical $k$-mer;\\
+     2. pushes it into the $w$-slot ring;\\
+     3. compares it with the saved minimum;\\
+     4. rescans the ring only on expiry.};
+
+  \node[anchor=west,font=\bfseries] at (.35,1.80)
+    {(d) Compact output is formed in three logical stages};
+  \node[stage] at (1.65,.90) {count traversal\\one count per tile};
+  \node[stage] at (4.65,.90) {exclusive scan\\one offset per tile};
+  \node[stage] at (7.65,.90) {emit traversal\\same tile algorithm};
+  \node[stage,minimum width=2.75cm] at (10.95,.90)
+    {disjoint output ranges\\in tile order};
+  \draw[-{Latex[length=1.8mm]},thick] (2.92,.90) -- (3.38,.90);
+  \draw[-{Latex[length=1.8mm]},thick] (5.92,.90) -- (6.38,.90);
+  \draw[-{Latex[length=1.8mm]},thick] (8.92,.90) -- (9.48,.90);
+\end{tikzpicture}
+\caption{How the Vulkan minimizer sketch is partitioned and evaluated.  A
+large input may first be divided into memory segments with overlapping
+context.  Within an uploaded segment, each GPU invocation owns a tile and
+replays left context before reaching its owned trigger positions.  The
+window minimum inside the invocation uses a circular buffer and rescan.  A
+count pass and prefix scan assign exact output intervals before the same tile
+traversal emits records.}
+\label{fig:extra-vulkan-sketch}
+\end{figure}
+
+The event count is not known before the state machine runs: a new minimum, an
+expired minimum, or an equal-hash case can produce an event.  The compact GPU
+route therefore first runs every tile in count mode.  An exclusive prefix
+scan turns the tile counts into output offsets.  The same tile traversal then
+runs in emit mode, and each tile writes only to its assigned interval.  The
+second traversal repeats hashing and minimum selection; it does not reuse a
+stored list of all candidate hashes.
+
+This Vulkan algorithm differs substantially from the SIMD two-stack ntHash
+algorithm.
+
+\begin{itemize}
+  \item \textbf{Hash.}  The SIMD method rolls ntHash in each lane.  The Vulkan
+        method rolls the forward and reverse-complement two-bit words and
+        applies the minimap-style integer scrambling function.
+  \item \textbf{Window minimum.}  The SIMD method combines block prefix and
+        suffix minima on a fixed schedule.  The Vulkan method saves one
+        minimum and performs a data-dependent $O(w)$ rescan when it expires.
+  \item \textbf{Parallel unit.}  A SIMD register advances several long chunks
+        in lock-step.  A GPU invocation advances one tile serially; parallelism
+        comes from scheduling many tile invocations.
+  \item \textbf{Boundaries and output.}  The SIMD method overlaps chunks so
+        every complete window belongs to a chunk, then transposes and
+        deduplicates per-window positions.  The Vulkan method reconstructs
+        state with left replay, owns events by trigger position, and uses
+        count--scan--emit to give tiles non-overlapping output ranges.
+\end{itemize}
+
+\section{Current BioSeqDB minimizer pipeline}
+\label{sec:current-minimizer-pipeline}
+
+\subsection{Configured CPU algorithms}
+\label{sec:configured-cpu-minimizers}
+
+The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
+minimizer implementation.  Its default value is \texttt{scalar}.  Table~\ref{tab:current-cpu-minimizers}
+maps the four CPU values to the algorithm families described earlier.  The
+setting name does not always name the hash used by the current code.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{.37\linewidth}X@{}}
+    \toprule
+    \textbf{Setting value} & \textbf{Current CPU route} \\
+    \midrule
+    \texttt{scalar}
+      & Scalar rescan with the minimap2 integer hash. \\
+    \texttt{simd\_minimap2\_reference}
+      & A1 with the minimap2 integer hash for DNA4.  Other alphabets use
+        scalar rescan. \\
+    \texttt{bounded\_nthash\_simd}
+      & A2 with 32-bit ntHash.  The exposed route is limited to DNA4 with
+        $k=15$ and $w=10$. \\
+    \texttt{two\_stack\_nthash}
+      & Normally A3 chronological SIMD with the minimap2 integer hash.  For a
+        whole DNA4 sequence already resident in 32-bit packed words, dispatch
+        uses A2 when $k=15$, $w=10$, and the output record is 64 bits.  It
+        stores the same hash. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{CPU minimizer implementations exposed by the PostgreSQL setting.}
+  \label{tab:current-cpu-minimizers}
+\end{table}
+
+\subsection{Divergence estimation from chain coverage}
+\label{sec:current-divergence}
+
+Divergence estimation is optional postprocessing after chaining.  For each
+region, it follows the chain from its first forward-query position until an
+anchor position has no query minimizer.  It compares the number of anchors in
+that leading run with the number of query minimizer records covered by the
+run.  Duplicate records at one position are counted separately.  Hashes are
+never compared.
+
+A prefix-count array makes membership checks and interval counts constant-time.
+The difference between adjacent entries shows whether a position contains a
+query minimizer.  The
+difference between entries at the two ends of an interval gives the number of
+records in that interval.  This avoids sorting the positions or searching the
+query minimizer list once per anchor.
+
+Algorithm~\ref{alg:current-divergence} uses \textsc{ForwardPositions}, a lazy
+iterator in ascending forward-query order.  Region orientation determines
+whether chain anchors are visited in ordinary or reverse order.  For an
+anchor flagged as reverse, with encoded query position $y$ and span $s$, its
+forward query position is $q-1-(y+1-s)$.  A forward anchor keeps $y$.
+
+\begin{algorithm}[H]
+\caption{Divergence from query minimizer positions}
+\label{alg:current-divergence}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require regions $\mathcal R$, chain anchors $A$, and query minimizers $Q$
+  \Require query length $q$, target length $t$, and $k$-mer length $k$
+  \If{$Q$ is empty}
+    \State \Return
+  \EndIf
+  \State $C[0\ldots q]\gets 0$
+  \ForAll{$x\in Q$ with $0\leq x.\operatorname{last\_pos}\leq q$}
+    \State $C[x.\operatorname{last\_pos}]\gets
+           C[x.\operatorname{last\_pos}]+1$
+  \EndFor
+  \State $P[0\ldots q+1]\gets 0$
+  \For{$i\gets 0$ \textbf{to} $q$}
+    \State $P[i+1]\gets P[i]+C[i]$
+  \EndFor
+  \State Define \Call{Present}{$p$} as
+         $0\leq p\leq q \land P[p+1]>P[p]$
+  \ForAll{$r\in\mathcal R$}
+    \State $r.\operatorname{divergence}\gets -1$
+    \If{$r.\operatorname{seed\_count}\leq 0$}
+      \State \textbf{continue}
+    \EndIf
+    \State $F\gets\Call{ForwardPositions}{r,A,q}$
+    \State $a\gets\Call{Next}{F}$
+    \If{not \Call{Present}{$a$}}
+      \State \textbf{continue}
+    \EndIf
+    \State $m\gets 1$
+    \State $b\gets a$
+    \ForAll{$p$ remaining in $F$}
+      \If{not \Call{Present}{$p$}}
+        \State \textbf{break}
+      \EndIf
+      \State $m\gets m+1,\quad b\gets p$
+    \EndFor
+    \State $n\gets P[b+1]-P[a]$
+    \If{$r.\operatorname{query\_start}>k \land
+         r.\operatorname{ref\_start}>k$}
+      \State $n\gets n+1$
+    \EndIf
+    \If{$q-r.\operatorname{query\_start}>k \land
+         t-r.\operatorname{ref\_end}>k$}
+      \State $n\gets n+1$
+    \EndIf
+    \If{$m\geq n$}
+      \State $r.\operatorname{divergence}\gets 0$
+    \Else
+      \State $r.\operatorname{divergence}\gets 1-(m/n)^{1/k}$
+    \EndIf
+  \EndFor
+\end{algorithmic}
+\end{algorithm}
+
+The two increments are edge corrections, and both comparisons in each branch
+are strict.  The right-edge branch uses the region's query start, not its query
+end.  The earlier V13 prototype uses a different equation.  The implemented
+estimate is the conditional calculation in Algorithm~\ref{alg:current-divergence}.
+
+The estimate is stored as region metadata.  It is not used to reject a
+region, change mapping quality, or skip base alignment.  Building the prefix
+array takes $O(q+|Q|)$ time and $O(q)$ memory.  Across all regions, the
+remaining work is $O(|\mathcal R|+\sum\text{anchors visited})$.
+
+\subsection{Tiled scalar rescan and G3SA's minimap2 kernel}
+\label{sec:vulkan-minimizer-sketch}
+\label{sec:g3sa-minimap2-sketch-comparison}
+
+In the earlier taxonomy, the Vulkan minimum calculation is an A1 variant
+without distant SIMD lanes.
+
+Whole-query input may use one uploaded interval.  Grid striding may give an
+invocation another tile after it finishes the current one.  DNA4 and DNA5 map
+ranks to two-bit codes.  The generic alphabet path uses its configured number
+of bits per character.  The comparison below uses the compact minimizer-word
+route.
+
+Both GPU implementations apply the minimap2 integer hash.  Their parallel
+units differ.  G3SA gives neighboring window starts to neighboring threads,
+as in A3, while BioSeqDB gives one tile to an invocation.
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}
+      >{\raggedright\arraybackslash}p{.19\linewidth}
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}X@{}}
+    \toprule
+    \textbf{Aspect} & \textbf{BioSeqDB compact Vulkan route}
+                    & \textbf{G3SA minimap2 CUDA} \\
+    \midrule
+    Work unit
+      & One invocation walks a tile in base order and may later receive
+        another tile by grid striding.
+      & One 32-thread block advances through a read.  In each chunk, four
+        rounds cover 128 adjacent window starts.  Grid striding may then give
+        the block another read. \\
+    Candidate construction
+      & One rolling update forms the next candidate.
+      & The 32 threads each rebuild five $k$-mers from input characters, then
+        place 160 hash-and-position records in shared memory. \\
+    Window minimum
+      & Carries the window state from one base to the next.
+      & Each thread scans $w$ shared candidates for every assigned window. \\
+    Boundary input
+      & Uses at most $k+w+1$ earlier bases rather than a fixed overlap.
+      & Loads 160 characters for 128 new starts, giving a fixed 32-character
+        overlap.  It covers every last window only when $k+w\leq 34$. \\
+    Output space
+      & The compact route computes exact output intervals for the tiles.
+      & Thread zero handles changes and tied minima, then writes the read's
+        minimizers at its padded input offset.  The output allocation has one
+        record slot per byte of batch capacity. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Minimizer extraction in the two GPU implementations.  The G3SA
+  column covers only its minimap2 path.}
+  \label{tab:g3sa-bioseq-vulkan-sketch}
+\end{table}
+
+For BioSeqDB, let $N$ be the owned base steps, $T$ the tile count, $B$ the
+owned and replayed steps, and $R$ the expiry rescans.  Since
+$B\leq N+T(k+w+1)$, one traversal costs $O(B+Rw)$ and at worst $O(Bw)$.
+Count and emit change this only by a constant factor.  For $M$ G3SA window
+starts, rebuilding candidates and scanning windows costs $O(Mk+Mw)$.
+
+The preset table includes $k=w=19$.  This needs 36 look-ahead characters,
+four more than the fixed overlap.  Near ambiguous bases and palindromes, an
+inner-loop \texttt{continue} can leave an incomplete candidate or old strand
+value to be hashed.  The code also accesses beyond its 128-record shared
+output buffer during initialization and emission.
