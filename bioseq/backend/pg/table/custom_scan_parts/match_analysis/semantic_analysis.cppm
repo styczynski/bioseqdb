@@ -3,10 +3,7 @@
  * @brief Counts finalized base, descendant, and ancestor match owners.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,63 +24,16 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_match_analysis_semantic_analysis;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-
-import :custom_scan_match_finalization;
-
-import :custom_scan_match_analysis_carrier_validation;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_match_finalization_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_match_analysis_carrier_validation_contracts;
+export import :custom_scan_match_analysis_semantic_analysis_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -464,12 +414,6 @@ export {
         return count;
     }
 
-    /** @brief Separates finalized BatchJoin and base-scan owner counts. */
-    struct finalized_match_owner_site_counts {
-        std::size_t batch = 0u;
-        std::size_t base = 0u;
-    };
-
     /** @brief Counts finalized owner classes in the direct child subtrees of a plan. */
     [[nodiscard]] finalized_match_owner_site_counts finalized_child_match_owner_site_counts(
         Plan* plan, Node* identity, const bioseq_stub_oids& oids) {
@@ -520,36 +464,6 @@ export {
         }
         return counts;
     }
-
-    /** @brief Adds owner counts while saturating at the ambiguous value two. */
-    [[nodiscard]] constexpr std::size_t
-    saturated_match_owner_site_count_add(std::size_t left, std::size_t right) noexcept {
-        return left > 1u || right > 1u || left + right > 1u ? std::size_t{2u} : left + right;
-    }
-
-    /** @brief Checks that a dummy helper has exactly one current or descendant owner. */
-    [[nodiscard]] constexpr bool
-    dummy_match_helper_has_unique_finalized_owner(std::size_t descendant_matches,
-                                                  std::size_t current_parent_matches) noexcept {
-        return saturated_match_owner_site_count_add(descendant_matches, current_parent_matches) ==
-               1u;
-    }
-
-    static_assert(dummy_match_helper_has_unique_finalized_owner(0u, 1u));
-    static_assert(!dummy_match_helper_has_unique_finalized_owner(1u, 1u));
-    static_assert(!dummy_match_helper_has_unique_finalized_owner(0u, 0u));
-    static_assert(!dummy_match_helper_has_unique_finalized_owner(2u, 0u));
-
-    /** @brief Checks that a dummy helper is supplied only by one ancestor owner. */
-    [[nodiscard]] constexpr bool
-    dummy_match_helper_is_unique_ancestor_carrier(std::size_t local_base_matches,
-                                                  std::size_t ancestor_matches) noexcept {
-        return local_base_matches == 0u && ancestor_matches == 1u;
-    }
-
-    static_assert(dummy_match_helper_is_unique_ancestor_carrier(0u, 1u));
-    static_assert(!dummy_match_helper_is_unique_ancestor_carrier(1u, 0u));
-    static_assert(!dummy_match_helper_is_unique_ancestor_carrier(0u, 2u));
 
     /** @brief Resolves and validates the finalization record for an ancestor BatchJoin scan. */
     [[nodiscard]] match_owner_finalization*

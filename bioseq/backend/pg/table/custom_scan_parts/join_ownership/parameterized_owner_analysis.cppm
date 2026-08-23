@@ -3,10 +3,7 @@
  * @brief Audits exact parameterized mmsearch owners and their planner ABI.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,94 +24,16 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_ownership_parameterized_owner_analysis;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-
-import :custom_scan_join_ownership_carrier_lineage;
-import :custom_scan_join_ownership_semantic_admission;
-import :custom_scan_join_ownership_descendant_neutralization;
+import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_oid_expression_support_expression_analysis;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_path_owner_contracts;
+export import :custom_scan_join_ownership_parameterized_owner_analysis_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Records exact owner matches and structural rejection diagnostics for one path tree. */
-    struct exact_parameterized_bmo_ownership {
-        std::size_t matches = 0u;
-        bool invalid = false;
-        std::uint32_t rejection_mask = 0u;
-        std::size_t wrapper_owns_expected = 0u;
-        std::uint32_t wrapper_method_mask = 0u;
-        std::size_t wrapper_restriction_count = 0u;
-        std::size_t wrapper_child_count = 0u;
-        std::size_t wrapper_version = 0u;
-        std::size_t wrapper_pointer_matches = 0u;
-        std::size_t wrapper_serial_matches = 0u;
-        std::size_t wrapper_clause_matches = 0u;
-        std::size_t expected_rinfo_serial = 0u;
-        std::size_t wrapper_rinfo_serial = 0u;
-        std::size_t expected_target_varno = 0u;
-        std::size_t expected_query_varno = 0u;
-        std::size_t wrapper_private_target_varno = 0u;
-        std::size_t wrapper_private_query_varno = 0u;
-        std::size_t wrapper_private_target_equal = 0u;
-        std::size_t wrapper_private_query_equal = 0u;
-        std::size_t wrapper_owner0_target_varno = 0u;
-        std::size_t wrapper_owner0_query_varno = 0u;
-        std::size_t wrapper_owner1_target_varno = 0u;
-        std::size_t wrapper_owner1_query_varno = 0u;
-        std::uint64_t wrapper_parent_relids_low = 0u;
-        std::uint64_t wrapper_child0_relids_low = 0u;
-        std::uint64_t wrapper_child1_relids_low = 0u;
-    };
-
     /** @brief Encodes relation identifiers below 64 into a compact diagnostic mask. */
     [[nodiscard]] std::uint64_t exact_bmo_audit_relids_low(Relids relids) noexcept {
         std::uint64_t mask = 0u;
@@ -161,20 +80,6 @@ export {
                equal(candidate->orclause, expected->orclause) &&
                equal(candidate->clause, expected->clause);
     }
-
-    /** @brief Bit flags describing why exact parameterized owner analysis failed. */
-    enum exact_parameterized_bmo_owner_rejection : std::uint32_t {
-        k_exact_bmo_unknown_custom_path = 1u << 0,
-        k_exact_bmo_base_scan_has_children = 1u << 1,
-        k_exact_bmo_owner_abi = 1u << 2,
-        k_exact_bmo_restriction_multiplicity = 1u << 3,
-        k_exact_bmo_missing_param_info = 1u << 4,
-        k_exact_bmo_missing_ppi_clause = 1u << 5,
-        k_exact_bmo_nested_join_clause = 1u << 6,
-        k_exact_bmo_unknown_core_path = 1u << 7,
-        k_exact_bmo_known_wrapper_abi = 1u << 8,
-        k_exact_bmo_known_wrapper_owns_clause = 1u << 9,
-    };
 
     /** @brief Marks owner analysis invalid and records one rejection reason. */
     inline void reject_exact_parameterized_bmo_owner(
@@ -290,7 +195,7 @@ export {
                                               Path* path,
                                               RestrictInfo* restriction,
                                               exact_parameterized_bmo_ownership& ownership,
-                                              const bool admit_known_wrapper_owner = false) {
+                                              const bool admit_known_wrapper_owner) {
         if (root == nullptr || path == nullptr || restriction == nullptr || ownership.invalid)
             return;
         check_stack_depth();

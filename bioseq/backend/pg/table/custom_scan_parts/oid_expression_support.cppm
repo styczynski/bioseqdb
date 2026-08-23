@@ -4,9 +4,8 @@
  */
 export module bioseq.postgres.table:custom_scan_oid_expression_support;
 
-import :custom_scan_runtime_support;
-
-export import :custom_scan_oid_expression_support_oid_catalog;
-export import :custom_scan_oid_expression_support_expression_analysis;
-export import :custom_scan_oid_expression_support_restriction_ownership;
-export import :custom_scan_oid_expression_support_semantic_analysis;
+export import :custom_scan_oid_expression_support_oid_catalog_contracts;
+export import :custom_scan_oid_expression_support_expression_analysis_contracts;
+export import :custom_scan_oid_expression_support_restriction_ownership_contracts;
+export import :custom_scan_oid_expression_support_semantic_analysis_contracts;
+export import :custom_scan_planner_aligner_contracts;

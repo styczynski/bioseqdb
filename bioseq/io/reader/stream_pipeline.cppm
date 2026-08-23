@@ -16,7 +16,7 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.io.reader:stream_pipeline;
+export module bioseq.io.reader:stream_pipeline;
 
 import :types;
 import bioseq.common.logging;

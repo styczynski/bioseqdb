@@ -4,79 +4,41 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
+#include "miscadmin.h"
+}
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:persisted_native_batch;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.persisted_native_batch;
+
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
-import :scanner_row;
-import bioseq.highway.dispatch_contract;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.minimizer_index;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -86,7 +48,15 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  * the compile-time generic-row continuation only when the native batch did
  * not produce the complete result.
  */
-template <class p_sequence, class p_pool, class p_generic_rows>
+template <class p_sequence,
+          class p_pool,
+          class p_generic_rows,
+          class p_materialize_target,
+          class p_same_target_locator,
+          class p_hash_major_identity_valid,
+          class p_fragment_identity_valid,
+          class p_with_pg_target,
+          class p_attach_query_stats>
 void process_persisted_native_batch(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -106,6 +76,12 @@ void process_persisted_native_batch(
     bool& cached_query_minimizer_stats_accounted,
     p_pool& pool,
     p_generic_rows& generic_rows,
+    const p_materialize_target& materialize_target,
+    const p_same_target_locator& same_target_locator,
+    const p_hash_major_identity_valid& hash_major_identity_valid,
+    const p_fragment_identity_valid& fragment_identity_valid,
+    const p_with_pg_target& with_pg_target,
+    const p_attach_query_stats& attach_query_stats,
     std::map<int32_t, std::vector<match_result>>& results) {
     const bool may_parallel_persisted_native =
         persisted_required && use_scanner_pg && scanner_pg_ctx != nullptr &&
@@ -152,7 +128,7 @@ void process_persisted_native_batch(
             }
             if (shared_locator == nullptr) {
                 shared_locator = &*locator;
-            } else if (!same_dispatch_target_locator(*shared_locator, *locator)) {
+            } else if (!same_target_locator(*shared_locator, *locator)) {
                 batch_identity_valid = false;
                 break;
             }
@@ -196,15 +172,15 @@ void process_persisted_native_batch(
 
         batch_identity_valid =
             batch_identity_valid && shared_locator != nullptr && native_group != nullptr &&
-            (hash_major_parallel_reader_identity_valid(*native_group, shared_target_bp_size) ||
-             fragment_parallel_reader_identity_valid(*native_group, shared_target_bp_size));
+            (hash_major_identity_valid(*native_group, shared_target_bp_size) ||
+             fragment_identity_valid(*native_group, shared_target_bp_size));
         if (batch_identity_valid) {
             const std::size_t letters_per_unit = facade_letters_per_unit;
             const std::uint64_t target_remainder = shared_target_bp_size % letters_per_unit;
             const std::size_t padding = static_cast<std::size_t>(
                 target_remainder == 0u ? 0u : letters_per_unit - target_remainder);
             bool native_batch_completed = false;
-            with_source_provider_pg_target<p_sequence>(
+            with_pg_target(
                 *scanner_pg_ctx,
                 *shared_locator,
                 alphabet_code,
@@ -228,8 +204,10 @@ void process_persisted_native_batch(
                  &query_ids,
                  &results,
                  &native_batch_completed,
+                 &materialize_target,
+                 &attach_query_stats,
                  storage_unit_byte_width](auto fragmented_target_view, pg_sequence_read_session*) {
-                    auto resident = try_materialize_target_for_segment_workers(
+                    auto resident = materialize_target(
                         fragmented_target_view,
                         storage_unit_byte_width,
                         static_cast<std::uint64_t>(shared_target_rowno));
@@ -557,7 +535,7 @@ void process_persisted_native_batch(
                                 native_group->persisted_reader_load_host_wall_ns);
                         }
                         for (std::size_t row = 0; row < batch_size; ++row) {
-                            attach_retained_hash_major_query_stats(
+                            attach_query_stats(
                                 native_collections[row],
                                 retained_query_sketches[row]->execution_stats);
                             scanner_pg_ctx->target_index_sources[row] =

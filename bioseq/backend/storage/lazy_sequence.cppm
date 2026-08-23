@@ -4,7 +4,7 @@
  */
 export module bioseq.storage.lazy_sequence;
 
-export import :view_contract;
+export import bioseq.storage.lazy_sequence_view;
 export import :owners;
 export import :adapters;
 export import :transforms;

@@ -4,34 +4,20 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <concepts>
-#include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <exception>
 #include <expected>
-#include <iterator>
-#include <libassert/assert.hpp>
-#include <limits>
 #include <memory>
 #include <new>
-#include <optional>
 #include <span>
-#include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 export module bioseq.indexing.minimizer_sequence:read_assembly_contract;
 
-import :admitted_runs;
-import :bucket_codec;
-import :replay_build;
+export import bioseq.indexing.minimizer_sequence.generation;
+import bioseq.indexing.minimizer_sequence.admitted_runs;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.hashing;
 import bioseq.common.seqan_adapter;
@@ -48,8 +34,9 @@ import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.storage.lazy_sequence;
+import bioseq.storage.lazy_sequence_view;
 import bioseq.storage.size;
 
 export namespace bioseq::indexing {
@@ -59,7 +46,6 @@ using bioseq::minimizers::minimizer_sketch_backend;
 using bioseq::minimizers::minimizer_sketch_backend_name;
 using bioseq::minimizers::sketch_collector;
 using bioseq::simd::collect_minimizers_view;
-using bioseq::storage::lazy_sequence;
 using bioseq::storage::sequence_size_t;
 
 template <class p_storage> struct direct_minimizer_bucket_index {
@@ -72,6 +58,7 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     class generation_spill_result {
       private:
         friend struct direct_minimizer_bucket_index<p_storage>;
+        template <class, class> friend struct direct_minimizer_generation_replay;
 
         std::uint64_t run_count_ = 0;
         exact_simd_index_execution_stats exact_simd_stats_{};
@@ -165,7 +152,12 @@ template <class p_storage> struct direct_minimizer_bucket_index {
     make_generation_collection_range(bioseq::storage::lazy_sequence_view<p_alphabet> sequence,
                                      std::uint64_t core_lo,
                                      std::uint64_t core_hi,
-                                     std::uint64_t halo_bp = 10u + 15u - 2u) noexcept;
+                                     std::uint64_t halo_bp = 10u + 15u - 2u) noexcept {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::make_generation_collection_range(
+            sequence, core_lo, core_hi, halo_bp);
+    }
 
     template <sequence_alphabet p_alphabet>
     [[nodiscard]] static std::expected<exact_simd_index_execution_stats,
@@ -180,7 +172,21 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         std::vector<detail::sorted_pair_t>& output,
         minimizer_sequence_generation_execution_receipt* execution_receipt = nullptr,
         bool allow_packed_bounded = false,
-        direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr);
+        direct_minimizer_bucket_build_stats* scalar_build_stats = nullptr) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::collect_generation_core_run(
+            sequence,
+            alphabet_code,
+            backend,
+            kernels,
+            range,
+            collector,
+            output,
+            execution_receipt,
+            allow_packed_bounded,
+            scalar_build_stats);
+    }
 
     /// Prepare external runs serially within the bounded production budget. Each source core is
     /// collected and spilled before the next is allocated. The returned direct minimizer-bucket
@@ -196,13 +202,30 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         std::uint64_t core_span_bp = 0,
         std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp,
         minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr,
-        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code);
+        std::uint8_t alphabet_code = bioseq::minimizers::k_unbound_packed_alphabet_code) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::spill_generation_replay_runs_serial(
+            storage,
+            sequence,
+            backend,
+            kernels,
+            core_span_bp,
+            position_segment_span_bp,
+            execution_receipt_out,
+            alphabet_code);
+    }
 
     [[nodiscard]] static auto make_generation_replay_producer(
         p_storage& storage,
         std::uint64_t target_length,
         generation_spill_result&& spill,
-        std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp);
+        std::uint64_t position_segment_span_bp = k_minimizer_preferred_segment_span_bp) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::make_generation_replay_producer(
+            storage, target_length, std::move(spill), position_segment_span_bp);
+    }
 
     /// Encode grouped-SoA rows from a sealed direct minimizer-bucket spill. The layout
     /// consumes the sealed direct minimizer-bucket spill without conversion.
@@ -215,7 +238,12 @@ template <class p_storage> struct direct_minimizer_bucket_index {
         generation_spill_result&& spill,
         const grouped_soa_generation_options& options,
         const grouped_soa_generation_limits& limits = {},
-        minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr);
+        minimizer_sequence_generation_execution_receipt* execution_receipt_out = nullptr) {
+        return direct_minimizer_generation_replay<
+            p_storage,
+            direct_minimizer_bucket_index<p_storage>>::encode_persisted_generation(
+            storage, sink, std::move(spill), options, limits, execution_receipt_out);
+    }
 
     template <sequence_alphabet p_alphabet>
     static void

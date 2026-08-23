@@ -4,134 +4,52 @@
  */
 module;
 #include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
-
 extern "C" {
 #include "access/heapam.h"
 #include "access/nbtree.h"
-#include "access/parallel.h"
 #include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
 #include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
 #include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
-
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
 }
 
+// Clang 22 must see these textual libc++ declarations before deserializing
+// header-backed dependency BMIs; importing std first makes aligned operator new
+// appear as two unrelated candidates during container allocation.
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
 #include <limits>
 #include <map>
-#include <memory>
-#include <new>
 #include <optional>
-#include <queue>
 #include <span>
 #include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_storage_io;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
 import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
 import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.postgres.storage.indexing.residency;
 import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
 import :fragment_image;
 import :generation_writer;
 import :generation_session;
 import :hash_major_writer;
-import :hash_major_session;
-export import :storage_adapter_contract;
-export import :fragment_storage_lifecycle;
-export import :fragment_storage_catalog;
+export import :fragment_storage_contract;
 export namespace bioseq::storage::indexing {
 
 /**
  * @brief Ensures the handle-owned decode buffer can hold the requested units.
  * @param[in] units Number of 64-bit units required.
  */
-inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
+void fragment_index_storage::ensure_buffer_(std::size_t units) const {
     if (decoded_units_ >= units && decoded_ != nullptr)
         return;
     if (own_mctx_ == nullptr) {
@@ -161,7 +79,7 @@ inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
  * @param[in] units Minimum number of 64-bit units required.
  * @return Mutable buffer valid until the next resize or handle cleanup.
  */
-[[nodiscard]] inline std::int64_t* fragment_index_storage::scratch_buffer_(std::size_t units) {
+[[nodiscard]] std::int64_t* fragment_index_storage::scratch_buffer_(std::size_t units) {
     const std::size_t required_units = std::max<std::size_t>(units, 1u);
     if (scratch_units_ >= required_units && scratch_ != nullptr) {
         return scratch_;
@@ -190,7 +108,7 @@ inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
 }
 
 /// @brief Returns the allocated write scratch capacity in bytes.
-[[nodiscard]] inline std::size_t fragment_index_storage::scratch_buffer_bytes_() const {
+[[nodiscard]] std::size_t fragment_index_storage::scratch_buffer_bytes_() const {
     return scratch_units_ * sizeof(std::int64_t);
 }
 
@@ -200,7 +118,7 @@ inline void fragment_index_storage::ensure_buffer_(std::size_t units) const {
  * @param[in] chunk_no Zero-based chunk number within the stream.
  * @return Complete physical and logical identity for the cached chunk.
  */
-[[nodiscard]] inline index_chunk_key
+[[nodiscard]] index_chunk_key
 fragment_index_storage::chunk_cache_key_(index_sub_key_t sub_key,
                                          std::size_t chunk_no) const noexcept {
     return index_chunk_key{
@@ -226,10 +144,10 @@ fragment_index_storage::chunk_cache_key_(index_sub_key_t sub_key,
  * @param[in] payload Serialized bytes copied by the cache on admission.
  * @param[in] written_in_current_xact Whether the row was written by this transaction.
  */
-inline void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
-                                                        std::size_t chunk_no,
-                                                        std::span<const char> payload,
-                                                        bool written_in_current_xact) const {
+void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
+                                                 std::size_t chunk_no,
+                                                 std::span<const char> payload,
+                                                 bool written_in_current_xact) const {
     (void)store_cached_chunk(chunk_cache_key_(sub_key, chunk_no), payload, written_in_current_xact);
 }
 
@@ -243,8 +161,8 @@ inline void fragment_index_storage::admit_cached_chunk_(index_sub_key_t sub_key,
  * @param[in] sub_key Logical stream within the handle's query key.
  * @param[in] chunk_no Zero-based chunk number within the stream.
  */
-inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
-                                                            std::size_t chunk_no) const {
+void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_key,
+                                                     std::size_t chunk_no) const {
     const index_chunk_key key = chunk_cache_key_(sub_key, chunk_no);
     if (auto cached = lookup_cached_chunk(key)) {
         const std::size_t units = (cached->size + sizeof(std::int64_t) - 1) / sizeof(std::int64_t);
@@ -362,7 +280,7 @@ inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_
  * @brief Counts distinct data sub-keys stored for the handle's query key.
  * @return Number of distinct non-temporary sub-keys, or zero when the relation is absent.
  */
-[[nodiscard]] inline std::size_t fragment_index_storage::number_of_sub_keys() const {
+[[nodiscard]] std::size_t fragment_index_storage::number_of_sub_keys() const {
     fragment_read_resources resources{AccessShareLock};
     try {
         resources.relation = open_index_relation_(false, AccessShareLock);
@@ -433,8 +351,7 @@ inline void fragment_index_storage::load_chunk_into_buffer_(index_sub_key_t sub_
  * @param[in] sub_key Logical stream within the handle's query key.
  * @return Number of matching rows, or zero when the relation is absent.
  */
-[[nodiscard]] inline std::size_t
-fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
+[[nodiscard]] std::size_t fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
     fragment_read_resources resources{AccessShareLock};
     try {
         resources.relation = open_index_relation_(false, AccessShareLock);
@@ -482,8 +399,8 @@ fragment_index_storage::number_of_chunks(index_sub_key_t sub_key) const {
  * @param[in] chunk_no Zero-based chunk number within the stream.
  * @return Payload size in bytes, or zero when the relation or row is absent.
  */
-[[nodiscard]] inline std::size_t
-fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key, std::size_t chunk_no) const {
+[[nodiscard]] std::size_t fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key,
+                                                                  std::size_t chunk_no) const {
     if (chunk_no > static_cast<std::size_t>((std::numeric_limits<std::int32_t>::max)())) {
         index_error("fragment chunk number exceeds PostgreSQL INT range");
     }
@@ -558,7 +475,7 @@ fragment_index_storage::chunk_byte_size(index_sub_key_t sub_key, std::size_t chu
  * @param[in] sub_key Logical stream to resize.
  * @param[in] bytes_count Total serialized payload size in bytes.
  */
-inline void fragment_index_storage::resize(index_sub_key_t sub_key, std::size_t bytes_count) {
+void fragment_index_storage::resize(index_sub_key_t sub_key, std::size_t bytes_count) {
     const std::size_t n =
         bytes_count == 0 ? 1 : 1 + (bytes_count - 1) / k_max_index_chunk_size_bytes;
     std::vector<std::size_t> plan(n);
@@ -576,8 +493,8 @@ inline void fragment_index_storage::resize(index_sub_key_t sub_key, std::size_t 
  * @param[in] sub_key Logical stream to resize.
  * @param[in] per_chunk_bytes Payload size in bytes for each zero-based chunk.
  */
-inline void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
-                                                  std::span<const std::size_t> per_chunk_bytes) {
+void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
+                                           std::span<const std::size_t> per_chunk_bytes) {
     std::vector<std::size_t> plan(per_chunk_bytes.begin(), per_chunk_bytes.end());
     for (std::size_t bytes : plan) {
         if (bytes > k_max_index_chunk_size_bytes) {
@@ -592,7 +509,7 @@ inline void fragment_index_storage::resize_chunks(index_sub_key_t sub_key,
  * @param[in] sub_key Logical stream within the handle's query key.
  * @param[in] chunk_no Zero-based chunk number within the stream.
  */
-inline void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
+void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
     if (decoded_sub_ == sub_key && decoded_chunk_ == chunk_no) {
         return;
     }
@@ -609,12 +526,12 @@ inline void fragment_index_storage::prefetch_chunk(index_sub_key_t sub_key, std:
  * @param[in] chunk_bytes Declared payload size in bytes.
  * @param[in] payload Bytes copied into a new PostgreSQL `bytea` tuple.
  */
-inline void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& resources,
-                                                      std::uint64_t query_key,
-                                                      index_sub_key_t sub_key,
-                                                      std::size_t chunk_no,
-                                                      std::size_t chunk_bytes,
-                                                      std::span<const char> payload) {
+void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& resources,
+                                               std::uint64_t query_key,
+                                               index_sub_key_t sub_key,
+                                               std::size_t chunk_no,
+                                               std::size_t chunk_bytes,
+                                               std::span<const char> payload) {
     if (resources.relation == nullptr) {
         index_error("fragment write relation is missing");
     }
@@ -710,11 +627,11 @@ inline void fragment_index_storage::upsert_chunk_row_(fragment_write_resources& 
  * @param[in] payload Serialized bytes copied into PostgreSQL storage.
  * @param[in] written_in_current_xact Whether the row belongs to this transaction.
  */
-inline void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t query_key,
-                                                                   index_sub_key_t sub_key,
-                                                                   std::size_t chunk_no,
-                                                                   std::span<const char> payload,
-                                                                   bool written_in_current_xact) {
+void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t query_key,
+                                                            index_sub_key_t sub_key,
+                                                            std::size_t chunk_no,
+                                                            std::span<const char> payload,
+                                                            bool written_in_current_xact) {
     fragment_write_resources resources{RowExclusiveLock};
     try {
         resources.relation = open_index_relation_(true, RowExclusiveLock);
@@ -736,7 +653,7 @@ inline void fragment_index_storage::write_serialized_chunk_checked(std::uint64_t
  * @brief Deletes direct-fragment rows for the handle's query key.
  * @param[in] inclusive_sub_key_range Optional inclusive sub-key range, or no value for all rows.
  */
-inline void fragment_index_storage::delete_where_(
+void fragment_index_storage::delete_where_(
     std::optional<std::pair<index_sub_key_t, index_sub_key_t>> inclusive_sub_key_range) {
     if (inclusive_sub_key_range &&
         inclusive_sub_key_range->second < inclusive_sub_key_range->first) {
@@ -824,7 +741,7 @@ inline void fragment_index_storage::delete_where_(
 }
 
 /// @brief Deletes every direct-fragment row and invalidates the decode-buffer identity.
-inline void fragment_index_storage::clear_entity() {
+void fragment_index_storage::clear_entity() {
     delete_where_(std::nullopt);
     decoded_sub_ = k_directory_sub_key;
     decoded_chunk_ = (std::numeric_limits<std::size_t>::max)();
@@ -836,7 +753,7 @@ inline void fragment_index_storage::clear_entity() {
  * @param[in] lo First sub-key to delete.
  * @param[in] hi Last sub-key to delete.
  */
-inline void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_sub_key_t hi) {
+void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_sub_key_t hi) {
     delete_where_(std::pair{lo, hi});
 }
 
@@ -844,7 +761,7 @@ inline void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_s
  * @brief Computes the in-memory sorted-run budget for this handle.
  * @return Budget in bytes after the process and index-memory caps are applied.
  */
-[[nodiscard]] inline std::size_t fragment_index_storage::run_buffer_bytes() const {
+[[nodiscard]] std::size_t fragment_index_storage::run_buffer_bytes() const {
     if (run_buffer_override_bytes_ > 0)
         return run_buffer_override_bytes_;
     constexpr std::uint64_t k_floor = std::uint64_t{64} << 20;
@@ -861,7 +778,7 @@ inline void fragment_index_storage::discard_sub_keys(index_sub_key_t lo, index_s
 }
 
 /// @brief Returns the lazily constructed sorted-run store owned by this handle.
-[[nodiscard]] inline sorted_pair_run_store& fragment_index_storage::sorted_runs_ensure_() {
+[[nodiscard]] sorted_pair_run_store& fragment_index_storage::sorted_runs_ensure_() {
     if (!sorted_runs_.has_value()) {
         sorted_runs_.emplace();
     }

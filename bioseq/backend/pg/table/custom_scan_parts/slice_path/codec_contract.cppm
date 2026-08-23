@@ -3,79 +3,46 @@
  * @brief Owns SliceProject opcodes, codec fields, and cost estimates.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
-#include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
-
 extern "C" {
-#include "catalog/namespace.h"
-#include "catalog/pg_aggregate.h"
-#include "catalog/pg_language_d.h"
-#include "catalog/pg_proc.h"
-#include "commands/extension.h"
-#include "optimizer/appendinfo.h"
-#include "optimizer/planmain.h"
-#include "storage/dsm.h"
-#include "storage/shmem.h"
-#include "utils/inval.h"
-#include "utils/syscache.h"
+#include "postgres.h"
 
-#include "rewrite/rewriteManip.h"
+#include "catalog/pg_type_d.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodes.h"
+#include "nodes/parsenodes.h"
+#include "nodes/pathnodes.h"
+#include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
+#include "nodes/value.h"
+#include "optimizer/optimizer.h"
+#include "utils/errcodes.h"
 }
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <utility>
+#include <vector>
 
 export module bioseq.postgres.table:custom_scan_slice_path_codec_contract;
 
-import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
+import bioseq.postgres.types.compact_sequence.header_probe;
+import bioseq.postgres.types.compact_sequence.materialization_contract;
 import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
 
-import :custom_scan_support;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+export import :custom_scan_slice_path_expression_contract;
+export import :custom_scan_slice_path_cost_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -90,21 +57,6 @@ export {
      * CASE, NULL, STRICT, volatility and error semantics.  Every serialized value
      * is a PostgreSQL Node, so copy/equal/out/read and setrefs remain core-owned.
      * ====================================================================== */
-
-    /** @brief Opcode tag for one node in the lazy SliceProject expression tree. */
-    enum class slice_project_opcode : std::uint8_t {
-        source_expr = 1,
-        literal_expr = 2,
-        element = 3,
-        slice = 4,
-        concat = 5,
-        reverse = 6,
-        reverse_complement = 7,
-        length = 8,
-        cardinality = 9,
-        bridge = 10,
-        materialize = 11,
-    };
 
     /** @brief Magic integer written to the first SliceProject plan header field (BSP1). */
     inline constexpr int k_bioseq_slice_project_magic = 0x42535031; /* BSP1 */
@@ -261,128 +213,6 @@ export {
         return "unknown";
     }
 
-    /** @brief True when @p oid is a registered sequence concat function variant. */
-    [[nodiscard]] bool slice_project_concat_oid(Oid oid, const bioseq_stub_oids& oids) noexcept {
-        return oid == oids.seq_concat_oid || oid == oids.seq_array_cat_oid ||
-               oid == oids.seq_concat_text_oid || oid == oids.text_concat_seq_oid ||
-               oid == oids.seq_concat_varchar_oid || oid == oids.varchar_concat_seq_oid ||
-               oid == oids.seq_concat_text_array_oid || oid == oids.text_array_concat_seq_oid ||
-               oid == oids.seq_concat_letter_array_oid || oid == oids.letter_array_concat_seq_oid;
-    }
-
-    /** @brief Maps a FuncExpr to a slice opcode when it implements a known lazy operator. */
-    [[nodiscard]] std::optional<slice_project_opcode>
-    slice_project_function_opcode(FuncExpr* function, const bioseq_stub_oids& oids) noexcept {
-        if (function == nullptr)
-            return std::nullopt;
-        if (slice_project_concat_oid(function->funcid, oids)) {
-            return slice_project_opcode::concat;
-        }
-        if (function->funcid == oids.seq_reverse_oid) {
-            return slice_project_opcode::reverse;
-        }
-        if (function->funcid == oids.seq_reverse_complement_oid) {
-            return slice_project_opcode::reverse_complement;
-        }
-        if (function->funcid == oids.seq_len_oid || function->funcid == oids.seq_array_length_oid) {
-            return slice_project_opcode::length;
-        }
-        if (function->funcid == oids.seq_cardinality_oid) {
-            return slice_project_opcode::cardinality;
-        }
-        if (function->funcid == oids.seq_to_text_oid ||
-            function->funcid == oids.seq_to_varchar_oid ||
-            function->funcid == oids.seq_to_array_oid) {
-            return slice_project_opcode::materialize;
-        }
-        if (function->funcid == oids.seq_from_letter_array_infer_oid ||
-            function->funcid == oids.seq_from_letter_array_named_oid) {
-            return slice_project_opcode::bridge;
-        }
-        return std::nullopt;
-    }
-
-    /** @brief Maps an expression node to a slice opcode when shape and OIDs match. */
-    [[nodiscard]] std::optional<slice_project_opcode>
-    slice_project_node_opcode(Node* node, const bioseq_stub_oids& oids) noexcept {
-        if (node == nullptr)
-            return std::nullopt;
-        if (IsA(node, SubscriptingRef)) {
-            auto* subscript = reinterpret_cast<SubscriptingRef*>(node);
-            if (subscript->refcontainertype != oids.bioseq_seq_type_oid) {
-                return std::nullopt;
-            }
-            /* A valid one-dimensional PG17 bound coordinate is NIL or exactly
-             * one cell (whose payload may be nullptr for an omitted bound).
-             * Leave wider/corrupt shapes opaque so the native subscript path
-             * raises its normative unsupported-shape error. */
-            if ((subscript->reflowerindexpr != NIL &&
-                 list_length(subscript->reflowerindexpr) != 1) ||
-                (subscript->refupperindexpr != NIL &&
-                 list_length(subscript->refupperindexpr) != 1)) {
-                return std::nullopt;
-            }
-            return subscript->reflowerindexpr == NIL ? slice_project_opcode::element
-                                                     : slice_project_opcode::slice;
-        }
-        if (FuncExpr* function = try_cast_pg_node<FuncExpr>(node)) {
-            return slice_project_function_opcode(function, oids);
-        }
-        if (OpExpr* operation = try_cast_pg_node<OpExpr>(node)) {
-            /* PostgreSQL represents SQL operator syntax as OpExpr, even when the
-             * implementation is one of the exact registered concat functions.  Do
-             * not recognize an arbitrary operator merely because opfuncid happens
-             * to be populated: validate the binary catalog operator/function identity
-             * and the sequence result shape first. */
-            if (OidIsValid(operation->opno) && OidIsValid(operation->opfuncid) &&
-                get_opcode(operation->opno) == operation->opfuncid &&
-                slice_project_concat_oid(operation->opfuncid, oids) &&
-                operation->opresulttype == oids.bioseq_seq_type_oid && !operation->opretset &&
-                list_length(operation->args) == 2) {
-                return slice_project_opcode::concat;
-            }
-        }
-        return std::nullopt;
-    }
-
-    /** @brief Returns FuncExpr or OpExpr argument lists, or NIL for other node kinds. */
-    [[nodiscard]] List* slice_project_call_arguments(Node* node) noexcept {
-        if (FuncExpr* function = try_cast_pg_node<FuncExpr>(node)) {
-            return function->args;
-        }
-        if (OpExpr* operation = try_cast_pg_node<OpExpr>(node)) {
-            return operation->args;
-        }
-        return NIL;
-    }
-
-    /* PostgreSQL wraps INSERT projection values in the registered same-type
-     * typmod cast.  The cast preserves logical length and the child lazy recipe;
-     * the destination slot is still the one unavoidable heap boundary.  Admit
-     * only the exact implicit, planner-constant cast shape.  Explicit calls and
-     * unrelated sequence-returning functions remain opaque producer leaves. */
-    [[nodiscard]] inline Node*
-    slice_project_typmod_cast_source(Node* node, const bioseq_stub_oids& oids) noexcept {
-        FuncExpr* function = try_cast_pg_node<FuncExpr>(node);
-        if (function == nullptr || function->funcid != oids.seq_cast_oid ||
-            function->funcresulttype != oids.bioseq_seq_type_oid || function->funcretset ||
-            OidIsValid(function->funcvariadic) || function->funcformat != COERCE_IMPLICIT_CAST ||
-            list_length(function->args) != 3)
-            return nullptr;
-        Node* source = reinterpret_cast<Node*>(linitial(function->args));
-        Const* target_typmod =
-            try_cast_pg_node<Const>(reinterpret_cast<Node*>(lsecond(function->args)));
-        Const* explicit_cast =
-            try_cast_pg_node<Const>(reinterpret_cast<Node*>(lthird(function->args)));
-        if (source == nullptr || exprType(source) != oids.bioseq_seq_type_oid ||
-            target_typmod == nullptr || target_typmod->constisnull ||
-            target_typmod->consttype != INT4OID || DatumGetInt32(target_typmod->constvalue) < 0 ||
-            explicit_cast == nullptr || explicit_cast->constisnull ||
-            explicit_cast->consttype != BOOLOID || DatumGetBool(explicit_cast->constvalue))
-            return nullptr;
-        return source;
-    }
-
     /* PG17 represents an omitted slice bound as either NIL or a one-cell List
      * whose cell contains nullptr.  Both forms are canonical omission; no nullptr
      * may enter custom_exprs and deparse as an empty string. */
@@ -481,12 +311,6 @@ export {
         return 4096u;
     }
 
-    /** @brief Startup and per-input-tuple planner costs for an owning mmsearch path. */
-    struct owned_mmsearch_cost {
-        Cost startup = 0;
-        Cost per_input_tuple = 0;
-    };
-
     /* Cost only executable operands, in SQL argument order.  In particular the
      * rendezvous FuncExpr itself (whose support function deliberately costs
      * 100000) must never enter an owning path's cost tree. */
@@ -516,7 +340,8 @@ export {
             if (constant->constisnull)
                 return 0u;
             if (constant->consttype == oids.bioseq_seq_type_oid) {
-                return classify_and_describe_sequence_header(constant->constvalue).bp_length;
+                return bioseq::postgres::compact_sequence_header_bp_length(
+                    constant->constvalue);
             }
         }
         const auto opcode = slice_project_node_opcode(expression, oids);
@@ -598,5 +423,20 @@ export {
         std::uint64_t planned_bytes = 0u;
         bool found = false;
     };
+
+    /** @brief Serializes the SliceProject plan header from one completed IR builder. */
+    [[nodiscard]] List* slice_project_header(const slice_project_ir_builder& builder) {
+        List* header = list_make5(makeInteger(k_bioseq_slice_project_magic),
+                                  makeInteger(k_bioseq_slice_project_codec_version),
+                                  makeInteger(list_length(builder.records)),
+                                  makeInteger(list_length(builder.expressions)),
+                                  slice_project_int8_const(builder.piece_boundaries));
+        header = lappend(header, slice_project_int8_const(builder.source_pieces));
+        header = lappend(header, slice_project_int8_const(builder.planned_symbols));
+        header = lappend(header, slice_project_int8_const(builder.planned_bytes));
+        header = lappend(header, makeInteger(list_length(builder.nodes)));
+        header = lappend(header, makeString(pstrdup("none")));
+        return header;
+    }
 
 } // export custom-scan partition declarations

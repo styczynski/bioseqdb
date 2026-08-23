@@ -612,21 +612,12 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
       "${BIOSEQ_GCC16_MODULE_SOURCE_CLOSURE_SHA256}")
 endif()
 
-# --- Build-speed: Reduced BMI for C++ modules -------------------------------
-# clang's reduced BMI (P2615) drops definitions that importers don't need from
-# each module's BMI, shrinking the BMI files and cutting the per-TU module
-# scan/load cost across the ~70-module graph (x3 targets). Injected via the
-# per-module-compile flag so it applies only to our module-interface units and
-# leaves -O3 codegen untouched. Probe-guarded so a toolchain lacking the flag
-# still configures cleanly.
-if(BIOSEQ_BUILD_CORE)
-  include(CheckCXXCompilerFlag)
-  check_cxx_compiler_flag("-fmodules-reduced-bmi" BIOSEQ_HAS_REDUCED_BMI)
-  if(BIOSEQ_HAS_REDUCED_BMI)
-    string(APPEND CMAKE_CXX_MODULE_MAP_FLAG " -fmodules-reduced-bmi")
-    message(STATUS "bioseq: -fmodules-reduced-bmi enabled; CMAKE_CXX_MODULE_MAP_FLAG='${CMAKE_CXX_MODULE_MAP_FLAG}'")
-  endif()
-endif()
+# Clang 22 reduced BMIs are deliberately disabled.  The generated namespace-
+# materialization builds exercise complete template definitions across module
+# boundaries; reduced BMIs have produced both corrupted source-location tables
+# and missing/duplicated global allocation declarations in those consumers.
+# This changes BMI size and build speed only.  Optimisation, specialization,
+# generated coordinate ownership, and runtime code generation remain unchanged.
 
 # --- Build-speed: optional throttle for memory-hungry module compiles -------
 # Heavy template TUs in this tree (dispatch_buffer.cppm, two_stacks_minimizers

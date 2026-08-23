@@ -4,13 +4,8 @@
  */
 export module bioseq.postgres.table:custom_scan_join_runtime;
 
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-import :custom_scan_match_ownership;
-
-export import :custom_scan_join_runtime_parameter_binding;
-export import :custom_scan_join_runtime_scan_admission;
-export import :custom_scan_join_runtime_tuple_production;
+export import :custom_scan_join_runtime_parameter_binding_contracts;
+export import :custom_scan_join_runtime_scan_admission_contracts;
+export import :custom_scan_join_runtime_tuple_injection_contracts;
+export import :custom_scan_join_runtime_scan_fetch_contracts;
+export import :custom_scan_execution_method_contracts;

@@ -165,7 +165,7 @@ inline void update_canonical_source_checksum(
 ///
 /// A transaction-scoped advisory lock keeps the sequence's fragment row
 /// numbers contiguous. The cache and tuple descriptor must outlive the call.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 template<class p_fragment_producer>
@@ -599,7 +599,7 @@ sequence_storage_manager<
 /// @param cache Caller-owned write cache that retains opened shard state.
 /// @return Locator and unpublished source epoch for later publication.
 /// @throws PostgreSQL ERROR when input or fragment persistence is invalid.
-export template<class p_length_type,
+template<class p_length_type,
          std::size_t p_bucket_minimum_length_bits,
          std::size_t p_bucket_maximum_length_bits>
 pending_sequence_source

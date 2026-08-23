@@ -3,119 +3,42 @@
  * @brief Defines physical catalog naming, metadata-age tracking, locks, and generation identifiers.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
+#include "postgres.h"
+
 #include "access/heapam.h"
 #include "access/nbtree.h"
-#include "access/parallel.h"
 #include "access/relation.h"
 #include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
 #include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
 #include "catalog/pg_sequence.h"
 #include "catalog/pg_type_d.h"
 #include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
 #include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
 #include "utils/builtins.h"
-#include "utils/inval.h"
+#include "utils/errcodes.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
-#include "utils/xid8.h"
-
-#include "common/relpath.h"
-#include "miscadmin.h"
-#include "port.h"
-#include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <tuple>
-#include <type_traits>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:catalog_metadata;
+
+import std;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
 import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
-import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 
 import :catalog_contracts;
 export namespace bioseq::storage::indexing {
@@ -257,14 +180,14 @@ inline void run_internal_ddl(const char* ddl) {
 }
 
 /// Translate a generation-storage PostgreSQL error for C++ unwinding.
-[[noreturn]] inline void minimizer_generation_storage_error_as_cpp(std::string_view message) {
+[[noreturn]] void minimizer_generation_storage_error_as_cpp(std::string_view message) {
     bioseq::postgres::support::invoke_pg_as_cpp(
         [message] { minimizer_generation_storage_error_pg_leaf(message); });
     pg_unreachable();
 }
 
 /// Re-enter PostgreSQL only after all owning C++ values have unwound.
-[[noreturn]] inline void minimizer_generation_storage_error(std::string_view message) {
+[[noreturn]] void minimizer_generation_storage_error(std::string_view message) {
     minimizer_generation_storage_error_as_cpp(message);
     pg_unreachable();
 }
@@ -673,7 +596,7 @@ inspect_minimizer_generation_sequence_contract() {
 
 /// Allocate a positive signed-SQL generation ID. This helper never creates the
 /// sequence. Installation owns that atomic DDL step.
-[[nodiscard]] inline std::uint64_t allocate_minimizer_generation_id_pg() {
+[[nodiscard]] std::uint64_t allocate_minimizer_generation_id_pg() {
     const minimizer_generation_sequence_inspection sequence =
         inspect_minimizer_generation_sequence_contract();
     if (!sequence) {

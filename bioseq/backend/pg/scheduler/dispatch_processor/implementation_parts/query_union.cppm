@@ -2,78 +2,49 @@
  * @file implementation_parts/query_union.cppm
  * @brief Owns admitted CPU query-union preparation and compact-direct validation.
  */
+module;
+
+extern "C" {
+#include "postgres.h"
+#include "utils/errcodes.h"
+}
+
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <algorithm>
-#include <array>
-#include <bit>
-#include <cstdio>
-#include <cstring>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
-#include <expected>
-#include <fstream>
-#include <iterator>
 #include <limits>
-#include <map>
-#include <memory>
 #include <new>
 #include <optional>
-#include <queue>
 #include <span>
 #include <stdexcept>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
-export module bioseq.postgres.scheduler.dispatch_processor:query_union;
+module bioseq.postgres.scheduler.dispatch_processor;
 
-import bioseq.postgres.scheduler.dispatch_processor;
-
-import :highway_registry;
 import :cpu_preparation;
-import :typed_flat_selector;
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.support;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
+import bioseq.common.radix_sort;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.compact_hash32_direct_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
 import bioseq.instrumentation.clock;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
-import bioseq.storage.scanner;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.pipeline.minimizer_execution_contract;
+import bioseq.pipeline.pipe;
+import bioseq.postgres.support;
+import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.kmers;
+import bioseq.storage.lazy_sequence_view;
 
 namespace bioseq::simd {
 

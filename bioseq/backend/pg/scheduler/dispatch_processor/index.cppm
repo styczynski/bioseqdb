@@ -124,119 +124,69 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+#include <stddef.h>
+#include <stdint.h>
+
+extern "C" {
+#include "postgres_ext.h"
+
+typedef uintptr_t Datum;
+typedef struct MemoryContextData* MemoryContext;
+typedef struct SnapshotData* Snapshot;
+}
 
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <iterator>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
-#include <queue>
+#include <ranges>
 #include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
-#include <unistd.h>
 
 export module bioseq.postgres.scheduler.dispatch_processor;
+export import bioseq.postgres.scheduler.dispatch_processor.hash_major_diagnostic_identity;
 
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.radix_sort;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
+export import bioseq.common.seqan_adapter;
+export import bioseq.highway.kernel_table_contract;
 import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.storage;
-import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
+import bioseq.postgres.storage.indexing.active_read_policy;
+import bioseq.postgres.storage.indexing.executor_read_context;
+import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
+import bioseq.postgres.storage.indexing.minimizer_read_stats;
+export import bioseq.pipeline.minimap_parameters_contract;
+export import bioseq.pipeline.minimap_port.match_result_contract;
+export import bioseq.pipeline.minimap_port;
+export import bioseq.pipeline.minimizer_execution_contract;
+export import bioseq.pipeline.stats;
 import bioseq.gpu.vulkan.runtime;
-import bioseq.postgres.types.compact_sequence;
+import bioseq.sequences.kmers.highway_minimizer_contract;
+export import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.lazy_sequence;
-import bioseq.storage.scanner;
+export import bioseq.storage.lazy_sequence_view;
 import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.pipeline_ops;
+import bioseq.postgres.storage.scanner.source_provider_contract;
+export import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
-import bioseq.postgres.scheduler.supervisor;
 namespace bioseq::simd {
+
+export using ::bioseq::minimizers::minimap_sketch_data;
 
 /** @brief Maximum number of rows processed by one scheduler dispatch batch. */
 export constexpr size_t dispatch_batch_capacity = 8192;
 
-/**
- * @brief Derives a nonzero diagnostic token from a hash-major source identity.
- *
- * Existing pipeline stats have a frozen u64 source field, while hash-major
- * authenticates a 128-bit source identity.  This domain-separated token is
- * diagnostic only: every hash-major correctness decision retains and compares
- * all 128 authenticated bits.
- *
- * @param[in] source_identity Authenticated 128-bit source identity.
- * @return A stable nonzero token used only in diagnostic statistics.
- */
-export [[nodiscard]] constexpr std::uint64_t
-hash_major_source_diagnostic_token(const std::array<std::byte, 16>& source_identity) noexcept {
-    std::array<std::byte, 32> bytes{std::byte{'B'},
-                                    std::byte{'S'},
-                                    std::byte{'E'},
-                                    std::byte{'Q'},
-                                    std::byte{'F'},
-                                    std::byte{'6'},
-                                    std::byte{'D'},
-                                    std::byte{'I'},
-                                    std::byte{'A'},
-                                    std::byte{'G'},
-                                    std::byte{'v'},
-                                    std::byte{'1'},
-                                    std::byte{0},
-                                    std::byte{0},
-                                    std::byte{0},
-                                    std::byte{0}};
-    for (std::size_t index = 0; index < source_identity.size(); ++index) {
-        bytes[16u + index] = source_identity[index];
-    }
-    const std::uint64_t token = bioseq::indexing::crc64_ecma182(bytes);
-    return token == 0u ? 0x9e3779b97f4a7c15ull : token;
-}
-
-namespace {
-constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_a{std::byte{1}};
-constexpr std::array<std::byte, 16> hash_major_diagnostic_identity_b{std::byte{2}};
-static_assert(hash_major_source_diagnostic_token(std::array<std::byte, 16>{}) != 0u);
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) != 0u);
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) ==
-              hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a));
-static_assert(hash_major_source_diagnostic_token(hash_major_diagnostic_identity_a) !=
-              hash_major_source_diagnostic_token(hash_major_diagnostic_identity_b));
-} // namespace
 /**
  * @brief Selects whether a batch is the primary query or an additional query.
  */
@@ -1110,6 +1060,14 @@ export class batch_processor {
         ::bioseq::pipeline_stats::pipeline_execution_stats& stats,
         scanner_pg_context* scanner_pg_ctx = nullptr);
 };
+
+/** Narrow typmod-specialized callable-table boundary used by generated roots. */
+export namespace cpu_preparation_detail {
+
+template <class p_alphabet, std::size_t p_width>
+[[nodiscard]] const batch_processor::cpu_preparation_typmod_operations& typmod_ops() noexcept;
+
+} // namespace cpu_preparation_detail
 
 static_assert(batch_processor::exactly_one_native_persisted_reader(true, false, false));
 static_assert(batch_processor::exactly_one_native_persisted_reader(false, true, false));

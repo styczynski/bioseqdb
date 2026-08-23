@@ -3,45 +3,38 @@
  * @brief Index rebuild routes and PostgreSQL error translation.
  */
 module;
-#include "access/heapam.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "commands/tablespace.h"
-#include "executor/tuptable.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 extern "C" {
-#include "storage/buffile.h"
+#include "postgres.h"
+
+#include "access/htup_details.h"
+#include "access/relation.h"
+#include "executor/spi.h"
+#include "fmgr.h"
+#include "nodes/pg_list.h"
+#include "port.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
 }
-#include <algorithm>
+
 #include <array>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <exception>
-#include <expected>
 #include <limits>
-#include <map>
-#include <new>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
+
 export module bioseq.postgres.storage.indexing.admin:rebuild_core;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
@@ -52,56 +45,45 @@ import bioseq.storage.scanner;                 // sequence access requirements
 import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
 import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
 import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
 import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.pool;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 import bioseq.postgres.table.io;
-import bioseq.postgres.storage.indexing.handles;
+import bioseq.postgres.storage.indexing.fragment_handle;
+import bioseq.postgres.storage.indexing.index_relation_identity;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.metadata; // column_table_row_count
+import bioseq.postgres.storage.indexing.admin.index_build_runtime;
+import bioseq.postgres.storage.indexing.admin.index_sketch_backend_policy;
+import bioseq.postgres.storage.indexing.admin.minimizer_kernel_selection;
+import bioseq.postgres.storage.indexing.admin.scheme_untagged_fragment_guard;
+import bioseq.postgres.storage.indexing.supported_indexes;
+export import bioseq.postgres.storage.indexing.admin.rebuild.promoted_sequence;
+import bioseq.postgres.storage.indexing.admin.rebuild.generation_route;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
 
 export namespace bioseq::storage::indexing {
 
-// ---- admin update_index ---------------------------------------------------
-/**
- * @brief Check whether an index name is present in the compiled registry.
- * @param name Logical index name.
- * @return True only for a registered name.
- */
-[[nodiscard]] inline bool name_is_registered(std::string_view name) {
-    for (auto& t : pg_supported_indexes::list_types())
-        if (t.first == name)
+/** Return whether a supplied compile-time registry contains an index name. */
+template <class p_supported_indexes>
+[[nodiscard]] inline bool registered_index_name(std::string_view name) {
+    for (const auto& type : p_supported_indexes::list_types()) {
+        if (type.first == name) {
             return true;
+        }
+    }
     return false;
 }
-/**
- * @brief Return the physical layout registered for one index name.
- * @param name Registered logical index name.
- * @return Its compile-time registry layout.
- */
-[[nodiscard]] inline sequence_index_layout layout_of_name(std::string_view name) {
-    return pg_supported_indexes::layout_of(name);
+
+/** Return the physical layout recorded by a supplied compile-time registry. */
+template <class p_supported_indexes>
+[[nodiscard]] inline sequence_index_layout registered_index_layout(std::string_view name) {
+    return p_supported_indexes::layout_of(name);
 }
 
 /**
@@ -248,156 +230,6 @@ rebuild_one_fragmented_maybe_resident(p_supported_indexes& idx,
         }
     }
     idx.rebuild_one_fragmented(name, store, sequence, backend, kernels, alphabet_code);
-}
-
-/**
- * Adapt one source-domain-promoted Datum to the canonical lazy facade for the
- * duration of an index-build callback.  The read session owns every facade
- * adapter and is closed before the caller resets the row context containing
- * the expanded Datum.
- */
-template <sequence_alphabet p_alphabet, class p_callback>
-inline void with_promoted_pg_sequence_view(Datum promoted_datum,
-                                           MemoryContext parent_context,
-                                           p_callback&& callback) {
-    const pg_sequence_descriptor descriptor = bioseq::postgres::support::invoke_pg_as_cpp(
-        [promoted_datum] { return classify_and_describe_sequence(promoted_datum); });
-    std::exception_ptr callback_failure;
-    pg_sequence_read_session* volatile session = nullptr;
-    PG_TRY();
-    {
-        auto* local_session = begin_pg_sequence_read_session(parent_context);
-        session = local_session;
-        try {
-            auto* owner =
-                make_pg_sequence_call_owner<p_alphabet>(*local_session, promoted_datum, descriptor);
-            std::forward<p_callback>(callback)(owner->view());
-            finish_pg_sequence_read_session(local_session, true);
-        } catch (...) {
-            callback_failure = std::current_exception();
-            abort_pg_sequence_read_session_noexcept(local_session);
-        }
-        session = nullptr;
-    }
-    PG_CATCH();
-    {
-        abort_pg_sequence_read_session_noexcept(const_cast<pg_sequence_read_session*>(session));
-        session = nullptr;
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-    if (callback_failure != nullptr) {
-        std::rethrow_exception(std::move(callback_failure));
-    }
-}
-
-/**
- * @brief Publish through hash-major when the exact locator-backed profile is registered.
- * @tparam p_sequence_range Compact source sequence range.
- * @param user_relid Source Bioseq relation.
- * @param column_attno Source sequence attribute.
- * @param index_name Registered minimizer index.
- * @param sequence_rowno Source-row ordinal and query key.
- * @param storage PostgreSQL generation storage authority.
- * @param sequence Snapshot-bound lazy sequence view.
- * @param source_binding Locator and source-snapshot binding.
- * @param backend Exact producer backend.
- * @param kernels Required backend kernel table.
- *
- * The persistence GUC selects this branch; unregistered profiles retain grouped-SoA.
- */
-template <class p_sequence_range>
-inline void build_and_verify_hash_major_minimizer_generation_pg(
-    Oid user_relid,
-    std::int16_t column_attno,
-    std::string_view index_name,
-    std::uint64_t sequence_rowno,
-    fragment_index_storage& storage,
-    bioseq::storage::lazy_sequence_view<
-        typename bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>::alphabet_type>
-        sequence,
-    bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range> source_binding,
-    bioseq::minimizers::minimizer_sketch_backend backend,
-    const bioseq::minimizers::minimizer_kernels* kernels) {
-    using source_binding_type = bioseq::storage::postgres_lazy_sequence_binding<p_sequence_range>;
-    const sequence_locator& locator = source_binding.locator();
-    constexpr std::uint16_t k_window_size = 10u;
-    constexpr std::uint16_t k_kmer_size = 15u;
-    constexpr std::uint16_t k_alphabet_code = source_binding_type::alphabet_code();
-    if (index_name == k_minimizers_per_fragment_index_name) {
-        // The fragment route owns one persisted index per physical source fragment. Never
-        // route it through the target-wide hash-major spill/merge publisher.
-        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                             column_attno,
-                                                             index_name,
-                                                             sequence_rowno,
-                                                             storage,
-                                                             sequence,
-                                                             source_binding,
-                                                             backend,
-                                                             kernels);
-        return;
-    }
-    if constexpr (k_alphabet_code != 0u) {
-        // Avoid instantiating the large hash-major publisher for alphabet
-        // specializations which are statically outside its registry.
-        build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                             column_attno,
-                                                             index_name,
-                                                             sequence_rowno,
-                                                             storage,
-                                                             sequence,
-                                                             source_binding,
-                                                             backend,
-                                                             kernels);
-        return;
-    } else {
-        const auto profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
-            backend, k_alphabet_code, k_kmer_size, k_window_size, locator.logical_length);
-        if (!profile) {
-            // Future DNA4 parameter profiles which are not in the hash-major
-            // registry continue on the grouped-SoA route.
-            build_and_verify_grouped_soa_minimizer_generation_pg(user_relid,
-                                                                 column_attno,
-                                                                 index_name,
-                                                                 sequence_rowno,
-                                                                 storage,
-                                                                 sequence,
-                                                                 source_binding,
-                                                                 backend,
-                                                                 kernels);
-            return;
-        }
-        const ready_hash_major_minimizer_publication publication =
-            build_and_publish_hash_major_minimizer_generation_pg(user_relid,
-                                                                 column_attno,
-                                                                 index_name,
-                                                                 sequence_rowno,
-                                                                 storage,
-                                                                 sequence,
-                                                                 source_binding,
-                                                                 backend,
-                                                                 kernels);
-        if (!publication.published || publication.generation_id == 0u ||
-            publication.query_key != sequence_rowno ||
-            publication.source_epoch != locator.source_epoch ||
-            publication.selected_backend != backend ||
-            publication.head.generation_id != publication.generation_id ||
-            publication.head.query_key != sequence_rowno ||
-            publication.head.source_epoch != locator.source_epoch ||
-            publication.manifest.generation_id != publication.generation_id ||
-            publication.manifest.source_epoch != locator.source_epoch ||
-            publication.manifest.target_length != locator.logical_length ||
-            publication.unique_hash_count != publication.manifest.unique_hash_count ||
-            publication.total_posting_count != publication.manifest.total_posting_count) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "normal hash-major minimizer rebuild publication validation was rejected",
-                fmt::format("index={} backend={}",
-                            index_name,
-                            bioseq::minimizers::minimizer_sketch_backend_name(backend)));
-        }
-    }
 }
 
 /// Reject a grouped-SoA rebuild before mixing inline and locator sources.
@@ -562,9 +394,16 @@ verify_grouped_soa_rebuild_sources_are_locators(Oid rel_oid,
     }
 }
 
-/// Rebuild one registered index across every sequence column and visible row.
+/**
+ * @brief Rebuild one registered index across every sequence column and visible row.
+ * @tparam p_supported_indexes Registry that supplies storage and index implementations.
+ * @param rel_oid Relation whose sequence columns are rebuilt.
+ * @param name Registered logical index name.
+ * @return Number of visible sequence rows processed by the rebuild.
+ */
+template <class p_supported_indexes>
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
-    if (!name_is_registered(name)) {
+    if (!registered_index_name<p_supported_indexes>(name)) {
         bioseq::postgres::support::invoke_pg_as_cpp([name] {
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -584,14 +423,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         pg_unreachable();
     }
     const relation_identity rid = index_relation_identity(rel_oid);
-    const sequence_index_layout layout = layout_of_name(name);
+    const sequence_index_layout layout = registered_index_layout<p_supported_indexes>(name);
     const auto backend = resolve_index_sketch_backend_from_gucs();
     const bool is_minimizer_index =
         name == bioseq::indexing::k_minimizers_per_fragment_index_name ||
         name == bioseq::indexing::k_minimizers_per_sequence_index_name;
     const bioseq::minimizers::minimizer_kernels* const minimizer_kernels =
         is_minimizer_index
-            ? selected_minimizer_kernels_for_operation(backend, "bioseq.update_index")
+            ? bind_selected_minimizer_kernels_for_operation(backend, "bioseq.update_index")
             : nullptr;
     const bool use_grouped_soa_generation =
         is_minimizer_index && bioseq::aligner::settings::grouped_soa_generation::enabled;
@@ -711,7 +550,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     MemoryContext work = bioseq::postgres::support::invoke_pg_as_cpp([parent_context] {
         return AllocSetContextCreate(parent_context, "bioseq_update_index", ALLOCSET_DEFAULT_SIZES);
     });
-    pg_supported_indexes idx;
+    p_supported_indexes idx;
     idx.apply_table_defaults();
 
     if (use_grouped_soa_generation) {
@@ -749,17 +588,17 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                            0,
                                            nullptr,
                                            work);
-            auto q = open_sequence_storage(rel_oid,
-                                           rid.db_oid,
-                                           rid.tablespace_oid,
-                                           rid.relfilenode,
-                                           a,
-                                           name,
-                                           sequence_locator{},
-                                           0,
-                                           nullptr,
-                                           work);
-            auto tb = open_table_storage(
+            auto q = open_sequence_storage_handle(rel_oid,
+                                                  rid.db_oid,
+                                                  rid.tablespace_oid,
+                                                  rid.relfilenode,
+                                                  a,
+                                                  name,
+                                                  sequence_locator{},
+                                                  0,
+                                                  nullptr,
+                                                  work);
+            auto tb = open_table_storage_handle(
                 rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
             try {
                 idx.clear_index(f, q, tb, name);
@@ -793,13 +632,13 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             relation_close(ur, AccessShareLock);
         }
         for (std::int16_t a : seq_attnos) {
-            auto tb = open_table_storage(
+            auto tb = open_table_storage_handle(
                 rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, caches, work);
             run_pg_index_build_with_cleanup(
                 tb, [&idx, &name, &tb] { idx.rebuild_one_table(name, tb); });
         }
         for (std::int16_t a : seq_attnos)
-            note_successful_write(rel_oid, rid.relfilenode, a, name);
+            mark_serialized_index_write_successful_pg(rel_oid, rid.relfilenode, a, name);
         caches->close_all(/*commit=*/false); // close cached seq_sub read-state relations (else
                                              // "resource was not closed" at commit)
         bioseq::storage::destroy_seq_caches(caches);
@@ -894,69 +733,72 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                 const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
                 if (is_minimizer_index && !use_grouped_soa_generation &&
                     backend == bioseq::minimizers::minimizer_sketch_backend::bounded_nthash_simd) {
-                    reject_bounded_nthash_for_scheme_untagged_fragment_layout(
+                    reject_bounded_nthash_for_scheme_untagged_fragment_storage(
                         backend, "bioseq.update_index");
                 }
                 if (is_locator_stub(hdr)) {
                     const sequence_locator loc = decode_locator_from_stub(hdr);
                     const Datum promoted_datum = bioseq::storage::promote_pg_sequence_locator(
                         source_provider, seq_attno, PointerGetDatum(hdr), inner);
-                    bioseq::pg_types::seq::dispatch_instance(
-                        alpha,
-                        bw,
-                        [rid,
-                         seq_attno,
-                         loc,
-                         rs,
-                         caches,
-                         inner,
-                         promoted_datum,
-                         layout,
-                         rel_oid,
-                         name,
-                         rowno,
-                         work,
-                         &idx,
-                         use_grouped_soa_generation,
-                         backend,
-                         minimizer_kernels,
-                         bw,
-                         alpha]<class p_sequence_type>() {
-                            using source_binding =
-                                bioseq::storage::postgres_lazy_sequence_binding<p_sequence_type>;
-                            const source_binding bound_source{
-                                rid.db_oid,
-                                rid.tablespace_oid,
-                                rid.relfilenode,
-                                seq_attno,
-                                loc,
-                                source_binding::expected_last_fragment_padding(loc),
-                                rs->snapshot,
-                                caches,
-                                inner};
-                            bioseq::postgres::support::invoke_pg_as_cpp([promoted_datum,
-                                                                         inner,
-                                                                         layout,
-                                                                         rel_oid,
-                                                                         rid,
-                                                                         seq_attno,
-                                                                         &name,
-                                                                         loc,
-                                                                         rowno,
-                                                                         caches,
-                                                                         work,
-                                                                         &idx,
-                                                                         use_grouped_soa_generation,
-                                                                         bound_source,
-                                                                         backend,
-                                                                         minimizer_kernels,
-                                                                         bw,
-                                                                         alpha] {
-                                with_promoted_pg_sequence_view<
-                                    typename source_binding::alphabet_type>(
-                                    promoted_datum,
-                                    inner,
-                                    [layout,
+                    if (use_grouped_soa_generation &&
+                        layout != sequence_index_layout::sequence_inline) {
+                        rebuild_detail::build_and_verify_locator_minimizer_generation(
+                            rebuild_detail::locator_generation_rebuild_request{
+                                .user_relation_oid = rel_oid,
+                                .database_oid = rid.db_oid,
+                                .tablespace_oid = rid.tablespace_oid,
+                                .main_relfilenode = rid.relfilenode,
+                                .column_attno = seq_attno,
+                                .locator = loc,
+                                .snapshot = rs->snapshot,
+                                .caches = caches,
+                                .row_context = inner,
+                                .work_context = work,
+                                .promoted_datum = promoted_datum,
+                                .index_name = name,
+                                .sequence_rowno = rowno,
+                                .storage_width = bw,
+                                .alphabet_code = alpha,
+                                .backend = backend,
+                                .kernels = minimizer_kernels});
+                    } else {
+                        bioseq::pg_types::seq::dispatch_instance(
+                            alpha,
+                            bw,
+                            [rid,
+                             seq_attno,
+                             loc,
+                             rs,
+                             caches,
+                             inner,
+                             promoted_datum,
+                             layout,
+                             rel_oid,
+                             name,
+                             rowno,
+                             work,
+                             &idx,
+                             backend,
+                             minimizer_kernels,
+                             bw,
+                             alpha]<class p_sequence_type>() {
+                                using source_binding =
+                                    bioseq::storage::postgres_lazy_sequence_binding<
+                                        p_sequence_type>;
+                                const source_binding bound_source{
+                                    rid.db_oid,
+                                    rid.tablespace_oid,
+                                    rid.relfilenode,
+                                    seq_attno,
+                                    loc,
+                                    source_binding::expected_last_fragment_padding(loc),
+                                    rs->snapshot,
+                                    caches,
+                                    inner};
+                                bioseq::postgres::support::invoke_pg_as_cpp(
+                                    [promoted_datum,
+                                     inner,
+                                     layout,
                                      rel_oid,
                                      rid,
                                      seq_attno,
@@ -966,85 +808,87 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                      caches,
                                      work,
                                      &idx,
-                                     use_grouped_soa_generation,
                                      bound_source,
                                      backend,
                                      minimizer_kernels,
                                      bw,
-                                     alpha](auto lazy_view) {
-                                        if (layout == sequence_index_layout::sequence_inline) {
-                                            auto store = open_sequence_storage(rel_oid,
-                                                                               rid.db_oid,
-                                                                               rid.tablespace_oid,
-                                                                               rid.relfilenode,
-                                                                               seq_attno,
-                                                                               name,
-                                                                               loc,
-                                                                               rowno,
-                                                                               caches,
-                                                                               work);
-                                            run_pg_index_build_with_cleanup(
-                                                store, [&idx, &name, &store, lazy_view] {
-                                                    idx.rebuild_one_inline(name, store, lazy_view);
-                                                });
-                                        } else if (use_grouped_soa_generation) {
-                                            auto store = open_fragment_storage(rel_oid,
-                                                                               rid.db_oid,
-                                                                               rid.tablespace_oid,
-                                                                               rid.relfilenode,
-                                                                               seq_attno,
-                                                                               name,
-                                                                               loc,
-                                                                               rowno,
-                                                                               caches,
-                                                                               work);
-                                            build_and_verify_hash_major_minimizer_generation_pg(
-                                                rel_oid,
-                                                seq_attno,
-                                                name,
-                                                rowno,
-                                                store,
-                                                lazy_view,
-                                                bound_source,
-                                                backend,
-                                                minimizer_kernels);
-                                        } else {
-                                            auto store = open_fragment_storage(rel_oid,
-                                                                               rid.db_oid,
-                                                                               rid.tablespace_oid,
-                                                                               rid.relfilenode,
-                                                                               seq_attno,
-                                                                               name,
-                                                                               loc,
-                                                                               rowno,
-                                                                               caches,
-                                                                               work);
-                                            run_pg_index_build_with_cleanup(
-                                                store,
-                                                [&idx,
-                                                 &name,
-                                                 &store,
-                                                 lazy_view,
-                                                 bw,
-                                                 alpha,
-                                                 rowno,
-                                                 backend,
-                                                 minimizer_kernels] {
-                                                    rebuild_one_fragmented_maybe_resident(
-                                                        idx,
+                                     alpha] {
+                                        with_promoted_pg_sequence_view<
+                                            typename source_binding::alphabet_type>(
+                                            promoted_datum,
+                                            inner,
+                                            [layout,
+                                             rel_oid,
+                                             rid,
+                                             seq_attno,
+                                             &name,
+                                             loc,
+                                             rowno,
+                                             caches,
+                                             work,
+                                             &idx,
+                                             backend,
+                                             minimizer_kernels,
+                                             bw,
+                                             alpha](auto lazy_view) {
+                                                if (layout ==
+                                                    sequence_index_layout::sequence_inline) {
+                                                    auto store = open_sequence_storage_handle(
+                                                        rel_oid,
+                                                        rid.db_oid,
+                                                        rid.tablespace_oid,
+                                                        rid.relfilenode,
+                                                        seq_attno,
                                                         name,
-                                                        store,
-                                                        lazy_view,
-                                                        bw,
-                                                        alpha,
+                                                        loc,
                                                         rowno,
-                                                        backend,
-                                                        minimizer_kernels);
-                                                });
-                                        }
+                                                        caches,
+                                                        work);
+                                                    run_pg_index_build_with_cleanup(
+                                                        store,
+                                                        [&idx, &name, &store, lazy_view] {
+                                                            idx.rebuild_one_inline(
+                                                                name, store, lazy_view);
+                                                        });
+                                                } else {
+                                                    auto store = open_fragment_storage(
+                                                        rel_oid,
+                                                        rid.db_oid,
+                                                        rid.tablespace_oid,
+                                                        rid.relfilenode,
+                                                        seq_attno,
+                                                        name,
+                                                        loc,
+                                                        rowno,
+                                                        caches,
+                                                        work);
+                                                    run_pg_index_build_with_cleanup(
+                                                        store,
+                                                        [&idx,
+                                                         &name,
+                                                         &store,
+                                                         lazy_view,
+                                                         bw,
+                                                         alpha,
+                                                         rowno,
+                                                         backend,
+                                                         minimizer_kernels] {
+                                                            rebuild_one_fragmented_maybe_resident(
+                                                                idx,
+                                                                name,
+                                                                store,
+                                                                lazy_view,
+                                                                bw,
+                                                                alpha,
+                                                                rowno,
+                                                                backend,
+                                                                minimizer_kernels);
+                                                        });
+                                                }
+                                            });
                                     });
                             });
-                        });
+                    }
                 } else {
                     if (use_grouped_soa_generation) {
                         reject_grouped_soa_nonlocator_source_as_cpp(name);
@@ -1077,16 +921,16 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                         loc.logical_length));
                             loc.shard_index = 0;
                             if (layout == sequence_index_layout::sequence_inline) {
-                                auto store = open_sequence_storage(rel_oid,
-                                                                   rid.db_oid,
-                                                                   rid.tablespace_oid,
-                                                                   rid.relfilenode,
-                                                                   seq_attno,
-                                                                   name,
-                                                                   loc,
-                                                                   rowno,
-                                                                   caches,
-                                                                   work);
+                                auto store = open_sequence_storage_handle(rel_oid,
+                                                                          rid.db_oid,
+                                                                          rid.tablespace_oid,
+                                                                          rid.relfilenode,
+                                                                          seq_attno,
+                                                                          name,
+                                                                          loc,
+                                                                          rowno,
+                                                                          caches,
+                                                                          work);
                                 run_pg_index_build_with_cleanup(
                                     store, [&idx, &name, &store, lazy_view] {
                                         idx.rebuild_one_inline(name, store, lazy_view);
@@ -1217,7 +1061,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         std::rethrow_exception(row_walk_failure);
     }
     for (std::int16_t a : seq_attnos) {
-        note_successful_write(rel_oid, rid.relfilenode, a, name);
+        mark_serialized_index_write_successful_pg(rel_oid, rid.relfilenode, a, name);
     }
     return written;
 }
@@ -1310,9 +1154,17 @@ static_assert(packed_bounded_nthash_index_pg_errcode(
     pg_unreachable();
 }
 
-/// SQL-facing boundary: no C++ execution error may cross the PostgreSQL C ABI.
+/**
+ * @brief Translate a registry-backed index rebuild across the PostgreSQL C ABI.
+ * @tparam p_supported_indexes Registry that supplies storage and index implementations.
+ * @param rel_oid Relation whose sequence columns are rebuilt.
+ * @param name_data Index name bytes.
+ * @param name_size Number of bytes in @p name_data.
+ * @return Number of visible sequence rows processed by the rebuild.
+ */
+template <class p_supported_indexes>
 [[nodiscard]] inline std::int64_t
-update_index_pg_checked(Oid rel_oid, const char* name_data, std::size_t name_size) {
+update_index_pg_checked_for(Oid rel_oid, const char* name_data, std::size_t name_size) {
     ErrorData* exact_error = nullptr;
     std::array<char, 2048> detail{};
     auto packed_bounded_status =
@@ -1323,7 +1175,7 @@ update_index_pg_checked(Oid rel_oid, const char* name_data, std::size_t name_siz
     bool unknown_cpp_error = false;
     try {
         const std::string name{name_data, name_size};
-        return update_index_impl(rel_oid, name);
+        return update_index_impl<p_supported_indexes>(rel_oid, name);
     } catch (bioseq::postgres::support::postgres_error& error) {
         exact_error = error.release_error_data();
     } catch (const bioseq::indexing::exact_simd_index_runtime_error& err) {
@@ -1369,6 +1221,11 @@ update_index_pg_checked(Oid rel_oid, const char* name_data, std::size_t name_siz
                  errmsg("bioseq.update_index raised an unknown C++ exception")));
     }
     pg_unreachable();
+}
+
+[[nodiscard]] std::int64_t
+update_index_pg_checked(Oid rel_oid, const char* name_data, std::size_t name_size) {
+    return update_index_pg_checked_for<pg_supported_indexes>(rel_oid, name_data, name_size);
 }
 
 } // namespace bioseq::storage::indexing

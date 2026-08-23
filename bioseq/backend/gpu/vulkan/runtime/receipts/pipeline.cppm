@@ -73,6 +73,7 @@ struct runtime_gpu_cache_metrics_audit {
     std::uint64_t gpu_pipeline_cache_load_ns = 0u;
     std::uint64_t gpu_pipeline_creates = 0u;
     std::uint64_t gpu_pipeline_creation_ns = 0u;
+    /// Set when a counter increment overflowed and the audit was marked unusable.
     bool saturated = false;
 
     /// @brief Checks token identity plus seed-load and pipeline-create metric shapes.
@@ -350,6 +351,7 @@ struct runtime_gpu_execution_environment_snapshot {
 struct runtime_pipeline_prepared_audit {
     shader_variant_key shader_key{};
     std::uint64_t receipt_identity = 0u;
+    /// Successful `prepare` call count for this shader key within the operation.
     std::uint64_t prepared_calls = 0u;
 };
 
@@ -365,7 +367,9 @@ struct runtime_pipeline_job_use_audit {
     std::uint64_t target_position_offset = 0u;
     std::uint64_t anchor_count = 0u;
     std::uint64_t range_count = 0u;
+    /// Set after `set_shape_input` records minimizer and target dimensions for this job.
     bool shape_contract_set = false;
+    /// Set when a per-job counter increment overflowed.
     bool saturated = false;
 
     /// @brief Returns the committed dispatch count for one shader kind.
@@ -387,9 +391,13 @@ struct runtime_pipeline_operation_audit {
     std::uint64_t committed_submissions = 0u;
     std::uint64_t begun_command_generations = 0u;
     std::uint64_t committed_command_generations = 0u;
+    /// Dispatches recorded in a burned generation before causal commit.
     std::uint64_t burned_pending_uses = 0u;
+    /// Uncommitted dispatches remain in an active command generation.
     bool pending = false;
+    /// Collector or seal path recorded a contract violation.
     bool invalid = false;
+    /// Set when an operation-level counter increment overflowed.
     bool saturated = false;
     std::array<std::uint8_t, VK_UUID_SIZE> device_uuid{};
     std::uint32_t api_version = 0u;

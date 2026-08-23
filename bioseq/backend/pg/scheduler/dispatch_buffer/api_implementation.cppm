@@ -24,15 +24,15 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.postgres.scheduler.dispatch_buffer.api;
+module bioseq.postgres.scheduler.dispatch_buffer.runtime_contract;
 
 import bioseq.highway.dispatch_contract;
 import bioseq.postgres.scheduler.dispatch_buffer;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
+import bioseq.pipeline.minimap_parameters_contract;
+import bioseq.pipeline.stats;
 import bioseq.indexing.type;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.scanner;
+import bioseq.postgres.storage.scanner.source_provider_contract;
 
 namespace bioseq::scheduler {
 

@@ -9,120 +9,42 @@
  * `(bucket, shard)`. The table layout shards via `index_table_shard`.
  */
 module;
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 
 extern "C" {
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/parallel.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "access/transam.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/namespace.h" // RelnameGetRelid
-#include "catalog/pg_am_d.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_opclass_d.h"
-#include "catalog/pg_sequence.h"
-#include "catalog/pg_type_d.h"
-#include "commands/sequence.h"
-#include "commands/tablespace.h"
-#include "executor/instrument.h"
-#include "executor/spi.h"
-#include "executor/tuptable.h"
-#include "storage/buffile.h"
-#include "storage/dsm.h"
-#include "storage/fd.h"
-#include "storage/ipc.h"
-#include "storage/procarray.h"
-#include "storage/relfilelocator.h"
-#include "storage/shm_toc.h"
-#include "utils/builtins.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/resowner.h"
-#include "utils/snapmgr.h"
-#include "utils/syscache.h"
-#include "utils/timestamp.h"
-#include "utils/xid8.h"
+#include "postgres.h"
 
-#include "common/relpath.h"
 #include "miscadmin.h"
 #include "port.h"
-#include "port/atomics.h"
+#include "storage/fd.h"
+#include "utils/memutils.h"
+#include "utils/resowner.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
+
+#include <cerrno>
+#include <new>
+
 export module bioseq.postgres.storage.indexing.chunked_storage:fragment_image;
+
+import std;
+export import bioseq.postgres.storage.indexing.minimizer_fragment_mapping_lease;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.memory_budget;
-import bioseq.postgres.support; // bioseq::postgres::support::try_open_postgres_relation, bioseq::postgres::support::find_primary_key_oid
-import bioseq.postgres.support.datums;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, format helpers
-import bioseq.storage.layout;           // sequence_locator
-import bioseq.storage.size;             // sequence_size_t
-import bioseq.indexing.type; // sequence_index_layout, index_sub_key_t, k_max_index_chunk_size_bytes, sentinels
-import bioseq.indexing.storage;           // the concepts
-import bioseq.indexing.minimizer_hashmap; // encoded header/bucket validation
 import bioseq.indexing.minimizer_fragment_image; // explicit fixed-endian minimizer fragment image image ABI
 import bioseq.indexing.compact_hash32_direct_index;
 import bioseq.indexing.minimizer_fragment_compact_hash32_adapter;
-import bioseq.postgres.table.io; // begin_column_read/read_next_column_row/end_column_read/column_read_state
-import bioseq.postgres.storage.scanner;        // PostgreSQL-backed lazy sequence access
-import bioseq.storage.lazy_sequence;           // lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.sequences.simd;                  // canonical bounded base decoding
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
-import bioseq.instrumentation.clock;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.storage.physical;
-import bioseq.postgres.storage.indexing.sql_row_codecs;
-import bioseq.postgres.storage.manager.sql_row_codecs;
-import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
 import :catalog;
+import :catalog_source_authorization;
+import :catalog_storage_descriptors;
 import :file_actions;
 export namespace bioseq::storage::indexing {
 
@@ -311,46 +233,6 @@ inline void validate_generation_metadata(const minimizer_generation_file_identit
     }
 }
 
-struct mapping_lease {
-    ResourceOwner owner = nullptr;
-    int fd = -1;
-    void* mapping = MAP_FAILED;
-    std::size_t mapping_bytes = 0u;
-    dev_t device{};
-    ino_t inode{};
-    bool remembered = false;
-};
-
-inline void release_mapping_lease_raw(mapping_lease& lease) noexcept {
-    if (lease.mapping != MAP_FAILED) {
-        (void)munmap(lease.mapping, lease.mapping_bytes);
-        lease.mapping = MAP_FAILED;
-        lease.mapping_bytes = 0u;
-    }
-    if (lease.fd >= 0) {
-        (void)::close(lease.fd);
-        lease.fd = -1;
-    }
-}
-
-inline void release_mapping_lease_resource(const Datum value) noexcept {
-    auto* const lease = reinterpret_cast<mapping_lease*>(DatumGetPointer(value));
-    if (lease == nullptr)
-        return;
-    lease->remembered = false;
-    release_mapping_lease_raw(*lease);
-}
-
-inline constexpr ResourceReleasePriority k_mapping_lease_release_priority = 10u;
-static_assert(k_mapping_lease_release_priority >= RELEASE_PRIO_FIRST);
-inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
-    .name = "bioseq minimizer fragment image mapping lease",
-    .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
-    .release_priority = k_mapping_lease_release_priority,
-    .ReleaseResource = release_mapping_lease_resource,
-    .DebugPrint = nullptr,
-};
-
 [[nodiscard]] inline mapping_lease* allocate_mapping_lease() {
     if (CurrentResourceOwner == nullptr || TopTransactionContext == nullptr) {
         minimizer_generation_storage_error_as_cpp(
@@ -360,34 +242,6 @@ inline const ResourceOwnerDesc k_mapping_lease_resource_owner_descriptor{
     return ::new (storage) mapping_lease{
         .owner = CurrentResourceOwner,
     };
-}
-
-inline void destroy_mapping_lease(mapping_lease*& lease) noexcept {
-    if (lease == nullptr)
-        return;
-    if (lease->remembered) {
-        ResourceOwnerForget(
-            lease->owner, PointerGetDatum(lease), &k_mapping_lease_resource_owner_descriptor);
-        lease->remembered = false;
-    }
-    release_mapping_lease_raw(*lease);
-    lease->~mapping_lease();
-    pfree(lease);
-    lease = nullptr;
-}
-
-/// Form the lifetime token expected by PostgreSQL-free mapped-index
-/// readers without transferring or extending the lease lifetime.  The token
-/// deliberately has no control block: callers must retain the backend-thread
-/// lease guard which supplied it until every borrowed span has been destroyed.
-[[nodiscard]] inline std::shared_ptr<const void>
-borrow_mapping_token(mapping_lease* const lease) noexcept {
-    if (lease == nullptr || lease->owner == nullptr || !lease->remembered || lease->fd < 0 ||
-        lease->mapping == MAP_FAILED || lease->mapping == nullptr || lease->mapping_bytes == 0u) {
-        return {};
-    }
-    std::shared_ptr<const void> no_owner;
-    return std::shared_ptr<const void>{no_owner, lease->mapping};
 }
 
 struct page_aligned_mapping_range {
@@ -814,62 +668,6 @@ enum class minimizer_fragment_image_mapped_open_validation : std::uint8_t {
     full_metadata = 1u,
 };
 
-/// Backend-thread RAII authority for one registered minimizer fragment image mmap/fd lease.
-///
-/// Borrowed reader tokens do not own or prolong this guard.  On the normal
-/// executor path the guard must therefore be declared/stored before every
-/// reader which borrows it, so reverse destruction releases the reader first
-/// and then promptly forgets, unmaps, closes and frees the lease.  PostgreSQL's
-/// ResourceOwner registration remains armed while the guard is live and is the
-/// ERROR/longjmp fallback when ordinary C++ destruction cannot run.
-class mapped_minimizer_fragment_lease_guard {
-  private:
-    minimizer_fragment_image_pg_detail::mapping_lease* lease_ = nullptr;
-
-    explicit mapped_minimizer_fragment_lease_guard(
-        minimizer_fragment_image_pg_detail::mapping_lease* lease) noexcept
-        : lease_(lease) {}
-
-    friend class mapped_minimizer_fragment_image;
-
-  public:
-    mapped_minimizer_fragment_lease_guard() = default;
-    mapped_minimizer_fragment_lease_guard(const mapped_minimizer_fragment_lease_guard&) = delete;
-    mapped_minimizer_fragment_lease_guard&
-    operator=(const mapped_minimizer_fragment_lease_guard&) = delete;
-
-    mapped_minimizer_fragment_lease_guard(mapped_minimizer_fragment_lease_guard&& other) noexcept
-        : lease_(std::exchange(other.lease_, nullptr)) {}
-
-    mapped_minimizer_fragment_lease_guard&
-    operator=(mapped_minimizer_fragment_lease_guard&& other) noexcept {
-        if (this != &other) {
-            minimizer_fragment_image_pg_detail::destroy_mapping_lease(lease_);
-            lease_ = std::exchange(other.lease_, nullptr);
-        }
-        return *this;
-    }
-
-    ~mapped_minimizer_fragment_lease_guard() {
-        minimizer_fragment_image_pg_detail::destroy_mapping_lease(lease_);
-    }
-
-    [[nodiscard]] explicit operator bool() const noexcept {
-        return static_cast<bool>(borrow_mapping_token());
-    }
-
-    /// Non-owning lifetime token. Every copy becomes invalid as soon as
-    /// this guard is destroyed or replaced.
-    [[nodiscard]] std::shared_ptr<const void> borrow_mapping_token() const noexcept {
-        return minimizer_fragment_image_pg_detail::borrow_mapping_token(lease_);
-    }
-};
-
-static_assert(!std::is_copy_constructible_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(!std::is_copy_assignable_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(std::is_nothrow_move_constructible_v<mapped_minimizer_fragment_lease_guard>);
-static_assert(std::is_nothrow_move_assignable_v<mapped_minimizer_fragment_lease_guard>);
-
 /// Validated mapped image with borrowed section views and an explicit lease transfer.
 class mapped_minimizer_fragment_image {
   private:
@@ -1069,7 +867,7 @@ class mapped_minimizer_fragment_image {
     [[nodiscard]] mapped_minimizer_fragment_lease_guard release_mapping_lease_guard() && noexcept {
         auto* const lease = std::exchange(lease_, nullptr);
         clear_views_();
-        return mapped_minimizer_fragment_lease_guard{lease};
+        return mapped_minimizer_fragment_lease_guard::adopt(lease);
     }
 
     friend mapped_minimizer_fragment_image

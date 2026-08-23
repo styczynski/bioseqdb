@@ -24,6 +24,7 @@ export module bioseq.postgres.types.compact_sequence:flat_abi;
 import bioseq.common.seqan_adapter;
 import bioseq.codegen.sql.annotation_model;
 import bioseq.postgres.support.sql_boundary;
+import bioseq.postgres.types.compact_sequence.dispatch_profile_contract;
 import bioseq.sequences;
 import bioseq.storage.layout;
 
@@ -44,6 +45,18 @@ export using pgseq_supported_storage_unit_byte_widths =
 #else
     all_storage_unit_byte_widths;
 #endif
+
+static_assert(pgseq_supported_alphabets::alphabet_count
+              == pgseq_dispatch_profile_alphabet_count);
+static_assert([] consteval {
+    for (unsigned value = 0u; value <= 0xffu; ++value) {
+        const auto byte_width = static_cast<std::uint8_t>(value);
+        if (pgseq_supported_storage_unit_byte_widths::contains_runtime(byte_width)
+            != pgseq_dispatch_profile_contains_storage_unit_byte_width(byte_width))
+            return false;
+    }
+    return true;
+}(), "compact-sequence dispatch-profile width contract drifted");
 
 export namespace bioseq::pg_types {
 

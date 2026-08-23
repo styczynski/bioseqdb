@@ -8666,9 +8666,10 @@ derive_active_import_artifact_paths(
     const pcm_artifact_paths& artifacts) {
     direct_arguments.push_back(
         "-fmodule-output=" + artifacts.pcm.string());
-    direct_arguments.emplace_back("-fmodules-reduced-bmi");
-    // The driver writes the reduced BMI above and a transient full BMI to
-    // `-o`; unlike `-c`, this performs no discarded object/backend action.
+    // The driver writes the full BMI to `-o`; unlike `-c`, this performs no
+    // discarded object/backend action.  Reduced BMIs are intentionally not
+    // requested because Clang 22 corrupts source locations and allocation
+    // declarations in complete generated template consumers.
     direct_arguments.emplace_back("--precompile");
     direct_arguments.push_back(source_spelling.string());
     direct_arguments.emplace_back("-o");

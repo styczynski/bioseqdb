@@ -145,11 +145,380 @@ namespace detail {
     return result;
 }
 
+[[nodiscard]] inline std::string_view coordinate_case(
+    const materialization_coordinate& coordinate,
+    std::string_view group) noexcept {
+    const auto assignment = std::ranges::find(
+        coordinate.assignments, group, &axis_case_assignment::group);
+    return assignment == coordinate.assignments.end()
+        ? std::string_view{}
+        : std::string_view{assignment->case_label};
+}
+
+[[nodiscard]] inline bool scheduler_root_coordinate(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate) noexcept {
+    return plan.topology.region.configured_output_module_name
+            == scheduler_output_module
+        && coordinate_case(coordinate, "shape") == "root";
+}
+
+[[nodiscard]] inline bool scheduler_scanner_coordinate(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate) noexcept {
+    return plan.topology.region.configured_output_module_name
+            == scheduler_output_module
+        && coordinate_case(coordinate, "shape") == "scanner_pg";
+}
+
+[[nodiscard]] inline std::string scheduler_implementation_global_module_fragment(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate) {
+    std::string fragment = global_module_fragment(plan);
+    const bool root = scheduler_root_coordinate(plan, coordinate);
+    const bool scanner = scheduler_scanner_coordinate(plan, coordinate);
+    if (!root && !scanner) return fragment;
+
+    std::vector<std::string_view> removable_lines{
+        "#include <array>\n",
+        "#include <limits>\n",
+        "#include <map>\n",
+        "#include <memory>\n",
+        "#include <stdexcept>\n",
+    };
+    if (root || scanner) {
+        removable_lines.insert(
+            removable_lines.end(),
+            {"#include <cstddef>\n",
+             "#include <cstdint>\n",
+             "#include <optional>\n",
+             "#include <utility>\n",
+             "#include <vector>\n"});
+    }
+    std::vector<source_edit> edits;
+    edits.reserve(removable_lines.size() + (scanner ? 1U : 0U));
+    if (scanner) {
+        constexpr std::string_view scanner_postgres_block{
+            "extern \"C\" {\n"
+            "#include \"postgres.h\"\n"
+            "#include \"access/attnum.h\"\n"
+            "}\n"
+            "\n"
+            "#undef Min\n"
+            "#undef Max\n"
+            "#undef snprintf\n"
+            "#undef vsnprintf\n"
+            "\n"};
+        const std::size_t begin = fragment.find(scanner_postgres_block);
+        if (begin == std::string::npos
+            || fragment.find(
+                   scanner_postgres_block,
+                   begin + scanner_postgres_block.size())
+                != std::string::npos) {
+            throw std::runtime_error(
+                "scheduler scanner PostgreSQL GMF anchor is absent or ambiguous");
+        }
+        constexpr std::string_view scanner_palloc_anchor{
+            "extern \"C\" {\n"
+            "#include \"c.h\"\n"
+            "#include \"utils/palloc.h\"\n"
+            "}\n"
+            "\n"};
+        edits.push_back(source_edit{
+            .begin_byte = begin,
+            .end_byte = begin + scanner_postgres_block.size(),
+            .replacement = std::string{scanner_palloc_anchor},
+            .source_identity =
+                plan.topology.region.boundary.source_identity,
+            .purpose =
+                "narrow scheduler scanner PostgreSQL GMF block to palloc anchor",
+        });
+    }
+    for (const std::string_view line : removable_lines) {
+        const std::size_t begin = fragment.find(line);
+        if (begin == std::string::npos
+            || fragment.find(line, begin + line.size()) != std::string::npos) {
+            throw std::runtime_error(
+                "scheduler implementation GMF standard-header anchor is absent or ambiguous: "
+                + std::string{line});
+        }
+        edits.push_back(source_edit{
+            .begin_byte = begin,
+            .end_byte = begin + line.size(),
+            .source_identity = plan.topology.region.boundary.source_identity,
+            .purpose = "strip scheduler implementation GMF standard header",
+        });
+    }
+    return apply_exact_edits(
+        std::move(fragment), std::move(edits), 0U);
+}
+
+[[nodiscard]] inline bool scheduler_root_std_entity(
+    const std::string_view name) noexcept {
+    return name == "addressof" || name == "array"
+        || name == "exchange" || name == "forward"
+        || name == "logic_error" || name == "map"
+        || name == "move" || name == "nullopt"
+        || name == "numeric_limits" || name == "optional"
+        || name == "size_t" || name == "uint8_t"
+        || name == "uint16_t" || name == "uint64_t"
+        || name == "vector";
+}
+
+[[nodiscard]] inline std::string rewrite_scheduler_root_std_qualifiers(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate,
+    std::string source) {
+    if (!scheduler_root_coordinate(plan, coordinate)) return source;
+    const structural_analysis::translation_unit unit =
+        structural_analysis::scan_token_slice(coordinate.relative_path, source);
+    std::vector<source_edit> edits;
+    for (std::size_t index = 0U; index < unit.tokens.size(); ++index) {
+        const structural_analysis::lexical_token& token = unit.tokens[index];
+        if (token.spelling != "std") continue;
+        if (index + 2U >= unit.tokens.size()
+            || unit.tokens[index + 1U].spelling != "::"
+            || !scheduler_root_std_entity(unit.tokens[index + 2U].spelling)) {
+            throw std::runtime_error(
+                "scheduler root body contains an unaudited std qualifier");
+        }
+        edits.push_back(source_edit{
+            .begin_byte = token.range.begin.byte_offset,
+            .end_byte = token.range.end.byte_offset,
+            .replacement = "typed_support_detail::root_std",
+            .source_identity = coordinate.relative_path.generic_string(),
+            .purpose = "bind scheduler root standard entity through light owner",
+        });
+    }
+    return apply_exact_edits(
+        std::move(source), std::move(edits), 0U);
+}
+
+[[nodiscard]] inline bool scheduler_scanner_std_entity(
+    const std::string_view name) noexcept {
+    return name == "forward" || name == "move"
+        || name == "optional" || name == "size_t"
+        || name == "uint8_t" || name == "uint16_t"
+        || name == "vector";
+}
+
+[[nodiscard]] inline std::string rewrite_scheduler_scanner_qualifiers(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate,
+    std::string source) {
+    if (!scheduler_scanner_coordinate(plan, coordinate)) return source;
+
+    const structural_analysis::translation_unit unit =
+        structural_analysis::scan_token_slice(
+            coordinate.relative_path, source);
+    std::vector<source_edit> edits;
+
+    for (std::size_t index = 0U; index < unit.tokens.size(); ++index) {
+        const structural_analysis::lexical_token& token = unit.tokens[index];
+
+        if (token.spelling == "std") {
+            if (index + 2U >= unit.tokens.size()
+                || unit.tokens[index + 1U].spelling != "::"
+                || !scheduler_scanner_std_entity(
+                    unit.tokens[index + 2U].spelling)) {
+                throw std::runtime_error(
+                    "scheduler scanner body contains an unaudited std qualifier");
+            }
+            edits.push_back(source_edit{
+                .begin_byte = token.range.begin.byte_offset,
+                .end_byte = token.range.end.byte_offset,
+                .replacement = "typed_support_detail::scanner_std",
+                .source_identity =
+                    coordinate.relative_path.generic_string(),
+                .purpose =
+                    "bind scheduler scanner standard entity through light owner",
+            });
+            continue;
+        }
+
+        if (token.spelling == "uint8_t"
+            && !(index >= 2U
+                 && unit.tokens[index - 2U].spelling == "std"
+                 && unit.tokens[index - 1U].spelling == "::")) {
+            edits.push_back(source_edit{
+                .begin_byte = token.range.begin.byte_offset,
+                .end_byte = token.range.end.byte_offset,
+                .replacement =
+                    "typed_support_detail::scanner_std::uint8_t",
+                .source_identity =
+                    coordinate.relative_path.generic_string(),
+                .purpose =
+                    "bind scheduler scanner uint8_t through light owner",
+            });
+            continue;
+        }
+
+        if (token.spelling == "AttrNumber") {
+            edits.push_back(source_edit{
+                .begin_byte = token.range.begin.byte_offset,
+                .end_byte = token.range.end.byte_offset,
+                .replacement =
+                    "typed_support_detail::scanner_attr_number",
+                .source_identity =
+                    coordinate.relative_path.generic_string(),
+                .purpose =
+                    "bind scheduler scanner AttrNumber through light owner",
+            });
+            continue;
+        }
+
+        if (token.spelling == "Datum") {
+            edits.push_back(source_edit{
+                .begin_byte = token.range.begin.byte_offset,
+                .end_byte = token.range.end.byte_offset,
+                .replacement =
+                    "typed_support_detail::scanner_datum",
+                .source_identity =
+                    coordinate.relative_path.generic_string(),
+                .purpose =
+                    "bind scheduler scanner Datum through light owner",
+            });
+        }
+    }
+
+    return apply_exact_edits(
+        std::move(source), std::move(edits), 0U);
+}
+
+[[nodiscard]] inline bool
+scheduler_sibling_declaration_required(const generation_plan& plan,
+                                       const materialization_coordinate& coordinate,
+                                       const owned_declaration& declaration) {
+    if (plan.topology.region.configured_output_module_name != scheduler_output_module) {
+        return true;
+    }
+
+    const std::string_view shape = coordinate_case(coordinate, "shape");
+    if (shape == "root") {
+        return declaration.entry_role == "scanner_pg" ||
+               declaration.entry_role == "inmemory_standard" ||
+               declaration.entry_role == "inmemory_segmented" ||
+               declaration.entry_role == "inmemory_chunked" ||
+               declaration.entry_role == "inmemory_chunked_segmented";
+    }
+    if (shape == "inmemory") {
+        return declaration.entry_role == "inmemory_standard" ||
+               declaration.entry_role == "inmemory_segmented" ||
+               declaration.entry_role == "inmemory_chunked" ||
+               declaration.entry_role == "inmemory_chunked_segmented";
+    }
+    if (shape == "scanner_pg" || shape == "inmemory_standard" || shape == "inmemory_segmented" ||
+        shape == "inmemory_chunked" || shape == "inmemory_chunked_segmented") {
+        return false;
+    }
+    throw std::runtime_error(
+        "scheduler implementation has an unaudited shape for local API declarations");
+}
+
+/**
+ * Keep generated scheduler implementation dependencies aligned with the body
+ * selected for one shape.  The authored input is a scan-only union of all
+ * seven bodies; copying that union into every pruned implementation defeats
+ * the shape boundary and needlessly loads unrelated template BMIs.
+ */
+[[nodiscard]] inline bool scheduler_body_import_required(
+    const generation_plan& plan,
+    const materialization_coordinate& coordinate,
+    std::string_view imported) noexcept {
+    if (plan.topology.region.configured_output_module_name
+        != scheduler_output_module) {
+        return true;
+    }
+
+    const std::string_view shape = coordinate_case(coordinate, "shape");
+    if (shape.empty()) return true;
+
+    if (imported
+        == "bioseq.postgres.storage.indexing.chunked_storage") {
+        return false;
+    }
+    if (imported
+        == "bioseq.postgres.storage.indexing.fragment_handle") {
+        return false;
+    }
+    if (imported
+        == "bioseq.postgres.scheduler.dispatch_processor.source_provider_promotion") {
+        return shape == "root" || shape == "scanner_pg";
+    }
+    if (imported
+        == "bioseq.postgres.scheduler.dispatch_processor.fragment_storage_opener") {
+        return shape == "scanner_pg";
+    }
+
+    if (imported == "bioseq.storage.layout") {
+        return shape == "root" || shape == "scanner_pg";
+    }
+
+    if (imported == "bioseq.sequences") {
+        return true;
+    }
+
+    if (imported
+            == "bioseq.postgres.scheduler.dispatch_processor.typed_support.row_adapters"
+        || imported
+            == "bioseq.postgres.scheduler.dispatch_processor.typed_support.resident_target_materialization"
+        || imported
+            == "bioseq.postgres.scheduler.dispatch_processor.typed_support.generic_rows"
+        || imported
+            == "bioseq.postgres.scheduler.dispatch_processor.typed_support.cpu_batch_route"
+        || imported
+            == "bioseq.postgres.scheduler.dispatch_processor.typed_support.root_coordination") {
+        return shape == "root";
+    }
+    if (imported ==
+        "bioseq.postgres.scheduler.dispatch_processor.typed_support.source_provider_adapters") {
+        return shape == "root";
+    }
+    if (imported == "bioseq.postgres.scheduler.dispatch_processor.typed_support.scanner_row") {
+        return shape == "scanner_pg";
+    }
+    if (imported
+        == "bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats") {
+        return shape == "root" || shape == "inmemory";
+    }
+    if (imported
+        == "bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors") {
+        return shape == "inmemory_standard"
+            || shape == "inmemory_chunked";
+    }
+    if (imported
+        == "bioseq.postgres.scheduler.dispatch_processor.checked_alignment_calls") {
+        return shape == "inmemory_segmented"
+            || shape == "inmemory_chunked_segmented";
+    }
+
+    if (shape == "scanner_pg") return false;
+
+    if (shape == "root") {
+        return imported == "bioseq.postgres.support"
+            || imported == "bioseq.sequences"
+            || imported == "bioseq.pipeline.pipe"
+            || imported == "bioseq.gpu.vulkan.runtime"
+            || imported == "bioseq.postgres.types.compact_sequence"
+            || imported == "bioseq.instrumentation.configuration"
+            || imported == "bioseq.instrumentation.descriptor"
+            || imported == "bioseq.instrumentation.profiler_state"
+            || imported == "bioseq.instrumentation.region"
+            || imported == "bioseq.instrumentation.runtime"
+            || imported == "bioseq.storage.size"
+            || imported == "bioseq.storage.layout"
+            || imported == "bioseq.postgres.storage.scanner"
+            || imported == "bioseq.parallelism.pool";
+    }
+    return true;
+}
+
 inline void render_imports(
     std::ostringstream& output,
     const generation_plan& plan,
     const bool output_primary,
-    const bool api_partition) {
+    const bool api_partition,
+    const materialization_coordinate* coordinate = nullptr) {
     std::set<std::string, std::less<>> emitted;
     if (output_primary) {
         output << "import "
@@ -158,11 +527,25 @@ inline void render_imports(
     }
     if (api_partition) output << "import :typed_flat_api;\n";
     for (const std::string& imported : neutral_imports(plan)) {
+        if (coordinate != nullptr
+            && !scheduler_body_import_required(
+                plan, *coordinate, imported)) {
+            continue;
+        }
         if (emitted.insert(imported).second) {
             output << "import " << imported << ";\n";
         }
     }
     output << '\n';
+}
+
+/** Imports the module that owns the declarations copied into a probe. */
+inline void render_signature_donor_import(
+    std::ostringstream& output,
+    const generation_plan& plan) {
+    output << "import "
+           << plan.topology.region.configured_output_module_name
+           << ";\n\n";
 }
 
 [[nodiscard]] inline std::string provenance_attribute(
@@ -543,7 +926,7 @@ inline void render_selector_switch(
            << "module "
            << plan.topology.region.configured_output_module_name
            << ":typed_flat_api;\n\n";
-    detail::render_imports(output, plan, true, false);
+    detail::render_signature_donor_import(output, plan);
     for (const std::uint32_t representative
          : plan.topology.identity_representative_ordinals) {
         const materialization_coordinate& coordinate =
@@ -633,26 +1016,59 @@ inline void render_selector_switch(
         throw std::runtime_error(
             "a template_flatten policy marker escaped into a production unit");
     }
+    body = detail::rewrite_scheduler_root_std_qualifiers(
+        plan, coordinate, std::move(body));
+    body = detail::rewrite_scheduler_scanner_qualifiers(
+        plan, coordinate, std::move(body));
     std::ostringstream output;
-    output << detail::global_module_fragment(plan)
+    const bool scheduler_implementation =
+        plan.topology.region.configured_output_module_name
+        == detail::scheduler_output_module;
+    const bool scheduler_local_api_context =
+        scheduler_implementation
+        && plan.policy == emission_policy::selector_api;
+    output << detail::scheduler_implementation_global_module_fragment(
+                  plan, coordinate)
            << "module " << plan.topology.region.configured_output_module_name
            << ";\n\n";
     detail::render_imports(
         output,
         plan,
         false,
-        plan.policy == emission_policy::selector_api);
-    if (plan.topology.region.configured_output_module_name
-        == detail::scheduler_output_module) {
-        output << "import :cpu_preparation;\n\n";
-    }
+        plan.policy == emission_policy::selector_api
+            && !scheduler_local_api_context,
+        &coordinate);
     const std::string_view rendered_namespace =
         plan.policy == emission_policy::implementation_owners
         ? std::string_view{plan.topology.region.boundary.qualified_name}
         : std::string_view{coordinate.identity_namespace};
-    output << "namespace " << rendered_namespace << " {\n"
-           << body;
-    if (!body.empty() && body.back() != '\n') output << '\n';
+    output << "namespace " << rendered_namespace << " {\n";
+    if (scheduler_local_api_context) {
+        for (const binding_record& binding : plan.topology.region.bindings) {
+            if (binding.role == axis_role::identity
+                && binding.declaration.kind
+                    == structural_analysis::declaration_kind::alias) {
+                output << detail::render_binding_declaration(
+                    plan, binding, coordinate, false)
+                       << '\n';
+            }
+        }
+        for (const owned_declaration& declaration : plan.topology.region.controlled_declarations) {
+            if (!declaration.generated_api_entry ||
+                coordinate_matches(coordinate, declaration.clauses) ||
+                !detail::scheduler_sibling_declaration_required(plan, coordinate, declaration)) {
+                continue;
+            }
+            std::string sibling_head =
+                detail::render_entry_head(plan, declaration, coordinate, false);
+            sibling_head = detail::rewrite_scheduler_root_std_qualifiers(
+                plan, coordinate, std::move(sibling_head));
+            output << sibling_head << ";\n\n";
+        }
+    }
+    output << body;
+    if (!body.empty() && body.back() != '\n')
+        output << '\n';
     output << "}  // namespace " << rendered_namespace << "\n";
     return output.str();
 }
@@ -731,7 +1147,11 @@ inline void render_selector_switch(
         + std::to_string(identity.ordinal);
     output << detail::global_module_fragment(plan)
            << "export module " << module << ";\n\n";
-    detail::render_imports(output, plan, true, false);
+    // A body-free probe validates declarations copied from the authenticated
+    // signature donor. Loading every implementation dependency here repeats
+    // large system-header source tables and can exhaust Clang's source-location
+    // address space before the declaration is parsed.
+    detail::render_signature_donor_import(output, plan);
     const std::string identity_key = detail::identity_key(identity);
     for (const materialization_coordinate& coordinate
          : plan.topology.coordinates) {
@@ -781,13 +1201,31 @@ inline void render_selector_switch(
             "typed_flat_selector requires at least one identity group");
     }
     const materialization_coordinate& representative = *identities.front();
+    const bool scheduler_selector =
+        plan.topology.region.configured_output_module_name
+            == detail::scheduler_output_module
+        && std::ranges::any_of(
+            identity_groups,
+            [](const axis_group* group) { return group->name == "alphabet"; })
+        && std::ranges::any_of(
+            identity_groups,
+            [](const axis_group* group) { return group->name == "width"; });
     std::ostringstream output;
-    output << detail::global_module_fragment(plan)
+    output << detail::global_module_fragment(plan);
+    if (scheduler_selector) {
+        output << "#include <libassert/assert.hpp>\n\n";
+    }
+    output
            << "// Generated by " << materialization_generator_identity << ".\n"
            << "module "
            << plan.topology.region.configured_output_module_name
            << ":typed_flat_selector;\n\n";
-    detail::render_imports(output, plan, true, true);
+    detail::render_signature_donor_import(output, plan);
+    output << "import :typed_flat_api;\n";
+    if (scheduler_selector) {
+        output << "import bioseq.common.logging;\n";
+    }
+    output << '\n';
     const std::string owner = detail::parent_namespace(
         plan.topology.region.boundary.qualified_name);
     if (!owner.empty()) output << "namespace " << owner << " {\n\n";
@@ -806,15 +1244,6 @@ inline void render_selector_switch(
         identities,
         0U,
         4U);
-    const bool scheduler_selector =
-        plan.topology.region.configured_output_module_name
-            == detail::scheduler_output_module
-        && std::ranges::any_of(
-            identity_groups,
-            [](const axis_group* group) { return group->name == "alphabet"; })
-        && std::ranges::any_of(
-            identity_groups,
-            [](const axis_group* group) { return group->name == "width"; });
     if (scheduler_selector) {
         output << "    ASSERT(false, fmt::format(\n"
                << "        \"BatchProcessor::process_sequences invalid typmod alphabet={} width={}\",\n"

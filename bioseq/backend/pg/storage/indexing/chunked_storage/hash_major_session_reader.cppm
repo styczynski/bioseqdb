@@ -51,37 +51,13 @@ extern "C" {
 #include "port/atomics.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <bit>
-#include <cerrno>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <exception>
-#include <expected>
 #include <fcntl.h>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <new>
-#include <optional>
-#include <queue>
-#include <span>
-#include <string>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <tuple>
-#include <type_traits>
 #include <unistd.h>
-#include <utility>
-#include <vector>
-export module bioseq.postgres.storage.indexing.chunked_storage:hash_major_session_reader;
+export module bioseq.postgres.storage.indexing.hash_major_session_reader;
+import std;
 import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.memory_budget;
@@ -116,9 +92,8 @@ import bioseq.postgres.storage.physical;
 import bioseq.postgres.storage.indexing.sql_row_codecs;
 import bioseq.postgres.storage.manager.sql_row_codecs;
 import bioseq.postgres.sql.generated.core.storage_indexing_pg_chunked_storage.entity_handles;
-import :catalog;
-import :hash_major_writer;
-import :hash_major_parallel_probe;
+import bioseq.postgres.storage.indexing.chunked_storage;
+import bioseq.postgres.storage.indexing.hash_major_parallel_probe;
 export namespace bioseq::storage::indexing {
 /// Snapshot-bound reader for one READY hash-major generation and its three streams.
 class index_storage_hash_major_minimizer_read_session {
@@ -1087,38 +1062,33 @@ class index_storage_hash_major_minimizer_read_session {
         minimizer_generation_catalog_source_authorization&& authorization) {
         try {
             if (state_ != operation_state::metadata_ready || !head_ || !manifest_ ||
-                !authorization.valid_ || !authorization.stats_.timed_equation_holds() ||
-                authorization.snapshot_ != snapshot_ ||
-                authorization.database_oid_ != MyDatabaseId ||
-                authorization.tablespace_oid_ != expected_tablespace_oid_ ||
-                authorization.index_name_ != index_name_ ||
-                authorization.source_.sequence_rowno != query_key_ ||
-                authorization.table_name_ != table_name_) {
-                authorization.invalidate_();
+                !authorization.matches_hash_major_reader(snapshot_,
+                                                          MyDatabaseId,
+                                                          expected_tablespace_oid_,
+                                                          index_name_,
+                                                          query_key_,
+                                                          table_name_)) {
+                authorization.invalidate_after_consumption();
                 fail_("hash-major source authorization binding/work disagrees");
             }
+            const auto& authorized_source = authorization.source_for_diagnostics();
+            const std::uint64_t authorized_checksum =
+                authorization.source_content_checksum_for_diagnostics();
             const auto source_identity = bioseq::indexing::hash_major_minimizer_source_identity(
                 query_key_,
-                authorization.source_.locator.source_epoch,
-                authorization.source_content_checksum_,
-                authorization.source_.locator.logical_length);
-            if (authorization.source_.locator.source_epoch != manifest_->source_epoch ||
-                authorization.source_content_checksum_ != manifest_->source_content_crc64 ||
-                authorization.source_.locator.logical_length != manifest_->target_length ||
-                authorization.source_.alphabet_code != manifest_->storage_profile.alphabet_code ||
+                authorized_source.locator.source_epoch,
+                authorized_checksum,
+                authorized_source.locator.logical_length);
+            if (authorized_source.locator.source_epoch != manifest_->source_epoch ||
+                authorized_checksum != manifest_->source_content_crc64 ||
+                authorized_source.locator.logical_length != manifest_->target_length ||
+                authorized_source.alphabet_code != manifest_->storage_profile.alphabet_code ||
                 source_identity != manifest_->source_identity ||
                 source_identity != head_->source_identity) {
-                authorization.invalidate_();
+                authorization.invalidate_after_consumption();
                 fail_("hash-major source identity/content disagrees");
             }
-            stats_.source_parent_rows_read = authorization.stats_.parent_rows_read;
-            stats_.source_catalog_rows_read = authorization.stats_.catalog_rows_read;
-            stats_.source_catalog_index_scans = authorization.stats_.catalog_index_scans;
-            stats_.source_fragment_rows_read = authorization.stats_.fragment_rows_read;
-            stats_.source_decoded_bp = authorization.stats_.decoded_bp;
-            stats_.source_storage_incarnations_checked =
-                authorization.stats_.storage_incarnations_checked;
-            stats_.cold.merge(authorization.cold_stats_);
+            authorization.record_hash_major_reader_stats(stats_);
             expected_generation_.emplace(expected_hash_major_minimizer_generation{
                 .generation_id = head_->generation_id,
                 .query_key = query_key_,
@@ -1127,11 +1097,11 @@ class index_storage_hash_major_minimizer_read_session {
                 .target_length = manifest_->target_length,
                 .storage_profile = manifest_->storage_profile,
             });
-            authorization.invalidate_();
+            authorization.invalidate_after_consumption();
             state_ = operation_state::source_authorized;
             return *expected_generation_;
         } catch (...) {
-            authorization.invalidate_();
+            authorization.invalidate_after_consumption();
             state_ = operation_state::failed;
             throw;
         }

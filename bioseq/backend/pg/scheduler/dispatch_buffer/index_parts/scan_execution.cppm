@@ -36,30 +36,19 @@ extern "C" {
 module bioseq.postgres.scheduler.dispatch_buffer:scan_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
+import :active_policy_accounting;
 
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
 import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.postgres.storage.indexing.active_read_policy_resolver;
 import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
 import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
 import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
 
@@ -523,7 +512,11 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     };
     /** @brief Aborts the active read session and clears wave handles on an error path. */
     const auto release_active_wave_after_error_noexcept =
-        [this, &clear_active_wave_member_handles_noexcept]() noexcept {
+        [this,
+         &clear_active_wave_member_handles_noexcept,
+         &scanner_pg_ctx,
+         &target_hdrs,
+         &per_row_query_hdrs]() noexcept {
             scanner_pg_ctx.read_session = nullptr;
             ::abort_pg_sequence_read_session_noexcept(
                 std::exchange(active_wave_read_session, nullptr));
@@ -531,9 +524,13 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
             target_hdrs.fill(nullptr);
             per_row_query_hdrs.fill(nullptr);
             active_wave_permit.reset();
-        };
+    };
     /** @brief Verifies the read session finished, then clears wave handles and releases admission. */
-    const auto release_active_wave_checked = [this, &clear_active_wave_member_handles_noexcept]() {
+    const auto release_active_wave_checked =
+        [this,
+         &clear_active_wave_member_handles_noexcept,
+         &target_hdrs,
+         &per_row_query_hdrs]() {
         if (active_wave_read_session != nullptr) {
             ereport(ERROR,
                     (errcode(ERRCODE_INTERNAL_ERROR),
@@ -546,7 +543,7 @@ void tuple_dispatch_buffer::run_batch_and_build_cursors_impl() {
     };
     /** @brief Tears down the active wave and destroys scanner_pg sequence caches after failure. */
     const auto abandon_scanner_cache_noexcept =
-        [this, &release_active_wave_after_error_noexcept]() noexcept {
+        [this, &release_active_wave_after_error_noexcept, &scanner_pg_cache]() noexcept {
             release_active_wave_after_error_noexcept();
             if (scanner_pg_cache == nullptr) {
                 return;

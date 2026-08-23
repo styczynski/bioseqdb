@@ -26,13 +26,13 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-export module bioseq.postgres.storage.indexing.sorted_runs:sorted_runs_merge;
+module bioseq.postgres.storage.indexing.sorted_runs;
 
 import bioseq.common.checked_arithmetic;
 import bioseq.postgres.support;
 import bioseq.parallelism.memory_admission;
 
-export import :sorted_runs_storage;
+import :sorted_runs_storage;
 
 namespace bioseq::storage::indexing {
 

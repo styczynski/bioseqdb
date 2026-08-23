@@ -3,10 +3,7 @@
  * @brief Owns Bioseq OID lookup, invalidation, and syscache validation.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,113 +24,10 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_oid_expression_support_oid_catalog;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
-import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-import :custom_scan_runtime_support;
-
-using namespace bioseq::postgres::support;
+export import :custom_scan_oid_expression_support_oid_catalog_contracts;
 
 export {
-
-    /** @brief Stores exact catalog OIDs for the SQL types and functions used by custom scans. */
-    struct bioseq_stub_oids {
-        Oid mmsearch_oid;
-        Oid mmsearch_with_opts_oid; // mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)
-        Oid bioseq_seq_type_oid;    // resolves to bioseq.seq pg_type row
-        Oid bioseq_aligner_options_type_oid;
-
-        Oid score_oid; // bioseq.score (alias for dp_score)
-        Oid dp_score_oid;
-        Oid query_len_oid;
-        Oid query_start_oid;
-        Oid query_end_oid;
-        Oid target_len_oid;
-        Oid target_start_oid;
-        Oid target_end_oid;
-        Oid num_matches_oid;
-        Oid block_length_oid;
-        Oid edit_oid;
-        Oid mapq_oid;
-        Oid chain_score_oid;
-        Oid dp_max_score_oid;
-        Oid seed_count_oid;
-        Oid secondary_chain_score_oid;
-        Oid is_reverse_oid;
-        Oid is_primary_oid;
-        Oid has_cigar_oid;
-        Oid divergence_oid;
-        Oid cigar_oid;
-        Oid symbol_count_oid;
-        /* Lazy sequence projection functions are resolved by exact
-         * signatures; the planner never classifies an operation by its name. */
-        Oid seq_concat_oid;
-        Oid seq_concat_text_oid;
-        Oid text_concat_seq_oid;
-        Oid seq_concat_varchar_oid;
-        Oid varchar_concat_seq_oid;
-        Oid seq_concat_text_array_oid;
-        Oid text_array_concat_seq_oid;
-        Oid seq_concat_letter_array_oid;
-        Oid letter_array_concat_seq_oid;
-        Oid seq_reverse_oid;
-        Oid seq_reverse_complement_oid;
-        Oid seq_array_cat_oid;
-        Oid seq_array_length_oid;
-        Oid seq_cardinality_oid;
-        Oid seq_to_text_oid;
-        Oid seq_to_varchar_oid;
-        Oid seq_to_array_oid;
-        Oid seq_from_letter_array_infer_oid;
-        Oid seq_from_letter_array_named_oid;
-        Oid seq_len_oid;
-        Oid seq_cast_oid;
-    };
 
     /** @brief Resolves a fully defined type without failing during partial extension setup. */
     [[nodiscard]] Oid lookup_defined_type_missing_ok(const char* schema_name,
@@ -485,16 +379,5 @@ export {
             return nullptr;
         return &get_cached_stub_oids();
     }
-
-    /** @brief Tests whether an Index is a concrete range-table identifier rather than a special Var. */
-    [[nodiscard]] constexpr bool bioseq_is_concrete_rte_varno(const Index varno) noexcept {
-        return varno != 0 && !IS_SPECIAL_VARNO(varno);
-    }
-    static_assert(bioseq_is_concrete_rte_varno(1));
-    static_assert(!bioseq_is_concrete_rte_varno(0));
-    static_assert(!bioseq_is_concrete_rte_varno(static_cast<Index>(INNER_VAR)));
-    static_assert(!bioseq_is_concrete_rte_varno(static_cast<Index>(OUTER_VAR)));
-    static_assert(!bioseq_is_concrete_rte_varno(static_cast<Index>(INDEX_VAR)));
-    static_assert(!bioseq_is_concrete_rte_varno(static_cast<Index>(ROWID_VAR)));
 
 } // export custom-scan partition declarations

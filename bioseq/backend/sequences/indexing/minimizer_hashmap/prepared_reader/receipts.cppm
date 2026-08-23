@@ -4,7 +4,7 @@
  */
 module;
 
-#include <libassert/assert.hpp>
+#include <new>
 
 export module bioseq.indexing.minimizer_hashmap:prepared_reader_receipts;
 

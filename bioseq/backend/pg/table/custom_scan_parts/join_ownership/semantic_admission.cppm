@@ -3,10 +3,7 @@
  * @brief Validates per-row operands, output semantics, and base-local mmsearch ownership.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,65 +24,20 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_ownership_semantic_admission;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
-import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-
-import :custom_scan_join_ownership_carrier_lineage;
+import :custom_scan_oid_expression_support_oid_catalog;
+import :custom_scan_oid_expression_support_expression_analysis;
+import :custom_scan_slice_path_expression_contract;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_sequence_typmod_contract;
+import :custom_scan_join_ownership_expression_signature_contract;
+export import :custom_scan_join_ownership_target_contracts;
+export import :custom_scan_join_ownership_semantic_admission_contracts;
 
 using namespace bioseq::postgres::support;
 
 export {
-    /** @brief Monotonic statement-local token used to pair BatchJoin plan components. */
-    int next_batch_join_plan_token = 1;
-
     /** @brief Encodes a finite planner Cost as a FLOAT8 plan node. */
     [[nodiscard]] Const* make_batch_join_cost_const(const Cost value) {
         if (!std::isfinite(value)) {
@@ -122,13 +74,6 @@ export {
         }
         return decoded;
     }
-
-    /** @brief Accumulates sequence Vars referenced by a movable per-row operand. */
-    struct per_row_operand_source_resolution {
-        RelOptInfo* joinrel = nullptr;
-        List* sequence_vars = NIL;
-        bool invalid = false;
-    };
 
     /** @brief Validates operand Vars against the candidate join relation. */
     struct per_row_operand_source_visitor {
@@ -174,17 +119,6 @@ export {
         Node* target_recipe = nullptr;
         bool invalid = false;
     };
-
-    /** @brief Recognizes exact ctid and tableoid row-identity Vars. */
-    [[nodiscard]] bool per_row_is_exact_row_identity_var(const Var* var) noexcept {
-        if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno) || var->varlevelsup != 0 ||
-            !bms_is_empty(var->varnullingrels))
-            return false;
-        return (var->varattno == SelfItemPointerAttributeNumber && var->vartype == TIDOID &&
-                var->vartypmod == -1 && !OidIsValid(var->varcollid)) ||
-               (var->varattno == TableOidAttributeNumber && var->vartype == OIDOID &&
-                var->vartypmod == -1 && !OidIsValid(var->varcollid));
-    }
 
     /** @brief Rejects output nodes whose planner frontier cannot move to the per-row owner. */
     struct per_row_output_semantic_visitor {
@@ -259,22 +193,6 @@ export {
         return true;
     }
 
-    /** @brief Collects passthrough Vars and helper identities needed by owner setrefs. */
-    struct per_row_owner_support_validation {
-        Index target_relid = 0;
-        Relids join_relids = nullptr;
-        const bioseq_stub_oids* oids = nullptr;
-        Node* target_recipe = nullptr;
-        List* passthrough_vars = NIL;
-        List* helper_identities = NIL;
-        /* Sequence-valued helpers which do not name this owner may still be exact
-         * outputs of one versioned descendant BatchJoin.  They remain candidates
-         * until each incumbent path validates that ownership structurally. */
-        List* foreign_exact_helper_identities = NIL;
-        List* helper_argument_vars = NIL;
-        bool invalid = false;
-    };
-
     /** @brief Appends a copied expression unless an equal expression is already present. */
     void per_row_append_unique_expression(List*& expressions, Node* node) {
         if (node == nullptr)
@@ -285,22 +203,6 @@ export {
         }
         expressions = lappend(expressions, copyObject(node));
     }
-
-    /** @brief Reports whether a list contains an expression structurally equal to a node. */
-    [[nodiscard]] bool per_row_expression_list_contains(List* expressions, Node* node) noexcept {
-        if (node == nullptr)
-            return false;
-        for (Node* existing : postgres_list<Node>(expressions)) {
-            if (existing != nullptr && equal(existing, node))
-                return true;
-        }
-        return false;
-    }
-
-    /** @brief Resolves authoritative sort/group references for a proposed owner target. */
-    [[nodiscard]] bool per_row_authoritative_sortgrouprefs(PlannerInfo* root,
-                                                           List* expressions,
-                                                           std::vector<Index>& results);
 
     /**
      * @brief Rebuilds an owner target at PostgreSQL's authoritative join frontier.
@@ -534,25 +436,6 @@ export {
         return !resolution.invalid;
     }
 
-    /**
-     * @brief Describes an admitted base-local mmsearch operand and its source Vars.
-     *
-     * Exact baserel operand validation for BioseqScan-owned mmsearch. Unlike the
-     * join relocation validation above, this expression is not moved across a planner
-     * frontier: its original post-setrefs ExprState remains authoritative at the
-     * scan.  Volatile functions and opaque/erroring CASE/COALESCE arms are thus
-     * legal and execute once in PostgreSQL order.  The remaining validation
-     * requires that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
-     * Var belongs to this non-nullable scan relation.
-     */
-    struct base_local_mmsearch_operand_resolution {
-        Node* expression = nullptr;
-        List* sequence_vars = NIL;
-        Var* primary_sequence_var = nullptr;
-        int32 typmod = -1;
-        bool evaluated = false;
-    };
-
     /** @brief Tracks base-relation and type constraints during operand validation. */
     struct base_local_mmsearch_operand_walker {
         RelOptInfo* rel = nullptr;
@@ -615,12 +498,6 @@ export {
             }
             return pg_walk_step::skip_subtree;
         }
-    };
-
-    /** @brief Carries the exact sequence typmod derived for a base-local expression. */
-    struct base_local_sequence_typmod_resolution {
-        int32 typmod = -1;
-        bool invalid = false;
     };
 
     /** @brief Derives a compatible sequence typmod through supported expression shapes. */
@@ -830,16 +707,6 @@ export {
             .evaluated = raw == nullptr,
         };
     }
-
-    /** @brief Classifies the target and query bindings owned by one base-scan mmsearch. */
-    struct base_local_mmsearch_ownership {
-        base_local_mmsearch_operand_resolution target{};
-        std::optional<base_local_mmsearch_operand_resolution> local_query{};
-        bool query_is_const = false;
-        bool query_is_param = false;
-        bool query_is_outer_var = false;
-        bool any_evaluated_operand = false;
-    };
 
     /** @brief Resolves an mmsearch call that a base relation can own without semantic movement. */
     [[nodiscard]] std::optional<base_local_mmsearch_ownership>

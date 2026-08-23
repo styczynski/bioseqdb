@@ -3,10 +3,7 @@
  * @brief Owns scan fetch support and finalized placeholder population.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,63 +24,25 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_runtime_tuple_production;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
 import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
+import bioseq.postgres.table.scan_state;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
-import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
+import bioseq.pipeline.minimap_port;
+import bioseq.sequences.cigar;
+import bioseq.sequences.compact_sequence_typmod;
+import bioseq.postgres.storage.indexing.admin.policy_catalog;
 
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-import :custom_scan_plan_builders;
-import :custom_scan_match_ownership;
-
-import :custom_scan_join_runtime_parameter_binding;
-import :custom_scan_join_runtime_scan_admission;
+import :custom_scan_scan_runtime_state_contracts;
+import :custom_scan_runtime_placeholder_contracts;
+import :custom_scan_runtime_match_contracts;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_semantic_analysis_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_runtime_tuple_injection_contracts;
+import :custom_scan_join_runtime_scan_fetch_contracts;
+import :custom_scan_join_runtime_scan_admission_contracts;
 
 using namespace bioseq::postgres::support;
 
@@ -128,105 +87,6 @@ export {
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("BioseqColumnScan Begin raised an unknown C++ exception")));
         }
-    }
-
-    /**
-     * @brief Fetches a scan tuple while honoring EvalPlanQual replacement semantics.
-     *
-     * This routine is concerned with substituting a test tuple if we are
-     * inside an EvalPlanQual recheck.  If we aren't, just execute
-     * the access method's next-tuple routine.
-     */
-    inline TupleTableSlot*
-    exec_scan_fetch(ScanState* node, ExecScanAccessMtd access_mtd, ExecScanRecheckMtd recheck_mtd) {
-        bioseq_log<logging_level::debug>("[bioseq] pg: ExecScanFetch() entered");
-        EState* estate = node->ps.state;
-
-        CHECK_FOR_INTERRUPTS();
-
-        if (estate->es_epq_active != nullptr) {
-            EPQState* epqstate = estate->es_epq_active;
-
-            /*
-             * We are inside an EvalPlanQual recheck.  Return the test tuple if
-             * one is available, after rechecking any access-method-specific
-             * conditions.
-             */
-            Index scanrelid = reinterpret_cast<Scan*>(node->ps.plan)->scanrelid;
-
-            if (scanrelid == 0) {
-                /*
-                 * This is a ForeignScan or CustomScan which has pushed down a
-                 * join to the remote side.  The recheck method is responsible not
-                 * only for rechecking the scan/join quals but also for storing
-                 * the correct tuple in the slot.
-                 */
-
-                TupleTableSlot* slot = node->ss_ScanTupleSlot;
-
-                if (!(*recheck_mtd)(node, slot))
-                    ExecClearTuple(slot); /* would not be returned by scan */
-                return slot;
-            } else if (epqstate->relsubs_done[scanrelid - 1]) {
-                /*
-                 * Return empty slot, as we already performed an EPQ substitution
-                 * for this relation.
-                 */
-
-                TupleTableSlot* slot = node->ss_ScanTupleSlot;
-
-                /* Return empty slot, as we already returned a tuple */
-                return ExecClearTuple(slot);
-            } else if (epqstate->relsubs_slot[scanrelid - 1] != nullptr) {
-                /*
-                 * Return replacement tuple provided by the EPQ caller.
-                 */
-
-                TupleTableSlot* slot = epqstate->relsubs_slot[scanrelid - 1];
-
-                Assert(epqstate->relsubs_rowmark[scanrelid - 1] == nullptr);
-
-                /* Mark to remember that we shouldn't return more */
-                epqstate->relsubs_done[scanrelid - 1] = true;
-
-                /* Return empty slot if we haven't got a test tuple */
-                if (TupIsNull(slot))
-                    return nullptr;
-
-                /* Check if it meets the access-method conditions */
-                if (!(*recheck_mtd)(node, slot))
-                    return ExecClearTuple(slot); /* would not be returned by
-                                                  * scan */
-                return slot;
-            } else if (epqstate->relsubs_rowmark[scanrelid - 1] != nullptr) {
-                /*
-                 * Fetch and return replacement tuple using a non-locking rowmark.
-                 */
-
-                TupleTableSlot* slot = node->ss_ScanTupleSlot;
-
-                /* Mark to remember that we shouldn't return more */
-                epqstate->relsubs_done[scanrelid - 1] = true;
-
-                if (!EvalPlanQualFetchRowMark(epqstate, scanrelid, slot))
-                    return nullptr;
-
-                /* Return empty slot if we haven't got a test tuple */
-                if (TupIsNull(slot))
-                    return nullptr;
-
-                /* Check if it meets the access-method conditions */
-                if (!(*recheck_mtd)(node, slot))
-                    return ExecClearTuple(slot); /* would not be returned by
-                                                  * scan */
-                return slot;
-            }
-        }
-
-        /*
-         * Run the node-type-specific access method function to get the next tuple
-         */
-        return (*access_mtd)(node);
     }
 
     /**

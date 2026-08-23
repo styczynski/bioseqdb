@@ -106,6 +106,34 @@ class HighwayProfileModeContractTest(unittest.TestCase):
         self.assertEqual(len(subagent_schema["oneOf"]), 8)
         for shape in subagent_schema["oneOf"]:
             self.assertFalse(shape["additionalProperties"])
+        create_shape = next(
+            shape for shape in subagent_schema["oneOf"]
+            if shape["title"] == "create"
+        )
+        expected_tiers = [
+            "contractor-intern", "intern", "contractor", "mid", "senior",
+            "specialist",
+        ]
+        self.assertEqual(
+            create_shape["properties"]["reasoning_effort"]["enum"],
+            expected_tiers,
+        )
+        self.assertEqual(
+            create_shape["properties"]["highest_spawn_tier"]["enum"],
+            [None, *expected_tiers],
+        )
+        self.assertIn(
+            "separate Cursor account quota",
+            create_shape["properties"]["reasoning_effort"]["description"],
+        )
+        repurpose_shape = next(
+            shape for shape in subagent_schema["oneOf"]
+            if shape["title"] == "repurpose"
+        )
+        self.assertEqual(
+            repurpose_shape["properties"]["highest_spawn_tier"]["enum"],
+            [None, *expected_tiers],
+        )
         remote_schema = definitions["remote-run"]["inputSchema"]
         for shape in remote_schema["oneOf"]:
             self.assertFalse(shape["additionalProperties"])

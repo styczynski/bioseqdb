@@ -4,29 +4,28 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
-
 extern "C" {
+#include "postgres.h"
+
+#include "access/attnum.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "fmgr.h"
+#include "utils/errcodes.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 }
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <cstdint>
-#include <cstring>
-#include <exception>
 #include <limits>
-#include <memory>
 #include <new>
-#include <span>
-#include <type_traits>
-#include <utility>
 
 export module bioseq.postgres.storage.scanner:source_scanner_promotion;
 
@@ -47,7 +46,7 @@ import bioseq.sequences;                 // compact_sequence_range, compact_sequ
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.table.io; // begin_column_read/read_column_row_by_number
 import bioseq.parallelism.pool;
-import :fragment_scanner;
+import bioseq.postgres.storage.scanner.fragment_scanner;
 import :source_registry;
 
 export import :source_scanner_routes;
@@ -59,6 +58,46 @@ export namespace bioseq::storage {
 [[nodiscard]] inline bool pg_sequence_source_registry_is_current_thread(
     const pg_sequence_source_registry_lease& lease) noexcept {
     return lease.registry != nullptr && lease.registry->backend_thread.is_current();
+}
+
+/**
+ * Validate the exact statement provider identity required by typed dispatch.
+ *
+ * This is deliberately out of line in the scanner owner so importing
+ * scheduler modules do not instantiate the scanner's PostgreSQL bridge and
+ * standard-library implementation details.
+ */
+[[gnu::noinline]] void
+validate_exact_pg_sequence_source_provider(pg_sequence_source_provider* provider,
+                                           Oid user_relid,
+                                           Oid database_oid,
+                                           Oid tablespace_oid,
+                                           Oid main_relfilenode,
+                                           Snapshot snapshot,
+                                           MemoryContext parent_mctx,
+                                           AttrNumber column_attno) {
+    auto* registry = provider != nullptr ? provider->lease.registry : nullptr;
+    const bool exact_provider =
+        provider != nullptr && provider->open &&
+        provider->kind == pg_sequence_source_provider_kind::scan && provider->lease.owned &&
+        registry != nullptr && provider->lease.provider_generation == registry->generation &&
+        registry->accepting_lookups && !registry->provider_closed && !registry->lease_fault &&
+        !registry->xact_ended && registry->backend_thread.is_current() &&
+        registry->user_relid == user_relid && registry->database_oid == database_oid &&
+        registry->tablespace_oid == tablespace_oid &&
+        registry->main_relfilenode == main_relfilenode &&
+        registry->authoritative_snapshot == snapshot && snapshot != nullptr &&
+        IsMVCCSnapshot(snapshot) && snapshot->regd_count > 0 && column_attno > 0 &&
+        parent_mctx != nullptr;
+    if (!exact_provider) {
+        bioseq::postgres::support::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg_internal(
+                         "%s", "locator sequence has no exact statement source-provider route")));
+        });
+        pg_unreachable();
+    }
 }
 
 /// Validate a locator against its immutable source and return a source-backed
@@ -192,6 +231,30 @@ promote_pg_sequence_locator(const pg_sequence_source_registry_lease& lease,
                                                trace,
                                                producer_value_id);
         });
+}
+
+/**
+ * Promote through an open provider without exposing the inline scanner body to
+ * cross-module coordinators.
+ */
+[[nodiscard]] [[gnu::noinline]] Datum
+promote_pg_sequence_source_provider_locator(pg_sequence_source_provider* provider,
+                                            AttrNumber column_attno,
+                                            Datum locator_datum,
+                                            MemoryContext result_context) {
+    return promote_pg_sequence_locator(provider, column_attno, locator_datum, result_context);
+}
+
+/**
+ * Promote through an already validated provider using the canonical scanner
+ * implementation, without exporting its inline implementation to the caller.
+ */
+[[nodiscard]] [[gnu::noinline]] Datum
+promote_validated_pg_sequence_source_provider_locator(pg_sequence_source_provider* provider,
+                                                      AttrNumber column_attno,
+                                                      Datum locator_datum,
+                                                      MemoryContext result_context) {
+    return promote_pg_sequence_locator(provider, column_attno, locator_datum, result_context);
 }
 
 /// Promote a locator through the route selected by relation and generation.

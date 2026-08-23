@@ -379,8 +379,6 @@ struct rebuilt_generation_metadata {
         .directory_bytes = std::move(*directory_bytes),
     };
 }
-} // namespace
-
 } // namespace compact_direct_test_support
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

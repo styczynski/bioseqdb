@@ -14,6 +14,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -1649,6 +1650,190 @@ class PackageOptimizationContractTests(unittest.TestCase):
             postgres_source_graph,
         )
         self.assertIn("preset -O3", postgres_source_graph)
+
+
+class CompilerLauncherWatchdogTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.launcher = PACKAGING_ROOT / "scripts" / "compiler_launcher.sh"
+
+    @staticmethod
+    def _write_executable(path: Path, source: str) -> None:
+        path.write_text(source, encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+    def _tool_environment(self, root: Path) -> tuple[dict[str, str], Path, Path]:
+        tools = root / "tools"
+        tools.mkdir()
+        self._write_executable(
+            tools / "setsid",
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "os.setsid()\n"
+            "os.execvp(sys.argv[1], sys.argv[1:])\n",
+        )
+        self._write_executable(
+            tools / "chrt",
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "[[ $1 == --rr && $2 == 1 ]]\n"
+            "shift 2\n"
+            "exec \"$@\"\n",
+        )
+        compiler = root / "fake-compiler.py"
+        pid_file = root / "compiler-pids"
+        self._write_executable(
+            compiler,
+            "#!/usr/bin/env python3\n"
+            "import os, pathlib, subprocess, sys, time\n"
+            "if len(sys.argv) == 2 and sys.argv[1] == '--version':\n"
+            "    print('fake-clang 22.1.6')\n"
+            "    raise SystemExit(0)\n"
+            "if 'BIOSEQ_TEST_EXIT_STATUS' in os.environ:\n"
+            "    raise SystemExit(int(os.environ['BIOSEQ_TEST_EXIT_STATUS']))\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+            "pathlib.Path(os.environ['BIOSEQ_TEST_PID_FILE']).write_text(\n"
+            "    f'{os.getpid()}\\n{child.pid}\\n', encoding='ascii')\n"
+            "time.sleep(120)\n",
+        )
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "PATH": str(tools) + os.pathsep + environment.get("PATH", ""),
+                "BIOSEQ_COMPILER_WATCHDOG_TEST_MODE": "1",
+                "BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC": "1",
+                "BIOSEQ_COMPILER_WATCHDOG_GRACE_SEC": "1",
+                "BIOSEQ_TEMPLATE_FLATTEN_PROFILE": "dna4_uint64",
+                "BIOSEQ_TEST_PID_FILE": str(pid_file),
+            }
+        )
+        return environment, compiler, pid_file
+
+    @staticmethod
+    def _wait_for_pid_file(path: Path) -> list[int]:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if path.exists():
+                values = [int(value) for value in path.read_text(encoding="ascii").split()]
+                if len(values) == 2:
+                    return values
+            time.sleep(0.05)
+        raise AssertionError("fake compiler did not publish its process identities")
+
+    @staticmethod
+    def _assert_processes_absent(pids: list[int]) -> None:
+        deadline = time.monotonic() + 10
+        remaining = set(pids)
+        while remaining and time.monotonic() < deadline:
+            for pid in tuple(remaining):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    remaining.remove(pid)
+                except PermissionError as error:
+                    raise AssertionError(f"cannot inspect fake compiler pid {pid}") from error
+            if remaining:
+                time.sleep(0.05)
+        if remaining:
+            raise AssertionError(f"compiler process group survived: {sorted(remaining)}")
+
+    def test_timeout_kills_compiler_group_and_emits_redacted_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            environment, compiler, pid_file = self._tool_environment(root)
+            result = subprocess.run(
+                [
+                    str(self.launcher),
+                    str(compiler),
+                    "-DPRIVATE_ARG=must-not-leak",
+                    "/sealed/source/persist_queue_publish.cppm",
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            pids = self._wait_for_pid_file(pid_file)
+            self.assertEqual(result.returncode, 124)
+            markers = [
+                line
+                for line in result.stderr.splitlines()
+                if line.startswith("BIOSEQ_COMPILER_WATCHDOG_TIMEOUT ")
+            ]
+            self.assertEqual(len(markers), 1)
+            marker = markers[0]
+            for field in (
+                "source=persist_queue_publish.cppm",
+                "profile=dna4_uint64",
+                "compiler_version=fake-clang_22.1.6",
+                "argv_sha256=",
+                "root_pid=",
+                "pgid=",
+                "pids=",
+                "rss_kib=",
+                "timeout_sec=1",
+                "grace_sec=1",
+            ):
+                self.assertIn(field, marker)
+            self.assertNotIn("must-not-leak", result.stderr)
+            self._assert_processes_absent(pids)
+
+    def test_cancellation_kills_compiler_group_without_timeout_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            environment, compiler, pid_file = self._tool_environment(root)
+            environment["BIOSEQ_COMPILER_WATCHDOG_TIMEOUT_SEC"] = "30"
+            process = subprocess.Popen(
+                [str(self.launcher), str(compiler), "unit.cppm"],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            pids = self._wait_for_pid_file(pid_file)
+            process.terminate()
+            _stdout, stderr = process.communicate(timeout=15)
+            self.assertEqual(process.returncode, 143)
+            self.assertNotIn("BIOSEQ_COMPILER_WATCHDOG_TIMEOUT", stderr)
+            self._assert_processes_absent(pids)
+
+    def test_production_rejects_watchdog_limit_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            environment, compiler, pid_file = self._tool_environment(root)
+            environment.pop("BIOSEQ_COMPILER_WATCHDOG_TEST_MODE")
+            result = subprocess.run(
+                [str(self.launcher), str(compiler), "unit.cppm"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 64)
+            self.assertIn("cannot be overridden", result.stderr)
+            self.assertFalse(pid_file.exists())
+
+    def test_compiler_status_is_preserved_without_timeout_diagnostic(self) -> None:
+        for expected_status in (0, 23):
+            with (
+                self.subTest(status=expected_status),
+                tempfile.TemporaryDirectory() as raw,
+            ):
+                root = Path(raw)
+                environment, compiler, pid_file = self._tool_environment(root)
+                environment["BIOSEQ_TEST_EXIT_STATUS"] = str(expected_status)
+                result = subprocess.run(
+                    [str(self.launcher), str(compiler), "unit.cppm"],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, expected_status)
+                self.assertNotIn("BIOSEQ_COMPILER_WATCHDOG_TIMEOUT", result.stderr)
+                self.assertFalse(pid_file.exists())
 
 
 class BuildAndStageContractTests(unittest.TestCase):

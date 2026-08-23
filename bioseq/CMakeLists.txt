@@ -279,9 +279,9 @@ list(REMOVE_ITEM BIOSEQ_NOPG_MODULES
 # Fail closed on authored additions until their target and generator ownership
 # has been reviewed and the exact inventory count is advanced deliberately.
 list(LENGTH BIOSEQ_NOPG_MODULES _bioseq_nopg_module_count)
-if(NOT _bioseq_nopg_module_count EQUAL 337)
+if(NOT _bioseq_nopg_module_count EQUAL 346)
   message(FATAL_ERROR
-    "Domain-neutral module inventory must contain exactly 337 authored units; "
+        "Domain-neutral module inventory must contain exactly 346 authored units; "
     "got ${_bioseq_nopg_module_count}")
 endif()
 unset(_bioseq_nopg_module_count)
@@ -722,9 +722,9 @@ if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_count EQUAL
   message(FATAL_ERROR
     "Post-erasure scheduler boundary contains duplicate sources")
 endif()
-if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_count EQUAL 14)
+if(NOT _bioseq_pipeline_dispatch_owner_boundary_source_count EQUAL 17)
   message(FATAL_ERROR
-    "Post-erasure scheduler boundary must contain exactly 14 sources; got "
+    "Post-erasure scheduler boundary must contain exactly 17 sources; got "
     "${_bioseq_pipeline_dispatch_owner_boundary_source_count}")
 endif()
 set(_bioseq_pipeline_dispatch_owner_boundary_text)

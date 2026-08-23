@@ -17,6 +17,7 @@ module;
 export module bioseq.postgres.storage.metadata:write_state;
 
 import :core;
+import :options;
 import bioseq.postgres.support;
 import bioseq.common.logging;
 

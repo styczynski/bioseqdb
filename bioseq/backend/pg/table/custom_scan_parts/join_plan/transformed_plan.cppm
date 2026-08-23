@@ -3,10 +3,7 @@
  * @brief Constructs per-row transformed plans and the stable path methods.
  */
 module;
-// Anchor Highway in this global module fragment so target-specific definitions
-// imported through multiple module graphs share one translation-unit context.
 #include <bioseq/pg_compat.h>
-#include <hwy/highway.h>
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -27,64 +24,21 @@ extern "C" {
 export module bioseq.postgres.table:custom_scan_join_plan_transformed_plan;
 
 import std;
-import bioseq.postgres.table.io;
-import :access_method;
-import :access_common;
-import :utils;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.vectorization.types;
-import bioseq.postgres.vectorization.execution;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.highway.dispatch_contract;
-import bioseq.postgres.external.path_builder_slot;
-import bioseq.postgres.storage.metadata;
-import bioseq.postgres.table.types;
-import bioseq.postgres.table.scan_state;
-import bioseq.postgres.table.sql_row_codecs;
-import bioseq.postgres.table.sql_rows;
 import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
-import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.scheduler.dispatch_buffer.api;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.memory_admission;
-import bioseq.gpu.vulkan.runtime;
-import bioseq.sequences;
-import bioseq.sequences.simd;
-import bioseq.pipeline.stats;
-import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.sequences.cigar;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.postgres.storage.manager;
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.coordinates;
-import bioseq.storage.lazy_sequence;
-import bioseq.postgres.storage.scanner;
 import bioseq.indexing.type;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.admin;
-import bioseq.instrumentation.summary_writer;
-import bioseq.common.seqan_adapter;
-import bioseq.postgres.table.batch_sort_scan;
-
-import :custom_scan_support;
-import :custom_scan_slice_projection;
-import :custom_scan_join_paths;
-import :custom_scan_scan_paths;
-
-import :custom_scan_scan_plan;
-
-import :custom_scan_join_plan_placeholder_lineage;
-import :custom_scan_join_plan_setrefs_rewrite;
-import :custom_scan_join_plan_plan_construction;
+import :custom_scan_plan_abi_constants;
+import :custom_scan_oid_expression_support_oid_catalog_contracts;
+import :custom_scan_oid_expression_support_expression_analysis_contracts;
+import :custom_scan_planner_method_contracts;
+import :custom_scan_join_ownership_descendant_path_contracts;
+import :custom_scan_join_ownership_helper_contracts;
+import :custom_scan_join_ownership_sequence_typmod_validation_contracts;
+import :custom_scan_join_ownership_semantic_admission_contracts;
+import :custom_scan_join_ownership_descendant_neutralization_contracts;
+import :custom_scan_join_plan_placeholder_registration_contracts;
+import :custom_scan_join_plan_setrefs_contracts;
+export import :custom_scan_join_plan_plan_construction_contracts;
 
 using namespace bioseq::postgres::support;
 

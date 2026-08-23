@@ -5,11 +5,10 @@
 module;
 
 #include <cstddef>
-#include <cstdint>
-#include <type_traits>
 
 export module bioseq.gpu.vulkan.abi:prefilter;
 
+import std;
 import bioseq.prefilter.types;
 
 export namespace bioseq::gpu::vulkan {

@@ -4,27 +4,19 @@
  */
 module;
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
 #include <hwy/base.h>
-#include <iterator>
-#include <limits>
-#include <new>
-#include <optional>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
-export module bioseq.indexing.minimizer_sequence:admitted_runs;
+export module bioseq.indexing.minimizer_sequence.admitted_runs;
 
-import :bucket_codec;
+import std;
+import bioseq.indexing.minimizer_sequence.bucket_codec;
 import bioseq.common.checked_arithmetic;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.storage;
 import bioseq.indexing.type;
 import bioseq.parallelism.memory_admission;
-import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.highway_minimizer_contract;
 import bioseq.storage.size;
 
 namespace bioseq::indexing::detail {

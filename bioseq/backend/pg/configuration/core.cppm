@@ -4,7 +4,10 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+}
+
 #include <limits>
 
 export module bioseq.postgres.configuration.core;

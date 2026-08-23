@@ -161,16 +161,32 @@ set(BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/scan_execution.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_buffer/index_parts/output.cppm")
 
+# These `.cppm` sources are ordinary target-owned compilation units, not named
+# module providers. Keep them out of the CXX_MODULES file set; they consume the
+# required module BMIs rather than publishing separately importable units.
+
 set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/table/batch_sort_scan_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/table/custom_scan_parts/scan_runtime/tuple_production.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/lifecycle.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/alignment_operation_stats.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/alignment_stats.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/index_admin.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/index_cold_absence.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/index_metadata.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/minimizer_diagnostics.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/minimizer_hash_major_diagnostics.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/scheduler_diagnostics.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/sequence_source_contract.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/extension/sql_frontdoor.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation_parts/dispatch_entry.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation_parts/persisted_cpu_target.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation_parts/persisted_gpu_target.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/implementation_parts/query_union.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/reprepare_probe_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/fragment_storage_opener_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_processor/source_provider_promotion_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/dispatch_buffer/api_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/runtime.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/highway_binding.cppm"
@@ -180,10 +196,22 @@ set(BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/persist_worker.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/shader_runtime.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/scheduler/supervisor/direct_minimizer_materialization.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/io/index_maintenance_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/scanner/source_provider_factory_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/fragment_handle_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/index_build_runtime_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/parallel_scan_probe_boundary_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/policy_catalog_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/ready_minimizer_fixture_kernel_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/admin/rebuild/generation_route_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/metadata_age_log_test_support_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/active_read_policy_resolver_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/minimizer_persistence_policy_implementation.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/types/compact_sequence/header_probe_implementation.cppm"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/external/standard_library_link_support.cppm")
 list(APPEND BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS
-  ${BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS}
-  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/sorted_runs/postgres_error.cppm")
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/sorted_runs/postgres_error.cppm"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend/pg/storage/indexing/sorted_runs/merge.cppm")
 foreach(_bioseq_pipeline_dispatch_owner IN LISTS
     BIOSEQ_PIPELINE_DISPATCH_OWNER_ALL_IMPLEMENTATION_UNITS)
   if(_bioseq_pipeline_dispatch_owner IN_LIST
@@ -198,6 +226,7 @@ list(REMOVE_ITEM SRC_MOD_FILES
   ${BIOSEQ_TEMPLATE_FLATTEN_INPUT_MODULES}
   ${BIOSEQ_POSTGRES_ORDINARY_CPPM_UNITS})
 list(APPEND SRC_MOD_FILES
+  ${BIOSEQ_DISPATCH_BUFFER_IMPLEMENTATION_PARTITIONS}
   "${BIOSEQ_TYPED_API_PARTITION}"
   "${BIOSEQ_TYPED_SELECTOR_PARTITION}")
 list(REMOVE_DUPLICATES SRC_MOD_FILES)

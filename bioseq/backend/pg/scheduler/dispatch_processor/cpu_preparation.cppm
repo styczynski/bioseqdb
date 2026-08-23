@@ -4,23 +4,21 @@
  */
 module;
 
-#include <bioseq/pg_compat.h>
+extern "C" {
+#include "postgres.h"
+#include "utils/errcodes.h"
+}
 
-#include <algorithm>
-#include <concepts>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
+
 #include <new>
-#include <optional>
-#include <span>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
 module bioseq.postgres.scheduler.dispatch_processor:cpu_preparation;
 
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
 import bioseq.common.checked_arithmetic;
 import bioseq.common.seqan_adapter;
@@ -817,5 +815,26 @@ template <class p_alphabet, std::size_t p_width>
     static_assert(operations.complete());
     return operations;
 }
+
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna4, 8>() noexcept;
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_ALPHABETS_UINT64)
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna5, 8>() noexcept;
+#endif
+#if defined(BIOSEQ_TEMPLATE_FLATTEN_HAS_ALL_COORDINATES)
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna4, 1>() noexcept;
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna4, 2>() noexcept;
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna4, 4>() noexcept;
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna5, 1>() noexcept;
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna5, 2>() noexcept;
+template const batch_processor::cpu_preparation_typmod_operations&
+typmod_ops<seq::dna5, 4>() noexcept;
+#endif
 
 } // namespace bioseq::simd::cpu_preparation_detail

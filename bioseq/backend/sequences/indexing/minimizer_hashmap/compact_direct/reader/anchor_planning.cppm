@@ -1,6 +1,10 @@
 /**
  * @file compact_direct/reader/anchor_planning.cppm
- * @brief Query-wave planning, admission, grouped execution, and final anchors.
+ * @brief Query-wave anchor planning for grouped-SoA control scans and compact-direct lookup.
+ *
+ * Implements the shared preparation pipeline selected by @c prepare_fragment_anchor_batch
+ * route dispatch: occurrence packing, unique-hash planning, and either grouped-SoA
+ * multi-pass control/orientation/emission or compact-H32 direct anchor materialization.
  */
 
 module;
@@ -48,18 +52,49 @@ export namespace bioseq::indexing {
 /**
  * Prepares one immutable anchor batch for a single query wave.
  *
- * \tparam p_oracle Selects the oracle query-plan matcher instead of the production
- *     bucket-direct matcher view.
- * \tparam p_compact_direct Selects the compact-H32 direct route without grouped-SoA
- *     control scans.
+ * Route is fixed at compile time by the template flags. Exactly one of three
+ * geometries is selected:
+ * - @c p_compact_direct: one compact-H32 lookup per unique query hash, then direct
+ *   layout, allocation, emission, and per-query local ordering.
+ * - @c p_oracle: grouped-SoA control scans indexed by explicit @c query_hash_plan rows
+ *   (baseline matcher for testing).
+ * - neither flag: production bucket-direct matcher with membership filter, radix, and
+ *   group offsets over hash-sorted occurrence references.
  *
- * Validates query descriptors, packs occurrence references, admits scratch and batch
- * memory, then either plans compact-direct anchors or runs grouped-SoA control-count,
- * orientation, emission, and per-block sort passes. Scratch moves to outstanding on
- * success. Each prepared query carries a compositional sortedness receipt.
+ * @tparam p_oracle When @c true, builds @c query_hash_plan rows and radix cursors for
+ *     the oracle matcher. Mutually exclusive with @c p_compact_direct.
+ * @tparam p_compact_direct When @c true, skips grouped-SoA control scans and delegates
+ *     anchor materialization to @c prepare_compact_direct_anchors_. Requires an attached
+ *     compact-direct index on the reader.
  *
- * \throws persisted_minimizer_lookup_error when readiness, policy, admission, decode,
- *     or pass-equation checks fail.
+ * @param admission Controller used to admit the returned batch permit and any scratch
+ *     growth during preparation. Must match @c scratch.admission_.
+ * @param queries Per-query minimizer views and geometry. Each @c minimizers span must
+ *     outlive the returned batch because @c prepared_query_anchors stores raw pointers.
+ *     Descriptors are validated against the reader profile (@c kmer_size, @c max_hash) and
+ *     representable minimizer coordinates.
+ * @param max_occ Per-hash posting cap for this wave. Must equal the reader's configured
+ *     @c max_occ_. For compact-direct, @c 0 selects the empty-postings fast path without
+ *     touching grouped-SoA payload or direct postings.
+ * @param scratch Reusable wave planner state. Must be @c idle and bound to @p admission.
+ *     On success the state becomes @c outstanding until the caller joins and completes
+ *     the wave. On failure @c reset_failed_wave_ restores @c idle.
+ * @param verify_compositional_order_for_testing When @c true, checks that each query's
+ *     emitted anchors are non-decreasing under @c canonical_anchor_less. Forced @c true
+ *     in debug builds regardless of this argument.
+ *
+ * @return A @c prepared_fragment_anchor_batch with @c ready_ @c true, per-query anchor
+ *     arrays owned by the batch permit, and @c sortedness_receipt_ stamped on every query.
+ *     Grouped-SoA routes fill forward then reverse slices per block before composing query
+ *     order. Compact-direct routes emit one forward and one reverse slice per query.
+ *
+ * @pre Reader @c ready_ is @c true and backing payload matches the selected route.
+ * @pre @c scratch.wave_state_ is @c idle (single-wave exclusivity).
+ *
+ * @throws persisted_minimizer_lookup_error On reader readiness or route-state mismatch,
+ *     invalid query descriptors or occurrence layout, scratch identity or busy-state
+ *     conflict, admission or allocation failure, wire decode errors surfaced from grouped
+ *     passes, stats pass-equation disagreement, or compositional order verification failure.
  */
 template <bool p_oracle, bool p_compact_direct>
 [[nodiscard]] inline prepared_fragment_anchor_batch

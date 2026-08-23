@@ -513,6 +513,51 @@ struct sequence_upload_view {
 };
 
 /**
+ * @brief Owns a contiguous batch of non-owning sequence upload descriptors.
+ *
+ * Keeping the vector operations in their defining module preserves the exact
+ * dynamically-sized upload batch while avoiding cross-module allocation lookup
+ * in Clang full-BMI consumers. The referenced sequence storage remains owned by
+ * the caller and must outlive the batch, exactly as for one sequence_upload_view.
+ */
+class sequence_upload_batch {
+    std::vector<sequence_upload_view> views_;
+
+public:
+    sequence_upload_batch() = default;
+    ~sequence_upload_batch() = default;
+    sequence_upload_batch(const sequence_upload_batch&) = delete;
+    sequence_upload_batch& operator=(const sequence_upload_batch&) = delete;
+    sequence_upload_batch(sequence_upload_batch&&) noexcept = default;
+    sequence_upload_batch& operator=(sequence_upload_batch&&) noexcept = default;
+
+    /** @brief Reserves descriptors for one scheduler batch. */
+    void reserve(const std::size_t capacity) {
+        views_.reserve(capacity);
+    }
+
+    /** @brief Appends one non-owning upload descriptor. */
+    void push_back(sequence_upload_view&& view) {
+        views_.push_back(std::move(view));
+    }
+
+    /** @brief Returns whether the batch contains no upload descriptors. */
+    [[nodiscard]] bool empty() const noexcept {
+        return views_.empty();
+    }
+
+    /** @brief Returns the number of upload descriptors. */
+    [[nodiscard]] std::size_t size() const noexcept {
+        return views_.size();
+    }
+
+    /** @brief Borrows the complete contiguous upload descriptor batch. */
+    [[nodiscard]] std::span<const sequence_upload_view> view() const noexcept {
+        return {views_.data(), views_.size()};
+    }
+};
+
+/**
  * @brief Aligns an upload byte count to the shader's 32-bit word boundary.
  * @param byte_count Unpadded byte count.
  * @return Aligned count, or `UINT64_MAX` on overflow.

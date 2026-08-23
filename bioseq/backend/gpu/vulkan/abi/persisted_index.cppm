@@ -4,10 +4,9 @@
  */
 module;
 
-#include <array>
-#include <cstdint>
-
 export module bioseq.gpu.vulkan.abi:persisted_index;
+
+import std;
 
 export namespace bioseq::gpu::vulkan {
 

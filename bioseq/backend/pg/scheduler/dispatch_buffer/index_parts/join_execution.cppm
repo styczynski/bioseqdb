@@ -36,30 +36,19 @@ extern "C" {
 module bioseq.postgres.scheduler.dispatch_buffer:join_execution;
 
 import bioseq.postgres.scheduler.dispatch_buffer;
+import :active_policy_accounting;
 
-import bioseq.common.logging;
 import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support;
-import bioseq.postgres.support.datums;
+import bioseq.common.logging;
 import bioseq.postgres.configuration.core;
-import bioseq.indexing.type;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.storage.lazy_sequence; // allocation observer for route-aware sequence payload tracing
+import bioseq.postgres.support;
 import bioseq.postgres.scheduler.dispatch_processor; // fixed-shape batch_processor, heavy pipeline in its own module
-import bioseq.sequences;
+import bioseq.sequences.compact_sequence_typmod;
 import bioseq.sequences.simd;
-import bioseq.pipeline.minimap_port;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.pipe;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.storage.manager;
-import bioseq.storage.scanner;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner; // statement-owned source provider for locator targets
-import bioseq.parallelism.memory_admission;
 import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.column.table_access;
 
 namespace bioseq::scheduler {
 

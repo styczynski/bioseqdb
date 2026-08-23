@@ -9,9 +9,10 @@ module;
 export module bioseq.storage.lazy_sequence:materialization;
 
 import std;
-import :view_contract;
+import bioseq.storage.lazy_sequence_view;
 import :transforms;
 import bioseq.common.checked_arithmetic;
+import bioseq.common.seqan_adapter;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.coordinates;
 import bioseq.storage.scanner;

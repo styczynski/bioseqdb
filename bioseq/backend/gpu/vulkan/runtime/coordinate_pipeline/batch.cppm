@@ -29,7 +29,9 @@ using coordinate_pipeline_detail::gpu_coordinate_vote_job_wire;
 using coordinate_pipeline_detail::gpu_seed_coordinate_wave_state;
 
 /// @brief Runs the batched seed, sort, chain, and coordinate submission sequence.
+/// Holds the runtime mutex until the call returns.
 /// @param[in] query_inputs Shared query minimizer storage and per-query records.
+///     `device_query_records` must be absent.
 /// @param[in] jobs Ordered coordinate jobs referring to `query_inputs`.
 /// @param[in] kmer_size K-mer span encoded into anchors.
 /// @param[in] max_occ Maximum target occurrences emitted per minimizer.
@@ -45,8 +47,11 @@ using coordinate_pipeline_detail::gpu_seed_coordinate_wave_state;
 /// @param[in] min_chain_score Minimum accepted chain score.
 /// @param[in] min_seed_count Minimum accepted seed count.
 /// @param[in] probe_limit Maximum coordinate candidates examined.
-/// @param[in] query_authority Device-query authorization consumed into the final receipt.
+/// @param[in] query_authority Grouped-SoA direct route authority that must match
+///     `query_inputs` when that route is selected and is consumed into the final receipt.
+///     A valid authority on the source-direct route is rejected.
 /// @return Per-job results, dispatch statistics, and causal operation receipt.
+///     Empty jobs, negative `max_occ`, or zero minimizers without grouped-SoA skip GPU work.
 /// @throws vulkan_runtime_error When identity, allocation, submission, or policy checks fail.
 gpu_seed_coordinate_batch_result
 runtime::run_seed_to_coordinate_batch_roundtrip(const gpu_seed_query_inputs& query_inputs,

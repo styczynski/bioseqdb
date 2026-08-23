@@ -3,6 +3,9 @@
  * @brief PostgreSQL minimizer index inspection, audit, cleanup and policy support.
  */
 module;
+#include <fmt/format.h>
+#include <bioseq/pg_compat.h>
+
 #include "access/heapam.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -13,389 +16,31 @@ module;
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 extern "C" {
 #include "storage/buffile.h"
 }
-#include <algorithm>
-#include <array>
-#include <concepts>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <exception>
-#include <expected>
-#include <limits>
-#include <map>
-#include <new>
-#include <optional>
-#include <span>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
-#include <vector>
 export module bioseq.postgres.storage.indexing.admin:inspection_policy;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
+import std;
+import :inspection_storage_support;
+import :grouped_soa;
+import :hash_major;
+import :rebuild_api;
+import bioseq.postgres.storage.indexing.admin.diagnostic_support;
 import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
 import bioseq.postgres.configuration.aligner;
 import bioseq.postgres.configuration.core;
+import bioseq.postgres.storage.indexing.admin.index_sketch_backend_policy;
 import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
-import bioseq.storage.scanner;                 // sequence access requirements
-import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
+import bioseq.postgres.types.compact_sequence;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
-import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
 import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.postgres.table.io;
-import bioseq.postgres.storage.indexing.handles;
 import bioseq.postgres.column.table_access;
 import bioseq.postgres.storage.metadata; // column_table_row_count
+import bioseq.postgres.table.io;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
-import :rebuild;
 
 export namespace bioseq::storage::indexing {
-
-/**
- * @brief Resolve and fully authenticate one READY hash-major generation.
- * @param rel_oid Source Bioseq relation.
- * @param index_name Registered logical index name.
- * @param sequence_rowno Source-row ordinal and query key.
- * @return Fixed-wire metadata plus recomputed directory, control, and posting receipts.
- *
- * The restart audit validates the 128-bit source identity and bounded-rereads every stream.
- */
-[[nodiscard]] inline hash_major_minimizer_generation_inspection
-inspect_hash_major_minimizer_generation(Oid rel_oid,
-                                        std::string_view index_name,
-                                        std::uint64_t sequence_rowno) {
-    const bool is_bioseq_table =
-        OidIsValid(rel_oid) && bioseq::postgres::support::invoke_pg_as_cpp([rel_oid] {
-            return relation_oid_uses_column_table_access_method(rel_oid);
-        });
-    if (!is_bioseq_table) {
-        ready_minimizer_error_as_cpp(ERRCODE_WRONG_OBJECT_TYPE,
-                                     "bioseq hash-major inspection requires a USING bioseq table");
-    }
-    const Oid user_id = GetUserId();
-    if (!bioseq::postgres::support::invoke_pg_as_cpp([rel_oid, user_id] {
-            return object_ownercheck(RelationRelationId, rel_oid, user_id);
-        })) {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [rel_oid] { aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(rel_oid)); });
-    }
-    if (index_name != k_minimizers_per_fragment_index_name &&
-        index_name != k_minimizers_per_sequence_index_name) {
-        ready_minimizer_error_as_cpp(ERRCODE_INVALID_PARAMETER_VALUE,
-                                     "bioseq hash-major inspection requires a minimizer index",
-                                     fmt::format("index_name={}", index_name));
-    }
-    if (!bioseq::indexing::sql_bigint_can_represent(sequence_rowno)) {
-        ready_minimizer_error_as_cpp(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                                     "bioseq hash-major inspection query key exceeds BIGINT");
-    }
-    if (bioseq::aligner::settings::minimizer::kmer_size != 15 ||
-        bioseq::aligner::settings::minimizer::window_size != 10) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major inspection requires the registered k=15,w=10 profile");
-    }
-
-    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
-    const relation_identity relation_identity = index_relation_identity(rel_oid);
-    if (!OidIsValid(relation_identity.db_oid) || !OidIsValid(relation_identity.tablespace_oid) ||
-        !OidIsValid(relation_identity.relfilenode)) {
-        ready_minimizer_error_as_cpp(ERRCODE_UNDEFINED_TABLE,
-                                     "bioseq hash-major inspection source relation is unavailable");
-    }
-    Snapshot active_snapshot = GetActiveSnapshot();
-    if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major inspection requires an active MVCC snapshot");
-    }
-
-    Snapshot registered_snapshot = nullptr;
-    hash_major_minimizer_generation_inspection result{};
-    try {
-        registered_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
-            [active_snapshot] { return RegisterSnapshot(active_snapshot); });
-        if (registered_snapshot == nullptr || registered_snapshot->regd_count == 0) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_INTERNAL_ERROR,
-                "bioseq hash-major inspection could not register its snapshot");
-        }
-
-        const minimizer_generation_administration_identity identity{
-            .database_oid = relation_identity.db_oid,
-            .tablespace_oid = relation_identity.tablespace_oid,
-            .main_relfilenode = relation_identity.relfilenode,
-            .user_relid = rel_oid,
-            .column_attno = seq_attno,
-            .index_name = std::string{index_name},
-        };
-        const ready_hash_major_minimizer_metadata_identity inspected =
-            inspect_ready_hash_major_minimizer_metadata_pg(
-                identity, sequence_rowno, registered_snapshot);
-        const std::string table_name = format_seqidx_name(index_name,
-                                                          relation_identity.db_oid,
-                                                          relation_identity.tablespace_oid,
-                                                          relation_identity.relfilenode,
-                                                          seq_attno,
-                                                          inspected.source.locator.bucket_index,
-                                                          inspected.source.locator.shard_index);
-        if (table_name.empty() || table_name.size() >= result.table_name.size() ||
-            index_name.size() >= result.index_name.size()) {
-            ready_minimizer_error_as_cpp(ERRCODE_NAME_TOO_LONG,
-                                         "bioseq hash-major inspection identity name is too long");
-        }
-
-        const auto expected_profile = bioseq::indexing::hash_major_minimizer_profile_for_backend(
-            resolve_index_sketch_backend_from_gucs(),
-            inspected.source.alphabet_code,
-            15u,
-            10u,
-            inspected.source.locator.logical_length);
-        if (!expected_profile || inspected.manifest.storage_profile != *expected_profile ||
-            inspected.head.query_key != sequence_rowno ||
-            inspected.source.sequence_rowno != sequence_rowno ||
-            inspected.head.source_epoch != inspected.source.locator.source_epoch ||
-            inspected.manifest.source_epoch != inspected.source.locator.source_epoch ||
-            inspected.head.source_content_crc64 != inspected.source_content_checksum ||
-            inspected.manifest.source_content_crc64 != inspected.source_content_checksum ||
-            inspected.manifest.target_length != inspected.source.locator.logical_length ||
-            inspected.head.source_identity !=
-                bioseq::indexing::hash_major_minimizer_source_identity(
-                    sequence_rowno,
-                    inspected.source.locator.source_epoch,
-                    inspected.source_content_checksum,
-                    inspected.source.locator.logical_length) ||
-            inspected.head.source_identity != inspected.manifest.source_identity ||
-            !inspected.source_stats.timed_equation_holds()) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "bioseq hash-major inspection source/profile identity disagrees");
-        }
-
-        static_assert(bioseq::indexing::k_hash_major_minimizer_head_bytes == 224u);
-        static_assert(bioseq::indexing::k_hash_major_minimizer_manifest_bytes == 336u);
-        const auto ceil_rows = [](std::uint64_t bytes) noexcept {
-            return bytes / bioseq::indexing::k_hash_major_minimizer_row_payload_bytes +
-                   (bytes % bioseq::indexing::k_hash_major_minimizer_row_payload_bytes != 0u ? 1u
-                                                                                             : 0u);
-        };
-        std::uint64_t expected_first_row = 0;
-        for (std::size_t stream_index = 0; stream_index < inspected.manifest.streams.size();
-             ++stream_index) {
-            const auto& descriptor = inspected.manifest.streams[stream_index];
-            const auto& catalog = inspected.exact_catalog_streams[stream_index];
-            if (descriptor.encoding_revision != 1u ||
-                descriptor.row_count != ceil_rows(descriptor.logical_bytes) ||
-                descriptor.first_row_ordinal != expected_first_row ||
-                catalog.kind != descriptor.kind ||
-                catalog.exact_catalog_rows != descriptor.row_count ||
-                catalog.exact_catalog_bytes != descriptor.logical_bytes ||
-                catalog.exact_catalog_stream_crc64 != descriptor.stream_crc64 ||
-                descriptor.row_count >
-                    (std::numeric_limits<std::uint64_t>::max)() - expected_first_row) {
-                ready_minimizer_error_as_cpp(
-                    ERRCODE_DATA_CORRUPTED,
-                    "bioseq hash-major inspection stream receipt disagrees",
-                    fmt::format("stream_index={}", stream_index));
-            }
-            expected_first_row += descriptor.row_count;
-            result.streams[stream_index] = {
-                .kind = descriptor.kind,
-                .element_count = descriptor.element_count,
-                .logical_bytes = descriptor.logical_bytes,
-                .row_count = descriptor.row_count,
-                .stream_crc64 = descriptor.stream_crc64,
-                .exact_catalog_rows = catalog.exact_catalog_rows,
-                .exact_catalog_bytes = catalog.exact_catalog_bytes,
-                .exact_catalog_stream_crc64 = catalog.exact_catalog_stream_crc64,
-            };
-        }
-        const auto& directory = inspected.manifest.streams[0];
-        const auto& controls = inspected.manifest.streams[1];
-        const auto& postings = inspected.manifest.streams[2];
-        const unsigned __int128 expected_directory_bytes =
-            static_cast<unsigned __int128>(directory.element_count) *
-            bioseq::indexing::k_hash_major_minimizer_directory_entry_bytes;
-        const unsigned __int128 expected_posting_bytes =
-            static_cast<unsigned __int128>(postings.element_count) *
-            inspected.manifest.storage_profile.stored_posting_width_bytes;
-        if (directory.kind != bioseq::indexing::hash_major_minimizer_stream_kind::directory ||
-            controls.kind != bioseq::indexing::hash_major_minimizer_stream_kind::controls ||
-            postings.kind != bioseq::indexing::hash_major_minimizer_stream_kind::postings ||
-            directory.element_width !=
-                bioseq::indexing::k_hash_major_minimizer_directory_entry_bytes ||
-            directory.element_count != inspected.manifest.directory_entry_count ||
-            expected_directory_bytes != directory.logical_bytes ||
-            directory.stream_crc64 != inspected.manifest.authenticated_directory_crc64 ||
-            controls.element_count != inspected.manifest.unique_hash_count ||
-            controls.logical_bytes != inspected.manifest.total_control_bytes ||
-            postings.element_count != inspected.manifest.total_posting_count ||
-            postings.logical_bytes != inspected.manifest.total_posting_bytes ||
-            expected_posting_bytes != postings.logical_bytes) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_DATA_CORRUPTED,
-                "bioseq hash-major inspection manifest stream equations disagree");
-        }
-
-        result.database_oid = relation_identity.db_oid;
-        result.main_relfilenode = relation_identity.relfilenode;
-        result.column_attno = seq_attno;
-        result.query_key = sequence_rowno;
-        std::ranges::copy(table_name, result.table_name.begin());
-        std::ranges::copy(index_name, result.index_name.begin());
-        result.source = inspected.source;
-        result.source_content_crc64 = inspected.source_content_checksum;
-        result.source_identity = inspected.head.source_identity;
-        result.head = inspected.head;
-        result.manifest = inspected.manifest;
-        result.encoded_head = inspected.encoded_head;
-        result.encoded_manifest = inspected.encoded_manifest;
-        result.head_rows = 1;
-        result.head_bytes = result.encoded_head.size();
-        result.manifest_rows = 1;
-        result.manifest_bytes = result.encoded_manifest.size();
-
-        Snapshot finished_snapshot = std::exchange(registered_snapshot, nullptr);
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [finished_snapshot] { UnregisterSnapshot(finished_snapshot); });
-    } catch (...) {
-        // The translated PostgreSQL ERROR owns snapshot cleanup.
-        registered_snapshot = nullptr;
-        throw;
-    }
-    return result;
-}
-
-/// Test-only process-parallel storage probe. Unlike the administrative
-/// inspector, this path does not serially audit all three streams before
-/// the timed scan. It validates READY metadata/source authority once, then
-/// delegates the exact row transport experiment to chunked_storage.
-[[nodiscard]] inline hash_major_minimizer_parallel_scan_stats
-hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
-                                              std::string_view index_name,
-                                              std::uint64_t sequence_rowno,
-                                              std::uint32_t requested_workers) {
-    const bool is_bioseq_table =
-        OidIsValid(rel_oid) && bioseq::postgres::support::invoke_pg_as_cpp([rel_oid] {
-            return relation_oid_uses_column_table_access_method(rel_oid);
-        });
-    if (!is_bioseq_table) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_WRONG_OBJECT_TYPE,
-            "bioseq hash-major parallel scan probe requires a USING bioseq table");
-    }
-    const Oid user_id = GetUserId();
-    if (!bioseq::postgres::support::invoke_pg_as_cpp([rel_oid, user_id] {
-            return object_ownercheck(RelationRelationId, rel_oid, user_id);
-        })) {
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [rel_oid] { aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(rel_oid)); });
-    }
-    if (index_name != k_minimizers_per_fragment_index_name &&
-        index_name != k_minimizers_per_sequence_index_name) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_INVALID_PARAMETER_VALUE,
-            "bioseq hash-major parallel scan probe requires a minimizer index",
-            fmt::format("index_name={}", index_name));
-    }
-    if (!bioseq::indexing::sql_bigint_can_represent(sequence_rowno) || requested_workers > 64u) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-            "bioseq hash-major parallel scan probe parameter is out of range",
-            fmt::format(
-                "sequence_rowno={} requested_workers={}", sequence_rowno, requested_workers));
-    }
-    if (bioseq::aligner::settings::minimizer::kmer_size != 15 ||
-        bioseq::aligner::settings::minimizer::window_size != 10) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major parallel scan probe requires the registered k=15,w=10 profile");
-    }
-
-    const std::int16_t seq_attno = single_seq_attno_for_inspection(rel_oid);
-    const relation_identity relation_identity = index_relation_identity(rel_oid);
-    if (!OidIsValid(relation_identity.db_oid) || !OidIsValid(relation_identity.tablespace_oid) ||
-        !OidIsValid(relation_identity.relfilenode)) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_UNDEFINED_TABLE,
-            "bioseq hash-major parallel scan probe source relation is unavailable");
-    }
-    Snapshot active_snapshot = GetActiveSnapshot();
-    if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "bioseq hash-major parallel scan probe requires an active MVCC snapshot");
-    }
-
-    Snapshot registered_snapshot = nullptr;
-    try {
-        registered_snapshot = bioseq::postgres::support::invoke_pg_as_cpp(
-            [active_snapshot] { return RegisterSnapshot(active_snapshot); });
-        if (registered_snapshot == nullptr || registered_snapshot->regd_count == 0) {
-            ready_minimizer_error_as_cpp(
-                ERRCODE_INTERNAL_ERROR,
-                "bioseq hash-major parallel scan probe could not register its snapshot");
-        }
-        const minimizer_generation_administration_identity identity{
-            .database_oid = relation_identity.db_oid,
-            .tablespace_oid = relation_identity.tablespace_oid,
-            .main_relfilenode = relation_identity.relfilenode,
-            .user_relid = rel_oid,
-            .column_attno = seq_attno,
-            .index_name = std::string{index_name},
-        };
-        minimizer_generation_catalog_source_authorization authorization =
-            authorize_minimizer_generation_catalog_source_pg(
-                identity, sequence_rowno, registered_snapshot);
-        hash_major_minimizer_parallel_scan_stats result =
-            probe_ready_hash_major_minimizer_parallel_scan_pg(identity,
-                                                              sequence_rowno,
-                                                              registered_snapshot,
-                                                              std::move(authorization),
-                                                              requested_workers);
-        Snapshot finished_snapshot = std::exchange(registered_snapshot, nullptr);
-        bioseq::postgres::support::invoke_pg_as_cpp(
-            [finished_snapshot] { UnregisterSnapshot(finished_snapshot); });
-        return result;
-    } catch (...) {
-        // The SQL ERROR boundary owns registered snapshot cleanup.
-        registered_snapshot = nullptr;
-        throw;
-    }
-}
 
 /// Resolve and fully validate one READY grouped-SoA generation under one
 /// registered MVCC snapshot. This setup-only bridge reads no payload extents
@@ -403,7 +48,7 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
 /// validates the generation geometry against the active k/w and fixed ABI.
 /// The inspector then independently revalidates the source row and
 /// complete metadata directory.
-[[nodiscard]] inline ready_minimizer_generation_inspection inspect_ready_minimizer_generation_impl(
+[[nodiscard]] ready_minimizer_generation_inspection inspect_ready_minimizer_generation_impl(
     Oid rel_oid, std::string_view index_name, std::uint64_t sequence_rowno) {
     const bool is_bioseq_table =
         OidIsValid(rel_oid) && bioseq::postgres::support::invoke_pg_as_cpp([rel_oid] {
@@ -710,138 +355,8 @@ hash_major_minimizer_parallel_scan_probe_impl(Oid rel_oid,
     return result;
 }
 
-/// Raise one fail-closed physical index audit error.
-[[noreturn]] inline void index_audit_error(std::string_view message) {
-    ereport(ERROR,
-            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq physical minimizer-index audit: %.*s",
-                    static_cast<int>(message.size()),
-                    message.data())));
-    pg_unreachable();
-}
-
-/// Open the SPI session required by one index audit query.
-inline void spi_connect_for_index_audit() {
-    if (SPI_connect() != SPI_OK_CONNECT) {
-        index_audit_error("SPI connection failed");
-    }
-}
-
-/// Execute an audit query that must return one nonnegative bigint.
-[[nodiscard]] inline std::int64_t index_audit_scalar_i64(const std::string& sql) {
-    spi_connect_for_index_audit();
-    const int status = SPI_execute(sql.c_str(), true, 0);
-    if (status != SPI_OK_SELECT || SPI_processed != 1 || SPI_tuptable == nullptr) {
-        SPI_finish();
-        index_audit_error("catalog query did not return exactly one row");
-    }
-    bool is_null = false;
-    const Datum value = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &is_null);
-    if (is_null) {
-        SPI_finish();
-        index_audit_error("catalog query returned NULL");
-    }
-    const std::int64_t result = DatumGetInt64(value);
-    SPI_finish();
-    if (result < 0) {
-        index_audit_error("catalog query returned a negative count");
-    }
-    return result;
-}
-
-/// Derive every physical index-name prefix for a relation's sequence columns.
-[[nodiscard]] inline std::vector<std::string> seqidx_prefixes_for(Oid rel_oid,
-                                                                  std::string_view name) {
-    const relation_identity rid = index_relation_identity(rel_oid);
-    std::vector<std::string> prefixes;
-    spi_connect_for_index_audit();
-    const std::string sql =
-        fmt::format("SELECT a.attnum FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid JOIN "
-                    "pg_namespace n ON t.typnamespace=n.oid "
-                    "WHERE a.attrelid={}::oid AND t.typname='seq' AND n.nspname IN "
-                    "('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped",
-                    static_cast<unsigned>(rel_oid));
-    if (SPI_execute(sql.c_str(), true, 0) != SPI_OK_SELECT || SPI_tuptable == nullptr) {
-        SPI_finish();
-        index_audit_error("sequence-column catalog lookup failed");
-    }
-    for (std::uint64_t row = 0; row < SPI_processed; ++row) {
-        bool is_null = false;
-        const Datum value =
-            SPI_getbinval(SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1, &is_null);
-        if (is_null) {
-            SPI_finish();
-            index_audit_error("sequence-column catalog lookup returned NULL");
-        }
-        const std::int16_t attno = DatumGetInt16(value);
-        prefixes.push_back(fmt::format(
-            "seqidx_{}_{:016x}_",
-            short_index_for(name),
-            identity_hash64(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name)));
-    }
-    SPI_finish();
-    if (prefixes.empty()) {
-        index_audit_error("target has no visible bioseq.seq column");
-    }
-    return prefixes;
-}
-
-/// List physical index shard relations matching one escaped prefix.
-[[nodiscard]] inline std::vector<std::string>
-shard_relnames_with_prefix(const std::string& prefix) {
-    std::vector<std::string> out;
-    spi_connect_for_index_audit();
-    std::string escaped;
-    for (const char character : prefix) {
-        if (character == '_' || character == '%' || character == '\\') {
-            escaped.push_back('\\');
-        }
-        escaped.push_back(character);
-    }
-    const std::string sql = fmt::format(
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname='bioseq_internal' AND c.relkind='r' AND c.relname LIKE '{}%' ESCAPE '\\'",
-        escaped);
-    if (SPI_execute(sql.c_str(), true, 0) != SPI_OK_SELECT || SPI_tuptable == nullptr) {
-        SPI_finish();
-        index_audit_error("physical index relation lookup failed");
-    }
-    for (std::uint64_t row = 0; row < SPI_processed; ++row) {
-        char* name = SPI_getvalue(SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1);
-        if (name == nullptr) {
-            SPI_finish();
-            index_audit_error("physical index relation lookup returned NULL");
-        }
-        out.emplace_back(name);
-    }
-    SPI_finish();
-    return out;
-}
-
-/// Count rows in one quoted physical index shard with an optional predicate.
-[[nodiscard]] inline std::int64_t count_in_shard(const std::string& relname,
-                                                 const std::string& where_clause) {
-    return index_audit_scalar_i64(fmt::format("SELECT count(*)::bigint FROM bioseq_internal.{} {}",
-                                              quote_identifier(relname.c_str()),
-                                              where_clause));
-}
-
-/// Check whether a shard has the complete grouped-generation key schema.
-[[nodiscard]] inline bool shard_has_minimizer_generation_key(const std::string& relname) {
-    const std::int64_t matching_attributes = index_audit_scalar_i64(
-        fmt::format("SELECT count(*)::bigint FROM pg_attribute "
-                    "WHERE attrelid='bioseq_internal.{}'::regclass "
-                    "AND attnum>0 AND NOT attisdropped AND ("
-                    "(attname='generation_id' AND atttypid='int8'::regtype) OR "
-                    "(attname='position_segment' AND atttypid='int4'::regtype) OR "
-                    "(attname='sub_key' AND atttypid='int8'::regtype) OR "
-                    "(attname='chunk_no' AND atttypid='int4'::regtype))",
-                    quote_identifier(relname.c_str())));
-    return matching_attributes == 4;
-}
-
 /// Count persisted rows across every shard of one logical index.
-[[nodiscard]] inline std::int64_t index_table_row_count_impl(Oid rel_oid, std::string_view name) {
+[[nodiscard]] std::int64_t index_table_row_count_impl(Oid rel_oid, std::string_view name) {
     std::int64_t total = 0;
     for (const std::string& pfx : seqidx_prefixes_for(rel_oid, name))
         for (const std::string& sh : shard_relnames_with_prefix(pfx)) {
@@ -854,23 +369,11 @@ shard_relnames_with_prefix(const std::string& prefix) {
     return total;
 }
 
-/// Metadata-only evidence that one minimizer index has no physical payload.
-struct cold_no_index_absence_audit {
-    std::uint64_t target_rows = 0;
-    bool target_cardinality_metadata_only = true;
-    std::uint64_t source_parent_rows_read = 0;
-    std::uint64_t source_fragment_rows_read = 0;
-    std::uint64_t source_decoded_bp = 0;
-    std::uint64_t physical_index_relations = 0;
-    std::uint64_t persisted_index_rows = 0;
-    std::uint64_t generation_objects = 0;
-};
-
 /// Fail-closed, metadata-only validation for one no-index policy. It reads
 /// Bioseq stripe metadata for target cardinality and PostgreSQL catalogs/index
 /// relations for persisted-index absence. It never forms a target tuple and
 /// therefore cannot hydrate or decode a sequence source.
-[[nodiscard]] inline cold_no_index_absence_audit
+[[nodiscard]] cold_no_index_absence_audit
 cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     if (name != "minimizers_per_fragment" && name != "minimizers_per_sequence") {
         index_audit_error("audit requires a minimizer fragment or sequence policy");
@@ -911,36 +414,8 @@ cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
     return audit;
 }
 
-/// Return the largest per-shard distinct published sub-key count.
-[[nodiscard]] inline std::int64_t
-index_distinct_sub_keys_impl(Oid rel_oid, std::string_view name, std::int64_t query_key) {
-    std::int64_t best = 0;
-    const std::string where = fmt::format("WHERE query_key={} AND sub_key < {}",
-                                          (long long)query_key,
-                                          (long long)k_temporary_run_sub_key_base);
-    for (const std::string& pfx : seqidx_prefixes_for(rel_oid, name))
-        for (const std::string& sh : shard_relnames_with_prefix(pfx)) {
-            // distinct sub_key in this shard for this query_key
-            if (SPI_connect() != SPI_OK_CONNECT)
-                continue;
-            std::string sql =
-                fmt::format("SELECT count(DISTINCT sub_key)::bigint FROM bioseq_internal.{} {}",
-                            quote_identifier(sh.c_str()),
-                            where);
-            if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT && SPI_processed > 0) {
-                bool isn = false;
-                std::int64_t v = DatumGetInt64(
-                    SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isn));
-                if (!isn && v > best)
-                    best = v;
-            }
-            SPI_finish();
-        }
-    return best;
-}
-
 /// Drop every physical index relation through the shared cleanup boundary.
-inline void drop_all_index_tables_impl() {
+void drop_all_index_tables_impl() {
     ErrorData* postgres_error = nullptr;
     std::array<char, 2048> cpp_error_detail{};
     bool cpp_error = false;
@@ -976,43 +451,8 @@ inline void drop_all_index_tables_impl() {
     }
 }
 
-/// 0 ok, 1 unknown name, 2 ineligible.
-[[nodiscard]] inline int
-set_index_policy_impl(Oid rel_oid, std::string_view name, bool update_on_insert) {
-    if (!name_is_registered(name))
-        return 1;
-    if (update_on_insert) {
-        auto flags = pg_supported_indexes::allows_on_insert_flags();
-        auto types = pg_supported_indexes::list_types();
-        for (std::size_t i = 0; i < types.size(); ++i)
-            if (types[i].first == name && !flags[i])
-                return 2;
-    }
-    const relation_identity rid = index_relation_identity(rel_oid);
-    if (SPI_connect() != SPI_OK_CONNECT)
-        return 0;
-    std::string sql =
-        fmt::format("INSERT INTO bioseq_internal.index_policy (user_relid, main_relfilenode, "
-                    "column_attno, index_name, enabled, update_on_insert) "
-                    "SELECT {}::oid, {}::oid, a.attnum, {}, true, {} FROM pg_attribute a JOIN "
-                    "pg_type t ON a.atttypid=t.oid "
-                    "JOIN pg_namespace n ON t.typnamespace=n.oid WHERE a.attrelid={}::oid AND "
-                    "t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') "
-                    "AND a.attnum>0 AND NOT a.attisdropped "
-                    "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) DO "
-                    "UPDATE SET update_on_insert=EXCLUDED.update_on_insert, enabled=true",
-                    static_cast<unsigned>(rel_oid),
-                    static_cast<unsigned>(rid.relfilenode),
-                    quote_literal_cstr(std::string(name).c_str()),
-                    update_on_insert ? "true" : "false",
-                    static_cast<unsigned>(rel_oid));
-    SPI_execute(sql.c_str(), false, 0);
-    SPI_finish();
-    return 0;
-}
-
 /// Persist one active read index for every sequence column of a relation.
-[[nodiscard]] inline int set_active_read_index_impl(Oid rel_oid, std::string_view name) {
+[[nodiscard]] int set_active_read_index_impl(Oid rel_oid, std::string_view name) {
     if (!name_is_registered(name))
         return 1;
     if (layout_of_name(name) == sequence_index_layout::table_chunks)

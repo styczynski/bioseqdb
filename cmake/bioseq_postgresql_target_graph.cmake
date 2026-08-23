@@ -253,6 +253,8 @@ if(BIOSEQ_TEST_INDEXES)
     bioseq_pipeline_dispatch_owners PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
   target_compile_definitions(bioseq_testing_support PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(
+    bioseq_integration_test_support PRIVATE BIOSEQ_TEST_INDEXES=1)
   if(TARGET bioseq_integration_tests)
     target_compile_definitions(bioseq_integration_tests PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()

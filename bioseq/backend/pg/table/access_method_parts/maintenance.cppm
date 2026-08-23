@@ -33,7 +33,6 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;
@@ -47,36 +46,6 @@ import bioseq.postgres.column.table_access;
 import :access_identity;
 import :access_common;
 import :access_hooks;
-import :access_method_scan_callbacks;
-import :access_method_tuple_mutation;
-
-/**
- * Allocation-free diagnostics for speculative authorities that survive a
- * terminal transaction callback.
- */
-struct pending_speculative_terminal_quarantine {
-    std::uint64_t invariant_events = 0u;
-    std::uint64_t quarantined_rows = 0u;
-    std::uint64_t quarantined_sources = 0u;
-    XactEvent last_event = XACT_EVENT_COMMIT;
-    bool storage_exhausted = false;
-    bool active_map_quarantined = false;
-};
-
-/** Returns fixed storage for authorities retained after a terminal callback. */
-[[nodiscard]] auto& quarantined_speculative_sources_noexcept() noexcept {
-    static std::array<pending_speculative_source_map, 4u> quarantined;
-    return quarantined;
-}
-
-/** Returns terminal speculative-source diagnostics. */
-[[nodiscard]] auto& speculative_source_quarantine_state_noexcept() noexcept {
-    static pending_speculative_terminal_quarantine state;
-    return state;
-}
-
-static_assert(noexcept(std::declval<pending_speculative_source_map&>().swap(
-    std::declval<pending_speculative_source_map&>())));
 
 /** @brief Repeatedly acquire or release a relation lock until the bounded deadline expires. */
 static bool try_lock_relation_until_timeout(
@@ -87,67 +56,6 @@ static void log_relation_statistics(Relation rel, int elevel);
 static void truncate_column_storage_tail(Relation rel, int elevel);
 /** @brief Compact eligible stripes and report whether physical storage changed. */
 static bool truncate_and_compact_column_stripes(Relation rel, int elevel);
-
-/** Retain impossible speculative authorities without allocating or throwing. */
-static void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
-    constexpr auto k_max_count = std::numeric_limits<std::uint64_t>::max();
-    auto& pending = access_pending_speculative_sources();
-    if (pending.empty())
-        return;
-
-    std::uint64_t source_count = 0u;
-    for (const auto& [key, entry] : pending) {
-        (void)key;
-        const auto entry_count = static_cast<std::uint64_t>(entry.sources.size());
-        source_count = k_max_count - source_count < entry_count
-                           ? k_max_count
-                           : source_count + entry_count;
-    }
-
-    auto& state = speculative_source_quarantine_state_noexcept();
-    if (state.invariant_events != k_max_count)
-        ++state.invariant_events;
-    const auto pending_rows = static_cast<std::uint64_t>(pending.size());
-    state.quarantined_rows = k_max_count - state.quarantined_rows < pending_rows
-                                 ? k_max_count
-                                 : state.quarantined_rows + pending_rows;
-    state.quarantined_sources = k_max_count - state.quarantined_sources < source_count
-                                    ? k_max_count
-                                    : state.quarantined_sources + source_count;
-    state.last_event = event;
-
-    for (auto& quarantine : quarantined_speculative_sources_noexcept()) {
-        if (quarantine.empty()) {
-            quarantine.swap(pending);
-            return;
-        }
-    }
-    // Retain the authority in the active map if every fixed quarantine slot
-    // is occupied.  This poisons later PRE_* validation rather than silently
-    // destroying an authority after its parent transaction has committed.
-    state.storage_exhausted = true;
-    state.active_map_quarantined = true;
-}
-
-/** Fail a pre-commit boundary when speculative publication remains unresolved. */
-static void require_no_pending_speculative_sources(const char* operation) {
-    const auto& pending = access_pending_speculative_sources();
-    if (pending.empty())
-        return;
-
-    std::size_t source_count = 0;
-    for (const auto& [key, entry] : pending) {
-        (void)key;
-        source_count += entry.sources.size();
-    }
-    ereport(ERROR,
-            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-             errmsg("bioseq speculative source publication authority was not consumed"),
-             errdetail("operation=%s speculative_rows=%zu pending_sources=%zu",
-                       operation,
-                       pending.size(),
-                       source_count)));
-}
 
 /** Replace a relation's physical storage and initialize Bioseq metadata. */
 void bioseq_relation_set_new_filenode(Relation rel,
@@ -1033,7 +941,7 @@ void column_transaction_callback(XactEvent event, void* arg) {
         // surviving move-only authority here is an internal invariant breach;
         // quarantine it without a PostgreSQL jump or destructor-bearing
         // callback frame after the terminal transaction boundary.
-        quarantine_pending_speculative_sources_noexcept(event);
+        handle_pending_speculative_xact_event(event);
         break;
     }
 
@@ -1041,18 +949,14 @@ void column_transaction_callback(XactEvent event, void* arg) {
     case XACT_EVENT_PARALLEL_ABORT: {
         discard_all_relation_write_states(GetCurrentSubTransactionId(), 0);
         release_subtransaction_read_states(GetCurrentSubTransactionId());
-        const bool active_map_quarantined =
-            speculative_source_quarantine_state_noexcept().active_map_quarantined;
-        if (!active_map_quarantined) {
-            access_pending_speculative_sources().clear();
-        }
+        handle_pending_speculative_xact_event(event);
         break;
     }
 
     case XACT_EVENT_PRE_COMMIT:
     case XACT_EVENT_PARALLEL_PRE_COMMIT:
     case XACT_EVENT_PRE_PREPARE: {
-        require_no_pending_speculative_sources("pre-commit/pre-prepare");
+        handle_pending_speculative_xact_event(event);
         flush_all_relation_write_states(GetCurrentSubTransactionId(), 0);
         release_subtransaction_read_states(GetCurrentSubTransactionId());
         break;
@@ -1068,21 +972,14 @@ void column_subtransaction_callback(SubXactEvent event,
     switch (event) {
     case SUBXACT_EVENT_START_SUB:
     case SUBXACT_EVENT_COMMIT_SUB: {
-        for (auto& [key, pending] : access_pending_speculative_sources()) {
-            (void)key;
-            if (pending.subtransaction_id == my_subid) {
-                pending.subtransaction_id = parent_subid;
-            }
-        }
+        handle_pending_speculative_subxact_event(event, my_subid, parent_subid);
         break;
     }
 
     case SUBXACT_EVENT_ABORT_SUB: {
         discard_all_relation_write_states(my_subid, parent_subid);
         release_subtransaction_read_states(my_subid);
-        std::erase_if(access_pending_speculative_sources(), [my_subid](const auto& entry) {
-            return entry.second.subtransaction_id == my_subid;
-        });
+        handle_pending_speculative_subxact_event(event, my_subid, parent_subid);
         break;
     }
 

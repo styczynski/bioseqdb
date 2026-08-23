@@ -2,8 +2,9 @@
  * @file reader.cppm
  * @brief Public sequence reader entry points.
  *
- * Re-exports the batch and view types from `:types` while keeping batch
- * execution and bounded streaming behind private module partitions.
+ * Re-exports the batch and view types from `:types`.  Pipeline partitions
+ * expose no names but remain interface dependencies so exported reader
+ * templates can instantiate their helper templates correctly.
  */
 module;
 
@@ -21,8 +22,11 @@ module;
 export module bioseq.io.reader;
 
 export import :types;
-import :batch_pipeline;
-import :stream_pipeline;
+// These partitions intentionally export no names.  They are interface
+// dependencies so helper-template definitions used by this unit's exported
+// templates remain necessarily reachable in importing translation units.
+export import :batch_pipeline;
+export import :stream_pipeline;
 import bioseq.common.logging;
 import bioseq.sequences;
 import bioseq.io.options;

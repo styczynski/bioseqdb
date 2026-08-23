@@ -14,7 +14,7 @@ module;
 #include <utility>
 #include <vector>
 
-module bioseq.codegen.highway:tests.contract;
+export module bioseq.codegen.highway:tests.contract;
 
 import :manifest;
 import :model;

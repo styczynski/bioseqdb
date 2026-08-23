@@ -3,12 +3,28 @@
  * @brief Implements scan, exact-row fetch, and parallel-scan TableAM callbacks.
  */
 module;
+
+extern "C" {
+#include "postgres.h"
+
+#include "access/skey.h"
+#include "access/tableam.h"
+#include "access/xact.h"
+#include "executor/tuptable.h"
+#include "nodes/bitmapset.h"
+#include "nodes/nodes.h"
+#include "nodes/pg_list.h"
+#include "storage/itemptr.h"
+#include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+}
+
 #include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
-#include <exception>
 #include <map>
 #include <new>
 #include <optional>
@@ -16,6 +32,7 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
+
 export module bioseq.postgres.table:access_method_scan_callbacks;
 
 import bioseq.postgres.storage.physical;
@@ -31,7 +48,6 @@ import bioseq.postgres.table.io;
 import bioseq.postgres.support;
 import bioseq.postgres.support.sql_boundary;
 import bioseq.codegen.sql.annotation_model;
-import bioseq.postgres.storage.indexing.admin;
 import bioseq.postgres.storage.indexing.chunked_storage;
 import bioseq.postgres.storage.indexing.chunked_storage.sql_entities;
 import bioseq.postgres.storage.manager;
@@ -42,12 +58,10 @@ import bioseq.storage.layout;
 import bioseq.postgres.table.am_cache;
 import bioseq.postgres.types.compact_sequence;
 import bioseq.postgres.column.table_access;
+import :access_callback_state;
 import :access_identity;
 import :access_common;
 import :access_hooks;
-
-/** Page-cache state captured across paired PostgreSQL callbacks. */
-extern bool previous_cache_enabled_state;
 
 static_assert(!std::is_trivially_destructible_v<bioseq::postgres::support::memory_context_scope>);
 
@@ -281,31 +295,6 @@ TableScanDesc bioseq_beginscan_with_options(Relation relation,
     }
 
     return reinterpret_cast<TableScanDesc>(scan);
-}
-
-/** Initialize the column reader used by a scan or exact-row fetch. */
-static column_read_state*
-init_bioseq_read_state(Relation relation,
-                       TupleDesc tupdesc,
-                       const bioseq::postgres::support::postgres_bitmapset& attr_needed,
-                       List* scan_qual,
-                       MemoryContext scan_context,
-                       Snapshot snapshot,
-                       bool random_access,
-                       parallel_column_scan_handle parallel_scan) {
-    bioseq::postgres::support::memory_context_scope ctx_guard{scan_context};
-
-    List* needed_columns = build_needed_column_list(tupdesc, attr_needed);
-    column_read_state* read_state = begin_column_read(relation,
-                                                      tupdesc,
-                                                      needed_columns,
-                                                      scan_qual,
-                                                      scan_context,
-                                                      snapshot,
-                                                      random_access,
-                                                      parallel_scan);
-
-    return read_state;
 }
 
 /** End a table scan and release its reader, caches, and memory context. */
@@ -836,50 +825,6 @@ TransactionId bioseq_index_delete_tuples(Relation rel, TM_IndexDeleteOp* delstat
         bioseq_log<logging_level::error, logging_target::postgres>(
             "bioseq_index_delete_tuples not implemented for simple deletion");
     }
-}
-
-/** Translate C++ failures after a table-AM callback has unwound its owners. */
-template <class p_function>
-decltype(auto) run_tableam_cpp_checked(const char* operation, p_function&& function) {
-    ErrorData* exact_error = nullptr;
-    std::array<char, 512> detail{};
-    bool cpp_error = false;
-    bool unknown_cpp_error = false;
-    try {
-        if constexpr (std::is_void_v<std::invoke_result_t<p_function&>>) {
-            function();
-            return;
-        } else {
-            return function();
-        }
-    } catch (bioseq::postgres::support::postgres_error& error) {
-        exact_error = error.release_error_data();
-    } catch (const std::exception& error) {
-        strlcpy(detail.data(),
-                error.what() == nullptr ? "std::exception without detail" : error.what(),
-                detail.size());
-        cpp_error = true;
-    } catch (...) {
-        unknown_cpp_error = true;
-    }
-    // The callback scope (including every vector, pending-source authority and
-    // bioseq::postgres::support::memory_context_scope) has unwound.  Only fixed
-    // diagnostic state remains at this PostgreSQL C callback boundary.
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
-    }
-    if (cpp_error) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("%s raised a C++ exception", operation),
-                 errdetail_internal("%s", detail.data())));
-    }
-    if (unknown_cpp_error) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("%s raised an unknown C++ exception", operation)));
-    }
-    pg_unreachable();
 }
 
 /** Enter the next-row implementation through the table-AM exception boundary. */

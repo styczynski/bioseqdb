@@ -9,6 +9,8 @@ module;
 
 export module bioseq.pipeline.pipe:stage_graph;
 
+export import bioseq.pipeline.runtime_contract;
+
 import std;
 import bioseq.common.logging;
 import bioseq.common.templating;
@@ -53,6 +55,7 @@ import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
+export import bioseq.pipeline.vulkan_decline;
 
 export {
 
@@ -105,23 +108,6 @@ export {
         // most one nanosecond and keeps focused tests independent of clock
         // resolution without sleeping.
         return elapsed > 0 ? elapsed : 1u;
-    }
-
-    /// Report that a mandatory Vulkan stage did not execute.
-    [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
-        auto& runtime = bioseq::gpu::vulkan::runtime::instance();
-        const std::string detail =
-            !runtime.is_usable()
-                ? fmt::format("runtime unavailable: {}", runtime.initialization_error())
-            : runtime.features().software_device
-                ? fmt::format("active Vulkan device '{}' is a CPU/software device "
-                              "(VkPhysicalDeviceType={}); explicit GPU execution requires a "
-                              "hardware Vulkan device",
-                              runtime.features().device_name.data(),
-                              runtime.features().device_type)
-                : "GPU path declined";
-        throw bioseq::gpu::vulkan::vulkan_runtime_error(
-            fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
     }
 
     /// Report the structured decline emitted by a mandatory Vulkan sketch.
@@ -251,11 +237,6 @@ export {
     // Forward declaration so stage_base::attach can refer to stage.
     template <is_constexpr_aligner_params p_aligner_parameters, class p_self, class p_sink>
     struct stage;
-
-    // Metadata types (defined fully in; forward-declared here so describe()
-    // has a return type).
-    struct stage_description;
-    struct pipeline_description;
 
     // =============================================================================
     // — narrow minimizer-batch shape carrying an optional device span.
@@ -710,18 +691,6 @@ export {
     // `arena_slab<p_element>` is owned by `bioseq.chaining.core` so chaining,
     // seed, and region kernels share one caller-owned output contract. The using
     // declarations above expose the slab and its factory to stage bodies.
-
-    // =============================================================================
-    // Metadata surface — forward types for algorithm_traits
-    // =============================================================================
-    //
-    // `named_property` precedes algorithm traits because their computed-property
-    // signatures return this type. Full descriptions follow the trait definitions.
-
-    struct named_property {
-        std::string name;
-        std::string value;
-    };
 
     } // namespace bioseq::simd::pipe
 

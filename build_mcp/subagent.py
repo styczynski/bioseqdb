@@ -83,7 +83,7 @@ OPERATION_PHASE_RANK = {
 }
 
 TIER_ORDER = (
-    "contractor-intern", "intern", "mid", "senior", "specialist",
+    "contractor-intern", "intern", "contractor", "mid", "senior", "specialist",
 )
 TIER_RANK = {name: index for index, name in enumerate(TIER_ORDER)}
 TIER_CONFIG: dict[str, dict[str, Any]] = {
@@ -100,6 +100,14 @@ TIER_CONFIG: dict[str, dict[str, Any]] = {
         "model_display": "gpt-5.6-terra",
         "reasoning": "medium",
         "cost": 22,
+    },
+    "contractor": {
+        "provider": "cursor",
+        "model": "gpt-5.5",
+        "model_display": "gpt-5.5",
+        # Cursor selects reasoning effort dynamically for this model.
+        "reasoning": None,
+        "cost": 45,
     },
     "mid": {
         "provider": "codex",
@@ -1335,8 +1343,8 @@ def _runtime_arguments(agent: Mapping[str, Any], *, resume: bool) -> list[str]:
             "agent", "--yolo", "--sandbox", "disabled", "-p",
             "--output-format", "stream-json",
             "--workspace", str(REPOSITORY_ROOT),
-            # Cursor documents the display name as "Composer 2.5" while
-            # ``agent --list-models`` exposes this canonical CLI identifier.
+            # Each Cursor tier stores the canonical identifier accepted by
+            # ``agent --model``; Cursor chooses any model-specific effort.
             "--model", str(agent["model"]),
         ]
         if resume:
@@ -1635,7 +1643,7 @@ def _launch_runtime(
                 _kill_runtime(cleanup_agent)
             raise SubagentError(
                 "CURSOR_RESULT_ERROR",
-                "Cursor reported an error for the submitted contractor-intern assignment.",
+                f"Cursor reported an error for the submitted {agent['tier']} assignment.",
                 details=cursor_snapshot.get("result_diagnostic"),
             )
         acknowledged_status = "WORKING"
@@ -1685,7 +1693,7 @@ def _launch_runtime(
                 _kill_runtime(cleanup_agent)
             raise SubagentError(
                 "CURSOR_RESULT_ERROR",
-                "Cursor reported an error for the submitted contractor-intern assignment.",
+                f"Cursor reported an error for the submitted {agent['tier']} assignment.",
                 details=cursor_snapshot.get("result_diagnostic"),
             )
         if pane.get("pane_dead") and cursor_snapshot.get("terminal_result") is not True:
@@ -2097,7 +2105,7 @@ def _wait_for_cursor_init(
         time.sleep(0.05)
     raise SubagentError(
         "RESUME_CONTEXT_MISSING",
-        "Cursor did not emit its system/init session ID; refusing to register an unresumable contractor-intern runtime",
+        f"Cursor did not emit its system/init session ID; refusing to register an unresumable {agent.get('tier', 'Cursor')} runtime",
         details={"terminal_result_seen": latest.get("terminal_result") is True},
     )
 
@@ -3032,6 +3040,7 @@ def _status_payload(state: Mapping[str, Any], caller_id: int) -> tuple[dict[str,
             "provider": agent.get("provider"),
             "reasoning_effort": agent.get("tier"),
             "model": agent.get("model"),
+            "model_display": agent.get("model_display"),
             "vendor_reasoning": agent.get("reasoning"),
             "cost": agent.get("cost"),
             "label": agent.get("label"),
@@ -3309,7 +3318,7 @@ def _bus_count_locked() -> int:
 def _account_resume_warning(state: Mapping[str, Any], agent: Mapping[str, Any]) -> list[str]:
     if agent.get("provider") != "codex":
         return [
-            "Cursor exposes no weekly quota percentage; contractor-intern continuity is best-effort."
+            f"Cursor exposes no weekly quota percentage; {agent.get('tier', 'Cursor')} continuity is best-effort."
         ]
     account = state["accounts"].get(str(agent.get("account")))
     remaining = account.get("remaining_percent") if isinstance(account, dict) else None
@@ -3426,6 +3435,7 @@ def _handle_create(arguments: Mapping[str, object]) -> str:
             "provider": provider,
             "tier": tier,
             "model": TIER_CONFIG[tier]["model"],
+            "model_display": TIER_CONFIG[tier]["model_display"],
             "reasoning": TIER_CONFIG[tier]["reasoning"],
             "cost": cost,
             "label": label,
@@ -3535,9 +3545,13 @@ def _handle_create(arguments: Mapping[str, object]) -> str:
         current["last_error"] = None
         _save_state_locked(state)
         budget_used = _live_budget(state)
-    if provider == "cursor":
+    if tier == "contractor-intern":
         warnings.append(
             "Composer 2.5 is a fast, weak one-shot backend with no quota endpoint; use it only for simplistic tasks, and its process may naturally become KILLED when the turn completes."
+        )
+    elif tier == "contractor":
+        warnings.append(
+            "Contractor uses Cursor gpt-5.5 with dynamically selected reasoning effort and consumes the separate Cursor account quota, for which no weekly percentage endpoint is available; its one-shot process may naturally become KILLED when the turn completes."
         )
     return _response(
         "create",
@@ -3550,6 +3564,7 @@ def _handle_create(arguments: Mapping[str, object]) -> str:
             "provider": provider,
             "reasoning_effort": tier,
             "model": TIER_CONFIG[tier]["model"],
+            "model_display": TIER_CONFIG[tier]["model_display"],
             "vendor_reasoning": TIER_CONFIG[tier]["reasoning"],
             "cost": cost,
             "label": label,
@@ -3613,7 +3628,7 @@ def _handle_interrupt(arguments: Mapping[str, object]) -> str:
         ):
             raise SubagentError(
                 "RESUME_CONTEXT_MISSING",
-                "contractor-intern has not exposed a resumable Cursor chat ID yet; its current work was left running rather than destructively interrupting context",
+                f"{agent.get('tier', 'Cursor agent')} has not exposed a resumable Cursor chat ID yet; its current work was left running rather than destructively interrupting context",
             )
         capability = secrets.token_urlsafe(32) if provider == "cursor" and instructions is not None else None
         agent["pending_capability_sha256"] = (

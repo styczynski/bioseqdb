@@ -15,16 +15,15 @@ export module bioseq.postgres.vectorization.aggregator_node:initialization;
 import bioseq.common.logging;
 import bioseq.postgres.support;
 import bioseq.postgres.vectorization.types;
+import :support;
+import :transitions;
+import :hash_runtime;
+import :execution;
 
 using bioseq::postgres::support::allocate_zeroed_array;
 using bioseq::postgres::support::allocate_zeroed_storage;
 using bioseq::postgres::support::pg_node_view;
 using bioseq::postgres::support::postgres_list;
-
-import :support;
-import :transitions;
-import :hash_runtime;
-import :execution;
 
 /** Converts a catalog text initializer to the aggregate transition type. */
 static Datum get_aggregate_initial_value(Datum text_initial_value, Oid transition_type) {
@@ -373,7 +372,7 @@ initialize_vector_aggregate_executor(Agg* node, EState* executor_state, int exec
      */
     if (node->aggstrategy == AGG_HASHED)
         executor_flags &= ~EXEC_FLAG_REWIND;
-    child_plan = outer_plan(node);
+    child_plan = outerPlan(node);
     outerPlanState(aggregate_state) = ExecInitNode(child_plan, executor_state, executor_flags);
 
     /**

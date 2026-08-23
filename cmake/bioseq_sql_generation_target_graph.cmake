@@ -665,7 +665,7 @@ bioseq_register_sql_owner(
   SOURCES
     backend/pg/table/access_hooks.cppm
     backend/pg/table/access_method.cppm
-    backend/pg/table/custom_scan/index.cppm
+    backend/pg/table/custom_scan_parts/sql_probe_contracts.cppm
   PROFILES production test_indexes
   AUTHORITIES FINAL
   FMGR_ENTRYPOINTS table_access_hooks)
@@ -876,6 +876,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "$<TARGET_FILE:bioseq_codegen>" sql prepare
       --authority support
       --profile "${_bioseq_sql_profile}"
+      --fmgr-prelude postgresql
       --source-list "${_bioseq_sql_support_registry}"
       --raw-compile-database "${BIOSEQ_SQL_RAW_COMPILE_DATABASE}"
       --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
@@ -948,6 +949,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage support
       --profile "${_bioseq_sql_profile}"
+      --fmgr-prelude postgresql
       --source-list "${_bioseq_sql_support_registry}"
       --compile-database "${_bioseq_sql_support_compile_database}"
       --pcm-root "${_bioseq_sql_pcm_root}"
@@ -1028,6 +1030,7 @@ add_custom_command(
     "$<TARGET_FILE:bioseq_codegen>" sql prepare
     --authority core
     --profile production
+    --fmgr-prelude postgresql
     --source-list "${BIOSEQ_SQL_REGISTRY_CORE_FILE}"
     --raw-compile-database "${BIOSEQ_SQL_RAW_COMPILE_DATABASE}"
     --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
@@ -1074,6 +1077,7 @@ add_custom_command(
     "$<TARGET_FILE:bioseq_codegen>" sql generate
     --stage core
     --profile production
+    --fmgr-prelude postgresql
     --source-list "${BIOSEQ_SQL_REGISTRY_CORE_FILE}"
     --compile-database "${BIOSEQ_SQL_CORE_COMPILE_DATABASE}"
     --pcm-root "${BIOSEQ_SQL_CORE_PCM_ROOT}"
@@ -1154,6 +1158,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "$<TARGET_FILE:bioseq_codegen>" sql prepare
       --authority final
       --profile "${_bioseq_sql_profile}"
+      --fmgr-prelude postgresql
       --source-list "${_bioseq_sql_final_registry}"
       --raw-compile-database "${BIOSEQ_SQL_RAW_COMPILE_DATABASE}"
       --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"
@@ -1246,6 +1251,7 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage final
       --profile "${_bioseq_sql_profile}"
+      --fmgr-prelude postgresql
       --source-list "${_bioseq_sql_final_registry}"
       --compile-database "${_bioseq_sql_final_compile_database}"
       --pcm-root "${_bioseq_sql_pcm_root}"

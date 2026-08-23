@@ -3,87 +3,78 @@
  * @brief Post-load policy lookup and index maintenance.
  */
 module;
-#include "access/heapam.h"
-#include "access/relation.h"
-#include "access/table.h"
-#include "access/tableam.h"
-#include "commands/tablespace.h"
-#include "executor/tuptable.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
 
-#include <bioseq/pg_compat.h>
-#include <libassert/assert.hpp>
 extern "C" {
-#include "storage/buffile.h"
+#include "postgres.h"
+
+#include "executor/spi.h"
+#include "fmgr.h"
+#include "utils/builtins.h"
+#include "utils/errcodes.h"
+#include "varatt.h"
 }
-#include <algorithm>
+
 #include <array>
-#include <concepts>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
-#include <exception>
-#include <expected>
 #include <limits>
-#include <map>
-#include <new>
-#include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <utility>
-#include <variant>
 #include <vector>
-export module bioseq.postgres.storage.indexing.admin:rebuild_post_load;
-import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.postgres.support;
-import bioseq.postgres.sql_boundary;
-import bioseq.postgres.configuration.aligner;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.storage.manager; // seq_caches, sequence_locator, is_locator_stub, decode_locator_from_stub
-import bioseq.storage.layout;
-import bioseq.storage.size;
-import bioseq.storage.lazy_sequence;           // make_resident_lazy_sequence
-import bioseq.storage.scanner;                 // sequence access requirements
-import bioseq.postgres.storage.scanner;        // with_postgres_lazy_sequence
-import bioseq.postgres.types.compact_sequence; // bioseq::pg_types::seq, dispatch_instance
-import bioseq.sequences;                       // compact_sequence_range
-import bioseq.common.seqan_adapter;            // seqan3::char_is_valid_for
-import bioseq.indexing.type;
-import bioseq.indexing.storage;
-import bioseq.indexing.traits;
-import bioseq.indexing.registry;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.hash_major_minimizer_index;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.pipeline.runtime_contract; // minimizer_algorithm
-import bioseq.sequences.kmers;           // minimizer/index APIs
-import bioseq.sequences.kmers.highway_minimizer_contract;
-import bioseq.highway.dispatch_contract;
-import bioseq.indexing.symbol_counts;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.mode;
-import bioseq.parallelism.pool;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
-import bioseq.postgres.table.io;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.column.table_access;
-import bioseq.postgres.storage.metadata; // column_table_row_count
-static_assert(__cplusplus >= 202302L, "C++23-or-later");
-import :policy_catalog;
-import :hash_major;
-import :grouped_soa;
 
-export import :rebuild_core;
+#include <fmt/format.h>
+
+export module bioseq.postgres.storage.indexing.admin:rebuild_post_load;
+import bioseq.postgres.support;
+import bioseq.indexing.type;
+import bioseq.postgres.storage.indexing.index_relation_identity;
+import bioseq.postgres.storage.indexing.admin.policy_catalog;
+import bioseq.postgres.storage.indexing.supported_indexes;
+static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {
+
+/**
+ * @brief Check whether an index name is present in the PostgreSQL registry.
+ * @param name Logical index name.
+ * @return True only for a registered name.
+ */
+[[nodiscard]] bool name_is_registered(std::string_view name) {
+    for (const auto& type : pg_supported_indexes::list_types()) {
+        if (type.first == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Check whether inserts may maintain one registered index.
+ * @param name Logical index name.
+ * @return True only when the registry enables insertion-time maintenance.
+ */
+[[nodiscard]] bool index_allows_update_on_insert(std::string_view name) {
+    const auto flags = pg_supported_indexes::allows_on_insert_flags();
+    const auto types = pg_supported_indexes::list_types();
+    for (std::size_t i = 0; i < types.size(); ++i) {
+        if (types[i].first == name) {
+            return flags[i];
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Return the physical layout registered for one PostgreSQL index name.
+ * @param name Registered logical index name.
+ * @return Its compile-time registry layout.
+ */
+[[nodiscard]] bioseq::indexing::sequence_index_layout layout_of_name(std::string_view name) {
+    return pg_supported_indexes::layout_of(name);
+}
+
 /// Raise a post-load maintenance SPI failure with its owning operation.
 [[noreturn]] inline void load_index_spi_error_as_cpp(std::string_view operation,
                                                      std::string_view detail) {
@@ -277,7 +268,7 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
  * @param main_relid Loaded Bioseq relation.
  * @return Sum of rows reported by the invoked index rebuilds.
  */
-[[nodiscard]] inline std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
+[[nodiscard]] std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
     const relation_identity rid = index_relation_identity(main_relid);
     pg_supported_indexes idx;
     idx.apply_table_defaults();
@@ -308,7 +299,7 @@ load_table_policy_strict_for_post_load(Oid user_relid, Oid relfilenode, std::int
     for (std::size_t i = 0; i < k_index_types.size(); ++i) {
         if (!idx.enabled[i])
             continue;
-        if (idx.policy[i] != index_update_policy::update_on_insert)
+        if (idx.policy[i] != bioseq::indexing::index_update_policy::update_on_insert)
             continue;
         // Use a distinct SPI portal/executor frame so sidecar DDL, snapshot
         // changes, and relcache invalidations are contained before bioseq.load resumes.

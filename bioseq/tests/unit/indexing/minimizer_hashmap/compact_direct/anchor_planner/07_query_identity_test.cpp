@@ -42,6 +42,7 @@ import bioseq.common.hashing; //  shared SHA-256
 import bioseq.tests.support.indexing_storage_fakes;
 
 import bioseq.tests.unit.indexing.minimizer_hashmap_support;
+import bioseq.tests.unit.indexing.minimizer_hashmap.compact_direct_support;
 
 using namespace seq::literals;
 

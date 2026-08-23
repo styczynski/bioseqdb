@@ -4,79 +4,38 @@
  */
 module;
 
-#include <algorithm>
-#include <array>
-#include <bioseq/pg_compat.h>
-#include <cstdio>
-#include <cstring>
-#include <fstream>
-#include <libassert/assert.hpp>
-#include <limits>
-#include <map>
-#include <memory>
-#include <optional>
-#include <queue>
-#include <span>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <unistd.h>
-#include <utility>
-#include <vector>
+extern "C" {
+#include "postgres.h"
+#include "access/attnum.h"
+#include "miscadmin.h"
+#include "utils/errcodes.h"
+#include "utils/memutils.h"
+#include "varatt.h"
+}
 
-export module bioseq.postgres.scheduler.dispatch_processor.typed_support:generic_rows;
+#undef Min
+#undef Max
+#undef snprintf
+#undef vsnprintf
 
+#include <new>
+
+export module bioseq.postgres.scheduler.dispatch_processor.typed_support.generic_rows;
+
+import std;
 import bioseq.postgres.scheduler.dispatch_processor;
-import :policy_stats;
-import :pg_alignment_errors;
-import :transient_storage;
-import :resident_targets;
-import :row_adapters;
-import :scanner_row;
-import bioseq.highway.dispatch_contract;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.policy_stats;
+import bioseq.postgres.scheduler.dispatch_processor.typed_support.pg_alignment_errors;
 import bioseq.common.logging;
-import bioseq.common.checked_arithmetic;
-import bioseq.common.hashing;
-import bioseq.common.seqan_adapter;
 import bioseq.postgres.support;
-import bioseq.postgres.configuration.core;
-import bioseq.postgres.configuration.scheduler;
-import bioseq.indexing.type;
-import bioseq.indexing.traits;
-import bioseq.indexing.minimizer_hashmap;
-import bioseq.indexing.minimizer_sequence;
-import bioseq.indexing.gpu_minimizer_index;
-import bioseq.postgres.storage.indexing.chunked_storage;
-import bioseq.postgres.storage.indexing.handles;
-import bioseq.postgres.storage.indexing.residency;
-import bioseq.postgres.storage.indexing.sorted_runs;
 import bioseq.sequences;
-import bioseq.sequences.kmers;
-import bioseq.sequences.kmers.vulkan_minimizers;
-import bioseq.chaining.vulkan;
-import bioseq.sequences.cigar;
 import bioseq.pipeline.minimap_port;
-import bioseq.pipeline.pipe;
-import bioseq.gpu.vulkan.runtime;
+import bioseq.pipeline.minimizer_execution_contract;
 import bioseq.postgres.types.compact_sequence;
-import bioseq.instrumentation.clock;
-import bioseq.instrumentation.configuration;
-import bioseq.instrumentation.descriptor;
-import bioseq.instrumentation.profiler_state;
-import bioseq.instrumentation.region;
-import bioseq.instrumentation.runtime;
-import bioseq.postgres.storage.manager;
 import bioseq.storage.lazy_sequence;
 import bioseq.storage.size;
-import bioseq.storage.layout;
-import bioseq.postgres.storage.scanner;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
-import bioseq.parallelism.pool;
-import bioseq.parallelism.memory_admission;
-import bioseq.parallelism.pipeline_ops;
-import bioseq.postgres.scheduler.supervisor;
-import bioseq.postgres.scheduler.supervisor.vulkan;
 
 export namespace bioseq::simd::typed_dispatch::typed_support_detail {
 
@@ -84,7 +43,12 @@ export namespace bioseq::simd::typed_dispatch::typed_support_detail {
  * Runs the non-Vulkan row dispatcher, retaining worker ordering, cancellation
  * points, source accounting, and the scanner/in-memory generated identities.
  */
-template <class p_sequence, class p_pool, class p_scanner_row, class p_inmemory_row>
+template <class p_sequence,
+          class p_pool,
+          class p_scanner_row,
+          class p_inmemory_row,
+          class p_with_pg_sequence_recipe,
+          class p_with_source_provider_pg_locator>
 void process_generic_rows(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -108,7 +72,9 @@ void process_generic_rows(
     p_pool& pool,
     p_scanner_row& scanner_row,
     p_inmemory_row& inmemory_row,
-    std::map<int32_t, std::vector<match_result>>& results) {
+    std::map<int32_t, std::vector<match_result>>& results,
+    p_with_pg_sequence_recipe& with_pg_sequence_recipe_fn,
+    p_with_source_provider_pg_locator& with_source_provider_pg_locator_fn) {
     std::vector<std::uint8_t> parallel_done;
     std::vector<match_result_collection> parallel_collections;
     std::vector<minimap2_parameters> parallel_params;
@@ -380,7 +346,8 @@ void process_generic_rows(
                                         alphabet_code,
                                         storage_unit_byte_width,
                                         scanner_pg_ctx,
-                                        &pool](row_view query_lazy_view,
+                                        &pool,
+                                        &scanner_row](row_view query_lazy_view,
                                                std::optional<row_view> target_lazy_view,
                                                pg_sequence_read_session* active_session) {
                     return scanner_row(query_lazy_view,
@@ -434,7 +401,7 @@ void process_generic_rows(
                                                      active_session);
                     };
                 if (has_query_recipe) {
-                    with_pg_sequence_recipe<row_alphabet>(
+                    with_pg_sequence_recipe_fn.template operator()<row_alphabet>(
                         *scanner_pg_ctx,
                         query_recipe,
                         scanner_pg_ctx->query_recipe_descriptors[row_index],
@@ -462,7 +429,7 @@ void process_generic_rows(
                         raise_typed_dispatch_pg_error_as_cpp(
                             ERRCODE_DATA_CORRUPTED, "per-row query locator padding is invalid");
                     }
-                    with_source_provider_pg_locator<row_alphabet>(
+                    with_source_provider_pg_locator_fn.template operator()<row_alphabet>(
                         *scanner_pg_ctx,
                         *query_locator,
                         static_cast<AttrNumber>(scanner_pg_ctx->mmsearch_query_attno),
@@ -479,7 +446,7 @@ void process_generic_rows(
                     const row_view query_lazy_view =
                         bioseq::storage::make_lazy_sequence_view(query_seq);
                     if (has_target_recipe) {
-                        with_pg_sequence_recipe<row_alphabet>(
+                        with_pg_sequence_recipe_fn.template operator()<row_alphabet>(
                             *scanner_pg_ctx,
                             target_recipe,
                             scanner_pg_ctx->target_recipe_descriptors[row_index],
