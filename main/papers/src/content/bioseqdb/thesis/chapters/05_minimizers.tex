@@ -1495,112 +1495,6 @@ The summary table:
   \label{tab:final-numbers}
 \end{table}
 
-\section{Current BioseqDB Minimizer pipeline}
-
-
-\section{Packed minimizer representation}
-\label{sec:packed-minimizer-representation}
-
-A minimizer record carries three values: a hash, the zero-based final
-position of its $k$-mer, and a strand bit.  BioSeqDB's CPU minimizer producers
-and collectors pack them in \texttt{minimizer\_representation<L,K>}.  Here
-$L$ is the number of position bits and $K$ is the $k$-mer length.  This use of
-$L$ is unrelated to the SIMD lane count used earlier in the chapter.
-
-The type first reserves
-\[
-  H=\min(2K,56)
-\]
-hash bits.  Let $R=H+L+1$, where the last term is the strand bit.  The type uses
-the first width $W\in\{16,32,64\}$ for which $R\leq W$.  Every bit above the
-position and strand fields then belongs to the hash, so the stored hash field
-has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
-contains a 56-bit hash and an 8-bit span, which is initialized from $K$.  The
-other contains the position, the strand bit, and any unused high bits.
-
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[
-  x=.09cm,
-  y=.88cm,
-  font=\footnotesize,
-  hashfield/.style={draw=black!75,fill=rewriteBlue!18},
-  posfield/.style={draw=black!75,fill=rewriteOrange!20},
-  strandfield/.style={draw=black!75,fill=rewriteGreen!25},
-  spanfield/.style={draw=black!75,fill=purple!16}
-]
-  \node[anchor=west,font=\bfseries] at (0,5.55)
-    {Rectangle width is proportional to stored bits};
-
-  \node[anchor=east] at (-4,4.55) {$\langle 2,2\rangle$};
-  \draw[hashfield] (0,4.22) rectangle (13,4.88);
-  \draw[posfield] (13,4.22) rectangle (15,4.88);
-  \draw[strandfield,thick] (15,4.22) rectangle (16,4.88);
-  \node at (6.5,4.55) {hash 13};
-  \node[anchor=west] at (20,4.55) {2 bytes};
-
-  \node[anchor=east] at (-4,3.35) {$\langle 7,7\rangle$};
-  \draw[hashfield] (0,3.02) rectangle (24,3.68);
-  \draw[posfield] (24,3.02) rectangle (31,3.68);
-  \draw[strandfield,thick] (31,3.02) rectangle (32,3.68);
-  \node at (12,3.35) {hash 24};
-  \node at (27.5,3.35) {7};
-  \node[anchor=west] at (36,3.35) {4 bytes};
-
-  \node[anchor=east] at (-4,2.15) {$\langle 28,15\rangle$};
-  \draw[hashfield] (0,1.82) rectangle (35,2.48);
-  \draw[posfield] (35,1.82) rectangle (63,2.48);
-  \draw[strandfield,thick] (63,1.82) rectangle (64,2.48);
-  \draw[draw=rewriteBlue!85!black,very thick]
-    (0,1.82) rectangle (64,2.48);
-  \node at (17.5,2.15) {hash 35};
-  \node at (49,2.15) {final position 28};
-  \node[anchor=west] at (68,2.15) {8 bytes};
-
-  \node[anchor=east] at (-4,.55) {$\langle 63,15\rangle$};
-  \node[font=\scriptsize] at (32,1.25) {high word: hash and span};
-  \node[font=\scriptsize] at (96,1.25) {low word: position and strand};
-  \draw[hashfield] (0,.22) rectangle (56,.88);
-  \draw[spanfield] (56,.22) rectangle (64,.88);
-  \draw[posfield] (64,.22) rectangle (127,.88);
-  \draw[strandfield,thick] (127,.22) rectangle (128,.88);
-  \node at (28,.55) {hash 56};
-  \node at (60,.55) {8};
-  \node at (95.5,.55) {final position 63};
-  \node[anchor=west] at (132,.55) {16 bytes};
-
-  \draw[hashfield] (2,-.48) rectangle (6,-.13);
-  \node[anchor=west] at (8,-.305) {hash};
-  \draw[posfield] (31,-.48) rectangle (35,-.13);
-  \node[anchor=west] at (37,-.305) {position};
-  \draw[strandfield] (66,-.48) rectangle (70,-.13);
-  \node[anchor=west] at (72,-.305) {one-bit strand};
-  \draw[spanfield] (109,-.48) rectangle (113,-.13);
-  \node[anchor=west] at (115,-.305) {span};
-\end{tikzpicture}
-\caption{Bit fields in four \texttt{minimizer\_representation<L,K>}
-instantiations, shown from high bits on the left to low bits on the right.
-Blue is the hash, orange is the zero-based final position, green is the
-one-bit strand, and purple is the span in the two-word form.  The highlighted
-$\langle28,15\rangle$ record is the default 64-bit sketch-data form.}
-\label{fig:minimizer-representation-layout}
-\end{figure}
-
-The $L$-bit field represents final positions from zero through
-$2^L-1$, so it can describe a local sequence span of at most $2^L$ bases.
-For $K=15$, values through $L=33$ still fit in 64 bits, while $L=34$
-requires the two-word form.  The $\langle28,15\rangle$ form has a 35-bit hash
-field, but its minimap2 integer hash occupies only 30 bits.
-
-The template can produce a two-byte record for small $K$ and $L$, but no
-current output route uses it.  The ordinary $K=15$ profile uses eight-byte or
-sixteen-byte records.  Extended $K=7$ profiles can use four-byte records.
-Dispatch uses a small set of compiled $L$ values rather than every possible
-value.  For example, a $K=15$ request that needs 20 position bits uses the
-$\langle33,15\rangle$ form.  The all-ones hash field is reserved as the
-maximum sentinel and is not emitted as a minimizer.
-
-
 \subsection{What the Vulkan sketch computes}
 
 The Vulkan path uses the word \emph{segment} for a memory-sized part of a long
@@ -1955,3 +1849,206 @@ four more than the fixed overlap.  Near ambiguous bases and palindromes, an
 inner-loop \texttt{continue} can leave an incomplete candidate or old strand
 value to be hashed.  The code also accesses beyond its 128-record shared
 output buffer during initialization and emission.
+
+
+\section{Current BioseqDB Minimizer pipeline}
+
+
+\section{Packed minimizer representation}
+\label{sec:packed-minimizer-representation}
+
+A minimizer record carries three values: a hash, the zero-based final
+position of its $k$-mer, and a strand bit.  BioSeqDB's CPU minimizer producers
+and collectors pack them in \texttt{minimizer\_representation<L,K>}.  Here
+$L$ is the number of position bits and $K$ is the $k$-mer length.  This use of
+$L$ is unrelated to the SIMD lane count used earlier in the chapter.
+
+The type first reserves
+\[
+  H=\min(2K,56)
+\]
+hash bits.  Let $R=H+L+1$, where the last term is the strand bit.  The type uses
+the first width $W\in\{16,32,64\}$ for which $R\leq W$.  Every bit above the
+position and strand fields then belongs to the hash, so the stored hash field
+has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
+contains a 56-bit hash and an 8-bit span, which is initialized from $K$.  The
+other contains the position, the strand bit, and any unused high bits.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  x=.09cm,
+  y=.88cm,
+  font=\footnotesize,
+  hashfield/.style={draw=black!75,fill=rewriteBlue!18},
+  posfield/.style={draw=black!75,fill=rewriteOrange!20},
+  strandfield/.style={draw=black!75,fill=rewriteGreen!25},
+  spanfield/.style={draw=black!75,fill=purple!16}
+]
+  \node[anchor=west,font=\bfseries] at (0,5.55)
+    {Rectangle width is proportional to stored bits};
+
+  \node[anchor=east] at (-4,4.55) {$\langle 2,2\rangle$};
+  \draw[hashfield] (0,4.22) rectangle (13,4.88);
+  \draw[posfield] (13,4.22) rectangle (15,4.88);
+  \draw[strandfield,thick] (15,4.22) rectangle (16,4.88);
+  \node at (6.5,4.55) {hash 13};
+  \node[anchor=west] at (20,4.55) {2 bytes};
+
+  \node[anchor=east] at (-4,3.35) {$\langle 7,7\rangle$};
+  \draw[hashfield] (0,3.02) rectangle (24,3.68);
+  \draw[posfield] (24,3.02) rectangle (31,3.68);
+  \draw[strandfield,thick] (31,3.02) rectangle (32,3.68);
+  \node at (12,3.35) {hash 24};
+  \node at (27.5,3.35) {7};
+  \node[anchor=west] at (36,3.35) {4 bytes};
+
+  \node[anchor=east] at (-4,2.15) {$\langle 28,15\rangle$};
+  \draw[hashfield] (0,1.82) rectangle (35,2.48);
+  \draw[posfield] (35,1.82) rectangle (63,2.48);
+  \draw[strandfield,thick] (63,1.82) rectangle (64,2.48);
+  \draw[draw=rewriteBlue!85!black,very thick]
+    (0,1.82) rectangle (64,2.48);
+  \node at (17.5,2.15) {hash 35};
+  \node at (49,2.15) {final position 28};
+  \node[anchor=west] at (68,2.15) {8 bytes};
+
+  \node[anchor=east] at (-4,.55) {$\langle 63,15\rangle$};
+  \node[font=\scriptsize] at (32,1.25) {high word: hash and span};
+  \node[font=\scriptsize] at (96,1.25) {low word: position and strand};
+  \draw[hashfield] (0,.22) rectangle (56,.88);
+  \draw[spanfield] (56,.22) rectangle (64,.88);
+  \draw[posfield] (64,.22) rectangle (127,.88);
+  \draw[strandfield,thick] (127,.22) rectangle (128,.88);
+  \node at (28,.55) {hash 56};
+  \node at (60,.55) {8};
+  \node at (95.5,.55) {final position 63};
+  \node[anchor=west] at (132,.55) {16 bytes};
+
+  \draw[hashfield] (2,-.48) rectangle (6,-.13);
+  \node[anchor=west] at (8,-.305) {hash};
+  \draw[posfield] (31,-.48) rectangle (35,-.13);
+  \node[anchor=west] at (37,-.305) {position};
+  \draw[strandfield] (66,-.48) rectangle (70,-.13);
+  \node[anchor=west] at (72,-.305) {one-bit strand};
+  \draw[spanfield] (109,-.48) rectangle (113,-.13);
+  \node[anchor=west] at (115,-.305) {span};
+\end{tikzpicture}
+\caption{Bit fields in four \texttt{minimizer\_representation<L,K>}
+instantiations, shown from high bits on the left to low bits on the right.
+Blue is the hash, orange is the zero-based final position, green is the
+one-bit strand, and purple is the span in the two-word form.  The highlighted
+$\langle28,15\rangle$ record is the default 64-bit sketch-data form.}
+\label{fig:minimizer-representation-layout}
+\end{figure}
+
+The $L$-bit field represents final positions from zero through
+$2^L-1$, so it can describe a local sequence span of at most $2^L$ bases.
+For $K=15$, values through $L=33$ still fit in 64 bits, while $L=34$
+requires the two-word form.  The $\langle28,15\rangle$ form has a 35-bit hash
+field, but its minimap2 integer hash occupies only 30 bits.
+
+The template can produce a two-byte record for small $K$ and $L$, but no
+current output route uses it.  The ordinary $K=15$ profile uses eight-byte or
+sixteen-byte records.  Extended $K=7$ profiles can use four-byte records.
+Dispatch uses a small set of compiled $L$ values rather than every possible
+value.  For example, a $K=15$ request that needs 20 position bits uses the
+$\langle33,15\rangle$ form.  The all-ones hash field is reserved as the
+maximum sentinel and is not emitted as a minimizer.
+
+\section{Vulkan minimizer dispatch schedule}
+\label{sec:vulkan-minimizer-scheduling}
+
+There is no shader program or dispatch per tile.  The compact minimizer route
+caches three pipeline variants: \texttt{ordered\_sketch\_tile},
+\texttt{prefix\_scan\_block}, and \texttt{prefix\_scan\_add}.  The ordered
+pipeline is specialized for the current $w$, not for a tile.  It runs twice,
+first to count records and later to emit them.  The two scan pipelines turn
+the tile counts into output offsets between these traversals.
+
+An ordered-sketch workgroup has 64 invocations.  Invocation $g$ serially runs
+the earlier A1-style tile traversal for tile $g$.  Its state is private, so
+the other 63 invocations can process other tiles at the same time.  If the
+number of workgroups is limited by the device, the invocation later handles
+tile $g+64G$, then $g+2(64G)$, where $G$ is the dispatched group count.  No
+threads cooperate within one tile.
+
+A tile owns 256 bases by default.  The value is neither a thread count nor a
+fixed limit.  The planner may change it for packed-storage alignment, the
+device group limit, and the bound $b+r\leq384$, where $b$ is the owned length
+and $r=\min(k+w+1,383)$ is the left replay.  For $k=15$ and $w=10$, a
+non-first tile replays up to 26 bases.  A full 256-base tile therefore walks at
+most 282 positions.  The code gives no measured reason for the literal value
+256.  Smaller tiles create more independent work but repeat more replay.
+Larger tiles reduce that overhead but lengthen the serial traversal.
+
+Algorithm~\ref{alg:vulkan-sketch-host-schedule} gives the exact dispatch
+order.  \textsc{PlanTiles} omits queries shorter than $k$.  It lists the
+remaining queries in upload order and their tiles in position order.
+
+\begin{algorithm}[H]
+\caption{Vulkan scheduling for one uploaded query batch}
+\label{alg:vulkan-sketch-host-schedule}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require uploaded queries $Q$, $k$, $w$, device group limit $G_{\max}$
+  \Require output policy $P\in\{\textsc{Preallocated},\textsc{ExactDevice}\}$
+  \State $\mathcal T\gets\Call{PlanTiles}{Q,k,w,G_{\max}}$
+  \State $T\gets|\mathcal T|$
+  \If{$T=0$}
+    \State \Return without a GPU dispatch
+  \EndIf
+  \State $G\gets\min(\lceil T/64\rceil,G_{\max})$
+  \State record \texttt{ordered\_sketch\_tile}(count), $G$ groups of 64
+  \State record a compute barrier
+  \State $B\gets\lceil T/256\rceil$
+  \State record \texttt{prefix\_scan\_block}, $B$ groups of one
+  \State record a compute barrier
+  \State record \texttt{prefix\_scan\_add}(stage 0), one group of 128
+  \State record a compute barrier
+  \State record \texttt{prefix\_scan\_add}(stage 1),
+         $\lceil T/128\rceil$ groups of 128
+  \If{$P=\textsc{ExactDevice}$}
+    \State expose the scan result to the host, submit, and wait
+    \State $C\gets\operatorname{offset}[T-1]+\operatorname{count}[T-1]$
+    \State allocate $C$ output records and begin recording emit
+  \EndIf
+  \State record a compute barrier
+  \State record \texttt{ordered\_sketch\_tile}(emit), $G$ groups of 64
+  \State submit and wait
+  \Statex
+  \Procedure{OrderedInvocation}{$g,M$}
+    \State $s\gets64G,\quad j\gets g$
+    \While{$j<T$}
+      \State $z\gets\Call{RunA1Tile}{\mathcal T[j],M}$
+      \If{$M=\textsc{Count}$}
+        \State $\operatorname{count}[j]\gets z$
+      \EndIf
+      \State $j\gets j+s$
+    \EndWhile
+  \EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+The ordered dispatch starts $64G$ invocations, each running
+\textsc{OrderedInvocation}.  \textsc{RunA1Tile} is the tile traversal
+described earlier.  It returns the number $z$ of accepted events.  In emit
+mode, an accepted event with local index $d$ is written at
+$\operatorname{offset}[j]+d$.
+
+The scan contains three dispatches.  The block scan uses one invocation per
+workgroup.  It serially exclusive-scans at most 256 tile counts and writes one
+block total.  This 256 counts per scan block is unrelated to the default 256
+bases per tile.  In scan-add stage 0, global invocation zero scans the block
+totals.  Stage 1 uses 128-invocation workgroups to add the corresponding block
+offset to every tile-local offset.  For counts $[3,2,4,1]$, the resulting
+offsets are $[0,3,5,9]$.  Emit therefore writes the four disjoint ranges
+$[0,3)$, $[3,5)$, $[5,9)$, and $[9,10)$ in tile order.  No merge shader is
+needed.
+
+The preallocated route records all five compute dispatches in one command
+buffer and uses one queue submission.  The exact-device route submits count
+and the three scan dispatches first, allocates the exact output size, then
+records and submits emit.  It therefore uses two queue submissions.  These
+scans operate on per-tile minimizer counts.  The later seed-hit lookup is a
+separate stage.
