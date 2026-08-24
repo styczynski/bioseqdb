@@ -221,6 +221,78 @@ depth .25\baselineskip height #1\baselineskip\relax}
   tabsize=3,
   xleftmargin =1em
 }
+
+% Reusable, self-contained C++26 snippets.  The stock listings bundle only
+% provides older C++ dialects, so derive the current dialect explicitly.  The
+% separate keyword classes let contextual identifiers, attributes, and common
+% fixed-width types remain visually distinct from reserved words.
+\definecolor{BioseqCodeBackground}{HTML}{F6F8FA}
+\definecolor{BioseqCodeBorder}{HTML}{D0D7DE}
+\definecolor{BioseqCodeText}{HTML}{24292F}
+\definecolor{BioseqCodeKeyword}{HTML}{8250DF}
+\definecolor{BioseqCodeContext}{HTML}{0550AE}
+\definecolor{BioseqCodeAttribute}{HTML}{953800}
+\definecolor{BioseqCodeType}{HTML}{116329}
+\definecolor{BioseqCodeString}{HTML}{0A3069}
+\definecolor{BioseqCodeComment}{HTML}{57606A}
+\definecolor{BioseqCodePreprocessor}{HTML}{A40E26}
+
+\lstdefinelanguage[26]{C++}[11]{C++}{%
+  morekeywords={char8_t,concept,consteval,constinit,co_await,co_return,
+    co_yield,contract_assert,requires},
+  morekeywords=[2]{final,import,module,override,post,pre},
+  morekeywords=[3]{assume,deprecated,fallthrough,indeterminate,likely,
+    maybe_unused,nodiscard,no_unique_address,noreturn,unlikely},
+  morekeywords=[4]{int8_t,int16_t,int32_t,int64_t,uint8_t,uint16_t,
+    uint32_t,uint64_t,int_fast8_t,int_fast16_t,int_fast32_t,int_fast64_t,
+    uint_fast8_t,uint_fast16_t,uint_fast32_t,uint_fast64_t,int_least8_t,
+    int_least16_t,int_least32_t,int_least64_t,uint_least8_t,uint_least16_t,
+    uint_least32_t,uint_least64_t,intmax_t,uintmax_t,intptr_t,uintptr_t,
+    ptrdiff_t,size_t}
+}
+
+\lstdefinestyle{bioseq-cpp26}{%
+  language={[26]C++},
+  basicstyle=\small\ttfamily\color{BioseqCodeText},
+  keywordstyle=\bfseries\color{BioseqCodeKeyword},
+  keywordstyle=[2]\bfseries\color{BioseqCodeContext},
+  keywordstyle=[3]\color{BioseqCodeAttribute},
+  keywordstyle=[4]\color{BioseqCodeType},
+  commentstyle=\itshape\color{BioseqCodeComment},
+  stringstyle=\color{BioseqCodeString},
+  directivestyle=\color{BioseqCodePreprocessor},
+  backgroundcolor=\color{BioseqCodeBackground},
+  frame=single,
+  rulecolor=\color{BioseqCodeBorder},
+  framerule=.4pt,
+  framesep=6pt,
+  aboveskip=.75\baselineskip,
+  belowskip=.75\baselineskip,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=2,
+  escapeinside={(*@}{@*)}
+}
+
+% Put a short explanatory note into a fixed-width column on the right of a
+% listing line.  It is injected through listings' escapeinside delimiters, so
+% ordinary C++ comments retain normal syntax highlighting and TeX-sensitive
+% characters in unrelated snippets are not interpreted as LaTeX.
+\newcommand{\BioseqCodeNote}[1]{%
+  \unskip\penalty0\hspace*{\fill}%
+  \parbox[t]{.44\linewidth}{%
+    \raggedright
+    \textcolor{BioseqCodeBorder}{\rule{.4pt}{1.05em}}\hspace{.6em}%
+    \normalfont\footnotesize\sffamily\color{BioseqCodeComment}#1\strut}%
+}
+
+\lstnewenvironment{BioseqCppSnippet}[1][]
+  {\lstset{style=bioseq-cpp26,#1}}
+  {}
+
 \lstdefinelanguage{DNA}{
     keywords = {A,C,T,G,\$}
 }

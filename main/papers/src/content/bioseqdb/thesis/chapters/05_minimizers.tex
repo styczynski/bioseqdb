@@ -1495,6 +1495,340 @@ The summary table:
   \label{tab:final-numbers}
 \end{table}
 
+
+\subsection{Seeding prototype: GPU}
+\label{sec:vulkan-minimizer-sketch}
+\label{sec:g3sa-minimap2-sketch-comparison}
+
+In the earlier taxonomy, the Vulkan minimum calculation is an A1 variant
+without distant SIMD lanes.
+
+Whole-query input may use one uploaded interval.  Grid striding may give an
+invocation another tile after it finishes the current one.  DNA4 and DNA5 map
+ranks to two-bit codes.  The generic alphabet path uses its configured number
+of bits per character.  The comparison below uses the compact minimizer-word
+route.
+
+Both GPU implementations apply the minimap2 integer hash.  Their parallel
+units differ.  G3SA gives neighboring window starts to neighboring threads,
+as in A3, while BioSeqDB gives one tile to an invocation.
+
+\begin{table}[H]
+  \centering
+  \footnotesize
+  \begin{tabularx}{\linewidth}{@{}
+      >{\raggedright\arraybackslash}p{.19\linewidth}
+      >{\raggedright\arraybackslash}X
+      >{\raggedright\arraybackslash}X@{}}
+    \toprule
+    \textbf{Aspect} & \textbf{BioSeqDB compact Vulkan route}
+                    & \textbf{G3SA minimap2 CUDA} \\
+    \midrule
+    Work unit
+      & One invocation walks a tile in base order and may later receive
+        another tile by grid striding.
+      & One 32-thread block advances through a read.  In each chunk, four
+        rounds cover 128 adjacent window starts.  Grid striding may then give
+        the block another read. \\
+    Candidate construction
+      & One rolling update forms the next candidate.
+      & The 32 threads each rebuild five $k$-mers from input characters, then
+        place 160 hash-and-position records in shared memory. \\
+    Window minimum
+      & Carries the window state from one base to the next.
+      & Each thread scans $w$ shared candidates for every assigned window. \\
+    Boundary input
+      & Uses at most $k+w+1$ earlier bases rather than a fixed overlap.
+      & Loads 160 characters for 128 new starts, giving a fixed 32-character
+        overlap.  It covers every last window only when $k+w\leq 34$. \\
+    Output space
+      & The compact route computes exact output intervals for the tiles.
+      & Thread zero handles changes and tied minima, then writes the read's
+        minimizers at its padded input offset.  The output allocation has one
+        record slot per byte of batch capacity. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{Minimizer extraction in the two GPU implementations.  The G3SA
+  column covers only its minimap2 path.}
+  \label{tab:g3sa-bioseq-vulkan-sketch}
+\end{table}
+
+For BioSeqDB, let $N$ be the owned base steps, $T$ the tile count, $B$ the
+owned and replayed steps, and $R$ the expiry rescans.  Since
+$B\leq N+T(k+w+1)$, one traversal costs $O(B+Rw)$ and at worst $O(Bw)$.
+Count and emit change this only by a constant factor.  For $M$ G3SA window
+starts, rebuilding candidates and scanning windows costs $O(Mk+Mw)$.
+
+The preset table includes $k=w=19$.  This needs 36 look-ahead characters,
+four more than the fixed overlap.  Near ambiguous bases and palindromes, an
+inner-loop \texttt{continue} can leave an incomplete candidate or old strand
+value to be hashed.  The code also accesses beyond its 128-record shared
+output buffer during initialization and emission.
+
+
+Figure~\ref{fig:extra-vulkan-sketch} described the A1 work inside one tile and
+the logical count, scan, and emit stages.  This section explains how those
+stages become Vulkan commands and when output memory is allocated.
+
+A shader kind names a reusable compute program.  A pipeline variant is its
+cached form for fixed parameters such as $w$ and the workgroup size.  A
+dispatch launches one pipeline variant over one or more workgroups.  Each
+workgroup contains a fixed number of invocations, which are logical GPU
+threads.  A tile is only a data record that describes replay and owned input
+bounds.  A command buffer stores dispatch commands and the barriers between
+them.  A queue submission sends the recorded command buffer to the GPU.
+
+There is no shader or dispatch per tile.  For one $w$, compact minimizer
+extraction obtains three cached variants: \texttt{ordered\_sketch\_tile},
+\texttt{prefix\_scan\_block}, and \texttt{prefix\_scan\_add}.  The ordered
+variant runs in count and emit modes.  The block-scan variant runs once, and
+the scan-add variant runs at stages 0 and 1.  This gives five compute
+dispatches.
+
+Let $Q$ be the uploaded query batch and let
+$\mathcal T=(t_0,\ldots,t_{T-1})$ be its flat tile list.  The ordered dispatch
+uses
+$G=\min(\lceil T/64\rceil,G_{\max})$ workgroups, where $G_{\max}$ is the
+device's X-dimension workgroup limit.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  x=1cm,
+  y=1cm,
+  font=\footnotesize,
+  query/.style={draw=rewriteBlue!90!black,fill=rewriteBlue!12,
+                rounded corners=1pt,minimum height=.50cm,align=center},
+  tile/.style={draw=black!65,fill=rewriteBlue!10,minimum height=.50cm,
+               align=center,font=\scriptsize,inner sep=1.5pt},
+  finalgroup/.style={draw=black!65,fill=rewriteOrange!11,
+                    rounded corners=1pt,minimum height=.50cm,
+                    align=center,font=\scriptsize,inner sep=1.5pt},
+  later/.style={draw=black!50,fill=black!5,rounded corners=1pt,
+                minimum height=.50cm,align=center,font=\scriptsize,
+                inner sep=1.5pt},
+  inv/.style={draw=rewriteGreen!75!black,fill=rewriteGreen!12,
+              rounded corners=1pt,minimum height=.46cm,
+              align=center,font=\scriptsize,inner sep=1.5pt},
+  map/.style={-{Latex[length=1.5mm,width=1.1mm]},thick},
+  stride/.style={map,densely dashed}
+]
+  \node[query,minimum width=13.80cm] (query) at (7.50,3.82)
+    {uploaded query batch $Q$};
+  \draw[map] (query.south) -- node[right,font=\scriptsize] {tile plan}
+    (7.50,3.18);
+
+  \node[tile,minimum width=1.05cm] at (1.10,2.84) {$t_0$};
+  \node[tile,minimum width=1.05cm] at (2.15,2.84) {$t_1$};
+  \node[tile,minimum width=.65cm] at (3.00,2.84) {$\cdots$};
+  \node[tile,minimum width=1.05cm] at (3.85,2.84) {$t_{63}$};
+
+  \node[tile,minimum width=1.05cm] at (5.05,2.84) {$t_{64}$};
+  \node[tile,minimum width=.65cm] at (5.90,2.84) {$\cdots$};
+  \node[tile,minimum width=1.15cm] at (6.85,2.84) {$t_{127}$};
+
+  \node at (7.85,2.84) {$\cdots$};
+  \node[finalgroup,minimum width=3.15cm] at (9.95,2.84)
+    {workgroup $G-1$\\up to 64 first-step tiles};
+  \node[later,minimum width=2.25cm] at (13.20,2.84)
+    {later grid-stride\\steps if clamped};
+
+  \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
+    (.575,2.45) -- (11.525,2.45)
+    node[midway,below=5pt,font=\scriptsize]
+      {$G$ workgroups, 64 invocations in each workgroup};
+
+  \node[anchor=west,font=\scriptsize] at (.55,1.12)
+    {grid stride when a later tile remains};
+  \node[inv,minimum width=2.15cm] (ig) at (2.05,.45)
+    {global invocation $g$};
+  \node[inv,minimum width=1.25cm] (tg) at (4.65,.45) {tile $g$};
+  \node[inv,minimum width=2.05cm] (tg1) at (8.00,.45)
+    {tile $g+64\mathbin{\cdot}G$};
+  \node[inv,minimum width=2.45cm] (tg2) at (11.85,.45)
+    {tile $g+2(64\mathbin{\cdot}G)$};
+  \draw[map] (ig) -- (tg);
+  \draw[stride] (tg) -- node[above,font=\scriptsize] {$+64\mathbin{\cdot}G$}
+    (tg1);
+  \draw[stride] (tg1) -- node[above,font=\scriptsize]
+    {$+64\mathbin{\cdot}G$} (tg2);
+  \node[font=\scriptsize,align=center] at (14.25,.45)
+    {stop when\\tile ID $\geq T$};
+\end{tikzpicture}
+\caption{Tile assignment in an ordered-sketch dispatch.  Each of the $G$
+workgroups has 64 invocations.  Invocation $g$ processes one tile at a time
+and advances by $64\mathbin{\cdot}G$ while another tile remains.}
+\label{fig:vulkan-tile-dispatch}
+\end{figure}
+
+The 256-base default is not a workgroup size.  It is the preferred owned tile
+length.  The planner may change it for packed-unit alignment, the device group
+limit, and the bound $b+r\leq384$, where $b$ is the owned length and
+$r=\min(k+w+1,383)$ is the left replay.  For $k=15$ and $w=10$, a full
+256-base non-first tile walks at most 282 positions.  The code gives no
+measured reason for choosing 256.
+
+The count dispatch writes \emph{Count}$[j]$, the number of output records for
+tile $j$.  The scan uses these values to assign output positions.  Set
+$S=256$ tile counts per scan block and $B=\lceil T/S\rceil$ blocks.
+
+\texttt{prefix\_scan\_block} reads \emph{Count}.  Each of its $B$
+single-invocation workgroups scans at most $S=256$ entries.  It writes
+local offsets into \emph{Offset} and one total per block into \emph{Block}.
+Stage 0 of
+\texttt{prefix\_scan\_add} replaces those totals with exclusive
+block bases.  It launches one workgroup of 128 invocations, but
+only global invocation zero performs the scan.  Stage 1 launches
+$\lceil T/128\rceil$ workgroups of 128 invocations.  It adds each
+block base to the matching local offset.  After stage 1, \emph{Offset}$[j]$
+is the global starting record position for tile $j$.  Stage 0 modifies
+\emph{Block} in place, and stage 1 modifies \emph{Offset} in place.
+
+The two values of 256 have different units.  One is the default number of
+bases owned by a tile.  The other is the number of tile-count entries in a
+scan block.
+
+The host-side runtime creates every Vulkan buffer.  A shader never allocates
+memory.  The positive value $A$ is the pessimistic output capacity planned by
+the caller.  It is not a proven bound.
+\textsc{HostAndDevice} creates an $A$-record device output before count and
+uses one submission.  \textsc{DeviceOnly} submits count and scan first, lets
+the host read $N_{\rm out}$ and create an exact device output, then submits
+emit.  It does not return a host minimizer vector.  The compact emit shader
+does not check $A$ for each write in \textsc{HostAndDevice}.  If $A$ is too
+small, the shader can write beyond the output buffer before the host detects
+overflow after submission.
+
+For readability, Algorithm~\ref{alg:vulkan-sketch-host-schedule} assigns an
+explanatory task token to every recorded dispatch.  Vulkan does not return
+these tokens.  \textsc{AwaitGPU} records a compute barrier after its task and
+does not stop the host.  \textsc{SubmitAndHostAwait} records the
+shader-to-host barrier, submits the command buffer, and waits for its fence.
+\textsc{RecordHostToGPUBarrier} makes host-prepared buffers visible to compute.
+
+\begin{algorithm}[H]
+\caption{Vulkan scheduling for one uploaded query batch}
+\label{alg:vulkan-sketch-host-schedule}
+\footnotesize
+\begin{algorithmic}[1]
+  \Require packed query batch $Q$, $k$, $w$, device group limit $G_{\max}$
+  \Require positive planned output capacity $A$
+  \Require policy $P\in\{\textsc{HostAndDevice},\textsc{DeviceOnly}\}$
+  \State $\mathcal T\gets\Call{PlanTiles}{Q,k,w,G_{\max}}$
+  \State $T\gets|\mathcal T|$
+  \State \Return without a GPU dispatch \textbf{if} $T=0$
+  \State $G\gets\min(\lceil T/64\rceil,G_{\max}),\quad S\gets256,
+         \quad B\gets\lceil T/S\rceil$
+  \State \Call{PrepareBoundDeviceInputs}{$Q,\mathcal T$}
+  \State allocate device buffers \emph{Count}$[T]$, \emph{Offset}$[T]$,
+         and \emph{Block}$[B]$
+  \State \textbf{if} $P=\textsc{HostAndDevice}$ \textbf{then}
+         $\mathit{Output}\gets\Call{HostCreateDeviceOutput}{A}$
+  \State \Call{BeginCommandBuffer}{}
+  \State \Call{RecordHostToGPUBarrier}{}
+  \State $\mathit{countTask}\gets
+         \Call{RecordOrderedSketchTile}{\textsc{Count},Q,\mathcal T,k,w,G,
+                                        \mathit{Count}}$
+  \State \Call{AwaitGPU}{$\mathit{countTask}$}
+  \State $\mathit{localTask}\gets
+         \Call{RecordPrefixScanBlock}{\mathit{Count},\mathit{Offset},
+                                      \mathit{Block},T,S,B}$
+  \State \Call{AwaitGPU}{$\mathit{localTask}$}
+  \State $\mathit{blockTask}\gets
+         \Call{RecordPrefixScanAdd}{0,\mathit{Block},B}$
+  \State \Call{AwaitGPU}{$\mathit{blockTask}$}
+  \State $\mathit{offsetTask}\gets
+         \Call{RecordPrefixScanAdd}{1,\mathit{Offset},\mathit{Block},T,S}$
+  \If{$P=\textsc{DeviceOnly}$}
+    \State \Call{SubmitAndHostAwait}{$\mathit{offsetTask}$}
+    \State $N_{\rm out}\gets
+           \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
+    \State \Return overflow \textbf{if} $N_{\rm out}>A$
+    \State $\mathit{Output}\gets\Call{HostCreateDeviceOutput}{N_{\rm out}}$
+    \State \Call{BeginCommandBuffer}{}
+    \State \Call{RecordHostToGPUBarrier}{}
+  \EndIf
+  \State \Call{AwaitGPU}{$\mathit{offsetTask}$}
+  \State $\mathit{emitTask}\gets
+         \Call{RecordOrderedSketchTile}{\textsc{Emit},Q,\mathcal T,k,w,G,
+                                        \mathit{Offset},\mathit{Output}}$
+  \State \Call{SubmitAndHostAwait}{$\mathit{emitTask}$}
+  \If{$P=\textsc{HostAndDevice}$}
+    \State $N_{\rm out}\gets
+           \mathit{Offset}[T-1]+\mathit{Count}[T-1]$
+    \State \Return overflow \textbf{if} $N_{\rm out}>A$
+    \State $\mathit{HostOutput}\gets
+           \Call{CopyMapped}{\mathit{Output}[0\ldots N_{\rm out})}$
+  \Else
+    \State $\mathit{HostOutput}\gets\varnothing$
+  \EndIf
+  \State \Return $(\mathit{Output},\mathit{HostOutput},N_{\rm out})$
+\end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+\textsc{PlanTiles} builds the flat array shown in
+Figure~\ref{fig:vulkan-tile-dispatch}.  Each tile gives its query, replay
+start, and owned interval.  Queries shorter than $k$ add no tile.
+\textsc{PrepareBoundDeviceInputs} binds the packed queries, rank lookup table,
+and tile array.  Each \textsc{RecordOrderedSketchTile} dispatch runs
+Algorithm~\ref{alg:vulkan-ordered-invocation} for every global invocation ID.
+In the second \textsc{DeviceOnly} command buffer,
+\textsc{AwaitGPU}$(\mathit{offsetTask})$ makes the completed scan writes visible
+to emit.  It is not another host wait.
+
+Both routes reserve memory headroom for capacity $A$ before dispatch.
+If $N_{\rm out}=0$, the logical capacity remains zero, but Vulkan still
+receives a four-byte physical buffer and the second submission still runs.
+
+\textsc{RunA1Tile} is the earlier serial tile traversal.  It streams records
+whose trigger position belongs to the tile's owned interval.
+
+\begin{algorithm}[H]
+\caption{Work done by one \texttt{ordered\_sketch\_tile} invocation}
+\label{alg:vulkan-ordered-invocation}
+\footnotesize
+\begin{algorithmic}[1]
+  \Procedure{OrderedInvocation}{$g,\mathit{mode}$}
+    \Require global invocation ID $0\leq g<64\mathbin{\cdot}G$
+    \Require dispatch-wide $\mathit{mode}\in\{\textsc{Count},\textsc{Emit}\}$
+    \Require bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$ from
+             Algorithm~\ref{alg:vulkan-sketch-host-schedule}
+    \Require bound \emph{Offset} and \emph{Output} in \textsc{Emit} mode
+    \State $j\gets g$
+    \While{$j<T$}
+      \State $\mathit{localCount}\gets0$
+      \ForAll{record $e$ streamed by \Call{RunA1Tile}{$Q,\mathcal T[j],k,w$}}
+        \If{$\mathit{mode}=\textsc{Emit}$}
+          \State $\mathit{Output}[\mathit{Offset}[j]
+                 +\mathit{localCount}]\gets e$
+        \EndIf
+        \State $\mathit{localCount}\gets\mathit{localCount}+1$
+      \EndFor
+      \If{$\mathit{mode}=\textsc{Count}$}
+        \State $\mathit{Count}[j]\gets\mathit{localCount}$
+      \EndIf
+      \State $j\gets j+64\mathbin{\cdot}G$
+    \EndWhile
+  \EndProcedure
+\end{algorithmic}
+\end{algorithm}
+
+With a toy scan width $S=2$ and \emph{Count}$=[3,2\mid4,1]$, the block scan
+writes local offsets
+$[0,3\mid0,4]$ into \emph{Offset} and block totals $[5,5]$ into \emph{Block}.
+Stage 0 changes \emph{Block} to the block bases $[0,5]$.  Stage 1 adds these
+bases and changes \emph{Offset} to $[0,3,5,9]$.  The measured total is
+$N_{\rm out}=9+1=10$, so \textsc{DeviceOnly} creates ten logical record slots
+before emit.  Emit writes the disjoint ranges $[0,3)$, $[3,5)$, $[5,9)$, and
+$[9,10)$.  Production uses $S=256$.  The scan assigns record positions.  It
+does not join A1 state between tiles.
+
+This schedule covers minimizer extraction.  Seed-hit lookup is a later stage.
+
+
+
 % \subsection{What the Vulkan sketch computes}
 
 % The Vulkan path uses the word \emph{segment} for a memory-sized part of a long
@@ -1657,58 +1991,50 @@ The summary table:
 \section{Current BioSeqDB minimizer pipeline}
 \label{sec:current-minimizer-pipeline}
 
-\subsection{Configured CPU algorithms}
-\label{sec:configured-cpu-minimizers}
-
-The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
-minimizer implementation.  Its default value is \texttt{scalar}.  Table~\ref{tab:current-cpu-minimizers}
-maps the four CPU values to the algorithm families described earlier.
-
-\begin{table}[H]
-  \centering
-  \small
-  \begin{tabularx}{\linewidth}{@{}p{.37\linewidth}X@{}}
-    \toprule
-    \textbf{Setting value} & \textbf{Current CPU route} \\
-    \midrule
-    \texttt{scalar}
-      & Scalar rescan with the minimap2 integer hash. \\
-    \texttt{simd\_minimap2\_reference}
-      & A1 with the minimap2 integer hash for DNA4.  Other alphabets use
-        scalar rescan. \\
-    \texttt{bounded\_nthash\_simd}
-      & A2 with 32-bit ntHash.  The exposed route is limited to DNA4 with
-        $k=15$ and $w=10$. \\
-    \texttt{two\_stack\_nthash}
-      & Normally A3 chronological SIMD with the minimap2 integer hash. \\
-    \bottomrule
-  \end{tabularx}
-  \caption{CPU minimizer implementations exposed by the PostgreSQL setting.}
-  \label{tab:current-cpu-minimizers}
-\end{table}
 
 \section{Packed minimizer representation}
 \label{sec:packed-minimizer-representation}
 
-In minimap2 minimizers are represented as 128-bit structs:
-%AITODO: Change into nice-looking commented snippet
-\begin{verbatim}
-struct MinimapSketchData {
-	uint64_t kmer: 56; //< kmer hash
-	uint64_t span: 8; //< how many bases this minimizer spans (usually this is set to k, but for first k symbols of sequence /or for ambigious symbols like "N" it can be lower/higher)
-	uint64_t strand: 1; //< indicates forward/reverse strand
-	uint64_t last_pos: 31; //< zero-based global position of the last base of the minimizer
-	uint64_t rid: 32; //< target sequence ID
-};
-static_asssert(sizeof(MinimapSketchData) == 128);
-\end{verbatim}
-This isn't real snippet from the minimap2 source code (real C code uses bitshifts over two int64 variables and does not use named bitfields in most cases):
+Minimap2's \texttt{mm\_sketch} emits each minimizer in an \texttt{mm128\_t},
+two \texttt{uint64\_t} words named \texttt{x} and \texttt{y}.  The C++26
+declaration below shows only interpretation of the fields, while minimap2's itself uses binary shifts and masks to set and extract specific values (which made its manual code analysis very challenging).
 
-A minimizer record carries three values: a hash, the zero-based final
-position of its $k$-mer, and a strand bit.  BioSeqDB's CPU minimizer producers
-and collectors pack them in \texttt{minimizer\_representation<L,K>}.  Here
-$L$ is the number of position bits and $K$ is the $k$-mer length.  This use of
-$L$ is unrelated to the SIMD lane count used earlier in the chapter.
+\begin{BioseqCppSnippet}
+struct MinimapSketchFields {
+  std::uint64_t kmer_hash : 56; (*@\BioseqCodeNote{logical $k$-mer hash}@*)
+  std::uint64_t span      :  8; (*@\BioseqCodeNote{input-base span}@*)
+  std::uint64_t strand    :  1; (*@\BioseqCodeNote{canonical orientation bit}@*)
+  std::uint64_t last_pos  : 31; (*@\BioseqCodeNote{zero-based final-base position}@*)
+  std::uint64_t rid       : 32; (*@\BioseqCodeNote{reference/query-segment ID}@*)
+};
+\end{BioseqCppSnippet}
+
+Minimap2's C code construction is done via:
+\begin{align}
+x=(\mathit{hash}\ll 8)\mathbin{|}\mathit{span}
+y=(\mathit{rid}\ll 32)\mathbin{|}(\mathit{last\_pos}\ll 1)\mathbin{|}
+\mathit{strand}
+\end{align}
+
+Normally span equals $k$ (or is $< k$ for first $k-1$ bases). Minimap2 suppors homopolymer compression (HPC) togglable by command line option \texttt{-H} which collapses strings of one repeating character into single character occurence. If HPC is enabled, span can have values $0 \leq span \leq 255$. If span is increased beyond 255 (there are 255 same characters in the input sequence next to each other), then minimizer is completely abandoned until new symbol is found.
+In BioseqDB we use/or not HPC by default? %TODO: Find out if bioseqDB uses HPC?
+
+The \texttt{rid} value identifies a reference during indexing and a query segment during query sketching. Note that the ID itself isn't useful during seeding, chaining or alignment, it's only useful at the end when reporting results.
+
+When porting the core of minimap2 algorithms we observed the following facts:
+\begin{enumerate}
+  \item The span contains no useful information as HPC is disabled by default and we don't have to support it at this time. For HPC disabled it can only carry information if the k-mer was at the start of the sequence (this can be checked via \emph{last\_pos} field)
+  \item \emph{rid} is completely useless during most of the pipeline
+  \item \emph{last_pos} which is the end position of the k-mer is only 31 bits which introduces requirement to split long sequences before using minimap2.
+  \item \emph{kmer_hash} is wide, but using more bits for hash than binary representation of k-mer is not giving any advantage (for example for DNA4 alpohabet if we encode each symbol in 2 bits then k=15 requires 30 bits for k-mer representation. Hashing 30-bits into 56-bit wide hash doesn't give any advantage as huge part of hashing space won't be used)
+\end{enumerate}
+
+BioSeqDB's minimizer producers and collectors use \texttt{minimizer\_representation<L,K>}.
+Every form stores the hash, zero-based final position, and strand.
+
+The longest form still uses \emph{span} set to $k$, but it's not used for anything other than just padding of fields. Here $L$ is the number of
+position bits and $K$ is the $k$-mer length.  This $L$ is unrelated to the SIMD
+lane count used earlier in the chapter.
 
 The type first reserves
 \[
@@ -1718,8 +2044,8 @@ hash bits.  Let $R=H+L+1$, where the last term is the strand bit.  The type uses
 the first width $W\in\{16,32,64\}$ for which $R\leq W$.  Every bit above the
 position and strand fields then belongs to the hash, so the stored hash field
 has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
-contains a 56-bit hash and an 8-bit span, which is initialized from $K$.  The
-other contains the position, the strand bit, and any unused high bits.
+contains a 56-bit hash and an 8-bit span.  The other word contains the position, the
+strand bit, and any unused high bits.
 
 \begin{figure}[htbp]
 \centering
@@ -1795,13 +2121,41 @@ For $K=15$, values through $L=33$ still fit in 64 bits, while $L=34$
 requires the two-word form.  The $\langle28,15\rangle$ form has a 35-bit hash
 field, but its minimap2 integer hash occupies only 30 bits.
 
-The template can produce a two-byte record for small $K$ and $L$, but no
-current output route uses it.  The ordinary $K=15$ profile uses eight-byte or
-sixteen-byte records.  Extended $K=7$ profiles can use four-byte records.
-Dispatch uses a small set of compiled $L$ values rather than every possible
-value.  For example, a $K=15$ request that needs 20 position bits uses the
-$\langle33,15\rangle$ form.  The all-ones hash field is reserved as the
-maximum sentinel and is not emitted as a minimizer.
+Currently the main parameter that drives used representation width is the number of position bits $L$ (this is compared against \emph{kmer\_size\_buckets} array).
+Theoretically the template can produce a two-byte record, but this bucket isn't suppored at this moment (such small width make's it problematic to adjust as we need to have very short hash, which isn't ideal as shorter k-mers are more prone to collisions or limit the size of sequence to less than 256, which would be very specific optimisation)
+The $\langle2,2\rangle$ on the figure is just the demonstrative example to show that template is supported even in very degenerated edge cases (we don't actually use special form for sequences with less than 4 bases as it would make very little sense).
+
+
+\subsection{Configured CPU algorithms}
+\label{sec:configured-cpu-minimizers}
+
+The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
+minimizer implementation.  Its default value is \texttt{scalar}.  Table~\ref{tab:current-cpu-minimizers}
+maps the four CPU values to the algorithm families described earlier.
+
+\begin{table}[H]
+  \centering
+  \small
+  \begin{tabularx}{\linewidth}{@{}p{.37\linewidth}X@{}}
+    \toprule
+    \textbf{Setting value} & \textbf{Current CPU route} \\
+    \midrule
+    \texttt{scalar}
+      & Scalar rescan with the minimap2 integer hash. \\
+    \texttt{simd\_minimap2\_reference}
+      & A1 with the minimap2 integer hash for DNA4.  Other alphabets use
+        scalar rescan. \\
+    \texttt{bounded\_nthash\_simd}
+      & A2 with 32-bit ntHash.  The exposed route is limited to DNA4 with
+        $k=15$ and $w=10$. \\
+    \texttt{two\_stack\_nthash}
+      & Normally A3 chronological SIMD with the minimap2 integer hash. \\
+    \bottomrule
+  \end{tabularx}
+  \caption{CPU minimizer implementations exposed by the PostgreSQL setting.}
+  \label{tab:current-cpu-minimizers}
+\end{table}
+
 
 \subsection{Tiled scalar rescan and G3SA's minimap2 kernel}
 \label{sec:vulkan-minimizer-sketch}
@@ -1871,10 +2225,6 @@ four more than the fixed overlap.  Near ambiguous bases and palindromes, an
 inner-loop \texttt{continue} can leave an incomplete candidate or old strand
 value to be hashed.  The code also accesses beyond its 128-record shared
 output buffer during initialization and emission.
-
-
-\section{Current BioseqDB Minimizer pipeline}
-
 
 
 \section{Vulkan minimizer dispatch schedule}
