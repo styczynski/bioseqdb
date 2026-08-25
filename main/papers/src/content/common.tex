@@ -64,21 +64,27 @@
 \definecolor{BioseqCodeRefDetail}{HTML}{57606A}
 
 % Repository aliases keep source references concise and make adding another
-% upstream a single declaration.  Source links intentionally target `main`.
+% upstream a single declaration.  The optional third argument records a
+% non-default branch; repositories otherwise target `main`.
 \ExplSyntaxOn
 \prop_new:N \g__bioseq_code_repositories_prop
+\prop_new:N \g__bioseq_code_repository_branches_prop
 \seq_new:N \l__bioseq_coderef_parts_seq
 \tl_new:N \l__bioseq_coderef_repo_tl
 \tl_new:N \l__bioseq_coderef_path_tl
 \tl_new:N \l__bioseq_coderef_base_tl
+\tl_new:N \l__bioseq_coderef_branch_tl
 \tl_new:N \l__bioseq_coderef_url_tl
 \tl_new:N \l__bioseq_coderef_description_tl
 \tl_new:N \l__bioseq_coderef_location_tl
 
-\NewDocumentCommand{\DeclareCodeRepository}{m m}
-  { \prop_gput:Nnn \g__bioseq_code_repositories_prop {#1} {#2} }
+\NewDocumentCommand{\DeclareCodeRepository}{m m O{main}}
+  {
+    \prop_gput:Nnn \g__bioseq_code_repositories_prop {#1} {#2}
+    \prop_gput:Nnn \g__bioseq_code_repository_branches_prop {#1} {#3}
+  }
 
-\DeclareCodeRepository{minimap2}{https://github.com/lh3/minimap2}
+\DeclareCodeRepository{minimap2}{https://github.com/lh3/minimap2}[master]
 \DeclareCodeRepository{g3sa}{https://github.com/sunwookim028/G3SA}
 \DeclareCodeRepository{sneakysnake}{https://github.com/CMU-SAFARI/SneakySnake}
 \DeclareCodeRepository{blockaligner}{https://github.com/Daniel-Liu-c0deb0t/block-aligner}
@@ -123,6 +129,12 @@
             {Unknown~code~repository~alias~'\tl_to_str:V \l__bioseq_coderef_repo_tl'}
             {Declare~it~with~\string\DeclareCodeRepository\{alias\}\{URL\}.}
         }
+      \prop_get:NVNTF
+        \g__bioseq_code_repository_branches_prop
+        \l__bioseq_coderef_repo_tl
+        \l__bioseq_coderef_branch_tl
+        { }
+        { \tl_set:Nn \l__bioseq_coderef_branch_tl {main} }
       \tl_if_empty:NT \l__bioseq_coderef_path_tl
         {
           \PackageError{bioseq-common}
@@ -132,7 +144,8 @@
       \tl_set:Nx \l__bioseq_coderef_url_tl
         {
           \tl_use:N \l__bioseq_coderef_base_tl
-          /blob/main/\tl_use:N \l__bioseq_coderef_path_tl
+          /blob/\tl_use:N \l__bioseq_coderef_branch_tl
+          /\tl_use:N \l__bioseq_coderef_path_tl
           \c_hash_str L\tl_to_str:n {#4}
         }
       \tl_set:Nn \l__bioseq_coderef_description_tl {#2}
