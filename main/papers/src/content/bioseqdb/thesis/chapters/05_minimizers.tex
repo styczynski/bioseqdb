@@ -20,10 +20,16 @@
     font=\footnotesize}
 }
 
+% This chapter keeps figures, tables, and algorithms beside their discussion.
+% Avoid stretching the surrounding paragraphs when a non-floating object moves
+% to the next page because it does not fit in the remaining space.
+\raggedbottom
+
 \section{From every base to a sparse, comparable sketch}
 \label{sec:minimizers-role}
 
-The first computational stage of the BioSeqDB aligner needs to compute $$\text{Seed}(X)$$
+The first computational stage of the BioSeqDB aligner needs to compute
+\(\operatorname{Seed}(X)\).
 A target seed becomes a key in an index. A query seed is looked
 up in that index, and each compatible occurrence becomes an anchor for the
 chaining stage described in Section~\ref{sec:chaining-purpose}. The seed set
@@ -82,7 +88,7 @@ window selection, and adjacent deduplication. The per-window minimum positions
 are calculated from the displayed hashes. In particular, the window beginning
 at hash position five has minimum position eight, not position five.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.54cm,
@@ -139,7 +145,7 @@ windows, so adjacent deduplication emits its position once.}
 Figure~\ref{fig:seed-hash-table} uses fixed four-base seeds on both sides. The
 symbols $h_1$, $h_2$, and $h_3$ are some computed hashes.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.88cm,
@@ -205,7 +211,7 @@ starts in this example. A usable seed index stores some seed metadata like posit
 
 Frequent seeds can produce very large occurrence lists. BioSeqDB can exclude
 seeds whose target frequency exceeds a configured threshold before anchors
-are constructed. This is common practice in other software as well: minimap2 can remove most common minimizers for specific sequence by using percentage threshold ($$\text{--q-occ-frac} \text{[0..1]}$$)
+are constructed. This is common practice in other software as well: minimap2 can remove most common minimizers for specific sequence by using percentage threshold (\texttt{--q-occ-frac} \(\in[0,1]\))
 
 \section{Methods of minimizer generation}
 
@@ -270,7 +276,7 @@ Equal hashes at different positions are not duplicate records. We wanmt to keep 
   \node[anchor=west] at (5.05,3.52)
     {hash 3 occurs at two different positions};
 
-  \node[anchor=west,font=\bfseries] at (0,2.62)
+  \node[anchor=west,font=\bfseries] at (0,2.82)
     {(b) The next candidate is larger};
   \node[anchor=east] at (1.40,1.94) {$W_1$};
   \foreach \i/\v/\sty in {0/3/rewrite cell,1/7/rewrite cell,
@@ -403,44 +409,24 @@ Each SIMD lane will load fragments of input data:
   \node[anchor=west,font=\bfseries] at (0,7.08)
     {(b) Lane 0 loses its minimum; the shared branch scans all lanes};
   \foreach \r/\lab in {0/lane 0,1/lane 1,2/lane 2,3/lane 3}
-    \node[anchor=east] at (1.35,3.35-.48*\r) {\lab};
+    \node[anchor=east] at (1.35,5.35-.48*\r) {\lab};
   \foreach \r/\c/\v in {
       0/0/7,0/1/6,0/2/5,0/3/9,
       1/0/3,1/1/7,1/2/6,1/3/5,
       2/0/8,2/1/1,2/2/4,2/3/6,
       3/0/5,3/1/6,3/2/2,3/3/8}
-    \node[rewrite new] at (1.80+.70*\c,3.35-.48*\r) {\v};
-  \node[rewrite min] at (1.80+.70*2,3.35) {5};
-  \node[rewrite box,minimum width=2.45cm] (mask) at (6.10,2.63)
+    \node[rewrite new] at (1.80+.70*\c,5.35-.48*\r) {\v};
+  \node[rewrite min] at (1.80+.70*2,5.35) {5};
+  \node[rewrite box,minimum width=2.45cm] (mask) at (6.10,4.63)
     {expiry mask\\$[1,0,0,0]$};
-  \draw[rewrite flow] (4.28,2.63)--(mask.west);
-  \node[rewrite note,text width=4.0cm,anchor=west] at (7.55,2.63)
+  \draw[rewrite flow] (4.28,4.63)--(mask.west);
+  \node[rewrite note,text width=4.0cm,anchor=west] at (7.55,4.63)
     {Only lane 0 accepts a replacement. The processor still loads and
      compares all four vector slots.};
   \draw[draw=rewriteOrange!90!black,very thick]
-    (1.43,1.25) rectangle (4.24,3.72);
+    (1.43,3.25) rectangle (4.24,5.72);
   \node[rewrite box,fill=rewriteOrange!12,minimum width=4.0cm]
-    at (5.95,.62) {$w=4$ vector loads and comparisons};\node[anchor=west,font=\bfseries] at (0,4.08)
-    {(b) Lane 0 loses its minimum; the shared branch scans all lanes};
-  \foreach \r/\lab in {0/lane 0,1/lane 1,2/lane 2,3/lane 3}
-    \node[anchor=east] at (1.35,3.35-.48*\r) {\lab};
-  \foreach \r/\c/\v in {
-      0/0/7,0/1/6,0/2/5,0/3/9,
-      1/0/3,1/1/7,1/2/6,1/3/5,
-      2/0/8,2/1/1,2/2/4,2/3/6,
-      3/0/5,3/1/6,3/2/2,3/3/8}
-    \node[rewrite new] at (1.80+.70*\c,3.35-.48*\r) {\v};
-  \node[rewrite min] at (1.80+.70*2,3.35) {5};
-  \node[rewrite box,minimum width=2.45cm] (mask) at (6.10,2.63)
-    {expiry mask\\$[1,0,0,0]$};
-  \draw[rewrite flow] (4.28,2.63)--(mask.west);
-  \node[rewrite note,text width=4.0cm,anchor=west] at (7.55,2.63)
-    {Only lane 0 accepts a replacement. The processor still loads and
-     compares all four vector slots.};
-  \draw[draw=rewriteOrange!90!black,very thick]
-    (1.43,1.25) rectangle (4.24,3.72);
-  \node[rewrite box,fill=rewriteOrange!12,minimum width=4.0cm]
-    at (5.95,.62) {$w=4$ vector loads and comparisons};
+    at (5.95,2.62) {$w=4$ vector loads and comparisons};
   
 \end{tikzpicture}
 \caption{Why direct SIMD rescan is costly. Each lane follows a different
@@ -493,7 +479,7 @@ minimum
 The suffix values are recalculated in a fixed $w$-step loop each $w$ steps. This means that we still have "rescan" part, but it becames unconditional.
 
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.70cm,
@@ -545,9 +531,9 @@ block.}
 \label{fig:two-stack-minimum}
 \end{figure}
 
-The SIMD-Minimizers use fixed-vector size architecture, where the SIMD vector is set to be uint32 times 8. The split per lane is the same as discussed previously. On Neon architecture only 128-bit-wide register is available, so the 256 fixed vector generates separate store intructions.
+\info{Fixed-width SIMD vectors}{The SIMD-Minimizers use fixed-vector size architecture, where the SIMD vector is set to be uint32 times 8. The split per lane is the same as discussed previously. On Neon architecture only 128-bit-wide register is available, so the 256 fixed vector generates separate store intructions.}
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.64cm,
@@ -618,7 +604,7 @@ it removes the repeated boundary position caused by the overlapping input
 pieces.
 
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.62cm,
@@ -690,7 +676,15 @@ The idea for one group is as follows:
 \begin{enumerate}
   \item We load $L$ new sequence positions into $L$ SIMD lanes each one is shifted by $1$ using load instructions
   \item For each lane we compute minimum along with strand direction and information which position it is. We call that new candidates: $x_0,\ldots,x_{L-1}$
-  \item We iterate through all candidates i.e $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$ where $T$ are previous $w-1$ candidates and calculate new minimums. This gives us $M$ which are $L$ minimums for entire parts of sequence: $\{\text{Seed}(X[p, p+1, ..., p+k+w-1], \text{Seed}(X[p+1, p+2, ..., p+k+w], ..., \text{Seed}(X[p+L, p+L+1, ..., p+k+w+L])\}$. Now this along last previous result $c^{*}$ forms $P$: $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
+  \item We iterate through all candidates i.e $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$ where $T$ are previous $w-1$ candidates and calculate new minimums. This gives us $M$ which are $L$ minimums for entire parts of sequence:
+  \[
+    \begin{aligned}
+      \{&\operatorname{Seed}(X[p,p+1,\ldots,p+k+w-1]),\\
+        &\operatorname{Seed}(X[p+1,p+2,\ldots,p+k+w]),\ldots,\\
+        &\operatorname{Seed}(X[p+L,p+L+1,\ldots,p+k+w+L])\}.
+    \end{aligned}
+  \]
+  Now this along last previous result $c^{*}$ forms $P$: $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
   \item For each lane $\ell$ we compare $P_{\ell}$ with $x_{\ell}$. If $h(x_{\ell}) \leq P_{\ell}$ then $P_{\ell}$ is a new minimizer and we emit it. Otherwise if $\text{pos}(P_{\ell}) = \text{pos}(x_{\ell})$ then we see $P_{\ell}$ expired so we emit it. 
   \item If the expiry happens then we go through all $w$ windows and check if their minimum has the same value but different position. This only requires checking $m_0, m_1, ..., m_{w-1}$. If yes then we do slow path: extract the ties in order (hence the name of the algorithm: chronological)
 \end{enumerate}
@@ -938,11 +932,14 @@ The idea for one group is as follows:
   \node[anchor=west] at (10.25,2.18)
     {current $\gets1@D_{16}$};
   
-  \node[anchor=west,text=rewriteBlue!90!black,font=\small] at (1.20,.72)
+  \node[align=center,text width=4.8cm,text=rewriteBlue!90!black,
+        font=\small] at (2.80,.72)
     {$8$ window minima in two groups $G_0$ and $G_1$};
-  \node[anchor=west,text=rewriteOrange!95!black,font=\small] at (5.60,.72)
+  \node[align=center,text width=2.8cm,text=rewriteOrange!95!black,
+        font=\small] at (7.20,.72)
     {$2w$ reductions};
-  \node[anchor=west,text=rewriteGreen!75!black,font=\small] at (10.10,.72)
+  \node[align=center,text width=4.0cm,text=rewriteGreen!75!black,
+        font=\small] at (11.80,.72)
     {hash ties are resolved separately};
   
   \end{tikzpicture}
@@ -960,64 +957,74 @@ The figure \ref{fig:rewrite-chronological-groups} illustrates calculation of win
   \begin{algorithm}[H]
   \caption{One iteration: build $L$ $k$-mers and rescan $L$ adjacent windows}
   \label{alg:rewrite-generic-chronological}
-  \small
-  \textbf{Carry:} $C$ = last $k-1$ bases,\quad
-  $T$ = last $w-1$ candidates,\quad
-  $c^\star$ = preceding window minimum.
-  
-  \begin{tabbing}
-  \qquad\=\qquad\=\kill
-  \textbf{while} the next $L$ candidate bases are available \textbf{do}\\
-  \> $U\gets$ next $L$ bases;\quad
-     $Y\gets C\mathbin\Vert U$;\quad
-     $\mathbf F,\mathbf R\gets\mathbf0$\\
-  
-  \> \textbf{for} $t=0,\ldots,k-1$ \textbf{do}
-     \hfill \emph{build forward/reverse kmers symbol by symbol}\\
-  \>\> $\mathbf z\gets\operatorname{load}_L(Y[t\,..\,t+L))$;\quad
-       $\mathbf F\gets F \Vert z$;\quad
-       $\mathbf R\gets \overline{z} \Vert R$\\
-  \> \textbf{end for}
-     \qquad\emph{calculate hashes from kmers}\\
-  
-  \> For each lane $\ell$, let
-     $a_\ell\gets H(\min(F_\ell,R_\ell))$.  If $F_\ell=R_\ell$ or
-     $a_\ell=h_{\max}$,\\
-  \>\> set $x_\ell\gets\infty$; otherwise set
-     $x_\ell\gets\operatorname{pack}
-     (a_\ell,\operatorname{position}_\ell,[R_\ell<F_\ell])$.\\
-  
-  \> $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$;\quad
-     $\mathbf M\gets\infty$\\
-  \> \textbf{for} $s=0,\ldots,w-1$ \textbf{do}
-     \hfill \emph{Calculate $M$ which will hold rightmost minimums of all $w$windows}\\
-  \>\> $\mathbf V\gets D[s\,..\,s+L)$;\quad
-       $\mathbf M\gets
-         \operatorname{select}(h(\mathbf V)\leq h(\mathbf M),
-                               \mathbf V,\mathbf M)$\\
-  \> \textbf{end for}
-     \qquad\emph{one step = three field loads + one compare + three selects}\\
-  \> Hence $M_\ell$ is the rightmost minimum of the complete window ending at
-     $x_\ell$.\\
-  
-  \> $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
-  \> We compare $P$ vs $x$ lane wise, for each lane $\ell$, let
-     $e \gets \emptyset$
-     If $x_{\ell} = P_\ell$ then $e \gets \text{event}^{\text{NEW}}(P_\ell)$
-     If $\text{pos}(P_\ell) = \text{pos}(x_\ell)$ (called expiration) then $e \gets \text{event}^{\text{EXPIRED}}(P_\ell)$\\
-  \> If $e \text{is} \text{EXPIRED}$, then check all $w$ windows for an equal hash on different position and set $e \gets \text{event}^{\text{TIE}}(P_\ell)$\\
-  \> If $e \text{is} \text{TIE}$, we reread the $w$ records only to construct ordered output (slow path).\\
-  \> $C\gets Y[L\,..\,L+k-1)$;\quad
-     $T\gets D[L\,..\,L+w-1)$;\quad
-     $c^\star\gets M_{L-1}$\\
-  \textbf{end while}\\
-  
-  \textbf{if} $0<q<L$ bases remain, \textbf{run the same body once} with $q$
-  active lanes and sentinels elsewhere;\\
-  \> both loops still execute $k$ and $w$ steps, but set
-     $C\gets Y[q\,..\,q+k-1)$,
-     $T\gets D[q\,..\,q+w-1)$, and $c^\star\gets M_{q-1}$.\\
-  \end{tabbing}
+  \footnotesize
+  \begin{algorithmic}[1]
+  \State \textbf{Carry:} $C$ = last $k-1$ bases,
+         $T$ = last $w-1$ candidates,
+         $c^\star$ = preceding window minimum
+  \While{the next $L$ candidate bases are available}
+    \State $U\gets$ next $L$ bases
+    \State $Y\gets C\mathbin\Vert U$
+    \State $\mathbf F,\mathbf R\gets\mathbf0$
+    \Statex \emph{Build forward/reverse kmers symbol by symbol.}
+    \For{$t=0,\ldots,k-1$}
+      \State $\mathbf z\gets\operatorname{load}_L(Y[t\,..\,t+L))$
+      \State $\mathbf F\gets F\mathbin\Vert z$
+      \State $\mathbf R\gets\overline{z}\mathbin\Vert R$
+    \EndFor
+    \Statex \hspace{\algorithmicindent}\emph{Calculate hashes from kmers.}
+    \ForAll{lanes $\ell$}
+      \State $a_\ell\gets H(\min(F_\ell,R_\ell))$
+      \If{$F_\ell=R_\ell$ or $a_\ell=h_{\max}$}
+        \State $x_\ell\gets\infty$
+      \Else
+        \State $x_\ell\gets\operatorname{pack}
+          (a_\ell,\operatorname{position}_\ell,[R_\ell<F_\ell])$
+      \EndIf
+    \EndFor
+    \State $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$
+    \State $\mathbf M\gets\infty$
+    \Statex \emph{Calculate $M$, which holds the rightmost minima of all $w$ windows.}
+    \For{$s=0,\ldots,w-1$}
+      \State $\mathbf V\gets D[s\,..\,s+L)$
+      \State $\mathbf M\gets
+        \operatorname{select}(h(\mathbf V)\leq h(\mathbf M),
+                              \mathbf V,\mathbf M)$
+    \EndFor
+    \Statex \hspace{\algorithmicindent}\emph{One step = three field loads + one compare + three selects.}
+    \State Hence $M_\ell$ is the rightmost minimum of the complete window
+           ending at $x_\ell$
+    \State $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
+    \ForAll{lanes $\ell$}
+      \State $e\gets\emptyset$
+      \If{$x_\ell=P_\ell$}
+        \State $e\gets\operatorname{event}^{\mathrm{NEW}}(P_\ell)$
+      \EndIf
+      \If{$\operatorname{pos}(P_\ell)=\operatorname{pos}(x_\ell)$}
+        \State $e\gets\operatorname{event}^{\mathrm{EXPIRED}}(P_\ell)$
+              \hfill\Comment{expiration}
+      \EndIf
+      \If{$e$ is \textsc{Expired}}
+        \State Check all $w$ windows for an equal hash on a different position
+        \State $e\gets\operatorname{event}^{\mathrm{TIE}}(P_\ell)$
+      \EndIf
+      \If{$e$ is \textsc{Tie}}
+        \State Reread the $w$ records only to construct ordered output
+              \hfill\Comment{slow path}
+      \EndIf
+    \EndFor
+    \State $C\gets Y[L\,..\,L+k-1)$
+    \State $T\gets D[L\,..\,L+w-1)$
+    \State $c^\star\gets M_{L-1}$
+  \EndWhile
+  \If{$0<q<L$ bases remain}
+    \State Run the same body once with $q$ active lanes and sentinels elsewhere
+    \State Both loops still execute $k$ and $w$ steps
+    \State $C\gets Y[q\,..\,q+k-1)$,
+           $T\gets D[q\,..\,q+w-1)$,
+           $c^\star\gets M_{q-1}$
+  \EndIf
+  \end{algorithmic}
   \end{algorithm}
   
 \section{Bioseq prototype}
@@ -1038,9 +1045,9 @@ After achieving runnable pipeline (with seeding, chaining, alignment and estimat
 \begin{table}[H]
   \centering
   \footnotesize
-  \begin{tabularx}{\linewidth}{p{.13\linewidth}p{.32\linewidth}X}
+  \begin{tabularx}{\linewidth}{@{}p{.13\linewidth}X@{}}
   \toprule
-  Label & Main change & What it means for the minimizer algorithm \\
+  Label & \shortstack[l]{Main change\\What it means for the minimizer algorithm} \\
   \midrule
   V1--V6 & naive SIMD rescan approach equivalent to A1 \\
   V7--V8 & hybrid algorithm A1 where we use two-stack for minimum calculation \\
@@ -1066,7 +1073,7 @@ As correctly predicted our benchmark (Table~\ref{tab:v6-phase}) showed that the 
 ``vectorised'' \texttt{mm\_sketch\_simd} took 24\,ms -- a 2$\times$
 slowdown. This was caused by the fact that any minimum going outside the window causes rescan of all lanes.
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \begin{tabular}{lrrr}
     \toprule
@@ -1249,7 +1256,7 @@ function call at every BP step.  Each call paid:
 
 Figure~\ref{fig:phase-evolution} shows full evolution of the prototypes. The scalar part involves unavoidable SIMD overhead of collecting results into map, scalar scramble hashing (minimap2 hash) and encoding output into the bit structure.
 
-\begin{figure}[ht]
+\begin{figure}[H]
   \centering
   \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
     import matplotlib.pyplot as plt
@@ -1315,7 +1322,7 @@ membership test against the query's minimizer-position set.
 
 The divergence estimator is used to measure the quality of the seeding. If the divergence is too high, the seeding is not good and the chain is not valid.
 
-When porting minimap2 code we had hidden one important detail visible on figure \ref{fig:v6-phase}. The \texttt{mm\_est\_err} section had significant 9-times slowdown. This is because we are using separate chunks for each lane, but the output minimizers were stored in the buffer.
+When porting minimap2 code we had hidden one important detail visible on table \ref{tab:v6-phase}. The \texttt{mm\_est\_err} section had significant 9-times slowdown. This is because we are using separate chunks for each lane, but the output minimizers were stored in the buffer.
 Minimap2 normally receives its \texttt{mini\_pos} array already sorted (because of how scalar loop works). This means that in our case we did the most naive approach:
 \begin{enumerate}
 \item Perform \texttt{std::sort} on the array to sort minimizers by positions
@@ -1330,7 +1337,7 @@ Figure~\ref{fig:phase-stack-v13} stacks the per-phase cost at
 \texttt{mm\_sketch} stack (from 14.99\,ms to 9.23\,ms, already
 covered in previous section.
 
-\begin{figure}[ht]
+\begin{figure}[H]
   \centering
   \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
     import matplotlib.pyplot as plt
@@ -1359,10 +1366,12 @@ covered in previous section.
         bottoms = bottoms + np.array(vals)
     for i, b in enumerate(bottoms):
         ax.text(i, b + 1.5, f'{b:.0f}', ha='center', fontsize=7)
+    # Reserve a legend-only band above the stacked bars and value labels.
+    ax.set_ylim(0, max(bottoms) * 1.35)
     ax.set_ylabel('Per-pair phase cost (ms) at 903\\,kbp', fontsize=8)
     ax.set_title('Per-phase pipeline composition (903\\,kbp, mean of 3 runs)', fontsize=9)
     ax.tick_params(axis='both', labelsize=7)
-    ax.legend(fontsize=6, frameon=False, loc='upper right', ncol=2)
+    ax.legend(fontsize=6, frameon=False, loc='upper center', ncol=2)
     ax.grid(True, alpha=0.3, axis='y')
     plt.xticks(rotation=15, ha='right', fontsize=7)
     print(get_filename_from_extension(".pgf"))
@@ -1372,6 +1381,7 @@ covered in previous section.
     903\,kbp we can see that V13 reduced exploded divergence phase}
   \label{fig:phase-stack-v13}
 \end{figure}
+\vspace{.35\baselineskip}
 
 \subsection{Seeding prototype V14: directly use nthash}
 
@@ -1389,7 +1399,7 @@ most of the time was spent on inserting minimizers into the index.
 
 The gap in performance didn't come from the minimizer hash distribution (or hashing speed itself) but from the usage of \texttt{std::unordered\_map}.
 The prototype's target index used STL's default hash table, while the C minimap2 path uses an open-addressing
-\texttt{khash\_t<uint64\_t>}. This shows another problem with directly porting minimap2 into C++. \texttt{std::unordered\_map} is known problem with standard library that we overlooked during implementation similarily to how texttt{std::sort} was used for divergence estimation.
+\texttt{khash\_t<uint64\_t>}. This shows another problem with directly porting minimap2 into C++. \texttt{std::unordered\_map} is known problem with standard library that we overlooked during implementation similarily to how \texttt{std::sort} was used for divergence estimation.
 The cleanest solution here was implementing indexing structures as flat hash maps directly.
 
 \subsection{Seeding prototype V15: Smaller minimizer space}
@@ -1400,26 +1410,33 @@ Existing iterations of seeding algorithm all used adjustable SIMD vector widths 
 However having smaller type means that we need to either get rid of strand information (1 bit) or use narrower position representation (this is not always possible) or use narrower hash representation. 
 We conducted early experiment testing V12 prototype with narrower hash of 14 bits.
 
-\begin{verbatim}
-  V12 (pre)   V12 (post-Goal-2)   delta
-mm_sketch_simd                    9.0 ms      9.5 ms              +0.5 ms (insignificant change)
-target_index_build                24.7 ms     4.9 ms              -19.8 ms (~85% fewer keys)
-collect_seed_hits                 12.3 ms     842.0 ms            +830 ms (70x regression)
-mg_lchain_simd                    8.9 ms      299.9 ms            +291 ms (34x regression)
-mm_align_skeleton                 87.2 ms    4811.0 ms            +4724 ms (56x regression)
-\end{verbatim}
+\begin{center}
+  \footnotesize\ttfamily
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lrrl@{}}
+    \toprule
+      & V12 (pre) & V12 (post-Goal-2) & delta \\
+    \midrule
+    mm\_sketch\_simd     &  9.0 ms &    9.5 ms & +0.5 ms (insignificant change) \\
+    target\_index\_build & 24.7 ms &    4.9 ms & $-19.8$ ms ($\sim85\%$ fewer keys) \\
+    collect\_seed\_hits  & 12.3 ms &  842.0 ms & +830 ms (70x regression) \\
+    mg\_lchain\_simd     &  8.9 ms &  299.9 ms & +291 ms (34x regression) \\
+    mm\_align\_skeleton  & 87.2 ms & 4811.0 ms & +4724 ms (56x regression) \\
+    \bottomrule
+  \end{tabular}
+\end{center}
 
-The kmer space stored in \texttt{target\_index} hash buckets collapsed to $\sim 16\,000$
+\warn{Hash-space collision amplification}{The kmer space stored in \texttt{target\_index} hash buckets collapsed to $\sim 16\,000$
 distinct keys for $168\,000$ query minimizers.  Each query had
 $\sim 10$ collisions per bucket, meaning the chain-anchor count exploded,
-and the alignment had to walk through all of them. This means that we sped up index lookups significantly (less memory accesses required), but at the same time the more costly parts of the pipeline get more false positives that need to be verified.
+and the alignment had to walk through all of them. This means that we sped up index lookups significantly (less memory accesses required), but at the same time the more costly parts of the pipeline get more false positives that need to be verified.}
 
 \subsection{Seeding prototypes summary}
 
-%TODO: Cite this stack overflow answer: https://stackoverflow.com/a/25027750
-The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \texttt{boost::unordered\_map} (marked as ${V13}^{*}$) yielded observable improvements. We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
+\todo{Cite this stack overflow answer: https://stackoverflow.com/a/25027750}
+The combination of the V12 inlinening fixes, the V13 estimator fix and replacing \path{boost::unordered_map} (marked as ${V13}^{*}$) yielded observable improvements. We didn't want to implement new hashing scheme at this time, only see the impact of using different hash storage.
 
-\begin{figure}[ht]
+\begin{figure}[H]
   \centering
   \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
     import matplotlib.pyplot as plt
@@ -1462,6 +1479,8 @@ The combination of the V12 inlinening fixes, the V13 estimator fix and replacing
     ax.set_ylabel('Wall-clock delta vs scalar (\\%, negative = faster)', fontsize=8)
     ax.set_title('SIMD vs scalar speedup across iterations', fontsize=9)
     ax.tick_params(axis='both', labelsize=7)
+    # Keep the upper-right legend above the tallest positive bar.
+    ax.set_ylim(top=10)
     ax.legend(fontsize=7, frameon=False, loc='upper right', ncol=2)
     ax.grid(True, alpha=0.3, axis='y')
     print(get_filename_from_extension(".pgf"))
@@ -1475,7 +1494,7 @@ The combination of the V12 inlinening fixes, the V13 estimator fix and replacing
 
 The summary table:
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \small
   \begin{tabular}{lrrrr}
@@ -1499,6 +1518,9 @@ The summary table:
 
 G3SA~~\cite{g3sa_paper} provides implementation of multiple useful kernels including one specific to minimizer generation phase.\footnote{Inspected code from official G3SA repository that supplies CUDA kernels along with CPU host-side code,
 \url{https://github.com/sunwookim028/G3SA}}
+
+\coderef{g3sa/minimap2/src/seeding_kernel.cu}
+  {G3SA seeding kernel}{mm_sketch_device}{83}{1}
 
 G3SA implements the \emph{A3 adjacent-window computation graph}, in CUDA
 SIMT. Let $L=32$ be the number of CUDA threads.  For group $r\in\{0,1,2,3\}$ and thread $t\in[0,L)$, define
@@ -1767,7 +1789,7 @@ When we collect results we need to either: have fixed memory offsets per tile an
 do a second pass to actually write them. This makes pipeline do twice as much work, but avoids any additional host pass and we can directly use output results. 
 The limtiations of our work is that we didn't measure the difference between these approaches or between G3SA approach.
 
-The core part is \emph{OrderedSketchTile} which runs the rescan algorithm in count modeand writes \emph{Count}.
+The core part is \emph{OrderedSketchTile} which runs the rescan algorithm in count mode and writes \emph{Count}.
 The \emph{Count}$[j]$ is the number of output records for
 tile $j$. \emph{PrefixScanBlock} reads \emph{Count}.  Each of its $B$
 single-invocation workgroups scans at most $S=256$ entries.  It writes
@@ -1845,7 +1867,8 @@ the caller using heuristic. \textsc{HostAndDevice} creates an $A$-record device 
   \Procedure{RecordOrderedSketchTile}{$g,\mathit{mode}$}
     \Require global invocation ID $0\leq g<64\mathbin{\cdot}G$
     \Require dispatch-wide $\mathit{mode}\in\{\textsc{Count},\textsc{Emit}\}$
-    \Require bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$ from
+    \Require bound $Q,\mathcal T,T,k,w,G,\mathit{Count}$
+    \Statex \hspace{\algorithmicindent}from
              Algorithm~\ref{alg:vulkan-sketch-host-schedule}
     \Require bound \emph{Offset} and \emph{Output} in \textsc{Emit} mode
     \State $j\gets g$
@@ -2054,7 +2077,9 @@ Minimap2's C code construction is done via:
 \end{align}
 
 Normally span equals $k$ (or is $< k$ for first $k-1$ bases). Minimap2 suppors homopolymer compression (HPC) togglable by command line option \texttt{-H} which collapses strings of one repeating character into single character occurence. If HPC is enabled, span can have values $0 \leq span \leq 255$. If span is increased beyond 255 (there are 255 same characters in the input sequence next to each other), then minimizer is completely abandoned until new symbol is found.
-In BioseqDB we use/or not HPC by default? %TODO: Find out if bioseqDB uses HPC?
+In BioseqDB we use/or not HPC by default?
+
+\todo{Find out if BioseqDB uses HPC.}
 
 The \texttt{rid} value identifies a reference during indexing and a query segment during query sketching. Note that the ID itself isn't useful during seeding, chaining or alignment, it's only useful at the end when reporting results.
 
@@ -2084,7 +2109,7 @@ has $W-L-1$ bits.  If $R>64$, the record uses two 64-bit words.  One word
 contains a 56-bit hash and an 8-bit span.  The other word contains the position, the
 strand bit, and any unused high bits.
 
-\begin{figure}[htbp]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
   x=.09cm,
@@ -2168,7 +2193,7 @@ The $\langle2,2\rangle$ on the figure is just the demonstrative example to show 
 
 The PostgreSQL setting \texttt{bioseq.aligner.minimizer.algorithm} chooses the
 minimizer implementation.  Its default value is \texttt{scalar}.  Table~\ref{tab:current-cpu-minimizers}
-maps the four CPU values to the algorithm families described earlier.
+maps the four CPU values to the algorithm families described earlier. Additionally we allow dispatching Vulkan kernel.
 
 \begin{table}[H]
   \centering
@@ -2193,9 +2218,13 @@ maps the four CPU values to the algorithm families described earlier.
   \label{tab:current-cpu-minimizers}
 \end{table}
 
-Additionally we allow dispatching Vulkan kernel. 
-
-
+\warn{Limitations}{
+  \begin{itemize}
+    \item Scalar rescan with the minimap2 integer hash is the default algorithm.
+    \item Bounded ntHash SIMD is limited to DNA4 with $k=15$ and $w=10$.
+    \item We don't provide G3SA-style GPU algorithm or didn't measure performance difference between it and current rescan approach.
+  \end{itemize}
+}
 
 
 
@@ -2289,3 +2318,5 @@ Additionally we allow dispatching Vulkan kernel.
 % region, change mapping quality, or skip base alignment.  Building the prefix
 % array takes $O(q+|Q|)$ time and $O(q)$ memory.  Across all regions, the
 % remaining work is $O(|\mathcal R|+\sum\text{anchors visited})$.
+
+\flushbottom
