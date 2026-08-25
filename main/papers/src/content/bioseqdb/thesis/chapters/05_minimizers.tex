@@ -224,12 +224,12 @@ This approach is implemented by minimap2.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[x=.72cm,y=.67cm,font=\footnotesize]
+\begin{tikzpicture}[x=1cm,y=.67cm,font=\footnotesize]
   \foreach \i/\b in {0/A,1/C,2/G,3/T,4/A,5/C,6/G,7/T,8/A,9/G,10/C,11/T}
     \node[rewrite cell,font=\ttfamily\footnotesize] at (.55+\i*.72,4.95) {\b};
   \node[anchor=east] at (.15,4.95) {bases};
   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
-    (.22,4.56)--(3.04,4.56)
+    (.22,4.56)--(3.76,4.56)
     node[midway,below=4pt] {$k=5$};
 
   \foreach \i/\v in {0/8,1/3,2/7,3/6,4/2,5/9,6/5,7/4}
@@ -239,7 +239,7 @@ This approach is implemented by minimap2.
     \node[font=\scriptsize,anchor=north] at (1.99+\i*.72,3.16) {$h_{\i}$};
 
   \foreach \row/\start/\winner in {0/0/1,1/1/4,2/2/4,3/3/4,4/4/4} {
-    \pgfmathsetmacro{\yy}{2.25-.56*\row}
+    \pgfmathsetmacro{\yy}{2.25-.82*\row}
     \node[anchor=east] at (1.20,\yy) {$W_{\row}$};
     \foreach \j in {0,...,3} {
       \pgfmathtruncatemacro{\idx}{\start+\j}
@@ -282,13 +282,13 @@ Equal hashes at different positions are not duplicate records. We wanmt to keep 
   \foreach \i/\v/\sty in {0/3/rewrite cell,1/7/rewrite cell,
                             2/3/rewrite min,3/9/rewrite new}
     \node[\sty] at (1.90+.74*\i,1.94) {\v};
-  \node[rewrite note,text width=5.0cm,anchor=west] at (5.05,1.94)
+  \node[rewrite note,text width=5.0cm,anchor=west] at (5.05,1.74)
     {The rightmost 3 remains the saved minimum.  The earlier 3 is still a
      different identity and can require its own event.};
 
-  \draw[rewrite flow] (3.00,1.42) |- (3.95,.72);
-  \node[rewrite out,minimum width=1.55cm] at (4.80,.72) {3 at right};
-  \node[rewrite out,minimum width=1.70cm] at (6.65,.72) {tied 3 at left};
+  \draw[rewrite flow] (3.00,1.42) |- (3.95,.52);
+  \node[rewrite out,minimum width=1.55cm] at (4.80,.52) {3 at right};
+  \node[rewrite out,minimum width=1.70cm] at (6.65,.52) {tied 3 at left};
 \end{tikzpicture}
 \caption{Why a hash value alone does not define the output.  Both orange
 cells have hash 3, but they refer to different $k$-mer positions.  Minimap2
@@ -576,7 +576,7 @@ block.}
     {window argmin\\$p_{0,t}\quad p_{1,t}$\\$p_{2,t}\quad p_{3,t}$};
   \node[stage] (absolute) at (14.45,1.55)
     {absolute positions\\$p_{c,t}+o_c$};
-  \node[stage] (collect) at (18.55,1.55)
+  \node[stage] (collect) at (19.05,1.55)
     {collected output\\$p_0,p_1,p_2,\ldots$\\deduplicate identity};
   \draw[->,thick] (lanes) -- (hash);
   \draw[->,thick] (hash) -- (minimum);
@@ -626,33 +626,33 @@ pieces.
   \foreach \r/\v in {0/1,1/1,2/2,3/4}
     \node[trace] at (1,3-\r) {\v};
 
-  \node[font=\small\bfseries] at (9.00,4.15) {one sorted row per chunk};
+  \node[font=\small\bfseries] at (9.50,4.15) {one sorted row per chunk};
   \foreach \r/\c/\v in {0/0/1,0/1/1,0/2/2,0/3/4,
                             1/0/12,1/1/13,1/2/13,1/3/13,
                             2/0/23,2/1/23,2/2/23,2/3/23,
                             3/0/30,3/1/35,3/2/35,3/3/36}
-    \node[cell] at (7.5+\c,3-\r) {\v};
+    \node[cell] at (8.0+\c,3-\r) {\v};
   \foreach \c/\v in {0/1,1/1,2/2,3/4}
-    \node[trace] at (7.5+\c,3) {\v};
+    \node[trace] at (8.0+\c,3) {\v};
 
-  \draw[->,very thick] (5.05,1.5) -- (6.75,1.5)
+  \draw[->,very thick] (5.00,1.5) -- (7.20,1.5)
     node[midway,above] {transpose};
-  \draw[->,very thick] (11.65,1.5) -- (13.15,1.5)
+  \draw[->,very thick] (11.80,1.5) -- (14.85,1.5)
     node[midway,above,align=center] {deduplicate\\and append};
 
-  \node[font=\small\bfseries] at (16.1,4.15) {ragged chunk outputs};
-  \node at (14.2,3.65) {$\operatorname{last}[c]$};
+  \node[font=\small\bfseries] at (17.5,4.15) {ragged chunk outputs};
+  \node at (15.6,3.65) {$\operatorname{last}[c]$};
   \foreach \r/\v in {0/0,1/11,2/23,3/30}
-    \node[carry] at (14.2,3-\r) {\v};
-  \foreach \x/\v in {15.5/1,16.5/2,17.5/4}
+    \node[carry] at (15.6,3-\r) {\v};
+  \foreach \x/\v in {16.9/1,17.9/2,18.9/4}
     \node[trace] at (\x,3) {\v};
-  \foreach \x/\v in {15.5/12,16.5/13}
+  \foreach \x/\v in {16.9/12,17.9/13}
     \node[cell] at (\x,2) {\v};
-  \node[anchor=west,gray!75] at (15.25,1) {no new position};
-  \foreach \x/\v in {15.5/35,16.5/36}
+  \node[anchor=west,gray!75] at (16.65,1) {no new position};
+  \foreach \x/\v in {16.9/35,17.9/36}
     \node[cell] at (\x,0) {\v};
   \foreach \r in {0,...,3}
-    \draw[->,gray!70] (14.55,3-\r) -- (15.10,3-\r);
+    \draw[->,gray!70] (15.95,3-\r) -- (16.50,3-\r);
 \end{tikzpicture}
 \caption{Transposition and boundary deduplication for four logical chunks.
 The input rows are vector steps and the columns are chunks. Transposition
@@ -859,7 +859,7 @@ The idea for one group is as follows:
   
   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
     (2.80,11.08)--(8.35,11.08)
-    node[midway,below=3pt] {$w$ SIMD reduction steps};
+    node[midway,below=3pt,xshift=.65cm] {$w$ SIMD reduction steps};
   \node[anchor=west,text=rewriteOrange!95!black] at (10.75,12.72)
     {solid: rightmost winner};
   \node[anchor=west,text=rewriteOrange!95!black] at (10.75,12.02)
@@ -924,7 +924,7 @@ The idea for one group is as follows:
   
   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
     (2.80,3.45)--(8.35,3.45)
-    node[midway,below=3pt] {$w$ SIMD reduction steps};
+    node[midway,below=3pt,xshift=.65cm] {$w$ SIMD reduction steps};
   
   \node[state,minimum width=1.65cm] at (3.55,2.18) {advance by $L$};
   \node[anchor=west] at (4.65,2.18)
@@ -966,13 +966,13 @@ The figure \ref{fig:rewrite-chronological-groups} illustrates calculation of win
     \State $U\gets$ next $L$ bases
     \State $Y\gets C\mathbin\Vert U$
     \State $\mathbf F,\mathbf R\gets\mathbf0$
-    \Statex \emph{Build forward/reverse kmers symbol by symbol.}
+    \AlgCommentLine{Build forward/reverse kmers symbol by symbol.}
     \For{$t=0,\ldots,k-1$}
       \State $\mathbf z\gets\operatorname{load}_L(Y[t\,..\,t+L))$
       \State $\mathbf F\gets F\mathbin\Vert z$
       \State $\mathbf R\gets\overline{z}\mathbin\Vert R$
     \EndFor
-    \Statex \hspace{\algorithmicindent}\emph{Calculate hashes from kmers.}
+    \AlgCommentLine{Calculate hashes from kmers.}
     \ForAll{lanes $\ell$}
       \State $a_\ell\gets H(\min(F_\ell,R_\ell))$
       \If{$F_\ell=R_\ell$ or $a_\ell=h_{\max}$}
@@ -984,14 +984,14 @@ The figure \ref{fig:rewrite-chronological-groups} illustrates calculation of win
     \EndFor
     \State $D\gets T\mathbin\Vert(x_0,\ldots,x_{L-1})$
     \State $\mathbf M\gets\infty$
-    \Statex \emph{Calculate $M$, which holds the rightmost minima of all $w$ windows.}
+    \AlgCommentLine{Calculate $M$, which holds the rightmost minima of all $w$ windows.}
     \For{$s=0,\ldots,w-1$}
       \State $\mathbf V\gets D[s\,..\,s+L)$
       \State $\mathbf M\gets
         \operatorname{select}(h(\mathbf V)\leq h(\mathbf M),
                               \mathbf V,\mathbf M)$
     \EndFor
-    \Statex \hspace{\algorithmicindent}\emph{One step = three field loads + one compare + three selects.}
+    \AlgCommentLine{One step = three field loads + one compare + three selects.}
     \State Hence $M_\ell$ is the rightmost minimum of the complete window
            ending at $x_\ell$
     \State $\mathbf P\gets(c^\star,M_0,\ldots,M_{L-2})$
@@ -1002,7 +1002,7 @@ The figure \ref{fig:rewrite-chronological-groups} illustrates calculation of win
       \EndIf
       \If{$\operatorname{pos}(P_\ell)=\operatorname{pos}(x_\ell)$}
         \State $e\gets\operatorname{event}^{\mathrm{EXPIRED}}(P_\ell)$
-              \hfill\Comment{expiration}
+              \Comment{expiration}
       \EndIf
       \If{$e$ is \textsc{Expired}}
         \State Check all $w$ windows for an equal hash on a different position
@@ -1010,7 +1010,7 @@ The figure \ref{fig:rewrite-chronological-groups} illustrates calculation of win
       \EndIf
       \If{$e$ is \textsc{Tie}}
         \State Reread the $w$ records only to construct ordered output
-              \hfill\Comment{slow path}
+              \Comment{slow path}
       \EndIf
     \EndFor
     \State $C\gets Y[L\,..\,L+k-1)$
@@ -1200,14 +1200,14 @@ This is limitation that wasn't observed in the original SIMD minimizers paper as
 The possible optimisation here is to keep \emph{two} independent 4-lane streams in flight
 simultaneously and interleave their operations in source order:
 
-\begin{verbatim}
+\begin{BioseqCppSnippet}
 shift_fwd_lo, shift_fwd_hi = ShiftLeft(state_fwd_lo / hi)
 state_fwd_lo, state_fwd_hi = And(Or(shift_fwd_, bp_), kmer_mask)
 state_rc_lo,  state_rc_hi  = Or(ShiftRight(state_rc_), new_high_)
 lex_lo,       lex_hi       = Min(state_fwd_, state_rc_)
 hash_lo,      hash_hi      = And(Mul(lex_, golden), hash_mask)
 elem_lo,      elem_hi      = IfThenElse(valid_, hash_|pos_, max)
-\end{verbatim}
+\end{BioseqCppSnippet}
 
 We chose 2 streams rather than 4 execution stream because the per-stream
 state plus the shared ring buffer for $w=10$ already consumes
@@ -1225,19 +1225,19 @@ the theoretical $2\times$ ILP win we expected.
 \texttt{xcrun llvm-objdump -d build/bioseq/bioseq\_bench} on the V11
 wrapper revealed the underlying problem. 
 
-\begin{verbatim}
-ldp q0, q1, [sp, #0x150]       # load bp_row from stack
-ushr.4s v2, v1, #0x2           # extract per-BP value
+\begin{BioseqAsmSnippet}
+ldp q0, q1, [sp, #0x150]       // load bp_row from stack
+ushr.4s v2, v1, #0x2           // extract per-BP value
 movi.4s v1, #0x3
-stp q0, q2, [sp, #0x150]       # store back
+stp q0, q2, [sp, #0x150]       // store back
 and.16b v0, v0, v1
 and.16b v1, v2, v1
-add x0, sp, #0x5, lsl #12      # prepare lambda's captured-this
+add x0, sp, #0x5, lsl #12      // prepare lambda's captured-this
 add x0, x0, #0x770
 movi.2d v2, #0xffffffffffffffff
 add x1, x22, #0x8
-bl 0x1002acca4 <step_one_bp_pair lambda>   # the offending call!
-\end{verbatim}
+bl 0x1002acca4 <step_one_bp_pair lambda>   // the offending call!
+\end{BioseqAsmSnippet}
 
 Despite the per-step body being decorated with
 \texttt{[[gnu::always\_inline]]}, Clang lowered the lambda as a
@@ -1517,8 +1517,7 @@ The summary table:
 \section{GPU acceleration for seeding}
 
 G3SA~~\cite{g3sa_paper} provides implementation of multiple useful kernels including one specific to minimizer generation phase.\footnote{Inspected code from official G3SA repository that supplies CUDA kernels along with CPU host-side code,
-\url{https://github.com/sunwookim028/G3SA}}
-
+\url{https://github.com/sunwookim028/G3SA}}%
 \coderef{g3sa/minimap2/src/seeding_kernel.cu}
   {G3SA seeding kernel}{mm_sketch_device}{83}{1}
 
@@ -1641,6 +1640,11 @@ transpose between candidate construction and window reduction.
 
 \subsection{Sketch pseudocode and work}
 
+Here, \Call{PublishBlockWrites}{} returns a block-scoped phase token. The token
+becomes ready only after every thread in the block has reached that phase and
+the named shared-memory writes are visible to every thread; awaiting it is
+therefore a collective rendezvous.
+
 \begin{algorithm}[H]
 \caption{G3SA sketching CUDA algorithm}
 \label{alg:g3sa-sketch-kernel}
@@ -1661,13 +1665,17 @@ transpose between candidate construction and window reduction.
                  (p+u<e)\ ?\ S[p+u]\ :\mathtt{NUL}$
           \State $\mathit{Cand}[u]\gets\infty$
         \EndFor
-        \State \Call{BlockBarrier}{}
+        \State $\mathit{baseReady}\gets
+               \Call{PublishBlockWrites}{\mathit{Base},\mathit{Cand}}$
+        \State $\operatorname{await}(\mathit{baseReady})$
         \For{$r\gets0$ \textbf{to} $4$ in every thread}
           \State $u\gets32r+t$
           \State $\mathit{Cand}[u]\gets
                  \Call{GetHashedKmer}{\mathit{Base},u,k,p-O[q]}$
         \EndFor
-        \State \Call{BlockBarrier}{}
+        \State $\mathit{hashReady}\gets
+               \Call{PublishBlockWrites}{\mathit{Cand}}$
+        \State $\operatorname{await}(\mathit{hashReady})$
         \For{$r\gets0$ \textbf{to} $3$ in every thread}
           \State $s\gets32r+t$, $\mathit{best}\gets\infty$
           \For{$j\gets0$ \textbf{to} $w-1$}
@@ -1686,7 +1694,9 @@ transpose between candidate construction and window reduction.
             \State $\mathit{Winner}[s]\gets0$
           \EndIf
         \EndFor
-        \State \Call{BlockBarrier}{}
+        \State $\mathit{winnerReady}\gets
+               \Call{PublishBlockWrites}{\mathit{Winner}}$
+        \State $\operatorname{await}(\mathit{winnerReady})$
         \If{$t=0$}
           \State $m\gets\Call{AppendChangesAndHashTies}
                     {\mathit{Cand},\mathit{Winner},w,O[q],m}$
@@ -2224,6 +2234,12 @@ maps the four CPU values to the algorithm families described earlier. Additional
     \item Bounded ntHash SIMD is limited to DNA4 with $k=15$ and $w=10$.
     \item We don't provide G3SA-style GPU algorithm or didn't measure performance difference between it and current rescan approach.
   \end{itemize}
+}
+
+\info{Position locality}{
+  In case of generating minimizers we can operate on local coordinates meaning that our minimizer representation can just track position relative to the sequence fragment. Sequence fragmentation in storage is described in later chapters.
+  However for next steps of processing (chaining) we use global coordinates. It would be possible to take advantage of that locality for example by building index that stores only minimizers for some shorter sequence fragments (this is also described in later chapters), but for simplicity even in that case we just map local coordinates afterwards to global ones at all times.
+  This have the cost of anchors being wider in memory (as we need to use int64 for global coordinates).
 }
 
 

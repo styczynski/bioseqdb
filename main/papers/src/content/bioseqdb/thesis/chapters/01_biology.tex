@@ -47,19 +47,13 @@ DNA. \cite{crick_central_dogma_1970}
 
 A protein sequence is written over the twenty common amino-acid symbols. It's alphabet is notably larger, but in most cases we can translate it to a DNA sequence and use the DNA alphabet directly.
 
-\begin{table}[ht]
+\begin{table}[H]
   \centering
   \small
   \setlength{\tabcolsep}{4pt}
-  \begin{tabularx}{\linewidth}{
-      @{}
-      >{\raggedright\arraybackslash}p{0.16\linewidth}
-      >{\raggedright\arraybackslash}p{0.27\linewidth}
-      >{\raggedright\arraybackslash}X
-      @{}
-    }
+  \begin{tabular}{@{}ll@{}}
     \toprule
-    Sequence class & Core symbols & Computational consequences \\
+    Sequence class & Core symbols \\
     \midrule
     DNA4 &
     \(\mathtt{A,C,G,T}\) \\
@@ -72,7 +66,7 @@ A protein sequence is written over the twenty common amino-acid symbols. It's al
     PROT20 &
     Twenty common amino-acid symbols \\
     \bottomrule
-  \end{tabularx}
+  \end{tabular}
   \caption{Biological alphabets and the distinctions that a sequence-processing
     system must not erase. The table describes biological data in general. It
     does not assert that every alphabet or ambiguity convention is exposed by
@@ -85,15 +79,81 @@ A protein sequence is written over the twenty common amino-acid symbols. It's al
 Due to nature of biological sequences, search must be able to match fragments that are non-exact, thus alignment operation is similar to popular fuzzy-search operations on normal text.
 The alignment can be viewed as a processes that optimises gaps (insertions and deletions) in a way to optimise similarity metric. High similarity score between parts of sequences can indicate that they share same evolutionary origin or have a common purpose. By comparing newly found sequences to already researched ones, we can deduce lots of relevant biological data. \cite{zpp_bio}
 
-We will consider finite nonemptystrings over the DNA4 alphabet. A gap is a symbol indicated by $‘-’$. An alignment is a process of adding gaps to the sequences so that they are of the same length and at the same time, there is no index where a gap occurs in both sequences.
+We will consider finite nonemptystrings over the DNA4 alphabet. A gap is a symbol indicated by \texttt{-}. An alignment is a process of adding gaps to the sequences so that they are of the same length and at the same time, there is no index where a gap occurs in both sequences.
 
 %TODO: Change those two sequences and replace this verbatim with nice looking tikz diagram similar to figure in 05_minimizers "Sliding minima from blockwise prefixes and suffixes. Blocks have the same width as the minimizer window ..." I want there to have nucleotide in coloured boxes (one color per A,C,T and G), "-" for delection without box. The sequences should be visually aligned and there should be cigar below with square-angled lines pointing to boxes/gaps describing each part - for example 2I should point to a gap of size 2
 As an example, let us present an alignment of $GATCAGATA$ and $CATTCAATCA$.
 One of the possible alignments is:
-\begin{verbatim}
-GAT-CAGAT-A
-CATTCA-ATCA
-\end{verbatim}
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  nucleotide/.style={minimum width=.48cm,minimum height=.48cm,
+    inner sep=0pt,line width=.55pt,font=\ttfamily\bfseries},
+  nuc A/.style={nucleotide,draw=Plum!80!black,fill=Plum!18},
+  nuc C/.style={nucleotide,draw=MidnightBlue!80!black,fill=MidnightBlue!14},
+  nuc G/.style={nucleotide,draw=OrangeRed!85!black,fill=OrangeRed!16},
+  nuc T/.style={nucleotide,draw=Green!60!black,fill=Green!15},
+  gap/.style={minimum width=.48cm,minimum height=.48cm,inner sep=0pt,
+    draw=none,fill=none,font=\ttfamily\bfseries},
+  row label/.style={anchor=east,font=\sffamily\scriptsize},
+  connector/.style={draw=black!35,line width=.45pt},
+  cigar/.style={minimum width=.48cm,minimum height=.40cm,inner sep=1pt,
+    draw=black!55,font=\ttfamily\scriptsize\bfseries},
+  cigar M/.style={cigar,fill=MidnightBlue!12},
+  cigar I/.style={cigar,fill=OrangeRed!16},
+  cigar D/.style={cigar,fill=Green!16}
+]
+  % Orthogonal source-to-alignment mappings are drawn first so boxes remain crisp.
+  \foreach \i/\c in {0/0,1/1,2/2,3/4,4/5,5/6,6/7,7/8,8/10} {
+    \pgfmathsetmacro{\sx}{.28+.67*\i}
+    \pgfmathsetmacro{\ax}{.58*\c}
+    \draw[connector] (\sx,3.20) -- (\sx,2.67) -| (\ax,2.40);
+  }
+  \foreach \i/\c in {0/0,1/1,2/2,3/3,4/4,5/5,6/7,7/8,8/9,9/10} {
+    \pgfmathsetmacro{\sx}{.10+.63*\i}
+    \pgfmathsetmacro{\ax}{.58*\c}
+    \draw[connector] (\ax,.70) -- (\ax,.15) -| (\sx,-.10);
+  }
+
+  \node[row label] at (-.55,3.45) {target sequence};
+  \node[row label] at (-.55,2.15) {target alignment};
+  \node[row label] at (-.55,.95) {query alignment};
+  \node[anchor=east,font=\sffamily\scriptsize] at (-0.55,-0.35)
+    {query sequence};
+
+  \foreach \i/\b in {0/G,1/A,2/T,3/C,4/A,5/G,6/A,7/T,8/A} {
+    \pgfmathsetmacro{\x}{.28+.67*\i}
+    \node[nuc \b] at (\x,3.45) {\b};
+  }
+  \foreach \c/\b in {0/G,1/A,2/T,4/C,5/A,6/G,7/A,8/T,10/A}
+    \node[nuc \b] at ({.58*\c},2.15) {\b};
+  \foreach \c in {3,9}
+    \node[gap] at ({.58*\c},2.15) {-};
+
+  \foreach \c/\b in {0/C,1/A,2/T,3/T,4/C,5/A,7/A,8/T,9/C,10/A}
+    \node[nuc \b] at ({.58*\c},.95) {\b};
+  \node[gap] at ({.58*6},.95) {-};
+  \foreach \i/\b in {0/C,1/A,2/T,3/T,4/C,5/A,6/A,7/T,8/C,9/A} {
+    \pgfmathsetmacro{\x}{.10+.63*\i}
+    \node[nuc \b] at (\x,-.35) {\b};
+  }
+
+  \draw[black!50,line width=.6pt] (7.00,-.82) -- (7.00,3.78);
+  \node[font=\sffamily\bfseries] at (9.35,3.50) {CIGAR};
+  \foreach \i/\op/\kind in {0/3M/M,1/1I/I,2/2M/M,3/1D/D,4/2M/M,5/1I/I,6/1M/M}
+    \node[cigar \kind] at ({7.58+.59*\i},2.92) {\op};
+  \node[anchor=north west,align=left,text width=4.55cm,
+        font=\sffamily\scriptsize] at (7.35,2.48) {%
+    \textbf{M}: both alignments consume a base (match or mismatch).\\[2pt]
+    \textbf{I}: the query consumes a base opposite a target gap.\\[2pt]
+    \textbf{D}: the target consumes a base opposite a query gap.};
+\end{tikzpicture}
+\caption{Alignment of the target sequence \texttt{GATCAGATA} and query
+sequence \texttt{CATTCAATCA}. Orthogonal connectors map each ungapped
+sequence position to its aligned column; gaps are intentionally unboxed.}
+\label{fig:biology-alignment-example}
+\end{figure}
 
 \noindent There are 4 cases that can occur during alignments:
 \begin{enumerate}
@@ -106,23 +166,23 @@ CATTCA-ATCA
 
 \section{Technical considerations}
 
-A typical workflow for sequence analysis includes $3$ data formats - FASTA, FASTQ, and SAM/BAM. Reference genome, stored in FASTA, is aligned with millions of reads in the FASTQ file and the result of alignment is saved as SAM/BAM file. The reason for the reference genome being in FASTA and reads in FASTQ is that we assume that the reference genome is correct, but reads produced by sequencers can contain various errors. Moreover, we’re more likely to score alignments with high-quality bases higher than the ones with low-quality.
+A typical workflow for sequence analysis includes $3$ data formats - FASTA, FASTQ, and SAM/BAM. Reference genome, stored in FASTA, is aligned with millions of reads in the FASTQ file and the result of alignment is saved as SAM/BAM file. The reason for the reference genome being in FASTA and reads in FASTQ is that we assume that the reference genome is correct, but reads produced by sequencers can contain various errors. Moreover, we're more likely to score alignments with high-quality bases higher than the ones with low-quality.
 
 \subsection{FASTA}
 
 FASTA is a text-based file format for storing nucleotide sequences. It is one of the most widely used formats in bioinformatics. The current standard specification is given by NCBI. Below is a description of the usually encountered version. \\
 
-\noindent It consists of a series of entries separated by a new line. Each entry starts with a single-line header. The header starts with ‘>’ and contains various metadata about the following sequence, like the description of the sequence, library accession number, and submission date. After the header comes the sequence itself represented with standard IUB/IUPAC acid codes, split into lines of length usually not exceeding $80$ characters. Aside from A, C, T, G commonly encountered is code N, which means any of A/C/T/G. Lowercase letters are treated the same as uppercase. The usual extension is .fasta and .fa. An example FASTA file:
+\noindent It consists of a series of entries separated by a new line. Each entry starts with a single-line header. The header starts with \texttt{>} and contains various metadata about the following sequence, like the description of the sequence, library accession number, and submission date. After the header comes the sequence itself represented with standard IUB/IUPAC acid codes, split into lines of length usually not exceeding $80$ characters. Aside from A, C, T, G commonly encountered is code N, which means any of A/C/T/G. Lowercase letters are treated the same as uppercase. The usual extension is .fasta and .fa. An example FASTA file:
 
 %TODO: This verbatim with nice tikz diagram where on the left side we have text with line for "indentifier", "sequence" and on the left side we got text with lines to "HG_9357/2022" and "2022-03-01" with text "There's no standard for header, but usually metadata is separated by "|" or "/" characters"
-\begin{verbatim}
->PartOfHumanGenome|HG_9357/2022|2022-03-01
+\begin{FastxFile}[fasta]
+(*@\FastxHeaderLine{>PartOfHumanGenome|HG_9357/2022|2022-03-01}@*)
 ACTTTGAGCTAGCATCGATTGGATCAGATGCAT
 ACTCATCGGCAGTCGCATCAGCTTGGACTACGT
->PartOfMouseGenome|MG_5417/2019|2019-08-14
+(*@\FastxHeaderLine{>PartOfMouseGenome|MG_5417/2019|2019-08-14}@*)
 ACTATAGGAGCAGANNNNNNNNCTAGAGACATC
 TCTGCGTNTNTTCCGGACGTACGTAGCATAGTC
-\end{verbatim}
+\end{FastxFile}
 
 \noindent The advantages of this format are simplicity and human readability. The downside is that it is not optimal in terms of size. To adhere to this issue, compression software is used, like gzip.
 
@@ -131,24 +191,28 @@ TCTGCGTNTNTTCCGGACGTACGTAGCATAGTC
 
 FASTQ is an extension of the FASTA format. It enhances FASTA by adding quality scores of sequences. It is a standard output format of sequencers. \\
 
-\noindent Each entry consists of $4$ lines. The first line starts with ‘@’ and contains metadata about the sequence. The second line contains the sequence itself. The third line starts with ‘+’ and may contain some additional metadata. The fourth line contains quality scores, represented by ASCII characters with codes from $33$ to $126$, one character per nucleotide. The file extension used is .fq and .fastq. Again, gzip can be used to reduce file size. An example FASTQ file:
+\noindent Each entry consists of $4$ lines. The first line starts with \texttt{@} and contains metadata about the sequence. The second line contains the sequence itself. The third line starts with \texttt{+} and may contain some additional metadata. The fourth line contains quality scores, represented by ASCII characters with codes from $33$ to $126$, one character per nucleotide. The file extension used is .fq and .fastq. Again, gzip can be used to reduce file size. An example FASTQ file:
 
 %TODO: This verbatim with nice tikz diagram where on the left side we have text (simialr to FASTA example) with line for "indentifier", "sequence", "quality scores" and "+ sign and identifier"
-\begin{verbatim}
-@HumanGenomeSequencerRead
+\begin{FastxFile}[fastq]
+(*@\FastxHeaderLine{@HumanGenomeSequencerRead}@*)
 ACTACTAGACGG
-+Genome20200301
-*!]^#[$*@*!(
-\end{verbatim}
+(*@\FastxSeparatorLine{+Genome20200301}@*)
+(*@\FastxQualityLine{*!]^#[$*@*!(}@*)
+\end{FastxFile}
 
 \noindent The quality score is usually a phread score, meaning $Q$ satisfies $Q = -10 \log_{10} p$, where $p$ is the probability of a corresponding nucleotide being incorrect. ASCII codes from $33$ to $126$ are mapped from $0$ to $93$.
 
+\Needspace{34\baselineskip}
 \subsection{CIGAR}
 
 CIGAR is an acronym for Concise Idiosyncratic Gapped Alignment Report and has been originally defined by the Exonerate alignment program. The CIGAR format is designed to contain the minimal information necessary for the reconstruction of an alignment. This format does not include nucleotides.
 \cite{cigar_nbis_explained}
 
 \begin{itemize}
+\setlength{\topsep}{.35\baselineskip}
+\setlength{\itemsep}{.12\baselineskip}
+\setlength{\parsep}{0pt}
 \item M - match or mismatch
 \item D - deletion
 \item I - insertion

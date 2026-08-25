@@ -35,10 +35,11 @@
 \PassOptionsToPackage{noend}{algpseudocode}
 \usepackage{algpseudocode}
 \else
-\PassOptionsToPackage{noEnd,indLines=false}{algpseudocodex}
+\PassOptionsToPackage{noEnd,indLines=false,italicComments=false}{algpseudocodex}
 \usepackage{algpseudocodex}
 \fi
 \usepackage{float}
+\usepackage{needspace}
 \usepackage{soul}
 \usepackage{setspace}
 \usepackage{mathtools}
@@ -92,13 +93,13 @@
   {
     \href{#1}{%
       \mbox{%
-        \textcolor{BioseqCodeRefIcon}{\fontsize{17}{17}\selectfont\faGithub}%
-        \hspace{.55em}%
+        \textcolor{BioseqCodeRefIcon}{\fontsize{7.5}{7.5}\selectfont\faGithub}%
+        \hspace{.3em}%
         \begin{tabular}[c]{@{}l@{}}
-          \sffamily\small\bfseries
+          \sffamily\fontsize{6.5}{7}\selectfont\bfseries
           \textcolor{BioseqCodeRefTitle}{\tl_use:N \l__bioseq_coderef_description_tl}
-          \\[-.35ex]
-          \ttfamily\scriptsize
+          \\[-.55ex]
+          \ttfamily\fontsize{5.5}{6}\selectfont
           \textcolor{BioseqCodeRefDetail}{\tl_use:N \l__bioseq_coderef_location_tl}
         \end{tabular}%
       }%
@@ -107,7 +108,6 @@
 
 \NewDocumentCommand{\coderef}{m m m m g}
   {
-    \par\noindent
     \group_begin:
       \seq_set_split:Nnn \l__bioseq_coderef_parts_seq {/} {#1}
       \seq_pop_left:NN \l__bioseq_coderef_parts_seq \l__bioseq_coderef_repo_tl
@@ -140,9 +140,9 @@
         { \tl_to_str:n {#3} \c_space_tl \tl_to_str:n {#4} }
       \IfNoValueF{#5}
         { \tl_put_right:Nx \l__bioseq_coderef_location_tl { :\tl_to_str:n {#5} } }
+      \unskip\penalty0\hspace*{.6em plus 1fill}
       \exp_args:NV \__bioseq_coderef_link:n \l__bioseq_coderef_url_tl
     \group_end:
-    \par\smallskip
   }
 \ExplSyntaxOff
 
@@ -272,7 +272,7 @@
     add before placeholder no space={__ROBEXT_MAIN_CONTENT__}{__EXT_PYPLOT_TEMPLATE_BEFORE__},
     add to placeholder no space={__ROBEXT_MAIN_CONTENT__}{__EXT_PYPLOT_TEMPLATE_AFTER__},
     custom include command={
-      \begin{figure}[ht]
+      \begin{figure}[H]
         \centering
         \input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}
       \end{figure}
@@ -284,10 +284,23 @@
 \def\mathdefault#1{#1} % Needed in matplotlib 3.8: https://github.com/matplotlib/matplotlib/issues/27907
 
 
-\renewcommand{\algorithmiccomment}[1]{\hfill$\triangleright$\textit{#1}}
-\newcommand{\CommentH}[1]{\Comment{\textbf{\textcolor{BlueViolet}{#1}}}}
+\definecolor{BioseqAlgorithmCommentBackground}{HTML}{FFF3B0}
+\definecolor{BioseqAlgorithmCommentText}{HTML}{6E4C00}
+\newcommand{\AlgComment}[1]{%
+  \begingroup
+  \setlength{\fboxsep}{1.2pt}%
+  \colorbox{BioseqAlgorithmCommentBackground}{%
+    \strut\normalfont\scriptsize\sffamily
+    \color{BioseqAlgorithmCommentText}#1}%
+  \endgroup
+}
+\renewcommand{\algorithmiccomment}[1]{\hfill\AlgComment{#1}}
+\newcommand{\CommentH}[1]{\Comment{\textbf{#1}}}
 
-\tikzset{fontscale/.style = {font=\relsize{#1}}}
+\tikzset{
+  fontscale/.style={font=\relsize{#1}},
+  algpxIndentLine/.style={draw=gray!65,line width=.35pt}
+}
 
 \DeclarePairedDelimiter\ceil{\lceil}{\rceil}
 \DeclarePairedDelimiter\floor{\lfloor}{\rfloor}
@@ -299,16 +312,17 @@
 \newcommand{\algruledefaultfactor}{.75}
 \newcommand{\algstrut}[1][\algruledefaultfactor]{\vrule width 0pt
 depth .25\baselineskip height #1\baselineskip\relax}
-\newcommand*{\algrule}[1][\algorithmicindent]{\hspace*{.5em}\vrule\algstrut
-\hspace*{\dimexpr#1-.5em}}
+\newcommand*{\algrule}[1][\algorithmicindent]{%
+  \hspace*{.5em}%
+  % Slightly overlap adjacent row segments.  This removes hairline seams from
+  % PDF antialiasing without changing the algorithm's row height.
+  \smash{\raisebox{-.30\baselineskip}{\rule{.4pt}{1.10\baselineskip}}}%
+  \algstrut
+  \hspace*{\dimexpr#1-.5em}}
 
 \makeatletter
 \newcount\ALG@printindent@tempcnta
-\def\ALG@printindent{%
-    \ifnum \theALG@nested>0% is there anything to print
-    \ifx\ALG@text\ALG@x@notext% is this an end group without any text?
-    % do nothing
-    \else
+\def\ALG@printindent@rules{%
     \unskip
     % draw a rule for each indent level
     \ALG@printindent@tempcnta=1
@@ -317,11 +331,27 @@ depth .25\baselineskip height #1\baselineskip\relax}
     \advance \ALG@printindent@tempcnta 1
     \ifnum \ALG@printindent@tempcnta<\numexpr\theALG@nested+1\relax% can't do <=, so add one to RHS and use < instead
     \repeat
+}
+\def\ALG@printindent{%
+    \ifnum \theALG@nested>0% is there anything to print
+    \ifx\ALG@text\ALG@x@notext% hidden end groups must not create a row
+    % do nothing
+    \else
+    \ALG@printindent@rules
     \fi
     \fi
 }%
 
 \patchcmd{\ALG@doentity}{\noindent\hskip\ALG@tlm}{\ALG@printindent}{}{\errmessage{failed to patch}}
+% algorithmicx normally emits an empty list item for every hidden EndFor,
+% EndIf, and EndWhile. With noEnd enabled those phantom rows create large
+% blank separators between otherwise adjacent pseudocode phases.
+\patchcmd{\ALG@doentity}{\item[]\nointerlineskip}{\relax}{}{\errmessage{failed to suppress hidden algorithm row}}
+
+\newcommand{\AlgCommentLine}[1]{%
+  \Statex
+  \ifnum\theALG@nested>0\ALG@printindent@rules\fi
+  \AlgComment{#1}}
 
 \AtBeginEnvironment{algorithmic}{\lineskip0pt}
 
@@ -443,14 +473,78 @@ depth .25\baselineskip height #1\baselineskip\relax}
 % characters in unrelated snippets are not interpreted as LaTeX.
 \newcommand{\BioseqCodeNote}[1]{%
   \unskip\penalty0\hspace*{\fill}%
-  \parbox[t]{.44\linewidth}{%
-    \raggedright
-    \textcolor{BioseqCodeBorder}{\rule{.4pt}{1.05em}}\hspace{.6em}%
-    \normalfont\footnotesize\sffamily\color{BioseqCodeComment}#1\strut}%
+  \makebox[.44\linewidth][l]{%
+    \textcolor{BioseqCodeBorder}{\rule[-.12em]{.4pt}{1.05em}}\hspace{.6em}%
+    \normalfont\footnotesize\sffamily\color{BioseqCodeComment}#1}%
 }
 
 \lstnewenvironment{BioseqCppSnippet}[1][]
   {\lstset{style=bioseq-cpp26,#1}}
+  {}
+
+\lstdefinelanguage{BioseqAArch64}{%
+  sensitive=true,
+  alsoletter={.},
+  morekeywords={add,and,bl,eor,ldp,ldr,lsl,lsr,mov,movi,orr,ret,stp,str,
+    sub,ushr,ushr.4s,movi.4s,movi.2d,and.16b},
+  morekeywords=[2]={sp,lr,fp,x0,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10,x11,
+    x12,x13,x14,x15,x16,x17,x18,x19,x20,x21,x22,x23,x24,x25,x26,x27,
+    x28,x29,x30,q0,q1,q2,q3,q4,q5,q6,q7,v0,v1,v2,v3,v4,v5,v6,v7},
+  morecomment=[l]{//},
+  morecomment=[l]{;}
+}
+
+\lstdefinestyle{bioseq-asm}{%
+  style=bioseq-cpp26,
+  language=BioseqAArch64,
+  keywordstyle=\bfseries\color{BioseqCodeKeyword},
+  keywordstyle=[2]\color{BioseqCodeType},
+  commentstyle=\itshape\color{BioseqCodeComment}
+}
+
+\lstnewenvironment{BioseqAsmSnippet}[1][]
+  {\lstset{style=bioseq-asm,#1}}
+  {}
+
+\definecolor{BioseqFastxHeader}{HTML}{0969DA}
+\definecolor{BioseqFastxSeparator}{HTML}{8250DF}
+\definecolor{BioseqFastxQuality}{HTML}{9A6700}
+\definecolor{BioseqFastxUnknown}{HTML}{57606A}
+
+\newcommand{\FastxHeaderLine}[1]{%
+  \normalfont\ttfamily\color{BioseqFastxHeader}\detokenize{#1}}
+\newcommand{\FastxSeparatorLine}[1]{%
+  \normalfont\ttfamily\color{BioseqFastxSeparator}\detokenize{#1}}
+\newcommand{\FastxQualityLine}[1]{%
+  \normalfont\ttfamily\color{BioseqFastxQuality}\detokenize{#1}}
+
+\lstdefinestyle{bioseq-fastx-base}{%
+  basicstyle=\small\ttfamily\color{BioseqFastxQuality},
+  backgroundcolor=\color{BioseqCodeBackground},
+  frame=single,
+  rulecolor=\color{BioseqCodeBorder},
+  framerule=.4pt,
+  framesep=6pt,
+  aboveskip=.75\baselineskip,
+  belowskip=.75\baselineskip,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  breaklines=true,
+  escapeinside={(*@}{@*)},
+  literate={A}{{\textcolor{Plum}{\bfseries A}}}{1}
+    {C}{{\textcolor{MidnightBlue}{\bfseries C}}}{1}
+    {G}{{\textcolor{OrangeRed}{\bfseries G}}}{1}
+    {T}{{\textcolor{Green!70!black}{\bfseries T}}}{1}
+    {N}{{\textcolor{BioseqFastxUnknown}{\bfseries N}}}{1}
+}
+
+\lstdefinestyle{bioseq-fastx-fasta}{style=bioseq-fastx-base,
+  basicstyle=\small\ttfamily\color{BioseqCodeText}}
+\lstdefinestyle{bioseq-fastx-fastq}{style=bioseq-fastx-base}
+
+\lstnewenvironment{FastxFile}[1][fasta]
+  {\Needspace{8\baselineskip}\lstset{style=bioseq-fastx-#1}}
   {}
 
 \lstdefinelanguage{DNA}{

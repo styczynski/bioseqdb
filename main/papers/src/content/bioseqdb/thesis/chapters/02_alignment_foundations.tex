@@ -63,7 +63,7 @@ examples of these modes.
 \definecolor{alignmentgray}{HTML}{F3F3F3}
 \definecolor{alignmentlight}{HTML}{F9F9F9}
 
-\begin{figure}[tbp]
+\begin{figure}[H]
   \centering
   \begin{tikzpicture}[
       x=1cm,
@@ -193,7 +193,7 @@ examples of these modes.
 
     % Local extension
     \begin{scope}[shift={(11.4,0)}]
-      \node[panel title] at (1.8,2.78) {Local-extension};
+      \node[panel title,font=\footnotesize] at (1.95,2.78) {Local-extension};
       \draw[matrix border,fill=alignmentlight]
         (1.05,1.02) rectangle (2.55,2.52);
       \draw[path line] (1.05,2.52) -- (1.36,2.20) -- (1.68,2.20)
@@ -261,7 +261,7 @@ Using \(H\) to open a gap permits a transition from any previous state. Local
 alignment also includes zero in the final maximum.
 %TODO: This listing is floating so not positioned where it should be
 
-\begin{algorithm}[tb]
+\begin{algorithm}[H]
   \caption{Affine-gap alignment with an explicit boundary contract}
   \label{alg:affine-dp}
   \begin{algorithmic}[1]
@@ -269,15 +269,14 @@ alignment also includes zero in the final maximum.
       and a boundary contract \(B\)
     \Ensure score, endpoints, and an optional CIGAR string
     \State initialize \(H\), \(I\), and \(D\) according to \(B\)
-    \State \textbf{for} \(i\gets 1\) to \(n\) \textbf{do}
-      \State \hspace{\algorithmicindent}\textbf{for} \(j\gets 1\) to \(m\)
-        \textbf{do}
+    \For{\(i\gets 1\) to \(n\)}
+      \For{\(j\gets 1\) to \(m\)}
         \State update \(M_{i,j}\), \(I_{i,j}\), \(D_{i,j}\), and \(H_{i,j}\)
           with Equation~\ref{eq:affine-dp}
         \State store the predecessor of each winning state when traceback is
           requested
-      \State \hspace{\algorithmicindent}\textbf{end for}
-    \State \textbf{end for}
+      \EndFor
+    \EndFor
     \State select the endpoint permitted by \(B\)
     \State follow predecessors to an allowed start and run-length encode the
       operations
@@ -314,8 +313,10 @@ First step is to use divide and conquer approach and split sequence into represe
 %TODO: This equalition is formatted in very ugly way, fix it
 \begin{equation}
 \begin{aligned}
-  \text{Seed}(x_1, x_2, ..., x_n) = {(s_1, i_1, j_1), (s_2, i_2, j_2), ..., (s_k, i_k, j_k)} \\
-  \text{where} 1 \leq i_a, j_a \leq n \forall a \in {1, 2, ..., k}
+  \operatorname{Seed}(x_1,\ldots,x_n)
+    &= \bigl\{(s_1,i_1,j_1),\ldots,(s_k,i_k,j_k)\bigr\},\\
+    &\text{where }1\leq i_a,j_a\leq n
+      \quad\text{for all }a\in\{1,\ldots,k\}.
 \end{aligned}
 \label{eq:seeding-def}
 \end{equation}
@@ -324,10 +325,14 @@ Seed $(s_a, i_a, j_a)$ is some represenative of the sequence substring $x_a = x_
 If a seed occurs in both query and reference, then we can consulde that two represented substrings are very similar.
 Using some concrete seeding function we can obtain intersection for query and reference:
 \begin{equation}
-\begin{aligned}
-  S_{X \cap Y} = {(s, i_x, j_x, i_y, j_y) \text{where} (s, i_x, j_x) \in \text{Seed}(X) \text{and} (s, i_y, j_y) \in \text{Seed}(Y)}
-\end{aligned}
-\label{eq:seeding-def}
+  S_{X\cap Y}=\left\{
+    (s,i_x,j_x,i_y,j_y)\;\middle|\;
+    \begin{aligned}
+      (s,i_x,j_x)&\in\operatorname{Seed}(X),\\
+      (s,i_y,j_y)&\in\operatorname{Seed}(Y)
+    \end{aligned}
+  \right\}.
+\label{eq:matching-seeds}
 \end{equation}
 
 %TODO: textbf doesn't work in most of the places, can we fix it?
@@ -350,7 +355,8 @@ do not distinguish these two strands. Genomic sequences thus need to satisy addi
 In our case this means that for minimizer of a window $W$ at position $p$ we need to have minimizer $\overline{W^{c}}$ at position $w-1-p = |W| - k - p$. \cite{groot_koerkamp_simd_minimizers_2025}
 In most of the software due to simplicity truly cannonical minimizers aren't used. Instead we take minimum of hashes of $k$-mer and its reverse complement: $m^{\text{cannonical}} = \min(m, \overline{m^{c}})$
 
-\begin{figure}[ht]
+\raggedbottom
+\begin{figure}[H]
   \centering
   \begin{tikzpicture}[
       scale=0.82,
@@ -511,7 +517,7 @@ Additionally software is implemented without proper abstractions - minimap2 code
 
 \textbf{Selective optimisations:}
 Optimisations are usually fixed for one single platform (AVX512 or SSE) and either get severe performance penalties (scalar fallbacks) or user cannot use them at all. SIMD support is quite popular even though it supports one or two selected platforms, but GPU support exists usually only for NVIDIA graphics cards.
-This leads to a difficult situation for the user as they need to choose between several versions of the same tool (\cite{mm2_fast_paper}, \cite{mm2_gpu_paper}), while better, more modern software like G3SA exists purely on NVIDIA hardware \cite{g3sa_pape}
+This leads to a difficult situation for the user as they need to choose between several versions of the same tool (\cite{mm2_fast_paper}, \cite{mm2_gpu_paper}), while better, more modern software like G3SA exists purely on NVIDIA hardware \cite{g3sa_paper}
 Modern hardware like MacBook Pro M3 with arm64 architecture won't be able to utilise any integrated GPU acceleration. While minimap2 offers compatibility layer to port SSE code to NEON, it does not vectorize all operations and code ported from SSE doesn't account for lane widths and instruction level parallelism available in M2-M4 chips. \cite{simd_opt_website_jake}
 
 I wanted to address these limitations by implementing BioseqDB, Postgres extension that will provide the following features:
@@ -571,3 +577,6 @@ Tight integration with Postgres also means that as a side effect, we can utilise
 % A reusable index separately needs source and parameter identity, safe
 % publication, invalidation, and bounded loading. These are database lifecycle
 % requirements rather than changes to minimizer or alignment arithmetic.
+
+\clearpage
+\flushbottom
