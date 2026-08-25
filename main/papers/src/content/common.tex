@@ -160,7 +160,7 @@
   \begingroup
   \let\tikzpicture\oldtikzpicture
   \let\endtikzpicture\oldendtikzpicture
-  \noindent\tcbox[
+    \noindent\tcbox[
     enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
     colback=BioseqTodoBackground,colframe=BioseqTodoFrame,
     colbacktitle=BioseqTodoBackground,coltitle=BioseqTodoFrame,
@@ -173,13 +173,13 @@
   \par\addvspace{.55\baselineskip}%
 }
 
-\NewDocumentCommand{\warn}{m m}{%
+\NewDocumentCommand{\warn}{m +m}{%
   \par\addvspace{.65\baselineskip}%
   \begingroup
   \let\tikzpicture\oldtikzpicture
   \let\endtikzpicture\oldendtikzpicture
-  \noindent\tcbox[
-    enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
+    \noindent\tcbox[capture=minipage,
+    enhanced,nobeforeafter,width=\linewidth,tcbox width=forced left,
     colback=BioseqWarningBackground,colframe=BioseqWarningFrame,
     colbacktitle=BioseqWarningBackground,coltitle=BioseqWarningFrame,
     borderline west={2.2pt}{0pt}{BioseqWarningFrame},
@@ -197,7 +197,7 @@
   \begingroup
   \let\tikzpicture\oldtikzpicture
   \let\endtikzpicture\oldendtikzpicture
-  \noindent\tcbox[
+    \noindent\tcbox[
     enhanced,nobeforeafter,width=\linewidth,tcbox width=auto limited,
     colback=BioseqInfoBackground,colframe=BioseqInfoFrame,
     colbacktitle=BioseqInfoBackground,coltitle=BioseqInfoFrame,
